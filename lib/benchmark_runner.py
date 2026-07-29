@@ -19,7 +19,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
@@ -181,6 +180,29 @@ def drain_find_gate(
     return counts
 
 
+def _benchmark_target_config_path(
+    results: Path, target: Path, target_slug: str,
+) -> Path | None:
+    """The immutable config nearest this result, then the live fallback."""
+    resolved_results = results.resolve()
+    directories = (resolved_results, *resolved_results.parents)
+    for directory in directories:
+        if (directory / "run.json").is_file():
+            snapshot = directory / "target.toml"
+            if snapshot.is_file():
+                return snapshot
+            break
+    if any(directory.name == "output" for directory in directories):
+        config_path = metrics._find_output_target_toml(results)
+        if config_path is not None:
+            return config_path
+    canonical = SCRIPT_ROOT / "output" / target_slug / "target.toml"
+    if canonical.is_file():
+        return canonical
+    target_config_path = target / "target.toml"
+    return target_config_path if target_config_path.is_file() else None
+
+
 def benchmark_target_config(
     results: Path, target: Path, target_slug: str,
 ) -> target_config.Config:
@@ -191,9 +213,10 @@ def benchmark_target_config(
         attacker_controls=["bytes"],
         sanitizers_enabled=["asan"],
     )
-    config_path = SCRIPT_ROOT / "output" / target_slug / "target.toml"
-    if not config_path.is_file():
-        config_path = metrics._find_output_target_toml(results)
+    # A benchmark run owns an immutable snapshot above its cells (and harness
+    # facades copy it into their output tree). Prefer that nearest contract;
+    # the live canonical config may change while a long run is still active.
+    config_path = _benchmark_target_config_path(results, target, target_slug)
     if config_path is not None:
         target_config.load_toml_into(config, config_path)
     return config
@@ -405,9 +428,9 @@ class BenchmarkLock:
             except (OSError, ValueError, IndexError):
                 self.path.unlink(missing_ok=True)
                 return self.__enter__()
-            target = self.path.stem.removeprefix(".run-")
+            run_id = self.path.stem.removeprefix(".run-")
             raise RuntimeError(
-                f"benchmark for target={target} backend={self.path.parent.name} "
+                f"benchmark run {run_id} for backend={self.path.parent.name} "
                 f"is already running (pid {owner})"
             )
         os.write(fd, f"{os.getpid()} {datetime.now(timezone.utc).isoformat()}\n".encode())
@@ -456,21 +479,9 @@ def write_cell(
     paused: int = 0, started_at: str = "", housekeeping: int = 0,
     build_identity: dict | None = None,
 ) -> None:
-    quality = "clean"
-    try:
-        candidate = (path.parent / ".run-quality").read_text(encoding="utf-8").strip()
-        if candidate in {
-            "clean", "incomplete", "provider_recovered", "provider_limited",
-            # A cell that read different source, or ran on a different binary,
-            # than its peers. Both keep their artifacts and leave the headline
-            # comparison, so the reason has to survive into the cell record.
-            "source_drift", "build_drift",
-        }:
-            quality = candidate
-    except OSError:
-        pass
-    if status == "incomplete" and quality == "clean":
-        quality = "incomplete"
+    # Source/build drift and unowned evidence leave the headline comparison, so
+    # their persistent reason must survive into the cell record.
+    quality = metrics.cell_run_quality(path.parent, status)
     drift: dict = {}
     try:
         drift = json.loads((path.parent / "source-drift.json").read_text(encoding="utf-8"))
@@ -512,96 +523,41 @@ def write_cell(
     _write_json(path, payload)
 
 
-def _build_identity_config(target: Path, target_slug: str) -> target_config.Config | None:
-    """The config a replay resolves its target artifacts through; None if unreadable."""
+def _benchmark_config(
+    target: Path, target_slug: str, config_path: Path | None = None,
+) -> target_config.Config:
+    """Load the exact target configuration a benchmark run executes."""
     config = target_config.Config(target_root=str(target))
-    config_path = SCRIPT_ROOT / "output" / target_slug / "target.toml"
-    if not config_path.is_file():
-        config_path = target / "target.toml"
-    if config_path.is_file():
-        try:
-            target_config.load_toml_into(config, config_path)
-        except (OSError, ValueError):
-            return None
+    if config_path is None:
+        config_path = SCRIPT_ROOT / "output" / target_slug / "target.toml"
+        if not config_path.is_file():
+            config_path = target / "target.toml"
+    target_config.load_toml_into(config, config_path)
     return config
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _target_build_identity(target: Path, target_slug: str) -> dict:
+def _target_build_identity(
+    target: Path, target_slug: str, config: target_config.Config | None = None,
+) -> dict:
     """Content identity of the target artifacts a benchmark replay can execute."""
-    config = _build_identity_config(target, target_slug)
     if config is None:
-        return {}
-
-    stamps: dict[str, str] = {}
-    suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
-    for sanitizer in target_config.SANITIZERS_VALID:
-        path = target / f"build-{sanitizer}{suffix}" / ".audit-build-stamp"
         try:
-            stamps[sanitizer] = hashlib.sha256(path.read_bytes()).hexdigest()
-        except OSError:
-            continue
-
-    artifacts: dict[str, dict[str, object]] = {}
-    configured = {
-        f"{sanitizer}-{kind}": value
-        for sanitizer in target_config.SANITIZERS_VALID
-        for kind, value in (
-            ("bin", config.sanitizer_bin(sanitizer)),
-            ("lib", config.sanitizer_lib(sanitizer)),
-        )
-        if value
-    }
-    for name, raw in configured.items():
-        try:
-            path = Path(config.resolve_path(raw))
-            if not path.is_file():
-                continue
-            artifacts[name] = {
-                "path": raw,
-                "size": path.stat().st_size,
-                "sha256": _file_sha256(path),
-            }
+            config = _benchmark_config(target, target_slug)
         except (OSError, ValueError):
-            continue
-    if not stamps and not artifacts:
-        return {}
-    return {"version": 1, "stamps": stamps, "artifacts": artifacts}
+            return {}
+    return build_preflight.build_identity(target, config)
 
 
-def _replay_binary_key(
-    sanitizer: str, config: target_config.Config | None, recorded: dict,
-) -> str:
-    """The binary a replay of this evidence runs.
-
-    That sanitizer's own when the cell recorded one or the config still
-    declares one, else the resolver's fallback to asan_bin. Reading the
-    recorded side first is what keeps a dropped `ubsan_bin` from quietly
-    rerouting UBSan evidence onto the ASan build and passing the check.
-    """
-    key = f"{sanitizer}-bin"
-    if key in recorded.get("artifacts", {}):
-        return key
-    return key if config is not None and config.sanitizer_bin(sanitizer) else "asan-bin"
-
-
-def _replay_build_keys(
-    crash_dirs: list[Path], config: target_config.Config | None, recorded: dict,
+def _replay_artifact_keys(
+    crash_dirs: list[Path],
+    config: target_config.Config | None,
+    recorded: dict,
 ) -> set[str]:
-    """Which target artifacts replaying this crash evidence would execute."""
+    """Target-owned files replaying this saved evidence will execute."""
     keys: set[str] = set()
     for crash_dir in crash_dirs:
         sanitizer = crash_artifacts.crash_sanitizer(crash_dir)
         if crash_artifacts.crash_harness_binary(crash_dir) is not None:
-            # A saved harness already contains a static archive. Only a shared
-            # library is consulted again when that executable is replayed.
             key = f"{sanitizer}-lib"
             artifact = recorded.get("artifacts", {}).get(key)
             recorded_path = (
@@ -616,127 +572,42 @@ def _replay_build_keys(
             ):
                 keys.add(key)
             continue
-        keys.add(_replay_binary_key(sanitizer, config, recorded))
+        runner_selected = (
+            config is not None
+            and bool(config.runner_bin)
+            and not config.sanitizer_bin(sanitizer)
+        )
+        runner_key = "runner-bin"
+        if (sanitizer in {"race", "runner"} or runner_selected) and (
+            runner_key in recorded.get("artifacts", {})
+            or runner_selected
+        ):
+            keys.add(runner_key)
+            continue
+        key = f"{sanitizer}-bin"
+        if key in recorded.get("artifacts", {}) or \
+                config is not None and config.sanitizer_bin(sanitizer):
+            keys.add(key)
+        else:
+            keys.add("asan-bin")
     return keys
 
 
-def _identity_matches_keys(recorded: dict, current: dict, keys: set[str]) -> bool:
-    """Compare both sides symmetrically: an artifact or stamp that has since
-    gone missing, or since appeared, differs as much as a changed one."""
-    for key in keys:
-        sanitizer = key.split("-", 1)[0]
-        if recorded.get("artifacts", {}).get(key) != current.get("artifacts", {}).get(key):
-            return False
-        if recorded.get("stamps", {}).get(sanitizer) != current.get("stamps", {}).get(sanitizer):
-            return False
-    return True
-
-
-def _replay_build_check(
-    crash_dirs: list[Path], recorded: dict, current: dict,
-    config: target_config.Config | None, subject: str,
-) -> tuple[bool, str]:
-    """Whether the build these crashes were found under is still the live one.
-
-    Only an artifact one side or the other names is checked. What is absent from
-    both is part of no replay: a statically linked harness on a target that
-    configures no instrumented library, or a target driven entirely through
-    [runner], has no target build to verify — then or now — and stays
-    replayable rather than marking its cell incomplete.
-    """
-    keys = {
-        key for key in _replay_build_keys(crash_dirs, config, recorded)
-        if recorded.get("artifacts", {}).get(key)
-        or current.get("artifacts", {}).get(key)
+def _source_drift(target: Path, baseline: str) -> dict:
+    """Describe persistent tracked-source drift at a cell boundary."""
+    if not baseline:
+        return {}
+    current = target_config.vcs_source_signature(
+        target, include_untracked=False,
+    )
+    if not current or current == baseline:
+        return {}
+    return {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "paths": target_config.source_changed_paths(
+            target, include_untracked=False,
+        ),
     }
-    if not keys:
-        return True, ""
-    if not recorded:
-        return False, f"{subject} recorded no executed build identity"
-    if not current:
-        return False, "the recorded target build is unavailable"
-    if not _identity_matches_keys(recorded, current, keys):
-        return False, f"the available target build differs from {subject}'s"
-    return True, ""
-
-
-def _build_matches_pin(pinned: dict, target: Path, target_slug: str) -> bool:
-    """Whether the live build is still the generation the run pinned.
-
-    Whole-identity comparison, unlike the per-crash check below: before a cell
-    starts there is no evidence yet to narrow the question to, so any difference
-    at all disqualifies it.
-    """
-    return not pinned or _target_build_identity(target, target_slug) == pinned
-
-
-class _SourceWatch:
-    """Watch a target's source content while one cell runs.
-
-    A cell whose agents edited the source read different code than its peers, so
-    it is not comparable to them. Boundary checks alone cannot see it: the
-    edit/build/test/revert cycle an agent performs leaves the tree byte-identical
-    by the time the cell ends, which is precisely why the content signature that
-    makes freshness trustworthy cannot double as drift detection. Sampling only
-    records — it never rebuilds, cancels, or otherwise acts — so it cannot
-    destabilise a run.
-
-    Deliberately VCS-only. A sample must be cheap enough to repeat for hours,
-    and hashing a whole checkout is not (a browser target is gigabytes); a
-    target the VCS cannot answer for is simply not watched. A failed query is
-    "no sample", never "changed" — reading it as changed would throw away a
-    finished cell over a transient git error.
-    """
-
-    def __init__(self, target: Path, target_slug: str, baseline: str, interval: int = 60):
-        self.target = target
-        self.target_slug = target_slug
-        self.baseline = baseline
-        self.interval = interval
-        self.drift: dict = {}
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def _sample(self) -> None:
-        if self.drift or not self.baseline:
-            return
-        current = target_config.vcs_source_signature(
-            self.target, include_untracked=False,
-        )
-        if not current or current == self.baseline:
-            return
-        self.drift = {
-            "observed_at": datetime.now(timezone.utc).isoformat(),
-            "paths": target_config.source_changed_paths(
-                self.target, include_untracked=False,
-            ),
-        }
-
-    def _loop(self) -> None:
-        while not self._stop.wait(self.interval):
-            try:
-                self._sample()
-            except OSError:
-                return  # diagnostics are never worth failing a cell over
-            if self.drift:
-                return
-
-    def start(self) -> None:
-        if not self.baseline:
-            return
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> dict:
-        """Stop sampling and report the first drift seen, including at the end."""
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=30)
-        try:
-            self._sample()
-        except OSError:
-            pass
-        return self.drift
 
 
 def _cell_build_identity(cell: dict) -> dict:
@@ -760,15 +631,20 @@ def _mark_build_finalization_incomplete(cell: dict, reason: str) -> None:
 
 def _replay_build_status(
     cell: dict, results: Path, target: Path, target_slug: str,
+    config: target_config.Config | None = None,
 ) -> tuple[bool, str]:
+    if config is None:
+        try:
+            config = _benchmark_config(target, target_slug)
+        except (OSError, ValueError):
+            config = None
+    recorded = _cell_build_identity(cell)
     crash_dirs = sorted((results / "crashes").glob("CRASH-*"))
-    if not crash_dirs:
-        return True, ""
-    return _replay_build_check(
-        crash_dirs, _cell_build_identity(cell),
-        _target_build_identity(target, target_slug),
-        _build_identity_config(target, target_slug), "the cell",
+    keys = _replay_artifact_keys(crash_dirs, config, recorded)
+    problems = build_preflight.pinned_build_problems(
+        target, recorded, config, keys,
     )
+    return not problems, "; ".join(problems)
 
 
 def dryrun_cell(cell_dir: Path, condition: str, replicate: int, backend: str) -> Path:
@@ -811,31 +687,34 @@ def mark_target_artifacts(target: Path) -> set[Path]:
     return marked
 
 
-def sweep_target_artifacts(target: Path, destination: Path, marked: set[Path] | None) -> int:
-    if marked is None or not target.is_dir() or not destination.is_dir():
-        return 0
-    moved = 0
-    for parent_name, glob in (("findings", "FIND-*"), ("crashes", "CRASH-*")):
-        output = destination / parent_name
-        output.mkdir(parents=True, exist_ok=True)
-        for parent in target.rglob(parent_name):
-            if ".git" in parent.parts or not parent.is_dir():
-                continue
-            for entry in list(parent.glob(glob)):
-                if entry.resolve() in marked:
-                    continue
-                target_path = output / entry.name
-                if target_path.exists():
-                    target_path = output / f"{entry.name}.from-target-{int(time.time())}-{os.getpid()}"
-                shutil.move(entry, target_path)
-                moved += 1
-                log(f"  Sweep: rescued {parent_name}/{entry.name} from source tree -> {target_path}")
-    for name in ("findings", "crashes"):
-        try:
-            (target / name).rmdir()
-        except OSError:
-            pass
-    return moved
+@contextmanager
+def _target_artifact_guard(target: Path, cell_dir: Path):
+    """Exclude a cell that writes unowned evidence into the shared target.
+
+    A target-tree FIND/CRASH carries no run id, so moving it into this cell is
+    unsafe whenever peer benchmarks share the checkout. Leave it untouched and
+    count only evidence written through the cell's RESULTS_DIR contract.
+    """
+    marked = mark_target_artifacts(target)
+    try:
+        yield
+    finally:
+        leaked = mark_target_artifacts(target) - marked
+        if leaked:
+            (cell_dir / ".target-artifacts-unowned").touch()
+            (cell_dir / ".run-quality").write_text(
+                "unowned_artifacts\n", encoding="utf-8",
+            )
+            resolved_target = target.resolve()
+            names = ", ".join(
+                str(path.relative_to(resolved_target))
+                for path in sorted(leaked)[:5]
+            )
+            log(
+                f"WARN: Cell {cell_dir.name}: target-tree artifacts have no "
+                f"benchmark owner ({names}); evidence left in place and this cell "
+                "excluded from the comparison"
+            )
 
 
 def cleanup_model_direct_scratch(cell_dir: Path) -> None:
@@ -914,35 +793,44 @@ def _reap_cell_processes(marker: str) -> None:
         )
 
 
-def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wall: int) -> int:
+def run_model_direct(
+    cell_dir: Path,
+    target: Path,
+    backend: str,
+    model: str,
+    wall: int,
+    config_snapshot: Path | None = None,
+) -> int:
     for name in ("crashes", "findings", "logs"):
         (cell_dir / name).mkdir(parents=True, exist_ok=True)
-    prompt = benchmark_model_direct_render.render(str(target), str(cell_dir), str(SCRIPT_ROOT), wall)
+    prompt = benchmark_model_direct_render.render(
+        str(target), str(cell_dir), str(SCRIPT_ROOT), wall,
+        str(config_snapshot) if config_snapshot is not None else "",
+    )
     (cell_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     raw = cell_dir / "backend.raw.log"
     for marker in (".quota-exhausted", ".backend-unavailable", ".run-quality"):
         (cell_dir / marker).unlink(missing_ok=True)
-    marked = mark_target_artifacts(target)
     previous_logdir = os.environ.get("LOGDIR")
     os.environ["LOGDIR"] = str(cell_dir / "logs")
     # Marker goes into the child's environment only, never this process's, so
     # the reap can never turn on the orchestrator itself.
     reap_marker = process_tree.new_marker()
-    try:
-        rc = llm_invoke.run_agent_prompt(
-            backend, prompt, wall, raw, model=model, max_turns=0,
-            add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
-            watchdog_marker_dir=cell_dir,
-            allow_subagents=False,
-            extra_env={process_tree.REAP_MARKER_VAR: reap_marker},
-        )
-    finally:
-        if previous_logdir is None:
-            os.environ.pop("LOGDIR", None)
-        else:
-            os.environ["LOGDIR"] = previous_logdir
-        _reap_cell_processes(reap_marker)
-    sweep_target_artifacts(target, cell_dir, marked)
+    with _target_artifact_guard(target, cell_dir):
+        try:
+            rc = llm_invoke.run_agent_prompt(
+                backend, prompt, wall, raw, model=model, max_turns=0,
+                add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
+                watchdog_marker_dir=cell_dir,
+                allow_subagents=False,
+                extra_env={process_tree.REAP_MARKER_VAR: reap_marker},
+            )
+        finally:
+            if previous_logdir is None:
+                os.environ.pop("LOGDIR", None)
+            else:
+                os.environ["LOGDIR"] = previous_logdir
+            _reap_cell_processes(reap_marker)
     usage = subprocess.run(
         [
             sys.executable, str(SCRIPT_ROOT / "lib" / "llm_usage.py"),
@@ -967,7 +855,9 @@ def run_model_direct(cell_dir: Path, target: Path, backend: str, model: str, wal
     return 0 if rc in (0, 124) else rc
 
 
-def prepare_facade(cell_dir: Path, target_slug: str) -> Path:
+def prepare_facade(
+    cell_dir: Path, target_slug: str, config_snapshot: Path | None = None,
+) -> Path:
     facade = cell_dir / "repo-root"
     shutil.rmtree(facade, ignore_errors=True)
     facade.mkdir(parents=True)
@@ -975,7 +865,11 @@ def prepare_facade(cell_dir: Path, target_slug: str) -> Path:
         (facade / name).symlink_to(SCRIPT_ROOT / name, target_is_directory=True)
     config_dir = facade / "output" / target_slug
     config_dir.mkdir(parents=True)
-    source_config = SCRIPT_ROOT / "output" / target_slug / "target.toml"
+    source_config = (
+        config_snapshot
+        if config_snapshot is not None
+        else SCRIPT_ROOT / "output" / target_slug / "target.toml"
+    )
     if source_config.is_file():
         shutil.copy2(source_config, config_dir / "target.toml")
     for name in ("AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "SECURITY.md", "requirements.txt", ".gitignore"):
@@ -987,11 +881,11 @@ def prepare_facade(cell_dir: Path, target_slug: str) -> Path:
 
 def run_harness(
     cell_dir: Path, target_slug: str, backend: str, model: str,
-    experiment: str, wall: int, agents: int | None,
+    experiment: str, wall: int, agents: int | None, build_identity: dict,
+    config_snapshot: Path | None = None,
 ) -> tuple[int, Path]:
-    facade = prepare_facade(cell_dir, target_slug)
+    facade = prepare_facade(cell_dir, target_slug, config_snapshot)
     target = (SCRIPT_ROOT / "targets" / target_slug).resolve()
-    marked = mark_target_artifacts(target)
     result_dir = facade / "output" / f"{target_slug}-{experiment}" / backend / "results"
     command = [
         str(facade / "bin" / "audit"), "--target", target_slug,
@@ -1007,6 +901,8 @@ def run_harness(
         # Benchmark cells must differ by the tested condition/backend, not by
         # whichever backend happened to synthesize a widened build recipe.
         "_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD": "1",
+        build_preflight.BENCHMARK_BUILD_PIN_ENV:
+            build_preflight.encode_benchmark_build_pin(build_identity),
         "PROBE_AUTO_ROUTE": "0",
         # Inherited by every cell process; see _reap_cell_processes.
         process_tree.REAP_MARKER_VAR: reap_marker,
@@ -1015,22 +911,22 @@ def run_harness(
         environment["NUM_AGENTS"] = str(agents)
     if wall:
         environment["AUDIT_WALL_BUDGET_SECS"] = str(wall)
-    with (cell_dir / "audit.log").open("w", encoding="utf-8") as stream:
-        try:
-            if wall:
-                rc = run_timeout(
-                    command, wall + SESSION_PAUSE_BACKSTOP, cwd=facade,
-                    env=environment, stdout=stream, stderr=subprocess.STDOUT,
-                ).returncode
-            else:
-                rc = subprocess.run(command, cwd=facade, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False).returncode
-        finally:
-            # Reap escaped cell processes even if the launch raised (OSError,
-            # timeout-helper failure) — the leak this guards against is exactly
-            # what an abnormal exit leaves behind.
-            _reap_cell_processes(reap_marker)
-    result_dir.mkdir(parents=True, exist_ok=True)
-    sweep_target_artifacts(target, result_dir, marked)
+    with _target_artifact_guard(target, cell_dir):
+        with (cell_dir / "audit.log").open("w", encoding="utf-8") as stream:
+            try:
+                if wall:
+                    rc = run_timeout(
+                        command, wall + SESSION_PAUSE_BACKSTOP, cwd=facade,
+                        env=environment, stdout=stream, stderr=subprocess.STDOUT,
+                    ).returncode
+                else:
+                    rc = subprocess.run(command, cwd=facade, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False).returncode
+            finally:
+                # Reap escaped cell processes even if the launch raised
+                # (OSError, timeout-helper failure) — the leak this guards
+                # against is exactly what an abnormal exit leaves behind.
+                _reap_cell_processes(reap_marker)
+        result_dir.mkdir(parents=True, exist_ok=True)
     logs = result_dir.parent / "logs"
     for marker in (".run-quality", ".backend-unavailable"):
         source = logs / marker
@@ -1050,9 +946,17 @@ def _run_tool(name: str, *args: str, env: dict | None = None, stdout=None) -> in
 def _resolve_reverify_fields(
     crash_dir: Path, target_root: Path, target_slug: str,
 ) -> tuple[dict[str, str], list[str]] | None:
+    command = [
+        sys.executable, str(SCRIPT_ROOT / "lib" / "benchmark.py"),
+        "resolve-reverify", str(crash_dir), str(target_root), target_slug,
+    ]
+    config_path = _benchmark_target_config_path(
+        crash_dir.parent.parent, target_root, target_slug,
+    )
+    if config_path is not None:
+        command.extend(["--target-toml", str(config_path)])
     resolved = subprocess.run(
-        [sys.executable, str(SCRIPT_ROOT / "lib" / "benchmark.py"), "resolve-reverify",
-         str(crash_dir), str(target_root), target_slug],
+        command,
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
     )
     if resolved.returncode:
@@ -1109,6 +1013,11 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         "SANITIZER_RUNS": "5", "SAN_OUTPUT_FILE": str(temporary),
         f"{upper}_GENERIC_BIN": binary,
     })
+    for key, entry in fields.items():
+        if not key.startswith("ENV_") or "=" not in entry:
+            continue
+        name, value = entry.split("=", 1)
+        environment[name] = value
     # The options the crash was found under are part of how it was found —
     # allocator shaping decides whether some faults surface at all — and the
     # runner header recorded them. The runners append the environment after
@@ -1382,8 +1291,13 @@ def _pool_replay_blocked(
     Per crash, using its owning cell: one required artifact whose build has
     moved on says nothing about another crash from the same or another cell.
     """
-    config = _build_identity_config(target, target_slug)
-    current = _target_build_identity(target, target_slug)
+    snapshot = bench_dir / "target.toml"
+    try:
+        config = _benchmark_config(
+            target, target_slug, snapshot if snapshot.is_file() else None,
+        )
+    except (OSError, ValueError):
+        config = None
     blocked: dict[str, str] = {}
     for cell_name, crash_dirs in sorted(_pool_crash_owners(bench_dir, pool).items()):
         cell = {}
@@ -1394,13 +1308,14 @@ def _pool_replay_blocked(
                 )
             except (OSError, ValueError):
                 cell = {}
+        recorded = _cell_build_identity(cell)
         for crash_dir in crash_dirs:
-            ok, reason = _replay_build_check(
-                [crash_dir], _cell_build_identity(cell), current, config,
-                cell_name or "the pool",
+            keys = _replay_artifact_keys([crash_dir], config, recorded)
+            problems = build_preflight.pinned_build_problems(
+                target, recorded, config, keys,
             )
-            if not ok:
-                blocked[crash_dir.name] = reason
+            if problems:
+                blocked[crash_dir.name] = "; ".join(problems)
     return blocked
 
 
@@ -1555,6 +1470,18 @@ def _root_result_lock(bench_root: Path):
     """Serialize the shared crosstab across concurrently running backends."""
     bench_root.mkdir(parents=True, exist_ok=True)
     with (bench_root / ".benchmark-result.lock").open("a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _ledger_lock(ledger: Path):
+    """Serialize one backend ledger's read-modify-write update."""
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    with ledger.with_name(f".{ledger.name}.lock").open("a+") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -1750,16 +1677,41 @@ def _source_pin_conflict(target: Path, target_slug: str, signature: str) -> str:
     )
 
 
-def _benchmark_config(target_root: Path, target_slug: str):
-    config = target_config.Config(target_root=str(target_root))
-    target_config.load_toml_into(
-        config, SCRIPT_ROOT / "output" / target_slug / "target.toml"
-    )
-    return config
+def _snapshot_benchmark_config(
+    bench_dir: Path,
+    target_root: Path,
+    target_slug: str,
+    *,
+    replace: bool,
+) -> Path:
+    """Materialize the target execution contract owned by one benchmark run."""
+    bench_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = bench_dir / "target.toml"
+    if snapshot.is_file() and not replace:
+        return snapshot
+    source = SCRIPT_ROOT / "output" / target_slug / "target.toml"
+    if not source.is_file():
+        source = target_root / "target.toml"
+    temporary = snapshot.with_name(f".{snapshot.name}.{os.getpid()}")
+    temporary.unlink(missing_ok=True)
+    try:
+        if source.is_file():
+            shutil.copy2(source, temporary)
+        else:
+            target_config.seed_toml(target_root, temporary)
+        os.replace(temporary, snapshot)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return snapshot
+
+
+def _config_digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def preflight_build(
-    args: argparse.Namespace, bench_dir: Path, model: str, pinned: bool = False,
+    args: argparse.Namespace, bench_dir: Path, model: str,
+    pinned: dict | None = None, config: target_config.Config | None = None,
 ) -> list[str]:
     """Converge, hold and verify the build this run pins.
 
@@ -1769,38 +1721,48 @@ def preflight_build(
     build it could not verify or could not hold — every cell would otherwise be
     measuring something nobody can name afterwards.
 
-    ``pinned`` marks a run that already has a recorded generation, which makes
-    this verify-only: see below.
+    ``pinned`` carries a run's recorded generation, which makes this
+    verify-only: see below.
     """
     if args.dry_run:
         return []
     target_root = SCRIPT_ROOT / "targets" / args.target
     try:
-        config = _benchmark_config(target_root, args.target)
+        config = config or _benchmark_config(target_root, args.target)
     except (OSError, ValueError) as exc:
         # A target with no generated config declares no sanitizer artifacts, so
         # there is nothing to verify rather than something wrong. Say so and let
         # the build checks below speak for themselves.
         log(f"WARN: sanitizer build preflight could not load target config: {exc}")
         config = target_config.Config(target_root=str(target_root))
-    if args.regenerate or pinned:
+    try:
+        runner_preflight.validate(config, log)
+    except (OSError, RuntimeError, ValueError) as exc:
+        # ValueError included: a [runner].bin that escapes the target root is a
+        # config the operator has to fix, not a traceback.
+        return [str(exc)]
+    if args.regenerate or pinned is not None:
         # Nothing is converged here. A regeneration replays existing evidence,
         # and a resumed run already has cells measured on the build it pinned —
         # converging either one could rebuild that generation out from under the
         # evidence that depends on it, before any check could refuse the run.
         unleased = build_preflight.hold_builds(
-            target_root, build_preflight.enabled_sanitizers(config), log
+            target_root, config, log,
         )
     else:
-        runner_preflight.validate(config, log)
         unleased = build_preflight.refresh(
             SCRIPT_ROOT, target_root, args.target, config, bench_dir,
             args.backend, model, log, include_alternates=False,
         )
-    if pinned:
+    if pinned is not None:
         log("Resuming a pinned run: verifying the recorded build, not rebuilding")
     blocking = [f"{name} could not be leased" for name in unleased]
-    blocking += build_preflight.build_problems(target_root, config)
+    if pinned is not None:
+        blocking += build_preflight.pinned_build_problems(
+            target_root, pinned, config,
+        )
+    else:
+        blocking += build_preflight.build_problems(target_root, config)
     return blocking
 
 
@@ -1808,7 +1770,8 @@ def run_single(args: argparse.Namespace, bench_root: Path) -> int:
     backend_root = bench_root / args.backend
     ledger = Path(args.ledger).resolve() if args.ledger else backend_root / "benchmark-results.md"
     if args.reset:
-        archive = metrics.reset_ledger(ledger, args.hard)
+        with _ledger_lock(ledger):
+            archive = metrics.reset_ledger(ledger, args.hard)
         log(f"Ledger {'deleted' if args.hard else f'archived to {archive}' if archive else 'already absent'}")
         return 0
     if not args.target:
@@ -1838,7 +1801,10 @@ def run_single(args: argparse.Namespace, bench_root: Path) -> int:
     if args.regenerate and not cells_dir.is_dir():
         print(f"FATAL: --regenerate: no cells/ to re-derive at {bench_dir}", file=sys.stderr)
         return 1
-    lock_name = f".run-{target_key(args.target)}.lock"
+    # Protect only one run directory. Build/source leases coordinate peer runs,
+    # and the result/ledger writers have their own locks, so serializing every
+    # same-target run would unnecessarily prevent same-backend comparisons.
+    lock_name = f".run-{target_key(run_id)}.lock"
     with BenchmarkLock(backend_root / lock_name):
         bench_dir.mkdir(parents=True, exist_ok=True)
         cells_dir.mkdir(parents=True, exist_ok=True)
@@ -1848,19 +1814,8 @@ def run_single(args: argparse.Namespace, bench_root: Path) -> int:
             return _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions, previous)
 
 
-def _pin_mismatch(previous: dict, identity: dict, source: str) -> str:
-    """Why a resumed run cannot continue into this build, if it cannot.
-
-    A run pins one build generation and one source state. Resuming into a
-    different one keeps the finished cells and adds cells measured on something
-    else, and the totals would average the two — the cross-generation comparison
-    this whole mechanism exists to prevent. Recorded emptiness is not a mismatch:
-    a run from before this was recorded has nothing to contradict.
-    """
-    recorded_identity = previous.get("build_identity")
-    if isinstance(recorded_identity, dict) and recorded_identity and identity \
-            and recorded_identity != identity:
-        return "the target build differs from the one this run pinned"
+def _source_pin_mismatch(previous: dict, source: str) -> str:
+    """Why a resume cannot continue at this tracked source state."""
     recorded_source = str(previous.get("source_signature") or "")
     if recorded_source and source and recorded_source != source:
         return "the target source differs from the state this run pinned"
@@ -2022,9 +1977,43 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     build_suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
     run_identity: dict = {}
     run_source = ""
+    config_snapshot: Path | None = None
+    run_config: target_config.Config | None = None
     # A run that already recorded a generation is being resumed, so from here on
     # it verifies rather than converges.
-    pinned = bool(previous.get("build_identity"))
+    recorded_identity = previous.get("build_identity")
+    pinned_identity = (
+        recorded_identity
+        if isinstance(recorded_identity, dict) and recorded_identity
+        else None
+    )
+    if not args.dry_run:
+        try:
+            config_snapshot = _snapshot_benchmark_config(
+                bench_dir, target_root, args.target,
+                replace=pinned_identity is None and not args.regenerate,
+            )
+            recorded_config = str(previous.get("target_config_sha256") or "")
+            current_config = _config_digest(config_snapshot)
+            if recorded_config and current_config != recorded_config:
+                reason = (
+                    f"the run target.toml snapshot was modified "
+                    f"({config_snapshot})"
+                )
+                print(
+                    f"FATAL: {_resume_refusal(reason, run_id)}",
+                    file=sys.stderr,
+                )
+                return 1
+            run_config = _benchmark_config(
+                target_root, args.target, config_snapshot,
+            )
+        except (OSError, ValueError) as exc:
+            print(
+                f"FATAL: benchmark target configuration is unusable: {exc}",
+                file=sys.stderr,
+            )
+            return 1
     if not args.dry_run and not args.regenerate:
         # Everything that can refuse the run happens before convergence. Once we
         # rebuild, a peer run's evidence is already invalid and a resumed run has
@@ -2036,7 +2025,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         run_source = target_config.vcs_source_signature(
             target_root, include_untracked=False,
         )
-        drifted = _pin_mismatch(previous, {}, run_source)
+        drifted = _source_pin_mismatch(previous, run_source)
         if drifted:
             print(f"FATAL: {_resume_refusal(drifted, run_id)}", file=sys.stderr)
             return 1
@@ -2045,14 +2034,25 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             print(f"FATAL: {conflict}", file=sys.stderr)
             return 1
 
-    blocking = preflight_build(args, bench_dir, model, pinned)
+    blocking = preflight_build(
+        args, bench_dir, model, pinned_identity, run_config,
+    )
     if blocking and not args.regenerate:
-        for reason in blocking:
-            print(f"FATAL: {reason}", file=sys.stderr)
-        print(
-            "FATAL: refusing to launch cells against a build this run cannot "
-            "verify or hold", file=sys.stderr,
-        )
+        if pinned_identity is not None:
+            for reason in blocking:
+                print(
+                    f"FATAL: {_resume_refusal(reason, run_id)}",
+                    file=sys.stderr,
+                )
+        else:
+            for reason in blocking:
+                print(f"FATAL: {reason}", file=sys.stderr)
+            print(
+                f"FATAL: fix the paths above and rerun, or build with "
+                f"`bin/setup-target {args.target} --build`; no benchmark cell "
+                "was launched",
+                file=sys.stderr,
+            )
         return 1
     for reason in blocking:
         log(f"WARN: regenerating over an unverified build: {reason}")
@@ -2065,17 +2065,19 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     # evidence even with nothing else running.
     if not args.regenerate:
         if not args.dry_run:
-            run_identity = _target_build_identity(target_root, args.target)
-            mismatch = _pin_mismatch(previous, run_identity, "")
-            if mismatch:
-                print(f"FATAL: {_resume_refusal(mismatch, run_id)}", file=sys.stderr)
-                return 1
-            # Carry the pin forward untouched: a resume must not re-pin, or the
-            # checks above could never fire on the attempt after this one.
-            run_identity = previous.get("build_identity") or run_identity
+            # A resume was already verified against its recorded pin above.
+            # Keep that pin byte-for-byte; recomputing it would turn a schema
+            # upgrade into a fictitious build change.
+            run_identity = pinned_identity or _target_build_identity(
+                target_root, args.target, run_config,
+            )
             run_source = str(previous.get("source_signature") or "") or run_source
             run_data["build_identity"] = run_identity
             run_data["source_signature"] = run_source
+            if config_snapshot is not None:
+                run_data["target_config_sha256"] = _config_digest(
+                    config_snapshot,
+                )
             if build_suffix:
                 run_data["build_suffix"] = build_suffix
                 _record_isolated_reference(target_root, build_suffix, bench_dir)
@@ -2130,20 +2132,18 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 experiment = f"bench-{run_id}-{condition}-r{replicate}"
                 log(f"Cell {name} starting: condition={condition} replicate={replicate} agents={1 if condition == 'model-direct' else args.agents or 'default'} model={model or '?'} experiment={experiment}")
                 predicted = cell_dir if condition == "model-direct" else cell_dir / "repo-root" / "output" / f"{args.target}-{experiment}" / args.backend / "results"
-                if not _build_matches_pin(
-                    run_identity,
-                    (SCRIPT_ROOT / "targets" / args.target).resolve(),
-                    args.target,
-                ):
+                drift = build_preflight.pinned_build_problems(
+                    target_root, run_identity, run_config,
+                )
+                if drift:
                     # Nothing inside the harness can reach here: the lease keeps
                     # every cooperating rebuild out for the run's whole life. An
                     # agent that ran a build tool by hand is outside that lease,
                     # and a cell measured on a different binary than its peers
                     # is not comparable, so refuse it rather than average it in.
                     log(
-                        f"WARN: Cell {name}: not started — the target build "
-                        f"changed since the run pinned it; original evidence "
-                        f"was left unchanged"
+                        f"WARN: Cell {name}: not started — {'; '.join(drift)}; "
+                        f"original evidence was left unchanged"
                     )
                     cell_dir.mkdir(parents=True, exist_ok=True)
                     (cell_dir / ".run-quality").write_text(
@@ -2166,11 +2166,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 # just-started long cell (the trailing harness cell) shows in the
                 # shared dashboard for its whole run, not only after it finishes.
                 update_live_result(bench_root, f"start {name}")
-                source_watch = _SourceWatch(
-                    (SCRIPT_ROOT / "targets" / args.target).resolve(),
-                    args.target, run_source,
-                )
-                source_watch.start()
                 start = time.monotonic()
                 started_at = datetime.now(timezone.utc).isoformat()
                 status = "done"
@@ -2180,17 +2175,28 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 elif condition == "model-direct":
                     log(f"Cell {name} live log: {(cell_dir / 'backend.raw.log').resolve()}")
                     results = cell_dir
-                    rc = run_model_direct(cell_dir, (SCRIPT_ROOT / "targets" / args.target).resolve(), args.backend, model, args.budget_wall)
+                    rc = run_model_direct(
+                        cell_dir, target_root, args.backend, model,
+                        args.budget_wall, config_snapshot,
+                    )
                 else:
                     log(f"Cell {name} live log: {(cell_dir / 'audit.log').resolve()}")
-                    rc, results = run_harness(cell_dir, args.target, args.backend, model, experiment, args.budget_wall, args.agents)
+                    rc, results = run_harness(
+                        cell_dir, args.target, args.backend, model, experiment,
+                        args.budget_wall, args.agents, cell_build_identity,
+                        config_snapshot,
+                    )
                 # Stop the clock where the finding work stops. Everything below
                 # — crash triage, the find-gate drain, metrics — is measurement
                 # of what was already found, so charging it to the cell's wall
                 # makes a 3h budget report as ~4h and makes conditions that
                 # produce more to adjudicate look slower at finding things.
                 wall = int(time.monotonic() - start)
-                source_drift = source_watch.stop()
+                source_drift = (
+                    {}
+                    if args.dry_run
+                    else _source_drift(target_root, run_source)
+                )
                 if source_drift:
                     # Keep every artifact — the findings are still findings — but
                     # take the cell out of the headline comparison: its agents
@@ -2206,12 +2212,30 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     (cell_dir / ".run-quality").write_text(
                         "source_drift\n", encoding="utf-8"
                     )
+                build_drift = (
+                    []
+                    if args.dry_run
+                    else build_preflight.pinned_build_problems(
+                        target_root, cell_build_identity, run_config,
+                    )
+                )
+                if build_drift:
+                    log(
+                        f"WARN: Cell {name}: target build changed during the "
+                        f"cell ({'; '.join(build_drift)}); artifacts kept, cell "
+                        "excluded from the comparison"
+                    )
+                    (cell_dir / ".run-quality").write_text(
+                        "build_drift\n", encoding="utf-8"
+                    )
                 if (cell_dir / ".backend-unavailable").exists():
                     status = "incomplete"
                     provider_unavailable = True
                 elif rc:
                     status = "failed"
-                elif source_drift:
+                elif (cell_dir / ".target-artifacts-unowned").exists():
+                    status = "incomplete"
+                elif source_drift or build_drift:
                     status = "incomplete"
                 paused = 0
                 housekeeping = 0
@@ -2226,25 +2250,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 except (OSError, ValueError):
                     pass
                 finalize_wall = getattr(args, "finalize_wall", 3600)
-                replay_build_ok = True
-                if (
-                    not args.dry_run
-                    and results.is_dir()
-                    and (results / "crashes").is_dir()
-                ):
-                    replay_build_ok, reason = _replay_build_status(
-                        {"build_identity": cell_build_identity},
-                        results,
-                        (SCRIPT_ROOT / "targets" / args.target).resolve(),
-                        args.target,
-                    )
-                    if not replay_build_ok:
-                        log(
-                            f"WARN: Cell {name}: crash finalization skipped — "
-                            f"{reason}; original evidence was left unchanged"
-                        )
-                        if status != "failed":
-                            status = "incomplete"
+                replay_build_ok = not build_drift
                 if (
                     not args.dry_run
                     and replay_build_ok
@@ -2348,19 +2354,22 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 results = Path(cell.get("results_dir", ""))
             except (OSError, ValueError):
                 continue
+            if (
+                (cell_dir / ".target-artifacts-unowned").is_file()
+                and cell.get("run_quality")
+                not in {"provider_limited", "source_drift", "build_drift"}
+            ):
+                cell["run_quality"] = "unowned_artifacts"
+                _write_json(cell_dir / "cell.json", cell)
             if results.is_dir():
                 finalizers_ok = True
                 finalize_wall = getattr(args, "finalize_wall", 3600)
                 replay_build_ok = True
-                if (
-                    cell.get("condition") == "model-direct"
-                    and (results / "crashes").is_dir()
-                ):
+                if (results / "crashes").is_dir():
                     replay_build_ok, reason = _replay_build_status(
                         cell,
                         results,
-                        (SCRIPT_ROOT / "targets" / args.target).resolve(),
-                        args.target,
+                        target_root, args.target, run_config,
                     )
                     if not replay_build_ok:
                         finalizers_ok = False
@@ -2424,9 +2433,9 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     # read or executed something its peers did not. Neither
                     # becomes comparable later, so regeneration must not promote
                     # them back into the totals.
-                    and cell.get("run_quality") not in (
-                        "provider_limited", "source_drift", "build_drift",
-                    )
+                    and cell.get("run_quality")
+                    not in metrics.NONCOMPARABLE_RUN_QUALITIES
+                    and not (cell_dir / ".target-artifacts-unowned").is_file()
                     and not (cell_dir / ".backend-unavailable").is_file()
                 ):
                     cell["status"] = "done"
@@ -2438,10 +2447,15 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
 
     report = update_result(bench_dir, bench_root, args.target, args.backend, model, args.dry_run, "pre-ledger")
     section = metrics.render_section(report)
-    metrics.append_to_ledger(ledger, section)
     render = SCRIPT_ROOT / "bin" / "render-md"
-    if render.is_file() and ledger.is_file():
-        subprocess.run([str(render), str(ledger), "--html-sibling"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    with _ledger_lock(ledger):
+        metrics.append_to_ledger(ledger, section)
+        if render.is_file() and ledger.is_file():
+            subprocess.run(
+                [str(render), str(ledger), "--html-sibling"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                check=False,
+            )
     print()
     log(f"Run {run_id} summary:")
     for condition in report.get("conditions", []):

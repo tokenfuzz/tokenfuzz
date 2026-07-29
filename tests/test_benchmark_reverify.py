@@ -737,7 +737,7 @@ class BenchmarkReverifyTests(unittest.TestCase):
             {}, results, target, slug,
         )
         self.assertFalse(ok)
-        self.assertIn("recorded no", reason)
+        self.assertIn("not part of this run's build pin", reason)
 
         unrelated_stamp.write_text("new\nsource\nrecipe\n", encoding="utf-8")
         self.assertEqual(
@@ -759,9 +759,11 @@ class BenchmarkReverifyTests(unittest.TestCase):
             {"build_identity": recorded}, results, target, slug,
         )
         self.assertFalse(ok)
-        self.assertIn("differs", reason)
+        self.assertIn("asan_bin changed", reason)
         blocked = benchmark_runner._pool_replay_blocked(bench, results, target, slug)
-        self.assertIn("differs", blocked.get("CRASH-0001", ""))
+        self.assertIn(
+            "asan_bin changed", blocked.get("CRASH-0001", ""),
+        )
 
         # Restoring the content restores the identity: an unchanged binary
         # someone merely touched is not a different build.
@@ -796,6 +798,57 @@ class BenchmarkReverifyTests(unittest.TestCase):
         stored = json.loads(cell_path.read_text(encoding="utf-8"))
         self.assertEqual(stored["build_identity"], recorded)
 
+    def test_replay_uses_the_run_config_snapshot(self) -> None:
+        target, slug = self.make_target("snapshot-target")
+        crash = self.make_crash(
+            "snapshot-run/cells/model-direct-r1/results",
+        )
+        snapshot_binary = target / "build-asan" / "src" / "snapshot-stub"
+        snapshot_binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        snapshot_binary.chmod(0o755)
+        snapshot = self.root / "snapshot-run" / "target.toml"
+        snapshot.write_text(
+            (target / "target.toml").read_text(encoding="utf-8").replace(
+                "build-asan/src/stub", "build-asan/src/snapshot-stub",
+            ),
+            encoding="utf-8",
+        )
+        (snapshot.parent / "run.json").write_text("{}\n", encoding="utf-8")
+        (crash.parent.parent.parent / "target.toml").write_text(
+            (target / "target.toml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+        fields, _ = benchmark_runner._resolve_reverify_fields(
+            crash, target, slug,
+        )
+        self.assertEqual(fields["BIN"], str(snapshot_binary))
+
+    def test_config_discovery_stops_at_the_benchmark_contract(self) -> None:
+        target, slug = self.make_target("bounded-config")
+        results = self.root / "loose" / "results"
+        results.mkdir(parents=True)
+        (self.root / "target.toml").write_text(
+            'target = "unrelated"\n', encoding="utf-8",
+        )
+        discovered = benchmark_runner._benchmark_target_config_path(
+            results, target, slug,
+        )
+        self.assertIsNotNone(discovered)
+        self.assertEqual(discovered.resolve(), (target / "target.toml").resolve())
+
+    def test_a_broken_runner_does_not_fall_back_to_asan(self) -> None:
+        target, slug = self.make_target("broken-runner")
+        with (target / "target.toml").open("a", encoding="utf-8") as output:
+            output.write('[runner]\nbin = "../missing-runner"\n')
+        crash = self.make_crash("broken-runner-cell")
+        (crash / "sanitizer.txt").write_text(
+            SANITIZER_DIAGNOSTICS["ubsan"], encoding="utf-8",
+        )
+        self.assertIsNone(
+            benchmark_runner._resolve_reverify_fields(crash, target, slug),
+        )
+
     def test_build_drift_fails_the_check_instead_of_dissolving_it(self) -> None:
         # The gate must not read its requirements off the live configuration:
         # a removed binary or a removed config key leaves no replay contract,
@@ -824,31 +877,53 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 self.assertFalse(ok)
                 self.assertTrue(reason)
 
-    def test_a_runner_driven_target_has_no_build_to_verify(self) -> None:
-        # A [runner] target configures no sanitizer binary, so there is nothing
-        # for the gate to compare. Demanding an identity there marks the whole
-        # cell incomplete, dropping its findings from every aggregate.
+    def test_a_target_owned_runner_is_verified(self) -> None:
         target = self.root / "runner-target"
         target.mkdir()
         (target / "target.toml").write_text(
             'target = "runner-target"\nbuild_system = "go"\n'
             '[sanitizer]\nenabled = ["race"]\n'
-            '[runner]\nbin = "sample-go"\nargs = ["{TESTCASE}"]\n',
+            '[runner]\nbin = "sample-go"\nargs = ["{TESTCASE}"]\n'
+            'env = ["RUN_ROOT={TARGET_ROOT}", "RUN_RESULTS={RESULTS_DIR}", '
+            '"RUN_SLUG={TARGET_SLUG}"]\n',
             encoding="utf-8",
         )
+        runner = target / "sample-go"
+        runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        runner.chmod(0o755)
         crash = self.make_crash("runner-cell")
         (crash / "sanitizer.txt").write_text(
             "WARNING: DATA RACE\nRead at 0x00 by goroutine 1:\n", encoding="utf-8",
         )
         results = crash.parent.parent
         identity = benchmark_runner._target_build_identity(target, "runner-target")
-        self.assertEqual(identity, {})
+        self.assertIn("runner-bin", identity["artifacts"])
+        fields, replay_args = benchmark_runner._resolve_reverify_fields(
+            crash, target, "runner-target",
+        )
+        self.assertEqual(fields["BIN"], str(runner))
+        self.assertEqual(replay_args, [str(crash / "poc.bin")])
+        self.assertEqual(fields["ENV_0"], f"RUN_ROOT={target}")
+        self.assertEqual(fields["ENV_1"], f"RUN_RESULTS={results}")
+        self.assertEqual(fields["ENV_2"], "RUN_SLUG=runner-target")
+        command, environment = self.replay_environment(
+            crash, target, "runner-target",
+        )
+        self.assertEqual(environment["ASAN_GENERIC_BIN"], str(runner))
+        self.assertEqual(environment["RUN_RESULTS"], str(results))
+        self.assertEqual(command[-1], str(crash / "poc.bin"))
         self.assertEqual(
             benchmark_runner._replay_build_status(
                 {"build_identity": identity}, results, target, "runner-target",
             ),
             (True, ""),
         )
+        runner.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        ok, reason = benchmark_runner._replay_build_status(
+            {"build_identity": identity}, results, target, "runner-target",
+        )
+        self.assertFalse(ok)
+        self.assertIn("runner_bin changed", reason)
 
     def test_a_dropped_override_cannot_reroute_replay_to_another_build(self) -> None:
         # With ubsan_bin gone the resolver falls back to the ASan binary. If the

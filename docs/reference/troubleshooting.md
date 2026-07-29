@@ -74,17 +74,25 @@ it.
 | Message | Meaning | What to do |
 | --- | --- | --- |
 | `build not replaced (another run is using ...)` | Another audit or benchmark holds this build. | Nothing. The existing build stays and work continues on it. |
-| `pinned benchmark build is not usable` | A benchmark cell found its pinned build missing, stale, or changed. Cells verify and never build. | Look for a build command run outside the harness during the run, then re-run the affected cell with `--run-id`. |
-| `target source changed during the cell` | The revision or tracked source changed while the cell ran. Untracked testcases and generated output do not trigger this. Artifacts are kept; the cell leaves the headline comparison. | Check `cells/<cell>/source-drift.json` for the paths. Agents must not edit tracked target source in place. |
-| `the available target build differs from the cell's` | Crash replay was skipped because the build moved on. Original evidence is untouched. | Re-run that cell; if it recurs with nothing else running, something outside the harness is rebuilding. |
+| `pinned benchmark build is not usable: <route> changed ...` | A cell found that a route selected by the run snapshot no longer has the bytes its parent pinned. Cells verify and never build. | The message names the path. Stop the process rebuilding it, then start a new run id; this run remains valid only if that exact generation is restored. |
+| `target source changed during the cell` | The revision or tracked source differs at the end-of-cell boundary. Untracked testcases and generated output do not trigger this. Artifacts are kept; the cell leaves the headline comparison. | Check `cells/<cell>/source-drift.json` for the paths. Agents must not leave tracked target edits in place. |
+| `crash triage skipped ... <route> changed` | Replay would execute a different pinned target artifact, so finalization kept the original evidence untouched. | Restore the named artifact generation or rerun the cell in a new run. |
 | `is at a different source state than a live run` | A benchmark refused to start: another live run pinned a different source state. | Use a separate checkout, or wait for that run. `--isolate-build` cannot fix this — both runs read one checkout. |
-| `refusing to launch cells against a build this run cannot verify or hold` | The build is missing, stale, or could not be leased. A benchmark will not measure a binary it cannot name. | Fix the build (`bin/setup-target <target> --build`) or wait for the run holding it, then start again. |
-| `the target build differs from the one this run pinned` | A `--run-id` resume found a different build than the cells already on disk were measured on. | Start a new run id, or restore the build that run pinned. Mixing generations would average two experiments. |
+| `build-<san> is stale (changed: <paths>)` | A fresh run found source or a build recipe newer than the available native build. This check is never used for a pinned resume. | Remove an accidental generated path, or run `bin/setup-target <target> --build` for a real source/recipe change, then rerun the fresh benchmark. |
+| `<route> changed since this run pinned it (<path>)` | A `--run-id` resume found different bytes than its completed cells used. | Start a new run id, or restore the named artifact and build stamp. The refusal leaves the recorded pin unchanged. |
+| `<route> now selects ... instead of ...`, `<route> is no longer selected by target.toml` | The run-owned `target.toml` execution route no longer matches its build pin. A missing or unexecutable file is reported as that artifact instead, not as this. | Restore the run snapshot from the original run, or start a new run id with the new configuration. |
+| `bootstrap refused ... the configured runner is in use` | `bin/setup-target` would replace a runner an audit or benchmark is holding. It refuses immediately rather than waiting out the lease. | Wait for that run, or use a separate checkout. |
+| `target-tree artifacts have no benchmark owner` | An agent wrote a finding or crash into the shared target checkout, where no run can prove ownership. The evidence remains on disk and the observing cell leaves the comparison. | Move the report into the correct cell results directory only when its provenance is known; agents should always use `RESULTS_DIR`. |
 | `<setting> was X for this run and is now Y` | A resume changed something that defines the experiment (model, effort, budget, agents, target revision). | Resume with the original settings, or start a new run id. `--replicates` and `--conditions` may still change. |
 
-A build is *stale* only when tracked source content, or the build recipe,
-actually changed. Ignored files a test run writes into the tree, and an edit that
-is reverted, both leave it fresh.
+Initial build freshness conservatively includes non-ignored untracked files,
+because they may be build inputs; ignored output and reverted edits leave it
+fresh. A build reported stale names the paths that made it so, which is what
+separates a by-product a previous run wrote into the checkout — delete it — from
+a real source edit — rebuild. Once a benchmark pins a build, its cells and
+resumes use only the run-owned config snapshot and exact recorded bytes. They
+do not call freshness, so those by-products cannot make an unchanged pinned
+build read as stale.
 
 ## C harness compilation fails
 

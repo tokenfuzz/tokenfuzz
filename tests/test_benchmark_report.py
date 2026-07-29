@@ -222,7 +222,7 @@ class BenchmarkReportTests(unittest.TestCase):
         (target / "file.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
         (target / "target.toml").write_text(
             'target = "sample"\n[sanitizer]\nenabled = []\n'
-            '[runner]\nbin = "/bin/true"\nargs = []\n',
+            f'[runner]\nbin = "{sys.executable}"\nargs = []\n',
             encoding="utf-8",
         )
         fake = self.root / "fake-codex"

@@ -21,6 +21,7 @@ import json
 import os
 import plistlib
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -2158,12 +2159,12 @@ def vcs_source_signature(
 ) -> str:
     """Content identity from the VCS alone, or "" when there is no cheap answer.
 
-    For repeated sampling while a run is in flight, where hashing a whole
-    checkout — gigabytes, for a browser target — is not affordable, and where
-    "cannot tell" must never be reported as "changed". Benchmark comparability
-    passes ``include_untracked=False`` because it is about product source a cell
-    could have read, not testcases or output the cell generated. Added/staged
-    files still count as tracked.
+    Used at benchmark boundaries, where hashing a whole checkout — gigabytes,
+    for a browser target — is not affordable, and where "cannot tell" must
+    never be reported as "changed". Benchmark comparability passes
+    ``include_untracked=False`` because it is about product source a cell could
+    have read, not testcases or output the cell generated. Added/staged files
+    still count as tracked.
     """
     found = _vcs_source_entries(
         Path(target_root), include_untracked=include_untracked,
@@ -2194,9 +2195,12 @@ def build_write_stamp(
     """Mark build-<san> as current with the source tree as of now.
 
     Writes build-<san>/.audit-build-stamp with the detected rev (line 1, for
-    human diagnostics), a source-state signature (line 2), and the producing
-    recipe's digest (line 3). ``recipe_path`` is explicit for non-canonical
-    build configurations; canonical builds use .audit/build[-<san>].sh.
+    human diagnostics), a source-state signature (line 2), the producing
+    recipe's digest (line 3), and a fresh build-generation token (line 4).
+    The token lets a pinned benchmark distinguish two successful builds made
+    from identical inputs; the first three source-derived fields cannot.
+    ``recipe_path`` is explicit for non-canonical build configurations;
+    canonical builds use .audit/build[-<san>].sh.
     Returns False (no-op) when the build dir does not exist."""
     root = Path(target_root)
     build_dir = _build_dir_for(root, san)
@@ -2214,7 +2218,9 @@ def build_write_stamp(
         _primary_build_recipe(root, san)
     recipe_digest = _build_recipe_digest(recipe)
     (build_dir / ".audit-build-stamp").write_text(
-        f"{rev}\n{sig}\n{recipe_digest}\n", encoding="utf-8")
+        f"{rev}\n{sig}\n{recipe_digest}\n{secrets.token_hex(16)}\n",
+        encoding="utf-8",
+    )
     return True
 
 
@@ -2239,6 +2245,22 @@ def build_stamp_fields(
         lines[1] if len(lines) >= 2 else "",
         lines[2] if len(lines) >= 3 else "",
     )
+
+
+def changed_build_recipe(
+    target_root: "str | os.PathLike", san: str = "asan",
+) -> str:
+    """Return the canonical recipe path when it differs from the build stamp."""
+    root = Path(target_root)
+    fields = build_stamp_fields(root, san)
+    recipe = _primary_build_recipe(root, san)
+    if fields is not None and fields[2] and \
+            fields[2] != _build_recipe_digest(recipe):
+        try:
+            return str(recipe.relative_to(root))
+        except ValueError:
+            return str(recipe)
+    return ""
 
 
 def build_input_key(

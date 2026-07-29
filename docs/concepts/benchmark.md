@@ -362,44 +362,64 @@ bin/benchmark --target <target> --isolate-build
 
 ## Running several backends at once
 
-Backends can be benchmarked against one target concurrently. They share the
-target's checkout and its sanitizer build, which is what makes the comparison
-fair — every cell of every run executes the same bytes.
+Backends — including multiple runs of the same backend — can benchmark one
+target concurrently. Run directories and target-config snapshots are private;
+the checkout and matching build generation are shared. Result and ledger
+writers serialize only their short file updates, not whole runs.
+
+Artifacts belong in the cell's results directory. A `FIND-*` or `CRASH-*`
+written into the shared target tree has no trustworthy run owner. The harness
+leaves that evidence in place and excludes the cell that observes it instead of
+assigning it to whichever run finishes first.
 
 A run pins one build generation:
 
-1. The run's preflight converges `build-asan` once, then holds a shared lease on
-   it for the whole run, including replay, pooled triage and metrics.
-2. A peer run whose build inputs match takes its own shared lease and uses the
+1. A fresh run snapshots `target.toml`, converges its selected native build
+   once, then records the selected runner, executable, library and build-stamp
+   bytes.
+2. It holds shared leases on those native build trees and any target-owned
+   generic runner for the whole run, including replay, pooled triage and
+   metrics.
+3. A peer run whose build inputs match takes its own shared lease and uses the
    same build. Nothing has to be duplicated.
-3. While any run holds the build, no `bin/setup-target`, `bin/build-configs` or
+4. While any run holds the build, no `bin/setup-target`, `bin/build-configs` or
    audit preflight will replace it. They say so and leave it in place.
-4. Cells verify the pinned build and never build. A cell that finds it missing,
-   stale, or different fails loudly rather than rebuilding, because rebuilding
-   would invalidate the cells that already ran.
+5. Cell startup, cell completion, resume and replay use the same exact-pin
+   verifier. Cells never run freshness checks and never build.
 
 Two things end up excluded from the headline comparison instead of silently
 averaged in. Their artifacts are always kept:
 
-- `source_drift` — the target's tracked source changed while the cell ran, so
-  its agents read code the other cells did not.
+- `source_drift` — the target's tracked source differs from the run pin when
+  the cell ends.
 - `build_drift` — the build changed since the run pinned it, which only a build
   command run outside the harness can cause.
+- `unowned_artifacts` — evidence appeared in the shared target tree without a
+  run identifier, so assigning it to this or a concurrent cell would be unsafe.
 
 Each run also pins the *source state* it is auditing, at the checkout rather
 than at the build directory. Start a run while another has pinned a different
 state and it refuses immediately: sharing the live build would measure a binary
 the current source did not produce, and rebuilding would corrupt that run. Use a
-separate checkout, or wait. Source pinning and drift detection read the VCS, so
-they cover git and Mercurial checkouts; a target under neither is not watched.
-They compare the revision and tracked working-tree content. Untracked
-testcases and generated output do not change the code a cell audited and do not
-invalidate it; build freshness separately retains its conservative treatment
-of possible untracked build inputs.
+separate checkout, or wait. Source pinning and the single end-of-cell boundary
+check read the VCS, so they cover git and Mercurial checkouts. There is no
+polling thread. They compare the revision and tracked working-tree content;
+untracked testcases and generated output do not invalidate a cell.
 
-A resumed `--run-id` is held to the same rule and never rebuilds: it verifies the
-build it pinned rather than converging one, and refuses if that build, the source
-state, or an experiment-defining setting has moved — model, reasoning effort,
+Before the first cell, build freshness remains conservative: a non-ignored
+untracked file may be a real build input, so preflight converges the build
+against the complete checkout once, naming the paths responsible if it must
+refuse. The benchmark then pins the selected execution routes and their bytes.
+Every cell receives the run's immutable `target.toml` snapshot and verifies
+that it still selects those routes. It does not ask whether a hypothetical
+rebuild would be fresh, so testcases and other by-products an earlier cell left
+in the checkout cannot invalidate an unchanged pinned build.
+
+A resumed `--run-id` never runs freshness and never rebuilds. It loads the
+run-owned config snapshot and verifies the recorded paths, bytes and build
+generation directly. A refusal names the changed route or path and tells the
+operator to start a new run id or restore that generation. It also refuses if
+the source state or an experiment-defining setting has moved — model, reasoning effort,
 `--budget-wall`, `--agents`, or the target revision. Raising `--replicates` and
 resuming a subset of `--conditions` remain the supported ways to continue a run,
 because neither changes what the finished cells measured.

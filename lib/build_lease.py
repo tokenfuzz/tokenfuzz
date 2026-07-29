@@ -52,6 +52,11 @@ _KEPT: list[int] = []
 # is identifiable, and removed by the OS only when the process is gone.
 _KEPT_PINS: list[Path] = []
 
+# Language bootstraps commonly replace a configured executable in the target
+# root instead of a build-<san>/ tree. It still needs the same reader/writer
+# protection as native sanitizer artifacts.
+RUNNER_LEASE_NAME = "target-runner"
+
 
 def lease_path(target_root: "str | os.PathLike", build_dir_name: str) -> Path:
     return Path(target_root) / ".audit" / "build-locks" / f"{build_dir_name}.lock"

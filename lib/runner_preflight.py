@@ -31,10 +31,23 @@ _VERSION_ARGS = {
 }
 
 
-def _resolve(config) -> Path:
+def runner_path(config) -> Path:
+    """The file ``[runner].bin`` selects, usable or not.
+
+    Selection and usability are separate questions: a caller checking whether a
+    pinned runner still has its recorded bytes must be able to say "missing" or
+    "not executable" about the file the config points at, rather than losing the
+    path and reporting a configuration change that did not happen.
+    """
     raw = str(config.runner_bin or "").strip()
     found = shutil.which(raw) if raw else None
-    candidate = Path(found or config.resolve_path(raw))
+    return Path(found or config.resolve_path(raw))
+
+
+def resolve(config) -> Path:
+    """Resolve the exact executable selected by ``[runner].bin``."""
+    raw = str(config.runner_bin or "").strip()
+    candidate = runner_path(config)
     if not candidate.is_file():
         raise RuntimeError(
             f"configured [runner].bin '{raw}' was not found on PATH or at {candidate}"
@@ -86,7 +99,7 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
             )
         return None
 
-    binary = _resolve(config)
+    binary = resolve(config)
     version_args = _VERSION_ARGS.get(Path(raw).name)
     if version_args:
         completed = run_timeout(

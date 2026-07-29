@@ -243,6 +243,18 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "results_dir": str(provider_results), "wall_seconds": 1,
         "status": "incomplete", "run_quality": "provider_limited",
     }), encoding="utf-8")
+    unowned_dir = cells_dir / "harness-r4"
+    unowned_dir.mkdir()
+    unowned_results = unowned_dir / "results"
+    unowned_results.mkdir()
+    (unowned_dir / ".target-artifacts-unowned").touch()
+    (unowned_dir / "cell.json").write_text(json.dumps({
+        "condition": "harness", "replicate": 4, "experiment": "unowned",
+        "results_dir": str(unowned_results), "wall_seconds": 1,
+        # This is the shape written by the first unowned-artifact implementation:
+        # regeneration must migrate it rather than promote it.
+        "status": "incomplete", "run_quality": "incomplete",
+    }), encoding="utf-8")
     regenerate_args = SimpleNamespace(**{**vars(budget_args), "regenerate": True})
     regenerate_age_pending = []
     def _regenerate_crash_triage(*args, **kwargs):
@@ -260,6 +272,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         )
     recovered = json.loads((cells_dir / "harness-r1" / "cell.json").read_text())
     provider = json.loads((provider_dir / "cell.json").read_text())
+    unowned = json.loads((unowned_dir / "cell.json").read_text())
     still_pending = json.loads((cells_dir / "harness-r2" / "cell.json").read_text())
     check(
         recovered["status"] == "done" and recovered["run_quality"] == "clean",
@@ -270,6 +283,12 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         provider["status"] == "incomplete" and provider["run_quality"] == "provider_limited",
         "regenerate preserves genuine provider-limited status",
         repr(provider),
+    )
+    check(
+        unowned["status"] == "incomplete"
+        and unowned["run_quality"] == "unowned_artifacts",
+        "regenerate cannot launder ambiguous target-tree evidence into metrics",
+        repr(unowned),
     )
     check(
         still_pending["status"] == "done"

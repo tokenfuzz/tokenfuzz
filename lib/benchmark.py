@@ -67,6 +67,35 @@ except Exception:  # pragma: no cover - target_config should always import
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 FINDING_CONFIRMATION_VERSION = "quality-trigger-v1"
+CELL_RUN_QUALITIES = frozenset({
+    "clean", "incomplete", "provider_recovered", "provider_limited",
+    "source_drift", "build_drift", "unowned_artifacts",
+})
+NONCOMPARABLE_RUN_QUALITIES = frozenset({
+    "provider_limited", "source_drift", "build_drift", "unowned_artifacts",
+})
+
+
+def cell_run_quality(cell_dir: Path, status: str) -> str:
+    """Resolve persistent cell-quality evidence with stable precedence."""
+    quality = "clean"
+    try:
+        candidate = (cell_dir / ".run-quality").read_text(
+            encoding="utf-8",
+        ).strip()
+        if candidate in CELL_RUN_QUALITIES:
+            quality = candidate
+    except OSError:
+        pass
+    if (
+        (cell_dir / ".target-artifacts-unowned").is_file()
+        and quality not in {"provider_limited", "source_drift", "build_drift"}
+    ):
+        quality = "unowned_artifacts"
+    if status == "incomplete" and quality == "clean":
+        quality = "incomplete"
+    return quality
+
 
 # ── sanitizer crash oracle ───────────────────────────────────────────────
 #
@@ -5336,15 +5365,7 @@ def _optional_int(value: str) -> int | None:
 
 def _cmd_write_cell(args: argparse.Namespace) -> int:
     path = Path(args.path)
-    run_quality = "clean"
-    try:
-        value = (path.parent / ".run-quality").read_text(encoding="utf-8").strip()
-        if value in {"clean", "incomplete", "provider_recovered", "provider_limited"}:
-            run_quality = value
-    except OSError:
-        pass
-    if args.status == "incomplete" and run_quality == "clean":
-        run_quality = "incomplete"
+    run_quality = cell_run_quality(path.parent, args.status)
     paused = max(0, _as_int(args.paused_seconds))
     housekeeping = max(0, _as_int(getattr(args, "housekeeping_seconds", 0)))
     payload = {
@@ -5509,24 +5530,45 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
     # of the same file accepts spellings they do not, and would then replay a
     # binary nothing else in the harness would have chosen.
     config = None
-    config_path = target_root / "target.toml"
-    if args.target_slug:
+    config_path = (
+        Path(args.target_toml)
+        if args.target_toml
+        else target_root / "target.toml"
+    )
+    if not args.target_toml and args.target_slug:
         split_config = SCRIPT_ROOT / "output" / args.target_slug / "target.toml"
         if split_config.is_file():
             config_path = split_config
     if _tc is not None and config_path.is_file():
-        config = _tc.Config(target_root=str(target_root))
+        config = _tc.Config(
+            slug=args.target_slug,
+            target_root=str(target_root),
+            results_dir=str(crash_dir.parent.parent),
+        )
         try:
             _tc.load_toml_into(config, config_path)
         except Exception:
             config = None
     binary_relative = ""
     library_relative = ""
+    runner_binary = ""
+    runner_selected = False
     if config is not None:
-        binary_relative = config.sanitizer_bin(sanitizer) or config.asan_bin
+        binary_relative = config.sanitizer_bin(sanitizer)
+        if not binary_relative and config.runner_bin:
+            runner_selected = True
+            try:
+                import runner_preflight
+                runner_binary = str(runner_preflight.runner_path(config))
+            except (OSError, ValueError):
+                runner_binary = ""
+        if not binary_relative and not runner_selected and config.asan_bin:
+            binary_relative = config.asan_bin
         library_relative = config.sanitizer_lib(sanitizer)
 
-    target_binary = _resolve_build_path(target_root, binary_relative)
+    target_binary = runner_binary or _resolve_build_path(
+        target_root, binary_relative,
+    )
 
     if harness is not None:
         # Replay a harness under the sanitizer it was built with: under the
@@ -5560,12 +5602,31 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
         and os.path.exists(target_binary)
         and os.access(target_binary, os.X_OK)
     ):
-        print(f"SAN={sanitizer}\nMODE=cli\nBIN={target_binary}\nTESTCASE={testcase}")
+        print(
+            f"SAN={sanitizer}\nMODE=cli\nBIN={target_binary}\nTESTCASE={testcase}"
+        )
         replay_args = _ca.find_repro_args(
             scan_dirs,
             bin_names=[os.path.basename(target_binary)],
             testcase_name=os.path.basename(str(testcase)),
         )
+        if runner_binary and config is not None:
+            import sanitizer_run
+            if not replay_args and config.runner_args:
+                replay_args = [
+                    sanitizer_run.expand_runner_value(
+                        value, config, sanitizer, testcase=str(testcase),
+                    )
+                    for value in config.runner_args
+                ]
+                if not any("{TESTCASE}" in value for value in config.runner_args):
+                    replay_args.append(str(testcase))
+            for index, entry in enumerate(config.runner_env):
+                value = sanitizer_run.expand_runner_value(
+                    entry, config, sanitizer, testcase=str(testcase),
+                )
+                if "=" in value:
+                    print(f"ENV_{index}={value}")
         for replay_arg in replay_args:
             value = str(testcase) if replay_arg == _ca.TESTCASE_TOKEN else replay_arg
             print(f"ARG={value}")
@@ -5632,6 +5693,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("crash_dir")
     p.add_argument("target_root")
     p.add_argument("target_slug", nargs="?", default="")
+    p.add_argument("--target-toml", default="")
 
     p_h = sub.add_parser("harvest", help="metric counts for one results dir")
     p_h.add_argument("results_dir", type=Path)

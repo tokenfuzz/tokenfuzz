@@ -135,6 +135,21 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "incomplete", cli_cell["run_quality"],
         "benchmark metadata CLI uses the same factual incomplete label",
     )
+    (cli_cell_dir / ".run-quality").write_text(
+        "provider_recovered\n", encoding="utf-8",
+    )
+    (cli_cell_dir / ".target-artifacts-unowned").touch()
+    benchmark_module._cmd_write_cell(SimpleNamespace(
+        path=str(cli_cell_dir / "cell.json"), condition="harness",
+        replicate="1", experiment="fixture", results_dir=str(cli_cell_dir / "results"),
+        wall_seconds="10", status="incomplete", requested_agents="",
+        paused_seconds="0",
+    ))
+    equal(
+        "unowned_artifacts",
+        json.loads((cli_cell_dir / "cell.json").read_text())["run_quality"],
+        "benchmark metadata CLI preserves unowned-artifact exclusion",
+    )
 
     # A productive session whose usage was never recorded (the zero-token
     # `primary` row) understates the cell total, so the cell must read
@@ -811,13 +826,29 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     artifact_target = root / "artifact-target"
     old = artifact_target / "findings" / "FIND-OLD"
     old.mkdir(parents=True)
-    marked = benchmark_runner.mark_target_artifacts(artifact_target)
-    new = artifact_target / "findings" / "FIND-NEW"
-    new.mkdir()
     destination = root / "cell"
     destination.mkdir()
-    equal(1, benchmark_runner.sweep_target_artifacts(artifact_target, destination, marked), "benchmark sweeps only newly leaked artifacts")
-    check(old.is_dir() and (destination / "findings" / "FIND-NEW").is_dir(), "benchmark preserves pre-existing target artifacts")
+    with benchmark_runner._target_artifact_guard(
+        artifact_target, destination,
+    ):
+        new = artifact_target / "findings" / "FIND-NEW"
+        new.mkdir()
+    check(
+        old.is_dir() and new.is_dir()
+        and (destination / ".target-artifacts-unowned").is_file()
+        and (destination / ".run-quality").read_text().strip()
+        == "unowned_artifacts",
+        "benchmark preserves unowned target artifacts and excludes the cell",
+    )
+    propagated = False
+    try:
+        with benchmark_runner._target_artifact_guard(
+            artifact_target, destination,
+        ):
+            raise RuntimeError("cell launch failed")
+    except RuntimeError:
+        propagated = True
+    check(propagated, "target artifact guard preserves cell launch failures")
 
     scratch_cell = root / "scratch-cell"
     (scratch_cell / "scratch" / "nested").mkdir(parents=True)

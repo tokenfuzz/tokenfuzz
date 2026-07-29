@@ -10,6 +10,7 @@ alternate-configuration trees the harness itself owns.
 
 from __future__ import annotations
 
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
@@ -17,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,12 +33,17 @@ import build_lease  # noqa: E402
 import build_preflight  # noqa: E402
 import target_config  # noqa: E402
 
-_loader = importlib.machinery.SourceFileLoader(
-    "build_configs_mod", str(ROOT / "bin" / "build-configs")
-)
-_spec = importlib.util.spec_from_loader(_loader.name, _loader)
-build_configs = importlib.util.module_from_spec(_spec)
-_loader.exec_module(build_configs)
+def _load_script(name: str, path: Path):
+    """Import an extensionless bin/ entry point as a module."""
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader)
+    )
+    loader.exec_module(module)
+    return module
+
+
+build_configs = _load_script("build_configs_mod", ROOT / "bin" / "build-configs")
 
 
 def _native_target(root: Path) -> None:
@@ -78,7 +85,16 @@ class VerifyOnlyCellTests(unittest.TestCase):
     def _build(self) -> None:
         (self.target / "build-asan").mkdir(exist_ok=True)
         (self.target / "build-asan" / "app").write_text("#!/bin/sh\n")
+        (self.target / "build-asan" / "app").chmod(0o755)
         target_config.build_write_stamp(self.target, "asan")
+
+    def _benchmark_environment(self) -> dict[str, str]:
+        identity = build_preflight.build_identity(self.target, self.config)
+        return {
+            "_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD": "1",
+            build_preflight.BENCHMARK_BUILD_PIN_ENV:
+                build_preflight.encode_benchmark_build_pin(identity),
+        }
 
     def test_no_problems_when_the_pinned_build_is_present(self) -> None:
         self._build()
@@ -99,6 +115,27 @@ class VerifyOnlyCellTests(unittest.TestCase):
         problems = build_preflight.build_problems(self.target, self.config)
         self.assertTrue(any("stale" in item for item in problems), problems)
 
+    def test_a_stale_build_names_the_paths_that_staled_it(self) -> None:
+        """The operator has to choose between rebuilding and removing a
+        by-product, and cannot without knowing which path is responsible."""
+        _git_commit_all(self.target)
+        self._build()
+        (self.target / "testcase.db").write_bytes(b"")
+        self.assertEqual(
+            ["build-asan is stale (changed: testcase.db)"],
+            build_preflight.build_problems(self.target, self.config),
+        )
+
+    def test_a_changed_recipe_is_named(self) -> None:
+        self._build()
+        (self.target / ".audit" / "build.sh").write_text(
+            "#!/bin/sh\n# changed\n", encoding="utf-8",
+        )
+        self.assertEqual(
+            ["build-asan is stale (changed: .audit/build.sh)"],
+            build_preflight.build_problems(self.target, self.config),
+        )
+
     def test_missing_configured_binary_is_a_problem(self) -> None:
         self._build()
         (self.target / "build-asan" / "app").unlink()
@@ -109,13 +146,30 @@ class VerifyOnlyCellTests(unittest.TestCase):
         self.config.sanitizers_explicitly_disabled = True
         self.assertEqual([], build_preflight.build_problems(self.target, self.config))
 
+    def test_findings_only_target_does_not_pin_leftover_native_builds(self) -> None:
+        self._build()
+        self.config.sanitizers_explicitly_disabled = True
+        self.assertEqual(
+            {}, build_preflight.build_identity(self.target, self.config),
+        )
+
+    def test_disabled_sanitizer_stamp_is_not_part_of_the_pin(self) -> None:
+        self._build()
+        (self.target / "build-ubsan").mkdir()
+        target_config.build_write_stamp(self.target, "ubsan")
+        identity = build_preflight.build_identity(self.target, self.config)
+        self.assertEqual(set(identity["stamps"]), {"asan"})
+
     def test_cell_preflight_fails_loudly_and_never_builds(self) -> None:
+        self._build()
+        environment = self._benchmark_environment()
+        (self.target / "build-asan" / "app").write_text("#!/bin/sh\nchanged\n")
         runtime = SimpleNamespace(
             target_root=self.target, config=self.config, root=ROOT,
             target_slug="sampleproj", logs=self.tmp, backend="codex", model="m",
         )
         with mock.patch.dict(
-            os.environ, {"_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD": "1"}, clear=False
+            os.environ, environment, clear=False
         ), mock.patch.object(build_preflight, "refresh") as refresh:
             with self.assertRaises(RuntimeError) as caught:
                 audit_runner.preflight_build(runtime)
@@ -124,12 +178,98 @@ class VerifyOnlyCellTests(unittest.TestCase):
 
     def test_cell_preflight_passes_on_a_good_build_without_building(self) -> None:
         self._build()
+        environment = self._benchmark_environment()
         runtime = SimpleNamespace(
             target_root=self.target, config=self.config, root=ROOT,
             target_slug="sampleproj", logs=self.tmp, backend="codex", model="m",
         )
         with mock.patch.dict(
-            os.environ, {"_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD": "1"}, clear=False
+            os.environ, environment, clear=False
+        ), mock.patch.object(build_preflight, "refresh") as refresh:
+            audit_runner.preflight_build(runtime)
+            refresh.assert_not_called()
+
+    def test_cell_preflight_requires_the_parent_pin(self) -> None:
+        self._build()
+        runtime = SimpleNamespace(
+            target_root=self.target, config=self.config, root=ROOT,
+            target_slug="sampleproj", logs=self.tmp, backend="codex", model="m",
+        )
+        with mock.patch.dict(
+            os.environ, {"_TOKENFUZZ_BENCHMARK_PRIMARY_BUILD": "1"}, clear=True
+        ), self.assertRaises(RuntimeError) as caught:
+            audit_runner.preflight_build(runtime)
+        self.assertIn("pin is missing or unreadable", str(caught.exception))
+
+    def test_the_pin_names_what_changed(self) -> None:
+        self._build()
+        identity = build_preflight.build_identity(self.target, self.config)
+        (self.target / "build-asan" / "app").write_text("#!/bin/sh\nchanged\n")
+        self.assertEqual(
+            ["asan_bin changed since this run pinned it (build-asan/app)"],
+            build_preflight.pinned_build_problems(self.target, identity),
+        )
+        (self.target / "build-asan" / "app").unlink()
+        self.assertEqual(
+            ["asan_bin is missing (build-asan/app)"],
+            build_preflight.pinned_build_problems(self.target, identity),
+        )
+        (self.target / "build-asan" / ".audit-build-stamp").unlink()
+        self.assertIn(
+            "asan_bin is missing (build-asan/app)",
+            build_preflight.pinned_build_problems(self.target, identity),
+        )
+
+    def test_the_pin_checks_bytes_without_a_target_config(self) -> None:
+        """Legacy callers can still verify the exact recorded paths."""
+        self._build()
+        identity = build_preflight.build_identity(self.target, self.config)
+        self.assertEqual(
+            [], build_preflight.pinned_build_problems(self.target, identity)
+        )
+
+    def test_the_pin_rejects_a_changed_execution_route(self) -> None:
+        self._build()
+        identity = build_preflight.build_identity(self.target, self.config)
+        self.config.sanitizer_bin = lambda name: ""
+        self.config.sanitizer_lib = lambda name: "build-asan/libnew.a"
+        problems = build_preflight.pinned_build_problems(
+            self.target, identity, self.config,
+        )
+        self.assertTrue(any("no longer selected" in item for item in problems))
+        self.assertTrue(any("not part of this run" in item for item in problems))
+
+    def test_a_version_one_pin_keeps_its_recorded_route(self) -> None:
+        self._build()
+        identity = build_preflight.build_identity(self.target, self.config)
+        identity["version"] = 1
+        self.config.sanitizer_bin = lambda name: ""
+        problems = build_preflight.pinned_build_problems(
+            self.target, identity, self.config,
+        )
+        self.assertIn(
+            "asan_bin is no longer selected by target.toml", problems,
+        )
+
+    def test_an_empty_pin_has_nothing_to_verify(self) -> None:
+        """A target that declares no sanitizer artifacts pins none of them."""
+        self.assertEqual([], build_preflight.pinned_build_problems(self.target, {}))
+
+    def test_cell_uses_the_pin_not_checkout_artifacts(self) -> None:
+        """A direct cell's generated input cannot reinterpret a pinned build."""
+        self._build()
+        environment = self._benchmark_environment()
+        (self.target / "testcase.db").write_bytes(b"")
+        self.assertIn(
+            "build-asan is stale",
+            build_preflight.build_problems(self.target, self.config),
+        )
+        runtime = SimpleNamespace(
+            target_root=self.target, config=self.config, root=ROOT,
+            target_slug="sampleproj", logs=self.tmp, backend="codex", model="m",
+        )
+        with mock.patch.dict(
+            os.environ, environment, clear=False
         ), mock.patch.object(build_preflight, "refresh") as refresh:
             audit_runner.preflight_build(runtime)
             refresh.assert_not_called()
@@ -193,47 +333,74 @@ class DriftAccountingTests(unittest.TestCase):
         (self.cell / ".run-quality").write_text("banana\n")
         self.assertEqual("clean", self._write("done")["run_quality"])
 
-    def test_build_matches_pin_compares_whole_identity(self) -> None:
+    def test_a_rebuilt_tree_stops_the_next_cell(self) -> None:
         target = self.tmp / "target"
         _native_target(target)
         (target / "build-asan").mkdir()
+        binary = target / "build-asan" / "app"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
         target_config.build_write_stamp(target, "asan")
-        pinned = benchmark_runner._target_build_identity(target, "sampleproj")
-        self.assertTrue(benchmark_runner._build_matches_pin({}, target, "sampleproj"))
-        self.assertTrue(
-            benchmark_runner._build_matches_pin(pinned, target, "sampleproj")
+        config = SimpleNamespace(
+            is_browser="0", sanitizers_explicitly_disabled=False,
+            sanitizers_enabled=["asan"], runner_bin="",
+            sanitizer_bin=lambda name: "build-asan/app" if name == "asan" else "",
+            sanitizer_lib=lambda name: "",
+            resolve_path=lambda raw: str(target / raw),
         )
+        pinned = build_preflight.build_identity(target, config)
+        self.assertEqual([], build_preflight.pinned_build_problems(target, {}))
+        self.assertEqual([], build_preflight.pinned_build_problems(target, pinned))
         (target / "main.c").write_text("int main(void){return 1;}\n")
         target_config.build_write_stamp(target, "asan")
-        self.assertFalse(
-            benchmark_runner._build_matches_pin(pinned, target, "sampleproj")
+        self.assertEqual(
+            ["build-asan was rebuilt since this run pinned it"],
+            build_preflight.pinned_build_problems(target, pinned),
         )
+
+    def test_same_input_rebuilds_get_distinct_generations(self) -> None:
+        target = self.tmp / "same-input"
+        _native_target(target)
+        (target / "build-asan").mkdir()
+        target_config.build_write_stamp(target, "asan")
+        first = (
+            target / "build-asan" / ".audit-build-stamp"
+        ).read_bytes()
+        target_config.build_write_stamp(target, "asan")
+        second = (
+            target / "build-asan" / ".audit-build-stamp"
+        ).read_bytes()
+        self.assertNotEqual(first, second)
+        self.assertEqual(target_config.build_freshness(target, "asan"), "fresh")
 
 
 class ResumeAndSuffixTests(unittest.TestCase):
     """A resumed run must land on the generation it pinned, or refuse."""
 
-    def test_recorded_identity_mismatch_refuses(self) -> None:
-        previous = {"build_identity": {"artifacts": {"asan-bin": {"sha256": "aaa"}}}}
-        live = {"artifacts": {"asan-bin": {"sha256": "bbb"}}}
-        self.assertIn("build differs", benchmark_runner._pin_mismatch(previous, live, ""))
-
     def test_recorded_source_mismatch_refuses(self) -> None:
         self.assertIn(
             "source differs",
-            benchmark_runner._pin_mismatch({"source_signature": "s0"}, {}, "s1"),
+            benchmark_runner._source_pin_mismatch(
+                {"source_signature": "s0"}, "s1",
+            ),
         )
 
     def test_matching_pin_is_not_a_mismatch(self) -> None:
-        previous = {"build_identity": {"a": 1}, "source_signature": "s0"}
-        self.assertEqual("", benchmark_runner._pin_mismatch(previous, {"a": 1}, "s0"))
+        previous = {"source_signature": "s0"}
+        self.assertEqual(
+            "", benchmark_runner._source_pin_mismatch(previous, "s0"),
+        )
 
     def test_a_run_recorded_before_pinning_has_nothing_to_contradict(self) -> None:
         """Runs from before this existed carry no pin. They must stay resumable
         rather than becoming permanently refused."""
-        self.assertEqual("", benchmark_runner._pin_mismatch({}, {"a": 1}, "s0"))
         self.assertEqual(
-            "", benchmark_runner._pin_mismatch({"source_signature": ""}, {}, "s1")
+            "", benchmark_runner._source_pin_mismatch({}, "s0"),
+        )
+        self.assertEqual(
+            "", benchmark_runner._source_pin_mismatch(
+                {"source_signature": ""}, "s1",
+            ),
         )
 
     def test_recorded_suffix_wins_over_recomputing(self) -> None:
@@ -278,23 +445,21 @@ class ResumeAndSuffixTests(unittest.TestCase):
             self.assertEqual("-img42", os.environ["AUDIT_BUILD_SUFFIX"])
 
 
-class DriftWatchTests(unittest.TestCase):
-    """Sampling records drift; it must never invent it."""
+class BoundarySourceDriftTests(unittest.TestCase):
+    """The one end-of-cell source check must never invent drift."""
 
-    def _watch(self, baseline: str) -> "benchmark_runner._SourceWatch":
-        return benchmark_runner._SourceWatch(Path("/nonexistent"), "t", baseline)
-
-    def test_an_unavailable_sample_is_not_drift(self) -> None:
+    def test_an_unavailable_boundary_check_is_not_drift(self) -> None:
         """A transient VCS failure must not discard a finished cell."""
-        watch = self._watch("sig-base")
         with mock.patch.object(
             benchmark_runner.target_config, "vcs_source_signature", return_value=""
         ):
-            watch._sample()
-        self.assertEqual({}, watch.drift)
+            self.assertEqual(
+                {}, benchmark_runner._source_drift(
+                    Path("/nonexistent"), "sig-base",
+                ),
+            )
 
-    def test_a_changed_sample_is_drift(self) -> None:
-        watch = self._watch("sig-base")
+    def test_a_changed_boundary_is_drift(self) -> None:
         with mock.patch.object(
             benchmark_runner.target_config, "vcs_source_signature",
             return_value="sig-other",
@@ -302,17 +467,21 @@ class DriftWatchTests(unittest.TestCase):
             benchmark_runner.target_config, "source_changed_paths",
             return_value=["parser.c"],
         ):
-            watch._sample()
-        self.assertEqual(["parser.c"], watch.drift["paths"])
+            drift = benchmark_runner._source_drift(
+                Path("/nonexistent"), "sig-base",
+            )
+        self.assertEqual(["parser.c"], drift["paths"])
 
-    def test_an_unchanged_sample_is_not_drift(self) -> None:
-        watch = self._watch("sig-base")
+    def test_an_unchanged_boundary_is_not_drift(self) -> None:
         with mock.patch.object(
             benchmark_runner.target_config, "vcs_source_signature",
             return_value="sig-base",
         ):
-            watch._sample()
-        self.assertEqual({}, watch.drift)
+            self.assertEqual(
+                {}, benchmark_runner._source_drift(
+                    Path("/nonexistent"), "sig-base",
+                ),
+            )
 
     def test_a_generated_artifact_is_not_drift(self) -> None:
         """A cell's own testcases land in the checkout it is auditing.
@@ -326,27 +495,26 @@ class DriftWatchTests(unittest.TestCase):
         self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)], check=False)
         _native_target(tmp)
         _git_commit_all(tmp)
-        watch = benchmark_runner._SourceWatch(
-            tmp, "t",
-            target_config.vcs_source_signature(tmp, include_untracked=False),
+        baseline = target_config.vcs_source_signature(
+            tmp, include_untracked=False,
         )
-        self.assertTrue(watch.baseline)
+        self.assertTrue(baseline)
         (tmp / "inj.mkv").write_bytes(b"\x1a\x45\xdf\xa3crafted")
-        watch._sample()
-        self.assertEqual({}, watch.drift)
+        self.assertEqual({}, benchmark_runner._source_drift(tmp, baseline))
         (tmp / "main.c").write_text("int main(void){return 1;}\n")
-        watch._sample()
-        self.assertEqual(["main.c"], watch.drift["paths"])
+        self.assertEqual(
+            ["main.c"], benchmark_runner._source_drift(tmp, baseline)["paths"],
+        )
 
-    def test_a_target_with_no_cheap_signature_is_not_watched(self) -> None:
-        """Hashing a whole checkout every minute is not affordable, so a target
-        the VCS cannot answer for is left alone rather than watched expensively."""
-        watch = self._watch("")
-        watch.start()
+    def test_an_empty_baseline_does_no_work(self) -> None:
         with mock.patch.object(
             benchmark_runner.target_config, "vcs_source_signature"
         ) as signature:
-            self.assertEqual({}, watch.stop())
+            self.assertEqual(
+                {}, benchmark_runner._source_drift(
+                    Path("/nonexistent"), "",
+                ),
+            )
             signature.assert_not_called()
 
 
@@ -390,6 +558,113 @@ class PrimaryOnlyBuildTests(unittest.TestCase):
         self.assertNotIn("--no-alternates", self._setup_target_argv(True))
 
 
+class GenericRunnerLeaseTests(unittest.TestCase):
+    def test_a_target_owned_runner_is_leased(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="runner-lease-") as directory:
+            target = Path(directory)
+            runner = target / "app"
+            runner.write_text("#!/bin/sh\n", encoding="utf-8")
+            runner.chmod(0o755)
+            config = target_config.Config(target_root=str(target))
+            config.sanitizers_enabled = []
+            config.sanitizers_explicitly_disabled = True
+            config.runner_bin = "app"
+            with mock.patch.object(
+                build_preflight.build_lease, "hold_shared", return_value=True,
+            ) as hold:
+                self.assertEqual(
+                    [], build_preflight.hold_builds(
+                        target, config, lambda message: None,
+                    ),
+                )
+            hold.assert_called_once_with(
+                target, build_preflight.build_lease.RUNNER_LEASE_NAME,
+                logger=mock.ANY,
+            )
+
+    def test_a_system_runner_is_pinned_but_not_target_leased(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="system-runner-pin-") as directory:
+            target = Path(directory)
+            config = target_config.Config(target_root=str(target))
+            config.sanitizers_enabled = []
+            config.sanitizers_explicitly_disabled = True
+            config.runner_bin = sys.executable
+            identity = build_preflight.build_identity(target, config)
+            self.assertIn("runner-bin", identity["artifacts"])
+            with mock.patch.object(
+                build_preflight.build_lease, "hold_shared", return_value=True,
+            ) as hold:
+                self.assertEqual(
+                    [], build_preflight.hold_builds(
+                        target, config, lambda message: None,
+                    ),
+                )
+            hold.assert_not_called()
+
+    def test_a_bootstrap_refuses_a_busy_runner_without_waiting(self) -> None:
+        """A consumer holds the runner for a whole run.
+
+        Blocking out the lease timeout only delays the same refusal, so the
+        operator waits fifteen minutes to be told to try later.
+        """
+        setup_target = _load_script("setup_target_mod", ROOT / "bin" / "setup-target")
+        with tempfile.TemporaryDirectory(prefix="runner-busy-") as directory:
+            target = Path(directory)
+            (target / "go.mod").write_text("module example.com/x\n", encoding="utf-8")
+            runner = target / "app"
+            runner.write_text("#!/bin/sh\n", encoding="utf-8")
+            runner.chmod(0o755)
+            config = target_config.Config(target_root=str(target))
+            config.build_system = "go"
+            config.runner_bin = "app"
+            setup = setup_target.Setup(SimpleNamespace(
+                target="busy", source="", build=True,
+            ))
+            setup.target_root = target
+            lock = build_lease.lease_path(target, build_lease.RUNNER_LEASE_NAME)
+            lock.parent.mkdir(parents=True, exist_ok=True)
+            # A separate open file description, so this reads as a foreign
+            # holder exactly as another run's lease would.
+            held = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(held, fcntl.LOCK_SH)
+                started = time.monotonic()
+                with self.assertRaises(RuntimeError) as caught:
+                    setup.language_build(config)
+                waited = time.monotonic() - started
+            finally:
+                os.close(held)
+            self.assertIn("is in use by another audit", str(caught.exception))
+            self.assertLess(waited, 1, "the bootstrap waited on a busy runner")
+
+    def test_an_unusable_runner_is_reported_as_the_artifact_it_is(self) -> None:
+        """Losing the file is not a configuration change.
+
+        Reporting one as the other sends the operator to restore a snapshot
+        that never moved instead of the runner that did.
+        """
+        with tempfile.TemporaryDirectory(prefix="runner-artifact-") as directory:
+            target = Path(directory)
+            runner = target / "app"
+            runner.write_text("#!/bin/sh\n", encoding="utf-8")
+            runner.chmod(0o755)
+            config = target_config.Config(target_root=str(target))
+            config.sanitizers_enabled = []
+            config.sanitizers_explicitly_disabled = True
+            config.runner_bin = "app"
+            identity = build_preflight.build_identity(target, config)
+            runner.chmod(0o644)
+            self.assertEqual(
+                [f"runner_bin is not executable ({runner})"],
+                build_preflight.pinned_build_problems(target, identity, config),
+            )
+            runner.unlink()
+            self.assertEqual(
+                [f"runner_bin is missing ({runner})"],
+                build_preflight.pinned_build_problems(target, identity, config),
+            )
+
+
 class ResumeNeverConvergesTests(unittest.TestCase):
     """A resumed run verifies its recorded build; it must never rebuild it.
 
@@ -408,6 +683,7 @@ class ResumeNeverConvergesTests(unittest.TestCase):
         subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
 
     def _preflight(self, pinned: bool):
+        identity = {"version": 1} if pinned else None
         with mock.patch.object(benchmark_runner, "_benchmark_config") as config, \
              mock.patch.object(benchmark_runner, "runner_preflight"), \
              mock.patch.object(benchmark_runner.build_preflight, "refresh",
@@ -415,22 +691,31 @@ class ResumeNeverConvergesTests(unittest.TestCase):
              mock.patch.object(benchmark_runner.build_preflight, "hold_builds",
                                return_value=[]) as hold, \
              mock.patch.object(benchmark_runner.build_preflight, "build_problems",
-                               return_value=[]), \
+                               return_value=[]) as freshness, \
+             mock.patch.object(benchmark_runner.build_preflight,
+                               "pinned_build_problems",
+                               return_value=[]) as exact_pin, \
              mock.patch.object(benchmark_runner.build_preflight,
                                "enabled_sanitizers", return_value=["asan"]):
             config.return_value = SimpleNamespace()
-            benchmark_runner.preflight_build(self.args, self.tmp, "m", pinned)
-        return refresh, hold
+            benchmark_runner.preflight_build(
+                self.args, self.tmp, "m", identity,
+            )
+        return refresh, hold, freshness, exact_pin
 
     def test_a_pinned_resume_holds_without_converging(self) -> None:
-        refresh, hold = self._preflight(pinned=True)
+        refresh, hold, freshness, exact_pin = self._preflight(pinned=True)
         refresh.assert_not_called()
         self.assertEqual(1, hold.call_count)
+        freshness.assert_not_called()
+        exact_pin.assert_called_once()
 
     def test_a_first_run_converges_normally(self) -> None:
-        refresh, hold = self._preflight(pinned=False)
+        refresh, hold, freshness, exact_pin = self._preflight(pinned=False)
         self.assertEqual(1, refresh.call_count)
         hold.assert_not_called()
+        freshness.assert_called_once()
+        exact_pin.assert_not_called()
 
 
 class ImmutableRunSettingsTests(unittest.TestCase):

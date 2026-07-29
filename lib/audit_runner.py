@@ -1589,8 +1589,9 @@ def preflight_build(runtime: Runtime) -> None:
         # unusable pinned build is a failed cell, not a repair job: a cell run
         # against the wrong binary is not a measurement, and continuing would
         # launder it into the comparison.
-        problems = build_preflight.build_problems(
-            runtime.target_root, runtime.config
+        problems = build_preflight.pinned_build_problems(
+            runtime.target_root, build_preflight.benchmark_build_pin(),
+            runtime.config,
         )
         if problems:
             raise RuntimeError(

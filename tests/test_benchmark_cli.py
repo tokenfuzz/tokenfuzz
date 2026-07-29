@@ -190,7 +190,7 @@ class BenchmarkCliTests(unittest.TestCase):
 
         target = "samples/sample-python"
         backend_root = self.bench_root / "codex"
-        lock = backend_root / f".run-{benchmark_runner.target_key(target)}.lock"
+        lock = backend_root / ".run-locked.lock"
         with benchmark_runner.BenchmarkLock(lock):
             blocked = self.run_cli(
                 "--target", target, "--dry-run", "--run-id", "locked",

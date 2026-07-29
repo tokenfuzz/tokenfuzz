@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import subprocess
@@ -14,6 +15,7 @@ SCRIPT_ROOT = Path(os.environ.get("AUDIT_ROOT", Path(__file__).resolve().parent.
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import build_materialize
+import build_lease
 import languages
 import target_config
 
@@ -339,7 +341,25 @@ class Setup:
         if not plan.get("cmds"):
             return
         audit_dir = self.target_root / ".audit"
-        status = languages.execute_bootstrap_plan(self.target_root, plan, audit_dir / "bootstrap.log", audit_dir / "bootstrap.sh")
+        refusal = (
+            f"bootstrap refused for {self.name}: the configured runner "
+            "is in use by another audit or benchmark"
+        )
+        lease = (
+            build_lease.exclusive(
+                self.target_root, build_lease.RUNNER_LEASE_NAME,
+                timeout=0,
+            )
+            if config.runner_bin
+            else contextlib.nullcontext(True)
+        )
+        with lease as acquired:
+            if not acquired:
+                raise RuntimeError(refusal)
+            status = languages.execute_bootstrap_plan(
+                self.target_root, plan, audit_dir / "bootstrap.log",
+                audit_dir / "bootstrap.sh",
+            )
         if status:
             raise RuntimeError(f"bootstrap failed for {self.name} (see {audit_dir / 'bootstrap.log'})")
 

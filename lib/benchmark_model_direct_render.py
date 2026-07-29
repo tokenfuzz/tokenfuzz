@@ -409,7 +409,13 @@ def _budget_line(wall_seconds: int) -> str:
     )
 
 
-def render(target_path: str, output_dir: str, script_root: str, wall_seconds: int = 0) -> str:
+def render(
+    target_path: str,
+    output_dir: str,
+    script_root: str,
+    wall_seconds: int = 0,
+    target_toml: str = "",
+) -> str:
     sys.path.insert(0, os.path.join(script_root, "lib"))
     try:
         from target_config import (  # type: ignore
@@ -423,7 +429,8 @@ def render(target_path: str, output_dir: str, script_root: str, wall_seconds: in
     from prompt_render import render_template  # type: ignore
 
     target = Path(target_path)
-    toml_path = _resolve_toml_path(target, script_root)
+    toml_path = Path(target_toml) if target_toml else \
+        _resolve_toml_path(target, script_root)
 
     san = None
     bin_path: Path | None = None
