@@ -113,7 +113,8 @@ class StackFrame:
         return filter_addresses_and_numbers(line)
 
 
-def _parse_frame_body(body: str) -> tuple[str, str]:
+def parse_frame_body(body: str) -> tuple[str, str]:
+    """Split a sanitizer frame display into its function and location."""
     body = body.strip()
     loc_match = _LOC_RE.search(body)
     if loc_match:
@@ -136,7 +137,7 @@ def parse_asan_frame(line: str) -> StackFrame | None:
     match = _ASAN_FRAME_RE.match(line)
     if not match:
         return None
-    function, location = _parse_frame_body(match.group("body"))
+    function, location = parse_frame_body(match.group("body"))
     if not function:
         return None
     return StackFrame(

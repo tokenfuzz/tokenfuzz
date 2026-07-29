@@ -26,6 +26,7 @@ from pathlib import Path
 
 import finding_dedup
 import finding_signature
+import stack_frames
 
 _TS = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
 
@@ -231,11 +232,42 @@ def _load_clusters(path: Path) -> list[dict]:
     return data.get("clusters", []) if isinstance(data, dict) else []
 
 
+def _cluster_site(cluster: dict, kind: str) -> str:
+    """Source location the cluster is pinned to, or "" when it has none.
+
+    Both clusterers already carry it — findings key on (class, file, line), and
+    crash dedup signatures preserve their parsed frame displays — so the graph
+    names the same site as the cluster index it sits beside, with no second
+    parse of the reports. A frame without a file (an entry thunk) falls through
+    to the next one rather than reporting the symbol as a path.
+    """
+    if kind == "find":
+        source = str(cluster.get("file") or "").strip()
+        line = str(cluster.get("line") or "").strip()
+        return f"{source}:{line}" if source and line else source
+    for display in str(cluster.get("signature") or "").split(" -> "):
+        fallback = display.startswith("fallback:")
+        body = display.removeprefix("fallback:")
+        while body:
+            # Fallback states can append a stack/report object after their
+            # source root. Trim only that controlled fallback suffix; real
+            # frame displays are parsed whole so dotted function tokens cannot
+            # be reconsidered as paths.
+            _function, location = stack_frames.parse_frame_body(body)
+            if location and not location.startswith(("(", "??:", "<unknown>:")):
+                return location
+            if not fallback or " " not in body:
+                break
+            body = body.rsplit(" ", 1)[0]
+    return ""
+
+
 def _cluster_times(
     run_dir: Path, cond: str, kind: str, rejected: bool,
     index: dict, members: dict, fallback: float,
-) -> tuple[list[float], bool]:
-    """Earliest discovery time per REAL cluster, from the clusterer's own JSON.
+) -> tuple[list[tuple[float, str]], bool]:
+    """Earliest discovery time and source site per REAL cluster, from the
+    clusterer's own JSON.
 
     The clusterers merge more than a raw signature key does, so a locally
     deduplicated list cannot be mapped onto their counts by truncation: given
@@ -244,13 +276,13 @@ def _cluster_times(
     membership and taking each cluster's earliest member gives the right curve
     and the right length at once.
 
-    Returns (times, approximate) — approximate when any cluster had no member we
-    could place on the timeline.
+    Returns ([(time, site)], approximate) — approximate when any cluster had no
+    member we could place on the timeline.
     """
     sub = ("crashes" if kind == "crash" else "findings") + ("-rejected" if rejected else "")
     owner = members.get(sub, {}) or {}
     pool_dir = run_dir / "pool" / sub
-    times: list[float] = []
+    times: list[tuple[float, str]] = []
     approximate = False
     for cluster in _load_clusters(run_dir / f"clusters-{sub}.json"):
         mine = [m for m in (cluster.get("members") or []) if owner.get(m) == cond]
@@ -269,7 +301,8 @@ def _cluster_times(
             # counted by the table, but nothing we can honestly place in time
             best = fallback
             approximate = True
-        times.append(min(max(0.0, best), fallback) if fallback else max(0.0, best))
+        when = min(max(0.0, best), fallback) if fallback else max(0.0, best)
+        times.append((when, _cluster_site(cluster, kind)))
     return sorted(times), approximate
 
 
@@ -294,20 +327,23 @@ def _is_batch_quantized(times: list[float]) -> bool:
     return max(buckets.values()) / len(times) > 0.3
 
 
-def _reconcile(times: list[float], count: int, wall: float) -> list[float]:
+def _reconcile(
+    times: list[tuple[float, str]], count: int, wall: float,
+) -> list[tuple[float, str]]:
     """Make the curve land exactly on the count the table reports.
 
     The clusterers merge a little more than the raw signature key does, so a
     local dedup can differ by one or two. The table is authoritative for *how
-    many*; this list only carries *when*. Extra entries drop from the tail (a
-    merged pair is discovered when its earlier half was); a shortfall lands at
-    the end of the run rather than inventing an early discovery.
+    many*; this list only carries *when* and *where*. Extra entries drop from
+    the tail (a merged pair is discovered when its earlier half was); a
+    shortfall lands at the end of the run, with no site, rather than inventing
+    an early discovery or a location it was never given.
     """
     if count <= 0:
         return []
     if len(times) > count:
         return times[:count]
-    return times + [wall] * (count - len(times))
+    return times + [(wall, "")] * (count - len(times))
 
 
 def build(bench_root: Path) -> dict:
@@ -393,14 +429,17 @@ def build(bench_root: Path) -> dict:
                         or rejected_upper_bound
                         or len(acc_times) != n_accepted
                         or len(rej_times) != n_rejected
-                        or _is_batch_quantized(accepted)
+                        or _is_batch_quantized([t for t, _ in accepted])
                     ),
                     "accepted": n_accepted,
                     "rejected": n_rejected,
                     "rejected_upper_bound": rejected_upper_bound,
                     "medium_plus": condition.get(mplus, 0),
-                    "accepted_times": [round(t, 4) for t in accepted],
-                    "rejected_times": [round(t, 4) for t in rejected],
+                    "accepted_times": [round(t, 4) for t, _ in accepted],
+                    # parallel to accepted_times: the source site behind each
+                    # step, "" where the cluster carried none
+                    "accepted_sites": [site for _, site in accepted],
+                    "rejected_times": [round(t, 4) for t, _ in rejected],
                 }
             series.append(entry)
             target_groups.add((target, target_sha))
@@ -448,6 +487,8 @@ _CSS = """
  background:#202124;color:#fff;font-size:.78em;line-height:1.5;padding:.5em .65em;
  border-radius:9px;box-shadow:0 2px 8px rgba(32,33,36,.35)}
 .ttd-tip b{color:#fff}
+.ttd-tip .src{font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace);
+ font-size:.95em;color:#8ab4f8;word-break:break-all}
 .ttd-tip .dim{color:#bdc1c6}
 .ttd-tip i{color:#bdc1c6}
 @media(max-width:860px){.ttd .grid{grid-template-columns:1fr}}
@@ -486,7 +527,7 @@ function hover(node,title,lines,grow){node.addEventListener("mouseenter",functio
   tip.replaceChildren();var heading=document.createElement("b");heading.textContent=title;tip.appendChild(heading);
   lines.forEach(function(line){tip.appendChild(document.createElement("br"));
    var part=document.createElement(line.italic?"i":"span");part.textContent=line.text;
-   if(line.dim)part.className="dim";tip.appendChild(part)});
+   if(line.dim)part.className="dim";if(line.site)part.className="src";tip.appendChild(part)});
   tip.style.display="block";place(e);if(grow)grow.setAttribute("r",5.5)});
  node.addEventListener("mousemove",place);
  node.addEventListener("mouseleave",function(){tip.style.display="none";if(grow)grow.setAttribute("r",3.5)})}
@@ -497,6 +538,15 @@ function hrs(v){return (Math.round((+v||0)*100)/100)+"h"}
 function label(r){var n=r.model||r.backend;return r.run_id?n+" · "+r.run_id:n}
 function noun(kind,n){var one=kind==="crash"?"crash":"finding";
  return n===1?one:(kind==="crash"?"crashes":"findings")}
+// The source site behind a point: the file a finding pins, or the first
+// source-bearing frame of a crash's dedup signature. Aggregate points carry a
+// capped list instead of one site.
+var SITE_LIST=4;
+function sites(m,i){var all=m.accepted_sites||[];
+ if(i!=null)return all[i]?[all[i]]:[];
+ var kept=all.filter(Boolean),head=kept.slice(0,SITE_LIST);
+ if(kept.length>head.length)head.push("+"+(kept.length-head.length)+" more");
+ return head}
 function nice(v,n,i){if(!(v>0))v=1;var s=v/(n||4),p=Math.pow(10,Math.floor(Math.log10(s))),q=s/p;
  var st=(q<=1?1:q<=2?2:q<=2.5?2.5:q<=5?5:10)*p;if(i)st=Math.max(1,Math.round(st));
  return{step:st,top:Math.ceil(v/st-1e-9)*st}}
@@ -534,10 +584,12 @@ function panel(host,kind,rows){
     fill:"#fff",stroke:c,"stroke-width":2,"stroke-linejoin":"round"});
    s.appendChild(tri);
    hover(tri,name+" · model-direct",[
-    {text:m.accepted+" separate "+noun(kind,m.accepted)+" kept"},
+    {text:m.accepted+" separate "+noun(kind,m.accepted)+" kept"}]
+    .concat(sites(m,null).map(function(w){return {text:w,site:true}}))
+    .concat([
     {text:"the model on its own, no harness — one attempt, stopped at "+hrs(r.wall_h)},
     {text:"This is the comparison point: the model was asked plainly to find vulnerabilities and given none of the harness's tooling. What it reported was then checked and counted the same way as the row above — the same bug reported twice counts once, and anything that did not hold up was dropped. So this number is directly comparable, not a raw tally.",dim:true},
-    {text:"Its crashes had to clear one extra bar: each had to crash again when the target was run normally. Anything that did not is counted as a finding here instead.",dim:true}]);
+    {text:"Its crashes had to clear one extra bar: each had to crash again when the target was run normally. Anything that did not is counted as a finding here instead.",dim:true}]));
    s.appendChild(el("text",{x:x+10,y:y+4,"font-size":10.5,fill:"#5f6368"},[tx(m.accepted)]));return}
   var at=m.accepted_times||[],pts=steps(at);
   if(!pts.length)return;
@@ -555,17 +607,21 @@ function panel(host,kind,rows){
    var hit=el("circle",{cx:px,cy:py,r:9,fill:"transparent","class":"hit"});
    s.appendChild(dot);s.appendChild(hit);
    hover(hit,name+" · tokenfuzz",[
-    {text:noun(kind,1)+" #"+(i+1)+" of "+m.accepted+" kept"},
+    {text:noun(kind,1)+" #"+(i+1)+" of "+m.accepted+" kept"}]
+    .concat(sites(m,i).map(function(w){return {text:w,site:true}}))
+    .concat([
     {text:"first seen "+hrs(t)+" into the run"},
-    {text:"One separate problem, not one report. The same problem written up more than once counts once here, and the step is placed at the first time it was seen.",dim:true}],dot)});
+    {text:"One separate problem, not one report. The same problem written up more than once counts once here, and the step is placed at the first time it was seen.",dim:true}]),dot)});
   var ex=X(end[0]);
   var dia=el("polygon",{points:[[ex,Y(end[1])-5.5],[ex+5.5,Y(end[1])],[ex,Y(end[1])+5.5],[ex-5.5,Y(end[1])]]
     .map(function(p){return p.join(",")}).join(" "),fill:c,stroke:"#fff","stroke-width":2,"class":"hit"});
   s.appendChild(dia);
   var finalLines=[
-   {text:"final total: "+m.accepted+" separate "+noun(kind,m.accepted)+" kept"},
+   {text:"final total: "+m.accepted+" separate "+noun(kind,m.accepted)+" kept"}]
+   .concat(sites(m,null).map(function(w){return {text:w,site:true}}))
+   .concat([
    {text:"over a "+hrs(r.wall_h)+" audit"},
-   {text:"Counted across this run's repeat attempts with duplicates merged — the same number as the Unique accepted column above.",dim:true}];
+   {text:"Counted across this run's repeat attempts with duplicates merged — the same number as the Unique accepted column above.",dim:true}]);
   if(m.approx_timing)finalLines.push({text:"discovery timing approximate",italic:true});
   hover(dia,name+" · tokenfuzz",finalLines);
   s.appendChild(el("text",{x:ex+10,y:Y(end[1])+4,"font-size":11.5,"font-weight":700,fill:"#202124"},[tx(m.accepted)]))});
@@ -607,7 +663,8 @@ def render(data: dict) -> str:
         "<h2>What each backend found, and what held up when checked</h2>\n"
         + _KEY
         + '<p class="hint">Hover any point — a discovery marker, a ◇ final total, '
-        'or a ▷ model-direct control — for what it is, its count, and its time.</p>\n'
+        'or a ▷ model-direct control — for what it is, its count, its time, and '
+        'its source site or sites, when known.</p>\n'
         '<div id="ttd-rows"></div>\n</section>\n'
         '<script type="application/json" id="ttd-data">' + payload + "</script>\n"
         "<script>" + _JS + "</script>\n"

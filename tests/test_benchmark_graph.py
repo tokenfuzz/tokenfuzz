@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -27,24 +28,119 @@ class ReconcileTests(unittest.TestCase):
     def test_extra_local_dedup_entries_drop_from_the_tail(self) -> None:
         # the clusterers merge a little more than the raw key: table wins
         self.assertEqual(
-            benchmark_graph._reconcile([0.1, 0.2, 0.9], 2, 3.0), [0.1, 0.2],
+            benchmark_graph._reconcile(
+                [(0.1, "a.c:1"), (0.2, "b.c:2"), (0.9, "c.c:3")], 2, 3.0),
+            [(0.1, "a.c:1"), (0.2, "b.c:2")],
         )
 
     def test_unresolved_results_land_at_the_end_not_dropped(self) -> None:
-        # endpoint must still equal the table's count
+        # endpoint must still equal the table's count, and a padded step claims
+        # no source site it was never given
         self.assertEqual(
-            benchmark_graph._reconcile([0.5], 3, 3.0), [0.5, 3.0, 3.0],
+            benchmark_graph._reconcile([(0.5, "a.c:1")], 3, 3.0),
+            [(0.5, "a.c:1"), (3.0, ""), (3.0, "")],
         )
 
     def test_zero_count_is_empty(self) -> None:
-        self.assertEqual(benchmark_graph._reconcile([0.4], 0, 3.0), [])
+        self.assertEqual(benchmark_graph._reconcile([(0.4, "a.c:1")], 0, 3.0), [])
 
     def test_curve_length_always_equals_the_table_count(self) -> None:
         for times, count in (([], 4), ([0.2] * 9, 3), ([0.1, 0.2], 2), ([], 0)):
+            entries = [(t, "a.c:1") for t in times]
             with self.subTest(times=len(times), count=count):
-                out = benchmark_graph._reconcile(list(times), count, 3.0)
+                out = benchmark_graph._reconcile(entries, count, 3.0)
                 self.assertEqual(len(out), count)
                 self.assertEqual(out, sorted(out), "a discovery curve never falls")
+
+
+class ClusterSiteTests(unittest.TestCase):
+    """A point names the source site its cluster is already pinned to."""
+
+    def test_finding_uses_its_keyed_file_and_line(self) -> None:
+        self.assertEqual(
+            benchmark_graph._cluster_site(
+                {"file": "src/app_parse.c", "line": "91"}, "find"),
+            "src/app_parse.c:91")
+
+    def test_finding_without_a_line_keeps_the_file(self) -> None:
+        for cluster, expected in (
+            ({"file": "src/app_parse.c"}, "src/app_parse.c"),
+            ({"file": "src/app.py", "line": "42"}, "src/app.py:42"),
+            ({"file": "src/App.kt"}, "src/App.kt"),
+        ):
+            with self.subTest(cluster=cluster):
+                self.assertEqual(
+                    benchmark_graph._cluster_site(cluster, "find"), expected)
+
+    def test_crash_uses_the_top_frame_of_its_dedup_signature(self) -> None:
+        self.assertEqual(
+            benchmark_graph._cluster_site(
+                {"signature": "child_free child.c:91 -> app_parse parse.c:12"}, "crash"),
+            "child.c:91")
+
+    def test_crash_keeps_line_column_and_generic_language_locations(self) -> None:
+        for signature, expected in (
+            ("app_parse src/app.c:91:17", "src/app.c:91:17"),
+            ("App.parse src/App.java:91", "src/App.java:91"),
+            ("main.run src/main.go:42", "src/main.go:42"),
+            ("app::parse src/app.rs:42", "src/app.rs:42"),
+            ("App.parse src/App.swift:42", "src/App.swift:42"),
+            ("app_parse src/app.ts", "src/app.ts"),
+            ("app_parse src/app.cpp", "src/app.cpp"),
+            (r"app_parse C:/src/app.c:91:17", r"C:/src/app.c:91:17"),
+        ):
+            with self.subTest(signature=signature):
+                self.assertEqual(
+                    benchmark_graph._cluster_site(
+                        {"signature": signature}, "crash"),
+                    expected,
+                )
+
+    def test_a_frame_without_a_file_falls_through_to_the_next(self) -> None:
+        # an entry thunk carries no source token: name the next real frame
+        # rather than passing a symbol off as a path
+        self.assertEqual(
+            benchmark_graph._cluster_site(
+                {"signature": "start -> app_parse parse.c:12"}, "crash"),
+            "parse.c:12")
+
+    def test_a_symbol_carrying_a_dot_is_not_read_as_a_file(self) -> None:
+        for signature in ("app_parse.cold", "main.run"):
+            with self.subTest(signature=signature):
+                self.assertEqual(
+                    benchmark_graph._cluster_site(
+                        {"signature": signature}, "crash"),
+                    "",
+                )
+
+    def test_non_source_locations_stay_unnamed(self) -> None:
+        for signature in (
+            "app_parse (libapp.so+ADDRESS)",
+            "app_parse ??:0",
+            "app_parse <unknown>:0",
+        ):
+            with self.subTest(signature=signature):
+                self.assertEqual(
+                    benchmark_graph._cluster_site(
+                        {"signature": signature}, "crash"),
+                    "",
+                )
+
+    def test_fallback_state_uses_the_same_location_grammar(self) -> None:
+        for signature in (
+            "fallback:src/app.c:91:17",
+            "fallback:app_parse src/app.c:91:17 stack-object arg line 7",
+        ):
+            with self.subTest(signature=signature):
+                self.assertEqual(
+                    benchmark_graph._cluster_site(
+                        {"signature": signature}, "crash"),
+                    "src/app.c:91:17",
+                )
+
+    def test_no_location_is_empty_not_invented(self) -> None:
+        self.assertEqual(benchmark_graph._cluster_site({}, "crash"), "")
+        self.assertEqual(benchmark_graph._cluster_site({}, "find"), "")
 
 
 class BatchQuantizedTests(unittest.TestCase):
@@ -176,8 +272,10 @@ class ClusterMembershipTimingTests(unittest.TestCase):
         self._crash("CRASH-0002", "b_fn b.c:2")
         self._crash("CRASH-0003", "c_fn c.c:3")
         (self.run / "clusters-crashes.json").write_text(json.dumps({"clusters": [
-            {"id": "CL-a", "members": ["CRASH-0001", "CRASH-0002"]},
-            {"id": "CL-b", "members": ["CRASH-0003"]},
+            {"id": "CL-a", "members": ["CRASH-0001", "CRASH-0002"],
+             "signature": "a_fn a.c:1 -> app_parse parse.c:12"},
+            {"id": "CL-b", "members": ["CRASH-0003"],
+             "signature": "c_fn c.c:3 -> app_parse parse.c:12"},
         ]}), encoding="utf-8")
         members = {"crashes": {"CRASH-0001": "harness", "CRASH-0002": "harness",
                                "CRASH-0003": "harness"}}
@@ -188,17 +286,20 @@ class ClusterMembershipTimingTests(unittest.TestCase):
         }}
         times, approx = benchmark_graph._cluster_times(
             self.run, "harness", "crash", False, index, members, 3.0)
-        self.assertEqual(times, [0.1, 0.9])
+        # each step carries its cluster's own crash site alongside its time
+        self.assertEqual(times, [(0.1, "a.c:1"), (0.9, "c.c:3")])
         self.assertFalse(approx)
 
     def test_unplaceable_cluster_is_marked_approximate(self) -> None:
         self._crash("CRASH-0001", "a_fn a.c:1")
         (self.run / "clusters-crashes.json").write_text(json.dumps({"clusters": [
-            {"id": "CL-a", "members": ["CRASH-0001"]}]}), encoding="utf-8")
+            {"id": "CL-a", "members": ["CRASH-0001"],
+             "signature": "a_fn a.c:1 -> start"}]}), encoding="utf-8")
         times, approx = benchmark_graph._cluster_times(
             self.run, "harness", "crash", False, {"crash": {}},
             {"crashes": {"CRASH-0001": "harness"}}, 3.0)
-        self.assertEqual(times, [3.0])   # parked at the end, never dropped
+        # parked at the end, never dropped; its site is still known
+        self.assertEqual(times, [(3.0, "a.c:1")])
         self.assertTrue(approx)
 
     def test_other_conditions_do_not_leak_into_a_curve(self) -> None:
@@ -290,10 +391,13 @@ class RenderTests(unittest.TestCase):
                 "condition": "harness", "run_id": "20260101-000000",
                 "version": "deadbee", "replicates": 2, "wall_h": 3.0,
                 "find": {"accepted": 2, "rejected": 5, "medium_plus": 1,
-                         "accepted_times": [0.5, 1.5], "rejected_times": [0.2, 0.3],
+                         "accepted_times": [0.5, 1.5],
+                         "accepted_sites": ["src/app_parse.c:91", "src/app_io.c:12"],
+                         "rejected_times": [0.2, 0.3],
                          "rejected_upper_bound": True},
                 "crash": {"accepted": 0, "rejected": 0, "medium_plus": 0,
-                          "accepted_times": [], "rejected_times": []},
+                          "accepted_times": [], "accepted_sites": [],
+                          "rejected_times": []},
             }],
         }
 
@@ -320,6 +424,31 @@ class RenderTests(unittest.TestCase):
         self.assertIn("ttd-tip", html)
         self.assertIn("mouseenter", html)
         self.assertIn("Hover any point", html)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_the_chart_script_parses(self) -> None:
+        # The chart is one inline script: a syntax slip anywhere in it silently
+        # costs the whole graph, and the surrounding page still renders fine.
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as script:
+            script.write(benchmark_graph._JS)
+            path = script.name
+        self.addCleanup(Path(path).unlink)
+        checked = subprocess.run(
+            ["node", "--check", path], capture_output=True, text=True, check=False)
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_a_point_names_the_source_site_it_lands_in(self) -> None:
+        # the site travels in the payload and is read back per point, so a
+        # reader can tell what a step is about without opening the run
+        html = benchmark_graph.render(self._data())
+        self.assertIn('"accepted_sites":["src/app_parse.c:91","src/app_io.c:12"]', html)
+        self.assertIn("m.accepted_sites", html)
+        self.assertIn("sites(m,i)", html)
+        self.assertGreaterEqual(
+            html.count("sites(m,null)"), 2,
+            "model-direct and final-total aggregate points both name sites",
+        )
+        self.assertIn("its source site or sites, when known", html)
 
     def test_metadata_is_inserted_with_text_content_only(self) -> None:
         data = self._data()

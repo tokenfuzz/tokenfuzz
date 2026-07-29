@@ -122,6 +122,12 @@ frame = stack_frames.first_interesting_frame(symbolized_variant)
 assert_eq("parse_record", frame.function if frame else "", "parses colon-style ASan frame numbers")
 assert_eq("src/parser.c:88", frame.location if frame else "", "parses colon-style frame location")
 
+body_func, body_location = stack_frames.parse_frame_body(
+    "App.parse src/App.java:91:7")
+assert_eq("App.parse", body_func, "frame-body parser keeps a dotted Java function")
+assert_eq("src/App.java:91:7", body_location,
+          "frame-body parser keeps a cross-language line and column")
+
 
 # macOS symbolizer strips paths and reports libc++ headers as bare basenames
 # ("string:2095"), so ClusterFuzz's path-based ``.*/libc\\+\\+`` rule never
