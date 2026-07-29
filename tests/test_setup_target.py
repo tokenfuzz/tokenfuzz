@@ -66,6 +66,16 @@ class SetupTargetTests(unittest.TestCase):
             raise AssertionError(process.stdout + process.stderr)
         return process
 
+    @staticmethod
+    def hg(*arguments: str) -> subprocess.CompletedProcess:
+        process = subprocess.run(
+            ["hg", "--config", "ui.username=test <test@example.invalid>", *arguments],
+            capture_output=True, text=True, check=False,
+        )
+        if process.returncode:
+            raise AssertionError(process.stdout + process.stderr)
+        return process
+
     def commit(self, repository: Path, message: str, *files: str) -> None:
         self.git("add", *files, cwd=repository)
         self.git(
@@ -148,6 +158,64 @@ class SetupTargetTests(unittest.TestCase):
         process = self.setup("demo", str(self.remote))
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertTrue((self.harness / "targets" / "demo" / "demo.c").is_file())
+
+    def test_pull_ignores_untracked_build_artifacts(self) -> None:
+        self.assertEqual(self.setup("demo", str(self.remote)).returncode, 0)
+        checkout = self.harness / "targets" / "demo"
+        (checkout / "build-asan").mkdir()
+        (checkout / "build-asan" / "libdemo.a").write_text("junk\n")
+        (checkout / ".audit").mkdir()
+        (checkout / "asan.err").write_text("leftover\n")
+        (self.remote / "fresh.c").write_text("int fresh(void) { return 0; }\n")
+        self.commit(self.remote, "add fresh", "fresh.c")
+
+        pulled = self.setup("demo", "--pull")
+        self.assertEqual(pulled.returncode, 0, pulled.stdout + pulled.stderr)
+        self.assertTrue((checkout / "fresh.c").is_file())
+        self.assertNotIn("leaving source checkout untouched", pulled.stdout)
+        self.assertTrue((checkout / "build-asan" / "libdemo.a").is_file())
+
+        # Tracked edits still block the update; they are what a pull clobbers.
+        (checkout / "CMakeLists.txt").write_text("# operator edit\n")
+        (self.remote / "later.c").write_text("int later(void) { return 0; }\n")
+        self.commit(self.remote, "add later", "later.c")
+        blocked = self.setup("demo", "--pull")
+        self.assertEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
+        self.assertIn("tracked local changes", blocked.stdout)
+        self.assertFalse((checkout / "later.c").exists())
+
+    @unittest.skipUnless(shutil.which("hg"), "Mercurial is not installed")
+    def test_hg_pull_ignores_untracked_build_artifacts(self) -> None:
+        remote = self.temp / "hg-remote"
+        remote.mkdir()
+        self.hg("init", str(remote))
+        (remote / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.16)\nproject(sample C)\n", encoding="utf-8",
+        )
+        self.hg("--cwd", str(remote), "add", "CMakeLists.txt")
+        self.hg("--cwd", str(remote), "commit", "-m", "initial")
+        self.assertEqual(self.setup("hgdemo", str(remote)).returncode, 0)
+        checkout = self.harness / "targets" / "hgdemo"
+        self.assertTrue((checkout / ".hg").is_dir())
+        (checkout / "build-asan").mkdir()
+        (checkout / "build-asan" / "libdemo.a").write_text("junk\n")
+        (remote / "fresh.c").write_text("int fresh(void) { return 0; }\n")
+        self.hg("--cwd", str(remote), "add", "fresh.c")
+        self.hg("--cwd", str(remote), "commit", "-m", "add fresh")
+
+        pulled = self.setup("hgdemo", "--pull")
+        self.assertEqual(pulled.returncode, 0, pulled.stdout + pulled.stderr)
+        self.assertTrue((checkout / "fresh.c").is_file())
+        self.assertNotIn("leaving source checkout untouched", pulled.stdout)
+
+        (checkout / "CMakeLists.txt").write_text("# operator edit\n", encoding="utf-8")
+        (remote / "later.c").write_text("int later(void) { return 0; }\n")
+        self.hg("--cwd", str(remote), "add", "later.c")
+        self.hg("--cwd", str(remote), "commit", "-m", "add later")
+        blocked = self.setup("hgdemo", "--pull")
+        self.assertEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
+        self.assertIn("tracked local changes", blocked.stdout)
+        self.assertFalse((checkout / "later.c").exists())
 
     def test_s6_peer_bootstrap_and_force_replacement(self) -> None:
         self.assertEqual(self.setup("demo", str(self.remote)).returncode, 0)

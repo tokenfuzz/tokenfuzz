@@ -157,10 +157,25 @@ class Setup:
                 command.extend(("-u", self.args.ref))
             run([*command, self.source, str(self.target_root)])
 
+    def blocked_by_local_edits(self) -> bool:
+        """True when tracked edits an update would clobber are present.
+
+        Untracked paths — sanitizer build trees, .audit overlays, leftover run
+        logs — are not source and never obstruct a fast-forward, so a checkout
+        carrying only those still updates. Shared with the freshness signature
+        so both read one VCS policy, git and hg alike.
+        """
+        changed = target_config.source_changed_paths(self.target_root, include_untracked=False)
+        if not changed:
+            return False
+        shown = ", ".join(changed[:3])
+        if len(changed) > 3:
+            shown += f", +{len(changed) - 3} more"
+        log(f"targets/{self.name} has tracked local changes ({shown}); leaving source checkout untouched")
+        return True
+
     def sync_git(self) -> None:
-        dirty = subprocess.run(["git", "-C", str(self.target_root), "status", "--porcelain"], capture_output=True, text=True).stdout
-        if dirty:
-            log(f"targets/{self.name} has local changes; leaving source checkout untouched")
+        if self.blocked_by_local_edits():
             return
         log(f"Fetching git updates for targets/{self.name}")
         if self.args.ref:
@@ -177,9 +192,7 @@ class Setup:
             log("No upstream tracking branch; fetched updates without changing HEAD")
 
     def sync_hg(self) -> None:
-        dirty = subprocess.run(["hg", "--cwd", str(self.target_root), "status"], capture_output=True, text=True).stdout
-        if dirty:
-            log(f"targets/{self.name} has local changes; leaving source checkout untouched")
+        if self.blocked_by_local_edits():
             return
         log(f"Pulling hg updates for targets/{self.name}")
         run(["hg", "--cwd", str(self.target_root), "pull"])
