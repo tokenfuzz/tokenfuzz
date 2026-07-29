@@ -198,6 +198,89 @@ class BuildLeaseTests(unittest.TestCase):
             "fresh", target_config.build_freshness(self.target, "asan", recipe_path=recipe)
         )
 
+    def test_a_stamped_tree_that_stops_verifying_is_rebuilt(self) -> None:
+        """A content stamp cannot see the host. When an already-fresh tree stops
+        producing a usable artifact — a shared dependency removed after the
+        build — trusting the stamp would leave every later run unable to
+        execute, so the build has to run again."""
+        (self.target / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\n")
+        (self.target / "main.c").write_text("int main(void){return 0;}\n")
+        recipe = self.target / ".audit" / "build.sh"
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        recipe.write_text(
+            "#!/bin/sh\nmkdir -p \"$2\"\ncat \"$2/../.audit/generation\" > \"$2/marker\"\n"
+        )
+        recipe.chmod(0o755)
+        (self.target / ".audit" / "generation").write_text("first\n")
+        first = build_materialize.materialize(
+            self.target, "asan", recipe, recipe, lambda tree: True,
+        )
+        self.assertEqual("built", first.status)
+
+        # Same source, same recipe: the stamp still says fresh.
+        self.assertEqual(
+            "fresh", target_config.build_freshness(self.target, "asan", recipe_path=recipe)
+        )
+        (self.target / ".audit" / "generation").write_text("second\n")
+        usable = iter([False, True])
+        again = build_materialize.materialize(
+            self.target, "asan", recipe, recipe, lambda tree: next(usable),
+        )
+        self.assertEqual("built", again.status)
+        self.assertEqual("second\n", (self.target / "build-asan" / "marker").read_text())
+
+    def test_a_rejected_stamped_tree_records_why_it_was_rebuilt(self) -> None:
+        """Discarding a stamped tree costs a full rebuild, and the rebuild's own
+        output is the only other thing in this log. Without the reason an
+        operator cannot tell a tree that stopped working from an ordinary stale
+        one, and recipe repair reads the same tail."""
+        (self.target / "main.c").write_text("int main(void){return 0;}\n")
+        recipe = self.target / ".audit" / "build.sh"
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        recipe.write_text("#!/bin/sh\nmkdir -p \"$2\"\n:\n")
+        recipe.chmod(0o755)
+        self.assertEqual(
+            "built",
+            build_materialize.materialize(
+                self.target, "asan", recipe, recipe, lambda tree: True,
+            ).status,
+        )
+
+        def reject(tree):
+            raise RuntimeError("libwidget.so.3 vanished after the build")
+
+        usable = iter([reject, lambda tree: True])
+        again = build_materialize.materialize(
+            self.target, "asan", recipe, recipe, lambda tree: next(usable)(tree),
+        )
+        self.assertEqual("built", again.status)
+        log = (self.target / ".audit" / "build-materialize-asan.log").read_text()
+        self.assertIn("stamped build rejected, rebuilding", log)
+        self.assertIn("libwidget.so.3 vanished after the build", log)
+
+    def test_a_stamped_tree_that_still_verifies_is_left_alone(self) -> None:
+        """The rebuild must be specific to a tree that stopped verifying: a
+        healthy fresh build is still returned untouched, or every run pays for
+        a rebuild it does not need."""
+        (self.target / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\n")
+        (self.target / "main.c").write_text("int main(void){return 0;}\n")
+        recipe = self.target / ".audit" / "build.sh"
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        recipe.write_text("#!/bin/sh\nmkdir -p \"$2\"\ndate +%s%N >> \"$2/builds\"\n")
+        recipe.chmod(0o755)
+        self.assertEqual(
+            "built",
+            build_materialize.materialize(
+                self.target, "asan", recipe, recipe, lambda tree: True,
+            ).status,
+        )
+        builds = (self.target / "build-asan" / "builds").read_text()
+        result = build_materialize.materialize(
+            self.target, "asan", recipe, recipe, lambda tree: True,
+        )
+        self.assertEqual("fresh", result.status)
+        self.assertEqual(builds, (self.target / "build-asan" / "builds").read_text())
+
 
 _PINNER = """
 import sys, time

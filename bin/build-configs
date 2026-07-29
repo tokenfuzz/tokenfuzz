@@ -18,6 +18,8 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import build_config
 import build_lease
+import build_routes
+import runner_preflight
 import target_config
 from timeout import run_timeout
 
@@ -160,8 +162,31 @@ def is_fresh(root: Path, config: build_config.BuildConfig, base_suffix: str) -> 
         ) == "fresh"
 
 
+def alternate_startup_failure(target, tree: Path) -> str:
+    """Loader failure of the file the runtime router would select in ``tree``.
+
+    An alternate is only ever reached through the same sub-path the primary
+    exposes, so build_routes picks exactly this file — verifying any other
+    artifact would prove readiness for something no run executes.
+    """
+    raw = target.sanitizer_bin("asan")
+    if not raw or "FILL_ME" in raw or target.is_browser in ("1", "true", "True"):
+        return ""
+    try:
+        candidate = build_routes.bin_subpath(Path(target.resolve_path(raw)), tree)
+    except (OSError, ValueError):
+        return ""
+    if candidate is None:
+        return ""
+    if not candidate.is_file():
+        return f"alternate sanitizer executable is missing: {candidate}"
+    if not os.access(candidate, os.X_OK):
+        return f"alternate sanitizer executable is not executable: {candidate}"
+    return runner_preflight.probe_startup(candidate, target, "asan")
+
+
 def materialize(
-    root: Path, config: build_config.BuildConfig, *, base_suffix: str,
+    root: Path, config: build_config.BuildConfig, target, *, base_suffix: str,
     force: bool, timeout_seconds: int,
 ) -> bool:
     recipe = build_config.recipe_path(root, config)
@@ -197,8 +222,18 @@ def materialize(
             )
             return False
         if not force and is_fresh(root, config, base_suffix):
-            log(f"{config.name}: fresh ({tree.name})")
-            return True
+            failure = alternate_startup_failure(target, tree)
+            if not failure:
+                log(f"{config.name}: fresh ({tree.name})")
+                return True
+            # Readiness is what lets the runtime router select this tree. Drop
+            # it before rebuilding so a concurrent route scan cannot keep
+            # offering an artifact that no longer starts.
+            build_config.ready_path(tree).unlink(missing_ok=True)
+            log(
+                f"{config.name}: cached build no longer starts; rebuilding: "
+                f"{failure.splitlines()[0][:200]}"
+            )
         recipe.parent.mkdir(parents=True, exist_ok=True)
         needs_recipe = (
             force or not recipe.is_file()
@@ -241,6 +276,13 @@ def materialize(
             )
             if completed.returncode or not build_config.produced_artifacts(tree):
                 log(f"{config.name}: build failed (rc={completed.returncode}; log: {output_path})")
+                write_marker(unavailable, input_key)
+                return False
+            # Compiling is not readiness: an alternate an agent rotates into
+            # must still start, or every probe it serves returns NO_EXEC.
+            failure = alternate_startup_failure(target, tree)
+            if failure:
+                log(f"{config.name}: build does not start; not marked ready: {failure.splitlines()[0][:200]}")
                 write_marker(unavailable, input_key)
                 return False
             target_config.build_write_stamp(root, "asan", recipe_path=recipe)
@@ -340,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
     succeeded = 0
     for item in selected:
         succeeded += materialize(
-            root, item, base_suffix=base_suffix, force=args.force,
+            root, item, config, base_suffix=base_suffix, force=args.force,
             timeout_seconds=args.timeout_seconds,
         )
     if args.all:

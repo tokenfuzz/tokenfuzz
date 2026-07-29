@@ -78,7 +78,7 @@ def output_is_feature_disabled(text: str) -> bool:
     return FEATURE_DISABLED_RE.search(text) is not None
 
 
-def _bin_subpath(asan_bin: Path, build_dir: Path) -> Path | None:
+def bin_subpath(asan_bin: Path, build_dir: Path) -> Path | None:
     """Compute the candidate binary path under ``build_dir``.
 
     ``asan_bin`` is the canonical binary's absolute path (e.g.
@@ -166,7 +166,7 @@ def enumerate_sibling_builds(
             if canonical_build_name and canonical_build_name.startswith("build-asan"):
                 if not name.startswith("build-asan"):
                     continue
-        bin_path = _bin_subpath(asan_bin, child)
+        bin_path = bin_subpath(asan_bin, child)
         if bin_path is None:
             continue
         cand = BuildCandidate(build_dir=child, binary=bin_path)

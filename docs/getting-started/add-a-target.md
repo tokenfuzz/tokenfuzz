@@ -128,6 +128,9 @@ best-effort improvisation. It holds to five rules:
 - **A broken recipe is repaired, not trusted.** If the existing recipe fails
   that clean build, setup gives the model at most three revised-recipe
   attempts, and installs a revision only after it builds successfully.
+  Compiling is not by itself success: a sanitizer executable that dies in the
+  dynamic loader before `main()` cannot run a testcase, so it counts as a
+  build failure and the loader's own diagnostic is what the repair reads.
 - **Freshness is content-based.** Source changes and recipe changes both
   invalidate the stamp.
 - **`build-asan` stays the control.** By default setup also prepares one cached

@@ -17,6 +17,7 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import build_materialize
 import build_lease
 import languages
+import runner_preflight
 import target_config
 
 RESERVED = {"output", "benchmark"}
@@ -376,6 +377,26 @@ class Setup:
         if status:
             raise RuntimeError(f"bootstrap failed for {self.name} (see {audit_dir / 'bootstrap.log'})")
 
+    def require_launchable(
+        self, config: target_config.Config, binary: Path, sanitizer_name: str,
+    ) -> None:
+        """Reject a sanitizer executable that dies in the loader before main().
+
+        An executable file is not yet a selectable artifact. Probed under the
+        target's own ``[runner].env``, so one that fails here fails under
+        bin/probe too and every run it serves returns NO_EXEC. No argv the
+        runner inference could derive repairs it; the build recipe can, and
+        this is the last point where that repair still runs.
+        """
+        failure = runner_preflight.probe_startup(
+            binary, config, sanitizer_name
+        )
+        if failure:
+            raise RuntimeError(
+                f"sanitizer executable {binary} failed before program "
+                f"startup:\n{failure}"
+            )
+
     def sanitizer_build_artifact_present(
         self,
         config: target_config.Config,
@@ -383,22 +404,43 @@ class Setup:
         build_dir: Path,
     ) -> bool:
         """Verify a recipe produced a selectable artifact in its clean tree."""
-        for kind, configured in (
-            ("bin", config.sanitizer_bin(sanitizer_name)),
-            ("lib", config.sanitizer_lib(sanitizer_name)),
-        ):
+        is_browser = config.is_browser in ("1", "true", "True")
+
+        def configured_in_tree(configured: str) -> Path | None:
             if not configured or "FILL_ME" in configured:
-                continue
+                return None
             try:
                 path = Path(config.resolve_path(configured))
                 path.resolve().relative_to(build_dir.resolve())
             except (OSError, ValueError):
-                continue
-            if kind == "bin" and path.is_file() and os.access(path, os.X_OK):
-                return True
-            if kind == "lib" and path.is_file():
-                return True
-        if config.is_browser in ("1", "true", "True"):
+                return None
+            return path
+
+        # bin/probe selects a configured executable ahead of any library
+        # harness route. If that exact in-tree file vanished or lost +x, a
+        # surviving library must not make the same build count as usable.
+        configured_bin = configured_in_tree(
+            config.sanitizer_bin(sanitizer_name)
+        )
+        if configured_bin is not None:
+            if not configured_bin.is_file() or not os.access(
+                configured_bin, os.X_OK
+            ):
+                return False
+            # A browser is launched through its own product layout, not a CLI
+            # help probe, so it is exempt from the startup check.
+            if not is_browser:
+                self.require_launchable(
+                    config, configured_bin, sanitizer_name
+                )
+            return True
+
+        configured_lib = configured_in_tree(
+            config.sanitizer_lib(sanitizer_name)
+        )
+        if configured_lib is not None and configured_lib.is_file():
+            return True
+        if is_browser:
             return bool(
                 target_config.detect_browser_sanitizer_bin(
                     self.target_root, sanitizer_name
@@ -407,6 +449,12 @@ class Setup:
         detected_bin, detected_lib = \
             target_config.detect_sanitizer_build_artifacts(
                 self.target_root, sanitizer_name
+            )
+        # Detection feeds <san>_bin below, so an unlaunchable detected program
+        # becomes the probe route even when a library was also produced.
+        if detected_bin:
+            self.require_launchable(
+                config, Path(config.resolve_path(detected_bin)), sanitizer_name
             )
         return bool(detected_bin or detected_lib)
 
@@ -478,8 +526,18 @@ class Setup:
                 freshness = target_config.build_freshness(
                     self.target_root, sanitizer_name, recipe_path=recipe
                 )
-                if freshness != "fresh" or self.args.force:
-                    log(f"bootstrap: materializing {sanitizer_name} build into {build_dir} (source is {freshness}; compiling so <san>_bin/<san>_lib can be detected; a few minutes)")
+                # Existing recipes still need the materializer's launch check:
+                # a content-fresh tree can lose a host shared dependency.
+                # A newly generated candidate must not replace a healthy tree
+                # merely because setup happened to generate it concurrently.
+                if freshness != "fresh" or self.args.force or not generated:
+                    if freshness == "fresh" and not self.args.force:
+                        log(
+                            f"bootstrap: verifying {sanitizer_name} build "
+                            f"startup in {build_dir}"
+                        )
+                    else:
+                        log(f"bootstrap: materializing {sanitizer_name} build into {build_dir} (source is {freshness}; compiling so <san>_bin/<san>_lib can be detected; a few minutes)")
                     audit_dir.mkdir(parents=True, exist_ok=True)
                     # A committed or hand-authored recipe may lose its executable
                     # bit. Restore only owner-execute; do not broaden its access.

@@ -52,6 +52,10 @@ def materialize(
     half-written belongs to this function alone: it takes the exclusive build
     lease for the whole build, and reports "held" without touching anything
     when a live run is executing that tree instead.
+
+    ``verify`` returns False to reject the tree without explanation, or raises
+    to reject it with one; either way the reason reaches both the caller and
+    the log the recipe repair loop reads.
     """
     target_root = Path(target_root)
     suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
@@ -77,10 +81,40 @@ def materialize(
                 "held", None,
                 f"timed out waiting for the build lease on {build_dir.name}",
             )
+        def note(message: str) -> None:
+            # Recipe repair reads this log's tail, and it is the only durable
+            # record of a rejection the build command itself never saw. The
+            # log is opened for append, so a reason written before a rebuild
+            # survives that rebuild's output.
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                with log_path.open("a", encoding="utf-8") as output:
+                    output.write(f"\n[build-materialize] {message}\n")
+            except OSError:
+                pass
+
         if not force and target_config.build_freshness(
             target_root, sanitizer, recipe_path=canonical_recipe
         ) == "fresh":
-            return MaterializeResult("fresh")
+            # The stamp proves the tree matches this source and recipe, not
+            # that it still works: an external shared dependency can be
+            # removed or version-bumped out from under a stamped build. Verify
+            # before trusting it, and rebuild when it no longer holds.
+            try:
+                usable = verify(build_dir)
+                reason = "" if usable else "no selectable sanitizer artifact"
+            except Exception as exc:
+                usable, reason = False, str(exc)
+            if usable:
+                return MaterializeResult("fresh")
+            # Discarding a stamped tree costs a full rebuild. Without this the
+            # only trace is that one happened, and nothing says the tree was
+            # broken rather than merely stale.
+            note(f"stamped build rejected, rebuilding: {reason}")
+
+        def failed_result(message: str) -> MaterializeResult:
+            note(f"failed: {message}")
+            return MaterializeResult("failed", log_path, message)
 
         token = f"{os.getpid()}-{time.time_ns()}"
         backup = audit_dir / "build-backups" / f"{build_dir.name}.{token}"
@@ -180,9 +214,8 @@ def materialize(
             try:
                 os.replace(backup, build_dir)
             except OSError as exc:
-                return MaterializeResult(
-                    "failed", log_path,
-                    f"{reason}; previous build is preserved at {backup}: {exc}",
+                return failed_result(
+                    f"{reason}; previous build is preserved at {backup}: {exc}"
                 )
         _remove_path(failed)
-        return MaterializeResult("failed", log_path, reason)
+        return failed_result(reason)

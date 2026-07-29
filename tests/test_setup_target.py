@@ -373,7 +373,7 @@ class SetupTargetTests(unittest.TestCase):
             "import pathlib, sys\n"
             "build = pathlib.Path(sys.argv[2])\nbuild.mkdir(parents=True, exist_ok=True)\n"
             f"binary = build / {target.name!r}\n"
-            "binary.write_bytes(b'\\0' * 5000)\nbinary.chmod(0o755)\n"
+            "binary.write_text('#!/bin/sh\\nexit 0\\n')\nbinary.chmod(0o755)\n"
             f"(build / 'lib{target.name}.a').write_bytes(b'archive')\n",
             encoding="utf-8",
         )
@@ -810,7 +810,7 @@ class SetupTargetTests(unittest.TestCase):
             f"#!{sys.executable}\nimport pathlib, sys\n"
             "build = pathlib.Path(sys.argv[2])\nbuild.mkdir(parents=True, exist_ok=True)\n"
             "binary = build / 'repairbuild'\n"
-            "binary.write_bytes(b'\\0' * 5000)\nbinary.chmod(0o755)\n"
+            "binary.write_text('#!/bin/sh\\nexit 0\\n')\nbinary.chmod(0o755)\n"
             "# REPAIRED_RECIPE\n"
         )
         auto_builder.write_text(
@@ -841,6 +841,104 @@ class SetupTargetTests(unittest.TestCase):
             ),
             "fresh",
         )
+
+    def test_stamped_build_that_stops_starting_is_rebuilt(self) -> None:
+        target = self.make_build_target("hostdrift")
+        self.build_recipe(target)
+        config = self.config("hostdrift")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "hostdrift"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/hostdrift"\n'
+            'asan_lib = "build-asan/libhostdrift.a"\n',
+            encoding="utf-8",
+        )
+        environment = {"LLM_DECIDE_DISABLE": "1"}
+        first = self.setup("hostdrift", "--build", environment=environment)
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+
+        binary = target / "build-asan" / "hostdrift"
+        binary.write_text(
+            "#!/bin/sh\n"
+            "echo \"$0: error while loading shared libraries: libsample.so.1: "
+            'cannot open shared object file" >&2\n'
+            "exit 127\n",
+            encoding="utf-8",
+        )
+        binary.chmod(0o755)
+        self.assertEqual(
+            "fresh",
+            target_config.build_freshness(
+                target, "asan", recipe_path=target / ".audit" / "build.sh"
+            ),
+        )
+
+        rebuilt = self.setup("hostdrift", "--build", environment=environment)
+
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout + rebuilt.stderr)
+        self.assertIn("asan build complete", rebuilt.stdout)
+        self.assertEqual("#!/bin/sh\nexit 0\n", binary.read_text(encoding="utf-8"))
+
+        # A surviving library does not make a configured CLI route usable.
+        # The exact binary bin/probe selects must be restored.
+        binary.unlink()
+        restored = self.setup("hostdrift", "--build", environment=environment)
+
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertIn("asan build complete", restored.stdout)
+        self.assertEqual("#!/bin/sh\nexit 0\n", binary.read_text(encoding="utf-8"))
+
+    def test_pre_main_loader_failure_reaches_build_recipe_repair(self) -> None:
+        target = self.make_build_target("loaderbuild")
+        recipe = self.build_recipe(target)
+        recipe.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, sys\n"
+            "build = pathlib.Path(sys.argv[2])\nbuild.mkdir(parents=True, exist_ok=True)\n"
+            "binary = build / 'loaderbuild'\n"
+            "binary.write_text("
+            "\"#!/bin/sh\\necho 'dyld[123]: Library not loaded: "
+            "/opt/lib/libsample.1.dylib' >&2\\nexit 134\\n\")\n"
+            "binary.chmod(0o755)\n",
+            encoding="utf-8",
+        )
+        recipe.chmod(0o755)
+        config = self.config("loaderbuild")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "loaderbuild"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/loaderbuild"\n',
+            encoding="utf-8",
+        )
+
+        captured_log = self.temp / "loader-repair-log"
+        repaired_body = (
+            f"#!{sys.executable}\nimport pathlib, sys\n"
+            "build = pathlib.Path(sys.argv[2])\nbuild.mkdir(parents=True, exist_ok=True)\n"
+            "binary = build / 'loaderbuild'\n"
+            "binary.write_text('#!/bin/sh\\nexit 0\\n')\nbinary.chmod(0o755)\n"
+            "# LOADER_REPAIRED_RECIPE\n"
+        )
+        auto_builder = self.harness / "bin" / "auto-build-script"
+        auto_builder.write_text(
+            f"#!{sys.executable}\nimport pathlib, sys\n"
+            "failure = pathlib.Path(sys.argv[sys.argv.index('--failure-log') + 1])\n"
+            f"pathlib.Path({str(captured_log)!r}).write_text(failure.read_text())\n"
+            "out = pathlib.Path(sys.argv[sys.argv.index('--out') + 1])\n"
+            f"out.write_text({repaired_body!r})\nout.chmod(0o755)\n",
+            encoding="utf-8",
+        )
+        auto_builder.chmod(0o755)
+
+        repaired = self.setup(
+            "loaderbuild", "--build",
+            environment={"LLM_DECIDE_DISABLE": "0"},
+        )
+
+        self.assertEqual(repaired.returncode, 0, repaired.stdout + repaired.stderr)
+        self.assertIn("repaired asan recipe", repaired.stdout)
+        self.assertIn("Library not loaded", captured_log.read_text())
+        self.assertIn("LOADER_REPAIRED_RECIPE", recipe.read_text())
 
     def test_build_supplies_backend_when_materializing_widened_config(self) -> None:
         target = self.make_build_target("widebuild")

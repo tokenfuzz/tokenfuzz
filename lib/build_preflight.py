@@ -406,6 +406,46 @@ def refresh(
     return unleased
 
 
+def _stamped_but_unlaunchable(config, sanitizer: str, logger) -> bool:
+    """True when a stamped-fresh sanitizer binary no longer reaches main().
+
+    The freshness stamp is content-based, so it cannot see the host: an
+    external shared dependency removed or version-bumped after the build
+    leaves the tree stamped fresh and the program unable to start. Every run
+    it serves would then record NO_EXEC, and a benchmark cell would pin it and
+    measure nothing. Report it as not-fresh instead, so the ordinary build path
+    re-runs and its recipe repair can engage.
+    """
+    if config.is_browser in ("1", "true", "True"):
+        return False
+    raw = config.sanitizer_bin(sanitizer)
+    if not raw or "FILL_ME" in raw:
+        return False
+    try:
+        binary = Path(config.resolve_path(raw))
+    except (OSError, ValueError):
+        return False
+    if not binary.is_file():
+        logger(
+            f"WARN: stamped {sanitizer} executable is missing, rebuilding: "
+            f"{binary}"
+        )
+        return True
+    if not os.access(binary, os.X_OK):
+        logger(
+            f"WARN: stamped {sanitizer} executable is not executable, "
+            f"rebuilding: {binary}"
+        )
+        return True
+    failure = runner_preflight.probe_startup(binary, config, sanitizer)
+    if failure:
+        logger(
+            f"WARN: stamped {sanitizer} build no longer starts, rebuilding: "
+            f"{failure.splitlines()[0][:200]}"
+        )
+    return bool(failure)
+
+
 def _converge(
     root: Path,
     target_root: Path,
@@ -426,7 +466,12 @@ def _converge(
     except OSError as exc:
         logger(f"WARN: sanitizer build freshness probe failed; continuing: {exc}")
         return
-    pending = [name for name, state in before.items() if state not in ("fresh", "skip")]
+    pending = []
+    for name, state in before.items():
+        if state not in ("fresh", "skip"):
+            pending.append(name)
+        elif state == "fresh" and _stamped_but_unlaunchable(config, name, logger):
+            pending.append(name)
     build_log = log_dir / "setup-build.log"
     environment = os.environ.copy()
     environment.update(

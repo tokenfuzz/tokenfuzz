@@ -26,6 +26,9 @@ targets/*
 # (build-asan, build-ubsan, …); *.log under it is already ignored below.
 !targets/canary/
 targets/canary/build-*/
+# Only the recipe is committed; build leases and materialize logs are run state.
+targets/canary/.audit/*
+!targets/canary/.audit/build.sh
 # Per-language synthetic benchmark targets live under samples/ and are committed
 # like the canary; re-include the samples container, then skip each target's
 # sanitizer/interpreter build dirs and language caches.

@@ -280,6 +280,121 @@ class BuildConfigTests(unittest.TestCase):
             self.assertTrue(build_config.is_ready(tree, recipe))
             self.assertEqual(primary_control.read_text(), "regular\n")
 
+    def test_alternate_that_cannot_start_is_not_marked_ready(self) -> None:
+        """Compiling is not readiness. An agent rotates into an alternate
+        through the same sub-path the primary exposes, so if that program dies
+        in the loader every probe it serves returns NO_EXEC — the alternate has
+        to be cached unavailable instead of offered."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            (root / "CMakeLists.txt").write_text("project(sample C)\n", encoding="utf-8")
+            primary = root / "build-asan"
+            primary.mkdir()
+            (primary / "sample").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (primary / "sample").chmod(0o755)
+            target_config.build_write_stamp(root, "asan")
+            config_path = Path(directory) / "target.toml"
+            config_path.write_text(
+                'target="sample"\nbuild_system="cmake"\nbuild_widening=false\n'
+                'asan_bin="build-asan/sample"\n'
+                '[[build_config]]\nname="compact"\nflags=["-DSMALL=ON"]\n',
+                encoding="utf-8",
+            )
+            config = target_config.Config(target_root=str(root))
+            target_config.load_toml_into(config, config_path)
+            item = config.build_configs[0]
+            recipe = build_config.recipe_path(root, item)
+            recipe.parent.mkdir(parents=True)
+            recipe.write_text(
+                "#!/usr/bin/env bash\nset -eu\nbuild=\"$2\"\nmkdir -p \"$build\"\n"
+                "printf '%s\\n' '#!/bin/sh' "
+                "'echo \"$0: error while loading shared libraries: libsample.so.1: "
+                "cannot open shared object file\" >&2' 'exit 127' > \"$build/sample\"\n"
+                # produced_artifacts only considers executables over 4096 bytes,
+                # so pad past that or the weaker gate rejects it first.
+                "printf '#%.0s' $(seq 1 5000) >> \"$build/sample\"\n"
+                "chmod +x \"$build/sample\"\n",
+                encoding="utf-8",
+            )
+            recipe.chmod(0o755)
+            completed = subprocess.run(
+                [
+                    str(ROOT / "bin" / "build-configs"),
+                    "--target-path", str(root), "--target-toml", str(config_path),
+                    "--config", "compact", "--timeout-seconds", "30",
+                ],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(completed.returncode, 1, completed.stdout + completed.stderr)
+            self.assertIn("does not start", completed.stdout + completed.stderr)
+            tree = build_config.build_dir(root, item)
+            self.assertFalse(build_config.is_ready(tree, recipe))
+
+    def test_fresh_alternate_that_stops_starting_is_rebuilt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "source"
+            root.mkdir()
+            (root / "CMakeLists.txt").write_text(
+                "project(sample C)\n", encoding="utf-8"
+            )
+            primary = root / "build-asan"
+            primary.mkdir()
+            (primary / "sample").write_text(
+                "#!/bin/sh\nexit 0\n", encoding="utf-8"
+            )
+            (primary / "sample").chmod(0o755)
+            target_config.build_write_stamp(root, "asan")
+            config_path = Path(directory) / "target.toml"
+            config_path.write_text(
+                'target="sample"\nbuild_system="cmake"\nbuild_widening=false\n'
+                'asan_bin="build-asan/sample"\n'
+                '[[build_config]]\nname="compact"\nflags=["-DSMALL=ON"]\n',
+                encoding="utf-8",
+            )
+            config = target_config.Config(target_root=str(root))
+            target_config.load_toml_into(config, config_path)
+            item = config.build_configs[0]
+            recipe = build_config.recipe_path(root, item)
+            recipe.parent.mkdir(parents=True)
+            recipe.write_text(
+                f"#!{sys.executable}\n"
+                "import pathlib, sys\n"
+                "binary = pathlib.Path(sys.argv[2]) / 'sample'\n"
+                "binary.write_text('#!/bin/sh\\nexit 0\\n' + '#' * 5000)\n"
+                "binary.chmod(0o755)\n",
+                encoding="utf-8",
+            )
+            recipe.chmod(0o755)
+            self.assertTrue(
+                build_configs.materialize(
+                    root, item, config, base_suffix="", force=False,
+                    timeout_seconds=30,
+                )
+            )
+            tree = build_config.build_dir(root, item)
+            binary = tree / "sample"
+            binary.write_text(
+                "#!/bin/sh\n"
+                "echo \"$0: error while loading shared libraries: "
+                'libsample.so.1" >&2\n'
+                "exit 127\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+
+            self.assertTrue(
+                build_configs.materialize(
+                    root, item, config, base_suffix="", force=False,
+                    timeout_seconds=30,
+                )
+            )
+
+            self.assertTrue(build_config.is_ready(tree, recipe))
+            self.assertTrue(binary.read_text(encoding="utf-8").startswith(
+                "#!/bin/sh\nexit 0\n"
+            ))
+
     def test_failed_alternate_is_cached_until_forced(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "source"

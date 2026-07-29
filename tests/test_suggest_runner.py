@@ -275,6 +275,29 @@ class SuggestRunnerTests(unittest.TestCase):
         self.assertIn("usage: sampleproj", help_text)
         self.assertEqual([], list(scratch.iterdir()))
 
+    def test_loader_diagnostic_is_not_offered_as_cli_help(self) -> None:
+        self.binary.write_text(
+            "#!/bin/sh\n"
+            "echo 'dyld[123]: Library not loaded: /opt/lib/libsample.1.dylib' >&2\n"
+            "echo '  Referenced from: /tmp/build/sampleproj' >&2\n"
+            "echo '  Reason: tried: /opt/lib/libsample.1.dylib (no such file)' >&2\n"
+            "exit 134\n",
+            encoding="utf-8",
+        )
+        self.binary.chmod(0o755)
+
+        result = self.run_command(
+            {
+                "binary": "c1", "args": ["{TESTCASE}"],
+                "reasoning": "the diagnostic looked long enough to be help",
+            },
+            "--apply",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("could not read help", result.stderr)
+        self.assertNotIn("[runner]", self.toml.read_text(encoding="utf-8"))
+
     def test_selects_a_declared_cli_over_the_detected_test_driver(self) -> None:
         (self.target / "CMakeLists.txt").write_text(
             "add_executable(sampleproj driver.c)\n"

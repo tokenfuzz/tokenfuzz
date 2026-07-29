@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 from llm_decide import llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
-from timeout import capture_timeout  # noqa: E402
+import runner_preflight  # noqa: E402
 import target_config as tc  # noqa: E402
 
 _MARKER = "# native CLI args set by bin/suggest-runner"
@@ -31,20 +31,7 @@ _HELP_TIMEOUT_SECONDS = 3
 _MAX_SUGGESTIONS = 2
 
 
-def run_captured(
-    command: list[str], seconds: int, cwd: str | os.PathLike[str],
-    max_bytes: int,
-) -> tuple[subprocess.CompletedProcess, bytes]:
-    """Run with closed stdin and bounded in-memory output."""
-    with capture_timeout(
-        command, seconds, cwd=cwd, input=b"",
-    ) as (completed, output_path):
-        with output_path.open("rb") as output:
-            captured = output.read(max_bytes)
-    return completed, captured
-
-
-def read_help(binary: Path, max_bytes: int = 16384) -> str:
+def read_help(binary: Path, env: dict | None = None, max_bytes: int = 16384) -> str:
     """Return the first useful bounded help response from a native CLI.
 
     Probed in a scratch directory on a closed stdin: a program that runs work
@@ -55,22 +42,28 @@ def read_help(binary: Path, max_bytes: int = 16384) -> str:
     for flag in ("--help", "-h"):
         with tempfile.TemporaryDirectory(prefix="suggest-runner-help-") as directory:
             try:
-                completed, output = run_captured(
+                completed, output = runner_preflight.capture_probe(
                     [str(binary), flag], _HELP_TIMEOUT_SECONDS, directory,
-                    max_bytes,
+                    max_bytes, env,
                 )
             except OSError:
                 continue
             if completed.returncode == 124:
                 return ""
             output = output.decode("utf-8", errors="replace")
+            # A program that never reached main() has no argv to infer: its
+            # loader diagnostic is long enough to pass for help text below.
+            if runner_preflight.startup_failure_reason(
+                completed.returncode, output
+            ):
+                return ""
             if len(output.strip()) >= 80:
                 return output
     return ""
 
 
 def candidate_programs(
-    target: Path, sanitizer: str, configured: Path,
+    target: Path, sanitizer: str, configured: Path, env: dict | None = None,
 ) -> list[dict[str, str]]:
     """Selectable instrumented CLIs with their help, configured binary first.
 
@@ -102,7 +95,7 @@ def candidate_programs(
               file=sys.stderr)
     programs: list[dict[str, str]] = []
     for path in paths[:_MAX_CANDIDATES]:
-        help_text = read_help(path)
+        help_text = read_help(path, env)
         if not help_text:
             print(f"[suggest-runner] no readable help, not offered: {path}",
                   file=sys.stderr)
@@ -248,6 +241,7 @@ def set_runner_args(text: str, args: list[str], reasoning: str) -> str:
 
 def validate_launch(
     binary: Path, args: list[str], help_text: str, timeout: int,
+    env: dict | None = None,
 ) -> tuple[bool, str]:
     """Reject unsafe launches and commands whose behavior ignores the input."""
     with tempfile.TemporaryDirectory(prefix="suggest-runner-") as directory:
@@ -265,8 +259,8 @@ def validate_launch(
             ]
 
         try:
-            completed, completed_output = run_captured(
-                [str(binary), *expand(testcase)], 10, directory, 65536,
+            completed, completed_output = runner_preflight.capture_probe(
+                [str(binary), *expand(testcase)], 10, directory, 65536, env,
             )
         except OSError as exc:
             return False, str(exc)
@@ -282,8 +276,8 @@ def validate_launch(
         if created:
             return False, f"derived invocation created output: {created[0]}"
         try:
-            absent, absent_output = run_captured(
-                [str(binary), *expand(missing)], 10, directory, 65536,
+            absent, absent_output = runner_preflight.capture_probe(
+                [str(binary), *expand(missing)], 10, directory, 65536, env,
             )
         except OSError as exc:
             return False, str(exc)
@@ -353,7 +347,11 @@ def main(argv: list[str]) -> int:
         return 1
     sanitizer, binary_name = selected
     binary = Path(binary_name)
-    programs = candidate_programs(target, sanitizer, binary)
+    # Probe every candidate the way the sanitizer runner launches it: a target
+    # that supplies its own library path in [runner].env would otherwise fail
+    # in the loader here and look like a program with no readable help.
+    environment = runner_preflight.runner_environment(cfg, sanitizer)
+    programs = candidate_programs(target, sanitizer, binary, environment)
     if not programs:
         print(f"[suggest-runner] could not read help from {binary}", file=sys.stderr)
         return 1
@@ -387,7 +385,8 @@ def main(argv: list[str]) -> int:
         else:
             chosen_binary = target / chosen["path"]
             valid, reason = validate_launch(
-                chosen_binary, runner_args, chosen["help"], args.timeout
+                chosen_binary, runner_args, chosen["help"], args.timeout,
+                environment,
             )
             if valid:
                 break
