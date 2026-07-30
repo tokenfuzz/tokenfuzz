@@ -114,7 +114,7 @@ def main(argv: list[str]) -> int:
             return 2
     preserve_set = BUILTIN_PRESERVE | set(preserve)
 
-    targets = target_slugs(output_root, args.target)
+    targets = target_slugs(output_root, args.target, REPO_ROOT)
     if not targets:
         if not args.quiet:
             print(f"[{TOOL}] no targets under {output_root}")

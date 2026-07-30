@@ -69,6 +69,22 @@ Notes:
   `target.toml` records `upstream_url = "FILL_ME"`, and the generated
   `reproduce.sh` asks for a checkout path
   instead of trying to clone.
+- `chromium` and `chrome` follow the upstream `depot_tools`/`gclient`
+  checkout layout; the first setup requires `depot_tools` on `PATH`.
+  `bin/setup-target chromium` creates
+  `targets/chromium/src` and registers the effective target as
+  `chromium/src`; `bin/audit --target chromium` resolves that nested source,
+  unless an ordinary target of that name is already registered under
+  `output/chromium/target.toml`, which keeps its own identity.
+  Its sanitizer build and browser probes use the full Chromium product.
+  Execution evidence comes from the product's own tagged console record, so
+  probes pass `--enable-logging=stderr`. They also use `--no-sandbox`: browser
+  output is page-influenced and therefore cannot be trusted as crash evidence,
+  while the dedicated sanitizer `log_path` must remain writable by renderer
+  children. On macOS they use Chromium's mock Keychain, preventing temporary
+  profiles from requesting the user's Safe Storage credential. Coverage
+  (`bin/hits`) speaks only the Firefox command line, so it has no Chromium
+  route yet.
 - If a checkout already exists under `targets/<target>/`, the no-URL
   form normally seeds or refreshes the generated config without touching
   source. It can still force a build when it detects stale ABI-tagged

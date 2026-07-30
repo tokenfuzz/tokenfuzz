@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ import build_lease
 import languages
 import runner_preflight
 import target_config
+import target_profile
 
 RESERVED = {"output", "benchmark"}
 
@@ -79,12 +81,22 @@ class Setup:
     def __init__(self, args: argparse.Namespace):
         validate_target(args.target)
         self.args = args
-        self.name = args.target
+        self.requested_name, self.profile = target_profile.resolve(
+            SCRIPT_ROOT, args.target
+        )
+        self.name = (
+            f"{self.requested_name}/{self.profile.source_subdir}"
+            if self.profile is not None
+            else args.target
+        )
         self.source = args.source
+        self.workspace_root = SCRIPT_ROOT / "targets" / self.requested_name
         self.target_root = SCRIPT_ROOT / "targets" / self.name
         self.config_dir = SCRIPT_ROOT / "output" / self.name
         self.toml = self.config_dir / "target.toml"
         self.seeded_full = False
+        if self.profile is not None and self.args.browser is None:
+            self.args.browser = self.profile.browser
 
     def detect_type(self, root: Path | None = None) -> str:
         candidate = root or self.target_root
@@ -103,6 +115,9 @@ class Setup:
         return "git"
 
     def prepare_source(self) -> None:
+        if self.profile is not None and self.profile.checkout == "gclient":
+            self.prepare_gclient_source()
+            return
         if self.target_root.is_dir():
             detected = self.detect_type(self.target_root)
             if self.args.repo_type != "auto" and self.args.repo_type != detected:
@@ -133,6 +148,151 @@ class Setup:
             raise ValueError(f"targets/{self.name} does not exist; pass a repo URL to clone it")
         repo_type = self.args.repo_type if self.args.repo_type != "auto" else self.detect_type()
         self.clone(repo_type)
+
+    def depot_tool(self, name: str) -> Path:
+        found = shutil.which(name)
+        candidates = [
+            Path(found) if found else None,
+            self.target_root / "third_party" / "depot_tools" / name,
+        ]
+        for candidate in candidates:
+            if (
+                candidate is not None
+                and candidate.is_file()
+                and os.access(candidate, os.X_OK)
+            ):
+                return candidate
+        raise RuntimeError(
+            f"{name} is required for the {self.requested_name} checkout; "
+            "install depot_tools and put it on PATH"
+        )
+
+    def sync_gclient(self) -> None:
+        gclient = self.depot_tool("gclient")
+        log(f"Syncing gclient dependencies for targets/{self.name}")
+        environment = os.environ.copy()
+        environment["PATH"] = (
+            f"{gclient.parent}{os.pathsep}{environment.get('PATH', '')}"
+        )
+        run(
+            [str(gclient), "sync"],
+            cwd=self.workspace_root,
+            env=environment,
+        )
+
+    def prepare_gclient_source(self) -> None:
+        assert self.profile is not None
+        if self.args.repo_type not in ("auto", "git"):
+            raise ValueError(
+                f"targets/{self.requested_name} uses a git-backed gclient checkout"
+            )
+        if self.source:
+            raise ValueError(
+                f"targets/{self.requested_name} uses the upstream gclient "
+                "checkout; omit the source URL"
+            )
+        metadata = self.workspace_root / ".gclient"
+        if (
+            self.target_root.is_dir()
+            and target_config.detect_repo_type(self.target_root) == "git"
+        ):
+            if not metadata.is_file():
+                raise ValueError(
+                    f"targets/{self.requested_name} has src but no .gclient metadata"
+                )
+            if self.args.no_update or not (
+                self.source or self.args.ref or self.args.pull
+            ):
+                log(f"Using existing targets/{self.name} without updating")
+                return
+            if self.blocked_by_local_edits():
+                return
+            if self.args.ref:
+                run([
+                    "git", "-C", str(self.target_root), "fetch",
+                    "origin", self.args.ref,
+                ])
+                run([
+                    "git", "-C", str(self.target_root), "checkout",
+                    self.args.ref,
+                ])
+            else:
+                log(f"Fast-forwarding git checkout for targets/{self.name}")
+                run([
+                    "git", "-C", str(self.target_root),
+                    "pull", "--ff-only",
+                ])
+            self.sync_gclient()
+            return
+        if metadata.is_file():
+            if self.args.no_update:
+                raise ValueError(
+                    f"targets/{self.requested_name} is an incomplete gclient "
+                    "checkout; rerun without --no-update to resume it"
+                )
+            log(
+                f"Resuming incomplete gclient workspace in "
+                f"targets/{self.requested_name}"
+            )
+            self.sync_gclient()
+            if (
+                not self.target_root.is_dir()
+                or target_config.detect_repo_type(self.target_root) != "git"
+            ):
+                raise RuntimeError(
+                    f"gclient sync did not create targets/{self.name}"
+                )
+            if self.args.ref:
+                run([
+                    "git", "-C", str(self.target_root),
+                    "checkout", self.args.ref,
+                ])
+                self.sync_gclient()
+            return
+        if self.workspace_root.exists() and any(self.workspace_root.iterdir()):
+            raise ValueError(
+                f"targets/{self.requested_name} exists without a complete "
+                "gclient src checkout"
+        )
+        self.workspace_root.mkdir(parents=True, exist_ok=True)
+        depot_tools = self.depot_tool("gclient").parent
+        fetch = depot_tools / "fetch"
+        if not fetch.is_file() or not os.access(fetch, os.X_OK):
+            raise RuntimeError(f"fetch is missing from depot_tools at {depot_tools}")
+        log(
+            f"Fetching {self.requested_name} gclient workspace into "
+            f"targets/{self.requested_name}"
+        )
+        run([str(fetch), *self.profile.fetch_args], cwd=self.workspace_root)
+        if (
+            not self.target_root.is_dir()
+            or target_config.detect_repo_type(self.target_root) != "git"
+            or not (self.workspace_root / ".gclient").is_file()
+        ):
+            raise RuntimeError(
+                f"gclient fetch did not create targets/{self.name} and "
+                f"targets/{self.requested_name}/.gclient"
+            )
+        if self.args.ref:
+            run(["git", "-C", str(self.target_root), "checkout", self.args.ref])
+            self.sync_gclient()
+
+    def seed_profile_build_recipe(self) -> None:
+        profile = self.profile
+        if profile is None or not profile.build_recipe:
+            return
+        recipe = self.target_root / ".audit" / "build.sh"
+        if recipe.is_file() and not self.args.force:
+            return
+        overlay = (
+            SCRIPT_ROOT / "lib" / "target-overlays" / profile.build_recipe
+        )
+        if not overlay.is_file():
+            raise RuntimeError(f"target build recipe is missing: {overlay}")
+        recipe.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(overlay, recipe)
+        recipe.chmod(0o755)
+        log(f"Installed target build recipe at {recipe}")
 
     def link_target(self, source: Path) -> None:
         destination = source.resolve()
@@ -240,6 +400,7 @@ class Setup:
             target_config.seed_toml(
                 self.target_root, self.toml, self.source,
                 preserve_curated=True, browser_mode=self.args.browser,
+                target_slug=self.name,
             )
             return
         if reason == "missing":
@@ -251,6 +412,7 @@ class Setup:
         target_config.seed_toml(
             self.target_root, self.toml, self.source,
             browser_mode=self.args.browser,
+            target_slug=self.name,
         )
         self.seeded_full = True
 
@@ -340,14 +502,18 @@ class Setup:
         self.run_config_helper("suggest-runner", helper_args)
 
     def language_build(self, config: target_config.Config) -> None:
-        if not self.args.build:
+        language = (
+            languages.for_build_system(config.build_system)
+            if config.build_system
+            else None
+        )
+        if not self.args.build and language and language.name == "python":
             stale = languages.stale_python_extensions(self.target_root)
             if stale:
                 log(f"ABI mismatch: {len(stale)} Python extension(s) built for a non-active interpreter - forcing a build")
                 self.args.build = True
         if not self.args.build or not config.build_system:
             return
-        language = languages.for_build_system(config.build_system)
         if not language:
             log(f"bootstrap: skipped (build_system='{config.build_system}' is not registered in lib/languages.py)")
             return
@@ -441,6 +607,9 @@ class Setup:
         if configured_lib is not None and configured_lib.is_file():
             return True
         if is_browser:
+            if self.profile is not None and self.profile.browser_bin:
+                product = build_dir / self.profile.browser_bin
+                return product.is_file() and os.access(product, os.X_OK)
             return bool(
                 target_config.detect_browser_sanitizer_bin(
                     self.target_root, sanitizer_name
@@ -490,8 +659,20 @@ class Setup:
                 candidate = candidate_dir / f"{recipe.name}.{os.getpid()}"
                 candidate.unlink(missing_ok=True)
                 generated = False
-                if recipe.is_file() and not self.args.force:
-                    log(f"bootstrap: keeping existing {recipe} (pass --force to regenerate)")
+                profile_recipe = (
+                    sanitizer_name == "asan"
+                    and self.profile is not None
+                    and bool(self.profile.build_recipe)
+                )
+                if recipe.is_file() and (
+                    not self.args.force or profile_recipe
+                ):
+                    if profile_recipe and self.args.force:
+                        log(
+                            f"bootstrap: using target overlay recipe {recipe}"
+                        )
+                    else:
+                        log(f"bootstrap: keeping existing {recipe} (pass --force to regenerate)")
                 elif os.access(auto_builder, os.X_OK):
                     candidate_dir.mkdir(parents=True, exist_ok=True)
                     environment = {**os.environ, "SCRIPT_ROOT": str(SCRIPT_ROOT)}
@@ -641,10 +822,29 @@ class Setup:
                     candidate.unlink(missing_ok=True)
         elif sanitizers and not (audit_dir / "build.sh").is_file():
             log(f"hint: {self.name} is a {config.build_system} target with no {audit_dir / 'build.sh'} yet; bin/audit builds it automatically")
+        preferred_browser_bins = {}
+        if (
+            self.profile is not None
+            and self.profile.browser_bin
+            and config.is_browser in ("1", "true", "True")
+        ):
+            # Bound to the product on disk, not to build freshness: a stale
+            # tree is exactly where the generic detector is least able to pick
+            # the full product out of an ambiguous build, so withholding the
+            # curated path there would install the worse answer.
+            for sanitizer_name in sanitizers:
+                relative = (
+                    f"build-{sanitizer_name}/"
+                    f"{self.profile.browser_bin}"
+                )
+                candidate = Path(config.resolve_path(relative))
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    preferred_browser_bins[sanitizer_name] = relative
         if target_config.refresh_detected_build_fields(
             self.target_root,
             self.toml,
             is_browser=config.is_browser in ("1", "true", "True"),
+            preferred_browser_bins=preferred_browser_bins,
         ):
             log(f"Refreshed <san>_bin/<san>_lib in {self.toml} from build trees on disk")
         # Persist every sanitizer that completed before reporting a later
@@ -678,6 +878,7 @@ class Setup:
 
     def execute(self) -> int:
         self.prepare_source()
+        self.seed_profile_build_recipe()
         self.seed_config()
         self.llm_bootstrap()
         target_config.parse_toml(self.toml)
@@ -691,7 +892,7 @@ class Setup:
         self.language_build(config)
         self.sanitizer_builds(config)
         self.runner_bootstrap()
-        print(f"\nNext steps:\n  1. Review output/{self.name}/target.toml.\n  2. Smoke-test with: bin/audit --target {self.name} --backend <claude|codex|gemini|grok|oss> 1")
+        print(f"\nNext steps:\n  1. Review output/{self.name}/target.toml.\n  2. Smoke-test with: bin/audit --target {self.requested_name} --backend <claude|codex|gemini|grok|oss> 1")
         return 0
 
 

@@ -846,6 +846,45 @@ class WorkQueueTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "no results directory"):
                 workqueue.context_from_args(args)
 
+    def named_target_context(self, script_root: Path, target: str):
+        args = argparse.Namespace(
+            script_root=str(script_root), target=target, target_path="",
+            target_slug="", results_dir="",
+        )
+        with mock.patch.dict(os.environ, {
+            "TARGET_ROOT": "", "TARGET_NAME": "", "TARGET_SLUG": "",
+            "RESULTS_DIR": "",
+        }, clear=False):
+            return workqueue.context_from_args(args)
+
+    def test_context_applies_target_overlay_before_resolving_paths(self) -> None:
+        script_root = self.root / "harness"
+        (script_root / "lib").mkdir(parents=True)
+        shutil.copytree(
+            ROOT / "lib" / "target-overlays",
+            script_root / "lib" / "target-overlays",
+        )
+        context = self.named_target_context(script_root, "chromium")
+        self.assertEqual(
+            context.target_root, (script_root / "targets/chromium/src").resolve()
+        )
+        self.assertEqual(
+            context.results_dir,
+            (script_root / "output/chromium/src/results").resolve(),
+        )
+        self.assertEqual(context.target_slug, "chromium/src")
+
+    def test_named_target_slug_matches_the_audit_derivation(self) -> None:
+        # bin/audit sanitizes each component of the same name, so a directly
+        # invoked tool must not open a second results tree for one target.
+        script_root = self.root / "case-harness"
+        (script_root / "targets" / "WolfSSL").mkdir(parents=True)
+        context = self.named_target_context(script_root, "WolfSSL")
+        self.assertEqual(context.target_slug, "wolfssl")
+        self.assertEqual(
+            context.results_dir, (script_root / "output/wolfssl/results").resolve()
+        )
+
     def test_state_cli_smoke_is_json_and_does_not_fall_through_to_help(self) -> None:
         self.write_cards([self.card("WORK-A", "src/app.c")])
         base = [

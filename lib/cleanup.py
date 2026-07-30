@@ -57,9 +57,19 @@ def resolve_output_root(raw: str, repo_root: Path) -> Path | None:
         return None
 
 
-def target_slugs(output_root: Path, explicit: list[str]) -> list[str]:
+def target_slugs(
+    output_root: Path,
+    explicit: list[str],
+    script_root: Path | None = None,
+) -> list[str]:
     if explicit:
-        return explicit
+        if script_root is None:
+            return explicit
+        from target_profile import effective_slug
+        return [
+            effective_slug(script_root, target, output_root=output_root)
+            for target in explicit
+        ]
     from target_config import iter_target_roots
 
     slugs: list[str] = []

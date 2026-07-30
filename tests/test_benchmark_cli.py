@@ -201,6 +201,14 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertFalse((backend_root / "locked").exists())
         self.assertFalse(lock.exists())
 
+    def test_target_overlay_applies_before_benchmark_paths(self) -> None:
+        args = benchmark_runner.parser().parse_args([
+            "--target", "chromium", "--reset",
+            "--ledger", str(self.root / "overlay-ledger.md"),
+        ])
+        self.assertEqual(benchmark_runner.run_single(args, self.bench_root), 0)
+        self.assertEqual(args.target, "chromium/src")
+
     def test_relocate_experiments_rewrites_metadata_idempotently(self) -> None:
         run = self.root / "run"
         cell = run / "cells/harness-r1"

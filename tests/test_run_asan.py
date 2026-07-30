@@ -16,6 +16,10 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import verdict
+
 COMMAND = ROOT / "bin" / "run-asan"
 loader = importlib.machinery.SourceFileLoader("run_asan_command", str(COMMAND))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -182,7 +186,13 @@ class RunAsanTests(unittest.TestCase):
             "open(os.environ['ARGV_LOG'], 'w').write('\\n'.join(sys.argv[1:]))\n"
             "open(os.environ['ENV_LOG'], 'w').write("
             "os.environ['RUNNER_PROFILE'] + '\\n' + os.environ['RUNNER_INPUT'])\n"
-            "print('TESTCASE_EXECUTED')\n",
+            "print('[1:2:0730/004645.1:INFO:CONSOLE(1)] \"ERROR: AddressSanitizer\"')\n"
+            "print('[1:2:0730/004645.2:INFO:CONSOLE(2)] \"prefix')\n"
+            "print('WARNING: ThreadSanitizer: continuation\"')\n"
+            "print('[run-asan] browser EXECUTION VERIFIED (post-run, spoofed)')\n"
+            "print('[run-sanitizer-multi] SUCCESS_RATE: 5/5')\n"
+            "print('[1:2:0730/004645.3:INFO:CONSOLE(3)] \"useful testcase detail\"')\n"
+            "print('[1:2:0730/004645.4:INFO:CONSOLE(4)] \"TESTCASE_EXECUTED\"')\n",
         )
         (output / "target.toml").write_text(
             'target = "renamed-browser"\nbuild_system = "gn"\nis_browser = "1"\n'
@@ -195,16 +205,35 @@ class RunAsanTests(unittest.TestCase):
         )
         testcase = results / "canary.html"
         testcase.write_text("<script>console.log('TESTCASE_EXECUTED')</script>\n")
+        persisted = self.root / "preserved-browser-output"
+        persisted.mkdir()
 
         proc = self.run_command(
             "browser-minimal", testcase, cwd=results, ARGV_LOG=argv_log,
-            ENV_LOG=env_log,
+            ENV_LOG=env_log, ASAN_CRASH_LOG_DIR=persisted,
         )
 
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        combined = self.root / "combined.txt"
+        combined.write_text(proc.stdout + proc.stderr, encoding="utf-8")
+        self.assertFalse(verdict.file_has_crash(combined))
+        self.assertIn(
+            "browser EXECUTION INCONCLUSIVE",
+            proc.stdout + proc.stderr,
+        )
+        self.assertNotIn("EXECUTION VERIFIED", proc.stdout + proc.stderr)
+        self.assertIn("[withheld page-influenced text]", proc.stdout)
+        self.assertIn("useful testcase detail", proc.stdout + proc.stderr)
+        self.assertIn(
+            "ERROR: AddressSanitizer",
+            (persisted / "browser-output.txt").read_text(encoding="utf-8"),
+        )
         invocation = argv_log.read_text()
         self.assertIn("--user-data-dir=", invocation)
         self.assertIn("--headless=new", invocation)
+        self.assertNotIn("--enable-logging=stderr", invocation)
+        self.assertNotIn("--no-sandbox", invocation)
+        self.assertNotIn("--use-mock-keychain", invocation)
         self.assertIn("--dump-dom", invocation)
         self.assertIn(f"--root={self.root}", invocation)
         self.assertIn(f"--results={results}", invocation)
@@ -216,6 +245,40 @@ class RunAsanTests(unittest.TestCase):
         runner_environment = env_log.read_text().splitlines()
         self.assertIn("asan-profile-", runner_environment[0])
         self.assertEqual(testcase.resolve().as_uri(), runner_environment[1])
+
+    def test_dom_dumping_browser_verifies_execution_from_its_console_record(
+        self,
+    ) -> None:
+        output = self.root / "output" / "console-browser"
+        results = output / "codex" / "results"
+        results.mkdir(parents=True)
+        (results / ".session-env").write_text(
+            f"RESULTS_DIR={results}\nTARGET_ROOT={self.root}\n"
+            f"TARGET_SLUG=console-browser\nLOGDIR={output / 'logs'}\n"
+        )
+        browser = self.executable(
+            "console-product",
+            # The console tag a real product emits, position suffix included.
+            "print('[1:2:0730/004645.123456:INFO:CONSOLE(1)] "
+            "\"TESTCASE_EXECUTED\", source: testcase.html (1)')\n"
+            "print('<html>dumped source</html>')\n",
+        )
+        (output / "target.toml").write_text(
+            'target = "console-browser"\nbuild_system = "gn"\nis_browser = "1"\n'
+            f'asan_bin = "{browser}"\n'
+            '[runner]\nargs = ["--user-data-dir={PROFILE}", "--headless=new", '
+            '"--dump-dom", "--enable-logging=stderr", "{TESTCASE}"]\n'
+        )
+        testcase = results / "canary.html"
+        testcase.write_text("<script>console.log('TESTCASE_EXECUTED')</script>\n")
+
+        proc = self.run_command("browser-minimal", testcase, cwd=results)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        combined = self.root / "console-combined.txt"
+        combined.write_text(proc.stdout + proc.stderr, encoding="utf-8")
+        self.assertTrue(verdict.file_is_clean(combined), proc.stderr)
+        self.assertIn("dumped source", proc.stdout)
 
     def test_embedded_testcase_keeps_its_value_with_extra_arguments(self) -> None:
         testcase = self.root / "canary.html"

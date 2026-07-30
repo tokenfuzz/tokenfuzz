@@ -1567,7 +1567,11 @@ def _configured_build_field_is_usable(
 
 
 def refresh_detected_build_fields(
-    target_root: Path, toml_path: Path, *, is_browser: bool = False,
+    target_root: Path,
+    toml_path: Path,
+    *,
+    is_browser: bool = False,
+    preferred_browser_bins: dict[str, str] | None = None,
 ) -> bool:
     """Re-detect <san>_bin and <san>_lib for every sanitizer from the build
     trees now on disk and correct them in target.toml in place. Policy per
@@ -1576,7 +1580,9 @@ def refresh_detected_build_fields(
     bin/suggest-runner, and detection is a weaker signal than either. Otherwise
     adopt what the build yields (filling an unset field or replacing a stale or
     mismatched one), or scrub a value that points at a build-internal artifact
-    or a now-missing path. Returns True if anything changed.
+    or a now-missing path. A target overlay may supply an already-validated
+    product path when a multi-executable browser build is intentionally
+    ambiguous to the generic detector. Returns True if anything changed.
 
     seed_toml must run before any build exists (it supplies build_system to
     the build step), so on a fresh target it cannot detect these fields and
@@ -1590,6 +1596,7 @@ def refresh_detected_build_fields(
     except OSError:
         return False
     changed = False
+    preferred_browser_bins = preferred_browser_bins or {}
 
     def _value_of(line: str) -> str:
         if line.lstrip().startswith("#"):
@@ -1641,7 +1648,9 @@ def refresh_detected_build_fields(
 
     for san in ("asan", "ubsan", "msan", "tsan"):
         if is_browser:
-            detected_bin = detect_browser_sanitizer_bin(target_root, san)
+            detected_bin = preferred_browser_bins.get(
+                san, ""
+            ) or detect_browser_sanitizer_bin(target_root, san)
             detected_lib = ""
         else:
             detected_bin, detected_lib = detect_sanitizer_build_artifacts(
@@ -2457,16 +2466,36 @@ def browser_runner_defaults(build_system: str) -> dict:
             "args": ["--profile", "{PROFILE}", "--no-remote", "{TESTCASE}"],
         }
     if build_system == "gn":
-        return {
-            "args": [
-                "--user-data-dir={PROFILE}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--headless=new",
-                "--dump-dom",
-                "{TESTCASE}",
-            ],
-        }
+        # Full products do not reliably return --dump-dom output; their tagged
+        # stderr console record supplies execution evidence without swapping in
+        # a narrower shell product.
+        args = [
+            "--user-data-dir={PROFILE}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--headless=new",
+            "--dump-dom",
+            "--enable-logging=stderr",
+            # Browser output is page-influenced, so sanitizer diagnostics are
+            # trusted only from log_path. Keep renderer children able to open
+            # that dedicated report rather than relying on spoofable stderr.
+            "--no-sandbox",
+        ]
+        if sys.platform == "darwin":
+            # Developer Chromium otherwise asks for the user's Safe Storage
+            # credential once per temporary audit profile.
+            args.append("--use-mock-keychain")
+        args.append("{TESTCASE}")
+        defaults = {"args": args}
+        if sys.platform == "linux":
+            # Chromium's ASan runtime guidance requires the NSS settings and
+            # recommends bypassing GLib's slice allocator.
+            defaults["env"] = [
+                "G_SLICE=always-malloc",
+                "NSS_DISABLE_ARENA_FREE_LIST=1",
+                "NSS_DISABLE_UNLOAD=1",
+            ]
+        return defaults
     return {}
 
 
@@ -2556,6 +2585,7 @@ def seed_toml(
     upstream_url: str = "",
     preserve_curated: bool = False,
     browser_mode: bool | None = None,
+    target_slug: str = "",
 ) -> None:
     """Seed a starter target.toml — best-effort introspection.
 
@@ -2570,7 +2600,7 @@ def seed_toml(
     (--force, missing, or unparseable file) leaves it False and regenerates."""
     root = Path(target_root)
     out = Path(out_path)
-    slug = root.name
+    slug = target_slug or root.name
 
     # Read the curated sections to carry forward BEFORE the template is built,
     # so the render below can substitute them in place of the seed defaults.

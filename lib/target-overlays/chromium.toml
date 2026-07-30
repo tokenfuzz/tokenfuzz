@@ -1,0 +1,7 @@
+checkout = "gclient"
+source_subdir = "src"
+browser = true
+fetch_args = ["chromium"]
+build_recipe = "chromium-build.sh"
+browser_bin_linux = "chrome"
+browser_bin_darwin = "Chromium.app/Contents/MacOS/Chromium"

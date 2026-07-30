@@ -35,6 +35,17 @@ _BUILD_CONFIGS_LOADER.exec_module(build_configs)
 
 
 class BuildConfigTests(unittest.TestCase):
+    def test_target_overlay_applies_before_build_config_paths(self) -> None:
+        args = build_configs.parse_args(["--target", "chromium", "--all"])
+        self.assertEqual(args.target, "chromium/src")
+        self.assertEqual(
+            Path(args.target_path), ROOT / "targets" / "chromium" / "src"
+        )
+        self.assertEqual(
+            Path(args.target_toml),
+            ROOT / "output" / "chromium" / "src" / "target.toml",
+        )
+
     def test_identity_preserves_argument_order_and_isolates_primary(self) -> None:
         first = build_config.BuildConfig("wide", "wide", ("-DA=1", "-DB=2"))
         reordered = build_config.BuildConfig("wide", "wide", ("-DB=2", "-DA=1"))

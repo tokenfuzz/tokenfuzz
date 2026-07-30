@@ -231,6 +231,27 @@ class CleanupTests(unittest.TestCase):
         self.assertFalse((nested / "claude/logs/index.log").exists())
         self.assertTrue(facade_log.is_file())
 
+    def test_target_overlay_scopes_cleanup_to_the_nested_target(self) -> None:
+        output = self.root / "overlay"
+        target = self.make_target(output, "chromium/src")
+
+        state = self.run_command(
+            CLEAN_STATE, output, "--target", "chromium", "--backend", "codex",
+            "--quiet",
+        )
+        self.assertEqual(state.returncode, 0, state.stdout + state.stderr)
+        self.assertTrue(target.is_dir())
+        self.assertTrue((target / "target.toml").is_file())
+        self.assertFalse((target / "codex").exists())
+        self.assertTrue((target / "claude").is_dir())
+
+        logs = self.run_command(
+            CLEAN_LOGS, output, "--target", "chromium", "--backend", "claude",
+            "--quiet",
+        )
+        self.assertEqual(logs.returncode, 0, logs.stdout + logs.stderr)
+        self.assertFalse((target / "claude/logs/index.log").exists())
+
     def test_nested_gitkeep_is_preserved_and_unreadable_target_fails_loud(self) -> None:
         output = self.root / "gitkeep"
         logs = output / "libxml2/codex/logs"

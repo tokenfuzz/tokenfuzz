@@ -364,6 +364,169 @@ class SetupTargetTests(unittest.TestCase):
         self.assertIn("plain source tree, not a git repo", process.stdout + process.stderr)
         self.assertFalse((self.harness / "targets" / "rejecttype").exists())
 
+    def test_chromium_profile_fetches_a_gclient_workspace(self) -> None:
+        tools = self.temp / "depot-tools"
+        tools.mkdir()
+        fetch_log = self.temp / "fetch.log"
+        fetch = tools / "fetch"
+        fetch.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, subprocess, sys\n"
+            "root = pathlib.Path.cwd()\n"
+            "pathlib.Path(os.environ['FETCH_LOG']).write_text("
+            "' '.join(sys.argv[1:]) + '\\n')\n"
+            "(root / '.gclient').write_text('solutions = []\\n')\n"
+            "subprocess.run(['git', 'clone', os.environ['FETCH_REMOTE'], "
+            "str(root / 'src')], check=True)\n"
+            "(root / 'src' / '.gn').write_text("
+            "'buildconfig = \"//build/config/BUILDCONFIG.gn\"\\n')\n",
+            encoding="utf-8",
+        )
+        fetch.chmod(0o755)
+        gclient = tools / "gclient"
+        gclient_log = self.temp / "gclient.log"
+        gclient.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$GCLIENT_LOG\"\n",
+            encoding="utf-8",
+        )
+        gclient.chmod(0o755)
+        environment = {
+            "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+            "FETCH_LOG": str(fetch_log),
+            "FETCH_REMOTE": str(self.remote),
+            "GCLIENT_LOG": str(gclient_log),
+        }
+        process = self.setup(
+            "chromium", "--no-llm-config",
+            environment=environment,
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        workspace = self.harness / "targets" / "chromium"
+        self.assertTrue((workspace / ".gclient").is_file())
+        self.assertTrue((workspace / "src" / ".git").is_dir())
+        config = self.config("chromium/src")
+        self.assertTrue(config.is_file())
+        self.assertIn('target        = "chromium/src"', config.read_text())
+        self.assertIn('is_browser    = "1"', config.read_text())
+        self.assertIn('"--enable-logging=stderr"', config.read_text())
+        self.assertIn('"--no-sandbox"', config.read_text())
+        if sys.platform == "darwin":
+            self.assertIn('"--use-mock-keychain"', config.read_text())
+        if sys.platform == "linux":
+            self.assertIn('"NSS_DISABLE_UNLOAD=1"', config.read_text())
+        recipe = workspace / "src" / ".audit" / "build.sh"
+        self.assertIn(
+            'autoninja -C "$build" chrome',
+            recipe.read_text(),
+        )
+        product_relative = (
+            "Chromium.app/Contents/MacOS/Chromium"
+            if sys.platform == "darwin" else "chrome"
+        )
+        product = workspace / "src" / "build-asan" / product_relative
+        product.parent.mkdir(parents=True)
+        product.write_text(
+            f"#!{sys.executable}\n", encoding="utf-8"
+        )
+        product.chmod(0o755)
+        refreshed = self.setup(
+            "chromium", "--no-llm-config", environment=environment,
+        )
+        self.assertEqual(
+            refreshed.returncode, 0, refreshed.stdout + refreshed.stderr
+        )
+        self.assertIn(
+            f'asan_bin      = "build-asan/{product_relative}"',
+            config.read_text(),
+        )
+        self.assertEqual("chromium\n", fetch_log.read_text())
+        self.assertIn(
+            "bin/audit --target chromium --backend", process.stdout
+        )
+        updated = self.setup(
+            "chromium", "--pull", "--no-llm-config",
+            environment=environment,
+        )
+        self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
+        self.assertEqual("sync\n", gclient_log.read_text())
+        self.assertIn("Fast-forwarding git checkout", updated.stdout)
+        recipe.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+        forced = self.setup(
+            "chromium/src", "--force", "--no-llm-config",
+            environment=environment,
+        )
+        self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
+        self.assertIn(
+            'autoninja -C "$build" chrome',
+            recipe.read_text(),
+        )
+
+    def test_registered_ordinary_chromium_target_keeps_its_identity(self) -> None:
+        ordinary = self.harness / "targets" / "chromium"
+        self.git("clone", str(self.remote), str(ordinary))
+        config = self.config("chromium")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "chromium"\nbuild_system = "cmake"\n',
+            encoding="utf-8",
+        )
+
+        process = self.setup("chromium", "--no-llm-config")
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertIn(
+            "Using existing targets/chromium without updating", process.stdout
+        )
+        self.assertFalse(self.config("chromium/src").exists())
+
+    def test_chrome_profile_resumes_an_interrupted_gclient_fetch(self) -> None:
+        tools = self.temp / "resume-depot-tools"
+        tools.mkdir()
+        gclient = tools / "gclient"
+        gclient.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, subprocess, sys\n"
+            "root = pathlib.Path.cwd()\n"
+            "subprocess.run(['git', 'clone', os.environ['FETCH_REMOTE'], "
+            "str(root / 'src')], check=True)\n"
+            "(root / 'src' / '.gn').write_text("
+            "'buildconfig = \"//build/config/BUILDCONFIG.gn\"\\n')\n"
+            "pathlib.Path(os.environ['GCLIENT_LOG']).write_text("
+            "' '.join(sys.argv[1:]) + '\\n')\n",
+            encoding="utf-8",
+        )
+        gclient.chmod(0o755)
+        workspace = self.harness / "targets" / "chrome"
+        workspace.mkdir(parents=True)
+        (workspace / ".gclient").write_text(
+            "solutions = []\n", encoding="utf-8"
+        )
+        gclient_log = self.temp / "resume-gclient.log"
+        process = self.setup(
+            "chrome", "--no-llm-config",
+            environment={
+                "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+                "FETCH_REMOTE": str(self.remote),
+                "GCLIENT_LOG": str(gclient_log),
+            },
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertTrue((workspace / "src" / ".git").is_dir())
+        self.assertTrue(self.config("chrome/src").is_file())
+        self.assertEqual("sync\n", gclient_log.read_text())
+        self.assertIn("Resuming incomplete gclient workspace", process.stdout)
+
+    def test_native_target_ignores_unrelated_python_abi_artifacts(self) -> None:
+        process = self.setup("nativeabi", str(self.remote), "--no-llm-config")
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        target = self.harness / "targets" / "nativeabi"
+        (target / "helper.cpython-9999-darwin.so").write_bytes(b"")
+        refreshed = self.setup("nativeabi", "--no-llm-config")
+        self.assertEqual(
+            refreshed.returncode, 0, refreshed.stdout + refreshed.stderr
+        )
+        self.assertNotIn("ABI mismatch", refreshed.stdout)
+
     def build_recipe(self, target: Path, sanitizer: str = "asan", executable: bool = True) -> Path:
         suffix = "" if sanitizer == "asan" else f"-{sanitizer}"
         recipe = target / ".audit" / f"build{suffix}.sh"

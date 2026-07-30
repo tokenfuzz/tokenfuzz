@@ -69,6 +69,7 @@ SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import benchmark as B  # noqa: E402  (runtime sys.path adjustment)
+import target_profile  # noqa: E402
 
 # Run-level subtrees / files never shipped, plus each crash dir's internal
 # .audit/. cells/ are heavy harness internals and the *.log files are
@@ -284,7 +285,12 @@ def main(argv: list[str]) -> int:
             "across backends)")
         return 1
 
-    runs = select_runs(bench_root, args.backend, args.target, args.run_id)
+    selected_target = target_profile.effective_slug(
+        SCRIPT_ROOT, args.target
+    )
+    runs = select_runs(
+        bench_root, args.backend, selected_target, args.run_id
+    )
     if not runs:
         scope = ", ".join(f"{k}={v}" for k, v in (
             ("backend", args.backend), ("target", args.target),

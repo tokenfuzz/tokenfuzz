@@ -21,6 +21,7 @@ import build_lease
 import build_routes
 import runner_preflight
 import target_config
+import target_profile
 from timeout import run_timeout
 
 
@@ -342,6 +343,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")
     if args.target:
+        args.target = target_profile.effective_slug(
+            SCRIPT_ROOT, args.target
+        )
         args.target_path = args.target_path or str(SCRIPT_ROOT / "targets" / args.target)
         args.target_toml = args.target_toml or str(SCRIPT_ROOT / "output" / args.target / "target.toml")
     if not args.target_path or not args.target_toml:

@@ -598,6 +598,7 @@ def default_script_root() -> Path:
 
 def context_from_args(args: argparse.Namespace) -> Context:
     script_root = realpath(getattr(args, "script_root", None) or os.environ.get("SCRIPT_ROOT") or default_script_root())
+    effective_target_name = ""
     target_given = bool(
         getattr(args, "target_path", None)
         or os.environ.get("TARGET_ROOT")
@@ -610,11 +611,27 @@ def context_from_args(args: argparse.Namespace) -> Context:
         target_root = realpath(os.environ["TARGET_ROOT"])
     elif getattr(args, "target", None) or os.environ.get("TARGET_NAME"):
         target_name = getattr(args, "target", None) or os.environ["TARGET_NAME"]
+        import target_profile
+        target_name = target_profile.effective_slug(
+            script_root, target_name
+        )
+        effective_target_name = target_name
         target_root = realpath(script_root / "targets" / target_name)
     else:
         target_root = realpath(Path.cwd())
     slug_given = bool(getattr(args, "target_slug", None) or os.environ.get("TARGET_SLUG"))
-    target_slug = getattr(args, "target_slug", None) or os.environ.get("TARGET_SLUG") or sanitize_slug(str(target_root))
+    # Sanitized per component, the way bin/audit derives the same slug from the
+    # same name: a named target must land in one results tree whichever entry
+    # point reached it.
+    named_slug = "/".join(
+        sanitize_slug(part) for part in effective_target_name.split("/")
+    ) if effective_target_name else ""
+    target_slug = (
+        getattr(args, "target_slug", None)
+        or os.environ.get("TARGET_SLUG")
+        or named_slug
+        or sanitize_slug(str(target_root))
+    )
     results_given = getattr(args, "results_dir", None) or os.environ.get("RESULTS_DIR")
     # A stateful results dir must be named, not guessed. With no RESULTS_DIR /
     # --results-dir AND no target identity (--target/--target-path/TARGET_ROOT/

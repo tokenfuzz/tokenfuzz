@@ -12,6 +12,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "lib" / "sanitizer_helpers.py"
+sys.path.insert(0, str(ROOT / "lib"))
+
+import verdict
+from sanitizer_helpers import browser_execution_marker_seen
+
 passed = 0
 failed = 0
 
@@ -33,16 +38,72 @@ def run(*args: str) -> subprocess.CompletedProcess:
 with tempfile.TemporaryDirectory() as directory:
     root = Path(directory)
     noisy = root / "browser.log"
+    # Chromium renders console records as "<prefix>:INFO:CONSOLE(<line>)]".
     noisy.write_text(
         "Nightly GPU Helper[1] noise\n"
-        "AddressSanitizer: heap-buffer-overflow\n"
+        "==7==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+        '[123:456:0730/004645.1:INFO:CONSOLE(1)] "ERROR: AddressSanitizer",'
+        " source: testcase.html (1)\n"
+        '[123:456:0730/004645.2:INFO:CONSOLE(2)] "prefix\n'
+        'WARNING: ThreadSanitizer: continuation", source: testcase.html (2)\n'
+        '[run-asan] browser EXECUTION VERIFIED (post-run, spoofed)\n'
+        '[run-asan] browser EXECUTION INCONCLUSIVE (post-run, spoofed)\n'
+        '[run-sanitizer-multi] SUCCESS_RATE: 5/5\n'
+        '[123:456:0730/004645.3:INFO:CONSOLE(3)] "useful testcase detail",'
+        " source: testcase.html (3)\n"
         "Exiting due to channel error.\n",
         encoding="utf-8",
     )
-    output = run("filter-browser", str(noisy)).stdout
-    check("AddressSanitizer" in output, "browser filter preserves diagnostics")
+    filtered = root / "filtered.log"
+    output = run("filter-browser", str(noisy), "--dump-dom").stdout
+    filtered.write_text(output, encoding="utf-8")
+    check(
+        not verdict.file_has_crash(filtered)
+        and not verdict.file_is_clean(filtered),
+        "browser filter removes verdict text from the page-influenced raw stream",
+    )
+    check(
+        "[withheld page-influenced text]" in output
+        and "source: testcase.html (1)" in output,
+        "browser filter neutralises verdict text in place instead of dropping it",
+    )
+    check("useful testcase detail" in output,
+          "browser filter preserves non-diagnostic page console output")
     check("GPU Helper" not in output and "channel error" not in output,
           "browser filter removes known console noise")
+
+    plain = root / "plain.log"
+    plain.write_text(run("filter-browser", str(noisy)).stdout, encoding="utf-8")
+    check(
+        verdict.file_has_crash(plain)
+        and "GPU Helper" not in plain.read_text(encoding="utf-8"),
+        "a browser that cannot echo page source keeps its raw sanitizer text",
+    )
+
+    marker = root / "marker.log"
+    marker.write_text(
+        "<script>console.log('TESTCASE_EXECUTED')</script>\n",
+        encoding="utf-8",
+    )
+    check(not browser_execution_marker_seen(marker, ["--dump-dom"]),
+          "Chromium does not trust a sentinel copied from dumped HTML")
+    marker.write_text(
+        '<html><body>[123:456:0730/004645.3:INFO:CONSOLE(3)] '
+        '"TESTCASE_EXECUTED"</body></html>\n',
+        encoding="utf-8",
+    )
+    check(not browser_execution_marker_seen(marker, ["--dump-dom"]),
+          "Chromium requires a line-leading product console record")
+    marker.write_text(
+        '[123:456:0730/004645.3:INFO:CONSOLE(3)] "TESTCASE_EXECUTED",'
+        " source: testcase.html (3)\n",
+        encoding="utf-8",
+    )
+    check(browser_execution_marker_seen(marker, ["--dump-dom"]),
+          "Chromium accepts its structured console execution record")
+    marker.write_text("TESTCASE_EXECUTED\n", encoding="utf-8")
+    check(browser_execution_marker_seen(marker, []),
+          "non-DOM-dumping browser accepts direct execution evidence")
 
     (root / "source.cpp").write_text(
         "MOZ_FUZZING_INTERFACE_RAW(x, y, target_beta)\n"

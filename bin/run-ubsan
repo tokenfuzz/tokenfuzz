@@ -16,7 +16,10 @@ sys.path.insert(0, str(ROOT / "lib"))
 import sanitizer
 import sanitizer_run
 import target_config
-from sanitizer_helpers import _BROWSER_NOISE, copy_file, copy_filtered, file_contains
+from sanitizer_helpers import (
+    _BROWSER_NOISE, copy_file, copy_filtered, file_contains,
+    report_browser_execution, untrusted_browser_filters,
+)
 from sanitizer_run import SanitizerRunner
 from timeout import capture_timeout, run_timeout
 
@@ -111,7 +114,10 @@ def run_browser(options: str, timeout: int, args: list[str]) -> int:
             timeout,
             env=environment,
         ) as (completed, output):
-            copy_filtered(output, sys.stdout.buffer, _BROWSER_NOISE)
+            withheld = copy_filtered(
+                output, sys.stdout.buffer, _BROWSER_NOISE,
+                mask=untrusted_browser_filters(launch_args),
+            )
             reports = [path for path in output_dir.glob("ubsan.log.*") if path.stat().st_size]
             for report in reports:
                 print(f"=== UBSan report: {report.name} ===")
@@ -124,10 +130,12 @@ def run_browser(options: str, timeout: int, args: list[str]) -> int:
                         shutil.copy2(report, persist)
                     shutil.copy2(output, Path(persist) / "browser-output.txt")
                     print(f"[run-ubsan] Raw UBSan logs preserved in {persist}", file=sys.stderr)
-            elif file_contains(output, b"TESTCASE_EXECUTED"):
-                print("[run-ubsan] EXECUTION VERIFIED: testcase ran (no UBSan issue)", file=sys.stderr)
             else:
-                print("[run-ubsan] WARNING: no UBSan issue and no execution evidence - testcase may not have run", file=sys.stderr)
+                report_browser_execution(
+                    output, launch_args, withheld,
+                    tool="ubsan", sanitizer="UBSan",
+                    persist=ENV.get("UBSAN_CRASH_LOG_DIR", ""),
+                )
             return completed.returncode
 
 

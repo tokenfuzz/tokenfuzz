@@ -500,6 +500,39 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         "default all-backend mode uses recoverable single-backend orchestration when only one exists",
     )
 
+    overlay_root = root / "overlay-harness"
+    overlay = overlay_root / "lib" / "target-overlays"
+    chromium_source = overlay_root / "targets" / "chromium" / "src"
+    overlay.mkdir(parents=True)
+    chromium_source.mkdir(parents=True)
+    (overlay / "chromium.toml").write_text(
+        'source_subdir = "src"\n', encoding="utf-8"
+    )
+    overlay_runtime = object()
+    with mock.patch.dict(
+        os.environ, {"SCRIPT_ROOT": str(overlay_root)}, clear=False
+    ), mock.patch.object(
+        audit_runner, "backend_configured", return_value=True
+    ), mock.patch.object(
+        audit_runner, "prepare_runtime", return_value=overlay_runtime
+    ) as overlay_prepare, mock.patch.object(
+        audit_runner, "run_backend", return_value=0
+    ):
+        overlay_rc = audit_runner.main([
+            "--target", "chromium", "--backend", "codex", "1",
+        ])
+    overlay_args = (
+        overlay_prepare.call_args.args
+        if overlay_prepare.call_args is not None else ()
+    )
+    check(
+        overlay_rc == 0
+        and len(overlay_args) >= 4
+        and overlay_args[1] == chromium_source
+        and overlay_args[2:4] == ("chromium/src", "chromium/src"),
+        "audit target overlay resolves source and output identity before runtime setup",
+    )
+
     with file_tools.capture_command([
         sys.executable, "-c", "import sys; sys.stdout.write('x' * (5 * 1024 * 1024))",
     ]) as captured:

@@ -11,6 +11,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from verdict import CLEAN_PATTERN, CRASH_PATTERNS
+
 
 def file_contains(path: Path, needle: bytes) -> bool:
     """Search a potentially large diagnostic without loading it into memory."""
@@ -24,18 +26,141 @@ def file_contains(path: Path, needle: bytes) -> bool:
     return False
 
 
+def browser_dumps_dom(launch_args) -> bool:
+    """Whether the runner echoes page source into its own output stream."""
+    return any(
+        value == "--dump-dom" or value.startswith("--dump-dom=")
+        for value in launch_args
+    )
+
+
+def untrusted_browser_filters(launch_args) -> tuple:
+    """Filters for a stream carrying page source, else nothing to neutralise.
+
+    Only a DOM-dumping runner puts attacker-chosen bytes where a verdict is
+    read from. Every other browser keeps its pre-existing raw output, so a
+    sanitizer report that reached stderr instead of its log file still reads
+    as the crash it is.
+    """
+    return _BROWSER_UNTRUSTED if browser_dumps_dom(launch_args) else ()
+
+
+def browser_execution_marker_seen(path: Path, launch_args) -> bool:
+    """Do not trust a marker that a DOM-dumping runner can echo from source."""
+    if not browser_dumps_dom(launch_args):
+        return file_contains(path, b"TESTCASE_EXECUTED")
+    with path.open("rb") as stream:
+        return any(
+            _CHROMIUM_CONSOLE_RECORD.match(line)
+            and b"TESTCASE_EXECUTED" in line
+            for line in stream
+        )
+
+
+def report_browser_execution(
+    path: Path,
+    launch_args,
+    withheld: set[re.Pattern],
+    *,
+    tool: str,
+    sanitizer: str,
+    persist: str = "",
+) -> None:
+    """Emit a metric-safe browser execution verdict when no report exists."""
+    prefix = f"[run-{tool}]"
+    marker_seen = browser_execution_marker_seen(path, launch_args)
+    if _BROWSER_RAW_CRASH_TEXT in withheld:
+        # A neutralised stream cannot be re-read for what it neutralised, so
+        # keep the raw bytes wherever the crash path would have kept them.
+        if persist and Path(persist).is_dir():
+            shutil.copy2(path, Path(persist) / "browser-output.txt")
+            print(
+                f"{prefix} Raw browser output preserved in {persist}",
+                file=sys.stderr,
+            )
+        if marker_seen:
+            print(
+                f"{prefix} browser EXECUTION INCONCLUSIVE "
+                f"(post-run, sanitizer-like browser output had no dedicated "
+                f"{sanitizer} report)",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"{prefix} WARNING: page-influenced browser output matched a "
+                f"sanitizer signature but no dedicated {sanitizer} report "
+                "was created; crash status and execution are inconclusive",
+                file=sys.stderr,
+            )
+    elif marker_seen:
+        print(
+            f"{prefix} browser EXECUTION VERIFIED "
+            "(post-run, marker=TESTCASE_EXECUTED)",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            f"{prefix} WARNING: no {sanitizer} issue and no execution "
+            "evidence - testcase may not have run",
+            file=sys.stderr,
+        )
+
+
 def copy_file(path: Path, destination) -> None:
     with path.open("rb") as source:
         shutil.copyfileobj(source, destination, 1024 * 1024)
 
 
-def copy_filtered(path: Path, destination, patterns) -> None:
+def copy_filtered(
+    path: Path, destination, patterns, *, mask=()
+) -> set[re.Pattern]:
+    """Copy the stream, dropping `patterns` and neutralising `mask` matches.
+
+    Dropping is for known noise, which carries nothing. A `mask` match is
+    page-influenced text that must not read as a verdict but is still evidence,
+    so its matching spans are replaced in place and the rest of the line is
+    kept. Returns every filter that matched.
+    """
+    withheld: set[re.Pattern] = set()
     with path.open("rb") as source:
         for raw in source:
             line = raw.decode(errors="replace")
-            if not any(pattern.search(line) for pattern in patterns):
-                destination.write(line.encode())
+            matched = next(
+                (pattern for pattern in patterns if pattern.search(line)),
+                None,
+            )
+            if matched is not None:
+                withheld.add(matched)
+                continue
+            for pattern in mask:
+                if not pattern.search(line):
+                    continue
+                withheld.add(pattern)
+                line = pattern.sub(_MASKED, line)
+                if pattern.search(line):
+                    line = ""     # cannot be neutralised: drop it entirely
+                    break
+            destination.write(line.encode())
+    return withheld
 
+
+# Browser stdout/stderr can carry page-controlled console records, including
+# unescaped newlines. Crash evidence comes from the sanitizer's separate
+# log_path files, which the runners copy without this filter. The replacement
+# deliberately shares no text with the patterns, so a masked line cannot match
+# them again.
+_MASKED = "[withheld page-influenced text]"
+_CHROMIUM_CONSOLE_RECORD = re.compile(
+    rb"^\[(?:[0-9]+:[0-9]+:)?[0-9]{4}/[0-9]{6}(?:\.[0-9]+)?"
+    rb":INFO:CONSOLE\([0-9]+\)\]"
+)
+_BROWSER_RAW_CRASH_TEXT = re.compile("|".join(CRASH_PATTERNS))
+_BROWSER_RAW_HARNESS_TEXT = re.compile(
+    CLEAN_PATTERN
+    + r"|^\[run-(?:asan|ubsan|msan|tsan)\] "
+      r"(?:browser|js|xpcshell|generic) EXECUTION INCONCLUSIVE \(post-run"
+)
+_BROWSER_UNTRUSTED = (_BROWSER_RAW_CRASH_TEXT, _BROWSER_RAW_HARNESS_TEXT)
 
 _BROWSER_NOISE = tuple(re.compile(pattern) for pattern in (
     r"^Nightly GPU Helper\[",
@@ -83,10 +208,12 @@ def firefox_fuzz_targets(target_root: str | os.PathLike[str]) -> list[str]:
 
 
 def _cmd_filter_browser(args: argparse.Namespace) -> int:
-    with open(args.path, "r", encoding="utf-8", errors="replace") as source:
-        for line in source:
-            if not any(pattern.search(line) for pattern in _BROWSER_NOISE):
-                sys.stdout.write(line)
+    copy_filtered(
+        Path(args.path), sys.stdout.buffer, _BROWSER_NOISE,
+        mask=untrusted_browser_filters(
+            ["--dump-dom"] if args.dump_dom else []
+        ),
+    )
     return 0
 
 
@@ -107,6 +234,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     command = sub.add_parser("filter-browser")
     command.add_argument("path")
+    command.add_argument("--dump-dom", action="store_true")
     command.set_defaults(func=_cmd_filter_browser)
 
     command = sub.add_parser("list-firefox-fuzz-targets")

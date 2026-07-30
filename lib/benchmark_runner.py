@@ -38,6 +38,7 @@ import process_tree
 import runner_preflight
 import stack_frames
 import target_config
+import target_profile
 import triage
 import validation_receipt
 from timeout import run_timeout
@@ -1816,6 +1817,7 @@ def preflight_build(
 
 
 def run_single(args: argparse.Namespace, bench_root: Path) -> int:
+    args.target = target_profile.effective_slug(SCRIPT_ROOT, args.target)
     backend_root = bench_root / args.backend
     ledger = Path(args.ledger).resolve() if args.ledger else backend_root / "benchmark-results.md"
     if args.reset:

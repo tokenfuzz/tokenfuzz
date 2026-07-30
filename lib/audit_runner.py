@@ -38,6 +38,7 @@ import sanitizer_run
 import structured_state
 import process_tree
 import target_config
+import target_profile
 import triage
 import verdict
 import vocab_rules
@@ -1691,6 +1692,8 @@ def _run_canary(
 
 
 def _canary_captured(output: Path) -> bool:
+    # The browser canary constructs this token from character codes, so a bare
+    # match cannot come from --dump-dom echoing the testcase source.
     try:
         with output.open(encoding="utf-8", errors="replace") as stream:
             return any("TESTCASE_EXECUTED" in line for line in stream)
@@ -2371,7 +2374,13 @@ def main(argv: list[str] | None = None) -> int:
     llm_invoke.apply_memory_policy(args.enable_memory)
     if args.new_target:
         return _new_target(root, args.new_target)
-    target_root = Path(args.target_path or root / "targets" / args.target).expanduser().absolute()
+    effective_target = (
+        args.target if args.target_path
+        else target_profile.effective_slug(root, args.target)
+    )
+    target_root = Path(
+        args.target_path or root / "targets" / effective_target
+    ).expanduser().absolute()
     if not target_root.is_dir():
         print(f"FATAL: target path does not exist: {target_root}", file=sys.stderr)
         return 1

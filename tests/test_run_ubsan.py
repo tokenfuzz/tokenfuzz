@@ -60,7 +60,7 @@ class RunUbsanTests(unittest.TestCase):
             "pathlib.Path(os.environ['ENV_LOG']).write_text("
             "os.environ['RUNNER_SAN'] + '\\n' + os.environ['RUNNER_PROFILE']"
             " + '\\n' + os.environ['RUNNER_INPUT'])\n"
-            "print('TESTCASE_EXECUTED')\n",
+            "print('[1:2:0730/004645.1:INFO:CONSOLE(1)] \"TESTCASE_EXECUTED\"')\n",
         )
         (self.output / "target.toml").write_text(
             'target = "browser-product"\nbuild_system = "gn"\nis_browser = "1"\n'
@@ -83,6 +83,9 @@ class RunUbsanTests(unittest.TestCase):
         invocation = argv_log.read_text(encoding="utf-8")
         self.assertIn("--user-data-dir=", invocation)
         self.assertIn("--headless=new", invocation)
+        self.assertNotIn("--enable-logging=stderr", invocation)
+        self.assertNotIn("--no-sandbox", invocation)
+        self.assertNotIn("--use-mock-keychain", invocation)
         self.assertIn(f"--root={self.root}", invocation)
         self.assertIn("--san=ubsan", invocation)
         self.assertIn(testcase.resolve().as_uri(), invocation)

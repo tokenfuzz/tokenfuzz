@@ -546,6 +546,20 @@ tc.seed_toml(gn_root, gn_out, "", browser_mode=True)
 tc.load_toml_into(gn_cfg, gn_out)
 assert_eq("1", gn_cfg.is_browser,
           "GN seed accepts explicit browser mode")
+assert_eq(True, "--enable-logging=stderr" in gn_cfg.runner_args,
+          "GN browser seed enables structured console evidence")
+assert_eq(True, "--no-sandbox" in gn_cfg.runner_args,
+          "GN browser seed keeps dedicated sanitizer logs reachable")
+assert_eq(
+    sys.platform == "darwin",
+    "--use-mock-keychain" in gn_cfg.runner_args,
+    "GN browser seed avoids macOS Safe Storage prompts only on Darwin",
+)
+assert_eq(
+    sys.platform == "linux",
+    "NSS_DISABLE_UNLOAD=1" in gn_cfg.runner_env,
+    "GN browser seed carries Chromium's Linux ASan runtime settings",
+)
 
 # ─── 9b. per-engine S4 flags are target metadata, not shared defaults ─
 generic_root = TEST_TMPDIR / "s4-generic"

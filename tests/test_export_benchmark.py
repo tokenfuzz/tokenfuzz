@@ -24,6 +24,7 @@ class ExportBenchmarkTests(unittest.TestCase):
         self.make_run("codex", "20260101-000000", "sampleproj")
         self.make_run("gemini", "20260101-000001", "sampleproj")
         self.make_run("gemini", "20260102-000000", "apptool")
+        self.make_run("codex", "20260103-000000", "chromium/src")
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -107,6 +108,12 @@ class ExportBenchmarkTests(unittest.TestCase):
         self.assertFalse((target / "gemini" / "20260102-000000").exists())
         self.assertNotIn("apptool", (target / "benchmark-result.md").read_text(encoding="utf-8"))
         self.assert_links_resolve(target)
+        chromium = self.root / "chromium-only"
+        proc = self.export(chromium, "--target", "chromium")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(
+            (chromium / "codex" / "20260103-000000").is_dir()
+        )
 
     def test_invalid_and_empty_selections_fail(self) -> None:
         self.assertNotEqual(self.export(
