@@ -333,6 +333,18 @@ def _activate_runtime(runtime: Runtime) -> None:
         LLM_DECIDE_LOG=str(runtime.logs / "llm-decisions.log"),
         LLM_DECIDE_COUNTER_FILE=str(runtime.logs / ".llm_decisions_harness"),
     )
+    try:
+        config_digest = target_config.read_session_env(runtime.results).get(
+            "TARGET_CONFIG_SHA256", "",
+        )
+    except (OSError, ValueError):
+        config_digest = ""
+    if config_digest:
+        os.environ["TARGET_CONFIG_SHA256"] = config_digest
+    else:
+        # A runtime activated before config pinning, or one with no pin, must
+        # not inherit another runtime's publication scope.
+        os.environ.pop("TARGET_CONFIG_SHA256", None)
     # Export only a real operator choice. Writing a resolved tier default back
     # would read downstream as an explicit setting and suppress the longer
     # per-decision defaults; clearing it when there is no choice keeps a value

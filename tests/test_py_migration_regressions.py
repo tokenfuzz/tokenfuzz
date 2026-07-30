@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import runpy
@@ -32,6 +33,7 @@ import report_identity
 import target_config
 import triage
 import triage_validate
+import validation_receipt
 import verdict
 import vocab_rules
 import workqueue
@@ -108,7 +110,13 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
             )
         return 0, results
 
-    def _budget_crash_triage(*_args, **_kwargs):
+    def _budget_crash_triage(results, *_args, **_kwargs):
+        for index in (1, 2):
+            validation_receipt.write(
+                results / "crashes" / f"CRASH-00{index}-1",
+                kind="crash", state="reportable",
+                attacker_controls=["bytes"],
+            )
         return {"promoted": 2, "rejected": 0, "demoted": 0, "pending": 1}
 
     def _budget_drain(results, *_args, **kwargs):
@@ -125,7 +133,12 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
             "content_sha1": report_identity.content_sha1(report),
             "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
             "attacker_controls": ["bytes"],
+            "anchors_verified": True,
         }), encoding="utf-8")
+        validation_receipt.write(
+            finding, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
         return {"accepted": 1, "rejected": 0, "pending": 0}
 
     budget_args = SimpleNamespace(
@@ -205,16 +218,18 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         repr((pending_cell, pending_metrics)),
     )
     check(
-        budget_metrics["confirmed_crashes"] == 3
+        budget_metrics["confirmed_crashes"] == 2
+        and budget_metrics["crash_candidates"] == 3
+        and budget_metrics["crashes_unadjudicated"] == 1
         and budget_metrics["crashes_pending"] == 1
         and budget_metrics["crashes_rejected"] == 0,
-        "two promoted crashes and one report skeleton all retain sanitizer credit",
+        "two promoted crashes receive credit while the report skeleton stays provisional",
         repr(budget_metrics),
     )
     budget_report = benchmark.aggregate(bench_dir, include_pool=False)
     budget_condition = budget_report["conditions"][0]
     check(
-        budget_condition["crash_total"] == 6
+        budget_condition["crash_total"] == 4
         and budget_condition["pending_crash_total"] == 2
         and budget_condition["confirmed_finding_total"] == 1,
         "pending findings and reports are qualified individually without erasing cell evidence",
@@ -452,13 +467,14 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     def _record_gate(
         _directory, report_path, _target_root, _deadline=None, _usage_index=None,
         _target_root_is_product=False,
-        _attacker_controls=None,
+        _attacker_controls=None, **_kwargs,
     ):
         reviewed_paths.append(report_path)
         return False
 
     with mock.patch.object(triage, "_run_tool", side_effect=_fake_export), \
-         mock.patch.object(triage, "_crash_trigger_gate", side_effect=_record_gate):
+         mock.patch.object(triage, "_crash_trigger_gate", side_effect=_record_gate), \
+         mock.patch.object(triage, "_cached_trigger_vote", return_value="Promote"):
         gate_status = triage.triage_one_crash(
             gate_crash, gate_root, root, "sampleproj", ["bytes"]
         )
@@ -715,8 +731,30 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         )
     with mock.patch.object(triage, "_trigger_vote", side_effect=[1, 1]) as votes:
         check(
-            triage._crash_trigger_gate(root, report_path, root) is True and votes.call_count == 2,
-            "two trigger rejects satisfy the crash gate quorum",
+            triage._crash_trigger_gate(root, report_path, root) is False
+            and votes.call_count == 2,
+            "unclassified reject votes cannot suppress a sanitizer-confirmed crash",
+        )
+    with mock.patch.object(
+        triage, "_trigger_vote", side_effect=[1, 1],
+    ) as votes, mock.patch.object(
+        triage, "_source_review_facts",
+        return_value={"rejection_kind": "contract-invalid"},
+    ):
+        check(
+            triage._crash_trigger_gate(root, report_path, root) is True
+            and votes.call_count == 2,
+            "two source-classified trigger rejects satisfy the crash gate quorum",
+        )
+    with mock.patch.object(
+        triage, "_trigger_vote", side_effect=[1, 1],
+    ), mock.patch.object(
+        triage, "_source_review_facts",
+        return_value={"rejection_kind": "no-added-boundary"},
+    ):
+        check(
+            triage._crash_trigger_gate(root, report_path, root) is False,
+            "a real native defect with no added boundary remains hardening evidence",
         )
     with mock.patch.dict(os.environ, {"LLM_DECIDE_DISABLE": "0"}, clear=False), \
          mock.patch.object(subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run:
@@ -866,9 +904,38 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         '{"decision_version":"v13-python","accept":true,"accept_count":2}\n',
         encoding="utf-8",
     )
+    trigger_source = root / "sample.c"
+    trigger_excerpt = "int app_parse(void) { return 0; }"
+    trigger_source.write_text(trigger_excerpt + "\n", encoding="utf-8")
+    trigger_anchor = {
+        "path": "sample.c",
+        "line": 1,
+        "symbol": "app_parse",
+        "kind": "source",
+        "excerpt": trigger_excerpt,
+        "excerpt_sha256": hashlib.sha256(
+            trigger_excerpt.encode(),
+        ).hexdigest(),
+    }
+    def _reject_trigger(_report, vote_path, *_args, **_kwargs):
+        vote_path.write_text(json.dumps({
+            "vote": "Reject",
+            "content_sha1": report_identity.content_sha1(finding_report),
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": ["bytes"],
+            "anchors": [trigger_anchor],
+            "anchors_verified": True,
+            "review_facts": {"rejection_kind": "contract-invalid"},
+            "target_revision": "",
+            "target_config_sha256": "",
+        }), encoding="utf-8")
+        return 1
+
     with mock.patch.dict(os.environ, {
         "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(root), "MODEL": "fixture",
-    }, clear=False), mock.patch.object(triage, "_trigger_vote", return_value=1):
+    }, clear=False), mock.patch.object(
+        triage, "_trigger_vote", side_effect=_reject_trigger,
+    ):
         finding_status = triage.validate_one_finding(finding, finding_root)
     check(finding_status == "rejected", "accepted finding still receives source-reading trigger validation")
     check((finding_root / "findings-rejected" / "FIND-001").is_dir(), "trigger-disproved finding is quarantined, not deleted")
@@ -1560,6 +1627,9 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         no_long_retry.call_count == 0,
         "full-report presence checks avoid retrying cached long reports",
     )
+    validation_receipt.write(
+        cached_reach_dir, kind="crash", state="reportable",
+    )
     cached_severity = subprocess.run(
         [str(ROOT / "bin" / "severity"), "--report", str(cached_reach_dir)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
@@ -1570,6 +1640,9 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         in cached_reach_report.read_text(encoding="utf-8"),
         "severity regeneration preserves cached fields materialized into an old report",
         cached_severity.stderr,
+    )
+    validation_receipt.write(
+        reach_dir, kind="crash", state="reportable",
     )
     severity_run = subprocess.run(
         [str(ROOT / "bin" / "severity"), "--report", str(reach_dir), "--json"],
@@ -1664,7 +1737,8 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         live_root, "CRASH-090", report="# Lifetime issue\n\nPublic calls leave a stale object.\n",
         sanitizer=_ASAN, testcase=True,
     )
-    with mock.patch.object(triage, "_bundle_needs_refresh", return_value=False), \
+    with mock.patch.dict(os.environ, {"CRASH_TRIGGER_GATE": "0"}, clear=False), \
+         mock.patch.object(triage, "_bundle_needs_refresh", return_value=False), \
          mock.patch.object(triage, "_bundle_missing_artifacts", return_value=[]), \
          mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision), \
          mock.patch.object(triage, "_run_tool") as live_tools:
@@ -1689,7 +1763,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "decision_version": "v13-python", "accept": True, "accept_count": 2,
     }), encoding="utf-8")
     with mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision), \
-         mock.patch.object(triage, "_finding_trigger_rejected", return_value=False), \
+         mock.patch.object(triage, "_finding_trigger_disposition", return_value="accepted"), \
          mock.patch.object(triage, "_run_tool") as finding_tools:
         finding_status = triage.validate_one_finding(live_finding, live_finding_root)
     check(finding_status == "accepted", "live finding finalization fills reach fields")

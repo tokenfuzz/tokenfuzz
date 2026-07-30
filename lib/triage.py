@@ -24,6 +24,7 @@ import llm_usage
 import report_identity
 import stack_frames
 import triage_validate
+import validation_receipt
 import workqueue
 from prompt_render import render_template
 
@@ -212,6 +213,12 @@ def _reject(
 ) -> Path:
     rejected_root.mkdir(parents=True, exist_ok=True)
     _annotate_rejection(directory, reason)
+    validation_receipt.write(
+        directory,
+        kind="crash" if directory.name.startswith("CRASH-") else "finding",
+        state="rejected",
+        detail=reason,
+    )
     destination = _unique_destination(rejected_root, directory.name)
     shutil.move(str(directory), destination)
     try:
@@ -254,6 +261,87 @@ def demote_to_finding(directory: Path, results_dir: Path, reason: str) -> Path:
     return destination
 
 
+_CRASH_DEMOTION_MARKER = re.compile(
+    r"Demoted from `crashes/`", re.IGNORECASE,
+)
+
+
+def route_finding_diagnostics(results_dir: str | os.PathLike[str]) -> int:
+    """Move complete sanitizer-backed FIND bundles into crash triage.
+
+    Only a dedicated sanitizer artifact is authoritative, and only a bundle
+    with a runnable testcase or harness crosses lanes.  Source-only memory
+    findings remain findings and receive a crash-lead marker; they must not be
+    lost merely because reproduction is incomplete.  Artifacts deliberately
+    demoted from crash triage are never promoted back.
+
+    The scan is limited to directories containing a sanitizer sidecar, so
+    calling it before crash triage does not add another full finding-gate pass.
+    """
+    results = Path(results_dir)
+    findings = results / "findings"
+    if not findings.is_dir():
+        return 0
+    routed = 0
+    candidates: set[Path] = set()
+    for pattern in ("FIND-*/sanitizer.txt", "FIND-*/.audit/sanitizer.txt"):
+        for path in findings.glob(pattern):
+            if path.is_file():
+                candidates.add(
+                    path.parent.parent
+                    if path.parent.name == ".audit" else path.parent
+                )
+    for directory in sorted(candidates):
+        report = _report(directory)
+        sanitizer = _sanitizer_file(directory)
+        if report is None or sanitizer is None:
+            continue
+        report_text = _read(report)
+        if _CRASH_DEMOTION_MARKER.search(report_text):
+            continue
+        sanitizer_text = _read(sanitizer)
+        if not (
+            has_valid_diagnostic(sanitizer_text)
+            and _has_memory_safety_signal(sanitizer_text)
+            and not autodiscard_reason(sanitizer_text)
+        ):
+            continue
+        testcase = crash_artifacts.find_testcase(
+            (directory, directory / ".audit"),
+            sanitizer_files=(sanitizer,),
+        )
+        if testcase is None:
+            _write_atomic_json(
+                directory / ".crash-lead.json",
+                {
+                    "schema_version": 1,
+                    "state": "unreproduced",
+                    "reason": (
+                        "saved memory-safety diagnostic without a runnable "
+                        "testcase"
+                    ),
+                },
+            )
+            continue
+        (directory / ".crash-lead.json").unlink(missing_ok=True)
+        with report.open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\n## Triage disposition\n\n"
+                "Routed from `findings/` to `crashes/`: a dedicated sanitizer "
+                "artifact and runnable reproducer establish a crash candidate.\n"
+            )
+        crash_id = (
+            f"CRASH-{directory.name.removeprefix('FIND-')}"
+            if directory.name.startswith("FIND-")
+            else f"CRASH-{directory.name}"
+        )
+        crashes = results / "crashes"
+        crashes.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(directory), _unique_destination(crashes, crash_id))
+        routed += 1
+    return routed
+
+
 def _field(text: str, name: str) -> str:
     table = re.search(rf"^\|\s*{re.escape(name)}\s*\|\s*([^|\n]+)", text, re.IGNORECASE | re.MULTILINE)
     if table:
@@ -274,6 +362,16 @@ _REACH_FIELD_LABELS = {
     "boundary": "Boundary",
     "advisory": "Advisory",
 }
+_OPTIONAL_REACH_FIELD_LABELS = {
+    # Older reports correctly describe only the vulnerable surface. Carrier is
+    # useful when it differs, but absence is not evidence that the surface is
+    # unknown and must not invalidate an otherwise complete report.
+    "reproducer_carrier": "Reproducer carrier",
+}
+_ALL_REACH_FIELD_LABELS = {
+    **_REACH_FIELD_LABELS,
+    **_OPTIONAL_REACH_FIELD_LABELS,
+}
 _REACH_FIELD_ENUMS = {
     "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
@@ -283,11 +381,12 @@ _REACH_FIELD_ENUMS = {
     "advisory": {"yes", "no"},
 }
 _SURFACE_KINDS = {"network", "library-api", "file-format", "cli", "dev-tool", "internal", "unknown"}
+_CARRIER_KINDS = {"network", "library-api", "file-format", "cli", "harness", "runner", "unknown"}
 
 
 def _valid_reach_field(key: str, value: object) -> str:
     """Return a safe scorer field value, or empty when a decision is malformed."""
-    if key not in _REACH_FIELD_LABELS or not isinstance(value, str):
+    if key not in _ALL_REACH_FIELD_LABELS or not isinstance(value, str):
         return ""
     normalized = " ".join(value.split()).strip()
     if not normalized or len(normalized) > 300 or "|" in normalized:
@@ -303,6 +402,10 @@ def _valid_reach_field(key: str, value: object) -> str:
     if key == "surface":
         kind = lowered.split(None, 1)[0].rstrip(":;,-")
         if kind not in _SURFACE_KINDS:
+            return ""
+    if key == "reproducer_carrier":
+        kind = lowered.split(None, 1)[0].rstrip(":;,-")
+        if kind not in _CARRIER_KINDS:
             return ""
     return normalized
 
@@ -342,7 +445,10 @@ def _accepted_reach_fields(
     return {
         key: value
         for key, raw in source.items()
-        if key in missing and (value := _valid_reach_field(key, raw))
+        if (
+            (key in missing or key in _OPTIONAL_REACH_FIELD_LABELS)
+            and (value := _valid_reach_field(key, raw))
+        )
     }
 
 
@@ -353,9 +459,9 @@ def _materialize_reach_fields(
         return False
     current = report.read_text(encoding="utf-8", errors="replace")
     additions = [
-        f"{_REACH_FIELD_LABELS[key]}: {value}"
+        f"{_ALL_REACH_FIELD_LABELS[key]}: {value}"
         for key, value in accepted.items()
-        if not _reach_field_present(current, _REACH_FIELD_LABELS[key])
+        if not _reach_field_present(current, _ALL_REACH_FIELD_LABELS[key])
     ]
     if not additions:
         return False
@@ -826,6 +932,14 @@ def _hold_incomplete(
     *,
     age_pending: bool = True,
 ) -> str:
+    # Give a held bundle a pending receipt so it reports in the pending lane.
+    # Without one it is indistinguishable from an artifact written before
+    # receipts existed, i.e. it reads as un-migrated data rather than as a real
+    # crash still waiting on evidence.
+    validation_receipt.write(
+        crash_dir, kind="crash", state="pending",
+        detail=f"incomplete {scope}: missing {','.join(missing)}",
+    )
     if not age_pending:
         _write_pending_marker(crash_dir, missing)
         return "pending"
@@ -1030,22 +1144,6 @@ def _direct_probe_trigger_bypass(
     return True
 
 
-def _finding_trigger_rejected(
-    finding_dir: Path, report: Path, deadline: float | None = None,
-    usage_index: str | os.PathLike[str] | None = None,
-    target_root_is_product: bool = False,
-) -> bool:
-    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
-    target_root = os.environ.get("TARGET_ROOT", "")
-    if not backend or not target_root:
-        return False
-    return _trigger_vote(
-        report, finding_dir / ".trigger-gate.json", backend,
-        os.environ.get("MODEL", ""), Path(target_root), deadline, usage_index,
-        target_root_is_product,
-    ) == 1
-
-
 def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
     """Return only a verdict produced for this prompt version and report."""
     try:
@@ -1063,9 +1161,39 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
     version = payload.get("decision_version")
     if version == triage_validate.TRIGGER_GATE_DECISION_VERSION:
         # A current verdict is only reusable under the threat model it was
-        # produced for; a controls change forces a fresh review.
+        # produced for; a controls, revision, or config change forces review.
         if payload.get("attacker_controls") != triage_validate.trigger_attacker_controls():
             return None
+        evidence = crash_bundle.recorded_evidence_context(report.parent)
+        evidence_id = evidence.get("evidence_id") if evidence else None
+        if evidence_id != payload.get("evidence_id"):
+            return None
+        for key, environment_name in (
+            ("target_revision", "TARGET_REV"),
+            ("target_config_sha256", "TARGET_CONFIG_SHA256"),
+        ):
+            current_scope = str(
+                (evidence or {}).get(key)
+                or os.environ.get(environment_name, ""),
+            )
+            if str(payload.get(key) or "") != current_scope:
+                return None
+        if vote in {"Promote", "Reject"}:
+            anchors = payload.get("anchors")
+            if (
+                payload.get("anchors_verified") is not True
+                or not isinstance(anchors, list)
+                or not anchors
+            ):
+                return None
+            target_root_value = os.environ.get("TARGET_ROOT", "")
+            target_root = Path(target_root_value)
+            if target_root_value and target_root.is_dir():
+                verified = triage_validate.verify_source_anchors(
+                    anchors, target_root,
+                )
+                if verified != anchors:
+                    return None
         return vote
     # Legacy verdicts predate controls binding: reuse only their non-negative
     # decisions (fail-open keep), never a Reject that could hide a real issue.
@@ -1073,8 +1201,42 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
         version in triage_validate.TRIGGER_GATE_ADVISORY_VERSIONS
         and vote in {"Promote", "Uncertain"}
     ):
-        return vote
+        # Legacy positive votes remain visible but are provisional until the
+        # source-anchor schema is refreshed. Legacy Rejects remain ignored.
+        return "Uncertain"
     return None
+
+
+def _source_review_facts(
+    report: Path, vote_files: tuple[Path, ...], *, rejection_quorum: int = 1,
+) -> dict[str, str]:
+    """Return verified boundary facts only when current reviewers agree."""
+    observed: dict[str, dict[str, int]] = {
+        "vulnerable_boundary_surface": {},
+        "reproducer_carrier": {},
+        "rejection_kind": {},
+    }
+    for vote_file in vote_files:
+        if _cached_trigger_vote(report, vote_file) not in {"Promote", "Reject"}:
+            continue
+        try:
+            payload = json.loads(vote_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        facts = triage_validate.source_review_facts(payload.get("review_facts"))
+        for key, value in facts.items():
+            observed[key][value] = observed[key].get(value, 0) + 1
+    return {
+        key: next(iter(counts))
+        for key, counts in observed.items()
+        if (
+            len(counts) == 1
+            and (
+                key != "rejection_kind"
+                or next(iter(counts.values())) >= rejection_quorum
+            )
+        )
+    }
 
 
 _TRIGGER_BATCH_SIZE = 4
@@ -1262,6 +1424,7 @@ def _crash_trigger_gate(
     usage_index: str | os.PathLike[str] | None = None,
     target_root_is_product: bool = False,
     attacker_controls: list[str] | None = None,
+    direct_probe_bypass: bool | None = None,
 ) -> bool:
     """Recall-safe trigger-provenance gate for a kept crash. A `bytes`-labelled
     trigger passes evaluate_crash_verdict's set-difference even when those bytes
@@ -1273,9 +1436,17 @@ def _crash_trigger_gate(
     with CRASH_TRIGGER_GATE=0. Returns True to reject."""
     if os.environ.get("CRASH_TRIGGER_GATE", "1") == "0":
         return False
-    if _direct_probe_trigger_bypass(
-        crash_dir, target_root, attacker_controls or ["bytes"],
-    ):
+    bypass = (
+        _direct_probe_trigger_bypass(
+            crash_dir, target_root, attacker_controls or ["bytes"],
+        )
+        if direct_probe_bypass is None else direct_probe_bypass
+    )
+    if bypass:
+        _review_ambiguous_crash_surface(
+            crash_dir, report, target_root, deadline, usage_index,
+            target_root_is_product,
+        )
         return False
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     model = os.environ.get("MODEL", "")
@@ -1285,11 +1456,50 @@ def _crash_trigger_gate(
         target_root_is_product,
     ) != 1:
         return False
-    return _trigger_vote(
+    if _trigger_vote(
         report, crash_dir / ".trigger-gate-2.json", backend, model,
         target_root, deadline, usage_index,
         target_root_is_product,
-    ) == 1
+    ) != 1:
+        return False
+    facts = _source_review_facts(
+        report,
+        (
+            crash_dir / ".trigger-gate.json",
+            crash_dir / ".trigger-gate-2.json",
+        ),
+        rejection_quorum=2,
+    )
+    return facts.get("rejection_kind") in {
+        "contract-invalid", "unreachable", "nonshipping",
+    }
+
+
+def _review_ambiguous_crash_surface(
+    crash_dir: Path, report: Path, target_root: Path,
+    deadline: float | None,
+    usage_index: str | os.PathLike[str] | None,
+    target_root_is_product: bool,
+) -> None:
+    """Source-review boundary/carrier only when the report leaves them conflated."""
+    if os.environ.get("CRASH_TRIGGER_GATE", "1") == "0":
+        return
+    if not _crash_surface_needs_review(report):
+        return
+    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
+    if not backend or not target_root.is_dir():
+        return
+    _trigger_vote(
+        report, crash_dir / ".trigger-gate.json", backend,
+        os.environ.get("MODEL", ""), target_root, deadline, usage_index,
+        target_root_is_product,
+    )
+
+
+def _crash_surface_needs_review(report: Path) -> bool:
+    surface = _field(_read(report), "Surface").lower()
+    kind = surface.split("—", 1)[0].split("-", 1)[0].strip()
+    return kind in {"", "cli", "unknown"}
 
 
 def triage_one_crash(
@@ -1402,22 +1612,75 @@ def triage_one_crash(
         _set_contract_concern(report, detail)
     else:
         _clear_contract_concern(report)
-    # Score before source-reading review so the trigger cache describes the
-    # final report shape. The validator strips generated scoring prose from its
-    # prompt, while retaining the structured reach fields the scorer surfaced.
-    if _decision_timeout(1, deadline):
-        _run_tool("severity", "--report", str(crash_dir), env=environment)
-        report = _report(crash_dir) or report
-    if not confirmed_trigger_bypass and _crash_trigger_gate(
-        crash_dir, report, Path(target_root), deadline, usage_index,
-        target_root_is_product, attacker_controls,
-    ):
+    direct_trigger_proof = (
+        confirmed_trigger_bypass
+        or _direct_probe_trigger_bypass(
+            crash_dir, Path(target_root), attacker_controls,
+        )
+    )
+    if direct_trigger_proof:
+        _review_ambiguous_crash_surface(
+            crash_dir, report, Path(target_root), deadline, usage_index,
+            target_root_is_product,
+        )
+        reject_trigger = False
+    else:
+        reject_trigger = _crash_trigger_gate(
+            crash_dir, report, Path(target_root), deadline, usage_index,
+            target_root_is_product, attacker_controls,
+            direct_probe_bypass=direct_trigger_proof,
+        )
+    if reject_trigger:
         _reject(
             crash_dir, rejected_root,
             "trigger-provenance (2 independent rejects): triggering state not attacker-reachable from a public boundary",
             category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
         )
         return "rejected"
+    trigger_votes = {
+        _cached_trigger_vote(report, crash_dir / name)
+        for name in (".trigger-gate.json", ".trigger-gate-2.json")
+    }
+    source_review_required = (
+        os.environ.get("CRASH_TRIGGER_GATE", "1") != "0"
+        and (
+            not direct_trigger_proof
+            or _crash_surface_needs_review(report)
+        )
+    )
+    if (
+        source_review_required
+        and not any(vote in {"Promote", "Reject"} for vote in trigger_votes)
+    ):
+        validation_receipt.write(
+            crash_dir, kind="crash", state="pending",
+            detail="source review is uncertain, stale, or incomplete",
+            attacker_controls=attacker_controls,
+        )
+        return "pending"
+    review_facts = _source_review_facts(
+        report,
+        (
+            crash_dir / ".trigger-gate.json",
+            crash_dir / ".trigger-gate-2.json",
+        ),
+        rejection_quorum=2,
+    )
+    if review_facts.get("rejection_kind") == "no-added-boundary":
+        state = "native-hardening"
+    elif (
+        verdict == "contract-flag"
+        or any(vote in {"Reject", "Uncertain"} for vote in trigger_votes)
+    ):
+        state = "conditional"
+    else:
+        state = "reportable"
+    validation_receipt.write(
+        crash_dir, kind="crash", state=state, detail=detail,
+        attacker_controls=attacker_controls, review_facts=review_facts,
+    )
+    if _decision_timeout(1, deadline):
+        _run_tool("severity", "--report", str(crash_dir), env=environment)
     return "promoted"
 
 
@@ -1435,6 +1698,7 @@ def triage_crash_dirs(
     age_pending: bool = True,
 ) -> dict[str, int]:
     results = Path(results_dir)
+    route_finding_diagnostics(results)
     crashes = results / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
     controls = attacker_controls or ["bytes"]
@@ -1732,12 +1996,8 @@ def _prepare_accepted_finding(
             finding_dir, usage_index, decision_override=reach_fields_override,
         )
         report = _report(finding_dir) or report
-    # Stabilize generated fields before trigger review so its content-addressed
-    # verdict remains current on the next pass.
-    _run_tool("severity", "--report", str(finding_dir))
-    report = _report(finding_dir) or report
     # Quality already reached quorum on the authored report. Advance that
-    # verdict across the harness-owned reach/severity annotations now, even if
+    # verdict across the harness-owned reach annotations now, even if
     # trigger review is temporarily unavailable, so a later trigger retry does
     # not repeat the quality calls first.
     cache_path = finding_dir / ".llm-find-quality.json"
@@ -1750,6 +2010,59 @@ def _prepare_accepted_finding(
         cache["report_sha1"] = report_identity.content_sha1(report)
         _write_atomic_json(cache_path, cache)
     return report
+
+
+def _finding_trigger_disposition(
+    finding_dir: Path, report: Path, deadline: float | None = None,
+    usage_index: str | os.PathLike[str] | None = None,
+    target_root_is_product: bool = False,
+) -> str:
+    """Return accepted, rejected, or pending from current trigger evidence."""
+    if (finding_dir / ".trigger-gate-bypass.json").is_file():
+        try:
+            bypass = json.loads(
+                (finding_dir / ".trigger-gate-bypass.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+        except (OSError, ValueError):
+            bypass = {}
+        if isinstance(bypass, dict) and bypass.get("bypass") is True:
+            return "accepted"
+    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
+    target_root = Path(os.environ.get("TARGET_ROOT", ""))
+    if backend and target_root.is_dir():
+        _trigger_vote(
+            report, finding_dir / ".trigger-gate.json", backend,
+            os.environ.get("MODEL", ""), target_root, deadline, usage_index,
+            target_root_is_product,
+        )
+    vote = _cached_trigger_vote(report, finding_dir / ".trigger-gate.json")
+    if vote == "Reject":
+        second = finding_dir / ".trigger-gate-2.json"
+        if backend and target_root.is_dir():
+            _trigger_vote(
+                report, second, backend,
+                os.environ.get("MODEL", ""), target_root, deadline, usage_index,
+                target_root_is_product,
+            )
+        second_vote = _cached_trigger_vote(report, second)
+        facts = _source_review_facts(
+            report, (finding_dir / ".trigger-gate.json", second),
+            rejection_quorum=2,
+        )
+        if second_vote != "Reject":
+            return "pending"
+        if facts.get("rejection_kind") == "no-added-boundary":
+            return "native-hardening"
+        if facts.get("rejection_kind") in {
+            "contract-invalid", "unreachable", "nonshipping",
+        }:
+            return "rejected"
+        return "pending"
+    if vote == "Promote":
+        return "accepted"
+    return "pending"
 
 
 def _finalize_accepted_finding(
@@ -1766,16 +2079,68 @@ def _finalize_accepted_finding(
             finding_dir, report, deadline, usage_index,
             reach_fields_override,
         )
-    if _finding_trigger_rejected(
+    disposition = _finding_trigger_disposition(
         finding_dir, report, deadline, usage_index,
         target_root_is_product,
-    ):
+    )
+    if disposition == "rejected":
         _reject(
             finding_dir, results_dir / "findings-rejected",
             "trigger-provenance: triggering state not attacker-reachable",
             category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
         )
         return "rejected"
+    if disposition == "pending":
+        validation_receipt.write(
+            finding_dir, kind="finding", state="pending",
+            detail="source review is uncertain, stale, or incomplete",
+        )
+        return "pending"
+    if disposition == "native-hardening":
+        review_facts = _source_review_facts(
+            report,
+            (
+                finding_dir / ".trigger-gate.json",
+                finding_dir / ".trigger-gate-2.json",
+            ),
+            rejection_quorum=2,
+        )
+        validation_receipt.write(
+            finding_dir, kind="finding", state="native-hardening",
+            detail="real native defect with no added security boundary",
+            attacker_controls=triage_validate.trigger_attacker_controls(),
+            review_facts=review_facts,
+        )
+        return "accepted"
+    controls = triage_validate.trigger_attacker_controls()
+    reach_verdict, reach_detail = evaluate_crash_verdict(_read(report), controls)
+    if reach_verdict == "incomplete":
+        validation_receipt.write(
+            finding_dir, kind="finding", state="pending",
+            detail="required boundary or trigger fields are incomplete",
+            attacker_controls=controls,
+        )
+        return "pending"
+    state = "conditional" if reach_verdict == "contract-flag" else "reportable"
+    review_facts = _source_review_facts(
+        report, (finding_dir / ".trigger-gate.json",),
+    )
+    validation_receipt.write(
+        finding_dir, kind="finding", state=state,
+        detail=reach_detail,
+        attacker_controls=controls,
+        review_facts=review_facts,
+    )
+    # Numeric severity is published only after source-backed validation.  A
+    # missing consequence or boundary therefore remains unrated rather than
+    # being interpreted as Low.
+    #
+    # Scoring rewrites the report, which looks like it would invalidate the
+    # receipt just written. It does not: the receipt binds
+    # `report_identity.content_sha1`, which covers authored content and skips
+    # the generated sections severity maintains. Keep that order — scoring
+    # first would score a report no receipt vouches for.
+    _run_tool("severity", "--report", str(finding_dir))
     return "accepted"
 
 
@@ -1791,9 +2156,11 @@ def validate_one_finding(
     initial_votes: list[dict] | None = None,
     defer_trigger: bool = False,
 ) -> str:
-    if (finding_dir / ".keep").is_file() or (finding_dir / ".reviewed").is_file():
-        return "accepted"
-    if _deadline_expired(deadline):
+    pinned = (
+        (finding_dir / ".keep").is_file()
+        or (finding_dir / ".reviewed").is_file()
+    )
+    if _deadline_expired(deadline) and not pinned:
         return "pending"
     usage_index = benchmark._find_index_jsonl(results_dir)
     report = _report(finding_dir)
@@ -1801,6 +2168,29 @@ def validate_one_finding(
         (finding_dir / ".needs-content").touch()
         return "pending"
     (finding_dir / ".needs-content").unlink(missing_ok=True)
+    if pinned:
+        controls = triage_validate.trigger_attacker_controls()
+        reach_verdict, reach_detail = evaluate_crash_verdict(
+            _read(report), controls,
+        )
+        if reach_verdict == "incomplete":
+            validation_receipt.write(
+                finding_dir, kind="finding", state="pending",
+                detail="human override requires complete boundary fields",
+                attacker_controls=controls,
+            )
+            return "pending"
+        state = (
+            "conditional"
+            if reach_verdict == "contract-flag" else "reportable"
+        )
+        validation_receipt.write(
+            finding_dir, kind="finding", state=state,
+            detail=f"human override; {reach_detail}",
+            attacker_controls=controls,
+        )
+        _run_tool("severity", "--report", str(finding_dir))
+        return "accepted"
     report_text = read_report_bounded(report)
     report_sha1 = report_identity.content_sha1(report)
     cache_path = finding_dir / ".llm-find-quality.json"

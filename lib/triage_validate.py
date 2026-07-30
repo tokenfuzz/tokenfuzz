@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,11 +13,100 @@ from pathlib import Path
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v3-scoped-controls"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v4-source-anchors"
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.
 TRIGGER_GATE_ADVISORY_VERSIONS = {"trigger-v2-caller-buffer"}
+
+ANCHOR_KINDS = {"source", "contract", "build"}
+BOUNDARY_SURFACES = {
+    "network", "library-api", "file-format", "cli", "dev-tool", "internal",
+    "unknown",
+}
+REPRODUCER_CARRIERS = {
+    "network", "library-api", "file-format", "cli", "harness", "runner",
+    "unknown",
+}
+REJECTION_KINDS = {
+    "contract-invalid", "unreachable", "nonshipping", "no-added-boundary",
+    "unknown",
+}
+
+
+def source_review_facts(value: object) -> dict[str, str]:
+    """Return only the generic boundary facts a source reviewer may assert."""
+    if not isinstance(value, dict):
+        return {}
+    facts: dict[str, str] = {}
+    for key, allowed in (
+        ("vulnerable_boundary_surface", BOUNDARY_SURFACES),
+        ("reproducer_carrier", REPRODUCER_CARRIERS),
+        ("rejection_kind", REJECTION_KINDS),
+    ):
+        normalized = str(value.get(key) or "").strip().lower()
+        if normalized in allowed:
+            facts[key] = normalized
+    return facts
+
+
+def verify_source_anchors(value: object, target_root: Path) -> list[dict]:
+    """Return source anchors whose path, line, symbol, and excerpt verify.
+
+    LLM conclusions may be semantic, but their citations are deterministic.
+    Each anchor is one exact source line so verification stays language-neutral
+    and does not require a target-specific parser.
+    """
+    if not isinstance(value, list):
+        return []
+    try:
+        root = target_root.resolve(strict=True)
+    except OSError:
+        return []
+    verified: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        relative = str(item.get("path") or "").strip()
+        excerpt = str(item.get("excerpt") or "").strip()
+        symbol = str(item.get("symbol") or "").strip()
+        kind = str(item.get("kind") or "").strip().lower()
+        try:
+            line = int(item.get("line"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            not relative or not excerpt or not symbol or kind not in ANCHOR_KINDS
+            or line < 1
+        ):
+            continue
+        path = root / relative
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+            source_lines = resolved.read_text(
+                encoding="utf-8", errors="replace",
+            ).splitlines()
+        except (OSError, ValueError):
+            continue
+        if (
+            line > len(source_lines)
+            or source_lines[line - 1].strip() != excerpt
+            or symbol not in "\n".join(source_lines)
+        ):
+            continue
+        verified.append({
+            "path": resolved.relative_to(root).as_posix(),
+            "line": line,
+            "symbol": symbol,
+            "kind": kind,
+            "excerpt": excerpt,
+            # The reviewer supplies the citation; deterministic code supplies
+            # its digest. Requiring an LLM to calculate a cryptographic hash
+            # would turn formatting arithmetic into false pending verdicts.
+            "excerpt_sha256": hashlib.sha256(excerpt.encode()).hexdigest(),
+        })
+    return verified
 
 
 def trigger_attacker_controls(value: str | None = None) -> list[str]:

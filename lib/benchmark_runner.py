@@ -79,11 +79,16 @@ def _decision_environment(
     backend: str, model: str, target: Path, target_slug: str,
     decision_log: Path | None = None,
     attacker_controls: str = "bytes",
+    *,
+    target_revision: str = "",
+    target_config_sha256: str = "",
 ):
     values = {
         "ACTIVE_BACKEND": backend, "BACKEND": backend, "MODEL": model,
         "TARGET_ROOT": str(target), "TARGET_SLUG": target_slug,
         "TARGET_ATTACKER_CONTROLS_CSV": attacker_controls or "bytes",
+        "TARGET_REV": target_revision,
+        "TARGET_CONFIG_SHA256": target_config_sha256,
     }
     if decision_log is not None:
         values["LLM_DECIDE_LOG"] = str(decision_log)
@@ -135,9 +140,12 @@ def drain_find_gate(
     paused = 0
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
     config = benchmark_target_config(results, target, target_slug)
+    revision, config_digest = _evidence_scope(results, target, target_slug)
     with _decision_environment(
         backend, model, target, target_slug,
         attacker_controls=config.attacker_controls_csv(),
+        target_revision=revision,
+        target_config_sha256=config_digest,
     ):
         previous_limit = os.environ.get("LLM_DECIDE_LIMIT_FILE")
         os.environ["LLM_DECIDE_LIMIT_FILE"] = str(limit_file)
@@ -220,6 +228,22 @@ def benchmark_target_config(
     if config_path is not None:
         target_config.load_toml_into(config, config_path)
     return config
+
+
+def _evidence_scope(
+    results: Path, target: Path, target_slug: str,
+) -> tuple[str, str]:
+    """Return the audited revision and immutable config digest for receipts."""
+    revision = target_config.find_benchmark_target_rev(results, target_slug)
+    config_path = _benchmark_target_config_path(results, target, target_slug)
+    try:
+        config_digest = (
+            hashlib.sha256(config_path.read_bytes()).hexdigest()
+            if config_path is not None else ""
+        )
+    except OSError:
+        config_digest = ""
+    return revision, config_digest
 
 
 # Why a direct-condition crash lost its promotion. "unmeasured" is distinct
@@ -1244,9 +1268,12 @@ def _finalize_condition_pools(
     """Build condition-local indexes after split_pool has copied its members."""
     reserved = {"crashes", "crashes-rejected", "findings", "findings-rejected"}
     config = benchmark_target_config(pool, target_root, target_slug)
+    revision, config_digest = _evidence_scope(pool, target_root, target_slug)
     with _decision_environment(
         backend, model, target_root, target_slug, decision_log,
         config.attacker_controls_csv(),
+        target_revision=revision,
+        target_config_sha256=config_digest,
     ):
         for condition in sorted(pool.iterdir()):
             if not condition.is_dir() or condition.name in reserved:
@@ -1334,12 +1361,15 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
     })
     target = SCRIPT_ROOT / "targets" / target_slug
     config = benchmark_target_config(pool, target, target_slug)
+    revision, config_digest = _evidence_scope(pool, target, target_slug)
     environment["TARGET_ATTACKER_CONTROLS_CSV"] = config.attacker_controls_csv()
     bundled = 0
     if not dry_run:
         with _decision_environment(
             backend, model, target, target_slug, bench_dir / "llm-decisions.log",
             config.attacker_controls_csv(),
+            target_revision=revision,
+            target_config_sha256=config_digest,
         ):
             triage.fill_reach_fields_tree(pool)
         if (pool / "crashes").is_dir():
@@ -2086,17 +2116,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     done = failed = 0
     provider_unavailable = False
     require_trigger_confirmation = True
-    if args.regenerate:
-        try:
-            run_metadata = json.loads(
-                (bench_dir / "run.json").read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            run_metadata = {}
-        require_trigger_confirmation = (
-            run_metadata.get("finding_confirmation")
-            == metrics.FINDING_CONFIRMATION_VERSION
-        )
     if not args.regenerate:
         for condition in conditions:
             for replicate in range(1, args.replicates + 1):
@@ -2261,9 +2280,14 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     try:
                         target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()
                         config = benchmark_target_config(results, target_root, args.target)
+                        revision, config_digest = _evidence_scope(
+                            results, target_root, args.target,
+                        )
                         with _decision_environment(
                             args.backend, model, target_root, args.target,
                             attacker_controls=config.attacker_controls_csv(),
+                            target_revision=revision,
+                            target_config_sha256=config_digest,
                         ):
                             crash_counts = triage_cell_crashes(
                                 results, target_root, args.target,
@@ -2387,9 +2411,14 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     try:
                         target_root = (SCRIPT_ROOT / "targets" / args.target).resolve()
                         config = benchmark_target_config(results, target_root, args.target)
+                        revision, config_digest = _evidence_scope(
+                            results, target_root, args.target,
+                        )
                         with _decision_environment(
                             args.backend, model, target_root, args.target,
                             attacker_controls=config.attacker_controls_csv(),
+                            target_revision=revision,
+                            target_config_sha256=config_digest,
                         ):
                             triage_cell_crashes(
                                 results, target_root, args.target,

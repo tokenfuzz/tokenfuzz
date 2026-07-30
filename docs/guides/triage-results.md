@@ -101,6 +101,15 @@ the `Status` column:
 `.pending-drop` — a review pass that ended below reject quorum — is an
 internal marker and does not appear in this column.
 
+Open `validation.json` when a report's publication status is unclear.
+`reportable`, `conditional`, and `native-hardening` are final lanes;
+`pending` preserves an uncertain or incomplete candidate without granting
+benchmark credit or severity; `rejected` preserves the evidence in the
+rejected tree. Native-hardening remains visible as a final engineering defect,
+but it is outside the security finding total and has no numeric security
+severity. The receipt is content-addressed, so stale review decisions do not
+survive changes to their report, evidence, configuration, or target identity.
+
 ## What a strong crash looks like
 
 A strong crash artifact has:
@@ -144,24 +153,29 @@ The rows are also emitted as bare-label lines. Triage reads the
 bare-label form, and `REPORT.html` renders the table. The fields:
 
 ```text
-Surface: network|library-api|cli|maint-tool|unknown
+Surface: network|library-api|file-format|cli|dev-tool|internal|unknown
+Reproducer carrier: network|library-api|file-format|cli|harness|runner|unknown
 Trigger source: bytes|both|call-sequence|timing|race|protocol-state|env|fs-state
 Caller contract: obeyed|violated|unspecified
 Boundary:
 Caller controls:
 Trusted caller actions:
-Parameter control: direct|mapped|harness-only|none
+Parameter control: direct|indirect|application-supplied|trusted|harness-only
 Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
 ```
 
 Notes:
 
-- `Surface` describes where the crash is reachable from. Agents write
+- `Surface` describes the vulnerable boundary, not the program used to carry
+  the testcase to it. Agents write
   a short label, optionally followed by prose (`library-api — C
   harness calls app_read_memory`); export normalises it to one of the
   tokens above, and `bin/severity` classifies it into a surface tier
   (e.g. `cli` → `cli_production`) from the surface *kind* alone before
-  computing severity. An unset `Surface` defaults to `unknown` and
+  computing severity. `Reproducer carrier` is optional metadata for cases
+  where those differ. Triage never infers `file-format` merely from
+  `cli + bytes`; the boundary must come from configured or source-reviewed
+  evidence. An unset `Surface` defaults to `unknown` and
   under-scores real findings, so always set it.
 - `Trigger source` is compared against `attacker_controls` to set
   *severity*, not to decide filing: a trigger fully within
@@ -498,8 +512,10 @@ bin/severity --batch "$RESULTS"
 What each command does:
 
 - `bin/export-repro` — builds the handoff bundle.
-- `bin/severity` — recomputes CVSS severity from reports and `target.toml`,
-  offline; `--batch` covers accepted crashes and findings together.
+- `bin/severity` — recomputes CVSS severity from canonical sanitizer evidence,
+  verified review facts, and `target.toml`, offline; `--batch` covers final
+  crashes and findings together. Pending or stale artifacts remain unrated
+  until triage refreshes `validation.json`.
 - `bin/cluster-crashes` and `bin/cluster-findings` — group reports
   that share a root cause, write the cluster summaries, and stamp
   `Cluster:` and `Dedup key:` lines into each report. Both run

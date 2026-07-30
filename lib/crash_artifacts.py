@@ -24,6 +24,7 @@ ARTIFACT_EXACT = {
     "sanitizer.txt",
     "harness.c",
     "severity.json",
+    "validation.json",
     "promotion.log",
     # Recorded CLI argv (find_repro_args), not a testcase — excluded here
     # because it would otherwise match the "repro." TESTCASE_PREFIXES.

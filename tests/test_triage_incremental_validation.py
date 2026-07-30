@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import runpy
 import subprocess
@@ -20,12 +21,14 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import audit_runner  # noqa: E402
 import benchmark  # noqa: E402
+import crash_bundle  # noqa: E402
 import finding_signature  # noqa: E402
 import llm_decide  # noqa: E402
 import report_identity  # noqa: E402
 import target_config  # noqa: E402
 import triage  # noqa: E402
 import triage_validate  # noqa: E402
+import validation_receipt  # noqa: E402
 
 
 def quality_vote(item_id: str, accept: bool = True) -> dict:
@@ -40,21 +43,66 @@ def quality_vote(item_id: str, accept: bool = True) -> dict:
     }
 
 
+def source_anchor(target_root: Path) -> dict:
+    source = target_root / "sample.c"
+    excerpt = "int app_parse(void) { return 0; }"
+    source.write_text(excerpt + "\n", encoding="utf-8")
+    return {
+        "path": "sample.c",
+        "line": 1,
+        "symbol": "app_parse",
+        "kind": "source",
+        "excerpt": excerpt,
+        "excerpt_sha256": hashlib.sha256(excerpt.encode()).hexdigest(),
+    }
+
+
+def trigger_vote(
+    report: Path, target_root: Path, vote: str = "Promote",
+    *, controls: list[str] | None = None,
+) -> dict:
+    evidence = crash_bundle.recorded_evidence_context(report.parent)
+    payload = {
+        "vote": vote,
+        "content_sha1": report_identity.content_sha1(report),
+        "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+        "attacker_controls": (
+            controls
+            if controls is not None
+            else triage_validate.trigger_attacker_controls()
+        ),
+        "anchors": [source_anchor(target_root)],
+        "anchors_verified": True,
+        "target_revision": str(
+            (evidence or {}).get("target_revision")
+            or os.environ.get("TARGET_REV", ""),
+        ),
+        "target_config_sha256": str(
+            (evidence or {}).get("target_config_sha256")
+            or os.environ.get("TARGET_CONFIG_SHA256", ""),
+        ),
+    }
+    if evidence is not None:
+        payload["evidence_id"] = evidence["evidence_id"]
+    if vote == "Reject":
+        payload["review_facts"] = {"rejection_kind": "contract-invalid"}
+    return payload
+
+
 def _write_batch_votes(command: list[str], only: set[str] | None = None) -> None:
     """Simulate the batched trigger validator: write a valid cached vote for each
     manifest item (optionally only a subset), so the caller sees those ids as
     voted and the rest as still-missing."""
     manifest = Path(command[command.index("--batch-manifest") + 1])
+    target_root = Path(command[command.index("--target-path") + 1])
     for item in json.loads(manifest.read_text(encoding="utf-8"))["items"]:
         if only is not None and item["id"] not in only:
             continue
         finding = Path(item["finding"])
-        Path(item["output"]).write_text(json.dumps({
-            "vote": "Promote",
-            "content_sha1": sorted(report_identity.content_sha1_candidates(finding))[0],
-            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
-            "attacker_controls": triage_validate.trigger_attacker_controls(),
-        }), encoding="utf-8")
+        Path(item["output"]).write_text(
+            json.dumps(trigger_vote(finding, target_root)),
+            encoding="utf-8",
+        )
 
 
 class IncrementalFindingValidationTests(unittest.TestCase):
@@ -81,6 +129,43 @@ class IncrementalFindingValidationTests(unittest.TestCase):
             triage, "_batch_reach_field_decisions", return_value=(set(), {}, set()),
         ):
             return triage.validate_find_gate(self.root, workers=2)
+
+    def test_human_override_is_materialized_as_a_validation_receipt(self) -> None:
+        with self.report.open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\nSurface: network\n"
+                "Primitive: authz_bypass\n"
+                "Class: authorization\n"
+                "Caller contract: obeyed\n"
+                "Caller controls: bytes\n"
+                "Trigger source: bytes\n"
+                "Parameter control: direct\n"
+                "Trusted caller actions: normal public call\n"
+                "Boundary: public request handler\n"
+                "Advisory: no\n"
+            )
+        (self.finding / ".keep").touch()
+        with mock.patch.object(triage, "_run_tool") as scorer:
+            self.assertEqual(
+                triage.validate_one_finding(self.finding, self.root),
+                "accepted",
+            )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "reportable")
+        scorer.assert_called_once_with(
+            "severity", "--report", str(self.finding),
+        )
+
+    def test_human_override_with_missing_facts_remains_pending(self) -> None:
+        (self.finding / ".reviewed").touch()
+        self.assertEqual(
+            triage.validate_one_finding(self.finding, self.root),
+            "pending",
+        )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "pending")
 
     def test_partial_vote_survives_pass_and_completes_quorum_once(self) -> None:
         with mock.patch.object(
@@ -212,12 +297,10 @@ class IncrementalFindingValidationTests(unittest.TestCase):
             quality_path, quality, self.report, report_text,
         ))
 
-        trigger = {
-            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
-            "content_sha1": legacy_sha1,
-            "attacker_controls": controls,
-            "vote": "Promote",
-        }
+        trigger = trigger_vote(
+            self.report, self.root, controls=controls,
+        )
+        trigger["content_sha1"] = legacy_sha1
         trigger_path = self.finding / ".trigger-gate.json"
         trigger_path.write_text(json.dumps(trigger), encoding="utf-8")
         with mock.patch.object(
@@ -263,12 +346,10 @@ class IncrementalFindingValidationTests(unittest.TestCase):
             )
             return 0
 
-        def trigger(_directory, report, *_args, **_kwargs):
-            self.assertIn("## Severity rationale", report.read_text())
-            return False
-
         with mock.patch.object(triage, "fill_reach_fields", side_effect=enrich), mock.patch.object(
-            triage, "_finding_trigger_rejected", side_effect=trigger,
+            triage, "_finding_trigger_disposition", return_value="accepted",
+        ), mock.patch.object(
+            triage, "evaluate_crash_verdict", return_value=("promote", ""),
         ), mock.patch.object(triage, "_run_tool", side_effect=score):
             self.assertEqual(
                 triage._finalize_accepted_finding(
@@ -380,12 +461,13 @@ Generated score text.
             2,
             report_identity.content_sha1(self.report),
         )))
-        (self.finding / ".trigger-gate.json").write_text(json.dumps({
-            "content_sha1": report_identity.content_sha1(self.report),
-            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
-            "attacker_controls": triage_validate.trigger_attacker_controls(),
-            "vote": "Promote",
-        }))
+        (self.finding / ".trigger-gate.json").write_text(json.dumps(
+            trigger_vote(self.report, self.root),
+        ))
+        validation_receipt.write(
+            self.finding, kind="finding", state="reportable",
+            attacker_controls=triage_validate.trigger_attacker_controls(),
+        )
         self.assertEqual(benchmark.count_confirmed_findings(self.finding.parent)[0], 1)
         self.assertEqual(finding_signature.read_llm_cache(self.finding)["class"], "auth:bypass")
         self.report.write_text(
@@ -575,12 +657,7 @@ Generated score text.
 
     def test_trigger_cache_requires_current_prompt_and_report(self) -> None:
         cache = self.finding / ".trigger-gate.json"
-        cache.write_text(json.dumps({
-            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
-            "content_sha1": report_identity.content_sha1(self.report),
-            "attacker_controls": triage_validate.trigger_attacker_controls(),
-            "vote": "Promote",
-        }))
+        cache.write_text(json.dumps(trigger_vote(self.report, self.root)))
         with mock.patch.dict(os.environ, {"LLM_DECIDE_DISABLE": "1"}, clear=False):
             self.assertEqual(
                 triage._trigger_vote(
@@ -621,17 +698,15 @@ Generated score text.
             {"LLM_DECIDE_DISABLE": "1", "TARGET_ATTACKER_CONTROLS_CSV": "bytes"},
             clear=False,
         ):
-            cache.write_text(json.dumps({
-                "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
-                "content_sha1": sha, "attacker_controls": ["bytes"], "vote": "Reject",
-            }))
+            cache.write_text(json.dumps(trigger_vote(
+                self.report, self.root, "Reject", controls=["bytes"],
+            )))
             self.assertEqual(  # matching controls -> cached Reject reused
                 triage._trigger_vote(self.report, cache, "codex", "x", self.root), 1)
-            cache.write_text(json.dumps({
-                "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
-                "content_sha1": sha,
-                "attacker_controls": ["bytes", "call-sequence"], "vote": "Reject",
-            }))
+            cache.write_text(json.dumps(trigger_vote(
+                self.report, self.root, "Reject",
+                controls=["bytes", "call-sequence"],
+            )))
             self.assertEqual(  # controls changed -> not reused (LLM disabled -> 2)
                 triage._trigger_vote(self.report, cache, "codex", "x", self.root), 2)
             legacy = {"decision_version": "trigger-v2-caller-buffer", "content_sha1": sha}
@@ -641,6 +716,45 @@ Generated score text.
             cache.write_text(json.dumps({**legacy, "vote": "Reject"}))
             self.assertEqual(  # legacy Reject never reused -> fresh review
                 triage._trigger_vote(self.report, cache, "codex", "x", self.root), 2)
+
+    def test_trigger_cache_binds_to_revision_and_live_source_anchor(self) -> None:
+        cache = self.finding / ".trigger-gate.json"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "LLM_DECIDE_DISABLE": "1",
+                "TARGET_ROOT": str(self.root),
+                "TARGET_REV": "revision-a",
+            },
+            clear=False,
+        ):
+            cache.write_text(json.dumps(trigger_vote(
+                self.report, self.root,
+            )))
+            self.assertEqual(
+                triage._trigger_vote(
+                    self.report, cache, "codex", "x", self.root,
+                ),
+                0,
+            )
+            with mock.patch.dict(
+                os.environ, {"TARGET_REV": "revision-b"}, clear=False,
+            ):
+                self.assertEqual(
+                    triage._trigger_vote(
+                        self.report, cache, "codex", "x", self.root,
+                    ),
+                    2,
+                )
+            (self.root / "sample.c").write_text(
+                "int app_parse(void) { return 1; }\n", encoding="utf-8",
+            )
+            self.assertEqual(
+                triage._trigger_vote(
+                    self.report, cache, "codex", "x", self.root,
+                ),
+                2,
+            )
 
     def test_find_gate_stabilizes_report_before_batched_trigger_vote(self) -> None:
         report_text = triage.read_report_bounded(self.report)
@@ -659,7 +773,11 @@ Generated score text.
 
         def fill(*_args, **_kwargs):
             self.report.write_text(
-                self.report.read_text() + "\nBoundary: public API\n",
+                self.report.read_text()
+                + "\nSurface: library-api\n"
+                + "Boundary: public API\n"
+                + "Caller contract: obeyed\n"
+                + "Trigger source: bytes\n",
                 encoding="utf-8",
             )
             return True
@@ -667,12 +785,9 @@ Generated score text.
         def batch(directories, *_args, **_kwargs):
             self.assertEqual(directories, [self.finding])
             self.assertIn("Boundary: public API", self.report.read_text())
-            (self.finding / ".trigger-gate.json").write_text(json.dumps({
-                "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
-                "content_sha1": report_identity.content_sha1(self.report),
-                "attacker_controls": triage_validate.trigger_attacker_controls(),
-                "vote": "Promote",
-            }))
+            (self.finding / ".trigger-gate.json").write_text(json.dumps(
+                trigger_vote(self.report, self.root),
+            ))
             return {self.finding}
 
         with mock.patch.dict(os.environ, {
@@ -773,12 +888,9 @@ Generated score text.
             )
 
         def write_reject(*_args, **_kwargs):
-            cache.write_text(json.dumps({
-                "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
-                "content_sha1": report_identity.content_sha1(self.report),
-                "attacker_controls": triage_validate.trigger_attacker_controls(),
-                "vote": "Reject",
-            }))
+            cache.write_text(json.dumps(trigger_vote(
+                self.report, self.root, "Reject",
+            )))
             return mock.Mock(returncode=1)
 
         with mock.patch.dict(
@@ -801,16 +913,33 @@ Generated score text.
             "--backend", "codex",
             "--gate", "trigger",
         ])
+        source = self.root / "sample.c"
+        excerpt = "int app_parse(void) { return 0; }"
+        source.write_text(excerpt + "\n", encoding="utf-8")
+        anchor = {
+            "path": "sample.c",
+            "line": 1,
+            "symbol": "app_parse",
+            "kind": "source",
+            "excerpt": excerpt,
+            "excerpt_sha256": hashlib.sha256(excerpt.encode()).hexdigest(),
+        }
         stamped = validator["stamp_trigger_vote"](
-            args, {"vote": "Promote"}, "report-sha1",
+            args, {"vote": "Promote", "anchors": [anchor]}, "report-sha1",
+            self.root,
         )
         self.assertEqual(
             stamped,
             {
                 "vote": "Promote",
+                "anchors": [anchor],
+                "anchors_verified": True,
+                "review_facts": {},
                 "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
                 "content_sha1": "report-sha1",
                 "attacker_controls": triage_validate.trigger_attacker_controls(),
+                "target_revision": "",
+                "target_config_sha256": "",
             },
         )
         self.report.write_text(
@@ -823,6 +952,135 @@ Generated score text.
         )
         self.assertNotIn("Generated score prose", facts["report"])
         self.assertEqual(content_sha1, report_identity.content_sha1(self.report))
+        batch_prompt = validator["render_trigger_batch_prompt"](
+            args, [{"id": "FIND-001", "facts": facts}],
+        )
+        self.assertIn('"anchors":[', batch_prompt)
+        self.assertIn('"rejection_kind":', batch_prompt)
+
+    def test_trigger_validator_stamps_only_verified_boundary_facts(self) -> None:
+        validator = runpy.run_path(str(ROOT / "bin" / "validate-finding"))
+        args = validator["parse_args"]([
+            "--finding", str(self.report),
+            "--target-path", str(self.root),
+            "--backend", "codex",
+            "--gate", "trigger",
+        ])
+        source = self.root / "sample.c"
+        excerpt = "int app_parse(void) { return 0; }"
+        source.write_text(excerpt + "\n", encoding="utf-8")
+        anchor = {
+            "path": "sample.c", "line": 1, "symbol": "app_parse",
+            "kind": "source", "excerpt": excerpt,
+        }
+        stamped = validator["stamp_trigger_vote"](
+            args, {
+                "vote": "Promote",
+                "anchors": [anchor],
+                "vulnerable_boundary_surface": "file-format",
+                "reproducer_carrier": "cli",
+            },
+            "report-sha1", self.root,
+        )
+        self.assertEqual(
+            stamped["review_facts"],
+            {
+                "vulnerable_boundary_surface": "file-format",
+                "reproducer_carrier": "cli",
+            },
+        )
+
+        unanchored = validator["stamp_trigger_vote"](
+            args, {
+                "vote": "Promote",
+                "anchors": [],
+                "vulnerable_boundary_surface": "network",
+            },
+            "report-sha1", self.root,
+        )
+        self.assertEqual(unanchored["vote"], "Uncertain")
+        self.assertEqual(unanchored["review_facts"], {})
+
+    def test_reviewed_boundary_facts_fail_open_on_disagreement(self) -> None:
+        common = trigger_vote(self.report, self.root)
+        first = self.finding / ".trigger-gate.json"
+        second = self.finding / ".trigger-gate-2.json"
+        first.write_text(json.dumps({
+            **common,
+            "review_facts": {
+                "vulnerable_boundary_surface": "file-format",
+                "reproducer_carrier": "cli",
+            },
+        }))
+        second.write_text(json.dumps({
+            **common,
+            "review_facts": {
+                "vulnerable_boundary_surface": "library-api",
+                "reproducer_carrier": "cli",
+            },
+        }))
+        self.assertEqual(
+            triage._source_review_facts(self.report, (first, second)),
+            {"reproducer_carrier": "cli"},
+        )
+
+    def test_negative_classification_requires_two_reviewers(self) -> None:
+        common = trigger_vote(self.report, self.root, "Reject")
+        first = self.finding / ".trigger-gate.json"
+        second = self.finding / ".trigger-gate-2.json"
+        first.write_text(json.dumps({
+            **common,
+            "review_facts": {"rejection_kind": "no-added-boundary"},
+        }))
+        self.assertEqual(
+            triage._source_review_facts(
+                self.report, (first, second), rejection_quorum=2,
+            ),
+            {},
+        )
+        second.write_text(json.dumps({
+            **common,
+            "review_facts": {"rejection_kind": "no-added-boundary"},
+        }))
+        self.assertEqual(
+            triage._source_review_facts(
+                self.report, (first, second), rejection_quorum=2,
+            ),
+            {"rejection_kind": "no-added-boundary"},
+        )
+
+    def test_ambiguous_surface_review_honors_operator_opt_out(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"CRASH_TRIGGER_GATE": "0"}, clear=False,
+        ), mock.patch.object(triage, "_trigger_vote") as vote:
+            triage._review_ambiguous_crash_surface(
+                self.finding, self.report, self.root, None, None, False,
+            )
+        vote.assert_not_called()
+
+    def test_no_added_boundary_is_preserved_as_native_hardening(self) -> None:
+        vote_path = self.finding / ".trigger-gate.json"
+        payload = trigger_vote(self.report, self.root, "Reject")
+        payload["review_facts"] = {
+            "rejection_kind": "no-added-boundary",
+            "vulnerable_boundary_surface": "dev-tool",
+        }
+        vote_path.write_text(json.dumps(payload), encoding="utf-8")
+        (self.finding / ".trigger-gate-2.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        with mock.patch.object(triage, "_run_tool") as scorer:
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None, None,
+                    prepared=True,
+                ),
+                "accepted",
+            )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "native-hardening")
+        scorer.assert_not_called()
 
 
 class DecisionTimeoutBackoffTests(unittest.TestCase):
@@ -913,6 +1171,46 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
             ):
                 audit_runner._activate_runtime(self._runtime(base, 0))
                 self.assertNotIn("LLM_DECISION_TIMEOUT", os.environ)
+
+    def test_activate_runtime_exports_only_its_pinned_config_digest(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="activate-config-") as tmp:
+            base = Path(tmp)
+            runtime = self._runtime(base, 0)
+            target_config.write_session_env(
+                base, str(base), str(base), "sampleproj", "HEAD", str(base),
+            )
+            config = base / "target.toml"
+            config.write_text(
+                'target = "sampleproj"\n'
+                '[threat_model]\nattacker_controls = ["bytes"]\n',
+                encoding="utf-8",
+            )
+            digest = target_config.pin_session_config(base, config)
+            with mock.patch.dict(os.environ, {}, clear=True):
+                audit_runner._activate_runtime(runtime)
+                self.assertEqual(
+                    os.environ.get("TARGET_CONFIG_SHA256"), digest,
+                )
+                finding = base / "findings" / "FIND-001"
+                finding.mkdir(parents=True)
+                (finding / "report.md").write_text(
+                    "# source-backed finding\n", encoding="utf-8",
+                )
+                receipt = validation_receipt.write(
+                    finding, kind="finding", state="reportable",
+                )
+                self.assertEqual(
+                    receipt["evidence"]["target_config_sha256"], digest,
+                )
+            (base / ".session-env").write_text(
+                "RESULTS_DIR=" + str(base) + "\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ, {"TARGET_CONFIG_SHA256": "stale"}, clear=True,
+            ):
+                audit_runner._activate_runtime(runtime)
+                self.assertNotIn("TARGET_CONFIG_SHA256", os.environ)
 
     def test_standalone_find_gate_keeps_its_batched_fallback(self) -> None:
         with tempfile.TemporaryDirectory(prefix="find-gate-timeout-") as tmp:

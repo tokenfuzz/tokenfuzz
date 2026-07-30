@@ -120,14 +120,22 @@ that the surface is test-only, internal tooling, or otherwise not shipped.
 
 # Surface scope (read before voting)
 
-This challenge is calibrated for native memory-safety / library-API findings,
-where "unreachable trigger" is the dominant false-finding mode. It is usually
-the WRONG axis for web / application / protocol / configuration / concurrency
-logic bugs, where the triggering path is trivially reachable and realness is
-a *semantic* property (an origin boundary crossed, an authz check weakened, a
-gadget reached). If this finding is one of those and you cannot source-prove
-one of (c)-(f), vote **Uncertain** and say the trigger-provenance axis does
-not settle the semantic issue.
+This challenge is calibrated first for native memory-safety / library-API
+findings, where unreachable trigger state is the dominant false-finding mode.
+For web / application / protocol / configuration / concurrency findings,
+select the matching generic semantic rubric instead of treating easy trigger
+reachability as proof:
+
+- resource exhaustion: identify the attacker-controlled exhausting quantity
+  and source-prove unbounded retention, work, or amplification;
+- disclosure / uninitialized output: trace the sensitive or uninitialized
+  source to an attacker-observable output;
+- auth / boundary / injection / crypto: identify the security decision or
+  trust boundary and source-prove the missing or bypassed enforcement;
+- memory / API contract: use the trigger-provenance construction above.
+
+If the relevant consequence cannot be source-proved in the budget, vote
+**Uncertain**. Missing evidence is pending, never evidence of Low impact.
 
 However, do not preserve a semantic-looking finding merely because it uses
 words like injection, boundary, or info disclosure. Reject when source evidence
@@ -158,10 +166,18 @@ READ the source and can name the specific constructor or guard that makes the
 triggering state unreachable from every attacker entry. Whenever two readings
 are defensible, keep the finding (Uncertain).
 
+Every Promote or Reject must include at least one verifiable source anchor.
+An anchor cites one exact line in the audited tree: a target-relative path and
+1-based line, a symbol or section name that occurs in that file, an anchor kind
+(`source`, `contract`, or `build`), and the cited line with surrounding
+whitespace removed. The harness verifies those fields, computes and persists
+the excerpt SHA-256, and downgrades an unverifiable Promote or Reject to
+Uncertain.
+
 Output ONE JSON object on a single line, nothing else:
 
 ```json
-{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the invariant/constructor that blocks every route into the triggering state, plus which of (a)-(f) applies>","surface_applies":"yes|no"}
+{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the invariant/constructor that blocks every route into the triggering state, plus which of (a)-(f) applies>","rejection_kind":"contract-invalid|unreachable|nonshipping|no-added-boundary|unknown","surface_applies":"yes|no","review_mode":"memory-contract|resource|disclosure|semantic-boundary","vulnerable_boundary_surface":"network|library-api|file-format|cli|dev-tool|internal|unknown","reproducer_carrier":"network|library-api|file-format|cli|harness|runner|unknown","anchors":[{"path":"relative/path.c","line":123,"symbol":"function_or_section","kind":"source|contract|build","excerpt":"exact trimmed source line"}]}
 ```
 
 Definitions:
@@ -177,5 +193,12 @@ Definitions:
 - **Uncertain**: you can neither construct a path nor affirmatively disprove
   one in the budget, OR the surface is not in scope for this challenge. Name
   what would settle it. This preserves the finding downstream.
+- `vulnerable_boundary_surface` names what consumes the untrusted operation;
+  `reproducer_carrier` names how the reproducer delivered it. They may differ.
+  Never infer `file-format` from `cli + bytes`; use source/config evidence.
+- For Reject, `rejection_kind` distinguishes a false security claim from a
+  real native defect that adds no capability at a code-execution or trusted
+  operator surface. Use `no-added-boundary` only for the latter; it remains
+  visible as native hardening instead of being reported as a security bug.
 
 Budget: {{ timeout_secs }}s wall time, ~60 tool calls. Be calibrated.

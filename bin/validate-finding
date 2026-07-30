@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 import llm_invoke
 import llm_usage
 import prompt_render
+import crash_bundle
 import report_identity
 import triage_validate
 
@@ -56,27 +57,76 @@ def candidate_snapshot(path: Path, *, semantic: bool = False) -> tuple[dict, str
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
-            return parsed, content_sha1
-    return {
+            facts = parsed
+            break
+    else:
+        facts = {
         "report": text,
         "source_path": str(path),
-    }, content_sha1
+        }
+    evidence = crash_bundle.recorded_evidence_context(path.parent)
+    if evidence is not None:
+        facts = dict(facts)
+        facts["probe_evidence"] = {
+            key: evidence.get(key)
+            for key in (
+                "evidence_id", "target_revision", "target_config_sha256",
+                "testcase_size", "sanitizer", "mode", "harness", "args",
+                "build_config_id", "build_recipe_sha256", "prerequisites",
+            )
+        }
+    return facts, content_sha1
 
 
 def candidate(path: Path) -> dict:
     return candidate_snapshot(path)[0]
 
 
-def stamp_trigger_vote(args, vote: dict, content_sha1: str) -> dict:
+def stamp_trigger_vote(
+    args, vote: dict, content_sha1: str, target: Path | None = None,
+    artifact_dir: Path | None = None, probe_evidence: object = None,
+) -> dict:
     """Content-address trigger verdicts; other validator modes stay unchanged."""
     if args.gate != "trigger":
         return vote
     stamped = dict(vote)
+    anchors = triage_validate.verify_source_anchors(
+        stamped.get("anchors"), target or Path(args.target_path),
+    )
+    stamped["anchors"] = anchors
+    stamped["anchors_verified"] = bool(anchors)
+    if stamped.get("vote") in {"Promote", "Reject"} and not anchors:
+        stamped.update(
+            vote="Uncertain",
+            downgraded_from=stamped.get("vote"),
+            downgrade_reason="no verifiable source anchor",
+        )
+    stamped["review_facts"] = (
+        triage_validate.source_review_facts(stamped)
+        if stamped.get("vote") in {"Promote", "Reject"} and anchors
+        else {}
+    )
     stamped.update({
         "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
         "content_sha1": content_sha1,
         "attacker_controls": triage_validate.trigger_attacker_controls(),
     })
+    evidence = probe_evidence if isinstance(probe_evidence, dict) else None
+    if evidence is None:
+        evidence = crash_bundle.recorded_evidence_context(
+            artifact_dir
+            or (Path(args.finding).parent if args.finding else Path(".")),
+        )
+    evidence_id = evidence.get("evidence_id") if evidence else None
+    if evidence_id is not None:
+        stamped["evidence_id"] = evidence_id
+    for key, environment_name in (
+        ("target_revision", "TARGET_REV"),
+        ("target_config_sha256", "TARGET_CONFIG_SHA256"),
+    ):
+        stamped[key] = str(
+            (evidence or {}).get(key) or os.environ.get(environment_name, ""),
+        )
     return stamped
 
 
@@ -257,6 +307,8 @@ def main(argv=None) -> int:
         target = Path(args.target_path)
         items = []
         outputs: dict[str, Path] = {}
+        artifact_dirs: dict[str, Path] = {}
+        probe_evidence: dict[str, object] = {}
         content_hashes: dict[str, str] = {}
         findings: list[Path] = []
         for entry in entries:
@@ -270,7 +322,9 @@ def main(argv=None) -> int:
             facts, content_hash = candidate_snapshot(finding, semantic=True)
             items.append({"id": item_id, "facts": facts})
             outputs[item_id] = output
+            artifact_dirs[item_id] = finding.parent
             content_hashes[item_id] = content_hash
+            probe_evidence[item_id] = facts.get("probe_evidence")
             findings.append(finding)
         if not target.is_dir():
             return 4
@@ -303,7 +357,10 @@ def main(argv=None) -> int:
                 continue
             if vote["vote"] == "Reject" and not str(vote.get("disproof", "")).strip():
                 vote.update(vote="Uncertain", downgraded_from="Reject", downgrade_reason="empty disproof")
-            vote = stamp_trigger_vote(args, vote, content_hashes[item_id])
+            vote = stamp_trigger_vote(
+                args, vote, content_hashes[item_id], target,
+                artifact_dirs[item_id], probe_evidence[item_id],
+            )
             output.write_text(json.dumps(vote, indent=2, sort_keys=True) + "\n")
         # 2 = transient backend failure (timeout / provider limit): the caller
         # must not hot-retry it. 3 = a completed response that parsed nothing;
@@ -349,7 +406,10 @@ def main(argv=None) -> int:
         return 3
     if args.gate == "trigger" and vote["vote"] == "Reject" and not str(vote.get("disproof", "")).strip():
         vote.update(vote="Uncertain", downgraded_from="Reject", downgrade_reason="empty disproof")
-    vote = stamp_trigger_vote(args, vote, content_hash)
+    vote = stamp_trigger_vote(
+        args, vote, content_hash, target, finding.parent,
+        facts.get("probe_evidence"),
+    )
     destination.write_text(json.dumps(vote, indent=2, sort_keys=True) + "\n")
     return VOTES.get(vote.get("vote"), 3)
 

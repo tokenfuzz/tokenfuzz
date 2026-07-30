@@ -23,6 +23,7 @@ import llm_invoke
 import llm_usage
 import report_identity
 import triage_validate
+import validation_receipt
 
 
 ASAN = "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602\n"
@@ -69,18 +70,65 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "confirmed_findings": findings,
             "findings_rejected": rejected_findings,
             "model_refusals": refusals,
+            "validation_waterfall": {
+                "crashes": {
+                    "candidates": crashes,
+                    "evidence_complete": crashes,
+                    "validated": crashes,
+                    "routed": crashes,
+                    "reportable": crashes,
+                    "lanes": {"reportable": crashes},
+                },
+                "findings": {
+                    "candidates": findings + rejected_findings,
+                    "evidence_complete": findings,
+                    "validated": findings + rejected_findings,
+                    "routed": findings + rejected_findings,
+                    "reportable": findings,
+                    "lanes": {
+                        "reportable": findings,
+                        "rejected": rejected_findings,
+                    },
+                },
+            },
             "tokens": {"output_tokens": 111, "token_source": "measured"},
         })
         return cell
+
+    @staticmethod
+    def finalize_fixture_finding(directory: Path) -> None:
+        validation_receipt.write(
+            directory,
+            kind="finding",
+            state="reportable",
+            attacker_controls=["bytes"],
+        )
+
+    @staticmethod
+    def finalize_fixture_crash(directory: Path) -> None:
+        validation_receipt.write(
+            directory,
+            kind="crash",
+            state="reportable",
+            attacker_controls=["bytes"],
+        )
 
     def test_harvest_counts_only_proved_and_adjudicated_artifacts(self) -> None:
         results = self.root / "results"
         proved = results / "crashes" / "CRASH-001"
         claimed = results / "crashes" / "CRASH-002"
+        provisional = results / "crashes" / "CRASH-003"
         proved.mkdir(parents=True)
         claimed.mkdir()
+        provisional.mkdir()
         (proved / "sanitizer.txt").write_text(ASAN)
+        (proved / "input.bin").write_bytes(b"fixture")
+        (proved / "report.md").write_text("# Proved bounds issue\n")
+        self.finalize_fixture_crash(proved)
         (claimed / "report.md").write_text("claim only\n")
+        (provisional / "report.md").write_text("# Provisional bounds issue\n")
+        (provisional / "sanitizer.txt").write_text(ASAN)
+        (provisional / "input.bin").write_bytes(b"fixture")
         rejected = results / "crashes-rejected"
         (rejected / "CRASH-009").mkdir(parents=True)
         (rejected / "REJECTED-CRASHES.md").write_text(
@@ -101,9 +149,21 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "content_sha1": report_identity.content_sha1(accepted_report),
             "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
             "attacker_controls": ["bytes"],
+            "anchors_verified": True,
         })
+        validation_receipt.write(
+            findings / "FIND-ACCEPTED",
+            kind="finding",
+            state="reportable",
+            attacker_controls=["bytes"],
+        )
         (findings / "FIND-KEEP" / ".keep").touch()
         (findings / "FIND-REVIEWED" / ".reviewed").touch()
+        for name in ("FIND-KEEP", "FIND-REVIEWED"):
+            (findings / name / "report.md").write_text(
+                f"# {name} state issue\n", encoding="utf-8",
+            )
+            self.finalize_fixture_finding(findings / name)
         (results / "findings-rejected" / "FIND-REJECTED").mkdir(parents=True)
         (results / "state").mkdir()
         (results / "state" / "hypotheses.jsonl").write_text(
@@ -120,6 +180,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         metrics = benchmark.harvest(results)
         self.assertEqual(metrics["confirmed_crashes"], 1)
         self.assertEqual(metrics["crash_dirs"], ["CRASH-001"])
+        self.assertEqual(metrics["crash_candidates"], 2)
+        self.assertEqual(metrics["crashes_unadjudicated"], 1)
         self.assertEqual(metrics["crashes_rejected"], 1)
         self.assertEqual(metrics["findings"], 4)
         self.assertEqual(metrics["confirmed_findings"], 3)
@@ -132,6 +194,22 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["tokens"]["cached_input_tokens"], 1200)
         self.assertEqual(metrics["tokens"]["output_tokens"], 80)
         self.assertEqual(metrics["tokens"]["asan_invocations"], 3)
+        self.assertEqual(
+            metrics["validation_waterfall"]["crashes"]["candidates"], 4,
+        )
+        self.assertEqual(
+            metrics["validation_waterfall"]["crashes"]["evidence_complete"], 2,
+        )
+        self.assertEqual(
+            metrics["validation_waterfall"]["findings"]["lanes"]["reportable"],
+            3,
+        )
+        self.assertEqual(
+            metrics["validation_waterfall"]["findings"]["lanes"][
+                "legacy-provisional"
+            ],
+            2,
+        )
 
         legacy = self.root / "legacy-row-rejected"
         (legacy / "crashes-rejected").mkdir(parents=True)
@@ -141,6 +219,50 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "| CR-b | app_parse.c:20 | t2 |\n"
         )
         self.assertEqual(benchmark.harvest(legacy)["crashes_rejected"], 2)
+
+    def test_native_hardening_is_final_but_not_security_credit(self) -> None:
+        results = self.root / "native"
+        crash = results / "crashes" / "CRASH-001"
+        finding = results / "findings" / "FIND-001"
+        for directory, kind in ((crash, "crash"), (finding, "finding")):
+            directory.mkdir(parents=True)
+            (directory / "report.md").write_text(
+                "# Native state issue\n", encoding="utf-8",
+            )
+            validation_receipt.write(
+                directory,
+                kind=kind,
+                state="native-hardening",
+                attacker_controls=["bytes"],
+            )
+        (crash / "sanitizer.txt").write_text(ASAN, encoding="utf-8")
+        (crash / "input.bin").write_bytes(b"fixture")
+        validation_receipt.write(
+            crash,
+            kind="crash",
+            state="native-hardening",
+            attacker_controls=["bytes"],
+        )
+
+        metrics = benchmark.harvest(results)
+        self.assertEqual(metrics["confirmed_crashes"], 0)
+        self.assertEqual(metrics["confirmed_findings"], 0)
+        self.assertEqual(metrics["finalized_crashes"], 1)
+        self.assertEqual(metrics["finalized_findings"], 1)
+        self.assertEqual(metrics["crashes_unadjudicated"], 0)
+        self.assertEqual(metrics["findings_unadjudicated"], 0)
+        self.assertEqual(
+            metrics["validation_waterfall"]["crashes"]["lanes"][
+                "native-hardening"
+            ],
+            1,
+        )
+        self.assertEqual(
+            metrics["validation_waterfall"]["findings"]["lanes"][
+                "native-hardening"
+            ],
+            1,
+        )
 
     def test_legacy_finding_metrics_preserve_quality_only_run_semantics(self) -> None:
         results = self.root / "legacy-findings"
@@ -210,6 +332,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         crash = direct / "crashes" / "CRASH-1"
         crash.mkdir(parents=True)
         (crash / "sanitizer.txt").write_text(ASAN)
+        (crash / "report.md").write_text("# Proved bounds issue\n")
+        self.finalize_fixture_crash(crash)
         direct_metrics = benchmark.harvest(direct)
         self.assertEqual(direct_metrics["tokens"]["asan_invocations"], 1)
         self.assertEqual(direct_metrics["execution"]["source"], "crash-floor")
@@ -261,6 +385,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             (directory / "report.md").write_text(
                 f"# State issue\n\nCluster: FCL-same{suffix}", encoding="utf-8"
             )
+            self.finalize_fixture_finding(directory)
         for name in ("CRASH-001", "CRASH-002"):
             directory = crashes / name
             directory.mkdir(parents=True)
@@ -268,6 +393,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             (directory / "REPORT.md").write_text(
                 "# Bounds issue\n\nCluster: CL-same\n", encoding="utf-8"
             )
+            self.finalize_fixture_crash(directory)
 
         metrics = benchmark.harvest(results)
 
@@ -317,6 +443,9 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "content_sha1": report_identity.content_sha1(finding_report),
             "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
             "attacker_controls": ["bytes"],
+            "anchors": [{"path": "sample.c"}],
+            "anchors_verified": True,
+            "review_facts": {"rejection_kind": "contract-invalid"},
         })
         (pending / "report.md").write_text("# Pending state issue\n", encoding="utf-8")
         self.write_json(pending / ".llm-find-quality.json", {
@@ -337,7 +466,10 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "content_sha1": report_identity.content_sha1(crash_report),
             "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
             "attacker_controls": ["bytes"],
+            "anchors": [{"path": "sample.c"}],
+            "anchors_verified": True,
         })
+        self.finalize_fixture_crash(crash)
 
         metrics = benchmark.harvest(results)
         states = {row["id"]: row for row in metrics["gate_states"]}
@@ -692,6 +824,13 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(harness["crash_median"], 2)
         self.assertEqual(harness["confirmed_finding_total"], 3)
         self.assertEqual(harness["model_refusal_total"], 2)
+        self.assertEqual(
+            harness["validation_waterfall"]["crashes"]["candidates"], 4,
+        )
+        self.assertEqual(
+            harness["validation_waterfall"]["findings"]["lanes"]["reportable"],
+            3,
+        )
         self.assertEqual(by_condition["model-direct"]["rejected_finding_total"], 2)
 
         failed = self.make_cell(bench, "harness-r3", "harness", 3, 0, status="failed")
@@ -713,6 +852,10 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.make_cell(bench, "harness-r1", "harness", 1, 1)
         ledger = self.root / "ledger.md"
         section = benchmark.render_section(benchmark.aggregate(bench))
+        self.assertIn("### Publication waterfall", section)
+        self.assertIn("Legacy provisional", section)
+        self.assertIn("Reviewed root families", section)
+        self.assertIn("| all conditions | crashes |", section)
         benchmark.append_to_ledger(ledger, section)
         benchmark.append_to_ledger(ledger, section)
         text = ledger.read_text()
@@ -745,8 +888,10 @@ class BenchmarkMetricsTests(unittest.TestCase):
             rejected_crash.mkdir(parents=True)
             (crash / "sanitizer.txt").write_text(ASAN)
             (crash / "report.md").write_text(f"# {condition} crash\n")
+            self.finalize_fixture_crash(crash)
             (finding / "report.md").write_text(f"# {condition} finding\n")
             (finding / ".keep").touch()
+            self.finalize_fixture_finding(finding)
             (rejected / "report.md").write_text("# rejected\n")
             (rejected_crash / "REPORT.md").write_text("# Rejected crash\n")
             (results / "crashes-rejected" / "REJECTED-CRASHES.md").write_text(
@@ -836,6 +981,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         finding.mkdir(parents=True)
         (finding / "report.md").write_text("# finding\n")
         (finding / ".keep").touch()
+        self.finalize_fixture_finding(finding)
         scratch = finding / ".validator-cwd"
         scratch.mkdir()
         (scratch / "src").symlink_to(self.root / "does-not-exist")
@@ -868,6 +1014,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         (finding / "report.md").write_text("# finding\n")
         (finding / ".keep").touch()
         (finding / "reproducer.xml").symlink_to("../../scratch-3/pruned.xml")
+        self.finalize_fixture_finding(finding)
         cell = self.make_cell(bench, "harness-r1", "harness", 1, 0, findings=1)
         data = json.loads((cell / "cell.json").read_text())
         data["results_dir"] = str(results)
@@ -905,6 +1052,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         target = scratch / "testcase.xml"
         target.write_text("<r/>", encoding="utf-8")
         (finding / "reproducer.xml").symlink_to(target)
+        self.finalize_fixture_finding(finding)
         cell = self.make_cell(bench, "harness-r1", "harness", 1, 0, findings=1)
         data = json.loads((cell / "cell.json").read_text())
         data["results_dir"] = str(results)
@@ -1049,6 +1197,13 @@ class BenchmarkMetricsTests(unittest.TestCase):
                 "unique_crash_clusters": 3, "medium_plus_bugs": 2,
                 "unique_rejected_crash_clusters": 3,
                 "top_severity_level": "High", "tokens": {},
+                # A finalized report carries validation lanes; without them the
+                # crosstab treats the counts as predating publication receipts
+                # and shows them as pending instead.
+                "validation_waterfall": {
+                    "crashes": {"candidates": 5, "lanes": {"reportable": 3}},
+                    "findings": {"candidates": 3, "lanes": {"reportable": 2}},
+                },
             }],
         }
         self.write_json(run / "report.json", report)
@@ -1075,6 +1230,40 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertNotIn("Pending crashes", ledger)
         self.assertIn("≤ 2", text)
         self.assertIn("≤ 2", ledger)
+
+    def test_crosstab_shows_pre_receipt_counts_as_pending(self) -> None:
+        # Counts written before publication receipts existed no longer follow
+        # from the artifacts, and recounting without receipts reads zero. Show
+        # neither number: the stale count reads as measured, and the zero reads
+        # as "found nothing".
+        run = self.root / "stale" / "codex" / "20260301-000000"
+        report = {
+            "run": {
+                "runid": "20260301-000000", "target": "sample",
+                "backend": "codex", "model": "gpt-test",
+            },
+            "bench_dir": str(run),
+            "conditions": [{
+                "condition": "harness", "replicates_done": 1,
+                "replicates_total": 1, "wall_median": 60,
+                "unique_crash_clusters": 7, "medium_plus_bugs": 4,
+                "unique_finding_clusters": 5, "medium_plus_findings": 2,
+                "top_severity_level": "High", "tokens": {},
+                "cells": [{
+                    "cell": "harness-r1", "condition": "harness",
+                    "status": "done", "wall_effective_seconds": 3600,
+                    "metrics": {"exists": True},
+                }],
+            }],
+        }
+        self.write_json(run / "report.json", report)
+        text = benchmark.crosstab(self.root / "stale")
+        self.assertIn("Pending", text)
+        self.assertNotIn("7 (4 M+)", text)
+        self.assertNotIn("5 (2 M+)", text)
+        # The reader is told which runs need regenerating, and why.
+        self.assertIn("bin/benchmark --regenerate", text)
+        self.assertIn("regenerate", text)
 
     def test_crosstab_live_progress_totals_include_rejected(self) -> None:
         run = self.root / "live" / "claude" / "20260201-000000"
@@ -1104,7 +1293,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         }
         self.write_json(run / "report.json", report)
         text = benchmark.crosstab(self.root / "live")
-        self.assertIn("## Runs in progress", text)
+        self.assertIn("## Runs awaiting review", text)
         self.assertIn("Findings (raw) | Crashes (raw)", text)
         # the reader has to be told these two columns are not the settled ones
         self.assertIn("count one problem once per report", text)

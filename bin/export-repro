@@ -47,6 +47,7 @@ import sanitizer as sanitizer_policy  # noqa: E402
 import stack_frames  # noqa: E402  (runtime sys.path adjustment)
 import symbol_names  # noqa: E402  (runtime sys.path adjustment)
 import target_config  # noqa: E402  (runtime sys.path adjustment)
+import validation_receipt  # noqa: E402
 
 
 def die(msg: str) -> None:
@@ -2625,7 +2626,7 @@ def _install_with_exact_case(src: Path, dst: Path) -> None:
 
 
 def _is_bundle_filename(name: str) -> bool:
-    if name in {"REPORT.md", "REPORT.html", "reproduce.sh", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "severity.json"}:
+    if name in {"REPORT.md", "REPORT.html", "reproduce.sh", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "severity.json", "validation.json"}:
         return True
     if name in {".llm-find-quality.json", ".severity_ok", ".severity_pending",
                 ".severity_failed"}:
@@ -3319,6 +3320,13 @@ def main(argv: list[str]) -> int:
     out_dir = Path(args.out) if args.out else crash_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     audit_subdir = out_dir / ".audit"
+    # Export changes representation, not validation. Carry authority forward
+    # only when the receipt was current before this in-place rewrite; an
+    # unvalidated bundle must never gain a receipt from export.
+    prior_validation = (
+        validation_receipt.read_current(crash_dir)
+        if out_dir == crash_dir else None
+    )
 
     scan_dirs: list[Path] = []
     if audit_subdir.is_dir():
@@ -3822,6 +3830,27 @@ def main(argv: list[str]) -> int:
 
     finally:
         shutil.rmtree(stage, ignore_errors=True)
+
+    if prior_validation is not None:
+        saved_evidence = prior_validation.get("evidence") or {}
+        validation_receipt.write(
+            out_dir,
+            kind=str(prior_validation["kind"]),
+            state=str(prior_validation["state"]),
+            detail=str(prior_validation.get("detail") or ""),
+            target_revision=str(saved_evidence.get("target_revision") or ""),
+            target_config_sha256=str(
+                saved_evidence.get("target_config_sha256") or "",
+            ),
+            attacker_controls=[
+                str(value)
+                for value in (saved_evidence.get("attacker_controls") or [])
+            ],
+            review_facts=(
+                saved_evidence.get("review_facts")
+                if isinstance(saved_evidence.get("review_facts"), dict) else {}
+            ),
+        )
 
     # ── Re-apply severity ────────────────────────────────────────────
     # build_report_md rebuilds REPORT.md from the agent's report.md, which

@@ -46,9 +46,12 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 import cluster_common
+import crash_artifacts
+import crash_bundle
 import llm_usage
 import report_identity
 import triage_validate
+import validation_receipt
 
 try:  # ClusterFuzz-normalized stack frames — reused, never reinvented.
     import stack_frames as _sf
@@ -428,31 +431,37 @@ def dir_has_sanitizer_output(d: Path) -> bool:
     return False
 
 
+def publication_state_names(
+    parent: Path, *, kind: str, prefix: str, require_sanitizer: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Return (security-credit names, all-final names) from one receipt pass."""
+    if not parent.is_dir():
+        return [], []
+    security: list[str] = []
+    finalized: list[str] = []
+    for child in sorted(parent.iterdir()):
+        if not child.is_dir() or not child.name.startswith(prefix):
+            continue
+        receipt = validation_receipt.read_current(child)
+        if (
+            receipt is None
+            or receipt.get("kind") != kind
+            or receipt.get("state") not in validation_receipt.FINAL_STATES
+            or (require_sanitizer and not dir_has_sanitizer_output(child))
+        ):
+            continue
+        finalized.append(child.name)
+        if receipt.get("state") in validation_receipt.SECURITY_STATES:
+            security.append(child.name)
+    return security, finalized
+
+
 def count_confirmed_crashes(crashes_dir: Path) -> tuple[int, list[str]]:
-    """Count crash subdirectories that contain genuine sanitizer output.
-
-    Returns (count, sorted list of crash dir names). A claimed crash dir
-    with no sanitizer text on disk is NOT counted — that is what keeps a
-    model-direct condition honest: it gets credit for proof, not assertion.
-
-    A promotion-pending (unenriched `bin/probe` skeleton) crash is still
-    counted and pooled here: its sanitizer artifact is real, and crash_total
-    is sum(confirmed_crashes) with no raw fallback, so dropping it would hide a
-    genuine crash that merely failed enrichment. Instead the severity scorer
-    fails closed on the unenriched report (level Unknown, no band), so it cannot
-    headline as a (mis)scored Medium+ crash — visible, never under-rated.
-    """
-    if not crashes_dir.is_dir():
-        return 0, []
-    confirmed: list[str] = []
-    for child in sorted(crashes_dir.iterdir()):
-        if not child.is_dir():
-            continue
-        if child.name.startswith("."):
-            continue
-        if dir_has_sanitizer_output(child):
-            confirmed.append(child.name)
-    return len(confirmed), confirmed
+    """Count sanitizer-backed crashes with a current security-state receipt."""
+    security, _ = publication_state_names(
+        crashes_dir, kind="crash", prefix="CRASH-", require_sanitizer=True,
+    )
+    return len(security), security
 
 
 def crash_is_pending(directory: Path) -> bool:
@@ -507,12 +516,14 @@ def _finding_trigger_kept(finding_dir: Path) -> bool:
         return False
     for name in (".trigger-gate.json", ".trigger-gate-2.json"):
         payload = _read_json(finding_dir / name)
-        if _current_trigger_vote(payload, report_sha1s) in {"Promote", "Uncertain"}:
+        if _current_trigger_vote(payload, report_sha1s, finding_dir) == "Promote":
             return True
     return False
 
 
-def _current_trigger_vote(payload: dict, report_sha1s: frozenset[str]) -> str | None:
+def _current_trigger_vote(
+    payload: dict, report_sha1s: frozenset[str], directory: Path,
+) -> str | None:
     if payload.get("content_sha1") not in report_sha1s:
         return None
     vote = payload.get("vote")
@@ -526,12 +537,24 @@ def _current_trigger_vote(payload: dict, report_sha1s: frozenset[str]) -> str | 
         and isinstance(payload.get("attacker_controls"), list)
         and vote in {"Promote", "Reject", "Uncertain"}
     ):
+        if vote in {"Promote", "Reject"}:
+            anchors = payload.get("anchors")
+            if (
+                payload.get("anchors_verified") is not True
+                or not isinstance(anchors, list)
+                or not anchors
+            ):
+                return None
+        evidence = crash_bundle.recorded_evidence_context(directory)
+        evidence_id = evidence.get("evidence_id") if evidence else None
+        if evidence_id != payload.get("evidence_id"):
+            return None
         return vote
     if (
         version in triage_validate.TRIGGER_GATE_ADVISORY_VERSIONS
         and vote in {"Promote", "Uncertain"}
     ):
-        return vote
+        return "Uncertain"
     return None
 
 
@@ -546,6 +569,16 @@ def _finding_is_confirmed(
     quorum with missing or stale trigger evidence remains pending. A
     `.keep`/`.reviewed` pin is the explicit human override for both gates.
     """
+    receipt = validation_receipt.read_current(finding_dir)
+    if receipt is not None:
+        return (
+            receipt.get("kind") == "finding"
+            and receipt.get("state") in validation_receipt.SECURITY_STATES
+        )
+    if require_trigger_confirmation:
+        # Legacy positive votes are preserved as visible provisional evidence;
+        # only the content-addressed publication receipt grants final credit.
+        return False
     if not _finding_is_admitted(finding_dir):
         return False
     return (
@@ -606,6 +639,11 @@ def count_confirmed_findings(
     """
     if not findings_dir.is_dir():
         return 0, []
+    if require_trigger_confirmation:
+        security, _ = publication_state_names(
+            findings_dir, kind="finding", prefix="FIND-",
+        )
+        return len(security), security
     confirmed: list[str] = []
     for child in sorted(findings_dir.iterdir()):
         if not child.is_dir() or not child.name.startswith("FIND-"):
@@ -1798,7 +1836,7 @@ def _trigger_snapshot(directory: Path) -> tuple[str, set[str]]:
         if payload.get("vote") not in {"Promote", "Reject", "Uncertain"}:
             continue
         observed = True
-        vote = _current_trigger_vote(payload, report_sha1s)
+        vote = _current_trigger_vote(payload, report_sha1s, directory)
         if vote is None:
             continue
         signals.add(vote)
@@ -1822,14 +1860,8 @@ def _trigger_snapshot(directory: Path) -> tuple[str, set[str]]:
     return state, signals
 
 
-def harvest_gate_states(
-    results_dir: Path,
-    confirmed_findings: list[str],
-    confirmed_crashes: list[str],
-) -> list[dict]:
+def harvest_gate_states(results_dir: Path) -> list[dict]:
     """Snapshot existing gate evidence without recomputing any disposition."""
-    confirmed_finding_set = set(confirmed_findings)
-    confirmed_crash_set = set(confirmed_crashes)
     rows: list[dict] = []
     for kind, location, prefix, rejected in (
         ("finding", "findings", "FIND-", False),
@@ -1845,6 +1877,13 @@ def harvest_gate_states(
                 continue
             report = cluster_common.artifact_report_path(directory)
             report_text = _read_metric_report(report)
+            receipt = validation_receipt.read_current(directory)
+            if receipt is not None and receipt.get("kind") != kind:
+                receipt = None
+            validation = (
+                str(receipt.get("state"))
+                if receipt is not None else "legacy-provisional"
+            )
             trigger, trigger_signals = _trigger_snapshot(directory)
             conflicts: list[str] = []
             if "Promote" in trigger_signals and "Reject" in trigger_signals:
@@ -1871,14 +1910,37 @@ def harvest_gate_states(
                 if accept_count and reject_count:
                     conflicts.append("quality-votes")
                 reproduced = False
-                pending = not rejected and directory.name not in confirmed_finding_set
+                evidence_complete = (
+                    quality in {"accept", "override"}
+                    and (
+                        trigger in {"promote", "reject", "bypass"}
+                        or validation in (
+                            validation_receipt.FINAL_STATES | {"rejected"}
+                        )
+                    )
+                )
+                pending = (
+                    not rejected
+                    and validation not in validation_receipt.FINAL_STATES
+                )
             else:
                 quality = "not-applicable"
                 reproduced = dir_has_sanitizer_output(directory)
+                sanitizer = crash_artifacts.find_primary_sanitizer(
+                    (directory, directory / ".audit"),
+                )
+                evidence_complete = (
+                    reproduced
+                    and sanitizer is not None
+                    and crash_artifacts.find_testcase(
+                        (directory, directory / ".audit"),
+                        sanitizer_files=(sanitizer,),
+                    ) is not None
+                )
                 pending = (
                     not rejected
                     and (
-                        directory.name not in confirmed_crash_set
+                        validation not in validation_receipt.FINAL_STATES
                         or crash_is_pending(directory)
                     )
                 )
@@ -1890,7 +1952,9 @@ def harvest_gate_states(
                 "disposition": disposition,
                 "quality": quality,
                 "trigger": trigger,
+                "validation": validation,
                 "reproduced": reproduced,
+                "evidence_complete": evidence_complete,
                 "pending": pending,
                 "conflicts": conflicts,
                 "_report_text": report_text,
@@ -1917,6 +1981,70 @@ def harvest_gate_states(
         del row["_report_text"]
         del row["_trigger_signals"]
     return rows
+
+
+def validation_waterfall(
+    gate_states: list[dict], *, crash_signatures: int, finding_signatures: int,
+) -> dict:
+    """Expose evidence and publication stages without inventing root causes."""
+    out: dict[str, dict] = {}
+    for kind, singular, signatures in (
+        ("crashes", "crash", crash_signatures),
+        ("findings", "finding", finding_signatures),
+    ):
+        rows = [row for row in gate_states if row.get("kind") == singular]
+        out[kind] = {
+            "candidates": len(rows),
+            "evidence_complete": sum(
+                bool(row.get("evidence_complete")) for row in rows
+            ),
+            "validated": sum(
+                row.get("validation") in (
+                    validation_receipt.FINAL_STATES | {"rejected"}
+                )
+                for row in rows
+            ),
+            # Gate-state rows are harvested after deterministic routing into
+            # the crash, finding, or rejected lane.
+            "routed": len(rows),
+            "reportable": sum(
+                row.get("validation") in validation_receipt.SECURITY_STATES
+                for row in rows
+            ),
+            "lanes": {
+                state: sum(row.get("validation") == state for row in rows)
+                for state in (
+                    "reportable", "conditional", "native-hardening",
+                    "pending", "rejected", "legacy-provisional",
+                )
+            },
+            "exact_signatures": signatures,
+            # Root-cause equivalence needs reviewed shared-invariant/fix
+            # evidence. Never infer it from stack or signal similarity.
+            "reviewed_root_families": None,
+        }
+    return out
+
+
+def _sum_cell_waterfalls(cells: list[dict], kind: str) -> dict:
+    """Sum condition-local occurrences; exact signatures are filled later."""
+    stages = ("candidates", "evidence_complete", "validated", "routed", "reportable")
+    lane_names = (
+        "reportable", "conditional", "native-hardening",
+        "pending", "rejected", "legacy-provisional",
+    )
+    result = {stage: 0 for stage in stages}
+    result["lanes"] = {name: 0 for name in lane_names}
+    for cell in cells:
+        metrics = cell.get("metrics") or {}
+        waterfall = metrics.get("validation_waterfall") or {}
+        row = waterfall.get(kind) or {}
+        for stage in stages:
+            result[stage] += _as_nonnegative_int(row.get(stage))
+        lanes = row.get("lanes") or {}
+        for name in lane_names:
+            result["lanes"][name] += _as_nonnegative_int(lanes.get(name))
+    return result
 
 
 def count_model_refusals(results_dir: Path) -> int:
@@ -2407,15 +2535,33 @@ def harvest(
     crashes_dir = results_dir / "crashes"
     findings_dir = results_dir / "findings"
 
-    crash_count, crash_dirs = count_confirmed_crashes(crashes_dir)
-    crash_clusters = parse_cluster_count(
-        crashes_dir / "CRASH-CLUSTERS.md", crash_count
+    crash_dirs, finalized_crash_dirs = publication_state_names(
+        crashes_dir, kind="crash", prefix="CRASH-", require_sanitizer=True,
+    )
+    crash_count = len(crash_dirs)
+    finalized_crash_count = len(finalized_crash_dirs)
+    crash_clusters = confirmed_finding_cluster_count(crashes_dir, crash_dirs)
+    crash_candidates = (
+        sum(
+            child.is_dir()
+            and not child.name.startswith(".")
+            and dir_has_sanitizer_output(child)
+            for child in crashes_dir.iterdir()
+        )
+        if crashes_dir.is_dir() else 0
     )
     finding_count = count_subdirs(findings_dir, "FIND-")
-    confirmed_finding_count, confirmed_finding_dirs = count_confirmed_findings(
-        findings_dir,
-        require_trigger_confirmation=require_trigger_confirmation,
-    )
+    if require_trigger_confirmation:
+        confirmed_finding_dirs, finalized_finding_dirs = publication_state_names(
+            findings_dir, kind="finding", prefix="FIND-",
+        )
+        confirmed_finding_count = len(confirmed_finding_dirs)
+        finalized_finding_count = len(finalized_finding_dirs)
+    else:
+        confirmed_finding_count, confirmed_finding_dirs = count_confirmed_findings(
+            findings_dir, require_trigger_confirmation=False,
+        )
+        finalized_finding_count = confirmed_finding_count
     rejected_pending = (
         sum(
             _finding_has_terminal_reject(child)
@@ -2432,9 +2578,12 @@ def harvest(
     metrics = {
         "results_dir": str(results_dir),
         "confirmed_crashes": crash_count,
-        # A pending report never erases sanitizer proof. It remains included
-        # in confirmed_crashes with Unknown severity and is surfaced
-        # separately so report completeness is visible.
+        "crash_candidates": crash_candidates,
+        "finalized_crashes": finalized_crash_count,
+        "crashes_unadjudicated": max(
+            0, crash_candidates - finalized_crash_count,
+        ),
+        # Promotion-pending is one reason a proved candidate lacks final credit.
         "crashes_pending": count_pending_crashes(crashes_dir),
         "crash_clusters": crash_clusters,
         "crash_dirs": crash_dirs,
@@ -2444,6 +2593,7 @@ def harvest(
         "discarded_hypotheses": count_discarded_hypotheses(results_dir),
         "findings": finding_count,
         "confirmed_findings": confirmed_finding_count,
+        "finalized_findings": finalized_finding_count,
         "finding_confirmation": (
             FINDING_CONFIRMATION_VERSION
             if require_trigger_confirmation else "legacy-quality"
@@ -2460,7 +2610,7 @@ def harvest(
         # 0-confirmed run for a clean "found nothing". Pure arithmetic on disk
         # state; no LLM call.
         "findings_unadjudicated": max(
-            0, finding_count - confirmed_finding_count - rejected_pending
+            0, finding_count - finalized_finding_count - rejected_pending
         ),
         "confirmed_finding_dirs": confirmed_finding_dirs,
         "finding_clusters": finding_clusters,
@@ -2490,8 +2640,11 @@ def harvest(
     metrics["artifact_links"] = harvest_artifact_links(
         results_dir, confirmed_finding_dirs, crash_dirs
     )
-    metrics["gate_states"] = harvest_gate_states(
-        results_dir, confirmed_finding_dirs, crash_dirs
+    metrics["gate_states"] = harvest_gate_states(results_dir)
+    metrics["validation_waterfall"] = validation_waterfall(
+        metrics["gate_states"],
+        crash_signatures=crash_clusters,
+        finding_signatures=finding_clusters,
     )
     return metrics
 
@@ -3404,6 +3557,12 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         fb = finding_by_cond.get(cond, {})
         rcb = rejected_crash_by_cond.get(cond, {})
         rfb = rejected_finding_by_cond.get(cond, {})
+        crash_waterfall = _sum_cell_waterfalls(done, "crashes")
+        finding_waterfall = _sum_cell_waterfalls(done, "findings")
+        crash_waterfall["exact_signatures"] = cb.get("unique_clusters", 0)
+        finding_waterfall["exact_signatures"] = fb.get("unique_clusters", 0)
+        crash_waterfall["reviewed_root_families"] = None
+        finding_waterfall["reviewed_root_families"] = None
         # Cell sums stay authoritative — they alone carry the rejection-ledger
         # auto-rejected signature rows that never get a crash dir. Only re-book
         # the post-pool demotions: subtract them from accepted, add to rejected.
@@ -3463,6 +3622,10 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "rejected_crash_clusters_upper_bound": rejected_crashes_upper_bound,
                 "unique_rejected_finding_clusters": unique_rejected_findings,
                 "rejected_finding_clusters_upper_bound": rejected_findings_upper_bound,
+                "validation_waterfall": {
+                    "crashes": crash_waterfall,
+                    "findings": finding_waterfall,
+                },
                 "wall_median": _median([float(x) for x in walls]),
                 "input_tokens_total": sum(r["input_tokens"] for r in token_rows),
                 "cached_input_tokens_total": sum(
@@ -4175,6 +4338,109 @@ def _render_ground_truth(scoring: dict | None,
     return lines
 
 
+def _render_validation_waterfall(
+    conditions: list[dict], backend: str, exact_signatures: dict[str, int],
+) -> list[str]:
+    rows: list[tuple[str, str, dict]] = []
+    for condition in sorted(conditions, key=lambda item: item["condition"]):
+        waterfall = condition.get("validation_waterfall") or {}
+        for kind in ("crashes", "findings"):
+            values = waterfall.get(kind) or {}
+            if _as_nonnegative_int(values.get("candidates")):
+                rows.append((condition["condition"], kind, values))
+    if not rows:
+        return []
+    totals: list[tuple[str, str, dict]] = []
+    for kind in ("crashes", "findings"):
+        matching = [values for _, row_kind, values in rows if row_kind == kind]
+        if not matching:
+            continue
+        total = {
+            stage: sum(
+                _as_nonnegative_int(values.get(stage)) for values in matching
+            )
+            for stage in (
+                "candidates", "evidence_complete", "validated", "routed",
+                "reportable",
+            )
+        }
+        total["lanes"] = {
+            lane: sum(
+                _as_nonnegative_int((values.get("lanes") or {}).get(lane))
+                for values in matching
+            )
+            for lane in (
+                "reportable", "conditional", "native-hardening",
+                "pending", "rejected", "legacy-provisional",
+            )
+        }
+        total["exact_signatures"] = exact_signatures.get(kind, 0)
+        total["reviewed_root_families"] = None
+        totals.append(("all conditions", kind, total))
+    rows.extend(totals)
+
+    lines = [
+        "### Publication waterfall",
+        "",
+        "| Condition | Lane | Candidates | Evidence complete | Validated "
+        "| Routed | Final | Exact signatures | Reviewed root families |",
+        "| --- | --- | --: | --: | --: | --: | --: | --: | --: |",
+    ]
+    for condition, kind, values in rows:
+        root_families = values.get("reviewed_root_families")
+        lines.append(
+            "| {condition} | {kind} | {candidates} | {evidence} | "
+            "{validated} | {routed} | {final} | {signatures} | {families} |".format(
+                condition=_condition_label(condition, backend),
+                kind=kind,
+                candidates=_as_nonnegative_int(values.get("candidates")),
+                evidence=_as_nonnegative_int(values.get("evidence_complete")),
+                validated=_as_nonnegative_int(values.get("validated")),
+                routed=_as_nonnegative_int(values.get("routed")),
+                final=_as_nonnegative_int(values.get("reportable")),
+                signatures=_as_nonnegative_int(values.get("exact_signatures")),
+                families=(
+                    _as_nonnegative_int(root_families)
+                    if root_families is not None else "—"
+                ),
+            )
+        )
+    lines.extend([
+        "",
+        "| Condition | Lane | Strong/reportable | Conditional | Pending "
+        "| Native hardening | Rejected | Legacy provisional |",
+        "| --- | --- | --: | --: | --: | --: | --: | --: |",
+    ])
+    for condition, kind, values in rows:
+        lanes = values.get("lanes") or {}
+        lines.append(
+            "| {condition} | {kind} | {strong} | {conditional} | {pending} "
+            "| {native} | {rejected} | {legacy} |".format(
+                condition=_condition_label(condition, backend),
+                kind=kind,
+                strong=_as_nonnegative_int(lanes.get("reportable")),
+                conditional=_as_nonnegative_int(lanes.get("conditional")),
+                pending=_as_nonnegative_int(lanes.get("pending")),
+                native=_as_nonnegative_int(lanes.get("native-hardening")),
+                rejected=_as_nonnegative_int(lanes.get("rejected")),
+                legacy=_as_nonnegative_int(lanes.get("legacy-provisional")),
+            )
+        )
+    lines.extend([
+        "",
+        "> **Final** contains reportable and conditional security artifacts; "
+        "native-hardening stays visible in its separate lane without entering "
+        "that total. Counts are condition-local artifact occurrences. "
+        "**Exact signatures** deduplicate matching evidence without claiming "
+        "a shared fix. **Reviewed root families** stays blank until a reviewer "
+        "establishes the shared invariant and remediation. Pending and legacy "
+        "provisional artifacts remain visible but receive neither final "
+        "benchmark credit nor numeric severity.",
+        "",
+    ])
+    return lines
+
+
 def render_section(report: dict) -> str:
     """One append-only markdown section for a single benchmark run.
 
@@ -4338,6 +4604,14 @@ def render_section(report: dict) -> str:
         "and the severity columns are what that extra work buys."
     )
     lines.append("")
+    lines.extend(_render_validation_waterfall(
+        conditions,
+        backend,
+        {
+            "crashes": len(report.get("crash_clusters", [])),
+            "findings": len(report.get("finding_clusters", [])),
+        },
+    ))
 
     # ── Ground truth (precision / recall) ────────────────────────────────
     lines.extend(_render_ground_truth(report.get("ground_truth_scoring"),
@@ -4530,6 +4804,22 @@ def _benchmark_roots(bench_root: Path) -> list[Path]:
     return roots
 
 
+def _report_has_validation_lanes(report: dict) -> bool:
+    """True when a report's counts came from the publication-receipt contract.
+
+    Counts predating receipts are not so much wrong as unreproducible: the
+    artifacts on disk no longer imply them. Marking such a report provisional
+    routes every count cell through the pending rendering already used for
+    unfinished runs, so a run awaiting regeneration cannot be misread as a
+    measured result — in either direction, since recounting a pre-receipt
+    corpus under the new gate reads zero.
+    """
+    for condition in report.get("conditions") or ():
+        if isinstance(condition, dict) and condition.get("validation_waterfall"):
+            return True
+    return False
+
+
 def _reports_by_run_target(bench_root: Path) -> list[dict]:
     """Every final or provisional report under a backend benchmark root.
 
@@ -4550,9 +4840,22 @@ def _reports_by_run_target(bench_root: Path) -> list[dict]:
         try:
             if report_path.is_file():
                 report = json.loads(report_path.read_text("utf-8"))
+                if not (
+                    report.get("provisional")
+                    or _report_has_validation_lanes(report)
+                ):
+                    # A finalized report with no validation lanes was written
+                    # before publication receipts existed, so its counts came
+                    # from a superseded contract and no longer follow from the
+                    # artifacts. Show them as pending rather than as numbers
+                    # this code would not produce. A run still in progress is
+                    # already provisional for its own reason and keeps it.
+                    report["provisional"] = True
+                    report["provisional_reason"] = "pre-receipt"
             else:
                 report = aggregate(run_dir, include_pool=False)
                 report["provisional"] = True
+                report["provisional_reason"] = "in-progress"
         except (OSError, ValueError):
             continue
         run = report.get("run", {})
@@ -4616,6 +4919,7 @@ def crosstab(bench_root: Path) -> str:
                 "conditions": report.get("conditions", []),
                 "bench_dir": Path(bench_dir) if bench_dir else None,
                 "provisional": bool(report.get("provisional")),
+                "provisional_reason": str(report.get("provisional_reason") or ""),
             })
 
     lines: list[str] = []
@@ -4770,7 +5074,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append("")
     provisional_rows = [row for row in rows if row["provisional"]]
     if provisional_rows:
-        lines.append("## Runs in progress")
+        lines.append("## Runs awaiting review")
         lines.append("")
         lines.append(
             "A *cell* is one repeat of one condition — the unit a run is built "
@@ -4780,6 +5084,17 @@ def crosstab(bench_root: Path) -> str:
             "they still count one problem once per report. The reviewed, "
             "duplicate-merged numbers are in the table above."
         )
+        if any(row["provisional_reason"] == "pre-receipt"
+               for row in provisional_rows):
+            lines.append("")
+            lines.append(
+                "Rows marked `regenerate` finished before publication receipts "
+                "existed. Their artifacts are intact, but the counts they were "
+                "published with no longer follow from them, and recounting "
+                "without receipts would read zero. Run "
+                "`bin/benchmark --regenerate` to re-derive them; until then "
+                "they are shown as pending rather than as either number."
+            )
         lines.append("")
         lines.append(
             "| Target | Backend | Run | Cell | Condition | Status | "
@@ -4813,7 +5128,11 @@ def crosstab(bench_root: Path) -> str:
                                 str(run.get("backend", "")),
                                 str(run.get("model", "")),
                             ),
-                            status=cell.get("status", "unknown"),
+                            status=(
+                                "regenerate"
+                                if row["provisional_reason"] == "pre-receipt"
+                                else cell.get("status", "unknown")
+                            ),
                             findings=(
                                 int(metrics.get("findings", 0) or 0)
                                 + int(metrics.get("findings_rejected", 0) or 0)

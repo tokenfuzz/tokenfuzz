@@ -39,6 +39,7 @@ import crash_artifacts  # noqa: E402
 import report_identity  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
+import validation_receipt  # noqa: E402
 from cluster_common import exact_child_file  # noqa: E402
 
 
@@ -116,6 +117,7 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     # ── Memory corruption — code-execution-capable (full vuln-system CIA) ──
     "uaf_write":         ("H", "H", "H", "N", "N", "N", None),
     "double_free":       ("H", "H", "H", "N", "N", "N", None),
+    "bad_free":          ("H", "H", "H", "N", "N", "N", None),
     "wild_write":        ("H", "H", "H", "N", "N", "N", None),
     "type_confusion":    ("H", "H", "H", "N", "N", "N", None),
     "heap_write":        ("H", "H", "H", "N", "N", "N", None),
@@ -888,15 +890,30 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
     return metrics, notes
 
 
-def detect_primitive(report_text: str) -> tuple[str, str]:
+def detect_primitive(
+    report_text: str, sanitizer_text: str | None = None,
+) -> tuple[str, str]:
     """Return (primitive_key, human_label).
 
-    Inspect both the narrative and any inline ASan output. ASan reports the
-    sanitizer class and the read/write direction on *different lines*, so
-    they are detected independently and combined. The size, when present in
-    a `READ of size N` / `WRITE of size N` line, distinguishes info-leak
-    shaped reads (≥16 bytes) from DoS-shaped 1-byte reads.
+    A dedicated sanitizer artifact is authoritative.  Classify its first
+    runtime diagnostic as one unit, falling back to report prose only when
+    there is no usable diagnostic.  Keeping the prose path preserves
+    source-only finding support without allowing a quoted bug class or byte
+    count to override observed runtime evidence.
     """
+    diagnostic_source = (
+        sanitizer_text if sanitizer_text is not None else report_text
+    )
+    diagnostic = stack_frames.first_sanitizer_diagnostic(diagnostic_source)
+    if diagnostic is not None:
+        primitive = _detect_primitive(diagnostic)
+        if primitive[0] != "unknown":
+            return primitive
+    return _detect_primitive(report_text)
+
+
+def _detect_primitive(report_text: str) -> tuple[str, str]:
+    """Classify one narrative or sanitizer-diagnostic span."""
     t = report_text.lower()
 
     # ── Direction (read / write) ──────────────────────────────────
@@ -916,12 +933,24 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
             rw = "read"
 
     # ── Sanitizer class ───────────────────────────────────────────
-    # Authoritative SIGBUS: the sanitizer headline names BUS / SIGBUS. A bus
-    # error is a misalignment / unmapped-access DoS (N,N,H), NOT a wild WRITE —
-    # match it before the corruption branches and the read/write-direction
-    # fallbacks so an incidental "WRITE of size N" frame (e.g. a memmove deep
-    # in the faulting libc stack) or a SCARINESS `wild-addr-write` tag cannot
-    # mis-route a bus error to a code-execution-capable corruption class.
+    # A SCARINESS wild-address tag is useful only when the diagnostic itself
+    # independently names the same access direction.  That makes BUS/SEGV a
+    # platform detail without allowing a tag or incidental stack-frame text to
+    # manufacture a write primitive.
+    scariness = re.search(r"scariness:\s*\d+\s*\(([^)\n]*)\)", t)
+    scariness_tag = scariness.group(1) if scariness else ""
+    caused_by = re.search(
+        r"(?:signal|fault)\s+is\s+caused\s+by\s+a\s+(read|write)\s+memory\s+access",
+        t,
+    )
+    caused_direction = caused_by.group(1) if caused_by else ""
+    if "wild-addr-write" in scariness_tag and caused_direction == "write":
+        return "wild_write", "wild-addr WRITE"
+    if "wild-addr-read" in scariness_tag and caused_direction == "read":
+        return "wild_read", "wild-addr READ"
+
+    # Untagged or contradictory SIGBUS remains availability-only.  Alignment
+    # faults and incidental libc WRITE frames must not become corruption.
     if re.search(r"addresssanitizer:\s*bus\b|"
                  r"summary:[^\n]*sanitizer:\s*bus\b|"
                  r"\bsigbus\b|\bbus error\b", t):
@@ -935,12 +964,14 @@ def detect_primitive(report_text: str) -> tuple[str, str]:
             return "uaf_write", "use-after-free WRITE"
         return "uaf_read", "use-after-free" + (" READ" if rw == "read" else "")
 
-    # Invalid frees (free of a non-malloc'd pointer, alloc/dealloc mismatch)
-    # are the same allocator-state corruption family as double-free.
-    if re.search(r"\bdouble[- ]free\b|\bbad[- ]free\b|"
+    if re.search(r"\bdouble[- ]free\b", t):
+        return "double_free", "double-free"
+    # Invalid frees share double-free's allocator-corruption impacts, but keep
+    # the sanitizer's distinct primitive label for diagnosis and metrics.
+    if re.search(r"\bbad[- ]free\b|"
                  r"attempting free on address which was not malloc|"
                  r"\balloc[- ]dealloc[- ]mismatch\b|\binvalid[- ]free\b", t):
-        return "double_free", "double-free / invalid free"
+        return "bad_free", "bad / invalid free"
 
     # C++ type confusion: ClusterFuzz's "Bad-cast to X from Y" crash type and
     # Clang CFI's cast-check failure are both precise sanitizer-grade signals.
@@ -1895,8 +1926,12 @@ def _build_config_field(report_dir: Path | None, build_evidence: dict | None) ->
     return " — ".join(parts)
 
 
-def compute_severity(report_text: str,
-                     cluster_size: int = 1, report_dir: Path | None = None) -> dict:
+def compute_severity(
+    report_text: str,
+    cluster_size: int = 1,
+    report_dir: Path | None = None,
+    sanitizer_text: str | None = None,
+) -> dict:
     """Score one report's severity as a CVSS v4.0 score.
 
     Steps, each a pure mapping:
@@ -1925,14 +1960,21 @@ def compute_severity(report_text: str,
     # A sanitizer-confirmed class with no CVSS row (undefined_behavior) still
     # counts as authoritative: it is unscoreable, not open to a self-declared
     # field overriding what the sanitizer observed.
-    prim_key, prim_label = detect_primitive(report_text)
+    diagnostic_source = (
+        sanitizer_text if sanitizer_text is not None else report_text
+    )
+    diagnostic = stack_frames.first_sanitizer_diagnostic(diagnostic_source)
+    observed_key = (
+        _detect_primitive(diagnostic)[0] if diagnostic is not None else "unknown"
+    )
+    prim_key, prim_label = detect_primitive(report_text, sanitizer_text)
     narrative_memory_classified = (
         prim_key != "unknown" and prim_key not in _NARRATIVE_ONLY_PRIMITIVES
     )
     runtime_authoritative = (
-        prim_key != "unknown"
-        and stack_frames.has_sanitizer_diagnostic(report_text)
-        and prim_key not in _NARRATIVE_ONLY_PRIMITIVES
+        observed_key != "unknown"
+        and prim_key == observed_key
+        and observed_key not in _NARRATIVE_ONLY_PRIMITIVES
     )
     structured_authoritative = False
     primitive_field = (fields.get("primitive_field") or "").strip().lower()
@@ -2653,6 +2695,25 @@ def update_report(report_path: Path, severity: dict) -> None:
     report_path.write_text(text, "utf-8")
 
 
+def clear_report_severity(
+    report_path: Path, report_dir: Path, replacement: str,
+) -> None:
+    """Remove a previously published numeric score from an unrated artifact."""
+    text = _strip_auto_sections(
+        report_path.read_text("utf-8", errors="replace"),
+    )
+    text, field_updated = _replace_structured_field(
+        text, "Severity", replacement,
+    )
+    if not field_updated:
+        text = _replace_severity_line(
+            text,
+            f"- **Severity**: {replacement} (auto: validation state)",
+        )
+    report_path.write_text(text, "utf-8")
+    (report_dir / "severity.json").unlink(missing_ok=True)
+
+
 # ─── Human-readable summary ───────────────────────────────────────────────
 
 
@@ -2803,6 +2864,53 @@ def main(argv: list[str] | None = None) -> int:
         print("1" if rooted else "0")
         return 0 if rooted else 1
 
+    receipt = None
+    if report_dir.parent.name in {"findings", "crashes"}:
+        receipt = validation_receipt.read_current(report_dir)
+        expected_kind = (
+            "finding" if report_dir.parent.name == "findings" else "crash"
+        )
+        if receipt is not None and receipt.get("kind") != expected_kind:
+            receipt = None
+        if (
+            receipt is not None
+            and receipt.get("state") == "native-hardening"
+        ):
+            clear_report_severity(
+                report_md, report_dir, "No security rating (native hardening)",
+            )
+            unscored = {
+                "level": "No security rating",
+                "score": None,
+                "primitive": "native-hardening",
+                "reason": "real native defect without an added security boundary",
+            }
+            if args.json:
+                print(json.dumps({"severity": unscored}, indent=2, sort_keys=True))
+            else:
+                print("Severity: No security rating (native hardening)")
+            return 0
+        if (
+            receipt is None
+            or receipt.get("state") not in validation_receipt.FINAL_STATES
+        ):
+            clear_report_severity(
+                report_md, report_dir, "Unknown (validation pending)",
+            )
+            unvalidated = {
+                "level": "Unknown",
+                "score": None,
+                "primitive": "unvalidated",
+                "reason": "no current final validation receipt",
+            }
+            if args.json:
+                print(json.dumps({"severity": unvalidated}, indent=2, sort_keys=True))
+            else:
+                print(
+                    "Severity: Unknown (no current final validation receipt)",
+                )
+            return 0
+
     cluster_size = _detect_cluster_size(report_text)
     # Strip our own auto-generated sections before scoring — otherwise the
     # explainer text in the rationale section (which mentions 'tests/',
@@ -2810,14 +2918,25 @@ def main(argv: list[str] | None = None) -> int:
     # subsequent runs and spuriously collapses the surface tier. Scoring
     # should only see the agent-authored part of the report.
     scoring_text = _strip_auto_sections(report_text)
-    # Append sanitizer.txt when adjacent — it has the canonical runtime summary
-    # (class + READ/WRITE of size N + SCARINESS line) that the report
-    # narrative may only paraphrase. Increases classifier accuracy without
-    # changing what gets persisted.
-    if adjacent_asan_text:
-        scoring_text = scoring_text + "\n" + adjacent_asan_text
-    severity = compute_severity(scoring_text, cluster_size=cluster_size,
-                                report_dir=report_dir)
+    review_facts = (
+        receipt.get("evidence", {}).get("review_facts", {})
+        if isinstance(receipt, dict) else {}
+    )
+    if isinstance(review_facts, dict):
+        reviewed_surface = str(
+            review_facts.get("vulnerable_boundary_surface") or "",
+        ).strip()
+        if reviewed_surface:
+            # The verified receipt, not reproducer shape or report prose, owns
+            # this override. Prefixing makes it the canonical structured field
+            # while leaving direct compute_severity callers unchanged.
+            scoring_text = f"Surface: {reviewed_surface}\n{scoring_text}"
+    severity = compute_severity(
+        scoring_text,
+        cluster_size=cluster_size,
+        report_dir=report_dir,
+        sanitizer_text=adjacent_asan_text or None,
+    )
     update_report(report_md, severity)
     # severity.json is the on-disk "this report has been scored" marker that
     # downstream gates (benchmark re-derive, bundle exports) test for. The

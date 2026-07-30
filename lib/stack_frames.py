@@ -84,6 +84,50 @@ def has_sanitizer_diagnostic(text: str) -> bool:
     return bool(SANITIZER_SIGNATURE_RE.search(text or ""))
 
 
+_DIAGNOSTIC_CLOSE_RE = re.compile(
+    r"^\s*(?:==\d+==)?SUMMARY:\s", re.IGNORECASE,
+)
+_DIAGNOSTIC_OPEN_RE = re.compile(
+    r"^\s*(?:==\d+==)?(?:ERROR|WARNING):\s"
+    r"|^\s*UndefinedBehaviorSanitizer:"
+    r"|^[^\s].*:\d+:\d+:\s*runtime error:",
+    re.IGNORECASE,
+)
+
+
+def first_sanitizer_diagnostic(text: str) -> str | None:
+    """Return the first complete runtime diagnostic in *text*.
+
+    Reports may contain prose plus several confirmation runs.  Primitive
+    classification must not splice a class from one run together with an
+    access size or direction from another, and report prose must not outrank
+    the runtime.  This bounded slice keeps the first diagnostic's headline,
+    access line, SCARINESS metadata, and closing summary together.
+    """
+    if not text:
+        return None
+    match = SANITIZER_SIGNATURE_RE.search(text)
+    if match is None:
+        return None
+    lines = text.splitlines(keepends=True)
+    offset = 0
+    start = 0
+    for index, line in enumerate(lines):
+        if offset + len(line) > match.start():
+            start = index
+            break
+        offset += len(line)
+    block = [lines[start]]
+    for line in lines[start + 1:]:
+        if _DIAGNOSTIC_CLOSE_RE.match(line):
+            block.append(line)
+            break
+        if _DIAGNOSTIC_OPEN_RE.match(line):
+            break
+        block.append(line)
+    return "".join(block)
+
+
 @dataclasses.dataclass(frozen=True)
 class StackFrame:
     index: int

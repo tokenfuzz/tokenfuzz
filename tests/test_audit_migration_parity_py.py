@@ -25,6 +25,7 @@ import prompt
 import report_identity
 import target_config
 import triage
+import validation_receipt
 import workqueue
 
 
@@ -90,6 +91,12 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         directory.mkdir()
         (directory / ".keep").touch()
         (directory / "report.md").write_text(f"Cluster: {cluster}\n", encoding="utf-8")
+        validation_receipt.write(
+            directory,
+            kind="finding",
+            state="reportable",
+            detail="neutral migration fixture",
+        )
 
     finding("FIND-001", "FCL-A")
     runtime = SimpleNamespace(results=progress_results, num_agents=1)
@@ -114,6 +121,12 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     )
     (secondary_report / "description.md").write_text(
         "Cluster: FCL-B\n", encoding="utf-8"
+    )
+    validation_receipt.write(
+        secondary_report,
+        kind="finding",
+        state="reportable",
+        detail="neutral migration fixture",
     )
     secondary_duplicate = audit_runner.progress(runtime)
     check(

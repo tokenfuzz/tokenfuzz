@@ -15,7 +15,8 @@ evidence for it):
    9b6ad27 widened caller_controls but not here). When you teach the scorer a
    new trigger token, add it here and to the canonical list above. #}
 {
-  "surface":         "<network | library-api | file-format | cli | dev-tool | internal | unknown> — short description",
+  "surface":         "<network | library-api | file-format | cli | dev-tool | internal | unknown> — the vulnerable boundary, not the reproducer program",
+  "reproducer_carrier": "<network | library-api | file-format | cli | harness | runner | unknown> — how the reproducer reached that boundary",
   "primitive":       "<one of the primitive_keys below>",
   "class":           "<short issue class, only if Primitive is unclear>",
   "caller_contract": "<obeyed | violated | unspecified>",
@@ -47,6 +48,11 @@ Allowed primitive_keys:
 
 Rules:
 - Pick the single most specific primitive_key that fits the bug.
+- Keep `surface` and `reproducer_carrier` separate. A shipped command-line
+  program reading a testcase may be only the carrier for a library or format
+  boundary. Record the boundary source review establishes; never infer
+  `file-format` merely from `cli + bytes`. If the tool's own options or command
+  handling are vulnerable, both may be `cli`.
 - `caller_contract` is `violated` when the public documentation states the
   precondition the testcase breaks. Normative wording such as "must make sure",
   "should", ownership/lifetime requirements, or valid parent/child/argument

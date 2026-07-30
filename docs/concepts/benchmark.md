@@ -121,12 +121,23 @@ measurement, not extra finding time, and it is budgeted separately
 (`--finalize-wall`) so a crash-heavy cell cannot starve finding validation.
 
 Anything still unadjudicated is handled conservatively rather than guessed at:
-an unvalidated finding does not enter the finding total, while a crash with
-sanitizer proof but an unfinished report still counts, at Unknown severity. A
-cell that was cut short — provider limit, interruption, failed post-processing
-— is marked incomplete and kept out of the medians, but the evidence it did
-produce is still reported as an observed count, so an interrupted productive
-cell is never mistaken for a barren one.
+an unvalidated finding does not enter the finding total, and a sanitizer-backed
+crash with unfinished validation remains a visible crash candidate rather than
+receiving final credit or an assumed severity. A cell that was cut short —
+provider limit, interruption, failed post-processing — is marked incomplete
+and kept out of the medians, but the evidence it did produce is still reported
+as an observed count, so an interrupted productive cell is never mistaken for
+a barren one.
+
+The run report also shows a publication waterfall: candidate,
+evidence-complete, validated, routed, final, and exact-signature counts.
+Strong/reportable, conditional, pending, native-hardening, rejected, and
+legacy-provisional lanes remain separate. These are condition-local artifact
+occurrences until the exact-signature column; TokenFuzz leaves reviewed root
+families blank rather than guessing that similar stacks or locations share one
+cause and fix. Native-hardening is final engineering evidence but stays outside
+the security total and numeric severity. Reproduction confidence, validation
+state, and CVSS severity are reported independently.
 
 Both conditions are held to the same evidence bar. The baseline's crashes are
 replayed through the target's normal invocation before they count, so a
@@ -473,10 +484,21 @@ bin/benchmark --target <target> --backend codex --regenerate \
 bin/benchmark --regenerate
 ```
 
-`--regenerate` launches no agents and makes no API calls. It re-scores, re-
-clusters, and re-renders the evidence already on disk, and recomputes cell
+`--regenerate` launches no audit/discovery agents. It re-routes, validates,
+scores, clusters, and renders the evidence already on disk, and recomputes cell
 status — so a cell an older run marked incomplete over one pending artifact can
-recover. Provider-limited and failed cells stay excluded.
+recover. Source-semantic validation may invoke the configured reviewer when a
+current content-addressed receipt is missing or stale; deterministic sanitizer,
+identity, scoring, and counting work does not. Provider-limited and failed
+cells stay excluded.
+
+Regeneration cannot manufacture evidence an old cell never recorded. Missing
+testcases, invocation prerequisites, build identity, source anchors, or replay
+artifacts remain visible as pending or unmeasured. A fresh benchmark run is
+warranted only when you need to measure discovery/recall or harness overhead
+under the new code, collect prerequisites that were never saved, or publish a
+comparison in which both conditions used the new audit contract. It is not
+needed merely to correct deterministic severity, routing, or report metrics.
 
 It does not substitute the current target build for the one a cell executed.
 Each new cell records the content identity of the binaries and instrumented

@@ -22,8 +22,26 @@ def should_file(verdict: str, sanitizer: str, runs: int) -> bool:
     return verdict == "CRASH" and sanitizer != "runner" and runs >= 2
 
 
+def _digests(path: Path) -> tuple[str, str]:
+    sha1 = hashlib.sha1()
+    sha256 = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            sha1.update(chunk)
+            sha256.update(chunk)
+    return sha1.hexdigest(), sha256.hexdigest()
+
+
 def _sha1(path: Path) -> str:
     digest = hashlib.sha1()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
@@ -61,6 +79,67 @@ def _probe_context_path(crash_dir: Path) -> Path | None:
     return None
 
 
+def recorded_evidence_context(crash_dir: Path) -> dict | None:
+    """Return a v4 probe record while every saved artifact still matches.
+
+    Unlike :func:`verified_probe_context`, this does not require the original
+    executable to remain installed.  It is therefore safe for pooled benchmark
+    consumers that only need to validate the immutable evidence receipt.
+    """
+    crash_dir = Path(crash_dir)
+    path = _probe_context_path(crash_dir)
+    if path is None:
+        return None
+    try:
+        context = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(context, dict) or context.get("version") != 4:
+        return None
+    testcase_name = context.get("testcase")
+    testcase = (
+        _artifact_path(crash_dir, testcase_name)
+        if isinstance(testcase_name, str) and testcase_name else None
+    )
+    sanitizer = _artifact_path(crash_dir, "sanitizer.txt")
+    if testcase is None or sanitizer is None:
+        return None
+    try:
+        testcase_sha1, testcase_sha256 = _digests(testcase)
+        if (
+            testcase_sha1 != context.get("testcase_sha1")
+            or testcase_sha256 != context.get("testcase_sha256")
+            or testcase.stat().st_size != context.get("testcase_size")
+            or _sha256(sanitizer) != context.get("sanitizer_sha256")
+            or sanitizer.stat().st_size != context.get("sanitizer_size")
+        ):
+            return None
+        harness_value = context.get("harness")
+        if isinstance(harness_value, dict):
+            harness = _artifact_path(
+                crash_dir, str(harness_value.get("name") or ""),
+            )
+            if (
+                harness is None
+                or _sha256(harness) != harness_value.get("sha256")
+                or harness.stat().st_size != harness_value.get("size")
+            ):
+                return None
+        elif harness_value is not False:
+            return None
+        payload = {
+            key: value for key, value in context.items() if key != "evidence_id"
+        }
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+        ).encode()
+        if context.get("evidence_id") != hashlib.sha256(encoded).hexdigest():
+            return None
+    except OSError:
+        return None
+    return context
+
+
 def verified_probe_context(crash_dir: Path) -> dict | None:
     """Return probe-authored context only while its testcase and build still match."""
     path = _probe_context_path(Path(crash_dir))
@@ -70,7 +149,7 @@ def verified_probe_context(crash_dir: Path) -> dict | None:
         context = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(context, dict) or context.get("version") not in (1, 2, 3):
+    if not isinstance(context, dict) or context.get("version") not in (1, 2, 3, 4):
         return None
     testcase_name = context.get("testcase")
     if not isinstance(testcase_name, str) or not testcase_name:
@@ -85,11 +164,16 @@ def verified_probe_context(crash_dir: Path) -> dict | None:
     )
     if testcase is None:
         return None
-    try:
-        if _sha1(testcase) != context.get("testcase_sha1"):
+    if context.get("version") == 4:
+        recorded = recorded_evidence_context(Path(crash_dir))
+        if recorded is None or recorded.get("evidence_id") != context.get("evidence_id"):
             return None
-    except OSError:
-        return None
+    else:
+        try:
+            if _sha1(testcase) != context.get("testcase_sha1"):
+                return None
+        except OSError:
+            return None
     recorded_binary = context.get("binary")
     if not isinstance(recorded_binary, dict) or not recorded_binary:
         return None
@@ -332,6 +416,15 @@ def restore_probe_context(sources: Sequence[Path], destination: Path) -> bool:
 
     restored = dict(context)
     restored["testcase"] = testcases[0].name
+    if restored.get("version") == 4:
+        evidence_payload = {
+            key: value for key, value in restored.items() if key != "evidence_id"
+        }
+        restored["evidence_id"] = hashlib.sha256(
+            json.dumps(
+                evidence_payload, sort_keys=True, separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
     identity = str(restored.get("identity") or "")
     if not identity:
         return False
@@ -404,28 +497,60 @@ def _write_probe_context(
     sanitizer: str,
     mode: str,
     harness: Path | None,
+    sanitizer_output: Path,
     args: Sequence[str],
     binary: str | os.PathLike[str] | None,
     build_config_id: str = "",
     build_recipe_digest: str = "",
 ) -> None:
-    (destination / ".probe-context.json").write_text(
-        json.dumps(
+    testcase_sha1, testcase_sha256 = _digests(testcase)
+    payload = {
+        "version": 4,
+        "identity": identity,
+        "target_revision": os.environ.get("TARGET_REV", ""),
+        "target_config_sha256": os.environ.get("TARGET_CONFIG_SHA256", ""),
+        "testcase": testcase.name,
+        "testcase_sha1": testcase_sha1,
+        "testcase_sha256": testcase_sha256,
+        "testcase_size": testcase.stat().st_size,
+        "sanitizer": sanitizer,
+        "sanitizer_sha256": _sha256(sanitizer_output),
+        "sanitizer_size": sanitizer_output.stat().st_size,
+        "mode": mode,
+        "harness": (
             {
-                "version": 3 if build_config_id else 1,
-                "identity": identity,
-                "testcase": testcase.name,
-                "testcase_sha1": _sha1(testcase),
-                "sanitizer": sanitizer,
-                "mode": mode,
-                "harness": bool(harness),
-                "args": list(args),
-                "binary": binary_identity(binary),
-                "build_config_id": build_config_id,
-                "build_recipe_sha256": build_recipe_digest,
-            },
-            sort_keys=True,
-        ) + "\n",
+                "name": harness.name,
+                "sha256": _sha256(harness),
+                "size": harness.stat().st_size,
+            }
+            if harness else False
+        ),
+        # Exact argv after the target binary/harness.  The testcase is recorded
+        # separately, so consumers never need to guess which token is input.
+        "args": list(args),
+        "binary": binary_identity(binary),
+        "build_config_id": build_config_id,
+        "build_recipe_sha256": build_recipe_digest,
+        "prerequisites": {
+            "non_input_argv": [
+                arg
+                for arg in args
+                if "{TESTCASE}" not in arg
+            ],
+            "invocation_template": (
+                list(args)
+                if any("{TESTCASE}" in arg for arg in args)
+                else ["{TESTCASE}", *args]
+            ),
+            "call_sequence": "harness-defined" if harness else "none-recorded",
+            "alternate_build": build_config_id or None,
+            "input_size": testcase.stat().st_size,
+        },
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    payload["evidence_id"] = hashlib.sha256(encoded).hexdigest()
+    (destination / ".probe-context.json").write_text(
+        json.dumps(payload, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
@@ -477,12 +602,6 @@ def materialize(
         for line in index_lines:
             key, separator, crash_id = line.partition("\t")
             if separator and key == identity and (crashes / crash_id).is_dir():
-                _write_probe_context(
-                    crashes / crash_id, identity=identity, testcase=testcase_path,
-                    sanitizer=sanitizer, mode=mode, harness=harness_path,
-                    args=args, binary=binary, build_config_id=build_config_id,
-                    build_recipe_digest=build_recipe_digest,
-                )
                 return "DUP", crash_id
     maximum = 0
     pattern = re.compile(rf"^CRASH-([0-9]+)-{re.escape(str(agent))}$")
@@ -493,12 +612,6 @@ def materialize(
             for identity_path in (path / ".probe-identity", path / ".audit" / ".probe-identity"):
                 try:
                     if identity_path.read_text(encoding="utf-8").strip() == identity:
-                        _write_probe_context(
-                            path, identity=identity, testcase=testcase_path,
-                            sanitizer=sanitizer, mode=mode, harness=harness_path,
-                            args=args, binary=binary, build_config_id=build_config_id,
-                            build_recipe_digest=build_recipe_digest,
-                        )
                         return "DUP", path.name
                 except OSError:
                     pass
@@ -514,16 +627,19 @@ def materialize(
             datetime.now(timezone.utc).isoformat() + "\n", encoding="utf-8",
         )
         (destination / ".probe-identity").write_text(identity + "\n", encoding="utf-8")
-        _write_probe_context(
-            destination, identity=identity, testcase=testcase_path,
-            sanitizer=sanitizer, mode=mode, harness=harness_path, args=args,
-            binary=binary, build_config_id=build_config_id,
-            build_recipe_digest=build_recipe_digest,
-        )
         shutil.copy2(testcase_path, destination / testcase_path.name)
         shutil.copy2(sanitizer_path, destination / "sanitizer.txt")
         if harness_path:
             shutil.copy2(harness_path, destination / harness_path.name)
+        _write_probe_context(
+            destination, identity=identity,
+            testcase=destination / testcase_path.name,
+            sanitizer=sanitizer, mode=mode,
+            harness=(destination / harness_path.name) if harness_path else None,
+            args=args, sanitizer_output=destination / "sanitizer.txt",
+            binary=binary, build_config_id=build_config_id,
+            build_recipe_digest=build_recipe_digest,
+        )
         if build_config_id and build_recipe_path is not None:
             recipe_copy = destination / ".build-config-recipe.sh"
             shutil.copy2(build_recipe_path, recipe_copy)

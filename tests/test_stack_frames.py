@@ -472,6 +472,34 @@ for _line, _want, _why in [
        f"has_sanitizer_diagnostic: {_why}",
        detail=f"line={_line!r} want={_want}")
 
+_diagnostics = (
+    "narrative use-after-free\n"
+    "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+    "READ of size 1 at 0x1 thread T0\n"
+    "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+    "==2==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x2\n"
+    "READ of size 32 at 0x2 thread T0\n"
+)
+_first_diagnostic = stack_frames.first_sanitizer_diagnostic(_diagnostics)
+ok(
+    _first_diagnostic is not None
+    and "READ of size 1" in _first_diagnostic
+    and "READ of size 32" not in _first_diagnostic
+    and "narrative use-after-free" not in _first_diagnostic,
+    "first_sanitizer_diagnostic binds class and size to one runtime fault",
+    detail=repr(_first_diagnostic),
+)
+_ubsan_diagnostics = (
+    "sample.c:10:2: runtime error: signed integer overflow\n"
+    "sample.c:20:4: runtime error: index 8 out of bounds\n"
+)
+ok(
+    "index 8" not in (
+        stack_frames.first_sanitizer_diagnostic(_ubsan_diagnostics) or ""
+    ),
+    "first_sanitizer_diagnostic does not splice separate UBSan faults",
+)
+
 if FAILED:
     print(f"\033[0;31m{FAILED} failed, {PASSED} passed\033[0m")
     sys.exit(1)

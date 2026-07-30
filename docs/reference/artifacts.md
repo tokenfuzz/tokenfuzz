@@ -83,9 +83,9 @@ The paths an operator inspects after a run:
 
 | Path | Purpose |
 | --- | --- |
-| `crashes/` | Accepted or pending crash artifacts. |
+| `crashes/` | Crash candidates, including final and pending artifacts. |
 | `crashes-rejected/` | Rejected crash artifacts and `REJECTED-CRASHES.html` / `REJECTED-CRASHES.md`. |
-| `findings/` | All security findings — any class, with or without a reproducer. See note below. |
+| `findings/` | Security finding candidates — any class, with or without a reproducer. See note below. |
 | `findings-rejected/` | FIND directories rejected by the LLM substance gate at quorum. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
 | `scratch-N/` | Active testcase work for agent `N`. |
@@ -101,9 +101,21 @@ FIND directories without a report get a `.needs-content` marker and
 surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with
 Reject votes below quorum leaves `.pending-drop`; reaching quorum moves
 the directory to `findings-rejected/` rather than deleting it. `touch
-.reviewed` (or `.keep`) inside a FIND directory pins it past either gate.
-Editing the report's substance re-opens its review; mechanical severity,
-patch, enrichment, and cluster annotations do not.
+.reviewed` (or `.keep`) inside a FIND directory requests a human override; the
+report must still contain complete boundary and trigger fields before the
+harness writes a final receipt. Editing the report's substance re-opens its
+review; mechanical severity, patch, enrichment, and cluster annotations do not.
+
+Every adjudicated artifact has a content-addressed `validation.json`. It binds
+the publication state to the report, saved evidence, target revision/config,
+and threat model. Its states are `reportable`, `conditional`,
+`native-hardening`, `pending`, and `rejected`. Pending and legacy artifacts
+remain visible on disk. Only current `reportable` and `conditional` receipts
+enter the security benchmark total or receive numeric severity;
+`native-hardening` is final but reported separately without a security score.
+Changing the report, testcase, harness, sanitizer diagnostic, invocation
+evidence, target/config identity, or review evidence invalidates the receipt
+and returns the artifact to review.
 
 A short run may leave `crashes/` and `findings/` empty — that is
 not a failed run by itself. Check the rejected indexes first to
@@ -143,6 +155,7 @@ CRASH-001-1/
   harness.{c,cc,cpp,cxx} # present iff the bug uses a C/C++ harness
   sanitizer.txt         # original sanitizer output
   patch.diff            # optional: candidate fix
+  validation.json       # current publication state + evidence identity
   severity.json         # records that the report was scored
   .audit/
   .dup-of               # only on non-canonical cluster members
@@ -182,6 +195,7 @@ Findings use:
 FIND-001/
   report.md              # the narrative; hand-edit this (description.md also accepted)
   report.html            # auto-generated sibling of report.md (open in browser)
+  validation.json        # current publication state + evidence identity
   severity.json          # records that the report was scored
   affected-files.txt     # optional, operator-authored — the harness does not generate it
   .dup-of                # only on non-canonical cluster members
@@ -221,9 +235,9 @@ override. Editing the report also invalidates saved quality votes so the
 revised content receives a fresh quorum. At quorum, the directory is moved
 to `findings-rejected/`.
 
-The severity scorer can also write `severity.json` and update the
-severity text for a FIND. That is useful context, not a requirement
-for the finding to exist.
+The severity scorer writes `severity.json` and updates severity text only
+after a current final-state validation receipt exists. A pending FIND remains
+available for review without being silently interpreted as Low severity.
 
 ## Logs
 

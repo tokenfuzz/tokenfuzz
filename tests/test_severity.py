@@ -91,12 +91,14 @@ class SeverityTests(unittest.TestCase):
     def score(self, report_dir: Path) -> dict:
         text = (report_dir / "report.md").read_text(encoding="utf-8")
         sanitizer = report_dir / "sanitizer.txt"
-        if sanitizer.is_file():
-            text += "\n" + sanitizer.read_text(encoding="utf-8", errors="replace")
         return severity.compute_severity(
             severity._strip_auto_sections(text),
             cluster_size=severity._detect_cluster_size(text),
             report_dir=report_dir,
+            sanitizer_text=(
+                sanitizer.read_text(encoding="utf-8", errors="replace")
+                if sanitizer.is_file() else None
+            ),
         )
 
     def assert_metrics(self, result: dict, **expected: str) -> None:
@@ -266,7 +268,7 @@ class SeverityTests(unittest.TestCase):
             "heap-use-after-free\nWRITE of size 8": "uaf_write",
             "heap-use-after-free\nREAD of size 4": "uaf_read",
             "ERROR: AddressSanitizer: use-after-poison\nWRITE of size 8": "uaf_write",
-            "ERROR: AddressSanitizer: bad-free": "double_free",
+            "ERROR: AddressSanitizer: bad-free": "bad_free",
             "ERROR: AddressSanitizer: new-delete-type-mismatch": "undefined_behavior",
             "ERROR: AddressSanitizer: free-size-mismatch": "undefined_behavior",
             "ERROR: AddressSanitizer: calloc-overflow": "undefined_behavior",
@@ -284,7 +286,7 @@ class SeverityTests(unittest.TestCase):
             "AddressSanitizer: SEGV on unknown address 0x12345678\ncaused by a WRITE memory access": "wild_write",
             "WARNING: ThreadSanitizer: data race": "data_race",
             "x.c:12:5: runtime error: signed integer overflow": "integer_overflow",
-            "attempting free on address which was not malloc()-ed": "double_free",
+            "attempting free on address which was not malloc()-ed": "bad_free",
             "Bad-cast detected": "type_confusion",
             "x.cc:10:5: runtime error: member access within address which does not point to an object; invalid vptr": "type_confusion",
             "x.c:1:2: runtime error: call to function through pointer to incorrect function type": "type_confusion",
@@ -324,6 +326,70 @@ class SeverityTests(unittest.TestCase):
         for text, expected in cases:
             with self.subTest(expected=expected):
                 self.assertEqual(severity.detect_primitive(text)[0], expected)
+
+    def test_saved_diagnostic_outranks_report_narrative(self) -> None:
+        diagnostic = (
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+            "READ of size 1 at 0x1 thread T0\n"
+            "SCARINESS: 12 (1-byte-read-heap-buffer-overflow)\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+        )
+        for narrative in (
+            "An upstream change called this a use-after-free.",
+            "The iterator discusses a 17-byte span and a sibling double-free.",
+        ):
+            with self.subTest(narrative=narrative):
+                self.assertEqual(
+                    severity.detect_primitive(narrative, diagnostic)[0],
+                    "heap_read_small",
+                )
+        later_run = diagnostic + (
+            "==2==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x2\n"
+            "READ of size 4096 at 0x2 thread T0\n"
+        )
+        self.assertEqual(
+            severity.detect_primitive("use-after-free", later_run)[0],
+            "heap_read_small",
+        )
+
+    def test_wild_address_tag_requires_matching_runtime_direction(self) -> None:
+        common = "==1==ERROR: AddressSanitizer: BUS on unknown address\n"
+        self.assertEqual(
+            severity.detect_primitive(
+                "",
+                common
+                + "The signal is caused by a WRITE memory access.\n"
+                + "SCARINESS: 30 (wild-addr-write)\n",
+            )[0],
+            "wild_write",
+        )
+        self.assertEqual(
+            severity.detect_primitive(
+                "",
+                common
+                + "The signal is caused by a READ memory access.\n"
+                + "SCARINESS: 30 (wild-addr-write)\n",
+            )[0],
+            "bus",
+        )
+
+    def test_saved_diagnostic_preserves_allocator_and_overlap_classes(self) -> None:
+        for token in ("calloc-overflow", "reallocarray-overflow", "pvalloc-overflow"):
+            with self.subTest(token=token):
+                self.assertEqual(
+                    severity.detect_primitive(
+                        "", f"ERROR: AddressSanitizer: {token}\n"
+                    )[0],
+                    "undefined_behavior",
+                )
+        self.assertEqual(
+            severity.detect_primitive(
+                "",
+                "ERROR: AddressSanitizer: strcpy-param-overlap\n"
+                "Address 0x1 is located in stack of thread T0\n",
+            )[0],
+            "stack_write",
+        )
 
     def test_narrative_negation_does_not_invent_findings(self) -> None:
         negatives = (
@@ -889,6 +955,10 @@ class SeverityTests(unittest.TestCase):
             report_id="CRASH-CLI-REPORT",
             surface="network — TLS handler",
         )
+        severity.validation_receipt.write(
+            report, kind="crash", state="reportable",
+            attacker_controls=["bytes"],
+        )
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(severity.main(["--report", str(report)]), 0)
             first = (report / "report.md").read_text()
@@ -907,9 +977,127 @@ class SeverityTests(unittest.TestCase):
             finding=True,
             extra_fields=(("Primitive", "path_traversal"),),
         )
+        severity.validation_receipt.write(
+            finding, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(severity.main(["--batch", str(self.root)]), 0)
         self.assertTrue((finding / "severity.json").is_file())
+
+    def test_report_cli_does_not_score_pending_evidence(self) -> None:
+        finding = self.make_report(
+            "possible path traversal",
+            report_id="FIND-PENDING-SCORE",
+            finding=True,
+            extra_fields=(("Primitive", "path_traversal"),),
+        )
+        severity.validation_receipt.write(
+            finding, kind="finding", state="pending",
+            attacker_controls=["bytes"],
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(
+                severity.main(["--report", str(finding), "--json"]), 0,
+            )
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["severity"]["level"], "Unknown")
+        self.assertFalse((finding / "severity.json").exists())
+
+    def test_native_hardening_receives_no_security_rating(self) -> None:
+        finding = self.make_report(
+            "heap-buffer-overflow\nWRITE of size 8",
+            report_id="FIND-NATIVE-HARDENING",
+            finding=True,
+        )
+        severity.validation_receipt.write(
+            finding, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(severity.main(["--report", str(finding)]), 0)
+        self.assertTrue((finding / "severity.json").is_file())
+        severity.validation_receipt.write(
+            finding, kind="finding", state="native-hardening",
+            attacker_controls=["bytes"],
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(
+                severity.main(["--report", str(finding), "--json"]), 0,
+            )
+        payload = json.loads(output.getvalue())["severity"]
+        self.assertEqual(payload["level"], "No security rating")
+        self.assertIsNone(payload["score"])
+        self.assertFalse((finding / "severity.json").exists())
+        report = (finding / "report.md").read_text(encoding="utf-8")
+        self.assertIn("No security rating (native hardening)", report)
+        self.assertNotIn("## Severity rationale", report)
+        self.assertIsNotNone(
+            severity.validation_receipt.read_current(finding),
+        )
+
+    def test_verified_boundary_fact_overrides_reproducer_carrier(self) -> None:
+        crash = self.make_report(
+            "heap-buffer-overflow\nWRITE of size 8",
+            report_id="CRASH-CARRIER-BOUNDARY",
+            surface="cli — shipped command-line reproducer",
+        )
+        severity.validation_receipt.write(
+            crash, kind="crash", state="reportable",
+            attacker_controls=["bytes"],
+            review_facts={
+                "vulnerable_boundary_surface": "file-format",
+                "reproducer_carrier": "cli",
+            },
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(
+                severity.main(["--report", str(crash), "--json"]), 0,
+            )
+        scored = json.loads(output.getvalue())["severity"]
+        self.assertEqual(scored["fields_used"]["surface"], "file-format")
+        self.assertEqual(scored["surface_label"], "file")
+        self.assert_metrics(scored, AV="N", UI="N")
+
+    def test_unverified_boundary_prose_cannot_override_surface(self) -> None:
+        crash = self.make_report(
+            "heap-buffer-overflow\nWRITE of size 8",
+            report_id="CRASH-UNVERIFIED-BOUNDARY",
+            surface="cli — shipped command-line reproducer",
+            extra=(
+                "The narrative claims Surface: file-format, but no source "
+                "review established that boundary."
+            ),
+        )
+        severity.validation_receipt.write(
+            crash, kind="crash", state="reportable",
+            attacker_controls=["bytes"],
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(
+                severity.main(["--report", str(crash), "--json"]), 0,
+            )
+        scored = json.loads(output.getvalue())["severity"]
+        self.assertEqual(scored["surface_label"], "cli_production")
+        self.assert_metrics(scored, AV="L", UI="P")
+
+    def test_unknown_runtime_class_does_not_claim_narrative_authority(self) -> None:
+        report = self.make_report(
+            "The narrative mentions a heap-buffer-overflow.",
+            report_id="FIND-UNKNOWN-DIAGNOSTIC",
+            finding=True,
+            extra_fields=(("Primitive", "path_traversal"),),
+        )
+        result = severity.compute_severity(
+            (report / "report.md").read_text(encoding="utf-8"),
+            report_dir=report,
+            sanitizer_text="ERROR: HWAddressSanitizer: tag-mismatch\n",
+        )
+        self.assertEqual(result["primitive_key"], "path_traversal")
 
     # ── exploit maturity ───────────────────────────────────────────────
 

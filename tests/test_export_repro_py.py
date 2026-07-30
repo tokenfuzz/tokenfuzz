@@ -80,6 +80,7 @@ def assert_true(condition: bool, name: str, detail: str = "") -> None:
 # ─── Load bin/export-repro as a module ──────────────────────────────
 
 sys.path.insert(0, str(ROOT / "lib"))
+import validation_receipt
 loader = importlib.machinery.SourceFileLoader("export_repro_mod", str(ROOT / "bin" / "export-repro"))
 spec = importlib.util.spec_from_loader("export_repro_mod", loader)
 er = importlib.util.module_from_spec(spec)
@@ -2225,6 +2226,15 @@ assert_eq(0, result_r.returncode,
           f"(stdout={result_r.stdout[-200:]!r} stderr={result_r.stderr[-200:]!r})")
 
 if result_r.returncode == 0:
+    # Direct export does not establish reportability. Model the real triage
+    # order: export, persist the validation receipt, then score.
+    validation_receipt.write(
+        reach_crash_dir, kind="crash", state="reportable",
+    )
+    subprocess.run(
+        [str(ROOT / "bin" / "severity"), "--report", str(reach_crash_dir)],
+        capture_output=True, text=True, env=env, cwd=output_root,
+    )
     report_r = (reach_crash_dir / "REPORT.md").read_text(encoding="utf-8")
     assert_in("## Severity rationale", report_r,
               "severity replay: '## Severity rationale' section emitted")
@@ -2324,6 +2334,9 @@ Strategy: S7
         assert_in("S7", backfill_html,
                   "post-export backfill: renderer exposes Strategy fallback")
 
+    validation_receipt.write(
+        backfill_crash_dir, kind="crash", state="reportable",
+    )
     backfill_severity = subprocess.run(
         [str(ROOT / "bin" / "severity"), "--report", str(backfill_crash_dir), "--json"],
         capture_output=True, text=True, env=env,

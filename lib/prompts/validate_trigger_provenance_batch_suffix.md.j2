@@ -13,7 +13,7 @@ evidence must produce `Uncertain`, never a guessed rejection.
 Output ONE JSON object on a single line, nothing else:
 
 ```json
-{"items":[{"id":"<exact id>","vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<constructed path or empty>","disproof":"<Reject only: named source invariant and clause (a)-(f)>","surface_applies":"yes|no"}]}
+{"items":[{"id":"<exact id>","vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<constructed path or empty>","disproof":"<Reject only: named source invariant and clause (a)-(f)>","rejection_kind":"contract-invalid|unreachable|nonshipping|no-added-boundary|unknown","surface_applies":"yes|no","review_mode":"memory-contract|resource|disclosure|semantic-boundary","vulnerable_boundary_surface":"network|library-api|file-format|cli|dev-tool|internal|unknown","reproducer_carrier":"network|library-api|file-format|cli|harness|runner|unknown","anchors":[{"path":"relative/path.c","line":123,"symbol":"function_or_section","kind":"source|contract|build","excerpt":"exact trimmed source line"}]}]}
 ```
 
 Return exactly one keyed item for every supplied id. The definitions and

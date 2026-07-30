@@ -485,7 +485,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     accepted.mkdir(parents=True)
     (accepted / "report.md").write_text("# Concrete issue\n\nsrc/a.c:10 bounds issue\n", encoding="utf-8")
     (accepted / ".llm-find-quality.json").write_text(json.dumps({"decision_version": "v13-python", "accept": True, "accept_count": 2}), encoding="utf-8")
-    equal("accepted", triage.validate_one_finding(accepted, rejected_results), "finding gate honors accepted cached quorum")
+    equal(
+        "pending",
+        triage.validate_one_finding(accepted, rejected_results),
+        "quality-only cached quorum remains pending without source validation",
+    )
     batched_pending = findings / "FIND-BATCH-PENDING"
     batched_pending.mkdir()
     (batched_pending / "report.md").write_text("# Concrete issue\n\nsrc/c.c:30 state issue\n", encoding="utf-8")
@@ -556,10 +560,20 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     created_at = (bundle_dir / ".crash-created-at").read_text(encoding="utf-8")
     check(bool(created_at.strip()), "crash bundle records its immutable filing clock")
+    original_evidence = crash_bundle.recorded_evidence_context(bundle_dir)
+    bundle_san.write_text(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\nconfirmation run\n",
+        encoding="utf-8",
+    )
     duplicate, duplicate_id = crash_bundle.materialize(
         bundle_results, "2", bundle_case, bundle_san, "asan", "generic", args=("--decode",)
     )
     equal(("DUP", crash_id), (duplicate, duplicate_id), "crash bundle identity prevents duplicate filing")
+    equal(
+        original_evidence,
+        crash_bundle.recorded_evidence_context(bundle_dir),
+        "duplicate confirmation cannot bind context to unsaved diagnostic output",
+    )
     equal(
         created_at,
         (bundle_dir / ".crash-created-at").read_text(encoding="utf-8"),
