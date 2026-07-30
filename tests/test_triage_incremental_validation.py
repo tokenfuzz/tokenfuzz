@@ -167,6 +167,42 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt["state"], "pending")
 
+    def test_reportless_finding_is_explicitly_pending_not_legacy(self) -> None:
+        self.report.unlink()
+        self.assertEqual(
+            triage.validate_one_finding(
+                self.finding, self.root, deadline=0,
+            ),
+            "pending",
+        )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "pending")
+        metrics = benchmark.harvest(self.root)
+        lanes = metrics["validation_waterfall"]["findings"]["lanes"]
+        self.assertEqual(lanes["pending"], 1)
+        self.assertEqual(lanes["legacy-provisional"], 0)
+
+    def test_finished_drain_rejects_a_reportless_finding(self) -> None:
+        self.report.unlink()
+        with mock.patch.dict(os.environ, {"LLM_DECIDE_DISABLE": "1"}):
+            self.assertEqual(
+                triage.validate_find_gate(
+                    self.root, reject_missing_reports=True,
+                ),
+                {"accepted": 0, "rejected": 1, "pending": 0},
+            )
+        self.assertFalse(self.finding.exists())
+        rejected = self.root / "findings-rejected" / self.finding.name
+        self.assertTrue(rejected.is_dir())
+        receipt = validation_receipt.read_current(rejected)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "rejected")
+        self.assertEqual(
+            receipt["detail"],
+            "incomplete missing: missing report.md",
+        )
+
     def test_partial_vote_survives_pass_and_completes_quorum_once(self) -> None:
         with mock.patch.object(
             triage.llm_decide, "llm_decide",
@@ -401,6 +437,18 @@ Generated score text.
         self.assertNotEqual(
             triage._quality_content_sha1(fenced),
             triage._quality_content_sha1(fenced.replace("substantive", "changed")),
+        )
+        generated_code = (
+            base
+            + "\n<!-- enrich:data-flow-snippets -->\n"
+            + "```text\n"
+            + "generated source excerpt\n"
+            + "```\n"
+            + "<!-- /enrich:data-flow-snippets -->\n"
+        )
+        self.assertEqual(
+            triage._quality_content_sha1(base),
+            triage._quality_content_sha1(generated_code),
         )
         contract_before_bare_summary = (
             "## Contract concern\n\nGenerated concern.\n\n"
@@ -810,6 +858,203 @@ Generated score text.
                 {"accepted": 1, "rejected": 0, "pending": 0},
             )
 
+    def test_find_gate_batches_required_second_reject_votes(self) -> None:
+        self.report.write_text(
+            self.report.read_text(encoding="utf-8")
+            + "\nSurface: library-api\n"
+            + "Boundary: public API\n"
+            + "Caller contract: violated\n"
+            + "Trigger source: call-sequence\n",
+            encoding="utf-8",
+        )
+        report_text = triage.read_report_bounded(self.report)
+        (self.finding / ".llm-find-quality.json").write_text(json.dumps(
+            triage._quality_payload(
+                report_text,
+                [
+                    quality_vote(self.finding.name)["items"][0],
+                    quality_vote(self.finding.name)["items"][0],
+                ],
+                2,
+                2,
+                report_identity.content_sha1(self.report),
+            )
+        ))
+        rounds = []
+
+        def batch(
+            directories, *_args, vote_name=".trigger-gate.json", **_kwargs,
+        ):
+            rounds.append(vote_name)
+            for directory in directories:
+                report = directory / "report.md"
+                (directory / vote_name).write_text(json.dumps(
+                    trigger_vote(report, self.root, vote="Reject"),
+                ))
+            return set(directories)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage, "_batch_reach_field_decisions",
+            return_value=(set(), {}, set()),
+        ), mock.patch.object(
+            triage, "fill_reach_fields", return_value=False,
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", side_effect=batch,
+        ), mock.patch.object(
+            triage.subprocess, "run",
+            side_effect=AssertionError("individual trigger fallback"),
+        ):
+            self.assertEqual(
+                triage.validate_find_gate(self.root, workers=1),
+                {"accepted": 0, "rejected": 1, "pending": 0},
+            )
+        self.assertEqual(
+            rounds, [".trigger-gate.json", ".trigger-gate-2.json"],
+        )
+
+    def test_find_gate_finalizes_cached_work_before_unresolved_quality_batch(self) -> None:
+        self.report.write_text(
+            "# State issue\n\nA public request crosses an authorization boundary.\n\n"
+            "Surface: library-api\n"
+            "Primitive: authz_bypass\n"
+            "Class: authorization\n"
+            "Caller contract: obeyed\n"
+            "Caller controls: bytes\n"
+            "Trigger source: bytes\n"
+            "Parameter control: direct\n"
+            "Trusted caller actions: normal public call\n"
+            "Boundary: public request handler\n"
+            "Advisory: no\n",
+            encoding="utf-8",
+        )
+        report_text = triage.read_report_bounded(self.report)
+        (self.finding / ".llm-find-quality.json").write_text(json.dumps(
+            triage._quality_payload(
+                report_text,
+                [
+                    quality_vote(self.finding.name)["items"][0],
+                    quality_vote(self.finding.name)["items"][0],
+                ],
+                2,
+                2,
+                report_identity.content_sha1(self.report),
+            )
+        ))
+        (self.finding / ".trigger-gate.json").write_text(json.dumps(
+            trigger_vote(self.report, self.root),
+        ))
+        unresolved = self.root / "findings" / "FIND-002"
+        unresolved.mkdir()
+        (unresolved / "report.md").write_text(
+            "# Unresolved state issue\n", encoding="utf-8",
+        )
+
+        def quality_batch(*_args, **_kwargs):
+            self.assertIsNotNone(validation_receipt.read_current(self.finding))
+            return {unresolved: []}
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage, "_batch_quality_votes", side_effect=quality_batch,
+        ), mock.patch.object(
+            triage, "_batch_reach_field_decisions",
+            return_value=(set(), {}, set()),
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", return_value=set(),
+        ), mock.patch.object(
+            triage, "_run_tool", return_value=0,
+        ):
+            self.assertEqual(
+                triage.validate_find_gate(self.root, workers=1),
+                {"accepted": 1, "rejected": 0, "pending": 1},
+            )
+
+    def test_crash_gate_processes_cached_work_before_reachability_batch(self) -> None:
+        crashes = self.root / "crashes"
+        ready = crashes / "CRASH-001"
+        unresolved = crashes / "CRASH-002"
+        for directory in (ready, unresolved):
+            directory.mkdir(parents=True)
+            (directory / "sanitizer.txt").write_text(
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n",
+                encoding="utf-8",
+            )
+        ready_report = ready / "report.md"
+        ready_report.write_text(
+            "# Bounds issue\n\n"
+            "Surface: library-api\n"
+            "Primitive: out_of_bounds_read\n"
+            "Class: memory-safety\n"
+            "Caller contract: obeyed\n"
+            "Trigger source: bytes\n"
+            "Parameter control: direct\n"
+            "Boundary: public parser\n"
+            "Caller controls: bytes\n"
+            "Trusted caller actions: normal public call\n"
+            "Advisory: no\n",
+            encoding="utf-8",
+        )
+        (ready / ".trigger-gate.json").write_text(json.dumps(
+            trigger_vote(ready_report, self.root),
+        ))
+        (unresolved / "report.md").write_text(
+            "# Unresolved bounds issue\n", encoding="utf-8",
+        )
+        processed: list[Path] = []
+
+        def triage_one(directory, *_args, **_kwargs):
+            processed.append(directory)
+            return "promoted" if directory == ready else "pending"
+
+        def reach_batch(directories, *_args, **_kwargs):
+            self.assertEqual(processed, [ready])
+            self.assertEqual(directories, [unresolved])
+            return set(), {}, set()
+
+        with mock.patch.object(
+            triage, "triage_one_crash", side_effect=triage_one,
+        ), mock.patch.object(
+            triage, "_batch_reach_field_decisions", side_effect=reach_batch,
+        ):
+            self.assertEqual(
+                triage.triage_crash_dirs(
+                    self.root, self.root, "sampleproj", workers=1,
+                ),
+                {"promoted": 1, "rejected": 0, "pending": 1, "demoted": 0},
+            )
+
+    def test_index_maintenance_rebinds_receipts_after_generated_report_edits(self) -> None:
+        validation_receipt.write(
+            self.finding, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
+        self.assertIsNotNone(validation_receipt.read_current(self.finding))
+        edited = False
+
+        def run(tool, *_args, **_kwargs):
+            nonlocal edited
+            if tool == "cluster-findings" and not edited:
+                self.report.write_text(
+                    self.report.read_text(encoding="utf-8")
+                    + "\n## Fields\n\n"
+                    + "| Field | Value |\n"
+                    + "| --- | --- |\n"
+                    + "| Cluster | FCL-generated |\n",
+                    encoding="utf-8",
+                )
+                edited = True
+            return 0
+
+        with mock.patch.object(triage, "_run_tool", side_effect=run):
+            self.assertTrue(
+                triage.maintain_indexes(self.root, self.root, workers=1),
+            )
+        self.assertTrue(edited)
+        self.assertIsNotNone(validation_receipt.read_current(self.finding))
+
     def test_malformed_batched_trigger_vote_stays_pending(self) -> None:
         report_text = triage.read_report_bounded(self.report)
         (self.finding / ".llm-find-quality.json").write_text(json.dumps(
@@ -1048,6 +1293,312 @@ Generated score text.
             ),
             {"rejection_kind": "no-added-boundary"},
         )
+
+    def test_public_boundary_scope_mismatch_is_conditional_not_rejected(self) -> None:
+        payload = trigger_vote(self.report, self.root, "Reject")
+        payload["review_facts"] = {
+            "rejection_kind": "unreachable",
+            "vulnerable_boundary_surface": "library-api",
+            "reproducer_carrier": "harness",
+        }
+        for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+            (self.finding / name).write_text(
+                json.dumps(payload), encoding="utf-8",
+            )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ACTIVE_BACKEND": "",
+                "BACKEND": "",
+                "TARGET_ROOT": str(self.root),
+            },
+            clear=False,
+        ):
+            self.assertEqual(
+                triage._finding_trigger_disposition(
+                    self.finding, self.report, None,
+                ),
+                "accepted",
+            )
+        self.assertFalse(triage._trigger_rejection_is_dispositive(
+            payload["review_facts"],
+        ))
+        self.assertTrue(triage._trigger_rejection_is_dispositive({
+            **payload["review_facts"],
+            "rejection_kind": "contract-invalid",
+        }))
+
+    def test_legacy_trigger_rejection_is_requeued_for_current_review(self) -> None:
+        rejected = self.root / "findings-rejected"
+        rejected.mkdir()
+        moved = rejected / self.finding.name
+        self.finding.rename(moved)
+        report = moved / "report.md"
+        payload = trigger_vote(report, self.root, "Reject")
+        payload["decision_version"] = "trigger-v4-source-anchors"
+        for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+            (moved / name).write_text(json.dumps(payload), encoding="utf-8")
+        (moved / "REJECTION.md").write_text(
+            "# Rejected artifact\n\n"
+            "Reason: trigger-provenance: state not attacker-reachable\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            triage._restore_stale_trigger_rejections(
+                self.root, kind="finding",
+            ),
+            1,
+        )
+        restored = self.root / "findings" / self.finding.name
+        self.assertTrue(restored.is_dir())
+        self.assertFalse((restored / "REJECTION.md").exists())
+        receipt = validation_receipt.read_current(restored)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "pending")
+
+    def test_current_trigger_rejection_receipt_is_refreshed(self) -> None:
+        rejected = self.root / "findings-rejected"
+        rejected.mkdir()
+        rejected_dir = rejected / self.finding.name
+        self.finding.rename(rejected_dir)
+        report = rejected_dir / "report.md"
+        payload = trigger_vote(report, self.root, "Reject")
+        for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+            (rejected_dir / name).write_text(
+                json.dumps(payload), encoding="utf-8",
+            )
+        (rejected_dir / "REJECTION.md").write_text(
+            "# Rejected artifact\n\n"
+            "Reason: trigger-provenance: documented caller contract violated\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            triage._restore_stale_trigger_rejections(
+                self.root, kind="finding",
+            ),
+            0,
+        )
+        receipt = validation_receipt.read_current(rejected_dir)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "rejected")
+
+    def test_quality_rejection_receipt_refresh_and_stale_requeue(self) -> None:
+        rejected = self.root / "findings-rejected"
+        rejected.mkdir()
+        current_dir = rejected / self.finding.name
+        self.finding.rename(current_dir)
+        report = current_dir / "report.md"
+        report_text = triage.read_report_bounded(report)
+        votes = [
+            {
+                "accept": False, "reason": "not security relevant",
+                "class": "", "severity": "",
+            },
+            {
+                "accept": False, "reason": "not security relevant",
+                "class": "", "severity": "",
+            },
+        ]
+        payload = triage._quality_payload(
+            report_text, votes, 2, 2, report_identity.content_sha1(report),
+        )
+        (current_dir / ".llm-find-quality.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        (current_dir / "REJECTION.md").write_text(
+            "# Rejected artifact\n\nReason: not security relevant\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            triage._refresh_or_restore_quality_rejections(
+                self.root, quorum=2, accept_quorum=2,
+            ),
+            0,
+        )
+        receipt = validation_receipt.read_current(current_dir)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "rejected")
+
+        (current_dir / ".llm-find-quality.json").write_text(
+            json.dumps({**payload, "report_sha1": "stale"}),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            triage._refresh_or_restore_quality_rejections(
+                self.root, quorum=2, accept_quorum=2,
+            ),
+            1,
+        )
+        self.assertTrue((self.root / "findings" / self.finding.name).is_dir())
+
+    def test_deterministic_crash_class_preserves_positive_legacy_vote(self) -> None:
+        crash = self.root / "crashes" / "CRASH-001"
+        crash.mkdir(parents=True)
+        report = crash / "report.md"
+        report.write_text(
+            "# Bounds issue\n\n"
+            "Surface: library-api\n"
+            "Primitive: out_of_bounds_read\n",
+            encoding="utf-8",
+        )
+        payload = trigger_vote(report, self.root)
+        payload["decision_version"] = "trigger-v4-source-anchors"
+        vote = crash / ".trigger-gate.json"
+        vote.write_text(json.dumps(payload), encoding="utf-8")
+        self.assertTrue(triage._materialize_crash_class(crash))
+        self.assertEqual(triage._field(report.read_text(), "Class"), "memory-safety")
+        self.assertEqual(triage._cached_trigger_vote(report, vote), "Uncertain")
+
+    def test_legacy_positive_finding_vote_publishes_conditionally(self) -> None:
+        payload = trigger_vote(self.report, self.root)
+        payload["decision_version"] = "trigger-v4-source-anchors"
+        (self.finding / ".trigger-gate.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        self.assertTrue(triage.fill_reach_fields(
+            self.finding,
+            decision_override={
+                "surface": "library-api",
+                "primitive": "authorization-bypass",
+                "class": "authorization",
+                "caller_contract": "obeyed",
+                "caller_controls": "bytes",
+                "trigger_source": "request",
+            },
+        ))
+        self.assertEqual(
+            triage._cached_trigger_vote(
+                self.report, self.finding / ".trigger-gate.json",
+            ),
+            "Uncertain",
+        )
+        with mock.patch.object(
+            triage, "evaluate_crash_verdict", return_value=("promote", ""),
+        ), mock.patch.object(triage, "_run_tool", return_value=0):
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None,
+                ),
+                "accepted",
+            )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "conditional")
+
+    def test_optional_severity_fields_do_not_block_cached_finalization(self) -> None:
+        self.report.write_text(
+            "# State issue\n\n"
+            "Surface: network\n"
+            "Primitive: authorization_bypass\n"
+            "Caller contract: obeyed\n"
+            "Caller controls: bytes\n"
+            "Trigger source: bytes\n"
+            "Trusted caller actions: normal public call\n"
+            "Boundary: request authorization boundary\n",
+            encoding="utf-8",
+        )
+        report_text = triage.read_report_bounded(self.report)
+        quality = triage._quality_payload(
+            report_text,
+            [
+                quality_vote(self.finding.name)["items"][0],
+                quality_vote(self.finding.name)["items"][0],
+            ],
+            2,
+            2,
+            report_identity.content_sha1(self.report),
+        )
+        (self.finding / ".llm-find-quality.json").write_text(
+            json.dumps(quality), encoding="utf-8",
+        )
+        payload = trigger_vote(self.report, self.root)
+        payload["decision_version"] = "trigger-v4-source-anchors"
+        (self.finding / ".trigger-gate.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        self.assertEqual(
+            triage._missing_reach_fields(self.report.read_text()),
+            {
+                "class": "Class",
+                "parameter_control": "Parameter control",
+                "advisory": "Advisory",
+            },
+        )
+        self.assertTrue(
+            triage._finding_ready_for_cached_finalization(
+                self.finding, 2, 2,
+            ),
+        )
+
+    def test_obsolete_reach_retry_exhaustion_is_reopened(self) -> None:
+        sidecar = self.finding / ".llm_fields.json"
+        sidecar.write_text(
+            json.dumps({"_fill_attempts": 2}), encoding="utf-8",
+        )
+        self.assertTrue(triage.fill_reach_fields(
+            self.finding,
+            decision_override={
+                "surface": "network",
+                "primitive": "authorization_bypass",
+                "class": "authorization",
+            },
+        ))
+        cache = json.loads(sidecar.read_text(encoding="utf-8"))
+        self.assertEqual(
+            cache["_decision_version"],
+            triage._REACH_FIELD_DECISION_VERSION,
+        )
+        self.assertEqual(cache["_fill_attempts"], 1)
+
+    def test_legacy_positive_crash_vote_publishes_conditionally(self) -> None:
+        crash = self.root / "crashes" / "CRASH-001"
+        crash.mkdir(parents=True)
+        report = crash / "report.md"
+        report.write_text(
+            "# Bounds issue\n\n"
+            "Surface: library-api\n"
+            "Primitive: out_of_bounds_read\n"
+            "Caller contract: obeyed\n"
+            "Trigger source: call-sequence\n",
+            encoding="utf-8",
+        )
+        (crash / "sanitizer.txt").write_text(
+            "ERROR: AddressSanitizer: heap-buffer-overflow\n",
+            encoding="utf-8",
+        )
+        (crash / "input.bin").write_bytes(b"x")
+        payload = trigger_vote(report, self.root)
+        payload["decision_version"] = "trigger-v4-source-anchors"
+        (crash / ".trigger-gate.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        with mock.patch.object(
+            triage, "_harness_rooted", return_value=False,
+        ), mock.patch.object(
+            triage, "has_valid_diagnostic", return_value=True,
+        ), mock.patch.object(
+            triage, "_has_memory_safety_signal", return_value=True,
+        ), mock.patch.object(
+            triage, "_bundle_needs_refresh", return_value=False,
+        ), mock.patch.object(
+            triage, "_bundle_missing_artifacts", return_value=[],
+        ), mock.patch.object(
+            triage, "fill_reach_fields", return_value=False,
+        ), mock.patch.object(
+            triage, "evaluate_crash_verdict", return_value=("promote", ""),
+        ), mock.patch.object(
+            triage, "_direct_probe_trigger_bypass", return_value=False,
+        ), mock.patch.object(triage, "_run_tool", return_value=0):
+            self.assertEqual(
+                triage.triage_one_crash(
+                    crash, self.root, self.root, "sampleproj", ["bytes"],
+                ),
+                "promoted",
+            )
+        receipt = validation_receipt.read_current(crash)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "conditional")
 
     def test_ambiguous_surface_review_honors_operator_opt_out(self) -> None:
         with mock.patch.dict(

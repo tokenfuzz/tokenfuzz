@@ -7,6 +7,7 @@ import errno
 import io
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -208,7 +209,11 @@ class BenchmarkMetricsTests(unittest.TestCase):
             metrics["validation_waterfall"]["findings"]["lanes"][
                 "legacy-provisional"
             ],
-            2,
+            1,
+        )
+        self.assertEqual(
+            metrics["validation_waterfall"]["findings"]["lanes"]["rejected"],
+            1,
         )
 
         legacy = self.root / "legacy-row-rejected"
@@ -886,12 +891,31 @@ class BenchmarkMetricsTests(unittest.TestCase):
             finding.mkdir(parents=True)
             rejected.mkdir(parents=True)
             rejected_crash.mkdir(parents=True)
-            (crash / "sanitizer.txt").write_text(ASAN)
-            (crash / "report.md").write_text(f"# {condition} crash\n")
+            (crash / "sanitizer.txt").write_text(
+                ASAN + f"workspace: {Path.home() / 'work' / 'sample.c'}\n"
+            )
+            (crash / "report.md").write_text(
+                f"# {condition} crash\n\n"
+                "Surface: file-format\n"
+                "Primitive: out_of_bounds_read\n"
+                "Class: memory-safety\n"
+                "Caller contract: obeyed\n"
+                "Caller controls: bytes\n"
+                "Trigger source: bytes\n"
+                "Parameter control: direct\n"
+                "Trusted caller actions: normal public call\n"
+                "Boundary: public parser\n"
+                "Advisory: no\n"
+            )
             self.finalize_fixture_crash(crash)
-            (finding / "report.md").write_text(f"# {condition} finding\n")
+            (finding / "report.md").write_text(
+                f"# {condition} finding\n\n"
+                f"workspace: {Path.home() / 'work' / 'sample.c'}\n"
+            )
             (finding / ".keep").touch()
             self.finalize_fixture_finding(finding)
+            self.assertIsNotNone(validation_receipt.read_current(crash))
+            self.assertIsNotNone(validation_receipt.read_current(finding))
             (rejected / "report.md").write_text("# rejected\n")
             (rejected_crash / "REPORT.md").write_text("# Rejected crash\n")
             (results / "crashes-rejected" / "REJECTED-CRASHES.md").write_text(
@@ -910,6 +934,30 @@ class BenchmarkMetricsTests(unittest.TestCase):
         pooled = benchmark.build_pool(bench)
         self.assertEqual(len(pooled["crashes"]), 2)
         self.assertEqual(len(pooled["findings"]), 2)
+        for directory in (
+            *sorted((bench / "pool" / "crashes").glob("CRASH-*")),
+            *sorted((bench / "pool" / "findings").glob("FIND-*")),
+        ):
+            self.assertIsNotNone(validation_receipt.read_current(directory))
+            self.assertNotIn(
+                str(Path.home() / "work"),
+                "\n".join(
+                    path.read_text(encoding="utf-8", errors="replace")
+                    for path in directory.iterdir()
+                    if path.is_file()
+                ),
+            )
+        for directory in sorted((bench / "pool" / "crashes").glob("CRASH-*")):
+            completed = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "bin" / "severity"),
+                    "--report", str(directory),
+                ],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((directory / "severity.json").is_file())
+            self.assertIsNotNone(validation_receipt.read_current(directory))
         self.assertFalse(any(
             (bench / "pool" / "crashes-rejected").glob("CELL-REJECTIONS-*.md")
         ))
@@ -923,6 +971,11 @@ class BenchmarkMetricsTests(unittest.TestCase):
             self.assertEqual(len(list((condition_pool / "crashes").glob("CRASH-*"))), 1)
             self.assertEqual(len(list((condition_pool / "findings").glob("FIND-*"))), 1)
             self.assertTrue((condition_pool / "findings-rejected" / "REJECTED-FINDINGS.md").is_file())
+            for directory in (
+                *condition_pool.joinpath("crashes").glob("CRASH-*"),
+                *condition_pool.joinpath("findings").glob("FIND-*"),
+            ):
+                self.assertIsNotNone(validation_receipt.read_current(directory))
 
     def test_pool_rebuild_survives_concurrent_writer_during_stale_cleanup(self) -> None:
         # A leftover staging tree from an interrupted run must be cleared even
@@ -1264,6 +1317,77 @@ class BenchmarkMetricsTests(unittest.TestCase):
         # The reader is told which runs need regenerating, and why.
         self.assertIn("bin/benchmark --regenerate", text)
         self.assertIn("regenerate", text)
+
+    def test_crosstab_shows_receipt_backed_subset_without_migration_noise(self) -> None:
+        run = self.root / "partial" / "codex" / "20260302-000000"
+        report = {
+            "run": {
+                "runid": "20260302-000000", "target": "sample",
+                "backend": "codex", "model": "gpt-test",
+            },
+            "bench_dir": str(run),
+            "conditions": [{
+                "condition": "harness", "replicates_done": 1,
+                "replicates_total": 1, "wall_median": 60,
+                "unique_crash_clusters": 7, "medium_plus_bugs": 4,
+                "unique_finding_clusters": 5, "medium_plus_findings": 2,
+                "top_severity_level": "High", "tokens": {},
+                "validation_waterfall": {
+                    "crashes": {
+                        "candidates": 7,
+                        "lanes": {
+                            "reportable": 3, "legacy-provisional": 4,
+                        },
+                    },
+                    "findings": {
+                        "candidates": 5,
+                        "lanes": {
+                            "reportable": 5, "legacy-provisional": 0,
+                        },
+                    },
+                },
+                "cells": [{
+                    "cell": "harness-r1", "condition": "harness",
+                    "status": "done", "wall_effective_seconds": 3600,
+                    "metrics": {"exists": True},
+                }],
+            }, {
+                "condition": "model-direct", "replicates_done": 1,
+                "replicates_total": 1, "wall_median": 60,
+                "unique_crash_clusters": 9, "medium_plus_bugs": 4,
+                "unique_finding_clusters": 8, "medium_plus_findings": 2,
+                "top_severity_level": "High", "tokens": {},
+                "validation_waterfall": {
+                    "crashes": {
+                        "candidates": 9,
+                        "lanes": {
+                            "reportable": 9, "legacy-provisional": 0,
+                        },
+                    },
+                    "findings": {
+                        "candidates": 8,
+                        "lanes": {
+                            "reportable": 8, "legacy-provisional": 0,
+                        },
+                    },
+                },
+                "cells": [{
+                    "cell": "model-direct-r1", "condition": "model-direct",
+                    "status": "done", "wall_effective_seconds": 3600,
+                    "metrics": {"exists": True},
+                }],
+            }],
+        }
+        self.write_json(run / "report.json", report)
+        text = benchmark.crosstab(self.root / "partial")
+        self.assertNotIn("publication receipts for only part", text)
+        self.assertNotIn("| regenerate |", text)
+        self.assertIn("7 (4 M+)", text)
+        self.assertIn("5 (2 M+)", text)
+        self.assertIn("9 (4 M+)", text)
+        self.assertIn("8 (2 M+)", text)
+        self.assertNotIn("unmigrated", text)
+        self.assertNotIn("## Runs awaiting review", text)
 
     def test_crosstab_live_progress_totals_include_rejected(self) -> None:
         run = self.root / "live" / "claude" / "20260201-000000"

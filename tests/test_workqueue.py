@@ -487,6 +487,36 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(latest["H-2"]["status"], "PENDING")
         self.assertEqual(latest["H-3"]["status"], "FIND-003")
 
+    def test_artifact_reconsideration_restores_only_prior_rejection(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_hypothesis(status="CRASH-002", card_id="WORK-A")
+        self.add_hypothesis(
+            hyp_id="H-2", status="DISCARDED", card_id="WORK-A",
+            file="src/a.c:app_close:20",
+        )
+        workqueue.record_artifact_rejection(
+            self.results, "CRASH-002-input-bounds",
+            "trigger-provenance: configured scope mismatch",
+            category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
+        )
+
+        changed = workqueue.record_artifact_reconsideration(
+            self.results, "CRASH-002-input-bounds.20260721T120000Z.1",
+            "trigger-review policy changed",
+        )
+
+        self.assertEqual([row["id"] for row in changed], ["H-1"])
+        latest = {
+            row["id"]: row
+            for row in workqueue.read_jsonl(
+                self.results / "state/hypotheses.jsonl",
+            )
+        }
+        self.assertEqual(latest["H-1"]["status"], "CRASH-002")
+        self.assertNotIn("rejected_category", latest["H-1"])
+        self.assertIn("Triage requeued CRASH-002", latest["H-1"]["note"])
+        self.assertEqual(latest["H-2"]["status"], "DISCARDED")
+
     def _reject_unreachable(self, artifact: str) -> None:
         workqueue.record_artifact_rejection(
             self.results, artifact,

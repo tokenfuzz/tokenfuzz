@@ -84,9 +84,13 @@ def _artifact_paths(directory: Path) -> list[Path]:
             if path.is_file():
                 paths.add(path)
     sanitizer = crash_artifacts.find_primary_sanitizer(roots)
-    testcase = crash_artifacts.find_testcase(
-        roots, sanitizer_files=(sanitizer,) if sanitizer else (),
-    )
+    # Publication binds the self-contained bundle, never a mutable scratch
+    # path recorded in an old sanitizer header.  find_testcase deliberately
+    # follows that header before scanning the bundle so export can recover the
+    # exact original input; after export, however, the local copy is the
+    # evidence.  Following the external path here also makes relative_to()
+    # below fail and silently prevents any receipt from being written.
+    testcase = crash_artifacts.find_testcase(roots)
     harness = crash_artifacts.find_harness_source(roots)
     for path in (sanitizer, testcase, harness):
         if path is not None and path.is_file():
@@ -122,11 +126,12 @@ def evidence_record(
     target_config_sha256: str = "",
     attacker_controls: list[str] | None = None,
     review_facts: dict[str, str] | None = None,
+    allow_missing_report: bool = False,
 ) -> dict | None:
     """Build the stable evidence identity used by every publication consumer."""
     directory = Path(directory)
     report = report_identity.find_report(directory)
-    if report is None:
+    if report is None and not allow_missing_report:
         return None
     artifacts: dict[str, dict] = {}
     try:
@@ -140,7 +145,12 @@ def evidence_record(
         return None
     probe = _probe_facts(directory)
     record = {
-        "report_sha1": report_identity.content_sha1(report),
+        # Pending/rejected artifacts may be incomplete by definition. An empty
+        # identity binds the absence itself: adding a report later changes this
+        # field and invalidates the receipt for a fresh pass.
+        "report_sha1": (
+            report_identity.content_sha1(report) if report is not None else ""
+        ),
         "artifacts": artifacts,
         "target_revision": (
             target_revision or str(probe.get("target_revision") or "")
@@ -188,6 +198,7 @@ def write(
         ),
         attacker_controls=attacker_controls,
         review_facts=review_facts,
+        allow_missing_report=state in {"pending", "rejected"},
     )
     if record is None:
         return None
@@ -209,6 +220,66 @@ def write(
     )
     os.replace(temporary, destination)
     return payload
+
+
+def rewrite_after_equivalent_transform(
+    directory: Path, prior_receipt: dict,
+) -> dict | None:
+    """Rebind a current receipt after a trusted representation-only rewrite.
+
+    Callers must capture *prior_receipt* with :func:`read_current` before they
+    rewrite the validated directory.  This is for harness-owned transforms
+    such as path scrubbing, bundle canonicalization, and replay-rate
+    annotation; it must not carry validation across a semantic report edit or
+    a change to the underlying reproducer.
+    """
+    if (
+        not isinstance(prior_receipt, dict)
+        or prior_receipt.get("schema_version") != SCHEMA_VERSION
+        or prior_receipt.get("kind") not in {"finding", "crash"}
+        or prior_receipt.get("state") not in ALL_STATES
+        or not isinstance(prior_receipt.get("evidence"), dict)
+    ):
+        raise ValueError("invalid prior validation receipt")
+    saved = prior_receipt["evidence"]
+    return write(
+        directory,
+        kind=str(prior_receipt["kind"]),
+        state=str(prior_receipt["state"]),
+        detail=str(prior_receipt.get("detail") or ""),
+        target_revision=str(saved.get("target_revision") or ""),
+        target_config_sha256=str(saved.get("target_config_sha256") or ""),
+        attacker_controls=[
+            str(value) for value in (saved.get("attacker_controls") or [])
+        ],
+        review_facts=(
+            saved.get("review_facts")
+            if isinstance(saved.get("review_facts"), dict) else {}
+        ),
+    )
+
+
+def snapshot_current_tree(root: Path) -> dict[Path, dict]:
+    """Capture current accepted-artifact receipts before a tree-wide rewrite."""
+    root = Path(root)
+    snapshots: dict[Path, dict] = {}
+    for kind, prefix in (("crashes", "CRASH-*"), ("findings", "FIND-*")):
+        for directory in sorted((root / kind).glob(prefix)):
+            if not directory.is_dir():
+                continue
+            receipt = read_current(directory)
+            if receipt is not None:
+                snapshots[directory] = receipt
+    return snapshots
+
+
+def rewrite_tree_after_equivalent_transform(
+    snapshots: dict[Path, dict],
+) -> None:
+    """Rebind receipts captured by :func:`snapshot_current_tree`."""
+    for directory, receipt in snapshots.items():
+        if directory.is_dir():
+            rewrite_after_equivalent_transform(directory, receipt)
 
 
 def read_current(directory: Path) -> dict | None:
@@ -266,7 +337,27 @@ def read_current(directory: Path) -> dict | None:
             saved.get("review_facts")
             if isinstance(saved.get("review_facts"), dict) else {}
         ),
+        allow_missing_report=payload.get("state") in {"pending", "rejected"},
     )
+    report = report_identity.find_report(Path(directory))
+    if (
+        current is not None
+        and report is not None
+        and saved.get("report_sha1")
+        in report_identity.content_sha1_candidates(report)
+    ):
+        # Generated fenced snippets were accidentally included in the first
+        # receipt identity. Accept that bounded legacy hash while migrating;
+        # every artifact digest and scope field must still match below.
+        current["report_sha1"] = saved.get("report_sha1")
+        identity_record = {
+            key: value for key, value in current.items()
+            if key != "evidence_id"
+        }
+        encoded = json.dumps(
+            identity_record, sort_keys=True, separators=(",", ":"),
+        ).encode()
+        current["evidence_id"] = hashlib.sha256(encoded).hexdigest()
     if current is None or current != saved:
         return None
     return payload

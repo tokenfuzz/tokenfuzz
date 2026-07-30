@@ -152,3 +152,14 @@ class HeldBundleReceiptTests(unittest.TestCase):
         aged = validation_receipt.read_current(moved)
         self.assertIsNotNone(aged)
         self.assertEqual(aged["state"], "rejected")
+
+    def test_reportless_crash_is_pending_after_regeneration_deadline(self) -> None:
+        (self.crash / "report.md").unlink()
+        status = triage.triage_one_crash(
+            self.crash, self.results, self.results / "target",
+            "sampleproj", ["bytes"], deadline=0, age_pending=False,
+        )
+        self.assertEqual(status, "pending")
+        receipt = validation_receipt.read_current(self.crash)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "pending")

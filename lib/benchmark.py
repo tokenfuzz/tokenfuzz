@@ -1999,9 +1999,8 @@ def validation_waterfall(
                 bool(row.get("evidence_complete")) for row in rows
             ),
             "validated": sum(
-                row.get("validation") in (
-                    validation_receipt.FINAL_STATES | {"rejected"}
-                )
+                row.get("disposition") == "rejected"
+                or row.get("validation") in validation_receipt.FINAL_STATES
                 for row in rows
             ),
             # Gate-state rows are harvested after deterministic routing into
@@ -2012,7 +2011,14 @@ def validation_waterfall(
                 for row in rows
             ),
             "lanes": {
-                state: sum(row.get("validation") == state for row in rows)
+                state: sum(
+                    (
+                        "rejected"
+                        if row.get("disposition") == "rejected"
+                        else row.get("validation")
+                    ) == state
+                    for row in rows
+                )
                 for state in (
                     "reportable", "conditional", "native-hardening",
                     "pending", "rejected", "legacy-provisional",
@@ -3939,12 +3945,17 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
             src = rd / "crashes" / name
             if not is_artifact_dir(src):
                 continue
+            prior_validation = validation_receipt.read_current(src)
             crash_n += 1
             dst_name = f"CRASH-{crash_n:04d}"
             dst = pool / "crashes" / dst_name
             shutil.copytree(src, dst, ignore=ignore_transient,
                             ignore_dangling_symlinks=True)
             _scrub_pooled_tree(dst)
+            if prior_validation is not None:
+                validation_receipt.rewrite_after_equivalent_transform(
+                    dst, prior_validation,
+                )
             members["crashes"][dst_name] = cond
             members["crash_cells"][dst_name] = cell_dir.name
         findings_dir = rd / "findings"
@@ -3953,12 +3964,17 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 src = findings_dir / name
                 if not is_artifact_dir(src):
                     continue
+                prior_validation = validation_receipt.read_current(src)
                 find_n += 1
                 dst_name = f"FIND-{find_n:04d}"
                 dst = pool / "findings" / dst_name
                 shutil.copytree(src, dst, ignore=ignore_transient,
                             ignore_dangling_symlinks=True)
                 _scrub_pooled_tree(dst)
+                if prior_validation is not None:
+                    validation_receipt.rewrite_after_equivalent_transform(
+                        dst, prior_validation,
+                    )
                 members["findings"][dst_name] = cond
         rejected_dir = rd / "findings-rejected"
         if rejected_dir.is_dir():
@@ -4804,8 +4820,24 @@ def _benchmark_roots(bench_root: Path) -> list[Path]:
     return roots
 
 
-def _report_has_validation_lanes(report: dict) -> bool:
-    """True when a report's counts came from the publication-receipt contract.
+def _condition_validation_state(condition: object) -> str:
+    """Return complete, pre-receipt, or incomplete for one condition."""
+    if not isinstance(condition, dict):
+        return "incomplete"
+    waterfall = condition.get("validation_waterfall")
+    if not isinstance(waterfall, dict):
+        return "pre-receipt"
+    for kind in ("crashes", "findings"):
+        lanes = (waterfall.get(kind) or {}).get("lanes")
+        if not isinstance(lanes, dict):
+            return "incomplete"
+        if _as_nonnegative_int(lanes.get("legacy-provisional")):
+            return "incomplete"
+    return "complete"
+
+
+def _report_validation_state(report: dict) -> str:
+    """Return complete, pre-receipt, or incomplete for publication accounting.
 
     Counts predating receipts are not so much wrong as unreproducible: the
     artifacts on disk no longer imply them. Marking such a report provisional
@@ -4814,10 +4846,17 @@ def _report_has_validation_lanes(report: dict) -> bool:
     measured result — in either direction, since recounting a pre-receipt
     corpus under the new gate reads zero.
     """
-    for condition in report.get("conditions") or ():
-        if isinstance(condition, dict) and condition.get("validation_waterfall"):
-            return True
-    return False
+    states = [
+        _condition_validation_state(condition)
+        for condition in (report.get("conditions") or ())
+    ]
+    if states and all(state == "pre-receipt" for state in states):
+        return "pre-receipt"
+    return (
+        "complete"
+        if states and all(state == "complete" for state in states)
+        else "incomplete"
+    )
 
 
 def _reports_by_run_target(bench_root: Path) -> list[dict]:
@@ -4840,9 +4879,10 @@ def _reports_by_run_target(bench_root: Path) -> list[dict]:
         try:
             if report_path.is_file():
                 report = json.loads(report_path.read_text("utf-8"))
-                if not (
-                    report.get("provisional")
-                    or _report_has_validation_lanes(report)
+                validation_state = _report_validation_state(report)
+                if (
+                    not report.get("provisional")
+                    and validation_state == "pre-receipt"
                 ):
                     # A finalized report with no validation lanes was written
                     # before publication receipts existed, so its counts came

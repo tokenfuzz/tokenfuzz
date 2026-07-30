@@ -105,18 +105,33 @@ def _canonicalize_tables(lines: list[str]) -> list[str]:
 _MAX_CACHED_REPORT_CHARS = 256 * 1024
 
 
-def _semantic_report_text(report_text: str, *, canonicalize_tables: bool) -> str:
+def _semantic_report_text(
+    report_text: str, *, canonicalize_tables: bool,
+    strip_enrich_fenced_code: bool = True,
+) -> str:
     if len(report_text) > _MAX_CACHED_REPORT_CHARS:
-        return _semantic_report_text_impl(report_text, canonicalize_tables)
-    return _semantic_report_text_cached(report_text, canonicalize_tables)
+        return _semantic_report_text_impl(
+            report_text, canonicalize_tables, strip_enrich_fenced_code,
+        )
+    return _semantic_report_text_cached(
+        report_text, canonicalize_tables, strip_enrich_fenced_code,
+    )
 
 
 @functools.lru_cache(maxsize=48)
-def _semantic_report_text_cached(report_text: str, canonicalize_tables: bool) -> str:
-    return _semantic_report_text_impl(report_text, canonicalize_tables)
+def _semantic_report_text_cached(
+    report_text: str, canonicalize_tables: bool,
+    strip_enrich_fenced_code: bool,
+) -> str:
+    return _semantic_report_text_impl(
+        report_text, canonicalize_tables, strip_enrich_fenced_code,
+    )
 
 
-def _semantic_report_text_impl(report_text: str, canonicalize_tables: bool) -> str:
+def _semantic_report_text_impl(
+    report_text: str, canonicalize_tables: bool,
+    strip_enrich_fenced_code: bool,
+) -> str:
     """Remove only harness-owned annotations from report cache identity.
 
     Agent-authored prose and code fences remain byte-sensitive. Generated
@@ -131,14 +146,22 @@ def _semantic_report_text_impl(report_text: str, canonicalize_tables: bool) -> s
         normalized = line.rstrip()
         fence = _CODE_FENCE_RE.match(line)
         if code_fence is not None:
-            if not skipped_section and normalized:
+            if (
+                not skipped_section
+                and (not enrich_fence or not strip_enrich_fenced_code)
+                and normalized
+            ):
                 stripped.append(line)
             if fence and fence.group(1)[0] == code_fence:
                 code_fence = None
             continue
         if fence:
             code_fence = fence.group(1)[0]
-            if not skipped_section and normalized:
+            if (
+                not skipped_section
+                and (not enrich_fence or not strip_enrich_fenced_code)
+                and normalized
+            ):
                 stripped.append(line)
             continue
         if _ENRICH_OPEN_RE.fullmatch(normalized):
@@ -179,8 +202,20 @@ def legacy_semantic_text_sha1(report_text: str) -> str:
     return hashlib.sha1(text.encode()).hexdigest()
 
 
+def legacy_enrich_semantic_text_sha1(
+    report_text: str, *, canonicalize_tables: bool = True,
+) -> str:
+    """Identity from before fenced enrich snippets were fully stripped."""
+    text = _semantic_report_text(
+        report_text,
+        canonicalize_tables=canonicalize_tables,
+        strip_enrich_fenced_code=False,
+    )
+    return hashlib.sha1(text.encode()).hexdigest()
+
+
 def content_sha1_candidates(path: Path) -> frozenset[str]:
-    """Current identity plus the one pre-table-canonicalization identity."""
+    """Current identity plus bounded identities written by prior versions."""
     try:
         report_text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -188,6 +223,10 @@ def content_sha1_candidates(path: Path) -> frozenset[str]:
     return frozenset({
         semantic_text_sha1(report_text),
         legacy_semantic_text_sha1(report_text),
+        legacy_enrich_semantic_text_sha1(report_text),
+        legacy_enrich_semantic_text_sha1(
+            report_text, canonicalize_tables=False,
+        ),
     })
 
 

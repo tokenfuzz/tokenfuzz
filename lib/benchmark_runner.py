@@ -39,6 +39,7 @@ import runner_preflight
 import stack_frames
 import target_config
 import triage
+import validation_receipt
 from timeout import run_timeout
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -159,6 +160,7 @@ def drain_find_gate(
                 limit_file.write_text("", encoding="utf-8")
                 counts = triage.validate_find_gate(
                     results, deadline=deadline, target_root_is_product=True,
+                    reject_missing_reports=True,
                 )
                 reset = _find_gate_reset(limit_file)
                 if reset is None:
@@ -1237,6 +1239,10 @@ def reverify_pool_crash_rates(
         if re.search(r"^CRASH_RATE:\s*[0-9]+/[0-9]+", text, re.MULTILINE):
             continue
         candidates.append(crash_dir)
+    prior_validations = {
+        crash_dir: validation_receipt.read_current(crash_dir)
+        for crash_dir in candidates
+    }
     results: dict[Path, bool] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(candidates) or 1)) as executor:
         futures = {
@@ -1254,6 +1260,11 @@ def reverify_pool_crash_rates(
     for crash_dir in candidates:
         if results.get(crash_dir):
             reverified += 1
+            prior_validation = prior_validations.get(crash_dir)
+            if prior_validation is not None:
+                validation_receipt.rewrite_after_equivalent_transform(
+                    crash_dir, prior_validation,
+                )
         else:
             log(f"WARN: reverify could not measure {crash_dir.name} - leaving rate unset ({reason})")
     if reverified:
@@ -1425,6 +1436,8 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                     log(f"WARN: reproducer bundle failed for {crash.name} ({reason})")
     if bundled:
         log(f"reproducer bundles created: {bundled} ({reason})")
+    prior_cluster_validations = validation_receipt.snapshot_current_tree(pool)
+    clustering_succeeded = True
     for kind, tool, output_name in (
         ("crashes", "cluster-crashes", "clusters-crashes.json"),
         ("findings", "cluster-findings", "clusters-findings.json"),
@@ -1433,10 +1446,12 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             continue
         with (bench_dir / output_name).open("w", encoding="utf-8") as output:
             if _run_tool(tool, str(pool), "--json", env=environment, stdout=output):
+                clustering_succeeded = False
                 output.seek(0)
                 output.truncate()
                 output.write('{"clusters":[]}\n')
-        _run_tool(tool, str(pool), env=environment)
+        if _run_tool(tool, str(pool), env=environment):
+            clustering_succeeded = False
     # Cluster the rejected side the same way, so "unique kept" and "unique cut"
     # count comparably — a raw reject tally against a deduplicated accept tally
     # measures two different things. The tool's root detection already accepts a
@@ -1457,6 +1472,10 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                 output.seek(0)
                 output.truncate()
                 output.write('{"clusters":[]}\n')
+    if clustering_succeeded:
+        validation_receipt.rewrite_tree_after_equivalent_transform(
+            prior_cluster_validations,
+        )
     metrics.split_pool(bench_dir, stage_name)
     if not triage.maintain_indexes(pool, target):
         log("WARN: combined pool index maintenance failed")

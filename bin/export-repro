@@ -3832,24 +3832,8 @@ def main(argv: list[str]) -> int:
         shutil.rmtree(stage, ignore_errors=True)
 
     if prior_validation is not None:
-        saved_evidence = prior_validation.get("evidence") or {}
-        validation_receipt.write(
-            out_dir,
-            kind=str(prior_validation["kind"]),
-            state=str(prior_validation["state"]),
-            detail=str(prior_validation.get("detail") or ""),
-            target_revision=str(saved_evidence.get("target_revision") or ""),
-            target_config_sha256=str(
-                saved_evidence.get("target_config_sha256") or "",
-            ),
-            attacker_controls=[
-                str(value)
-                for value in (saved_evidence.get("attacker_controls") or [])
-            ],
-            review_facts=(
-                saved_evidence.get("review_facts")
-                if isinstance(saved_evidence.get("review_facts"), dict) else {}
-            ),
+        validation_receipt.rewrite_after_equivalent_transform(
+            out_dir, prior_validation,
         )
 
     # ── Re-apply severity ────────────────────────────────────────────

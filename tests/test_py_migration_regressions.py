@@ -1583,6 +1583,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     (cached_reach_dir / ".llm_fields.json").write_text(
         json.dumps({
             "_fill_attempts": 2,
+            "_decision_version": triage._REACH_FIELD_DECISION_VERSION,
             "trusted_caller_actions": "normal public call",
         }),
         encoding="utf-8",

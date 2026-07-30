@@ -720,17 +720,21 @@ class SeverityTests(unittest.TestCase):
         ))
         self.assert_metrics(constrained_sequence, AV="L", AT="P")
 
-        for report_id, trigger in (("CRASH-OUTSIDE", "both"), ("CRASH-ALIAS", "sequence")):
-            with self.subTest(trigger=trigger):
-                outside = self.score(self.make_report(
-                    "attempting free on address which was not malloc()-ed",
-                    report_id=report_id,
-                    controls=trigger,
-                    trigger=trigger,
-                    target_controls=("bytes",),
-                ))
-                self.assert_metrics(outside, AV="L", AT="P")
-                self.assertEqual(outside["level"], "Low")
+        mixed = self.score(self.make_report(
+            "attempting free on address which was not malloc()-ed",
+            report_id="CRASH-OUTSIDE", controls="both", trigger="both",
+            target_controls=("bytes",),
+        ))
+        self.assert_metrics(mixed, AV="N", MAT="P", MVC="")
+        self.assertEqual(mixed["level"], "High")
+
+        sequence = self.score(self.make_report(
+            "attempting free on address which was not malloc()-ed",
+            report_id="CRASH-ALIAS", controls="sequence", trigger="sequence",
+            target_controls=("bytes",),
+        ))
+        self.assert_metrics(sequence, AV="L", AT="P")
+        self.assertEqual(sequence["level"], "Low")
 
     def test_structured_trigger_beats_incidental_prose(self) -> None:
         result = self.score(self.make_report(
@@ -1128,10 +1132,10 @@ class SeverityTests(unittest.TestCase):
 
     # ── declared trigger components ────────────────────────────────────
 
-    def test_taxonomy_caller_controls_localises_like_trigger_both(self) -> None:
+    def test_taxonomy_caller_controls_preserves_attacker_byte_path(self) -> None:
         """`Trigger source: bytes` + `Caller controls: call-sequence` states
-        what a crash states as `Trigger source: both`. Reading only one field
-        scored the same fact Medium on findings and Low on crashes."""
+        what a crash states as `Trigger source: both`. Attacker-controlled
+        bytes keep the public surface vector; the local ordering is MAT:P."""
         report = self.make_report(
             "options are dropped on a reused context, leaving XXE enabled",
             report_id="FIND-TOKENCTL", finding=True, trigger="bytes",
@@ -1139,7 +1143,7 @@ class SeverityTests(unittest.TestCase):
             extra_fields=(("Primitive", "xxe"),),
         )
         result = self.score(report)
-        self.assert_metrics(result, AV="L", AT="P")
+        self.assert_metrics(result, AV="N", MAT="P", MVC="")
 
     def test_placeholder_cell_does_not_shadow_an_inferred_bare_label(self) -> None:
         """Triage writes inferred reach fields as bare labels below a table

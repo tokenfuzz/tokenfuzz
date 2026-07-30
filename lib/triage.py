@@ -233,6 +233,172 @@ def _reject(
     return destination
 
 
+_TRIGGER_REJECTION_RE = re.compile(
+    r"^trigger-provenance(?:\s|\(|:)", re.IGNORECASE,
+)
+_PUBLIC_BOUNDARY_SURFACES = {
+    "network", "library-api", "file-format", "cli",
+}
+
+
+def _rejection_reason(directory: Path) -> str:
+    try:
+        text = (directory / "REJECTION.md").read_text(
+            encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return ""
+    match = re.search(r"^Reason:\s*(.+)$", text, re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _trigger_rejection_is_dispositive(facts: dict[str, str]) -> bool:
+    """Whether reviewed trigger evidence may remove a security artifact."""
+    kind = facts.get("rejection_kind", "")
+    surface = facts.get("vulnerable_boundary_surface", "")
+    if kind == "unreachable" and surface in _PUBLIC_BOUNDARY_SURFACES:
+        # A demonstrated public boundary outside configured attacker controls
+        # carries an attack precondition; it is not made unreal by that scope
+        # mismatch. evaluate_crash_verdict/severity records the downgrade.
+        return False
+    return kind in {"contract-invalid", "unreachable", "nonshipping"}
+
+
+def _restore_rejected_artifact(
+    directory: Path, active_root: Path, *, kind: str, detail: str,
+) -> Path:
+    """Move one superseded rejection back to its active validation lane."""
+    active_root.mkdir(parents=True, exist_ok=True)
+    destination = _unique_destination(active_root, directory.name)
+    shutil.move(str(directory), destination)
+    (destination / "REJECTION.md").unlink(missing_ok=True)
+    (destination / "validation.json").unlink(missing_ok=True)
+    validation_receipt.write(
+        destination, kind=kind, state="pending", detail=detail,
+    )
+    try:
+        workqueue.record_artifact_reconsideration(
+            active_root.parent, directory.name, detail,
+        )
+    except OSError as exc:
+        print(
+            f"WARN: could not restore structured state for {directory.name}: {exc}",
+            file=sys.stderr,
+        )
+    return destination
+
+
+def _restore_stale_trigger_rejections(
+    results_dir: Path, *, kind: str,
+) -> int:
+    """Requeue trigger Rejects that the current gate cannot affirm.
+
+    Reject votes from an older prompt are intentionally not reusable. Leaving
+    their directories in the rejected tree nevertheless made that fail-open
+    rule ineffective: regeneration never visited them. Current votes are also
+    requeued when their source facts say the vulnerable boundary is public and
+    the only objection is configured threat-model reachability.
+    """
+    if kind == "crash":
+        rejected_root = results_dir / "crashes-rejected"
+        active_root = results_dir / "crashes"
+        prefix = "CRASH-*"
+    elif kind == "finding":
+        rejected_root = results_dir / "findings-rejected"
+        active_root = results_dir / "findings"
+        prefix = "FIND-*"
+    else:
+        raise ValueError(f"unsupported artifact kind: {kind}")
+    restored = 0
+    for directory in sorted(rejected_root.glob(prefix)):
+        if (
+            not directory.is_dir()
+            or not _TRIGGER_REJECTION_RE.match(_rejection_reason(directory))
+        ):
+            continue
+        report = _report(directory)
+        vote_files = (
+            directory / ".trigger-gate.json",
+            directory / ".trigger-gate-2.json",
+        )
+        current_votes = (
+            [_cached_trigger_vote(report, path) for path in vote_files]
+            if report is not None else []
+        )
+        facts = (
+            _source_review_facts(
+                report, vote_files, rejection_quorum=2,
+            )
+            if report is not None else {}
+        )
+        if (
+            current_votes == ["Reject", "Reject"]
+            and _trigger_rejection_is_dispositive(facts)
+        ):
+            if validation_receipt.read_current(directory) is None:
+                validation_receipt.write(
+                    directory, kind=kind, state="rejected",
+                    detail=_rejection_reason(directory),
+                    review_facts=facts,
+                )
+            continue
+        _restore_rejected_artifact(
+            directory, active_root, kind=kind,
+            detail="requeued after trigger-review policy or schema change",
+        )
+        restored += 1
+    if restored:
+        print(
+            f"INFO: requeued {restored} {kind} trigger rejection(s) "
+            "for current source review",
+            file=sys.stderr,
+        )
+    return restored
+
+
+def _refresh_or_restore_quality_rejections(
+    results_dir: Path, *, quorum: int, accept_quorum: int,
+) -> int:
+    """Bind current quality Rejects and requeue the stale remainder."""
+    rejected_root = results_dir / "findings-rejected"
+    restored = 0
+    for directory in sorted(rejected_root.glob("FIND-*")):
+        if (
+            not directory.is_dir()
+            or _TRIGGER_REJECTION_RE.match(_rejection_reason(directory))
+        ):
+            continue
+        report = _report(directory)
+        cache_path = directory / ".llm-find-quality.json"
+        cache = _finding_cache(cache_path)
+        current_reject = (
+            report is not None
+            and _quality_cache_matches(
+                cache_path, cache, report, read_report_bounded(report),
+            )
+            and _quality_terminal(cache, quorum, accept_quorum)
+            and cache.get("accept") is False
+        )
+        if current_reject:
+            if validation_receipt.read_current(directory) is None:
+                validation_receipt.write(
+                    directory, kind="finding", state="rejected",
+                    detail=_rejection_reason(directory),
+                )
+            continue
+        _restore_rejected_artifact(
+            directory, results_dir / "findings", kind="finding",
+            detail="requeued because the finding-quality rejection is stale",
+        )
+        restored += 1
+    if restored:
+        print(
+            f"INFO: requeued {restored} stale finding-quality rejection(s)",
+            file=sys.stderr,
+        )
+    return restored
+
+
 def demote_to_finding(directory: Path, results_dir: Path, reason: str) -> Path:
     """Move a runtime-only CRASH artifact into the findings pipeline."""
     report = _report(directory)
@@ -372,6 +538,7 @@ _ALL_REACH_FIELD_LABELS = {
     **_REACH_FIELD_LABELS,
     **_OPTIONAL_REACH_FIELD_LABELS,
 }
+_REACH_FIELD_DECISION_VERSION = "reach-fields-v2-complete-publication"
 _REACH_FIELD_ENUMS = {
     "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
@@ -452,6 +619,23 @@ def _accepted_reach_fields(
     }
 
 
+def _reach_field_cache(path: Path) -> dict:
+    """Retain valid field evidence while resetting obsolete retry exhaustion."""
+    cache = _finding_cache(path)
+    if cache.get("_decision_version") == _REACH_FIELD_DECISION_VERSION:
+        return cache
+    migrated = {
+        key: value
+        for key in _ALL_REACH_FIELD_LABELS
+        if (value := _valid_reach_field(key, cache.get(key)))
+    }
+    migrated.update({
+        "_decision_version": _REACH_FIELD_DECISION_VERSION,
+        "_fill_attempts": 0,
+    })
+    return migrated
+
+
 def _materialize_reach_fields(
     report: Path, accepted: dict[str, str],
 ) -> bool:
@@ -481,6 +665,49 @@ def _materialize_reach_fields(
     return True
 
 
+def _materialize_reach_fields_preserving_positive_votes(
+    report: Path, accepted: dict[str, str],
+) -> bool:
+    """Advance fail-open trigger evidence across one harness field annotation."""
+    vote_files = (
+        report.parent / ".trigger-gate.json",
+        report.parent / ".trigger-gate-2.json",
+    )
+    prior_votes = {
+        path: _cached_trigger_vote(report, path)
+        for path in vote_files
+    }
+    if not _materialize_reach_fields(report, accepted):
+        return False
+    # A positive trigger review cannot hide a bug. Reach fields are generated
+    # by the harness from the same report evidence, so preserve only fail-open
+    # votes captured immediately before this exact annotation. A Reject is
+    # deliberately never carried across semantic content.
+    current_sha1 = report_identity.content_sha1(report)
+    for path, vote in prior_votes.items():
+        if vote not in {"Promote", "Uncertain"}:
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload["content_sha1"] = current_sha1
+        _write_atomic_json(path, payload)
+    return True
+
+
+def _materialize_crash_class(directory: Path) -> bool:
+    """Fill the class that follows deterministically from crash admission."""
+    report = _report(directory)
+    if report is None or _reach_field_present(_read(report), "Class"):
+        return False
+    return _materialize_reach_fields_preserving_positive_votes(
+        report, {"class": "memory-safety"},
+    )
+
+
 _NO_REACH_DECISION = object()
 
 
@@ -508,8 +735,8 @@ def fill_reach_fields(
     if not missing:
         return False
     sidecar = directory / ".llm_fields.json"
-    cache = _finding_cache(sidecar)
-    changed = _materialize_reach_fields(
+    cache = _reach_field_cache(sidecar)
+    changed = _materialize_reach_fields_preserving_positive_votes(
         report, _accepted_reach_fields(cache, missing),
     )
     if changed:
@@ -541,7 +768,10 @@ def fill_reach_fields(
     _write_atomic_json(sidecar, cache)
     if not accepted:
         return changed
-    return _materialize_reach_fields(report, accepted) or changed
+    return (
+        _materialize_reach_fields_preserving_positive_votes(report, accepted)
+        or changed
+    )
 
 
 def _batch_reach_field_decisions(
@@ -566,10 +796,12 @@ def _batch_reach_field_decisions(
         missing = _missing_reach_fields(report_text)
         if not missing:
             continue
-        cache = _finding_cache(directory / ".llm_fields.json")
+        cache = _reach_field_cache(directory / ".llm_fields.json")
         cached = _accepted_reach_fields(cache, missing)
         if cached:
-            if _materialize_reach_fields(report, cached):
+            if _materialize_reach_fields_preserving_positive_votes(
+                report, cached,
+            ):
                 prefilled.add(directory)
             report_text = report.read_text(encoding="utf-8", errors="replace")
             narrative = report_text[:6000]
@@ -1247,8 +1479,9 @@ def _batch_finding_trigger_votes(
     usage_index: str | os.PathLike[str] | None,
     target_root_is_product: bool,
     workers: int = 4,
+    vote_name: str = ".trigger-gate.json",
 ) -> set[Path]:
-    """Populate independent keyed trigger votes with shared CLI startup."""
+    """Populate one round of independent keyed trigger votes in batches."""
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     target_root = Path(os.environ.get("TARGET_ROOT", ""))
     if not backend or not target_root.is_dir():
@@ -1257,7 +1490,7 @@ def _batch_finding_trigger_votes(
         return set(directories)
     pending = []
     for directory in directories:
-        vote_file = directory / ".trigger-gate.json"
+        vote_file = directory / vote_name
         report = _report(directory)
         if report is None:
             continue
@@ -1470,9 +1703,7 @@ def _crash_trigger_gate(
         ),
         rejection_quorum=2,
     )
-    return facts.get("rejection_kind") in {
-        "contract-invalid", "unreachable", "nonshipping",
-    }
+    return _trigger_rejection_is_dispositive(facts)
 
 
 def _review_ambiguous_crash_surface(
@@ -1515,7 +1746,26 @@ def triage_one_crash(
     confirmed_trigger_bypass: bool = False,
     age_pending: bool = True,
 ) -> str:
+    report = _report(crash_dir)
     if _deadline_expired(deadline):
+        current_receipt = validation_receipt.read_current(crash_dir)
+        if (
+            current_receipt is not None
+            and current_receipt.get("state") in validation_receipt.FINAL_STATES
+        ):
+            return "promoted"
+        validation_receipt.write(
+            crash_dir, kind="crash", state="pending",
+            detail=(
+                "incomplete missing: missing report.md"
+                if report is None else "crash triage deadline expired"
+            ),
+        )
+        if report is None and current_receipt is None:
+            print(
+                f"WARN: {crash_dir}: missing report; held pending",
+                file=sys.stderr,
+            )
         return "pending"
     usage_index = benchmark._find_index_jsonl(results_dir)
     rejected_root = results_dir / "crashes-rejected"
@@ -1541,7 +1791,6 @@ def triage_one_crash(
     # is held promotion-pending for up to CRASH_PROMOTION_PENDING_MAX passes
     # rather than rejected, so a real crash the agent is still bundling is not
     # lost. Only a persistently incomplete dir ages out to crashes-rejected/.
-    report = _report(crash_dir)
     missing: list[str] = []
     if report is None:
         missing.append("report.md")
@@ -1650,7 +1899,10 @@ def triage_one_crash(
     )
     if (
         source_review_required
-        and not any(vote in {"Promote", "Reject"} for vote in trigger_votes)
+        and not any(
+            vote in {"Promote", "Reject", "Uncertain"}
+            for vote in trigger_votes
+        )
     ):
         validation_receipt.write(
             crash_dir, kind="crash", state="pending",
@@ -1698,13 +1950,70 @@ def triage_crash_dirs(
     age_pending: bool = True,
 ) -> dict[str, int]:
     results = Path(results_dir)
+    _restore_stale_trigger_rejections(results, kind="crash")
     route_finding_diagnostics(results)
     crashes = results / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
     controls = attacker_controls or ["bytes"]
     bypasses = confirmed_trigger_bypasses or set()
     directories = [path for path in sorted(crashes.glob("CRASH-*")) if path.is_dir()]
+    for directory in directories:
+        sanitizer = _sanitizer_file(directory)
+        sanitizer_text = _read(sanitizer) if sanitizer else ""
+        if (
+            _has_memory_safety_signal(sanitizer_text)
+            and not autodiscard_reason(sanitizer_text)
+        ):
+            _materialize_crash_class(directory)
     counts = {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0}
+    if not directories:
+        return counts
+    # A current final receipt needs no repeated triage. Cached trigger reviews
+    # whose core boundary verdict is complete also need no provider call, so
+    # finish those before optional severity enrichment can consume the shared
+    # deadline.
+    finalized: list[Path] = []
+    cached_ready: list[Path] = []
+    for directory in directories:
+        receipt = validation_receipt.read_current(directory)
+        if (
+            receipt is not None
+            and receipt.get("kind") == "crash"
+            and receipt.get("state") in validation_receipt.FINAL_STATES
+        ):
+            finalized.append(directory)
+            continue
+        report = _report(directory)
+        if report is None:
+            continue
+        reach_verdict, _reach_detail = evaluate_crash_verdict(
+            _read(report), controls,
+        )
+        if reach_verdict == "incomplete":
+            continue
+        if (
+            os.environ.get("CRASH_TRIGGER_GATE", "1") == "0"
+            or directory in bypasses
+            or _cached_trigger_resolution(directory, report)
+        ):
+            cached_ready.append(directory)
+    counts["promoted"] += len(finalized)
+    if cached_ready:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            cached_statuses = list(pool.map(
+                lambda directory: triage_one_crash(
+                    directory, results, Path(target_root), target_slug, controls,
+                    findings_only, deadline, target_root_is_product,
+                    _NO_REACH_DECISION, directory in bypasses, age_pending,
+                ),
+                cached_ready,
+            ))
+        for status in cached_statuses:
+            counts[status] = counts.get(status, 0) + 1
+    handled = set(finalized) | set(cached_ready)
+    directories = [
+        directory for directory in directories if directory not in handled
+    ]
     if not directories:
         return counts
     reach_directories = []
@@ -2055,14 +2364,73 @@ def _finding_trigger_disposition(
             return "pending"
         if facts.get("rejection_kind") == "no-added-boundary":
             return "native-hardening"
-        if facts.get("rejection_kind") in {
-            "contract-invalid", "unreachable", "nonshipping",
-        }:
+        if _trigger_rejection_is_dispositive(facts):
             return "rejected"
-        return "pending"
+        return "accepted"
     if vote == "Promote":
         return "accepted"
+    if vote == "Uncertain":
+        # A legacy positive or inconclusive current review cannot justify
+        # suppressing a quality-confirmed finding. Publish it conditionally;
+        # _finalize_accepted_finding binds that weaker state into the receipt.
+        return "accepted"
     return "pending"
+
+
+def _cached_trigger_resolution(directory: Path, report: Path) -> bool:
+    """Whether trigger adjudication can finish without a provider call."""
+    try:
+        bypass = json.loads(
+            (directory / ".trigger-gate-bypass.json").read_text(
+                encoding="utf-8",
+            )
+        )
+    except (OSError, ValueError):
+        bypass = {}
+    if isinstance(bypass, dict) and bypass.get("bypass") is True:
+        return True
+    first = _cached_trigger_vote(report, directory / ".trigger-gate.json")
+    if first in {"Promote", "Uncertain"}:
+        return True
+    if first == "Reject":
+        return _cached_trigger_vote(
+            report, directory / ".trigger-gate-2.json",
+        ) in {"Promote", "Uncertain", "Reject"}
+    return False
+
+
+def _finding_ready_for_cached_finalization(
+    finding_dir: Path, quorum: int, accept_quorum: int,
+) -> bool:
+    """Whether the quality gate can finish this finding without model work."""
+    if (
+        (finding_dir / ".keep").is_file()
+        or (finding_dir / ".reviewed").is_file()
+    ):
+        return True
+    report = _report(finding_dir)
+    if report is None:
+        return False
+    report_text = read_report_bounded(report)
+    cache_path = finding_dir / ".llm-find-quality.json"
+    cache = _finding_cache(cache_path)
+    if (
+        not _quality_cache_matches(
+            cache_path, cache, report, report_text,
+        )
+        or not _quality_terminal(cache, quorum, accept_quorum)
+    ):
+        return False
+    if cache.get("accept") is False:
+        return True
+    reach_verdict, _reach_detail = evaluate_crash_verdict(
+        _read(report), triage_validate.trigger_attacker_controls(),
+    )
+    return (
+        cache.get("accept") is True
+        and reach_verdict != "incomplete"
+        and _cached_trigger_resolution(finding_dir, report)
+    )
 
 
 def _finalize_accepted_finding(
@@ -2121,9 +2489,17 @@ def _finalize_accepted_finding(
             attacker_controls=controls,
         )
         return "pending"
-    state = "conditional" if reach_verdict == "contract-flag" else "reportable"
     review_facts = _source_review_facts(
         report, (finding_dir / ".trigger-gate.json",),
+    )
+    trigger_vote = _cached_trigger_vote(
+        report, finding_dir / ".trigger-gate.json",
+    )
+    state = (
+        "conditional"
+        if reach_verdict == "contract-flag"
+        or trigger_vote in {"Reject", "Uncertain"}
+        else "reportable"
     )
     validation_receipt.write(
         finding_dir, kind="finding", state=state,
@@ -2155,18 +2531,47 @@ def validate_one_finding(
     target_root_is_product: bool = False,
     initial_votes: list[dict] | None = None,
     defer_trigger: bool = False,
+    reject_missing_report: bool = False,
 ) -> str:
     pinned = (
         (finding_dir / ".keep").is_file()
         or (finding_dir / ".reviewed").is_file()
     )
-    if _deadline_expired(deadline) and not pinned:
-        return "pending"
-    usage_index = benchmark._find_index_jsonl(results_dir)
     report = _report(finding_dir)
     if report is None:
+        if reject_missing_report:
+            (finding_dir / ".needs-content").unlink(missing_ok=True)
+            _reject(
+                finding_dir,
+                results_dir / "findings-rejected",
+                "incomplete missing: missing report.md",
+            )
+            return "rejected"
         (finding_dir / ".needs-content").touch()
+        current_receipt = validation_receipt.read_current(finding_dir)
+        validation_receipt.write(
+            finding_dir, kind="finding", state="pending",
+            detail="missing report",
+        )
+        if current_receipt is None:
+            print(
+                f"WARN: {finding_dir}: missing report; held pending",
+                file=sys.stderr,
+            )
         return "pending"
+    if _deadline_expired(deadline) and not pinned:
+        current_receipt = validation_receipt.read_current(finding_dir)
+        if (
+            current_receipt is not None
+            and current_receipt.get("state") in validation_receipt.FINAL_STATES
+        ):
+            return "accepted"
+        validation_receipt.write(
+            finding_dir, kind="finding", state="pending",
+            detail="finding validation deadline expired",
+        )
+        return "pending"
+    usage_index = benchmark._find_index_jsonl(results_dir)
     (finding_dir / ".needs-content").unlink(missing_ok=True)
     if pinned:
         controls = triage_validate.trigger_attacker_controls()
@@ -2273,6 +2678,10 @@ def validate_one_finding(
             f"Reason: {rejected_reason}\n",
             encoding="utf-8",
         )
+    validation_receipt.write(
+        finding_dir, kind="finding", state="pending",
+        detail="finding quality review is incomplete",
+    )
     return "pending"
 
 
@@ -2354,10 +2763,17 @@ def validate_find_gate(
     accept_quorum: int | None = None,
     deadline: float | None = None,
     target_root_is_product: bool = False,
+    reject_missing_reports: bool = False,
 ) -> dict[str, int]:
     results = Path(results_dir)
     findings = results / "findings"
     findings.mkdir(parents=True, exist_ok=True)
+    q = quorum or _positive_int_env("FIND_GATE_QUORUM", 2)
+    aq = accept_quorum or _positive_int_env("FIND_GATE_ACCEPT_QUORUM", 2)
+    _restore_stale_trigger_rejections(results, kind="finding")
+    _refresh_or_restore_quality_rejections(
+        results, quorum=q, accept_quorum=aq,
+    )
     # Stamp discovery before the deadline-gated vote work below: when the wall
     # budget is already spent the votes are skipped, but the finding was still
     # found and must keep its place on the timeline. This is telemetry for a
@@ -2372,10 +2788,33 @@ def validate_find_gate(
             file=sys.stderr,
         )
     directories = [path for path in sorted(findings.glob("FIND-*")) if path.is_dir()]
-    q = quorum or _positive_int_env("FIND_GATE_QUORUM", 2)
-    aq = accept_quorum or _positive_int_env("FIND_GATE_ACCEPT_QUORUM", 2)
     timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
+    # Finish conclusive cached work before asking a provider for anything.
+    # Regeneration often has a large legacy backlog alongside already-reviewed
+    # artifacts. Letting the backlog consume the shared deadline first made
+    # those artifacts look unadjudicated even though no model call was needed.
+    cached_directories = [
+        directory for directory in directories
+        if _finding_ready_for_cached_finalization(directory, q, aq)
+    ]
+    if cached_directories:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            cached_statuses = list(pool.map(
+                lambda directory: validate_one_finding(
+                    directory, results, quorum=q, accept_quorum=aq,
+                    timeout=timeout, deadline=deadline,
+                    target_root_is_product=target_root_is_product,
+                    reject_missing_report=reject_missing_reports,
+                ),
+                cached_directories,
+            ))
+        for status in cached_statuses:
+            counts[status] += 1
+    cached_set = set(cached_directories)
+    directories = [
+        directory for directory in directories if directory not in cached_set
+    ]
     initial_votes = _batch_quality_votes(
         directories, results, q, aq, timeout, deadline, workers,
     ) if directories and not _deadline_expired(deadline) else {}
@@ -2387,6 +2826,7 @@ def validate_find_gate(
                 target_root_is_product=target_root_is_product,
                 initial_votes=initial_votes.get(directory),
                 defer_trigger=True,
+                reject_missing_report=reject_missing_reports,
             ),
             directories,
         ))
@@ -2411,15 +2851,38 @@ def validate_find_gate(
         accepted_quality, results, deadline, usage_index,
         target_root_is_product, workers,
     )
+    second_trigger_directories = []
+    for directory in accepted_quality:
+        report = _report(directory)
+        if (
+            report is not None
+            and _cached_trigger_vote(
+                report, directory / ".trigger-gate.json",
+            ) == "Reject"
+        ):
+            second_trigger_directories.append(directory)
+    second_trigger_attempted = (
+        _batch_finding_trigger_votes(
+            second_trigger_directories, results, deadline, usage_index,
+            target_root_is_product, workers, vote_name=".trigger-gate-2.json",
+        )
+        if second_trigger_directories else set()
+    )
     for directory, status in zip(directories, statuses):
         if status == "quality-accepted":
             report = _report(directory)
             if (
-                directory in trigger_attempted
-                and (
-                    report is None
-                    or _cached_trigger_vote(
+                report is None
+                or (
+                    directory in trigger_attempted
+                    and _cached_trigger_vote(
                         report, directory / ".trigger-gate.json",
+                    ) is None
+                )
+                or (
+                    directory in second_trigger_attempted
+                    and _cached_trigger_vote(
+                        report, directory / ".trigger-gate-2.json",
                     ) is None
                 )
             ):
@@ -2474,6 +2937,7 @@ def maintain_indexes(
     workers: int = 4,
 ) -> bool:
     results = Path(results_dir)
+    prior_validations = validation_receipt.snapshot_current_tree(results)
     for name in ("crashes", "crashes-rejected", "findings", "findings-rejected"):
         (results / name).mkdir(parents=True, exist_ok=True)
     benchmark.write_rejected_crashes_index(results / "crashes-rejected")
@@ -2494,4 +2958,12 @@ def maintain_indexes(
         existing = [str(path) for path in summaries if path.is_file() and path.stat().st_size]
         if existing:
             succeeded = _run_tool("render-md", *existing, "--html-sibling") == 0 and succeeded
+    if succeeded:
+        # Clustering, enrichment, and Markdown normalization change only the
+        # maintainer-facing representation. Rebind after the whole successful
+        # transaction so condition copies and severity consumers see the final
+        # rendered form.
+        validation_receipt.rewrite_tree_after_equivalent_transform(
+            prior_validations,
+        )
     return succeeded

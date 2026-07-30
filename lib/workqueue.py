@@ -2458,6 +2458,47 @@ def record_artifact_rejection(
     return changed
 
 
+def record_artifact_reconsideration(
+    results_dir: Path, artifact_name: str, reason: str,
+) -> list[dict]:
+    """Restore the originating hypothesis when adjudication requeues an artifact."""
+    path = state_dir(results_dir) / "hypotheses.jsonl"
+    if not path.is_file():
+        return []
+    artifact_id = _artifact_status_id(artifact_name)
+    if not artifact_id:
+        return []
+    rejected_note = re.compile(
+        rf"^Triage rejected\s+({re.escape(artifact_id)}(?:-\d+)?)\s*:",
+        re.IGNORECASE,
+    )
+
+    def mutate(rows: list[dict]) -> list[dict]:
+        latest_indexes: dict[tuple[str, str], int] = {}
+        for index, row in enumerate(rows):
+            hypothesis_id = str(row.get("id", "")).strip()
+            if hypothesis_id:
+                latest_indexes[(str(row.get("agent", "")), hypothesis_id)] = index
+        changed: list[dict] = []
+        for index in latest_indexes.values():
+            row = rows[index]
+            if str(row.get("status", "")).strip().upper() != "DISCARDED":
+                continue
+            match = rejected_note.match(str(row.get("note", "")).strip())
+            if match is None:
+                continue
+            previous = match.group(1).upper()
+            row["status"] = previous
+            row["updated_at"] = now_iso()
+            row["note"] = f"Triage requeued {previous}: {reason}".strip()
+            row.pop("rejected_category", None)
+            changed.append(dict(row))
+        return changed
+
+    _rows, changed = update_jsonl(path, mutate)
+    return changed
+
+
 def _crash_origin_from_hyps(hyps: list[dict], crash_id: str) -> dict | None:
     """Find the hypothesis row (from an already-read list) that filed `crash_id`.
 

@@ -125,6 +125,30 @@ class ValidationReceiptTests(unittest.TestCase):
         (self.directory / "input.bin").write_bytes(b"changed")
         self.assertIsNone(validation_receipt.read_current(self.directory))
 
+    def test_receipt_binds_bundled_testcase_not_external_header_path(self) -> None:
+        scratch = Path(self.temporary.name) / "scratch" / "input.bin"
+        scratch.parent.mkdir()
+        scratch.write_bytes(b"mutable scratch")
+        bundled = self.directory / "input.bin"
+        bundled.write_bytes(b"immutable bundle")
+        (self.directory / "sanitizer.txt").write_text(
+            "ASAN_RUN_HEADER: "
+            f"testcase={scratch}\n"
+            "ERROR: AddressSanitizer: heap-buffer-overflow\n",
+            encoding="utf-8",
+        )
+        payload = validation_receipt.write(
+            self.directory, kind="finding", state="conditional",
+            attacker_controls=["bytes"],
+        )
+        self.assertIsNotNone(payload)
+        self.assertIn("input.bin", payload["evidence"]["artifacts"])
+        self.assertIsNotNone(validation_receipt.read_current(self.directory))
+        scratch.write_bytes(b"changed scratch")
+        self.assertIsNotNone(validation_receipt.read_current(self.directory))
+        bundled.write_bytes(b"changed bundle")
+        self.assertIsNone(validation_receipt.read_current(self.directory))
+
     def test_receipt_file_is_never_mistaken_for_a_testcase(self) -> None:
         validation_receipt.write(
             self.directory, kind="finding", state="pending",
@@ -132,6 +156,39 @@ class ValidationReceiptTests(unittest.TestCase):
         )
         payload = json.loads((self.directory / "validation.json").read_text())
         self.assertEqual(payload["evidence"]["artifacts"], {})
+        self.assertIsNotNone(validation_receipt.read_current(self.directory))
+
+    def test_pending_receipt_binds_an_absent_report_until_content_arrives(self) -> None:
+        self.report.unlink()
+        self.assertIsNone(validation_receipt.write(
+            self.directory, kind="finding", state="reportable",
+        ))
+        pending = validation_receipt.write(
+            self.directory, kind="finding", state="pending",
+            detail="missing report",
+        )
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["evidence"]["report_sha1"], "")
+        self.assertIsNotNone(validation_receipt.read_current(self.directory))
+        self.report.write_text(
+            "# Boundary issue\n\nContent arrived.\n", encoding="utf-8",
+        )
+        self.assertIsNone(validation_receipt.read_current(self.directory))
+
+    def test_generated_enrichment_code_fence_does_not_stale_receipt(self) -> None:
+        validation_receipt.write(
+            self.directory, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
+        self.report.write_text(
+            self.report.read_text(encoding="utf-8")
+            + "\n<!-- enrich:data-flow-snippets -->\n"
+            + "```text\n"
+            + "generated source excerpt\n"
+            + "```\n"
+            + "<!-- /enrich:data-flow-snippets -->\n",
+            encoding="utf-8",
+        )
         self.assertIsNotNone(validation_receipt.read_current(self.directory))
 
     def test_explicit_scope_change_invalidates_the_receipt(self) -> None:

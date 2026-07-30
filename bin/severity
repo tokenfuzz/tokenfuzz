@@ -616,10 +616,11 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
 
     # Authoritative localisation from triage's structured set-difference. When
     # the *only* trigger component outside the attacker's control is a local
-    # `call-sequence`, the primitive is reachable solely by a trusted in-process
-    # caller driving that ordering — the attacker-controlled bytes (the `both`
-    # case) are mere setup. That is AV:L/AT:P, and it holds even for
-    # trigger_source=both, where the byte veto below would otherwise keep AV:N.
+    # `call-sequence`, and no declared component is attacker-controlled, the
+    # primitive is reachable solely by a trusted in-process caller driving that
+    # ordering. A mixed bytes+call-sequence trigger is not caller-only: the
+    # attacker-controlled bytes still cross the vulnerable boundary, while the
+    # sequence remains an environmental precondition represented by MAT:P.
     #
     # The subset test is exact and conservative — it localises ONLY when the
     # out-of-control set is {call-sequence} and nothing else:
@@ -632,7 +633,11 @@ def _local_caller_only(fields: dict) -> tuple[bool, str]:
     # concern) and never localises; a target that exposes the call-sequence
     # declares it in attacker_controls, clearing it from the set → AV:N.
     oob = _contract_oob_components(fields)
-    if oob and oob <= {"call-sequence"}:
+    attacker_driven = (
+        _declared_trigger_components(fields)
+        & _active_attacker_controls(fields)
+    )
+    if oob and oob <= {"call-sequence"} and not attacker_driven:
         return True, ("trigger's only out-of-attacker-control component is a "
                       "local call-sequence → AV:L/AT:P")
 
@@ -2879,6 +2884,9 @@ def main(argv: list[str] | None = None) -> int:
             clear_report_severity(
                 report_md, report_dir, "No security rating (native hardening)",
             )
+            validation_receipt.rewrite_after_equivalent_transform(
+                report_dir, receipt,
+            )
             unscored = {
                 "level": "No security rating",
                 "score": None,
@@ -2947,6 +2955,13 @@ def main(argv: list[str] | None = None) -> int:
                    indent=2, sort_keys=True),
         "utf-8",
     )
+    if receipt is not None:
+        # Scoring canonicalizes structured fields and generated sections in
+        # the report. That is a harness-owned representation change, not a new
+        # security decision, so keep the receipt bound to the scored form.
+        validation_receipt.rewrite_after_equivalent_transform(
+            report_dir, receipt,
+        )
 
     if args.json:
         print(json.dumps({"severity": severity}, indent=2, sort_keys=True))

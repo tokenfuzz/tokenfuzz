@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import benchmark_runner
 import crash_bundle
+import validation_receipt
 
 
 DIAGNOSTIC = (
@@ -422,6 +423,34 @@ class BenchmarkReverifyTests(unittest.TestCase):
                     "recorded sanitizer options are unusable",
                     (crash / ".audit" / "reverify.log").read_text(encoding="utf-8"),
                 )
+
+    def test_successful_reverification_rebinds_current_receipt(self) -> None:
+        target, slug = self.make_target("receipt-target")
+        crash = self.make_crash("receipt-pool")
+        (crash / "report.md").write_text(
+            "# Lifetime issue\n", encoding="utf-8",
+        )
+        validation_receipt.write(
+            crash, kind="crash", state="reportable",
+            attacker_controls=["bytes"],
+        )
+        self.assertIsNotNone(validation_receipt.read_current(crash))
+
+        def reverify(directory, *_args, **_kwargs):
+            with (directory / "sanitizer.txt").open("a", encoding="utf-8") as stream:
+                stream.write("\nCRASH_RATE: 5/5\n")
+            return True
+
+        with mock.patch.object(
+            benchmark_runner, "reverify_one_crash", side_effect=reverify,
+        ):
+            self.assertEqual(
+                benchmark_runner.reverify_pool_crash_rates(
+                    crash.parent.parent, target, slug, "test",
+                ),
+                1,
+            )
+        self.assertIsNotNone(validation_receipt.read_current(crash))
 
     def test_a_harness_replays_under_its_own_sanitizer(self) -> None:
         # Through the ASan wrapper a UBSan harness gets ASAN_OPTIONS and never

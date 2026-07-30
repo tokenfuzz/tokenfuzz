@@ -13,11 +13,15 @@ from pathlib import Path
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v4-source-anchors"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v5-public-boundary"
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.
-TRIGGER_GATE_ADVISORY_VERSIONS = {"trigger-v2-caller-buffer"}
+TRIGGER_GATE_ADVISORY_VERSIONS = {
+    "trigger-v2-caller-buffer",
+    "trigger-v3-scoped-controls",
+    "trigger-v4-source-anchors",
+}
 
 ANCHOR_KINDS = {"source", "contract", "build"}
 BOUNDARY_SURFACES = {
