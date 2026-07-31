@@ -673,8 +673,10 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertIn('"## Expected sanitizer output"', source)
         self.assertIn(r'r"^CRASH_RATE:\s*[0-9]+/[0-9]+"', source)
 
-    def rebuild_export_argv(self, bench: Path) -> list[tuple[str, tuple]]:
-        """Tools rebuild_pool invokes, with everything but the export stubbed."""
+    def rebuild_tool_calls(
+        self, bench: Path, *, dry_run: bool = False,
+    ) -> list[tuple[str, tuple]]:
+        """Tools rebuild_pool invokes, with everything but the tools stubbed."""
         calls: list[tuple[str, tuple]] = []
 
         def fake_run_tool(name, *args, **kwargs):
@@ -688,8 +690,71 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 mock.patch.object(benchmark_runner.triage, "fill_reach_fields_tree"), \
                 mock.patch.object(benchmark_runner, "reverify_pool_crash_rates"), \
                 mock.patch.object(benchmark_runner, "_run_tool", fake_run_tool):
-            benchmark_runner.rebuild_pool(bench, "slug", "codex", "model", False, "test")
-        return [args for name, args in calls if name == "export-repro"]
+            benchmark_runner.rebuild_pool(
+                bench, "slug", "codex", "model", dry_run, "test",
+            )
+        return calls
+
+    def rebuild_export_argv(self, bench: Path) -> list[tuple]:
+        return [
+            args for name, args in self.rebuild_tool_calls(bench)
+            if name == "export-repro"
+        ]
+
+    def test_a_dry_run_pool_is_scored_before_it_is_clustered(self) -> None:
+        # A dry run still recopies the pool from the cells and publishes it,
+        # and clustering reads the Severity row out of each report. Skipping
+        # the offline scorer there publishes whichever severity the cells
+        # happened to carry, from whichever scorer last ran over them.
+        for dry_run in (True, False):
+            bench = self.root / f"pool-scoring-bench-{dry_run}"
+            staging = bench / ".pool.staging"
+            (staging / "crashes" / "CRASH-0001").mkdir(parents=True)
+            (staging / "findings" / "FIND-0001").mkdir(parents=True)
+            names = [
+                name for name, _ in
+                self.rebuild_tool_calls(bench, dry_run=dry_run)
+            ]
+            self.assertIn("severity", names, f"dry_run={dry_run}")
+            self.assertLess(
+                names.index("severity"), names.index("cluster-crashes"),
+                f"dry_run={dry_run}",
+            )
+
+    def test_a_stale_score_aborts_before_clustering_or_pool_swap(self) -> None:
+        bench = self.root / "stale-severity"
+        staging = bench / ".pool.staging"
+        staging.mkdir(parents=True)
+        live = bench / "pool"
+        live.mkdir()
+        (live / "sentinel").write_text("previous result", encoding="utf-8")
+        calls: list[str] = []
+
+        def fake_run_tool(name, *args, **kwargs):
+            calls.append(name)
+            return 0
+
+        with mock.patch.object(benchmark_runner.metrics, "build_pool"), \
+                mock.patch.object(benchmark_runner.metrics, "relocate_experiments"), \
+                mock.patch.object(benchmark_runner, "benchmark_target_config"), \
+                mock.patch.object(
+                    benchmark_runner, "_pool_severity_not_current",
+                    return_value=["findings/FIND-0001"],
+                ), \
+                mock.patch.object(benchmark_runner, "_run_tool", fake_run_tool):
+            with self.assertRaisesRegex(
+                RuntimeError, "current scorer did not produce",
+            ):
+                benchmark_runner.rebuild_pool(
+                    bench, "slug", "codex", "model", True, "test",
+                )
+
+        self.assertEqual(calls, ["severity"])
+        self.assertTrue(staging.is_dir())
+        self.assertEqual(
+            (live / "sentinel").read_text(encoding="utf-8"),
+            "previous result",
+        )
 
     def test_a_rebuilt_pool_exports_the_revision_its_run_recorded(self) -> None:
         # A pool is rebuilt long after its run, against a slug whose live

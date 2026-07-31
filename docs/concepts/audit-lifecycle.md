@@ -211,7 +211,7 @@ input.<ext>        the testcase bytes
 harness.{c,cc,cpp,cxx} present iff the bug uses a C/C++ harness
 sanitizer.txt      full sanitizer output
 patch.diff         optional candidate fix
-severity.json      records that the report was scored
+severity.json      the published score, bound to the report it came from
 .audit/            original agent-authored files, kept for provenance
 ```
 

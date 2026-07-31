@@ -156,7 +156,7 @@ CRASH-001-1/
   sanitizer.txt         # original sanitizer output
   patch.diff            # optional: candidate fix
   validation.json       # current publication state + evidence identity
-  severity.json         # records that the report was scored
+  severity.json         # the published score, bound to the report it came from
   .audit/
   .dup-of               # only on non-canonical cluster members
 ```
@@ -196,7 +196,7 @@ FIND-001/
   report.md              # the narrative; hand-edit this (description.md also accepted)
   report.html            # auto-generated sibling of report.md (open in browser)
   validation.json        # current publication state + evidence identity
-  severity.json          # records that the report was scored
+  severity.json          # the published score, bound to the report it came from
   affected-files.txt     # optional, operator-authored — the harness does not generate it
   .dup-of                # only on non-canonical cluster members
   .needs-content         # marker added when report.md is missing
@@ -238,6 +238,13 @@ to `findings-rejected/`.
 The severity scorer writes `severity.json` and updates severity text only
 after a current final-state validation receipt exists. A pending FIND remains
 available for review without being silently interpreted as Low severity.
+
+`severity.json` records the published level, score, and vector together with
+the scorer version and a hash of the report content they were derived from.
+Later passes rewrite reports — reach-field fills, enrichment, pool copies — so
+that binding is what distinguishes a current score from one an earlier scorer
+left behind. A score whose binding no longer matches is re-derived, never
+credited as-is.
 
 ## Logs
 

@@ -236,9 +236,6 @@ def _reject(
 _TRIGGER_REJECTION_RE = re.compile(
     r"^trigger-provenance(?:\s|\(|:)", re.IGNORECASE,
 )
-_PUBLIC_BOUNDARY_SURFACES = {
-    "network", "library-api", "file-format", "cli",
-}
 
 
 def _rejection_reason(directory: Path) -> str:
@@ -253,15 +250,22 @@ def _rejection_reason(directory: Path) -> str:
 
 
 def _trigger_rejection_is_dispositive(facts: dict[str, str]) -> bool:
-    """Whether reviewed trigger evidence may remove a security artifact."""
-    kind = facts.get("rejection_kind", "")
-    surface = facts.get("vulnerable_boundary_surface", "")
-    if kind == "unreachable" and surface in _PUBLIC_BOUNDARY_SURFACES:
-        # A demonstrated public boundary outside configured attacker controls
-        # carries an attack precondition; it is not made unreal by that scope
-        # mismatch. evaluate_crash_verdict/severity records the downgrade.
-        return False
-    return kind in {"contract-invalid", "unreachable", "nonshipping"}
+    """Whether reviewed trigger evidence may remove a security artifact.
+
+    A scope mismatch — a contract-obeying public boundary that this target's
+    configured attacker controls do not list — is not `unreachable`. The
+    reviewer is told to vote Promote there and let severity carry the attack
+    precondition, so the surface cannot be used to second-guess the kind: an
+    `unreachable` vote is the affirmative disproof it says it is, and a public
+    surface is where the reviewer most often has the source to prove one.
+
+    Recall is protected by the quorum, not by the surface: the facts reaching
+    here come from two current, anchored reviewers that agree on the kind, and
+    a vote from a superseded prompt fails open and is requeued.
+    """
+    return facts.get("rejection_kind", "") in {
+        "contract-invalid", "unreachable", "nonshipping",
+    }
 
 
 def _restore_rejected_artifact(

@@ -90,18 +90,11 @@ def _config_for_report(report_path: Path):
     recorded_rev = target_config.find_benchmark_target_rev(toml, cfg.slug)
     if recorded_rev:
         cfg.target_rev = recorded_rev
-    if cfg.slug and not cfg.target_root:
-        slug_path = Path(cfg.slug)
-        if not slug_path.is_absolute() and ".." not in slug_path.parts:
-            for ancestor in toml.parents:
-                root = ancestor / "targets" / slug_path
-                if root.is_dir():
-                    cfg.target_root = str(root)
-                    break
-            if not cfg.target_root:
-                root = SCRIPT_ROOT / "targets" / slug_path
-                if root.is_dir():
-                    cfg.target_root = str(root)
+    root = target_config.find_target_root(
+        report_path, repository_root=SCRIPT_ROOT,
+    )
+    if root is not None:
+        cfg.target_root = str(root)
     return cfg
 
 

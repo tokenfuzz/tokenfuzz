@@ -536,7 +536,10 @@ Agent-inlined narrative that must be replaced by the sibling diff.
             config = enrich_report._config_for_report(report)
         self.assertEqual(config.slug, "mine")
         self.assertEqual(config.target_rev, "feed1234")
-        self.assertEqual(Path(config.target_root), checkout / "targets" / "mine")
+        self.assertEqual(
+            Path(config.target_root),
+            (checkout / "targets" / "mine").resolve(),
+        )
 
         with mock.patch.object(enrich_report, "SCRIPT_ROOT", checkout), \
              mock.patch.object(

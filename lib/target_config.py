@@ -613,6 +613,60 @@ def find_target_toml(start: str | os.PathLike) -> Optional[Path]:
     return None
 
 
+def find_target_root(
+    start: str | os.PathLike,
+    *,
+    repository_root: str | os.PathLike | None = None,
+) -> Optional[Path]:
+    """Target source root belonging to the config nearest *start*.
+
+    Live results bind an exact, possibly external checkout in `.session-env`.
+    Benchmark pools have no session; their nearest `target.toml` names the
+    target, and the source lives under the enclosing checkout's
+    `targets/<slug>`. Never fall back to `find_session_dir`: its broad
+    `output/` scan is appropriate for callers that have no target identity,
+    but a report already has one and must not borrow another target's session.
+    """
+    cur = Path(start).absolute()
+    if cur.is_file():
+        cur = cur.parent
+    for parent in [cur, *cur.parents]:
+        if not _is_file(parent / ".session-env"):
+            continue
+        try:
+            root = read_session_env(parent).get("TARGET_ROOT", "").strip()
+        except OSError:
+            return None
+        if root:
+            try:
+                return Path(root).expanduser().resolve(strict=False)
+            except OSError:
+                return None
+        break
+    toml = find_target_toml(start)
+    if toml is None:
+        return None
+    try:
+        parsed = parse_toml(toml)
+    except (OSError, ValueError):
+        return None
+    slug = parsed.get("target") or parsed.get("slug")
+    if not isinstance(slug, str) or not slug.strip():
+        return None
+    relative = Path(slug.strip())
+    if relative.is_absolute() or ".." in relative.parts:
+        return None
+    for ancestor in toml.parents:
+        candidate = ancestor / "targets" / relative
+        if candidate.is_dir():
+            return candidate.resolve()
+    if repository_root is not None:
+        candidate = Path(repository_root) / "targets" / relative
+        if candidate.is_dir():
+            return candidate.resolve()
+    return None
+
+
 def find_benchmark_target_rev(
     start: str | os.PathLike, expected_slug: str,
 ) -> str:

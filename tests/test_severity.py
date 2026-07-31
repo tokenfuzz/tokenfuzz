@@ -18,6 +18,8 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import severity_receipt  # noqa: E402
+
 
 def load_severity():
     loader = importlib.machinery.SourceFileLoader(
@@ -1016,6 +1018,148 @@ class SeverityTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(severity.main(["--batch", str(self.root)]), 0)
         self.assertTrue((finding / "severity.json").is_file())
+
+    def test_scored_marker_binds_the_report_it_scored(self) -> None:
+        """A report edited after scoring no longer has a current marker.
+
+        Severity comes from the report's reach fields, and later passes rewrite
+        reports. Without a content binding a stale score reads as current and
+        is published as if the scorer had just produced it.
+        """
+        finding = self.make_report(
+            "heap-buffer-overflow\nREAD of size 8",
+            report_id="FIND-SCORE-FRESHNESS",
+            finding=True,
+            trigger="bytes",
+        )
+        severity.validation_receipt.write(
+            finding, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(severity.main(["--report", str(finding)]), 0)
+        report = finding / "report.md"
+        self.assertIsNotNone(
+            severity_receipt.read_current(finding, report),
+        )
+        marker = json.loads((finding / "severity.json").read_text())
+        self.assertEqual(
+            marker["scorer_version"], severity_receipt.SCORER_DECISION_VERSION,
+        )
+        self.assertIn("CVSS:4.0/", marker["vector"])
+        self.assertEqual(marker["level"], marker["level"].capitalize())
+
+        # Re-scoring is idempotent: rewriting the Severity row and rationale
+        # must not invalidate the marker the same run just wrote.
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(severity.main(["--report", str(finding)]), 0)
+        self.assertIsNotNone(severity_receipt.read_current(finding, report))
+
+        # Generated severity text is excluded from report_sha1 so scoring is
+        # idempotent, but the receipt must still describe what readers see.
+        replacement = "Low" if marker["level"] != "Low" else "Critical"
+        report.write_text(
+            report.read_text(encoding="utf-8").replace(
+                f"- **Severity**: {marker['level']}",
+                f"- **Severity**: {replacement}",
+                1,
+            ),
+            encoding="utf-8",
+        )
+        self.assertIsNone(severity_receipt.read_current(finding, report))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(severity.main(["--report", str(finding)]), 0)
+        self.assertIsNotNone(severity_receipt.read_current(finding, report))
+
+        # A changed scoring input does invalidate it.
+        report.write_text(
+            report.read_text(encoding="utf-8").replace(
+                "| Trigger source | bytes |",
+                "| Trigger source | call-sequence |",
+            ),
+            encoding="utf-8",
+        )
+        self.assertIsNone(severity_receipt.read_current(finding, report))
+
+        # So does a scorer whose semantics have moved on. Re-validate first:
+        # the edit invalidated the publication receipt too, and an unvalidated
+        # report is cleared rather than scored.
+        severity.validation_receipt.write(
+            finding, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(severity.main(["--report", str(finding)]), 0)
+        self.assertIsNotNone(severity_receipt.read_current(finding, report))
+        stale = json.loads((finding / "severity.json").read_text())
+        stale["scorer_version"] = "severity-v0-superseded"
+        (finding / "severity.json").write_text(json.dumps(stale))
+        self.assertIsNone(severity_receipt.read_current(finding, report))
+
+    def test_pooled_harness_check_uses_the_report_target(self) -> None:
+        """A pool report must not borrow another target's live session."""
+        checkout = self.root / "checkout"
+        mine = checkout / "targets" / "mine"
+        other = checkout / "targets" / "other"
+        mine.mkdir(parents=True)
+        other.mkdir(parents=True)
+
+        pool = checkout / "output" / "benchmark" / "run" / "pool"
+        crash = pool / "crashes" / "CRASH-POOLED"
+        crash.mkdir(parents=True)
+        (pool / "target.toml").write_text(
+            'target = "mine"\n', encoding="utf-8",
+        )
+
+        # This is the unrelated session find_session_dir used to discover by
+        # scanning the checkout's output tree from a sessionless pool.
+        foreign = checkout / "output" / "other" / "codex" / "results"
+        foreign.mkdir(parents=True)
+        (checkout / "output" / "other" / "target.toml").write_text(
+            'target = "other"\n', encoding="utf-8",
+        )
+        (foreign / ".session-env").write_text(
+            f"TARGET_ROOT={other}\n", encoding="utf-8",
+        )
+
+        report = crash / "report.md"
+        report.write_text("# pooled crash\n", encoding="utf-8")
+        (crash / "sanitizer.txt").write_text(
+            "ERROR: AddressSanitizer: heap-use-after-free\n"
+            "    #0 driver harness.c:13\n"
+            f"    #1 target_free {mine / 'src.c'}:27\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(severity.tc.find_session_dir(crash), foreign.resolve())
+        self.assertEqual(
+            Path(severity._target_root_for_report(crash)),
+            mine.resolve(),
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = severity.main([
+                "--report", str(crash), "--harness-rooted-check",
+            ])
+        self.assertEqual(rc, 1)
+        self.assertEqual(output.getvalue().strip(), "0")
+
+        # A live result remains bound to the exact checkout in its own session,
+        # even when a same-slug source tree exists under the harness checkout.
+        live_root = self.root / "external-mine"
+        live_root.mkdir()
+        live = (
+            checkout / "output" / "mine" / "codex" / "results"
+            / "crashes" / "CRASH-LIVE"
+        )
+        live.mkdir(parents=True)
+        (live.parents[1] / ".session-env").write_text(
+            f"TARGET_ROOT={live_root}\n", encoding="utf-8",
+        )
+        self.assertEqual(
+            Path(severity._target_root_for_report(live)),
+            live_root.resolve(),
+        )
 
     def test_report_cli_does_not_score_pending_evidence(self) -> None:
         finding = self.make_report(

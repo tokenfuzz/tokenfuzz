@@ -35,7 +35,9 @@ import crash_bundle
 import llm_invoke
 import llm_usage
 import process_tree
+import report_identity
 import runner_preflight
+import severity_receipt
 import stack_frames
 import target_config
 import target_profile
@@ -1358,6 +1360,33 @@ def _pool_replay_blocked(
     return blocked
 
 
+def _pool_severity_not_current(pool: Path) -> list[str]:
+    """Accepted pooled artifacts whose Severity row no scorer run vouches for.
+
+    Clustering reads severity out of the report, so a score bound to different
+    report content — or produced by an older scorer — is credited as if it were
+    current. The marker makes that visible instead of silent.
+    """
+    stale: list[str] = []
+    for kind, prefix in (("crashes", "CRASH-"), ("findings", "FIND-")):
+        for directory in sorted((pool / kind).glob(f"{prefix}*")):
+            receipt = validation_receipt.read_current(directory)
+            # Only artifacts that carry a published score: an unrated one
+            # (pending, native hardening) has no marker by design.
+            if (
+                receipt is None
+                or receipt.get("state")
+                not in validation_receipt.SECURITY_STATES
+            ):
+                continue
+            report = report_identity.find_report(directory)
+            if report is None:
+                continue
+            if severity_receipt.read_current(directory, report) is None:
+                stale.append(f"{kind}/{directory.name}")
+    return stale
+
+
 def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dry_run: bool, reason: str) -> None:
     stage_name = ".pool.staging"
     metrics.build_pool(bench_dir, stage_name)
@@ -1395,8 +1424,6 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             reverify_pool_crash_rates(
                 pool, target, target_slug, reason, skip=set(blocked),
             )
-        with (bench_dir / "severity.log").open("w", encoding="utf-8") as output:
-            _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
         bundle_candidates: list[Path] = []
         for crash in sorted((pool / "crashes").glob("CRASH-*")):
             reports = list(crash.glob("[Rr][Ee][Pp][Oo][Rr][Tt].md"))
@@ -1437,6 +1464,22 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                     log(f"WARN: reproducer bundle failed for {crash.name} ({reason})")
     if bundled:
         log(f"reproducer bundles created: {bundled} ({reason})")
+    # Score the pool on every path, including a dry run. Clustering below reads
+    # each report's Severity row, and the pool it reads was just recopied from
+    # the cells — so a pool that skipped scoring publishes whatever severity the
+    # cells happened to carry, computed by whichever scorer ran back then. The
+    # scorer is offline and deterministic, so there is nothing for a dry run to
+    # hold back.
+    with (bench_dir / "severity.log").open("w", encoding="utf-8") as output:
+        _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
+    unscored = _pool_severity_not_current(pool)
+    if unscored:
+        detail = (
+            f"{len(unscored)} pooled artifact(s) carry a severity the current "
+            f"scorer did not produce ({reason}): {', '.join(unscored[:5])}"
+        )
+        log(f"WARN: {detail}; refusing to publish stale severity")
+        raise RuntimeError(detail)
     prior_cluster_validations = validation_receipt.snapshot_current_tree(pool)
     clustering_succeeded = True
     for kind, tool, output_name in (

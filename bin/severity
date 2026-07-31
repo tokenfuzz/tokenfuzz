@@ -27,7 +27,6 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).absolute().parent
@@ -37,6 +36,7 @@ import cvss4  # noqa: E402
 import crash_bundle  # noqa: E402
 import crash_artifacts  # noqa: E402
 import report_identity  # noqa: E402
+import severity_receipt  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
 import validation_receipt  # noqa: E402
@@ -342,7 +342,15 @@ def _sanitizer_ran_clean(report_dir: Path | None) -> bool:
 
 def _threat_metric(report_text: str, fields: dict,
                    report_dir: Path | None) -> tuple[str, str]:
-    """Derive CVSS v4.0 Exploit Maturity (E).
+    """Derive CVSS v4.0 Exploit Maturity (E) from local reproduction evidence.
+
+    A deliberate, disclosed departure from FIRST, which grades E on threat
+    intelligence about *publicly available* exploit code. Nothing this harness
+    produces is publicly disclosed, so the FIRST reading would put every
+    artifact at the same E and erase the one distinction that matters most for
+    triage order: whether the bug was demonstrated or only argued. E is
+    therefore read as reproduction confidence, and the report's rationale block
+    says so rather than implying the standard's meaning.
 
     The harness does not claim active real-world exploitation unless the
     report says so. Exploit Maturity is graded on *evidence*, not prose:
@@ -2163,15 +2171,12 @@ _SOURCE_LOC_RE = re.compile(r"^(?P<path>.+\.\w+):\d+(?::\d+)?$")
 
 
 def _target_root_for_report(report_dir: Path | None) -> str:
-    """Absolute TARGET_ROOT from the report's existing harness session metadata."""
+    """Absolute source root belonging to this report's target context."""
     if report_dir is None:
         return ""
     try:
-        session_dir = tc.find_session_dir(report_dir)
-        if session_dir is None:
-            return ""
-        root = tc.read_session_env(session_dir).get("TARGET_ROOT", "").strip()
-        return str(Path(root).expanduser().resolve(strict=False)) if root else ""
+        root = tc.find_target_root(report_dir, repository_root=HERE.parent)
+        return str(root) if root is not None else ""
     except Exception:
         return ""
 
@@ -2407,8 +2412,14 @@ def _format_severity_section(sev: dict) -> str:
         "computed by the vendored FIRST reference scorer. Base metrics come "
         "from the primitive and surface, with Attack Vector/Requirements also "
         "reflecting the trigger's caller-control facts (a trusted local "
-        "API/call-sequence reads as AV:L/AT:P). The Threat metric (E) comes "
-        "from reproducer evidence; the Environmental Security Requirements "
+        "API/call-sequence reads as AV:L/AT:P). The Threat metric (E) is read "
+        "locally, not from threat intelligence: it grades how far this audit "
+        "got toward proving the bug — a reproducer that fires is E:P, an "
+        "unproven argument is E:U — so a demonstrated bug outranks a written "
+        "one. FIRST defines E against *public* exploit availability, which is "
+        "not what is measured here, and nothing in this run is publicly "
+        "disclosed. Read E as reproduction confidence. The Environmental "
+        "Security Requirements "
         "(CR/IR/AR) are left Not Defined — they model a deploying "
         "organisation's asset importance, which the scorer cannot derive, so a "
         "generic score keeps the CVSS-B worst case. Environmental *modified "
@@ -2437,7 +2448,7 @@ def _format_severity_section(sev: dict) -> str:
     lines.append(f"| Vuln Conf/Integ/Avail     | {m['VC']}/{m['VI']}/{m['VA']} | primitive class = `{sev['primitive_key']}` |")
     lines.append(f"| Subseq Conf/Integ/Avail   | {m['SC']}/{m['SI']}/{m['SA']} | primitive class |")
     if any(k in m for k in ("E", "CR", "IR", "AR", "MAT", "MAV", "MUI", "MVC", "MVI", "MVA", "MSC", "MSI", "MSA")):
-        lines.append(f"| Threat Exploit Maturity (E) | {m.get('E', 'X')} | reproducer / exploit evidence |")
+        lines.append(f"| Threat Exploit Maturity (E) | {m.get('E', 'X')} | local reproduction evidence — not public exploit availability |")
         lines.append(f"| Env Requirements (CR/IR/AR) | {m.get('CR', 'X')}/{m.get('IR', 'X')}/{m.get('AR', 'X')} | not defined — deployer-set asset importance (CVSS-B baseline) |")
         env_attack = "/".join(m.get(k, "X") for k in ("MAV", "MAC", "MAT", "MPR", "MUI"))
         lines.append(f"| Env Modified AV/AC/AT/PR/UI | {env_attack} | caller control / contract concern |")
@@ -2721,7 +2732,7 @@ def clear_report_severity(
             f"- **Severity**: {replacement} (auto: validation state)",
         )
     report_path.write_text(text, "utf-8")
-    (report_dir / "severity.json").unlink(missing_ok=True)
+    (report_dir / severity_receipt.FILENAME).unlink(missing_ok=True)
 
 
 # ─── Human-readable summary ───────────────────────────────────────────────
@@ -2951,15 +2962,11 @@ def main(argv: list[str] | None = None) -> int:
         sanitizer_text=adjacent_asan_text or None,
     )
     update_report(report_md, severity)
-    # severity.json is the on-disk "this report has been scored" marker that
-    # downstream gates (benchmark re-derive, bundle exports) test for. The
-    # score itself lives in the report; this file only records that scoring ran.
-    (report_dir / "severity.json").write_text(
-        json.dumps({"schema_version": 3,
-                    "scored_at": datetime.now(timezone.utc).isoformat()},
-                   indent=2, sort_keys=True),
-        "utf-8",
-    )
+    # severity.json binds the published score to the report content and scorer
+    # it came from, so a downstream gate (benchmark re-derive, bundle export)
+    # can tell a current score from one a later report rewrite left behind.
+    # Written after update_report: the binding hashes the scored report.
+    severity_receipt.write(report_dir, report_md, severity)
     if receipt is not None:
         # Scoring canonicalizes structured fields and generated sections in
         # the report. That is a harness-owned representation change, not a new

@@ -4607,7 +4607,10 @@ def render_section(report: dict) -> str:
         "annotated `N (M "
         "M+)` where `M` is how many of the `N` clusters `bin/severity` "
         "scored Medium or higher — the security-yield subset, on one scale "
-        "across both conditions. **Top crash severity** is the highest crash "
+        "across both conditions. Both accepted columns count the reportable "
+        "and conditional lanes together; the validation waterfall below splits "
+        "them, and reportable is the primary yield. "
+        "**Top crash severity** is the highest crash "
         "severity in the row. "
         f"`{baseline_label}` is a bare \"find the vulnerabilities\" prompt "
         "with no harness around it, so a large raw crash count there is "
@@ -5268,6 +5271,19 @@ def crosstab(bench_root: Path) -> str:
         "The two columns are merged separately, so one underlying problem can "
         "appear on both sides if it was accepted in one write-up and rejected "
         "in another. Do not divide them into a pass rate."
+    )
+    lines.append("")
+    lines.append(
+        "**What accepted covers.** Both accepted columns count two lanes "
+        "together: *reportable* — the trigger is inside the target's declared "
+        "attacker controls and source review agreed — and *conditional* — the "
+        "artifact survived review but carries an attack precondition, most "
+        "often a trigger component the threat model does not list, or a "
+        "reviewer who kept it without confirming it. A conditional artifact is "
+        "a real result that needs one more fact before it can be reported as "
+        "it stands, and most accepted artifacts are conditional. The "
+        "validation waterfall below splits the lanes per condition, so the "
+        "reportable subset is the one to read as primary security yield."
     )
     lines.append("")
 

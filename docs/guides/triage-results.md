@@ -385,7 +385,7 @@ CRASH-001-1/
   harness.{c,cc,cpp,cxx} # when applicable
   sanitizer.txt
   patch.diff             # optional: candidate fix that passes `git apply --check`
-  severity.json          # records that the report was scored
+  severity.json          # the published score, bound to the report it came from
   .audit/
 ```
 

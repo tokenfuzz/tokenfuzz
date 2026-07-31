@@ -1376,7 +1376,14 @@ Generated score text.
             {"rejection_kind": "no-added-boundary"},
         )
 
-    def test_public_boundary_scope_mismatch_is_conditional_not_rejected(self) -> None:
+    def test_unreachable_disproof_is_dispositive_at_a_public_surface(self) -> None:
+        """Two anchored `unreachable` Rejects remove the finding anywhere.
+
+        The reviewer, not the surface, preserves a scope mismatch: the prompt
+        routes a contract-obeying public call outside configured controls to
+        Promote. Re-reading an `unreachable` disproof as a scope mismatch
+        because the surface is public republished refuted reports.
+        """
         payload = trigger_vote(self.report, self.root, "Reject")
         payload["review_facts"] = {
             "rejection_kind": "unreachable",
@@ -1400,15 +1407,48 @@ Generated score text.
                 triage._finding_trigger_disposition(
                     self.finding, self.report, None,
                 ),
-                "accepted",
+                "rejected",
             )
-        self.assertFalse(triage._trigger_rejection_is_dispositive(
-            payload["review_facts"],
-        ))
-        self.assertTrue(triage._trigger_rejection_is_dispositive({
+        for surface in ("library-api", "network", "file-format", "cli",
+                        "internal", "unknown"):
+            self.assertTrue(triage._trigger_rejection_is_dispositive({
+                **payload["review_facts"],
+                "vulnerable_boundary_surface": surface,
+            }), surface)
+        # A public surface still cannot turn a non-dispositive kind into one.
+        self.assertFalse(triage._trigger_rejection_is_dispositive({
             **payload["review_facts"],
-            "rejection_kind": "contract-invalid",
+            "rejection_kind": "no-added-boundary",
         }))
+
+    def test_lone_unreachable_reject_keeps_the_finding(self) -> None:
+        """One Reject is not the quorum: recall comes from agreement, not surface."""
+        payload = trigger_vote(self.report, self.root, "Reject")
+        payload["review_facts"] = {
+            "rejection_kind": "unreachable",
+            "vulnerable_boundary_surface": "library-api",
+            "reproducer_carrier": "harness",
+        }
+        (self.finding / ".trigger-gate.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        second = trigger_vote(self.report, self.root, "Promote")
+        second["review_facts"] = {
+            "vulnerable_boundary_surface": "library-api",
+            "reproducer_carrier": "harness",
+        }
+        (self.finding / ".trigger-gate-2.json").write_text(
+            json.dumps(second), encoding="utf-8",
+        )
+        self.assertEqual(
+            triage._source_review_facts(
+                self.report,
+                (self.finding / ".trigger-gate.json",
+                 self.finding / ".trigger-gate-2.json"),
+                rejection_quorum=2,
+            ).get("rejection_kind"),
+            None,
+        )
 
     def test_disagreeing_trigger_review_keeps_finding_conditionally(self) -> None:
         first = trigger_vote(self.report, self.root, "Reject")
