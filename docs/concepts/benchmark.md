@@ -208,9 +208,9 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Condition` | `tokenfuzz` or the direct baseline label. |
 | `Replicates` | `done/total`. Replicates that recovered from a mid-run provider pause got their full budget and fold in unmarked; a `(Np)` suffix flags N provider-limited replicates excluded from the totals (a same-run-id re-run retries them). |
 | `Wall (h)` | Median hours a cell spent finding things. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
-| `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
+| `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
 | `Unique accepted findings` | Distinct evidence-signature clusters of accepted non-crash security reports, shown `N (M M+)`: N clusters, M scored Medium or higher. This is not a guaranteed root-cause count. Links to the finding cluster report. |
-| `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `≤ N` marks an upper bound. |
+| `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
 | `Unique accepted crashes` | Distinct sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. This is not a guaranteed unique-fix count. Links to the crash cluster report. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
 
@@ -219,7 +219,7 @@ directory tally counts matching evidence many times over and would not be
 comparable with a clustered one. Signature clustering is a deterministic
 deduplication proxy: one root cause can split across different sites, and
 different root causes can share a sink signature. Where duplicates could not be resolved the
-count is shown as `≤ N` — it over-states rather than hides, so a rejected
+count is shown as `up to N` — it over-states rather than hides, so a rejected
 result never quietly vanishes from the column.
 
 The count cells are links. They point into the condition-specific
@@ -233,7 +233,7 @@ climbs and ends exactly on the `Unique accepted` count. The chip above each
 curve shows what the gate accepted and rejected. When a result's discovery time
 can't be recovered, the panel flags the timing as approximate rather than
 faking precision. Accepted and rejected results are deduplicated separately, and
-a `≤` rejected count is a conservative upper bound — neither figure is
+an `up to` rejected count is a conservative upper bound — neither figure is
 *precision*, which needs the answer key described below.
 
 **Token usage** compares what each condition actually cost. The bold row per

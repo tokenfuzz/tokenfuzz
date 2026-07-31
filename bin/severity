@@ -151,6 +151,9 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     "regex_dos":         ("N", "N", "H", "N", "N", "N", None),
     "dos_amplification": ("N", "N", "H", "N", "N", "N", None),
     "integer_overflow":  ("N", "N", "L", "N", "N", "N", None),  # precursor
+    # A source-reviewed allocator mismatch establishes an invalid-release
+    # failure but, without a runtime diagnostic, not a write primitive.
+    "allocator_mismatch": ("N", "N", "H", "N", "N", "N", None),
     # ── Web / application classes ─────────────────────────────────────────
     "code_execution":    ("H", "H", "H", "N", "N", "N", None),
     "command_injection": ("H", "H", "H", "N", "N", "N", None),
@@ -1422,6 +1425,8 @@ _VALIDATED_CLASS_PRIMITIVES = {
     "logic:identifier-truncation": "logic_regression",
     "logic:validation-bypass": "logic_regression",
     "memory-safety:bounds": "heap_read_small",
+    "memory-safety:allocator-mismatch": "allocator_mismatch",
+    "memory-safety:alignment": "bus",
     "memory-safety:integer-overflow": "integer_overflow",
     "memory-safety:lifetime": "uaf_read",
     "memory-safety:null-deref": "null_deref",

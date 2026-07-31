@@ -679,7 +679,50 @@ Generated score text.
         self.assertEqual(runs[:3], expected)
         self.assertEqual(runs[3:], expected)
 
-    def test_transient_trigger_batch_is_not_retried(self) -> None:
+    def test_timed_out_trigger_batch_retries_missing_ids_individually(self) -> None:
+        directories = []
+        for index in range(2):
+            directory = self.root / "findings" / f"FIND-{index + 10:03d}"
+            directory.mkdir()
+            (directory / "report.md").write_text(
+                "# State issue\n\nA public request crosses a boundary.\n",
+                encoding="utf-8",
+            )
+            directories.append(directory)
+        runs = []
+
+        def run(command, *_args, **_kwargs):
+            manifest = Path(command[command.index("--batch-manifest") + 1])
+            ids = [item["id"] for item in json.loads(manifest.read_text())["items"]]
+            runs.append(ids)
+            if len(runs) == 1:
+                return mock.Mock(returncode=124)
+            _write_batch_votes(command)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            triage._batch_finding_trigger_votes(
+                directories, self.root, None, None, False, workers=1,
+            )
+
+        self.assertEqual(
+            runs,
+            [
+                [directory.name for directory in directories],
+                [directories[0].name],
+                [directories[1].name],
+            ],
+        )
+        for directory in directories:
+            self.assertIsNotNone(triage._cached_trigger_vote(
+                directory / "report.md", directory / ".trigger-gate.json",
+            ))
+
+    def test_provider_limited_trigger_batch_is_not_retried(self) -> None:
         directory = self.root / "findings" / "FIND-010"
         directory.mkdir()
         (directory / "report.md").write_text(
@@ -701,7 +744,46 @@ Generated score text.
             triage._batch_finding_trigger_votes(
                 [directory], self.root, None, None, False, workers=1,
             )
-        self.assertEqual(calls, 1)  # a timeout is never hot-retried
+        self.assertEqual(calls, 1)  # provider/backend failures are not hot-retried
+
+    def test_trigger_batch_validator_distinguishes_wall_exhaustion(self) -> None:
+        validator = runpy.run_path(str(ROOT / "bin" / "validate-finding"))
+        manifest = self.root / "trigger-batch.json"
+        manifest.write_text(json.dumps({
+            "items": [{
+                "id": self.finding.name,
+                "finding": str(self.report),
+                "output": str(self.finding / ".trigger-gate.json"),
+            }],
+        }), encoding="utf-8")
+        arguments = [
+            "--batch-manifest", str(manifest),
+            "--target-path", str(self.root),
+            "--backend", "codex",
+            "--gate", "trigger",
+        ]
+
+        def invoke_status(status: int):
+            def invoke(_backend, _prompt, _timeout, raw, **_kwargs):
+                Path(raw).write_text("backend did not return a vote\n", encoding="utf-8")
+                return status
+            return invoke
+
+        with mock.patch.object(
+            validator["llm_invoke"], "run_agent_prompt",
+            side_effect=invoke_status(124),
+        ), mock.patch.object(
+            validator["llm_usage"], "append_usage_event",
+        ):
+            self.assertEqual(validator["main"](arguments), 124)
+
+        with mock.patch.object(
+            validator["llm_invoke"], "run_agent_prompt",
+            side_effect=invoke_status(127),
+        ), mock.patch.object(
+            validator["llm_usage"], "append_usage_event",
+        ):
+            self.assertEqual(validator["main"](arguments), 2)
 
     def test_trigger_cache_requires_current_prompt_and_report(self) -> None:
         cache = self.finding / ".trigger-gate.json"
@@ -1327,6 +1409,52 @@ Generated score text.
             **payload["review_facts"],
             "rejection_kind": "contract-invalid",
         }))
+
+    def test_disagreeing_trigger_review_keeps_finding_conditionally(self) -> None:
+        first = trigger_vote(self.report, self.root, "Reject")
+        first["review_facts"] = {
+            "rejection_kind": "contract-invalid",
+            "vulnerable_boundary_surface": "internal",
+            "reproducer_carrier": "harness",
+        }
+        second = trigger_vote(self.report, self.root, "Promote")
+        second["review_facts"] = {
+            "vulnerable_boundary_surface": "library-api",
+            "reproducer_carrier": "harness",
+        }
+        (self.finding / ".trigger-gate.json").write_text(
+            json.dumps(first), encoding="utf-8",
+        )
+        (self.finding / ".trigger-gate-2.json").write_text(
+            json.dumps(second), encoding="utf-8",
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "ACTIVE_BACKEND": "",
+                "BACKEND": "",
+                "TARGET_ROOT": str(self.root),
+            },
+            clear=False,
+        ), mock.patch.object(
+            triage, "evaluate_crash_verdict", return_value=("promote", ""),
+        ), mock.patch.object(triage, "_run_tool", return_value=0):
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None,
+                    prepared=True,
+                ),
+                "accepted",
+            )
+
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "conditional")
+        self.assertEqual(
+            receipt["evidence"]["review_facts"],
+            {"reproducer_carrier": "harness"},
+        )
 
     def test_legacy_trigger_rejection_is_requeued_for_current_review(self) -> None:
         rejected = self.root / "findings-rejected"

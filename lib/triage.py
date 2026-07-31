@@ -1513,9 +1513,13 @@ def _batch_finding_trigger_votes(
     model = os.environ.get("MODEL", "")
 
     def run_batch(batch: list[tuple[Path, Path, Path]], tag: str, timeout: int) -> int:
-        """Validate one batch. Returns the validator's exit code, where 2 flags a
-        transient backend failure (timeout / provider limit) the caller must not
-        retry, and our own hard timeout maps to the same."""
+        """Validate one batch.
+
+        The validator preserves the timeout status (124) to distinguish a
+        consumed review wall from another
+        transient backend failure (2), and our outer hard timeout maps to the
+        same wall-exhausted status.
+        """
         manifest = raw_dir / f"trigger-batch-{os.getpid()}-{time.time_ns()}-{tag}.json"
         payload = {
             "items": [
@@ -1541,7 +1545,7 @@ def _batch_finding_trigger_votes(
                 timeout=timeout + 2, check=False,
             ).returncode
         except subprocess.TimeoutExpired:
-            return 2
+            return 124
         finally:
             manifest.unlink(missing_ok=True)
 
@@ -1561,17 +1565,28 @@ def _batch_finding_trigger_votes(
 
     retries: list[tuple[str, list[tuple[Path, Path, Path]]]] = []
     for index, batch, rc in first_results:
-        # Retry exactly once, and only ids a *completed* response left unvoted.
-        # Finish the whole first wave before starting retries so an incomplete
-        # early batch cannot consume the shared deadline ahead of untouched ids.
-        if rc not in (0, 3):
+        # Retry exactly once, and only ids still unvoted after a completed
+        # response or a consumed review wall. A source-heavy four-item review
+        # can exhaust its wall before emitting any keyed output; retrying the
+        # same group on every regeneration permanently starves those ids.
+        # Only that demonstrated failure earns singleton walls. Completed
+        # partial/parse-failed responses keep the old grouped retry, while
+        # provider failures (2) are never hot-retried.
+        # Finish the whole first wave first so an early incomplete batch cannot
+        # consume the shared deadline ahead of untouched ids.
+        if rc not in (0, 3, 124):
             continue
         missing = [
             (directory, report, vote_file)
             for directory, report, vote_file in batch
             if _cached_trigger_vote(report, vote_file) is None
         ]
-        if missing:
+        if rc == 124:
+            retries.extend(
+                (f"{index}-retry-{offset}", [item])
+                for offset, item in enumerate(missing)
+            )
+        elif missing:
             retries.append((f"{index}-retry", missing))
 
     def retry(tag_and_batch: tuple[str, list[tuple[Path, Path, Path]]]) -> None:
@@ -2356,12 +2371,14 @@ def _finding_trigger_disposition(
                 target_root_is_product,
             )
         second_vote = _cached_trigger_vote(report, second)
+        if second_vote in {"Promote", "Uncertain"}:
+            return "accepted"
+        if second_vote != "Reject":
+            return "pending"
         facts = _source_review_facts(
             report, (finding_dir / ".trigger-gate.json", second),
             rejection_quorum=2,
         )
-        if second_vote != "Reject":
-            return "pending"
         if facts.get("rejection_kind") == "no-added-boundary":
             return "native-hardening"
         if _trigger_rejection_is_dispositive(facts):
@@ -2490,7 +2507,12 @@ def _finalize_accepted_finding(
         )
         return "pending"
     review_facts = _source_review_facts(
-        report, (finding_dir / ".trigger-gate.json",),
+        report,
+        (
+            finding_dir / ".trigger-gate.json",
+            finding_dir / ".trigger-gate-2.json",
+        ),
+        rejection_quorum=2,
     )
     trigger_vote = _cached_trigger_vote(
         report, finding_dir / ".trigger-gate.json",

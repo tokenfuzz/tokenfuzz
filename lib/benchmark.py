@@ -318,7 +318,7 @@ def _artifact_report_link(label: object, artifact_dir: Path,
 
 def _rejected_label(value: object, upper_bound: bool) -> object:
     """Show when an unclusterable rejection count is only a safe maximum."""
-    return f"≤ {value}" if upper_bound else value
+    return f"up to {value}" if upper_bound else value
 
 
 def _unique_with_medium_plus(unique: int, medium_plus: int) -> str:
@@ -590,16 +590,12 @@ def _finding_is_confirmed(
 
 def _finding_has_terminal_reject(finding_dir: Path) -> bool:
     """True iff a rejected FIND is awaiting its final directory move."""
-    if _finding_is_pinned(finding_dir):
-        return False
-    quality = _read_json(finding_dir / ".llm-find-quality.json")
-    if quality.get("accept") is False and report_identity.quality_cache_matches_report(
-        finding_dir, quality,
-    ):
-        return True
-    return _finding_quality_accepted(finding_dir) and _trigger_snapshot(
-        finding_dir
-    )[0] == "reject"
+    receipt = validation_receipt.read_current(finding_dir)
+    return (
+        receipt is not None
+        and receipt.get("kind") == "finding"
+        and receipt.get("state") == "rejected"
+    )
 
 
 def _iter_jsonl(path: Path):
@@ -4597,7 +4593,7 @@ def render_section(report: dict) -> str:
         "evidence type. `bin/cluster-findings` / `bin/cluster-crashes` merge "
         "matching evidence signatures on both sides. These deterministic "
         "signature clusters reduce duplicate reports but are not guaranteed "
-        "root-cause or unique-fix counts. A `≤ N` "
+        "root-cause or unique-fix counts. An `up to N` "
         "rejected cell is a conservative upper bound because legacy rows had "
         "no artifact to cluster or clustering could not run. "
         "**Unique rejected findings** "
@@ -5253,7 +5249,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "Both columns merge duplicate reports of the same problem wherever "
         "the artifacts carry enough evidence to tell. Where that was not "
-        "possible, a rejected count is shown as `≤ N`: an upper bound, so a "
+        "possible, a rejected count is shown as `up to N`: an upper bound, so a "
         "rejected result is over-stated rather than quietly dropped."
     )
     lines.append("")
@@ -5285,7 +5281,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "- **Unique rejected crashes** — candidates review threw out: not "
         "reproducible, already known, or not a sanitizer-class bug. Duplicates "
-        "are merged by stack signature; `≤ N` marks an upper bound."
+        "are merged by stack signature; `up to N` marks an upper bound."
     )
     lines.append(
         "- **Unique accepted crashes** — crashes with sanitizer output and "

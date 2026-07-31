@@ -881,6 +881,8 @@ class SeverityTests(unittest.TestCase):
             "file-write:path-traversal": "arbitrary_file_write",
             "boundary:sandbox-escape": "sandbox_escape",
             "injection:command": "code_execution",
+            "memory-safety:allocator-mismatch": "allocator_mismatch",
+            "memory-safety:alignment": "bus",
         }
         for label, expected in aliases.items():
             with self.subTest(label=label):
@@ -898,6 +900,32 @@ class SeverityTests(unittest.TestCase):
                 self.assertEqual(
                     severity._primitive_from_validated_class(ambiguous), "",
                 )
+
+        for report_id, finding_class, expected in (
+            (
+                "FIND-ALLOCATOR",
+                "memory-safety:allocator-mismatch",
+                "allocator_mismatch",
+            ),
+            ("FIND-ALIGNMENT", "memory-safety:alignment", "bus"),
+        ):
+            with self.subTest(finding_class=finding_class):
+                report = self.make_report(
+                    "Concrete source-reviewed memory-safety consequence.",
+                    report_id=report_id, finding=True,
+                    extra_fields=(("Primitive", "undefined_behavior"),),
+                )
+                (report / ".llm-find-quality.json").write_text(json.dumps({
+                    "decision_version": "v13-python",
+                    "accept": True,
+                    "accept_count": 2,
+                    "class": finding_class,
+                }))
+                scored = self.score(report)
+                self.assertEqual(scored["primitive_key"], expected)
+                self.assertIsNotNone(scored["score"])
+                if expected == "allocator_mismatch":
+                    self.assert_metrics(scored, VC="N", VI="N", VA="H")
 
         file_write, _ = severity._cvss4_metrics(
             "arbitrary_file_write", "library", {}, False,

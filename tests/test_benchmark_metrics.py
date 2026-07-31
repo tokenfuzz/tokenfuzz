@@ -480,8 +480,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         states = {row["id"]: row for row in metrics["gate_states"]}
 
         self.assertEqual(metrics["confirmed_findings"], 0)
-        self.assertEqual(metrics["findings_rejected_pending"], 1)
-        self.assertEqual(metrics["findings_unadjudicated"], 1)
+        self.assertEqual(metrics["findings_rejected_pending"], 0)
+        self.assertEqual(metrics["findings_unadjudicated"], 2)
         self.assertEqual(metrics["findings_rejected"], 1)
         self.assertEqual(metrics["confirmed_crashes"], 1)
         self.assertEqual(states["FIND-001"]["disposition"], "pending")
@@ -495,6 +495,24 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertTrue(states["FIND-002"]["pending"])
         self.assertEqual(states["FIND-003"]["disposition"], "rejected")
         self.assertEqual(states["FIND-003"]["conflicts"], ["quality-votes"])
+
+    def test_rejected_receipt_left_in_active_lane_is_not_unadjudicated(self) -> None:
+        results = self.root / "results"
+        finding = results / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text(
+            "# Rejected state issue\n", encoding="utf-8",
+        )
+        validation_receipt.write(
+            finding, kind="finding", state="rejected",
+            detail="directory move pending",
+        )
+
+        metrics = benchmark.harvest(results)
+
+        self.assertEqual(metrics["confirmed_findings"], 0)
+        self.assertEqual(metrics["findings_rejected_pending"], 1)
+        self.assertEqual(metrics["findings_unadjudicated"], 0)
 
     def test_current_model_families_use_their_exact_price_tiers(self) -> None:
         cases = (
@@ -1281,8 +1299,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         ledger = benchmark.render_section(report)
         self.assertNotIn("Pending findings", ledger)
         self.assertNotIn("Pending crashes", ledger)
-        self.assertIn("≤ 2", text)
-        self.assertIn("≤ 2", ledger)
+        self.assertIn("up to 2", text)
+        self.assertIn("up to 2", ledger)
 
     def test_crosstab_shows_pre_receipt_counts_as_pending(self) -> None:
         # Counts written before publication receipts existed no longer follow

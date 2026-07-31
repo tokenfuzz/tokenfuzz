@@ -505,7 +505,7 @@ _KEY = """
  <div class="ki"><svg viewBox="0 0 26 12"><circle cx="3" cy="6" r="3" fill="#2a78d6"/><circle cx="8" cy="6" r="3" fill="#d64f92"/><circle cx="13" cy="6" r="3" fill="#6f52c9"/><circle cx="18" cy="6" r="3" fill="#00897b"/><circle cx="23" cy="6" r="3" fill="#c45d00"/></svg>
   <div class="kt"><b>Label = model · run, colour = backend</b><span>One chart covers every run of the same target, so each row is labelled with the model that ran it and when that run started — otherwise two runs of one model would look alike. A model's own row and its harness row share the label. Colour is the CLI behind it: blue codex, magenta claude, violet gemini, teal grok, and orange OSS. Every target is audited on live, unfixed code — there is no planted bug to re-find.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><path d="M1 6 L25 6" stroke="currentColor" stroke-width="1.5"/><circle cx="13" cy="6" r="2.5" fill="currentColor"/></svg>
-  <div class="kt"><b>Reading the chip</b><span>The line above each curve shows how much was kept and how much was rejected, each counted with its own duplicates merged. One problem can be kept in one write-up and rejected in another, so the two sides do not divide into a pass rate; a ≤ means the rejected figure is an upper bound.</span></div></div>
+  <div class="kt"><b>Reading the chip</b><span>The line above each curve shows how much was kept and how much was rejected, each counted with its own duplicates merged. One problem can be kept in one write-up and rejected in another, so the two sides do not divide into a pass rate; “up to” means the rejected figure is an upper bound.</span></div></div>
 </div>
 """
 
@@ -567,7 +567,7 @@ function panel(host,kind,rows){
   s.appendChild(el("circle",{cx:ml+4,cy:cy-3.5,r:4,fill:c}));
   s.appendChild(el("text",{x:ml+14,y:cy,"font-size":11,"font-weight":700,fill:"#202124"},[tx(label(r))]));
   s.appendChild(el("text",{x:ml+236,y:cy,"font-size":11,fill:"#5f6368"},[tx(m.accepted+" accepted")]));
-  s.appendChild(el("text",{x:ml+336,y:cy,"font-size":11,fill:"#5f6368"},[tx((u?"≤ ":"")+m.rejected+" rejected")]));
+  s.appendChild(el("text",{x:ml+336,y:cy,"font-size":11,fill:"#5f6368"},[tx((u?"up to ":"")+m.rejected+" rejected")]));
   cy+=16});
  for(var v=0;v<=ys.top+1e-9;v+=ys.step){var yv=Math.round(v*1e6)/1e6;
   s.appendChild(el("line",{x1:ml,x2:ml+pw,y1:Y(yv),y2:Y(yv),stroke:yv?"#e8eaed":"#b9bec4","stroke-width":yv?1:1.5}));

@@ -362,9 +362,13 @@ def main(argv=None) -> int:
                 artifact_dirs[item_id], probe_evidence[item_id],
             )
             output.write_text(json.dumps(vote, indent=2, sort_keys=True) + "\n")
-        # 2 = transient backend failure (timeout / provider limit): the caller
-        # must not hot-retry it. 3 = a completed response that parsed nothing;
-        # 0 = votes written (the caller still retries any missing ids, once).
+        # A wall-exhausted source review gets a narrower retry than other
+        # backend failures: the caller splits only that batch into singleton
+        # reviews. Provider/capacity failures remain 2 and are not hot-retried.
+        # 3 is a completed response that parsed nothing; 0 means votes were
+        # written (the caller still retries any missing ids once).
+        if status == 124:
+            return 124
         if transient:
             return 2
         return 0 if parsed else 3
