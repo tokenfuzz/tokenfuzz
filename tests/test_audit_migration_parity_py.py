@@ -242,9 +242,9 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     )
 
     with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "oss"}, clear=True):
-        oss_tier = triage.llm_decide.decision_timeout()
+        oss_tier = triage.llm_decide.decision_timeout("unmeasured")
     with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "codex"}, clear=True):
-        hosted_tier = triage.llm_decide.decision_timeout()
+        hosted_tier = triage.llm_decide.decision_timeout("unmeasured")
     check(
         oss_tier == 180 and hosted_tier == 45
         and audit_runner._operator_decision_timeout(None) == 0

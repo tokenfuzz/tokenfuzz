@@ -73,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
 
     # Unset, this decision gets its own measured default -- the tier ceiling is
     # shorter than a single observed call, so every call would time out.
-    for backend, expected in (("claude", 450), ("oss", 1800)):
+    for backend, expected in (("claude", 800), ("oss", 3200)):
         captured.clear()
         with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": backend}, clear=True), \
              mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):

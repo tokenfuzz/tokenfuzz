@@ -119,7 +119,7 @@ def distill_bug_class(
     usage_index: Path | None = None,
 ) -> str:
     """LLM-distill the bug class from a peer fix. Empty string on failure."""
-    timeout = decision_timeout() if timeout is None else timeout
+    timeout = decision_timeout("s6-peer-distill") if timeout is None else timeout
     prompt = render_template("peer_fix_distill.md.j2", {
         "peer": peer,
         "fix_id": str(fix_entry.get("id", "")),
@@ -160,7 +160,7 @@ def map_to_target_file(
 
     Returns the relative path or empty string on failure / no good match.
     """
-    timeout = decision_timeout() if timeout is None else timeout
+    timeout = decision_timeout("s6-peer-map") if timeout is None else timeout
     if not target_file_listing or not bug_class_summary:
         return ""
     # Cap the listing in the prompt — file lists are noisy and the LLM

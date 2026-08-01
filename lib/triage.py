@@ -759,7 +759,7 @@ def fill_reach_fields(
     decision = decision_override
     if decision is _NO_REACH_DECISION:
         prompt = render_template("triage_reachability_fields.md.j2", {"narrative": text})
-        timeout = llm_decide.decision_timeout()
+        timeout = llm_decide.decision_timeout("reachability-fields")
         decision = llm_decide.llm_decide(
             "reachability-fields", "", prompt, timeout, usage_index=usage_index,
         )
@@ -823,7 +823,7 @@ def _batch_reach_field_decisions(
         items.append({"id": directory.name, "report": narrative})
     if not items:
         return attempted, {}, prefilled
-    timeout = llm_decide.decision_timeout()
+    timeout = llm_decide.decision_timeout("reachability_fields_batch")
     instructions = render_template(
         "triage_reachability_fields.md.j2", {"narrative": ""},
     ).split("\nReport:", 1)[0]

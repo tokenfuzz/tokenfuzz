@@ -122,9 +122,23 @@ DECISION_TIMEOUT_OSS = 180
 # slowest observed completion. Re-derive from `<decision> OK ... elapsed=` lines
 # in the decisions log: a timed-out call reports the cutoff, not the time the
 # call needed, so rc=124 lines cannot size these.
+#
+# A decision that reaches its ceiling spends the whole window, returns nothing,
+# and trips its own exact-prompt breaker, so the work it was doing is skipped
+# rather than retried. A higher ceiling does not delay calls that complete, but
+# it does increase the worst case for a call that never does; size these from
+# observed completions rather than treating more wall as free. Every decision
+# that needs more than the tier must be listed here and name itself at its call
+# site. The required argument prevents a refactor from silently dropping back
+# to the bare tier.
 DECISION_TIMEOUT_HOSTED_DEFAULTS = {
-    "cluster_expand": 450,
-    "trigger_validator": 600,
+    "cluster_expand": 800,
+    # Completions are censored: this ran at the bare tier, so its own OK lines
+    # cannot size it. Derived instead from its uncensored single-item sibling
+    # (`reachability-fields`, 37s slowest) doubled and scaled for the batch.
+    "reachability_fields_batch": 120,
+    "s6-peer-map": 90,
+    "trigger_validator": 700,
     "work_rerank": 150,
 }
 
@@ -1026,7 +1040,7 @@ def _load_mock(mock_val: str) -> Optional[str]:
     return mock_val
 
 
-def decision_timeout(decision: str = "") -> int:
+def decision_timeout(decision: str) -> int:
     """Return the configured decision ceiling, or the default for `decision`."""
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     tier = (

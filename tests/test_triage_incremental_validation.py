@@ -564,10 +564,12 @@ Generated score text.
 
         lock = threading.Lock()
         active = maximum = calls = 0
+        reach_timeouts: list[int] = []
 
-        def decide(*_args, **_kwargs):
+        def decide(_decision, _required, _prompt, timeout, **_kwargs):
             nonlocal active, maximum, calls
             with lock:
+                reach_timeouts.append(timeout)
                 active += 1
                 calls += 1
                 maximum = max(maximum, active)
@@ -581,6 +583,7 @@ Generated score text.
                 directories, None, workers=2,
             )
         self.assertEqual((calls, maximum), (3, 2))
+        self.assertEqual(reach_timeouts, [120, 120, 120])
 
         active = maximum = calls = 0
 
@@ -843,7 +846,7 @@ Generated score text.
             )
 
         # Five findings split 4 + 1; both reviews get the same full wall.
-        self.assertEqual(seen, [(4, 600), (1, 600)])
+        self.assertEqual(seen, [(4, 700), (1, 700)])
 
         # The wall is the decision's measured default, not a fixed ceiling: an
         # explicit operator timeout still overrides it, per its documented
@@ -897,7 +900,7 @@ Generated score text.
 
         # The singleton retries a timeout fans out to get the same full wall as
         # the batch that starved: at 300s those retries were starving too.
-        self.assertEqual(seen, [(2, 600), (1, 600), (1, 600)])
+        self.assertEqual(seen, [(2, 700), (1, 700), (1, 700)])
 
     def test_provider_limited_trigger_batch_is_not_retried(self) -> None:
         directory = self.root / "findings" / "FIND-010"
@@ -1987,7 +1990,7 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ, {"ACTIVE_BACKEND": backend}, clear=True,
             ):
-                self.assertEqual(llm_decide.decision_timeout(), expected)
+                self.assertEqual(llm_decide.decision_timeout("unmeasured"), expected)
         for value, expected in (
             ("17", 17), ("45", 45), ("180", 180), ("0", 45),
             ("junk", 45), ("", 45),
@@ -1997,12 +2000,12 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
                 {"LLM_DECISION_TIMEOUT": value, "ACTIVE_BACKEND": "codex"},
                 clear=True,
             ):
-                self.assertEqual(llm_decide.decision_timeout(), expected)
+                self.assertEqual(llm_decide.decision_timeout("unmeasured"), expected)
 
     def test_agent_reading_decisions_get_their_measured_default(self) -> None:
         # Hosted, then the same values scaled by the oss tier ratio.
         for backend, expand, rerank, other in (
-            ("claude", 450, 150, 45), ("oss", 1800, 600, 180),
+            ("claude", 800, 150, 45), ("oss", 3200, 600, 180),
         ):
             with mock.patch.dict(
                 os.environ, {"ACTIVE_BACKEND": backend}, clear=True,
@@ -2010,6 +2013,10 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
                 self.assertEqual(llm_decide.decision_timeout("cluster_expand"), expand)
                 self.assertEqual(llm_decide.decision_timeout("work_rerank"), rerank)
                 self.assertEqual(llm_decide.decision_timeout("find_quality_batch"), other)
+
+    def test_decision_timeout_requires_a_decision_name(self) -> None:
+        with self.assertRaises(TypeError):
+            llm_decide.decision_timeout()  # type: ignore[call-arg]
 
     def test_explicit_setting_overrides_the_measured_default_downward(self) -> None:
         # A per-decision default is a default, never a floor over the operator.
@@ -2053,7 +2060,7 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {}, clear=True):
                 audit_runner._activate_runtime(self._runtime(base, 0))
                 self.assertNotIn("LLM_DECISION_TIMEOUT", os.environ)
-                self.assertEqual(llm_decide.decision_timeout("cluster_expand"), 450)
+                self.assertEqual(llm_decide.decision_timeout("cluster_expand"), 800)
             # A choice the runtime carries reaches the decision, whether or not
             # it was already in this environment.
             with mock.patch.dict(os.environ, {}, clear=True):
