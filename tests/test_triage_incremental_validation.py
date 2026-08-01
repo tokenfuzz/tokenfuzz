@@ -607,6 +607,89 @@ Generated score text.
         self.assertEqual(attempted, set(directories))
         self.assertEqual((calls, maximum), (3, 2))
 
+    def test_repeat_finalization_of_unchanged_findings_spends_no_provider_call(self) -> None:
+        """Finalize twice; the second pass must reach no provider at all.
+
+        Every claim about what adjudication costs depends on whether a second
+        pass over unchanged artifacts re-pays for verdicts already on disk.
+        Asserting it directly is what keeps that question answered: the caches
+        bind on report identity, so any transform that rewrites a report
+        between passes silently reintroduces the entire bill.
+        """
+        self.report.write_text(
+            "# State issue\n\n"
+            "A caller-controlled request crosses an authorization boundary.\n\n"
+            "Boundary: network\n"
+            "Caller controls: bytes\n"
+            "Trusted caller actions: none\n"
+            "Caller contract: obeyed\n"
+            "Trigger source: bytes\n"
+            "Surface: network\n"
+            "Primitive: authz_bypass\n"
+            "Class: authorization\n"
+            "Parameter control: direct\n"
+            "Advisory: no\n"
+            "Strategy: S3\n",
+            encoding="utf-8",
+        )
+        quality_calls: list[str] = []
+        provider_calls: list[list[str]] = []
+        subprocess_run = subprocess.run
+
+        def run(command, *_args, **_kwargs):
+            if "--batch-manifest" in command:
+                provider_calls.append(list(command))
+                _write_batch_votes(command)
+                return mock.Mock(returncode=0)
+            return subprocess_run(command, *_args, **_kwargs)
+
+        def quality_batch(directories, *_args, **_kwargs):
+            quality_calls.append("batch")
+            return {
+                directory: [
+                    {"accept": True, "reason": "concrete boundary issue",
+                     "class": "auth:bypass", "severity": "high"},
+                ] * 2
+                for directory in directories
+            }
+
+        def gate() -> dict[str, int]:
+            with mock.patch.dict(os.environ, {
+                "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            }, clear=False), mock.patch.object(
+                triage.llm_decide, "provider_limit_open", return_value=False,
+            ), mock.patch.object(
+                triage.subprocess, "run", side_effect=run,
+            ), mock.patch.object(
+                triage, "_batch_quality_votes", side_effect=quality_batch,
+            ):
+                return triage.validate_find_gate(self.root, workers=1)
+
+        first = gate()
+        self.assertEqual(first["accepted"], 1)
+        self.assertTrue(quality_calls, "the first pass must review the finding")
+        self.assertTrue(provider_calls, "the first pass must reach the validator")
+        self.assertIsNotNone(
+            validation_receipt.read_current(self.finding),
+            "severity formatting must not make the accepted finding uncountable",
+        )
+
+        before = self.report.read_text(encoding="utf-8")
+        quality_calls.clear()
+        provider_calls.clear()
+        second = gate()
+
+        self.assertEqual(second["accepted"], 1)
+        self.assertIsNotNone(validation_receipt.read_current(self.finding))
+        self.assertEqual(
+            self.report.read_text(encoding="utf-8"), before,
+            "an unchanged finding must not be rewritten by finalization",
+        )
+        self.assertEqual(
+            (quality_calls, provider_calls), ([], []),
+            "a second finalization of unchanged findings must be free",
+        )
+
     def test_incomplete_trigger_batch_retries_only_missing_ids_once(self) -> None:
         directories = []
         for index in range(2):

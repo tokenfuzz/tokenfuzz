@@ -1320,6 +1320,14 @@ def _direct_probe_trigger_bypass(
 
     Every condition is machine-authored and fail-closed. Missing legacy evidence
     simply keeps the existing LLM trigger review; it never rejects a crash.
+
+    The empty-argv requirement makes this rare in practice — it fired on none
+    of 268 crash directories across a full benchmark, because a decoder or a
+    shell needs flags to read a file at all. Accepting the target's configured
+    argv instead was measured and rejected: it would reach seven more
+    artifacts while dropping the one independent reachability check on a
+    sanitizer-confirmed crash, and a runner's operator-chosen flag can itself
+    be the precondition the review exists to disclose.
     """
     bypass = crash_dir / ".trigger-gate-bypass.json"
     bypass.unlink(missing_ok=True)
@@ -1951,7 +1959,7 @@ def triage_one_crash(
         attacker_controls=attacker_controls, review_facts=review_facts,
     )
     if _decision_timeout(1, deadline):
-        _run_tool("severity", "--report", str(crash_dir), env=environment)
+        _score_validated_report(crash_dir, report, env=environment)
     return "promoted"
 
 
@@ -2454,6 +2462,80 @@ def _finding_ready_for_cached_finalization(
     )
 
 
+def _score_validated_report(
+    directory: Path, report: Path, *, env: dict | None = None,
+) -> int:
+    """Score a validated report and carry its verdicts across that rewrite.
+
+    Severity may synthesize a Fields table from the report's existing bare
+    labels. That is a representation-only transform, but it changes the full
+    report identity. Snapshot only verdicts that are current immediately
+    before scoring, then bind those same verdicts and the validation receipt to
+    the scored form. Any later authored edit still invalidates them normally.
+    """
+    quality_path = directory / ".llm-find-quality.json"
+    quality = _finding_cache(quality_path)
+    quality_current = (
+        quality.get("accept") is True
+        and _quality_cache_matches(
+            quality_path, quality, report, read_report_bounded(report),
+        )
+    )
+    trigger_payloads: dict[Path, dict] = {}
+    for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+        path = directory / name
+        if _cached_trigger_vote(report, path) is None:
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            trigger_payloads[path] = payload
+
+    # Call shape matches the historical scorer invocation exactly: an explicit
+    # env=None is equivalent for subprocess, but callers assert on this call.
+    rc = (
+        _run_tool("severity", "--report", str(directory), env=env)
+        if env is not None
+        else _run_tool("severity", "--report", str(directory))
+    )
+    if rc != 0:
+        return rc
+    report = _report(directory) or report
+    current_sha1 = report_identity.content_sha1(report)
+    if current_sha1 is None:
+        return rc
+    scored_receipt = validation_receipt.read_current(directory)
+    try:
+        caches_rebound = False
+        if quality_current:
+            bounded_sha1 = _quality_content_sha1(read_report_bounded(report))
+            if (
+                quality.get("content_sha1") != bounded_sha1
+                or quality.get("report_sha1") != current_sha1
+            ):
+                quality["content_sha1"] = bounded_sha1
+                quality["report_sha1"] = current_sha1
+                _write_atomic_json(quality_path, quality)
+                caches_rebound = True
+        for path, payload in trigger_payloads.items():
+            if payload.get("content_sha1") != current_sha1:
+                payload["content_sha1"] = current_sha1
+                _write_atomic_json(path, payload)
+                caches_rebound = True
+        if caches_rebound and scored_receipt is not None:
+            validation_receipt.rewrite_after_equivalent_transform(
+                directory, scored_receipt,
+            )
+    except OSError as exc:
+        print(
+            f"WARN: could not bind {directory.name} validation to scored report: {exc}",
+            file=sys.stderr,
+        )
+    return rc
+
+
 def _finalize_accepted_finding(
     finding_dir: Path, results_dir: Path, report: Path,
     deadline: float | None,
@@ -2537,12 +2619,11 @@ def _finalize_accepted_finding(
     # missing consequence or boundary therefore remains unrated rather than
     # being interpreted as Low.
     #
-    # Scoring rewrites the report, which looks like it would invalidate the
-    # receipt just written. It does not: the receipt binds
-    # `report_identity.content_sha1`, which covers authored content and skips
-    # the generated sections severity maintains. Keep that order — scoring
-    # first would score a report no receipt vouches for.
-    _run_tool("severity", "--report", str(finding_dir))
+    # Score only after source-backed validation. Severity may canonicalize the
+    # report while doing so; _score_validated_report carries the current gate
+    # caches across that exact harness-owned rewrite. Scoring first would score
+    # a report no receipt vouches for.
+    _score_validated_report(finding_dir, report)
     return "accepted"
 
 
@@ -2620,7 +2701,7 @@ def validate_one_finding(
             detail=f"human override; {reach_detail}",
             attacker_controls=controls,
         )
-        _run_tool("severity", "--report", str(finding_dir))
+        _score_validated_report(finding_dir, report)
         return "accepted"
     report_text = read_report_bounded(report)
     report_sha1 = report_identity.content_sha1(report)
