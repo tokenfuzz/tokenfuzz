@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import contextlib
 import fcntl
 import http.server
 import json
@@ -1241,43 +1242,83 @@ def benchmark_count_crashes(path: Path):
     return benchmark.count_confirmed_crashes(path)
 
 
+@contextlib.contextmanager
+def _phase_span(spans: list[str], name: str):
+    """Record one post_iteration phase's duration.
+
+    Housekeeping has been a single aggregate number, so a barrier that costs a
+    fifth of the audit wall could not be attributed to a phase and every
+    estimate had to be inferred from decision timestamps. Timing is advisory:
+    a span never changes a disposition, and a phase that raises still records
+    what it spent before failing.
+    """
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        spans.append(f"{name}={time.monotonic() - started:.1f}s")
+
+
+def _log_phase_spans(runtime: Runtime, spans: list[str]) -> None:
+    """Publish advisory timing without changing housekeeping's outcome."""
+    if not spans:
+        return
+    try:
+        index_log(runtime, "Housekeeping phases: " + " ".join(spans))
+    except OSError as exc:
+        print(
+            f"WARN: housekeeping phase timing could not be recorded: {exc}",
+            file=sys.stderr,
+        )
+
+
 def post_iteration(runtime: Runtime, *, deadline: float | None = None) -> None:
-    crash_counts = triage.triage_crash_dirs(
-        runtime.results, runtime.target_root, runtime.target_slug,
-        runtime.config.attacker_controls, workers=runtime.num_agents,
-        findings_only=runtime.config.sanitizers_explicitly_disabled,
-        deadline=deadline,
-    )
-    finding_counts = triage.validate_find_gate(
-        runtime.results, workers=runtime.num_agents, deadline=deadline,
-    )
-    if deadline is not None and time.monotonic() >= deadline:
+    spans: list[str] = []
+    try:
+        with _phase_span(spans, "crash_triage"):
+            crash_counts = triage.triage_crash_dirs(
+                runtime.results, runtime.target_root, runtime.target_slug,
+                runtime.config.attacker_controls, workers=runtime.num_agents,
+                findings_only=runtime.config.sanitizers_explicitly_disabled,
+                deadline=deadline,
+            )
+        with _phase_span(spans, "finding_gate"):
+            finding_counts = triage.validate_find_gate(
+                runtime.results, workers=runtime.num_agents, deadline=deadline,
+            )
+        if deadline is not None and time.monotonic() >= deadline:
+            index_log(
+                runtime,
+                "Housekeeping: productive wall budget reached during result triage; "
+                "remaining index work deferred",
+            )
+            return
+        with _phase_span(spans, "cluster_expand"):
+            cluster_counts = expand_new_crash_clusters(runtime, deadline=deadline)
+        if deadline is not None and time.monotonic() >= deadline:
+            index_log(
+                runtime,
+                "Housekeeping: productive wall budget reached during cluster expansion; "
+                "remaining index work deferred",
+            )
+            return
+        with _phase_span(spans, "indexes"):
+            maintain_local_indexes(runtime)
+            maintain_aggregate_indexes(runtime)
+        with _phase_span(spans, "orphan_enforce"):
+            enforced = enforce_orphan_testcases(runtime, deadline=deadline)
+        with _phase_span(spans, "corpus_promote"):
+            promoted = promote_corpus(runtime)
         index_log(
             runtime,
-            "Housekeeping: productive wall budget reached during result triage; "
-            "remaining index work deferred",
+            f"Housekeeping: crashes promoted={crash_counts['promoted']} rejected={crash_counts['rejected']} "
+            f"pending={crash_counts['pending']} demoted={crash_counts['demoted']} "
+            f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
+            f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']} "
+            f"orphans_enforced={enforced} corpus_promoted={promoted}",
         )
-        return
-    cluster_counts = expand_new_crash_clusters(runtime, deadline=deadline)
-    if deadline is not None and time.monotonic() >= deadline:
-        index_log(
-            runtime,
-            "Housekeeping: productive wall budget reached during cluster expansion; "
-            "remaining index work deferred",
-        )
-        return
-    maintain_local_indexes(runtime)
-    maintain_aggregate_indexes(runtime)
-    enforced = enforce_orphan_testcases(runtime, deadline=deadline)
-    promoted = promote_corpus(runtime)
-    index_log(
-        runtime,
-        f"Housekeeping: crashes promoted={crash_counts['promoted']} rejected={crash_counts['rejected']} "
-        f"pending={crash_counts['pending']} demoted={crash_counts['demoted']} "
-        f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
-        f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']} "
-        f"orphans_enforced={enforced} corpus_promoted={promoted}",
-    )
+    finally:
+        _log_phase_spans(runtime, spans)
 
 
 def _write_cluster_marker(path: Path) -> None:

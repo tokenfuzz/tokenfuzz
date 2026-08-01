@@ -67,6 +67,65 @@ class AuditClockTests(unittest.TestCase):
         self.assertEqual(state.housekeeping_seconds, 12.5)
         self.assertEqual(float((self.logs / ".housekeeping_secs").read_text()), 12.5)
 
+    def test_post_iteration_records_every_completed_phase(self) -> None:
+        runtime = SimpleNamespace(
+            results=self.root / "results", target_root=self.root / "target",
+            target_slug="sampleproj", num_agents=2, index=self.runtime.index,
+            config=SimpleNamespace(
+                attacker_controls=["bytes"],
+                sanitizers_explicitly_disabled=False,
+            ),
+        )
+        crash_counts = {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0}
+        finding_counts = {"accepted": 0, "rejected": 0, "pending": 0}
+        with mock.patch.object(
+            audit_runner.triage, "triage_crash_dirs", return_value=crash_counts,
+        ), mock.patch.object(
+            audit_runner.triage, "validate_find_gate", return_value=finding_counts,
+        ), mock.patch.object(
+            audit_runner, "expand_new_crash_clusters", return_value={"added": 0},
+        ), mock.patch.object(audit_runner, "maintain_local_indexes"), \
+                mock.patch.object(audit_runner, "maintain_aggregate_indexes"), \
+                mock.patch.object(audit_runner, "enforce_orphan_testcases", return_value=0), \
+                mock.patch.object(audit_runner, "promote_corpus", return_value=0), \
+                mock.patch.object(audit_runner, "index_log") as index_log, \
+                mock.patch.object(
+                    audit_runner.time, "monotonic",
+                    side_effect=[float(value) for value in range(12)],
+                ):
+            audit_runner.post_iteration(runtime)
+
+        phase_line = index_log.call_args_list[-1].args[1]
+        self.assertEqual(
+            phase_line,
+            "Housekeeping phases: crash_triage=1.0s finding_gate=1.0s "
+            "cluster_expand=1.0s indexes=1.0s orphan_enforce=1.0s "
+            "corpus_promote=1.0s",
+        )
+
+    def test_phase_failure_is_recorded_without_masking_the_failure(self) -> None:
+        runtime = SimpleNamespace(
+            results=self.root / "results", target_root=self.root / "target",
+            target_slug="sampleproj", num_agents=1, index=self.runtime.index,
+            config=SimpleNamespace(
+                attacker_controls=["bytes"],
+                sanitizers_explicitly_disabled=False,
+            ),
+        )
+        with mock.patch.object(
+            audit_runner.triage, "triage_crash_dirs",
+            side_effect=RuntimeError("triage failed"),
+        ), mock.patch.object(
+            audit_runner.time, "monotonic", side_effect=[10.0, 12.5],
+        ), mock.patch.object(
+            audit_runner, "index_log", side_effect=OSError("log unavailable"),
+        ) as index_log:
+            with self.assertRaisesRegex(RuntimeError, "triage failed"):
+                audit_runner.post_iteration(runtime)
+        index_log.assert_called_once_with(
+            runtime, "Housekeeping phases: crash_triage=2.5s",
+        )
+
     def test_initial_queue_refresh_is_recorded_as_housekeeping(self) -> None:
         results = self.root / "results"
         results.mkdir()
