@@ -105,7 +105,7 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 ## bin/state cheat sheet (use instead of `--help`)
 
 ```
-resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1..S8]
+resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1|S2|S3|S5|S6|S7|S8]
 next-card     --agent N [--mode MODE] [--peek]
 show-card     CARD_ID [--mode MODE]                     # compact JSON
 list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
@@ -131,8 +131,8 @@ explain-queue [--mode MODE] [--strategy S] [--top N] [--all]
 recent probe artifacts. It is not filing or discard evidence.
 
 Card discard uses the configured floor (default: three card-linked CLEAN rows
-across two actually-probed hypothesis shapes). MISSED, NO_EXEC, CRASH, and
-DIFF do not count. A surface unavailable in every configured sibling
+across two actually-probed hypothesis shapes). MISSED, NO_EXEC, and CRASH do
+not count. A surface unavailable in every configured sibling
 build/mode exits through ENV-BLOCKED (which soft-blocks its owning card), or a
 proven mode-incompatible, stale, or non-public card may be marked `blocked`
 with a precise note. MISSED alone is not proof of unreachability.
@@ -176,11 +176,11 @@ Caller controls:
 Trusted caller actions:
 Caller contract: obeyed|violated|unspecified
 Trigger source: bytes|call-sequence|timing|race|protocol-state|env|fs-state|both
-Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
+Strategy: S1|S2|S3|S5|S6|S7|S8|REF
 ```
 
 `Strategy` is the investigation strategy actually in use when the
-testcase was filed (S1..S8 from the strategy index, or REF for the
+testcase was filed (an active strategy from the strategy index, or REF for the
 pattern-search library). Same field for findings/FIND-*.
 
 `Entry` (optional, recommended): the public API function an external caller
@@ -241,12 +241,6 @@ mechanics: `.agents/references/session-rules.md`.
 - Before `findings/FIND-*/`: confirm security (above), scan
   `findings/FINDING-CLUSTERS.md` for existing FINDs on same location
   (Status `NEEDS CONTENT` means fix in place, don't open a duplicate).
-
-## Differential testing (JIT/Wasm)
-
-Browser-mode only. For `js/src/jit`, `js/src/wasm`, `js/src/irregexp`:
-use `bin/probe` `MODE: js-diff` testcases; the differential harness flags
-output divergence as DIFF, not CRASH.
 
 ## Drill-down
 

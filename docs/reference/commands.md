@@ -95,7 +95,7 @@ Common flags:
 | Flag | Meaning |
 | --- | --- |
 | `--model <name>` | Override the backend's configured model. Required for `oss`. |
-| `--strategy S1` … `--strategy S8` | Pin one investigation strategy and suspend rotation. |
+| `--strategy S1|S2|S3|S5|S6|S7|S8` | Pin one investigation strategy and suspend rotation. S4 is reserved. |
 | `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer's initial session is still running. |
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
 | `--new-target <slug>` | Generate starter config and exit without starting an audit. |
@@ -144,8 +144,7 @@ testcase, and records the verdict in `state/runs.jsonl`.
   and can file a stable crash bundle.
 - Use `--dry-run` to inspect mode, sanitizer, output path, and resolved command
   without executing target code.
-- Use `--mode browser|js|generic|js-diff` only when automatic mode detection is
-  wrong or the testcase deliberately requests differential execution.
+- Use `--mode browser|js|generic` only when automatic mode detection is wrong.
 
 Run `bin/probe --help` for the rest.
 
@@ -162,7 +161,7 @@ Every testcase begins with native-comment headers:
 TARGET: path/to/file.c:Function:123
 HYPOTHESIS-ID: H1
 CATEGORY: bounds
-MODE: generic          # optional: auto|browser|js|generic|js-diff
+MODE: generic          # optional: auto|browser|js|generic
 HARNESS: harness.c     # optional sibling API harness
 ```
 

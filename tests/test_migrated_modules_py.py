@@ -1057,6 +1057,40 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "environment-blocked work advances strategy rotation",
     )
 
+    # S4 is reserved, so stale state is replaced before an agent is launched.
+    (strategy_results / "state" / "strategy-1").write_text("S4\n", encoding="utf-8")
+    audit_runner.initialize_agent_strategies(
+        SimpleNamespace(
+            root=ROOT, target_root=generic_target, target_slug="demo",
+            results=strategy_results, repo_type="none", num_agents=1,
+            fixed_strategy="",
+        )
+    )
+    equal(
+        "S7", (strategy_results / "state" / "strategy-1").read_text().strip(),
+        "a stale S4 assignment is replaced by a strategy that owns cards",
+    )
+    (strategy_results / "work-cards.jsonl").write_text(
+        json.dumps({"id": "WORK-only", "strategy": "S3", "status": "unclaimed"}) + "\n",
+        encoding="utf-8",
+    )
+    (strategy_results / "state" / "strategy-1").write_text("S3\n", encoding="utf-8")
+    (strategy_results / ".agent_strategy_streak_1").write_text("2\n", encoding="utf-8")
+    with mock.patch.object(
+        audit_runner.workqueue, "strategy_completion_status",
+        return_value={"complete": True, "evidence": 2, "threshold": 2},
+    ):
+        audit_runner.update_strategy_rotation(
+            rotation_runtime, rotation_context, {1: idle_progress}, set(),
+        )
+    equal(
+        "S5", (strategy_results / "state" / "strategy-1").read_text().strip(),
+        "rotation with no alternative queue skips the reserved S4 identifier",
+    )
+    (strategy_results / "work-cards.jsonl").write_text(
+        "".join(json.dumps(card) + "\n" for card in strategy_cards), encoding="utf-8"
+    )
+
     subsystem_runtime = SimpleNamespace(
         root=ROOT, target_root=generic_target, target_slug="demo",
         results=strategy_results, repo_type="none", num_agents=2,

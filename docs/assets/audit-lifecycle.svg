@@ -78,7 +78,7 @@
   <g filter="url(#al-shadow)"><rect x="300" y="476" width="240" height="64" class="crash"/></g>
   <text x="316" y="494" class="out-tag" fill="#991b1b">Reproducible subset</text>
   <text x="316" y="512" class="title">crashes/CRASH-*</text>
-  <text x="316" y="530" class="micro">Sanitizer or differential proof saved.</text>
+  <text x="316" y="530" class="micro">Reproducible sanitizer proof saved.</text>
 
   <g filter="url(#al-shadow)"><rect x="560" y="476" width="180" height="64" class="reject"/></g>
   <text x="576" y="494" class="out-tag" fill="#374151">Dropped, with reason</text>

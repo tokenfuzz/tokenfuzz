@@ -314,74 +314,7 @@ print("[run-asan] CRASH DETECTED: ASan error found")
         self.assertIn("small body line 1", self.output(short))
         self.assertIn("small body line 2", self.output(short))
 
-    def test_unconfigured_differential_is_reported_as_skipped_not_matching(self) -> None:
-        self.write_runner(
-            """if len(sys.argv) > 1 and sys.argv[1] == "js-diff":
-    print("[run-asan] js-diff requires target.toml [s4_diff_pairs] "
-          "jit_eager and jit_off arguments", file=sys.stderr)
-    raise SystemExit(2)
-print("TESTCASE_EXECUTED")
-print("[run-asan] browser EXECUTION VERIFIED (post-run, marker=TESTCASE_EXECUTED)")
-"""
-        )
-        javascript = self.root / "testcase.js"
-        javascript.write_text("print('TESTCASE_EXECUTED');\n")
-        tried = self.root / "skip.log"
-        skipped = self.run_multi("js", javascript, environment={"TRIED_INPUTS_LOG": str(tried)})
-        output = self.output(skipped)
-        self.assertIn("AUTO-DIFF: SKIPPED", output)
-        self.assertNotIn("outputs match", output)
-        self.assertIn("verdict=CLEAN", tried.read_text())
-
-    def test_differential_generic_coverage_skip_and_crash_signature_dedup(self) -> None:
-        self.write_runner(
-            """if len(sys.argv) > 1 and sys.argv[1] == "js-diff":
-    print("[run-asan] DIFFERENTIAL: outputs DIFFER — potential JIT issue")
-    raise SystemExit(1)
-print("TESTCASE_EXECUTED")
-print("[run-asan] browser EXECUTION VERIFIED (post-run, marker=TESTCASE_EXECUTED)")
-"""
-        )
-        javascript = self.root / "testcase.js"
-        javascript.write_text("print('TESTCASE_EXECUTED');\n")
-        tried = self.root / "diff.log"
-        diff = self.run_multi("js", javascript, environment={"TRIED_INPUTS_LOG": str(tried)})
-        self.assertEqual(diff.returncode, 1)
-        self.assertIn("DIFFERENTIAL FINDING", self.output(diff))
-        self.assertIn("verdict=DIFF", tried.read_text())
-
-        self.write_runner(
-            """if len(sys.argv) > 1 and sys.argv[1] == "js-diff":
-    print("==12345==ERROR: AddressSanitizer: heap-buffer-overflow")
-    print("[run-asan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!")
-    raise SystemExit(1)
-print("TESTCASE_EXECUTED")
-print("[run-asan] browser EXECUTION VERIFIED (post-run, marker=TESTCASE_EXECUTED)")
-"""
-        )
-        tried.write_text("", encoding="utf-8")
-        crash = self.run_multi(
-            "js", javascript, environment={"TRIED_INPUTS_LOG": str(tried)}
-        )
-        self.assertEqual(crash.returncode, 1)
-        self.assertIn("ASan crash in differential mode", self.output(crash))
-        self.assertIn("CRASHES FOUND", self.output(crash))
-        self.assertNotIn("DIFFERENTIAL FINDING", self.output(crash))
-        self.assertIn("verdict=CRASH", tried.read_text())
-
-        self.write_runner(
-            """if len(sys.argv) > 1 and sys.argv[1] == "js-diff":
-    print("AddressSanitizer:DEADLYSIGNAL")
-    raise SystemExit(1)
-print("TESTCASE_EXECUTED")
-print("[run-asan] browser EXECUTION VERIFIED (post-run, marker=TESTCASE_EXECUTED)")
-"""
-        )
-        deadly = self.run_multi("js", javascript)
-        self.assertEqual(deadly.returncode, 1)
-        self.assertIn("ASan crash in differential mode", self.output(deadly))
-        self.assertIn("CRASHES FOUND", self.output(deadly))
-
+    def test_generic_coverage_skip_and_crash_signature_dedup(self) -> None:
         self.write_hits(
             "if 'generic' in sys.argv: print('hits should not be called', file=sys.stderr); raise SystemExit(99)\n"
             "print('HIT: sample_function')\n"

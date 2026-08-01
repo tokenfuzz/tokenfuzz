@@ -45,7 +45,7 @@ the FIND is preserved whether or not the reproducer lands.
    pinned: never edit `target.toml` or the results `.target.toml`; record proven
    runner/build metadata failures as ENV-BLOCKED for operator repair. Neither
    result is evidence for discard.
-5. If CRASH, DIFF, or a runner diagnostic appears, stop rotating: confirm as
+5. If CRASH or a runner diagnostic appears, stop rotating: confirm as
    required and complete the crash or finding at the absolute results path
    from AGENT IDENTITY (use the path printed by `bin/probe` when it files one).
 6. If CLEAN, decide from evidence:

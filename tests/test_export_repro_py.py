@@ -86,6 +86,12 @@ spec = importlib.util.spec_from_loader("export_repro_mod", loader)
 er = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(er)
 
+assert_eq(er.normalize_strategy("S4"), "", "reserved S4 has no report attribution")
+assert_eq(
+    er.normalize_strategy("S4 (retired differential)"), "",
+    "reserved S4 free-form labels have no report attribution",
+)
+
 
 # ─── Direct unit tests on strip / inference helpers ─────────────────
 

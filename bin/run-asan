@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import filecmp
 import os
 import shutil
 import sys
@@ -18,16 +17,11 @@ import sanitizer
 import sanitizer_run
 import target_config
 from sanitizer_helpers import (
-    _BROWSER_NOISE, copy_file, copy_filtered, file_contains,
+    _BROWSER_NOISE, copy_file, copy_filtered,
     firefox_fuzz_targets,
     report_browser_execution, untrusted_browser_filters,
 )
 from timeout import capture_timeout, run_timeout
-
-_ASAN_DIAGNOSTIC_MARKERS = (
-    b"ERROR: AddressSanitizer",
-    b"AddressSanitizer:DEADLYSIGNAL",
-)
 
 MACH_PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
@@ -243,71 +237,6 @@ def run_xpcshell(option_string: str, timeout: int, args: list[str]) -> int:
     return completed.returncode
 
 
-def run_js_diff(option_string: str, timeout: int, args: list[str]) -> int:
-    if not args:
-        print("Usage: run-asan js-diff <testcase.js> [extra args...]", file=sys.stderr)
-        return 1
-    testcase, flags, script_args = split_js_args(args)
-    eager = CONFIG.s4_diff_pairs.get("jit_eager", []) if CONFIG else []
-    off = CONFIG.s4_diff_pairs.get("jit_off", []) if CONFIG else []
-    if not eager or not off:
-        print(
-            "[run-asan] js-diff requires target.toml [s4_diff_pairs] "
-            "jit_eager and jit_off arguments",
-            file=sys.stderr,
-        )
-        return 2
-    js = BASE_ENV.get("ASAN_JS", str(BUILD_DIR / "dist/bin/js"))
-    print(f"=== Running with {' '.join(eager)} (JIT eager) ===", file=sys.stderr)
-    with capture_timeout(
-        [js, *eager, *flags, *testcase, *script_args], timeout,
-        env=runtime_env(option_string),
-    ) as (eager_run, eager_out):
-        print(f"=== Running with {' '.join(off)} (JIT off) ===", file=sys.stderr)
-        with capture_timeout(
-            [js, *off, *flags, *testcase, *script_args], timeout,
-            env=runtime_env(option_string),
-        ) as (off_run, off_out):
-            print(f"=== {' '.join(eager)} output ===")
-            copy_file(eager_out, sys.stdout.buffer)
-            print(f"\n=== {' '.join(off)} output ===")
-            copy_file(off_out, sys.stdout.buffer)
-            print()
-            eager_crash = any(
-                file_contains(eager_out, marker)
-                for marker in _ASAN_DIAGNOSTIC_MARKERS
-            )
-            off_crash = any(
-                file_contains(off_out, marker)
-                for marker in _ASAN_DIAGNOSTIC_MARKERS
-            )
-            if eager_crash:
-                print(f"[run-asan] CRASH in {' '.join(eager)} mode", file=sys.stderr)
-            if off_crash:
-                print(f"[run-asan] CRASH in {' '.join(off)} mode", file=sys.stderr)
-            if eager_crash or off_crash:
-                return 1
-            failed = [
-                f"{label}=rc{completed.returncode}"
-                for label, completed in (
-                    ("jit_eager", eager_run), ("jit_off", off_run),
-                )
-                if completed.returncode
-            ]
-            if failed:
-                print(
-                    "[run-asan] DIFFERENTIAL: execution failed "
-                    f"({', '.join(failed)}); no comparison was made",
-                    file=sys.stderr,
-                )
-                return 2
-            if filecmp.cmp(eager_out, off_out, shallow=False):
-                print("[run-asan] DIFFERENTIAL: outputs MATCH (no divergence)", file=sys.stderr)
-                return 0
-            print("[run-asan] DIFFERENTIAL: outputs DIFFER - potential JIT bug!", file=sys.stderr)
-            return 1
-
-
 def resolve_command(name: str) -> str:
     found = shutil.which(name)
     return found or name
@@ -439,9 +368,9 @@ def run_fuzz_js(option_string: str, timeout: int, args: list[str]) -> int:
 
 
 def main(argv: list[str]) -> int:
-    modes = {"browser", "browser-minimal", "js", "xpcshell", "js-diff", "generic", "fuzz", "fuzz-repro", "fuzz-js"}
+    modes = {"browser", "browser-minimal", "js", "xpcshell", "generic", "fuzz", "fuzz-repro", "fuzz-js"}
     if not argv or argv[0] not in modes:
-        print("Usage: run-asan {browser|browser-minimal|js|xpcshell|js-diff|generic|fuzz|fuzz-repro|fuzz-js} [args...]")
+        print("Usage: run-asan {browser|browser-minimal|js|xpcshell|generic|fuzz|fuzz-repro|fuzz-js} [args...]")
         return 1
     mode, args = argv[0], argv[1:]
     sanitizer.warn_if_disabled("asan", CONFIG)
@@ -451,7 +380,6 @@ def main(argv: list[str]) -> int:
     if mode == "browser-minimal": return run_browser(options("minimal"), normal_timeout, args)
     if mode == "js": return run_js(options("js"), int(BASE_ENV.get("ASAN_TIMEOUT", "10")), args)
     if mode == "xpcshell": return run_xpcshell(options("xpcshell"), normal_timeout, args)
-    if mode == "js-diff": return run_js_diff(options("js"), int(BASE_ENV.get("ASAN_TIMEOUT", "10")), args)
     if mode == "generic": return run_generic(options("full"), normal_timeout, args)
     if mode == "fuzz": return run_fuzz(options("fuzz"), int(BASE_ENV.get("FUZZ_ASAN_TIMEOUT", "600")), args)
     if mode == "fuzz-repro": return run_fuzz(options("fuzz-repro"), int(BASE_ENV.get("ASAN_FUZZ_REPRO_TIMEOUT", "20")), args, True)

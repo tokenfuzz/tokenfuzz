@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Coverage-gated sanitizer and differential testcase runner."""
+"""Coverage-gated sanitizer testcase runner."""
 
 from __future__ import annotations
 
@@ -32,15 +32,14 @@ import sanitizer_run
 import target_config
 import verdict as verdict_lib
 from file_tools import capture_command
-from sanitizer_helpers import file_contains
 from probe_helpers import _nonnegative_int
 from timeout import run_timeout
 
-VALID_MODES = {"auto", "browser", "js", "generic", "js-diff"}
+VALID_MODES = {"auto", "browser", "js", "generic"}
 VALID_SANITIZERS = {"asan", "ubsan", "msan", "tsan", "race", "runner"}
 MODE_MATRIX = {
-    "asan": {"browser", "js", "generic", "js-diff"},
-    "ubsan": {"browser", "js", "generic", "js-diff"},
+    "asan": {"browser", "js", "generic"},
+    "ubsan": {"browser", "js", "generic"},
     "msan": {"js", "generic"},
     "tsan": {"js", "generic"},
     "race": {"generic"},
@@ -57,7 +56,7 @@ HEADER_RE = {
 }
 BARE_METADATA = re.compile(r"^\s*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):\s*")
 HELP = """Usage:
-  bin/probe [--confirm | --sanitizer-runs N] [--dry-run] [--mode auto|browser|js|generic|js-diff] \\
+  bin/probe [--confirm | --sanitizer-runs N] [--dry-run] [--mode auto|browser|js|generic] \\
             [--hypothesis-id HYPOTHESIS-ID] \\
             [--want REGEX] testcase [-- harness-args...]
 
@@ -67,7 +66,7 @@ Required testcase headers:
   CATEGORY: bounds|lifetime|type|size|uninit|state
 
 Optional testcase headers:
-  MODE: auto|browser|js|generic|js-diff
+  MODE: auto|browser|js|generic
   HARNESS: harness.c
   CARD-ID: <id>
 
@@ -621,9 +620,6 @@ class Probe:
                 if found:
                     override = found
                     preargs = ["--transpile-only", "--skip-project", "--compiler-options", '{"module":"CommonJS","moduleResolution":"node","target":"ES2022","ignoreDeprecations":"6.0"}']
-        if self.mode == "js-diff":
-            runner = BIN_DIR / ("run-asan" if self.sanitizer == "asan" else "run-ubsan")
-            return [str(runner), "js-diff", str(self.exec_testcase), *self.args.args]
         if self.mode in {"browser", "js"}:
             if self.mode == "browser":
                 configured = (
@@ -729,16 +725,7 @@ class Probe:
         )
         if Path(self.command[0]).name == "run-sanitizer-multi":
             self.actual_runs_path.write_text("0\n", encoding="utf-8")
-        if self.mode == "js-diff":
-            with capture_command(
-                self.command, merge_stderr=True, env=self.environment
-            ) as completed:
-                self.output.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(completed.stdout, self.output)
-                with completed.stdout.open("rb") as source:
-                    shutil.copyfileobj(source, sys.stdout.buffer, 1024 * 1024)
-        else:
-            completed = subprocess.run(self.command, env=self.environment, check=False)
+        completed = subprocess.run(self.command, env=self.environment, check=False)
         result = completed.returncode
         probe_verdict = self._classify(result)
         result, probe_verdict = self._auto_route(result, probe_verdict)
@@ -769,8 +756,6 @@ class Probe:
         if self.output.is_file() and self.output.stat().st_size:
             if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
                 return "CRASH"
-            if file_contains(self.output, b"DIFFERENTIAL: outputs DIFFER"):
-                return "DIFF"
             if verdict_lib.file_is_clean(self.output):
                 return "CLEAN"
             return "NO_EXEC"
@@ -778,7 +763,7 @@ class Probe:
 
     def _auto_route(self, returncode: int, current: str) -> tuple[int, str]:
         binary = self.environment.get("ASAN_GENERIC_BIN", "")
-        if os.environ.get("PROBE_AUTO_ROUTE", "1") == "0" or self.mode != "generic" or self.sanitizer != "asan" or current in {"CRASH", "DIFF"} or not binary or not self.output.is_file():
+        if os.environ.get("PROBE_AUTO_ROUTE", "1") == "0" or self.mode != "generic" or self.sanitizer != "asan" or current == "CRASH" or not binary or not self.output.is_file():
             return returncode, current
         feature = feature_disabled_marker(self.output)
         if not feature:
@@ -889,7 +874,7 @@ class Probe:
             return
         strategy_path = Path(self.config.results_dir) / "state" / f"strategy-{self.agent}"
         strategy = strategy_path.read_text().strip().upper() if strategy_path.is_file() else ""
-        if not re.fullmatch(r"S[1-8]|REF", strategy):
+        if not re.fullmatch(r"S[1-3]|S[5-8]|REF", strategy):
             strategy = ""
         try:
             status, crash_id = crash_bundle.materialize(

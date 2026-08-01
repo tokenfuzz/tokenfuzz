@@ -194,6 +194,11 @@ def main(argv: list[str]) -> int:
         required=True,
         choices=list(HYPOTHESIS_DIAGNOSTIC_CATEGORIES),
     )
+    # Free-form on purpose: the agent types this, and agents write 'S7',
+    # 's7', and 'S7-fuzz-improvement' alike. A rejected value would abort
+    # add-hyp, and the hypothesis row is what couples a claim, a probe run,
+    # and the rotation's evidence count — losing it costs far more than an
+    # off-vocabulary label, which the report path normalizes anyway.
     p_add.add_argument("--strategy", required=True)
     p_add.add_argument("--status", default="PENDING")
     p_add.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")

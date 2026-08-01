@@ -379,7 +379,6 @@ Browser mode enables:
 
 - browser and JS testcase assumptions;
 - coverage-gated browser or shell runs when available;
-- JS differential mode.
 
 The browser binary and launch arguments are target metadata. For example:
 
@@ -425,19 +424,7 @@ edit to the shared `output/<target>/target.toml` applies to the next run
 rather than retargeting probes already contributing to this one. Editing or
 removing the snapshot itself is a contract violation and fails loud.
 
-## Strategy hints: `[s4_diff_pairs]` and `[s6_peers]`
-
-Target configuration supports two optional strategy-hint sections.
-
-`[s4_diff_pairs]` lists pairs of execution modes the harness can diff
-for S4 (differential testing). Each JS engine has its own flags, so they
-must be configured with that target rather than inferred from its slug:
-
-```toml
-[s4_diff_pairs]
-jit_off   = ["--engine-specific-off"]
-jit_eager = ["--engine-specific-eager"]
-```
+## Strategy hints: `[s6_peers]`
 
 `[s6_peers]` lists upstream peer projects to mine for S6
 (cross-project variant):
@@ -448,8 +435,8 @@ domain = "xml-parser"
 peers  = ["libexpat", "Xerces-C++", "rapidxml"]
 ```
 
-Empty or missing values are fine unless `js-diff` is selected. Both sections
-only suggest additional strategy material. `bin/audit --new-target` can also
+Empty or missing values are fine. The section only suggests additional
+strategy material. `bin/audit --new-target` can also
 LLM-bootstrap a real `[threat_model]` and `[s6_peers]` instead of the
 conservative defaults; you can re-run that derivation at any time:
 

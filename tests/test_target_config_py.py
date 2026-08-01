@@ -561,20 +561,6 @@ assert_eq(
     "GN browser seed carries Chromium's Linux ASan runtime settings",
 )
 
-# ─── 9b. per-engine S4 flags are target metadata, not shared defaults ─
-generic_root = TEST_TMPDIR / "s4-generic"
-generic_root.mkdir()
-generic_out = TEST_TMPDIR / "s4-generic.toml"
-tc.seed_toml(generic_root, generic_out, "")
-generic_text = generic_out.read_text(encoding="utf-8")
-if "[s4_diff_pairs]" not in generic_text:
-    passed("seed_toml: non-browser target has no [s4_diff_pairs] section")
-else:
-    failed("seed_toml: non-browser target has no [s4_diff_pairs] section",
-           "section unexpectedly present")
-assert_not_in("[s4_diff_pairs]", fx_text,
-              "browser seed has no hardcoded per-engine JIT flags")
-
 # Every build-tree path a generic seed persists is the canonical alias, which
 # Config.resolve_path maps onto whichever suffixed tree the image is running.
 suffixed_seed_root = TEST_TMPDIR / "suffixed-seed"

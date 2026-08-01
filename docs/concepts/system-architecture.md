@@ -86,7 +86,7 @@ carries the full ruleset and the rationale for each rule.
 
 Each agent is a small autonomous worker:
 
-- it has a role (`reproduce` or `analysis`) and a strategy (S1–S8);
+- it has a role (`reproduce` or `analysis`) and an active strategy (S1, S2, S3, S5, S6, S7, or S8; S4 is reserved);
 - it reads source through capped wrappers so prompts stay small;
 - it writes one testcase at a time and runs it immediately;
 - it keeps a compact state snippet so a context compaction doesn't
@@ -95,7 +95,7 @@ Each agent is a small autonomous worker:
 Agents do not browse the source freely. The work queue points them at
 specific files, and the strategy decides what to look for inside
 those files — prior fixes, spec gaps, lifetime and state sequences,
-differential oracles, and so on. If the current strategy goes dry,
+property oracles, and so on. If the current strategy goes dry,
 the harness rotates the agent to a different one — only after
 structured state confirms the method was actually tried (see
 [Strategy model](strategy-model.md#strategy-rotation)).
@@ -106,7 +106,7 @@ A single execution gate (`bin/probe`) runs every testcase. It:
 
 - reads the testcase header;
 - picks the right runner (browser, JS shell, generic CLI, C/C++ or
-  language harness, differential, or the configured `[runner]`);
+  language harness, or the configured `[runner]`);
 - captures output and writes the result to `state/runs.jsonl`.
 
 For API-level testcases, the runner can compile a sibling harness
@@ -128,8 +128,8 @@ report-only FINDs go through FIND validation instead.
 Triage is the boundary between "an agent produced an artifact" and
 "this is worth human review." Two contracts, deliberately different:
 
-- **Crashes** need a runnable testcase, saved sanitizer or
-  differential output, complete report fields, and they must not be
+- **Crashes** need a runnable testcase, saved sanitizer output,
+  complete report fields, and they must not be
   a low-value class (OOM, assertion-only abort, stack overflow,
   plain null deref). A trigger source outside the declared attacker
   surface does not reject a crash — it stays in `crashes/` with a
@@ -191,7 +191,7 @@ is_browser = "1"   # browsers and browser-like runtime targets
 ```
 
 Browser mode enables HTML/JS testcase assumptions, browser and shell
-agents, coverage-gated runs, and JS differential mode.
+agents, and coverage-gated runs.
 
 Generic mode is for everything else. Findings-only mode is gated by
 `[sanitizer].enabled = []` in `target.toml`, not by the language

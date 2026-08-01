@@ -100,7 +100,7 @@
   <text x="40" y="412" class="lane-tag">Execute</text>
   <g filter="url(#sa-shadow)"><rect x="200" y="418" width="560" height="50" class="probe"/></g>
   <text x="220" y="444" class="title">bin/probe</text>
-  <text x="310" y="444" class="sub">One execution gate. Coverage check, then sanitizer or differential runner.</text>
+  <text x="310" y="444" class="sub">One execution gate. Coverage check, then configured sanitizer or runner.</text>
 
   <!-- Probe → triage -->
   <path d="M480,468 L480,490" class="arrow" marker-end="url(#sa-arrow)"/>

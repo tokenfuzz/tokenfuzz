@@ -122,8 +122,8 @@ working data-flow context for the area.
 
 Every testcase runs through one execution gate: `bin/probe`. It reads
 the testcase header, picks the right runner (browser, JS shell,
-generic CLI, C/C++ or language harness, differential, or the
-configured `[runner]`), captures output, and records the verdict in
+generic CLI, C/C++ or language harness, or the configured `[runner]`),
+captures output, and records the verdict in
 `state/runs.jsonl`.
 
 Common outcomes:
@@ -134,13 +134,12 @@ Common outcomes:
 | Missed the target code (browser/JS only) | A coverage-gated probe didn't reach the named function. | Revise the input. |
 | Clean hit | The code ran but the sanitizer was quiet. | Mutate input shape, state, timing, or allocator layout. |
 | Sanitizer diagnostic | The input might be a crash candidate. | Confirm by re-running, minimise, and file under `crashes/`. |
-| Differential divergence (JS only) | Two JS modes disagreed on output. | Save both outputs and file as a finding — no sanitizer crash needed. |
 
 Coverage gating only fires in browser and JS modes. Generic CLI
 targets always run the sanitizer directly.
 
-Probe output is a contract, not a log. Crash promotion requires a
-saved sanitizer or differential output file; report-only FINDs go
+Probe output is a contract, not a log. Crash promotion requires saved
+sanitizer output; report-only FINDs go
 through FIND validation instead.
 
 ## 6. Triage
@@ -150,7 +149,7 @@ Triage decides whether an artifact is useful and in scope.
 **For crashes, the gates are strict:**
 
 - there is a runnable testcase;
-- sanitizer or differential output is saved;
+- sanitizer output is saved;
 - the report fields are complete;
 - the result is not an auto-quarantined low-value class — null
   dereference (`0x0` SEGV), OOM, assertion-only abort (ABRT with no

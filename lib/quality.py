@@ -100,7 +100,7 @@ _ASAN_PREFIX_PATTERNS = (
 _ASAN_VERIFIED_RE = re.compile(
     r"(ASAN_RUN_HEADER:|SANITIZER_RUN_HEADER:|CRASH_RATE:|EXECUTION_RATE:|SUCCESS_RATE: [1-9][0-9]*/|"
     r"\[run-asan\] CRASH DETECTED|"
-    r"\[run-asan\] (?:browser|js|js-diff|xpcshell|generic)? ?EXECUTION VERIFIED|"
+    r"\[run-asan\] (?:browser|js|xpcshell|generic)? ?EXECUTION VERIFIED|"
     r"ERROR: AddressSanitizer)"
 )
 # Clean-success evidence for corpus promotion. Mirrors lib/verdict.py:

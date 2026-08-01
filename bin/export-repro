@@ -302,7 +302,6 @@ SANITIZER_META = {
 #   browser-minimal  Fast browser smoke mode with smaller sanitizer options.
 #   generic          Target CLI or probe-built HARNESS executable.
 #   js               Standalone JS shell script execution.
-#   js-diff          Differential JS shell execution; reports divergence.
 #   xpcshell         Firefox parent-process JS/XPCOM runner.
 #   fuzz             libFuzzer corpus run; halt_on_error=0 to keep collecting.
 #   fuzz-repro       Single fuzzer crash replay; halt_on_error=1 for a clean
@@ -321,7 +320,6 @@ _EXPORT_MODE_TO_CANONICAL = {
     "browser-minimal": "minimal",
     "generic": "full",
     "js": "js",
-    "js-diff": "js",
     "xpcshell": "xpcshell",
     "fuzz": "fuzz",
     "fuzz-js": "fuzz",
@@ -2051,7 +2049,7 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
     return usable(read_field_from_fields_table(path, label))
 
 
-_STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-8]|REF)\b", re.IGNORECASE)
+_STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-3]|S[5-8]|REF)\b", re.IGNORECASE)
 _SURFACE_FIELD_RE = re.compile(
     r"^(network|library-api|file-format|cli|dev-tool|maint-tool|internal|unknown)"
     r"\b(?:\s*—\s*(.*))?$",
@@ -2072,7 +2070,7 @@ def normalize_strategy(value: str) -> str:
 
     Accepts agent-written forms like 'S2', 'Strategy 2', 'S2-invariant-negation',
     'S5 (lifetime & state)', or 'REF: pattern-search'. Returns the bare token
-    (S1..S8 or REF) so the Fields table and cluster columns stay terse. Falls
+    (an active S-code or REF) so the Fields table and cluster columns stay terse. Falls
     back to the input value when no recognised token is present, and returns
     empty for empty input. The strategy index lives in
     .agents/references/strategies/README.md."""
@@ -2080,6 +2078,8 @@ def normalize_strategy(value: str) -> str:
         return ""
     s = value.strip()
     if not s:
+        return ""
+    if re.search(r"\bS4\b", s, re.IGNORECASE):
         return ""
     m = _STRATEGY_TOKEN_RE.search(s)
     if not m:

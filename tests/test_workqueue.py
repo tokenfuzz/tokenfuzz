@@ -239,8 +239,8 @@ class WorkQueueTests(unittest.TestCase):
         """A boundary reason must reach the rule-audit playbook on real files.
 
         Parser and protocol files normally also contain input, lifetime, and
-        assertion signals.  With a two-companion cap, leaving S3 behind those
-        generic signals means the boundary card never exists.
+        assertion signals.  Leaving S3 behind those generic signals ranks the
+        boundary card below them on a file whose defect is a broken rule.
         """
         source = """
         int parse_request(const char *input) {
@@ -848,6 +848,74 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         ids = [row["id"] for row in workqueue.read_jsonl(self.results / "work-cards.jsonl")]
         self.assertEqual(ids.count("S6-valid"), 1)
+
+    def test_add_hyp_accepts_the_strategy_labels_agents_actually_write(self) -> None:
+        """A rejected label must not cost the hypothesis row.
+
+        The agent types `--strategy` itself, and writes 'S7', 's7', and
+        'S7-fuzz-improvement' alike.  The row couples a claim, its probe
+        runs, and the rotation's evidence count, so refusing an
+        off-vocabulary label loses far more than it protects; the report
+        path normalizes the label later.
+        """
+        for label in ("S7", "s7", "S7-fuzz-improvement", "REF"):
+            with self.subTest(label=label):
+                done = self.run_command([
+                    sys.executable, str(ROOT / "bin" / "state"),
+                    "--results-dir", str(self.results),
+                    "--target-path", str(self.target),
+                    "--target-slug", "sample",
+                    "add-hyp", "--agent", "1", "--card-id", "WORK-A",
+                    "--hypothesis", "bounds issue in app_parse",
+                    "--file", "src/app.c:app_parse:10",
+                    "--input-shape", "crafted bytes", "--guard-gap", "length check",
+                    "--diagnostic", "bounds", "--strategy", label,
+                ])
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        recorded = {
+            row.get("strategy")
+            for row in workqueue.read_jsonl(self.results / "state" / "hypotheses.jsonl")
+        }
+        self.assertEqual({"S7", "s7", "S7-fuzz-improvement", "REF"}, recorded)
+
+    def test_every_fired_strategy_gets_a_card_on_a_multi_signal_file(self) -> None:
+        """A strategy with no card can never be assigned to an agent.
+
+        Real parser files fire four or five buckets at once, so dropping the
+        tail of the bucket order per file starved that strategy across the
+        whole queue: on every benchmarked target S8 ended with zero cards.
+        """
+        # rank_target configures the module-level partition depth from the
+        # tree it scans; restore it so this fixture cannot reshape the
+        # subsystem labels other tests assert on.
+        depth = workqueue._AUTO_SUBSYSTEM_DEPTH
+        self.addCleanup(setattr, workqueue, "_AUTO_SUBSYSTEM_DEPTH", depth)
+        environment = mock.patch.dict(os.environ, {}, clear=False)
+        environment.start()
+        self.addCleanup(environment.stop)
+
+        source = self.target / "src/codec.c"
+        source.parent.mkdir()
+        source.write_text(
+            "size_t decode(const char *input, size_t length) {\n"
+            "  assert(input != NULL);\n"
+            "  char *buffer = malloc(length);\n"
+            "  memcpy(buffer, input, length);\n"
+            "  free(buffer);\n"
+            "  return encode_roundtrip(decode_roundtrip(input));\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        _score, reasons = workqueue.code_feature_reasons(
+            source.read_text(encoding="utf-8"),
+        )
+        primary = workqueue.strategy_for(reasons)
+        fired = {primary, *workqueue.complementary_strategies(reasons, primary)}
+        self.assertIn("S8", fired, "fixture must fire the last bucket")
+        cards = workqueue.rank_target(self.ctx, 40)
+        self.assertLessEqual(len(cards), 40)
+        emitted = {row["strategy"] for row in cards if row["file"] == "src/codec.c"}
+        self.assertEqual(fired, emitted)
 
     def test_llm_rerank_is_cached_and_fails_open_on_invalid_output(self) -> None:
         cards = [self.card("WORK-A", "src/a.c"), self.card("WORK-B", "src/b.c")]

@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import prompt
 import workqueue
+import audit_runner
 
 
 class StrategyValidationTests(unittest.TestCase):
@@ -26,7 +27,7 @@ class StrategyValidationTests(unittest.TestCase):
     def test_registry_is_complete_and_every_reference_is_substantive(self) -> None:
         self.assertEqual(
             list(prompt._STRATEGIES),
-            ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "REF"],
+            ["S1", "S2", "S3", "S5", "S6", "S7", "S8", "REF"],
         )
         for strategy, (filename, _summary) in prompt._STRATEGIES.items():
             with self.subTest(strategy=strategy, filename=filename):
@@ -49,6 +50,7 @@ class StrategyValidationTests(unittest.TestCase):
         retired = (
             "S6-state-machine.md", "S7-cross-browser.md",
             "S6-cross-browser.md", "S8-fuzz-improvement.md",
+            "S4-differential.md",
         )
         for filename in retired:
             self.assertFalse((STRATEGIES / filename).exists())
@@ -81,15 +83,16 @@ class StrategyValidationTests(unittest.TestCase):
         ):
             self.assertRegex(s8, pattern)
 
-    def test_readme_agents_and_headings_match_eight_strategy_model(self) -> None:
+    def test_readme_agents_and_headings_match_active_strategy_model(self) -> None:
         readme = self.text("README.md")
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-        self.assertIn("8 strategies", readme)
-        self.assertNotIn("7 strategies ", readme)
+        self.assertIn("7 active strategies", readme)
+        self.assertIn("S4: Reserved", readme)
         self.assertRegex(readme, r"S7.*Adversarial")
         self.assertRegex(readme, r"S8.*Property-based")
         self.assertNotIn("State machine sequences", readme)
-        self.assertIn("8 strategies", agents)
+        self.assertIn("7 active strategies", agents)
+        self.assertIn("S4: Reserved", agents)
         self.assertIn("S8: Property-based", agents)
         self.assertIn("Strategy S6", self.text("S6-cross-project.md"))
         self.assertIn("Strategy S7", self.text("S7-fuzz-improvement.md"))
@@ -171,18 +174,26 @@ class StrategyValidationTests(unittest.TestCase):
         for text in (
             "memcpy bounds issue in this parser", "MOZ_ASSERT failed in release",
             "thread race on the dispatch table", "spec says MUST reject",
-            "JIT differential check via ion-eager",
         ):
             self.assertIsNone(matcher.search(text), text)
         self.assertGreaterEqual(weight, 2)
 
-    def test_audit_help_and_prompt_brief_expose_s8(self) -> None:
+    def test_audit_help_excludes_reserved_s4_and_prompt_brief_exposes_s8(self) -> None:
         proc = subprocess.run(
             [str(ROOT / "bin" / "audit"), "--help"], capture_output=True, text=True
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("S1,S2,S3,S4,S5,S6,S7,S8", proc.stdout + proc.stderr)
+        self.assertIn("S1,S2,S3,S5,S6,S7,S8", proc.stdout + proc.stderr)
+        self.assertNotIn("S1,S2,S3,S4", proc.stdout + proc.stderr)
+        self.assertEqual("", prompt.strategy_brief("S4", REFERENCES))
         self.assertIn("Property oracle", prompt.strategy_brief("S8", REFERENCES))
+        self.assertNotIn("S4", audit_runner.STRATEGIES)
+        rejected = subprocess.run(
+            [str(ROOT / "bin" / "audit"), "--strategy", "S4", "0"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(2, rejected.returncode)
+        self.assertIn("invalid choice: 'S4'", rejected.stderr)
 
 
 if __name__ == "__main__":

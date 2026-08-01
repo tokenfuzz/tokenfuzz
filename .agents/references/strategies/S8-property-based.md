@@ -55,7 +55,7 @@ table is the up-front filter so you *generate* security-relevant work instead of
   all the input it needs.
 - **Random fuzzers** generate inputs but have no oracle for "this output is wrong
   even though it didn't crash." S8 is the oracle.
-- **Differential testing (S4)** needs two implementations of the same spec.
+- Cross-implementation comparison needs two implementations of the same spec.
   Properties don't — `decode(encode(x)) == x` only needs one implementation.
 
 ## The five property categories
@@ -410,7 +410,7 @@ non-security paths should not have been filed at all.
 | Other strategy | Interaction |
 |----------------|-------------|
 | S3 (spec-vs-impl) | If the spec explicitly states the property, S3 finds it via spec-reading. S8 finds it without needing the spec by reading the code's own claims. |
-| S4 (differential) | Round-trip is a degenerate differential (encoder vs decoder). S4 covers cross-build / cross-tier / cross-version differentials; S8 covers same-build property differentials. |
+| Cross-configuration comparison | Round-trip is a degenerate comparison (encoder vs decoder). S8 covers same-build property checks. |
 | S6 (peer projects) | A property-violation in target X is a near-guaranteed property-violation in peer Y unless Y explicitly defended against it. After confirming an S8 finding, run the same property against peer projects from `output/<slug>/target.toml` `[s6_peers]`. |
 | S7 (adversarial input) | S7 generates inputs to crash. S8 generates inputs to violate a property. Same generator infrastructure; different oracle. |
 

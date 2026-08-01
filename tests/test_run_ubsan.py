@@ -95,53 +95,6 @@ class RunUbsanTests(unittest.TestCase):
         self.assertIn("ubsan-profile-", runner_environment[1])
         self.assertEqual(testcase.resolve().as_uri(), runner_environment[2])
 
-    def test_js_diff_requires_target_specific_pairs(self) -> None:
-        engine = self.executable("js", "raise SystemExit(99)\n")
-        (self.output / "target.toml").write_text(
-            'target = "browser-product"\n[sanitizer]\nenabled = ["ubsan"]\n',
-            encoding="utf-8",
-        )
-        testcase = self.results / "canary.js"
-        testcase.write_text("print('same')\n", encoding="utf-8")
-
-        process = self.run_command("js-diff", testcase, UBSAN_JS=engine)
-
-        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
-        self.assertIn("requires target.toml [s4_diff_pairs]", process.stderr)
-
-    def test_js_diff_distinguishes_divergence_from_failed_modes(self) -> None:
-        testcase = self.results / "canary.js"
-        testcase.write_text("print('same')\n", encoding="utf-8")
-        (self.output / "target.toml").write_text(
-            'target = "browser-product"\n'
-            '[sanitizer]\nenabled = ["ubsan"]\n'
-            '[s4_diff_pairs]\njit_eager = ["--eager"]\n'
-            'jit_off = ["--off"]\n',
-            encoding="utf-8",
-        )
-        divergent = self.executable(
-            "divergent-js",
-            "import sys\n"
-            "print('eager' if sys.argv[1] == '--eager' else 'off')\n",
-        )
-
-        process = self.run_command(
-            "js-diff", testcase, UBSAN_JS=divergent
-        )
-
-        self.assertEqual(process.returncode, 1, process.stdout + process.stderr)
-        self.assertIn("outputs DIFFER", process.stdout + process.stderr)
-
-        failing = self.executable(
-            "failing-js",
-            "import sys\nprint('unsupported ' + sys.argv[1])\n"
-            "raise SystemExit(64)\n",
-        )
-        process = self.run_command("js-diff", testcase, UBSAN_JS=failing)
-        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
-        self.assertIn("execution failed", process.stdout + process.stderr)
-        self.assertNotIn("outputs DIFFER", process.stdout + process.stderr)
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

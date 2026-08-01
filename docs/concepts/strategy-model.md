@@ -8,7 +8,9 @@ to turn a chunk of source into evidence. Each strategy specifies:
 - how to mutate it;
 - what the result means.
 
-There are eight of them plus a shared pattern-search reference.
+There are seven active strategies, one reserved identifier, and a shared
+pattern-search reference. S4 is intentionally unused; keeping the gap preserves
+the meaning of the strategy codes already stored in reports and resumable state.
 Strategies are **methods, not bug categories** — a single bounds bug
 can be reached by S1 (the recent fix nearby), S5 (an object-state
 sequence), or S7 (an input-shape boundary), depending on which clue
@@ -27,7 +29,7 @@ They exist for one reason:
 | **S1** Prior-fix and regression variant | Mine recent fixes and large refactors for incomplete patches, removed checks, and unfixed sibling code paths. | A regression testcase adapted from the changed or neighbouring code. |
 | **S2** Invariant negation | Break asserts, preconditions, and algorithm assumptions one at a time. | An input that challenges one precise guard or state assumption. |
 | **S3** Spec vs. implementation | Compare what the spec or doc requires against what the code (especially optimisation fast paths) actually does. | A testcase comparing required behaviour against the implementation shortcut. |
-| **S4** Advanced differential testing | Go beyond the automatic JIT-vs-interpreter diff: GC zeal, Wasm tiers, cross-build variants, and other hand-set comparisons. | A textual divergence between modes (no sanitizer crash needed). |
+| **S4** Reserved | Unused and not assignable. | No cards, assignments, or report attribution. |
 | **S5** Lifetime and state | Probe re-entrancy, error-path cleanup, ordering, and timing transitions on the same object. | A multi-step sequence that reaches a lifetime or state transition. |
 | **S6** Cross-project variant mining | Take a recent fix in a peer project that implements the same spec/format/algorithm, look for the unfixed analogue here. | An adapted testcase against the local implementation. |
 | **S7** Adversarial input and fuzz engineering | Build parser/decoder boundary inputs and smarter seeds. | A targeted seed, a minimised input, or a corpus variant. |
@@ -64,12 +66,18 @@ Most real files hit more than one row. When that happens, the file
 gets:
 
 - a *primary* card with the highest-priority strategy;
-- a bounded number of *companion* cards for the other angles.
+- a *companion* card for every other angle its own code signals.
 
 So two agents can attack the same file from different directions
 without one starving the other. A parser function with
 input-consumption verbs, casts, and asserts becomes an S7 card with
 S2 and S3 companions.
+
+Every fired angle gets a card, because dropping the lowest-priority
+ones starves that strategy across the whole queue rather than on one
+file: real parser files fire four or five rows at once, so the last
+row produced no card on any target, and a strategy that owns no cards
+can never be assigned to an agent.
 
 Two other card sources sit on top of the ranked list:
 
@@ -129,6 +137,9 @@ unclaimed work that no other agent is currently running, so the fleet
 spreads across strategies instead of converging on one. An agent that
 never manages to produce evidence is rotated anyway, so a stuck method
 cannot stall the run.
+
+S4 is reserved. The CLI rejects it, the rotation never assigns it, and reports
+must not attribute new work to it.
 
 The rule of thumb: **rotate the method, not the subsystem.** A
 subsystem should not be abandoned merely because notes were

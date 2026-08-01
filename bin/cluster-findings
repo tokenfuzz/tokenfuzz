@@ -141,11 +141,11 @@ _STRATEGY_BARE_RE = re.compile(
 _STRATEGY_TABLE_RE = re.compile(
     r"^\|\s*Strategy\s*\|\s*(?P<val>.+?)\s*\|\s*$", re.MULTILINE | re.IGNORECASE,
 )
-_STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-8]|REF)\b", re.IGNORECASE)
+_STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-3]|S[5-8]|REF)\b", re.IGNORECASE)
 
 
 def _extract_strategy(report_text: str) -> str:
-    """Return the canonical S1..S8 / REF token recorded in the FIND report, or "".
+    """Return an active strategy / REF token recorded in the FIND report, or "".
 
     Matches bin/cluster-crashes' extractor; accepts both the bare-label and
     Fields-table forms. Free-form labels collapse to the first S<N>/REF token
@@ -157,6 +157,8 @@ def _extract_strategy(report_text: str) -> str:
         val = m.group("val").strip()
         if not val or val in {"—", "-", "TBD", "?"}:
             continue
+        if re.search(r"\bS4\b", val, re.IGNORECASE):
+            return ""
         tok = _STRATEGY_TOKEN_RE.search(val)
         return tok.group(1).upper() if tok else val
     return ""

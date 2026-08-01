@@ -34,7 +34,7 @@ class RulesDigestTests(unittest.TestCase):
             "rg-safe", "bin/peek", "show-patch", "NEUTRAL",
             "bin/state resume --agent", "crashes-rejected", "FINDING-CLUSTERS",
             "Caller contract", "Trigger source", "Parameter control", "FIND",
-            "patch.diff", "write that section", "differential",
+            "patch.diff", "write that section",
         )
         for topic in topics:
             with self.subTest(topic=topic):

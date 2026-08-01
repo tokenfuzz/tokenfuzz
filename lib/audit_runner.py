@@ -47,7 +47,9 @@ import workqueue
 from timeout import run_timeout
 
 
-STRATEGIES = tuple(f"S{i}" for i in range(1, 9))
+# S4 is reserved for future use. Keep the numeric gap: historical reports and
+# resumable state already persist the meanings of S5-S8.
+STRATEGIES = ("S1", "S2", "S3", "S5", "S6", "S7", "S8")
 STRATEGY_DRY_THRESHOLD = 3
 STRATEGY_S1_DRY_THRESHOLD = 8
 STRATEGY_FORCE_EXTRA = 5
@@ -101,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--backend", choices=("all", "claude", "codex", "gemini", "grok", "oss"), default=None)
     parser.add_argument("--model", default="")
     parser.add_argument("--experiment", default="")
-    parser.add_argument("--strategy", choices=tuple(f"S{i}" for i in range(1, 9)), default="")
+    parser.add_argument("--strategy", choices=STRATEGIES, default="")
     parser.add_argument("--claude-bin")
     parser.add_argument("--codex-bin")
     parser.add_argument("--gemini-bin")
@@ -855,11 +857,18 @@ def update_strategy_rotation(
         completion = workqueue.strategy_completion_status(ctx, str(agent), current)
         if not completion["complete"] and streak < threshold + STRATEGY_FORCE_EXTRA:
             continue
-        alternatives = [strategy for strategy in STRATEGIES if strategy != current and counts[strategy]]
+        alternatives = [
+            strategy for strategy in STRATEGIES
+            if strategy != current and counts[strategy]
+        ]
         if not alternatives:
-            alternatives = [STRATEGIES[(STRATEGIES.index(current) + 1) % len(STRATEGIES)]]
+            following = STRATEGIES.index(current) + 1 if current in STRATEGIES else 0
+            alternatives = [STRATEGIES[following % len(STRATEGIES)]]
         alternatives.sort(
-            key=lambda strategy: (strategy in assigned, -counts[strategy], STRATEGIES.index(strategy))
+            key=lambda strategy: (
+                strategy in assigned, -counts[strategy],
+                STRATEGIES.index(strategy),
+            )
         )
         selected = alternatives[0]
         (runtime.results / "state" / f"strategy-{agent}").write_text(selected + "\n", encoding="utf-8")

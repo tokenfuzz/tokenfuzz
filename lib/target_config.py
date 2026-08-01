@@ -3058,11 +3058,6 @@ class Config:
     # startup. Absent section keeps the existing default behavior.
     sanitizers_explicitly_disabled: bool = False
 
-    # S4 (differential testing) per-engine CLI flag sets. Keys mirror the
-    # [s4_diff_pairs] section in target.toml — currently jit_off and
-    # jit_eager. Empty when the target has no [s4_diff_pairs] section.
-    s4_diff_pairs: dict[str, list[str]] = field(default_factory=dict)
-
     # S6 (cross-project variant mining) peer projects. Populated only from
     # [s6_peers] in target.toml. Empty when no peers are configured.
     s6_peers: list[str] = field(default_factory=list)
@@ -3300,7 +3295,6 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     cfg.sanitizer_suppressions = {}
     cfg.sanitizer_options = {}
     cfg.sanitizers_explicitly_disabled = False
-    cfg.s4_diff_pairs = {}
     cfg.s6_peers = []
     cfg.s6_domain = ""
     cfg.ubsan_bin = ""
@@ -3346,12 +3340,6 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
             _apply_sanitizer_section(cfg, v, p)
         elif k == "runner" and isinstance(v, dict):
             _apply_runner_section(cfg, v, p)
-        elif k == "s4_diff_pairs" and isinstance(v, dict):
-            for pair_key, pair_val in v.items():
-                if isinstance(pair_val, list):
-                    cfg.s4_diff_pairs[str(pair_key)] = [
-                        x for x in pair_val if isinstance(x, str) and x
-                    ]
         elif k == "s6_peers" and isinstance(v, dict):
             peers = v.get("peers", [])
             if isinstance(peers, list):

@@ -349,7 +349,7 @@ _INPUT_CONSUMPTION_RE = re.compile(
 # Each row is (compiled_regex, points, reason). `code_feature_reasons`
 # adds `points` (saturating) to a file's rank score and records
 # `reason`; `strategy_for` / `complementary_strategies` map the reason
-# set to an audit strategy S1..S8.
+# set to an active audit strategy (S1, S2, S3, S5, S6, S7, or S8).
 #
 # Discipline (docs/development.md): these run against EVERY target's source, so
 # every row must be target-agnostic — it matches a *family* (verb stems,
@@ -699,8 +699,8 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
 
 # Logical-security reasons whose useful first method is S3's rule audit. They
 # get S3 as the primary card even when the same large file also contains the
-# higher-throughput S7/S5/S2 signals below. Otherwise the two-companion cap
-# consumes S5 and S2 before S3, so the rule-audit card is never emitted.
+# higher-throughput S7/S5/S2 signals below, so the boundary angle leads the
+# queue on a file whose defect is a broken rule rather than a bad free.
 S3_SECURITY_REASONS: frozenset[str] = frozenset({
     "access-control decision", "identity/origin decision",
     "credential/verification decision", "query/template construction",
@@ -719,8 +719,8 @@ BOUNDARY_REASONS: frozenset[str] = S3_SECURITY_REASONS | {"remote-peer endpoint"
 # descending expected yield for non-security collisions:
 # S7 adversarial-input and S5 lifetime/state are sanitizer-checked so
 # they lead; S2/S3 are code-grounded; S8 is the no-sanitizer oracle.
-# S1 (prior-fix) and S4/S6 (cross-artifact) are not seedable from one
-# file's code features — the rotation owns them, not this table.
+# S1 (prior-fix) and S6 (cross-artifact) are not seedable from one file's
+# code features. S4 is reserved and has no runtime behavior.
 #
 # The boundary rows (access control, identity/origin, credential
 # verification, query/template construction, outbound requests, path
@@ -1157,9 +1157,10 @@ def strategy_for(reasons: list[str]) -> str:
     reasons.
 
     Logical-security decisions are primary S3 work: large parser/protocol
-    files almost always also fire S7/S5/S2, and the two-companion cap would
-    otherwise omit S3 entirely. For all other reasons, returns the first
-    strategy bucket (highest expected yield first, see `_STRATEGY_BUCKETS`).
+    files almost always also fire S7/S5/S2, which would otherwise rank the
+    rule audit below them on a file whose defect is a broken rule. For all
+    other reasons, returns the first strategy bucket (highest expected yield
+    first, see `_STRATEGY_BUCKETS`).
     `complementary_strategies` emits the remaining methods so making the rule
     audit primary does not discard memory/state work. Falls back to S1
     (prior-fix default) when no code feature fired.
@@ -1178,8 +1179,8 @@ def complementary_strategies(reasons: list[str], primary: str) -> list[str]:
 
     Returns every strategy bucket the file's reasons fall into, excluding
     `primary`, ordered by expected yield (see `_STRATEGY_BUCKETS`).
-    `rank_target` emits up to RANK_WORK_PER_FILE_COMPANIONS of them as
-    companion cards so one file can be probed from several angles.
+    `rank_target` emits all of them as companion cards so one file can be
+    probed from every angle its own code signals.
     """
     rset = set(reasons)
     out = [strat for strat, tags in _STRATEGY_BUCKETS
@@ -1695,9 +1696,13 @@ def rank_target(ctx: Context, limit: int, patch_cards: Path | None = None) -> li
             # only ever produced one card per file. Companions inherit
             # the parent's score / patch boost minus a small offset so
             # the primary still leads the queue.
+            #
+            # Every fired strategy gets one. A cap dropped them in bucket
+            # order, which starves the tail of that order queue-wide rather
+            # than per file, and a strategy owning no cards is never
+            # assignable to an agent.
             companions = complementary_strategies(reasons, primary_strategy)
-            companion_cap = _int_env("RANK_WORK_PER_FILE_COMPANIONS", 2)
-            for idx, comp_strategy in enumerate(companions[:companion_cap]):
+            for idx, comp_strategy in enumerate(companions):
                 ch = hashlib.sha1(
                     f"{ctx.target_slug}:{rel}:{comp_strategy}".encode()
                 ).hexdigest()[:12]
@@ -4145,30 +4150,6 @@ STRATEGY_KEYWORDS: dict[str, tuple[re.Pattern[str], int]] = {
         ),
         2,
     ),
-    # S4 — differential / configuration-dependent divergence. Covers the
-    # "same input, different result across configurations" surface:
-    # optimization tiers / JIT pipelines, optimization levels, build
-    # flags, conditional compilation, endianness, sanitizer vs
-    # non-sanitizer, interpreter-vs-compiled execution paths.
-    "S4": (
-        re.compile(
-            r"\b(?:differential|divergence|differs|inconsistent|mismatch"
-            r"|interpreter[\s_-]?vs[\s_-]?(?:jit|compiled|optimi[sz]ed)"
-            r"|jit[\s_-]?vs[\s_-]?(?:interpreter|interp)"
-            r"|optimi[sz]ation[\s_-]?(?:level|tier|pipeline)"
-            r"|opt[\s_-]?level|(?:^|[\s(=,])-O[0-3sg]\b"
-            r"|compile[\s_-]?flag|build[\s_-]?flag|feature[\s_-]?flag"
-            r"|conditional[\s_-]?compilation"
-            r"|ifdef|#if[\s_-]?defined"
-            r"|endian(?:ness)?|big[\s_-]?endian|little[\s_-]?endian"
-            r"|architecture[\s_-]?dependent|platform[\s_-]?dependent"
-            r"|configuration[\s_-]?dependent"
-            r"|sanitizer[\s_-]?vs[\s_-]?(?:non[\s_-]?sanitizer|release)"
-            r"|asan[\s_-]?only|ubsan[\s_-]?only)",
-            re.IGNORECASE,
-        ),
-        1,
-    ),
     # S5 — re-entrancy / lifetime / state.
     "S5": (
         re.compile(
@@ -4294,9 +4275,9 @@ def strategy_yield(ctx: Context) -> dict:
 
     Each run is attributed to a strategy via its hypothesis (the agent stamps
     its working strategy on every hypothesis), falling back to the work
-    card's strategy when the run has no hypothesis. `yield` is
-    (CRASH+DIFF)/runs — the signal-producing fraction. Strategies with no
-    runs are omitted; unattributable runs bucket under "(none)".
+    card's strategy when the run has no hypothesis. `yield` is CRASH/runs —
+    the signal-producing fraction. Strategies with no runs are omitted;
+    unattributable runs bucket under "(none)".
     """
     hyp_strategy = {
         str(h.get("id", "")): str(h.get("strategy", "") or "")
@@ -4316,7 +4297,7 @@ def strategy_yield(ctx: Context) -> dict:
         verdict = str(run.get("verdict", "") or "").upper()
         b = buckets.setdefault(
             strategy,
-            {"strategy": strategy, "runs": 0, "crash": 0, "diff": 0,
+            {"strategy": strategy, "runs": 0, "crash": 0,
              "clean": 0, "no_exec": 0, "other": 0},
         )
         b["runs"] += 1
@@ -4325,8 +4306,6 @@ def strategy_yield(ctx: Context) -> dict:
         # `other` rather than silently inflating `clean`.
         if verdict == "CRASH":
             b["crash"] += 1
-        elif verdict == "DIFF":
-            b["diff"] += 1
         elif verdict == "CLEAN":
             b["clean"] += 1
         elif verdict == "NO_EXEC":
@@ -4335,8 +4314,7 @@ def strategy_yield(ctx: Context) -> dict:
             b["other"] += 1
     rows = []
     for b in buckets.values():
-        signal = b["crash"] + b["diff"]
-        b["yield"] = round(signal / b["runs"], 3) if b["runs"] else 0.0
+        b["yield"] = round(b["crash"] / b["runs"], 3) if b["runs"] else 0.0
         rows.append(b)
     rows.sort(key=lambda r: (-r["yield"], -r["runs"], r["strategy"]))
     return {"strategies": rows}
@@ -5370,7 +5348,7 @@ def _runtime_feedback_decision(
     total: int,
     signals: dict[str, int],
 ) -> tuple[str, str]:
-    if any(v in verdicts for v in ("CRASH", "DIFF", "FIND")):
+    if any(v in verdicts for v in ("CRASH", "FIND")):
         return (
             "productive-artifact",
             "productive signal exists; confirm, file, and cluster nearby before pivoting",

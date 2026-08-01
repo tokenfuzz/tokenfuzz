@@ -128,7 +128,6 @@ class MultiRun:
         self.crashes = 0
         self.executions = 0
         self.successes = 0
-        self.diff_divergences = 0
 
     def _output_file(self) -> Path | None:
         configured = os.environ.get("SAN_OUTPUT_FILE", os.environ.get("ASAN_OUTPUT_FILE", ""))
@@ -415,51 +414,13 @@ class MultiRun:
                     self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - no execution evidence (matches run 1)")
             self.emit()
 
-    def auto_diff(self) -> None:
-        mode = self.args[0] if self.args else ""
-        testcase = self.args[1] if len(self.args) > 1 else ""
-        if self.sanitizer != "asan" or mode not in {"js", "xpcshell"} or not Path(testcase).is_file() or self.crashes or not self.executions:
-            return
-        self.emit("\n=== AUTO-DIFFERENTIAL ([s4_diff_pairs] JIT flags) ===")
-        with capture_command(
-            [str(SCRIPT_DIR / "run-asan"), "js-diff", testcase], merge_stderr=True
-        ) as completed:
-            if completed.returncode == 2:
-                # Missing flags and failed mode launches are both
-                # non-comparisons. Falling through to the "match" arm would
-                # record a differential that never ran as a clean one.
-                self.emit(
-                    "[run-sanitizer-multi] AUTO-DIFF: SKIPPED - js-diff could "
-                    "not execute both configured modes"
-                )
-                self.append_raw(completed.stdout)
-                self.write_digest(completed.stdout)
-            elif _file_matches(
-                completed.stdout,
-                re.compile(
-                    r"ERROR: AddressSanitizer|"
-                    r"AddressSanitizer:DEADLYSIGNAL"
-                ),
-            ):
-                self.emit("[run-sanitizer-multi] AUTO-DIFF: ASan crash in differential mode!")
-                self.append_raw(completed.stdout)
-                self.write_digest(completed.stdout)
-                self.crashes += 1
-            elif _file_matches(completed.stdout, re.compile(r"outputs DIFFER")):
-                self.emit("[run-sanitizer-multi] AUTO-DIFF: DIVERGENCE DETECTED - potential JIT correctness issue")
-                self.append_raw(completed.stdout)
-                self.write_digest(completed.stdout)
-                self.diff_divergences += 1
-            else:
-                self.emit("[run-sanitizer-multi] AUTO-DIFF: outputs match (no JIT divergence)")
-
     def record_tried(self) -> None:
         configured = os.environ.get("TRIED_INPUTS_LOG")
         if not configured:
             return
         testcase = self.args[1] if len(self.args) > 1 else ""
         digest = hashlib.sha1(Path(testcase).read_bytes()).hexdigest()[:12] if Path(testcase).is_file() else "?"
-        verdict = "CRASH" if self.crashes else "DIFF" if self.diff_divergences else "NO_EXEC" if not self.executions else "EXEC_FAIL" if not self.successes else "CLEAN"
+        verdict = "CRASH" if self.crashes else "NO_EXEC" if not self.executions else "EXEC_FAIL" if not self.successes else "CLEAN"
         destination = Path(configured)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("a") as stream:
@@ -479,13 +440,9 @@ class MultiRun:
         self.emit(f"CRASH_RATE: {self.crashes}/{self.runs}")
         self.emit(f"[run-sanitizer-multi] EXECUTION_RATE: {self.executions}/{self.runs}")
         self.emit(f"[run-sanitizer-multi] SUCCESS_RATE: {self.successes}/{self.runs}")
-        self.auto_diff()
         self.record_tried()
         if self.crashes:
             self.emit(f"[run-sanitizer-multi] CRASHES FOUND: {self.crashes}/{self.runs} runs crashed")
-            return 1
-        if self.diff_divergences:
-            self.emit(f"[run-sanitizer-multi] DIFFERENTIAL FINDING: {self.diff_divergences} divergent js-diff check(s)")
             return 1
         if not self.executions:
             self.emit("[run-sanitizer-multi] WARNING: testcase may not have executed in any run")
