@@ -120,7 +120,15 @@ def guide_section(context: PromptContext, cold: bool) -> str:
 
 def find_first_directive(context: PromptContext) -> str:
     return render_template(
-        "find_first_directive.md.j2", {"results_dir": str(context.results_dir)}
+        "find_first_directive.md.j2",
+        {
+            "results_dir": str(context.results_dir),
+            # Rendered into this directive rather than the session suffix:
+            # cold-start, compact-fresh and deep-investigation all embed it,
+            # so the narrative contract lands exactly once per prompt —
+            # including the compact variant, which has no common suffix.
+            "report_prose": render_template("report_prose.md.j2", {}),
+        },
     )
 
 

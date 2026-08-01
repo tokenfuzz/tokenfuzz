@@ -495,6 +495,10 @@ def render(
         # enforces, so it does not drift into filing caller-misuse
         # NULL-derefs the gate rejects.
         "bug_contract": render_template("audit_bug_contract.md.j2", {}),
+        # Shared report-narrative contract, the same partial the harness
+        # session prompt renders. Report readability must not be a
+        # condition difference either.
+        "report_prose": render_template("report_prose.md.j2", {}),
         "target_path": target_path,
         "output_dir": output_dir,
         "crash_objective": _build_crash_objective(

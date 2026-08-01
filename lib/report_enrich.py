@@ -561,11 +561,13 @@ def _build_tldr(text: str) -> Optional[str]:
         s = re.sub(r"<!--.*?-->", "", s, flags=re.DOTALL)
         s = s.strip()
         m = re.search(r"^(.+?[.!?])(?:\s|$)", s)
-        line = m.group(1) if m else s
-        return (line[: limit - 1] + "…") if len(line) > limit else line
+        return _truncate_prose(m.group(1) if m else s, limit)
 
     bug = _first_sentence(summary)
-    fix = _first_sentence(fix_direction)
+    # The Fix line names a file, a function and the edit, so its opening
+    # sentence runs longer than a Summary lead. The Bug limit cut it
+    # mid-expression and dropped the actionable half.
+    fix = _first_sentence(fix_direction, 320)
     trigger_line = ""
     if boundary or trigger or caller_controls:
         bits = []
@@ -742,14 +744,17 @@ def _snippet_for_ref(ctx: EnrichContext, path_ref: str, line: int,
     return snippet
 
 
-def _truncate_anchor(text: str, limit: int = 140) -> str:
-    """Shorten a Data-Flow anchor for display without breaking Markdown.
+def _truncate_prose(text: str, limit: int) -> str:
+    """Shorten a line of report prose for display without breaking Markdown.
 
     Plain ``text[:n] + "…"`` could cut mid-word and, worse, slice through
     an inline-code span — leaving an unbalanced backtick that renders as a
     literal `` ` `` followed by un-styled text (e.g. ``against `s…``). We
     cut on a word boundary when one is reasonably close, then re-close any
-    inline-code span the cut left open."""
+    inline-code span the cut left open.
+
+    Shared by the Data-Flow anchor labels and the TL;DR card — both cut
+    author prose that routinely ends inside a `code span`."""
     if len(text) <= limit:
         return text
     cut = text[: limit - 1]
@@ -787,7 +792,7 @@ def _build_section_snippets(ctx: EnrichContext, text: str,
             snippet = _snippet_for_ref(ctx, path_ref, lineno)
             if snippet is None:
                 continue
-            anchor = _truncate_anchor(line_stripped)
+            anchor = _truncate_prose(line_stripped, 140)
             # Strip a leading list bullet (`- `, `* `, `1. `) so the
             # anchor reads as prose, not a fresh list item.
             anchor = re.sub(r"^(?:[-*]|\d+\.)\s+", "", anchor)

@@ -225,8 +225,11 @@ Operational caps: 1 FIND/agent/iteration when you also promote a CRASH;
 up to 3 FINDs/iteration in source-only mode. Distinct `file:function:line`
 with independent rationales.
 
+Prose shape for every report — headings, order, word budgets — is the
+"Report narrative" block of this prompt.
+
 Point at the fix (best-effort, never blocks filing): always end `report.md`
-with a `## Fix Direction` heading (on its own line) + a one-sentence body.
+with a `## Fix Direction` heading (on its own line).
 When the fix is a surgical diff, save it
 as `patch.diff` in the FIND/CRASH dir instead — `bin/enrich-report` inlines
 it as `## Patch`, so don't write that section yourself. Capture/validation

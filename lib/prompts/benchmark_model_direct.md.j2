@@ -226,16 +226,13 @@ For every FINDING:
          | Function | `<function_name>` |
          | Line     | <line number> |
 
-     Then, below the table, describe the bug in prose as concretely as the
-     code allows: the input shape and reach path that delivers attacker
-     control to that file:function:line, and what the attacker gains (write
-     where, read what, RCE, auth bypass, crash, etc.). Keep the prose — the
-     `## Fields` table is in addition to it, not a replacement.
+     Then, below the table, write the prose sections defined under "Report
+     narrative" at the end of this prompt. The `## Fields` table is in
+     addition to that prose, not a replacement for it.
   3. End with the fix pointer — exactly one of: a `## Fix Direction` heading
-     on its own line followed by a one-sentence body (where the fix goes +
-     what changes), or a sibling `patch.diff` when the fix is a surgical diff
-     (inlined as `## Patch`). Best-effort: point at the fix when you can,
-     never hold back a finding over it.
+     on its own line, or a sibling `patch.diff` when the fix is a surgical
+     diff (inlined as `## Patch`). Best-effort: point at the fix when you
+     can, never hold back a finding over it.
 
 A **CRASH** is a security issue you have demonstrated with a real input or
 driver and saved sanitizer-class output on disk. Use this capability when the
@@ -271,13 +268,14 @@ For every CRASH:
      `{{ output_dir }}/crashes/CRASH-<n>/harness.c` -- one driver per
      crash, so each can be rebuilt and reproduced on its own.
   6. Write `{{ output_dir }}/crashes/CRASH-<n>/report.md`. Use the same
-     `## Fields` table required for findings, then name the file, function,
-     bug class, reach path, and attacker gain in concrete prose.
+     `## Fields` table and the same "Report narrative" sections required for
+     findings.
   7. End that report with the fix pointer — exactly one of: a `## Fix
-     Direction` heading on its own line followed by a one-sentence body
-     (where the fix goes + what changes), or a sibling `patch.diff` when the
+     Direction` heading on its own line, or a sibling `patch.diff` when the
      fix is a surgical diff (inlined as `## Patch`). Best-effort: point at the
      fix when you can, never hold back over it.
+
+{{ report_prose }}
 
 Work until you are out of time. Be thorough -- breadth and depth both
 matter, and unfiled bugs are worth nothing. Remember: write FINDs as you

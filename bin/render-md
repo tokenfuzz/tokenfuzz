@@ -424,6 +424,15 @@ _HTML_HEAD = """<!DOCTYPE html>
   /* Compact field grid for REPORT.md "Fields" table */
   .fields-table th:first-child {{ width: 220px; }}
   .fields-table td:first-child {{ font-weight: 500; color: var(--muted); }}
+  /* Field-name glossary: the harness vocabulary (Primitive, Boundary,
+     Caller contract, ...) is defined once here rather than re-explained
+     in every report's prose. Dotted underline is the conventional
+     "hover me" affordance and degrades to plain text without CSS. */
+  .fields-table td:first-child abbr {{
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+    cursor: help;
+  }}
   /* Rejected crashes / findings table: ID | Site | Reason | Report. Fixed
      widths cap ID, Site, and Report; Reason takes the remainder. ID and
      Site can hold tokens wider than their column (long finding slugs,
@@ -1046,6 +1055,61 @@ def _linkify_cluster_siblings(rendered_html: str) -> str:
     return "".join(out)
 
 
+# Harness vocabulary a reader outside this project has no way to guess.
+# Defined once here, as a hover gloss on the Fields grid, instead of
+# every report spending prose re-explaining it. Wording tracks
+# `.agents/references/session-rules.md` — update both together.
+_FIELD_GLOSSARY = {
+    "primitive": "The concrete security effect, such as a heap write, "
+                 "use-after-free, information disclosure, or check bypass.",
+    "surface": "Where the vulnerable boundary sits: network, public library "
+               "API, file format, shipped CLI, non-shipping developer tool, "
+               "internal code, or unknown.",
+    "boundary": "The untrusted input path an attacker actually reaches "
+                "this code through.",
+    "caller controls": "What the external caller supplies — the part of "
+                       "the trigger an attacker gets to choose.",
+    "caller contract": "Whether the trigger obeys the target's documented "
+                       "API rules: obeyed, violated, or unspecified when "
+                       "the docs are silent. Violations receive explicit "
+                       "contract review.",
+    "trusted caller actions": "What the application around the target has "
+                              "to do for the bug to be reachable — normal "
+                              "calls, or an unusual sequence.",
+    "trigger source": "What an external caller must supply to reach it: "
+                      "bytes, call-sequence, timing, race, protocol-state, "
+                      "environment, filesystem state, or both bytes and a "
+                      "call sequence.",
+    "parameter control": "How input reaches the decisive parameter: direct "
+                         "(the API consumes it), mapped (product code "
+                         "forwards it), harness-only (only the test driver "
+                         "supplies it), or none.",
+    "class": "Bug class in standard vocabulary — memory-safety, auth, "
+             "injection, info-disclosure, crypto, race, logic.",
+    "cluster": "Reports grouped as the same underlying issue; (singleton) "
+               "means no sibling report was found.",
+    "dedup frames": "The top stack frames used to decide two crashes are "
+                    "the same bug.",
+    "reproduction rate": "How many confirmation runs reproduced the "
+                         "diagnostic.",
+    "advisory": "yes means the report ships a prose fix direction rather "
+                "than a directly applicable patch.diff.",
+    "strategy": "The investigation strategy (S1-S8, or REF) the agent was "
+                "running when it filed this report.",
+}
+
+
+def _gloss_field_name(rendered_html: str, raw_cell: str) -> str:
+    """Attach the glossary tooltip to a known Fields key cell. Unknown
+    keys — and any key whose cell already carries markup — are returned
+    untouched, so a new field never renders worse than before."""
+    definition = _FIELD_GLOSSARY.get(raw_cell.strip().lower())
+    if not definition or "<" in rendered_html:
+        return rendered_html
+    return (f'<abbr title="{html.escape(definition, quote=True)}">'
+            f'{rendered_html}</abbr>')
+
+
 def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
     """Wrap severity / surface tokens in styled spans so the HTML view
     shows pill-shaped badges and chips. Operates on the raw cell text
@@ -1145,8 +1209,23 @@ def _align_class(align: str) -> str:
     return f' class="{align}"' if align in ("left", "right", "center") else ""
 
 
-def _render_table_html(header: list[str], align: list[str], body: list[list[str]]) -> str:
+def _render_table_html(header: list[str], align: list[str], body: list[list[str]],
+                       extra_rows: list[tuple[str, str]] | None = None) -> str:
     extra = _table_extra_class(header)
+    if extra_rows and extra == "fields-table":
+        # Fill the field's existing row when it has one — the table
+        # usually already carries the key with a placeholder value, and
+        # appending would print the field twice. Only a key with no row
+        # at all is added. `_orphan_field_labels` yields keys the table
+        # has no real value for, so filling never clobbers one.
+        body = [list(row) for row in body]
+        by_key = {row[0].strip().casefold(): row for row in body if len(row) >= 2}
+        for key, value in extra_rows:
+            row = by_key.get(key.casefold())
+            if row is None:
+                body.append([key, value])
+            else:
+                row[1] = value
     cls = f' class="{extra}"' if extra else ""
     out = ['<div class="table-wrap">', f"<table{cls}>", "<thead><tr>"]
     for i, c in enumerate(header):
@@ -1165,6 +1244,8 @@ def _render_table_html(header: list[str], align: list[str], body: list[list[str]
             a = align[i] if i < len(align) else "none"
             row_key = row[0] if (is_kv_table and i > 0 and row) else ""
             inner = _decorate_cell(_render_inline(c), c, row_key)
+            if is_kv_table and i == 0:
+                inner = _gloss_field_name(inner, c)
             out.append(f"    <td{_align_class(a)}>{inner}</td>")
         out.append("  </tr>")
     out.append("</tbody>")
@@ -1243,10 +1324,52 @@ def _populated_table_fields(lines: list[str]) -> set[str]:
     return populated
 
 
-def _is_bare_label_line(line: str, populated_table_fields: set[str] | None = None) -> bool:
+def _has_fields_table(lines: list[str]) -> bool:
+    return any(
+        [cell.casefold() for cell in _split_row(line)[:2]] == ["field", "value"]
+        and index + 1 < len(lines)
+        and _TABLE_SEP_RE.match(lines[index + 1])
+        for index, line in enumerate(lines)
+    )
+
+
+def _orphan_field_labels(lines: list[str], populated: set[str]) -> list[tuple[str, str]]:
+    """Bare labels carrying a value the Fields table does not have, in
+    document order.
+
+    A later pass (lib/triage.py, bin/severity) normally promotes these
+    into the table, but until it runs — or when it never does — the bare
+    label is the report's only copy. Rendering it where it sits leaves an
+    orphan key/value list at the foot of the page, divorced from the grid
+    that answers the same questions. The caller folds these into that
+    grid instead. Only meaningful when a Fields table exists to fold
+    into; otherwise the label must render in place or the value is lost."""
+    if not _has_fields_table(lines):
+        return []
+    orphans: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in lines:
+        match = _BARE_LABEL_RE.match(line)
+        if not match:
+            continue
+        key = match.group("key").casefold()
+        if key in populated or key in seen or key not in _PROMOTABLE_LABEL_KEYS:
+            continue
+        _, _, value = line.partition(":")
+        value = value.strip()
+        if not value or report_identity.field_value_is_placeholder(key, value.casefold()):
+            continue
+        seen.add(key)
+        orphans.append((match.group("key").strip(), value))
+    return orphans
+
+
+def _is_bare_label_line(line: str, populated_table_fields: set[str] | None = None,
+                        folded_fields: set[str] | None = None) -> bool:
     """A line that belongs to the regex-extraction duplicate block that
-    follows the Fields table in REPORT.md. Suppress it only when the visible
-    table has the value; otherwise the bare label is the report's sole data."""
+    follows the Fields table in REPORT.md. Suppress it only when the value
+    is on screen already — in the visible table, or folded into it by the
+    caller; otherwise the bare label is the report's sole data."""
     if _SEVERITY_LINE_RE.match(line):
         return True
     match = _BARE_LABEL_RE.match(line)
@@ -1255,7 +1378,7 @@ def _is_bare_label_line(line: str, populated_table_fields: set[str] | None = Non
     key = match.group("key").casefold()
     if populated_table_fields is None or key not in _PROMOTABLE_LABEL_KEYS:
         return True
-    return key in populated_table_fields
+    return key in populated_table_fields or key in (folded_fields or set())
 
 
 _REPORT_LABEL_HEADING_RE = re.compile(
@@ -1660,6 +1783,11 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
     self-contained HTML document, styled with the Material 3 stylesheet."""
     lines = text.splitlines()
     populated_table_fields = _populated_table_fields(lines)
+    # Fields the table is missing but the body carries as bare labels.
+    # Folded into the grid below rather than left as an orphan key/value
+    # list at the foot of the page.
+    orphan_fields = _orphan_field_labels(lines, populated_table_fields)
+    folded_fields = {key.casefold() for key, _ in orphan_fields}
     body: list[str] = []
     i = 0
     paragraph: list[str] = []
@@ -1692,7 +1820,7 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
         # lines out before rendering so they do not get folded into prose.
         paragraph[:] = [
             line for line in paragraph
-            if not _is_bare_label_line(line, populated_table_fields)
+            if not _is_bare_label_line(line, populated_table_fields, folded_fields)
         ]
         if not paragraph:
             paragraph.clear()
@@ -1887,7 +2015,14 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
             while j < len(lines) and _TABLE_ROW_RE.match(lines[j]):
                 body_rows.append(_split_row(lines[j]))
                 j += 1
-            body.append(_render_table_html(header, align, body_rows))
+            # Fold only into the first Fields grid. Guarding on the table
+            # kind matters: a non-Fields table earlier in the document
+            # would otherwise consume the orphans and drop them.
+            is_fields = _table_extra_class(header) == "fields-table"
+            body.append(_render_table_html(
+                header, align, body_rows, orphan_fields if is_fields else None))
+            if is_fields:
+                orphan_fields = []
             i = j
             continue
 

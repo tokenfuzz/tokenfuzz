@@ -171,6 +171,12 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
                 self.assertIn("`killall`", rendered)
                 self.assertRegex(rendered, r"including absolute\s+paths")
                 self.assertIn("matched PIDs", rendered)
+                # Report narrative contract — every variant that can file a
+                # report must carry it, including the compact one, which has
+                # no session-rules digest to fall back on.
+                self.assertIn("## Report narrative", rendered)
+                self.assertIn("**Impact**", rendered)
+                self.assertEqual(rendered.count("## Report narrative"), 1)
         compact = prompt.compact_fresh_prompt(context, 1)
         self.assertIn("## COMPACT RUNTIME CONTRACT", compact)
         self.assertIn("bin/state update-hyp --id", compact)

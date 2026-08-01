@@ -69,6 +69,30 @@ class ReportEnrichTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def test_tldr_fix_line_survives_a_full_sentence(self) -> None:
+        fix = (
+            "In `lib/parser.c`, clamp the output loop to the block actually "
+            "being emitted by passing `in->count` down to `app_emit()` and "
+            "iterating `for (int i = S; i < in->count + S; i++)` instead of "
+            "the full window."
+        )
+        tldr = report_enrich._build_tldr(
+            f"## Summary\nA filter overflows its output buffer.\n\n"
+            f"## Fix Direction\n{fix}\n\nBoundary: input file\n"
+        )
+        self.assertIn(fix, tldr)
+        self.assertNotIn("…", tldr)
+
+        # Past the limit it still cuts on a word boundary and re-closes the
+        # inline-code span, instead of leaving a dangling backtick.
+        long_fix = "Rewrite the extractor to take a capacity `size_t cap" + " x" * 200
+        truncated = report_enrich._build_tldr(
+            f"## Summary\nA bug.\n\n## Fix Direction\n{long_fix}\n"
+        )
+        self.assertTrue(truncated.rstrip().endswith("…"))
+        self.assertEqual(truncated.count("`") % 2, 0)
+        self.assertNotIn(" x…", truncated)
+
     def test_full_enrichment_rendering_and_idempotency(self) -> None:
         crash = self.root / "crashes" / "CRASH-001"
         crash.mkdir(parents=True)
@@ -496,9 +520,9 @@ Agent-inlined narrative that must be replaced by the sibling diff.
         ):
             self.assertIsNone(report_enrich._source_url(context(url, revision), "x.c", 1))
         short = "guard: f (a.c:1) — small note"
-        self.assertEqual(report_enrich._truncate_anchor(short), short)
+        self.assertEqual(report_enrich._truncate_prose(short, 140), short)
         long_anchor = "guard: f (a.c:1) — rejects values against `sizeof" + "x" * 100
-        truncated = report_enrich._truncate_anchor(long_anchor)
+        truncated = report_enrich._truncate_prose(long_anchor, 140)
         self.assertTrue(truncated.endswith("…"))
         self.assertEqual(truncated.count("`") % 2, 0)
 

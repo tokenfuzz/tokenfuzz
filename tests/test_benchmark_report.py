@@ -76,6 +76,12 @@ class BenchmarkReportTests(unittest.TestCase):
         self.assertNotRegex(body, r"\bS[1-8]\b")
         self.assertNotIn("| Strategy", body)
         self.assertRegex(body, r"Use the same\s+`## Fields` table")
+        # The report-narrative contract is shared with the harness prompt.
+        # If only one condition carried it, a prose-quality difference
+        # between the two arms would be a prompt artifact.
+        self.assertIn("## Report narrative", body)
+        self.assertEqual(body.count("## Report narrative"), 1)
+        self.assertIn("**Impact**", body)
 
         literal = prompt_render.render_template(
             ROOT / "lib" / "prompts" / "benchmark_model_direct.md.j2",

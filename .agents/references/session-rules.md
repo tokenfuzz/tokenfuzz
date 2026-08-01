@@ -442,10 +442,11 @@ attachment — no rewrite needed.
 Always try to point at the fix — best-effort, it never blocks or
 downgrades a finding:
 - **`## Fix Direction`** — the `## Fix Direction` heading on its own line,
-  then one sentence naming where the fix goes and what changes (the missing
-  check, the corrected bound, the inverted predicate); keep the heading bare
-  so the exporter detects it. Cheap, so write it on every FIND and CRASH. The
-  only time you omit it is when you attach a `patch.diff` instead (below).
+  then the body your session prompt's "Report narrative" block specifies
+  (where the fix goes, what changes, and when needed why a cheaper fix does
+  not work); keep the heading bare so the exporter detects it. Cheap, so
+  write it on every FIND and CRASH. The only time you omit it is when you
+  attach a `patch.diff` instead (below).
 - **`patch.diff`** — the upgrade over the prose line: a surgical patch saved
   as a file named exactly
   `patch.diff` in the FIND directory (alongside `report.md`), or in

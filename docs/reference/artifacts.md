@@ -246,6 +246,29 @@ that binding is what distinguishes a current score from one an earlier scorer
 left behind. A score whose binding no longer matches is re-derived, never
 credited as-is.
 
+## Report narrative
+
+Crash and finding reports share one narrative shape, so a reviewer reads
+every backend's output the same way. In order:
+
+| Section | Budget | Answers |
+| --- | --- | --- |
+| `## Summary` | 60–90 words | What the component does, what goes wrong, what the attacker gets |
+| `## Root Cause` | 120–200 words | The invariant the code assumed and the input that breaks it |
+| `## Data Flow` | ≤ 8 bullets | The path, as `step: func (path/file.c:NN) — sentence` |
+| `## Impact` | 40–70 words | Who is exposed and what they lose |
+| `## Fix Direction` | 30–60 words | Where the fix goes and what changes |
+
+`## Summary` is required because it feeds the reviewer TL;DR. Any other
+section with no evidence behind it is omitted rather than filled — an
+unevidenced Impact paragraph costs more than a missing one. Sections outside
+this set are written by the harness (`## Fields`, `## Patch`, `## Severity
+rationale`, `## Classification`, `## Reproduce`), not by the report author.
+
+The contract lives in `lib/prompts/report_prose.md.j2` and is rendered into
+both the harness session prompt and the model-direct baseline, so prose shape
+is never a difference between benchmark conditions.
+
 ## Logs
 
 ```text

@@ -144,6 +144,92 @@ paragraph
         self.assertIn("<code>FCL-9a914177</code>", signature_html)
         self.assertIn("<code>abcdef1234567890abcdef1234567890</code>", signature_html)
 
+    def test_fields_grid_glosses_harness_vocabulary(self) -> None:
+        fields = self.markdown(
+            "fields",
+            """# CRASH-1
+
+| Field | Value |
+|:------|:------|
+| Primitive | heap-buffer-overflow |
+| Caller contract | unspecified |
+| Reviewer note | see thread |
+""",
+        )
+        html = self.html(fields)
+        # Known key: definition rides along as a hover gloss, so no report
+        # has to spend prose explaining the harness's own vocabulary.
+        self.assertIn('<abbr title="The concrete security effect', html)
+        self.assertIn("Caller contract</abbr>", html)
+        self.assertIn("cursor: help", html)
+        # Unknown key renders exactly as before.
+        self.assertIn('<td class="left">Reviewer note</td>', html)
+        # Value cells are never glossed — only the label column.
+        self.assertNotIn('<abbr title="Bug class', html)
+
+    def test_fields_missing_from_the_table_fold_into_it(self) -> None:
+        # A bare label the Fields table lacks used to render where it sat —
+        # an orphan key/value list at the foot of the page, answering the
+        # same questions as the grid at the top. 18% of pooled reports hit
+        # this, mostly `Strategy`.
+        folded = self.markdown(
+            "folded",
+            """# CRASH-1
+
+| Field | Value |
+|:------|:------|
+| Primitive | double-free |
+
+## Summary
+
+prose
+
+Trusted caller actions: reuses the handle after close
+Strategy: S5
+""",
+        )
+        html = self.html(folded)
+        grid = html.split('class="fields-table"')[1].split("</table>")[0]
+        for field in ("Trusted caller actions", "reuses the handle after close",
+                      "Strategy", "S5"):
+            self.assertIn(field, grid)
+        page = html.split("<body>")[1]                # not the stylesheet
+        self.assertNotIn("report-definition", page)   # no orphan list
+        self.assertEqual(page.count("reuses the handle after close"), 1)
+
+        # A placeholder is an existing-but-empty row, not a populated one.
+        # Replace its value rather than displaying two contradictory rows.
+        placeholder = self.markdown(
+            "placeholder",
+            """# CRASH-2
+
+| Field | Value |
+|:------|:------|
+| Boundary | — |
+
+## Summary
+
+prose
+
+Boundary: caller-supplied sample bytes
+""",
+        )
+        placeholder_grid = self.html(placeholder).split(
+            'class="fields-table"'
+        )[1].split("</table>")[0]
+        self.assertEqual(placeholder_grid.count("Boundary</abbr>"), 1)
+        self.assertEqual(placeholder_grid.count("caller-supplied sample bytes"), 1)
+        self.assertNotIn(">—<", placeholder_grid)
+
+        # Fall open: with no Fields table to fold into, the bare labels are
+        # the report's only copy and must still render.
+        loose = self.markdown(
+            "loose",
+            "# CRASH-2\n\n## Summary\n\nprose\n\n"
+            "Trusted caller actions: reuses the handle\nStrategy: S5\n",
+        )
+        self.assertIn("reuses the handle", self.html(loose))
+
     def test_lists_and_structured_label_suppression(self) -> None:
         lists = self.markdown(
             "lists",
@@ -194,8 +280,15 @@ Real prose lives here.
             "CVSS-BTE 4.0: 6.5 Medium",
         ):
             self.assertNotIn(duplicate, bare_html)
-        self.assertIn("<dt>Trigger source</dt><dd>bytes</dd>", bare_html)
-        self.assertIn("<dt>Parameter control</dt><dd>direct</dd>", bare_html)
+        # A field the table lacks must stay visible. It is folded into the
+        # Fields grid rather than rendered where it sits, so the reader has
+        # one place to look; the requirement is that the value survives.
+        grid = bare_html.split('class="fields-table"')[1].split("</table>")[0]
+        for field, value in (("Trigger source", "bytes"),
+                             ("Parameter control", "direct"),
+                             ("Boundary", "serialized sample bytes")):
+            self.assertIn(field, grid)
+            self.assertIn(value, grid)
         self.assertIn("Real prose lives here", bare_html)
 
         unrelated_table = self.markdown(

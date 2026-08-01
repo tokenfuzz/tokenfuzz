@@ -1,0 +1,50 @@
+{# Shared narrative contract for CRASH/FIND report.md prose.
+
+   One source of truth for HOW a report reads, rendered into both the harness
+   session prompt (lib/prompt.py find_first_directive) and the model-direct
+   baseline (lib/benchmark_model_direct_render.py). Both conditions must carry
+   it or a benchmark prose difference is a prompt artifact.
+
+   Scope is deliberately narrow: heading names, order, and voice. It says
+   nothing about what qualifies as a bug (audit_bug_contract.md.j2) and
+   nothing about the `## Fields` table or the bare-label fields — every
+   downstream parser reads those, so reshaping them would move gate decisions.
+
+   The omit-rather-than-guess rule is load-bearing. A word budget a model
+   fills with speculation turns a real finding into a rejected one; the
+   budget must never read as a quota.
+
+   Keep it terse: it is cache-replayed on every tool call. #}
+## Report narrative
+
+Write for a maintainer who has never opened the file. Use these headings, in
+this order — `bin/enrich-report` builds the reviewer TL;DR from Summary plus
+Fix Direction and inlines source snippets under Data Flow; other names get
+neither.
+
+- **Summary** (60-90 words). First sentence: what the component does and what
+  goes wrong, no symbol names. Second: the shortest input or call sequence
+  that reaches it. Third: what the attacker gets. Then the mechanism, with
+  real names and `file:line`.
+- **Root Cause** (120-200 words). The invariant the code assumes, the input
+  that breaks it, and the two or three lines that matter. State the wrong
+  assumption in words — "the loop bounds itself by the window size, but the
+  buffer was sized from the frame". Quote code only where prose cannot carry
+  it; the reader has the file open.
+- **Data Flow**. One sentence narrating the whole path, then up to 8 bullets
+  as `step: func (path/file.c:NN) — <one plain sentence>`.
+- **Impact** (40-70 words). Who is exposed, in what deployment, what they
+  lose. Quantify relevant measurements such as overflow length or controlled
+  bytes; do not repeat metadata already present in the Fields table.
+- **Fix Direction** (30-60 words). Where the fix goes, what changes, and why
+  an obvious cheaper fix is insufficient when that is not self-evident. A
+  sibling `patch.diff` replaces this section.
+
+Summary is required; the TL;DR is built from it. Budgets are targets — under is
+fine, double is not. **Omit any other section you have no evidence for instead
+of filling it**: an invented Impact paragraph can invalidate a real finding.
+Write "exploitability beyond a crash is unproven" when that is the truth.
+
+Gloss each internal name on first use. One idea per sentence. Write "writes 5
+bytes past the end of a 72-byte allocation", not "OOB write". The fields table
+carries the metadata; don't restate it in prose.
