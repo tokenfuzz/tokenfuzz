@@ -266,6 +266,31 @@ class ProbeCppHarnessTests(unittest.TestCase):
                 '#include <stdlib.h>\n'
                 'int main(void) { putenv("LD_PRELOAD=shim.so"); system("app input"); }\n',
             ),
+            (
+                "spaced-preload.c",
+                '#include <stdlib.h>\n'
+                'int main(void) { putenv("LD_PRELOAD= shim.so"); system("app input"); }\n',
+            ),
+            # The same assignment carries injection from an environment array
+            # or a command string, without passing through a setter call.
+            (
+                "spawn-environ.c",
+                '#include <spawn.h>\n'
+                'int main(void) { char *env[] = {"DYLD_INSERT_LIBRARIES=shim.dylib", 0}; '
+                'char *argv[] = {"app", 0}; pid_t pid; '
+                'return posix_spawn(&pid, "app", 0, 0, argv, env); }\n',
+            ),
+            (
+                "exec-environ.c",
+                '#include <unistd.h>\n'
+                'int main(void) { char *env[] = {"LD_PRELOAD=shim.so", 0}; '
+                'char *argv[] = {"app", 0}; return execve("app", argv, env); }\n',
+            ),
+            (
+                "command-string.c",
+                '#include <stdlib.h>\n'
+                'int main(void) { return system("LD_PRELOAD=shim.so ./app input"); }\n',
+            ),
         ):
             with self.subTest(name=name):
                 harness = self.scratch / name
@@ -325,6 +350,33 @@ class ProbeCppHarnessTests(unittest.TestCase):
         proc = self.run_probe(version_testcase)
 
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_loader_name_without_an_assignment_does_not_create_a_carrier(self) -> None:
+        for name, setup in (
+            ("observed", '(void)getenv("LD_PRELOAD");'),
+            (
+                "indirect-clear",
+                'const char *key = "LD_PRELOAD"; unsetenv(key);',
+            ),
+            ("empty-set", 'setenv("LD_PRELOAD", "", 1);'),
+            ("empty-putenv", 'putenv("LD_PRELOAD=");'),
+            ("logged", 'const char *format = "LD_PRELOAD=%s"; (void)format;'),
+        ):
+            with self.subTest(name=name):
+                harness = self.scratch / f"{name}.c"
+                harness.write_text(
+                    "#include <stdlib.h>\n#include <unistd.h>\n"
+                    f"int main(int argc, char **argv) {{ {setup} return argc == 2 "
+                    '? execl("app", "app", argv[1], (char *)0) : 2; }\n',
+                    encoding="utf-8",
+                )
+                testcase = self.write_testcase(
+                    f"{name}.txt", harness.name, f"H-{name}",
+                )
+
+                proc = self.run_probe(testcase)
+
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 
     def test_comments_line_splices_and_raw_strings_do_not_create_carriers(self) -> None:
         spliced = self.scratch / "spliced.c"

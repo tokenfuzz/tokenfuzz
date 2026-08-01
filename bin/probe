@@ -55,10 +55,18 @@ HEADER_RE = {
     "harness": re.compile(r"^[^A-Za-z]*HARNESS:\s*([^\s>*]+)", re.M),
 }
 BARE_METADATA = re.compile(r"^\s*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):\s*")
-_DYNAMIC_INTERPOSITION_RE = re.compile(
+# A setter names the variable and supplies the library as a later argument.
+_LOADER_SETTER_RE = re.compile(
     r"\b(?:setenv|_putenv_s|SetEnvironmentVariable(?:A|W)?)\s*\(\s*"
-    r"['\"](?:DYLD_INSERT_LIBRARIES|LD_PRELOAD)['\"]|"
-    r"\bputenv\s*\(\s*['\"](?:DYLD_INSERT_LIBRARIES|LD_PRELOAD)="
+    r'"(?:DYLD_INSERT_LIBRARIES|LD_PRELOAD)"\s*,'
+    r'(?!\s*(?:""\s*[,)]|(?:NULL|nullptr)\b|0\s*[,)]))'
+)
+# Everything else carries both halves in one literal, wherever it sits:
+# putenv, an execve / posix_spawn environment array, or a command string. A
+# closing quote means the value is empty and a format specifier means the
+# literal is a message, so neither supplies a library.
+_LOADER_ASSIGNMENT_RE = re.compile(
+    r'"(?:DYLD_INSERT_LIBRARIES|LD_PRELOAD)=(?!["%])'
 )
 _PROCESS_LAUNCH_RE = re.compile(
     r"(?<![A-Za-z0-9_.>:])(?:(?:::|std\s*::)\s*)?(?:"
@@ -78,6 +86,7 @@ _C_LEXEME_RE = re.compile(
 _LOADER_STRING_RE = re.compile(
     r'^"(?:DYLD_INSERT_LIBRARIES|LD_PRELOAD)(?:=[^"]*)?"$'
 )
+_EMPTY_STRING_RE = re.compile(r'^(?:u8|[uUL])?""$')
 HELP = """Usage:
   bin/probe [--confirm | --sanitizer-runs N] [--dry-run] [--mode auto|browser|js|generic] \\
             [--hypothesis-id HYPOTHESIS-ID] \\
@@ -272,6 +281,8 @@ def _c_carrier_tokens(text: str) -> str:
         string = match.group("string")
         if string is not None and _LOADER_STRING_RE.fullmatch(string):
             return string
+        if string is not None:
+            return '""' if _EMPTY_STRING_RE.fullmatch(string) else '"?"'
         value = match.group(0)
         return "".join("\n" if char == "\n" else " " for char in value)
 
@@ -284,12 +295,16 @@ def reject_harness_only_carrier(source: Path) -> None:
     Ordinary launchers can still carry real file/protocol inputs, so ambiguous
     cases stay for provenance review. Loader injection has no testcase-derived
     target state and is safe to stop before confirmation.
+
+    Only an assignment that supplies a library is injection, so reading or
+    clearing the variable stays allowed. Interpreted harnesses and carriers that
+    build the assignment at runtime are out of scope here and reach the same
+    boundary through provenance review.
     """
     code = _c_carrier_tokens(source.read_text(encoding="utf-8", errors="replace"))
-    launcher = _PROCESS_LAUNCH_RE.search(code)
-    if not launcher:
+    if not _PROCESS_LAUNCH_RE.search(code):
         return
-    interposition = _DYNAMIC_INTERPOSITION_RE.search(code)
+    interposition = _LOADER_SETTER_RE.search(code) or _LOADER_ASSIGNMENT_RE.search(code)
     if not interposition:
         return
     raise ValueError(
