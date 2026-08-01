@@ -14,7 +14,7 @@ Read only the strategy file you need, not all of them.
 |----------|----------|------|------|
 | **1st** | **S1: Prior-fix + regression variant** | `S1-prior-fix-review.md` | Always first. 3/7 historical findings. Mines own fixes AND refactors. |
 | **2nd** | **S2: Invariant negation** | `S2-assert-negation.md` | Mechanical: asserts, algorithm assumptions, multi-precondition gates. |
-| **3rd** | **S3: Spec-vs-impl + fast-paths** | `S3-spec-vs-impl.md` | LLM-native: spec compliance AND optimization fast-path skips. |
+| **3rd** | **S3: Rule-vs-implementation** | `S3-spec-vs-impl.md` | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
 | **4th** | **S4: Advanced differential** | `S4-differential.md` | Beyond basic JIT diff (now automatic): GC zeal, wasm tiers, cross-build. |
 | **5th** | **S5: Lifetime & state violation** | `S5-reentrancy.md` | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
 | **6th** | **S6: Cross-project variant mining** | `S6-cross-project.md` | Mine peer projects' fixes for bug classes in target. |

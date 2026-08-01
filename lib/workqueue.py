@@ -354,11 +354,12 @@ _INPUT_CONSUMPTION_RE = re.compile(
 # Discipline (docs/development.md): these run against EVERY target's source, so
 # every row must be target-agnostic — it matches a *family* (verb stems,
 # macro shapes, libc/POSIX symbols, language keywords), never one
-# project's types/headers/internal macros. A loose pattern costs
-# ranking noise, not exploration depth (a file is flagged once
-# regardless of hit count past the cap), so we prefer breadth. Rows
-# span C/C++/Rust/Go/Swift/Java/Python; a row that cannot match a
-# given language simply contributes nothing there.
+# project's types/headers/internal macros. A loose pattern can consume the
+# rank window and, for a logical-security reason, select the wrong primary
+# playbook. Prefer decision-shaped identifiers/calls over domain nouns and
+# prose while retaining cross-language breadth. Rows span
+# C/C++/Rust/Go/Swift/Java/Python; a row that cannot match a given language
+# simply contributes nothing there.
 #
 # Inclusion criterion for a new row: it must (a) plausibly match across
 # ≥3 unrelated codebases, and (b) map cleanly to one primary strategy
@@ -367,11 +368,32 @@ _INPUT_CONSUMPTION_RE = re.compile(
 # and S5 lifetime/state are sanitizer-checked; S2 invariant-negation and
 # S3 spec-vs-impl are grounded in code the agent can read; S8 needs no
 # sanitizer.
+#
+# The boundary rows name a *security decision or trust transition* — the
+# place code decides who may act, whose identity it believes, what secret
+# it accepts, which file it touches, or which remote peer it talks to.
+# Until they existed the scorer could only rank memory-handling code, so
+# an authorization check or a cookie-scoping rule never became a card
+# under any strategy, and a boundary file that did rank carried a reason
+# naming only its memcpy. They are keyed on decision vocabulary rather
+# than data handling, because a boundary defect is a wrong answer to that
+# decision, not a malformed byte. Tokens with a dominant non-security
+# meaning in ordinary library code are excluded on purpose: bare `token`
+# (lexers), `origin` (geometry), `domain` (numeric domain), `key` (map
+# keys), `sign`/`signature` (arithmetic, function signatures, magic).
+# A SQL statement head, not a bare verb: `delete`/`update`/`select` all occur
+# in ordinary prose and log text, so each keyword must carry the clause that
+# makes it a statement.
+_SQL_STATEMENT = (
+    r"\b(?:select\b[^\"'`\n]{0,160}\bfrom\b|insert\s+into\b|delete\s+from\b"
+    r"|update\s+[\w\"'`\[]|union\s+(?:all\s+)?select\b)"
+)
+
 CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
     # S7 — untrusted-input entrypoint: an identifier carrying a
     # consume-verb segment, snake_case or CamelCase, at any position.
     (_INPUT_CONSUMPTION_RE, 16, "input-consumption entrypoint"),
-    # S7 — deserialization sink: untrusted serialized data reaching an
+    # S3 — deserialization sink: untrusted serialized data reaching an
     # object-graph reconstructor (RCE class; Java/Python/Go).
     (re.compile(
         r"\bObjectInputStream\b|\breadObject\b|\breadUnshared\b|\bXMLDecoder\b"
@@ -385,16 +407,192 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
         r"|\b[A-Z][A-Z0-9_]*(?:API|EXPORT|PUBLIC|EXTERN)[A-Z0-9_]*\b"
         r"|\bpub\s+(?:unsafe\s+)?fn\b|\b(?:public|open)\s+func\b"
     ), 14, "exported API surface"),
-    # S7 — command / injection surface: untrusted data reaching a shell,
+    # S3 — command / injection surface: untrusted data reaching a shell,
     # process spawn, dynamic class load, or JNDI/naming lookup.
     (re.compile(
-        r"\b(?:system|popen)\s*\(|\bexec[lv]?[pe]*\s*\("
+        # C spellings must close into code rather than prose: `rc = system(c);`
+        # and `if (system(c) != 0)` both qualify, while "operating system
+        # (gzip) handles" continues into a word and does not. Requiring a
+        # terminating `;` alone would drop the checked-call form, which is the
+        # more common one. Bare exec excludes method calls (`regex.exec()`,
+        # `db.exec()`), a dominant non-process meaning in JavaScript.
+        r"\b(?:system|popen)\s*\([^;\n]+\)\s*[;,)!=<>&|]"
+        r"|(?<![.\w])exec(?:l|le|lp|lpe|v|ve|vp|vpe)?\s*\([^;\n]+\)\s*[;,)!=<>&|]"
         r"|\bProcessBuilder\b|\bRuntime\.getRuntime\b|\bexec\.Command(?:Context)?\b"
         r"|\b(?:process::)?Command::new\b"
         r"|\bos\.system\b|\bsubprocess\.(?:Popen|call|run|check_output|check_call)\b"
-        r"|\bClass\.forName\b|\bInitialContext\b|\b\w*[Cc]ontext\.lookup\b"
+        r"|\bClass\.forName\b|\bInitialContext\b|[Cc]ontext\.lookup\b"
         r"|\bdlopen\s*\("
     ), 13, "command/injection surface"),
+    # S3 — access-control decision: the code that decides whether an
+    # action is permitted, or that changes the privilege it runs under.
+    (re.compile(
+        # Decision-shaped auth identifiers. Do not use a bare `auth` prefix
+        # (matches `authoritative`/`AuthenticAMD`) or a bare `authentication`
+        # noun (matches AEAD/HMAC documentation throughout crypto trees).
+        # The separator in the second branch is load-bearing: it admits
+        # `db_authorize(` while excluding camelCase compounds such as
+        # `isUpdateAuthorized(`, which validate a parameter rather than a
+        # principal. Merging the two branches would drop that distinction.
+        r"\b(?:authenticate|authorize)\w*\s*\("
+        r"|\b\w+[_-](?:authenticate|authorize)\w*\s*\("
+        r"|\b(?:authentication|authorization|authorizer)[_-]?(?:check|callback"
+        r"|handler|policy|required|state|allow|deny|guard|filter)\w*"
+        r"|\bauthorizer\b|\b(?:authn|authz)\w*"
+        r"|\bauth[_-]?(?:check|callback|state|policy|required|handler|user|role"
+        r"|permission|login|request|method|allow|deny|fail|error)\w*"
+        r"|(?-i:\b\w*(?:(?:Authenticate|Authorize)(?:Request|User|Role|Access"
+        r"|Permission|Action|Token|Peer)|Auth(?:Check|Read|Write|Access|Authorize|Permission"
+        r"|Role|User|Policy|Guard|Allow|Deny)|_auth_(?:check|read|write|access"
+        r"|authorize|permission|role|user|policy|guard|allow|deny))\w*\s*\()"
+        r"|\bunauthoriz|\bacl\b"
+        r"|\baccess[\s_-]?control|\bcapable\s*\("
+        r"|\bcapabilit(?:y|ies)[\s_-]?(?:permission|privilege|access)\w*"
+        r"|\b(?:check|verify|require|enforce|grant|deny|drop)[\s_-]?privileg\w*"
+        r"|\bprivileg\w*[\s_-]?(?:check|level|mode|role|user|guard|policy)\w*"
+        r"|\b(?:check|verify|require|enforce|grant|deny|denied|test)[\s_-]?permission"
+        r"|\bpermission[\s_-]?(?:check|denied|bits?|mask|mode|flags?)\b"
+        r"|\b(?:is|may|can|check|require|enforce)_?(?:allow|permit|access|auth"
+        r"|role|owner|admin)\w*\s*\("
+        r"|\bset(?:re)?[ug]id\s*\(|\bchroot\s*\(|\bdrop[\s_-]?privileg|\bsandbox"
+    , re.IGNORECASE), 12, "access-control decision"),
+    # S3 — identity / origin decision: whose identity the code believes and
+    # which trust scope it carries a request into. `cookie` and `redirect`
+    # need a qualifier because both have a dominant unrelated meaning in
+    # ordinary source — a database schema cookie, redirected output — that
+    # outnumbered the HTTP sense; the qualified forms still match every
+    # HTTP-family file that carries the real thing.
+    (re.compile(
+        r"\bset-cookie\b|\bcookie\s*:"
+        r"|\bcookies?[_-](?:jar|dict|entr|param|string|list|header|domain|path"
+        r"|secure|samesite)\w*"
+        r"|\b(?:http|request|response)\b[^\n]{0,80}\bcookies?\b"
+        r"|\bcookies?\b[^\n]{0,80}\b(?:http|request|response|domain|path|secure|samesite|header)\b"
+        r"|\bredirect[_-]?(?:url|uri|location|host|count|limit|follow|chain)\w*"
+        r"|\b(?:follow|max|no)[_-]?redirects?\b"
+        r"|\breferr?er\s*:|\b(?:http|request|header)[_-]?referr?er\w*"
+        r"|\breferr?er[_-]?(?:header|url|uri|policy)\w*"
+        r"|\bsame[\s_-]?origin\w*"
+        r"|\bcross[\s_-]?origin\w*|\bcors\b|\bhost(?:name)?[\s_-]?(?:check|verif|match|valid)\w*"
+        r"|\bverify[\s_-]?(?:host|hostname|peer|cert)\w*|\bcheck[\s_-]?host\w*"
+        r"|\bservername\b|\bsni\b|\bsame[\s_-]?site\b"
+        r"|\bWWW-Authenticate\b|\bAuthorization\s*:|\bX-Forwarded-\w+"
+    , re.IGNORECASE), 11, "identity/origin decision"),
+    # S3 — credential / assertion verification: the step that decides a
+    # secret, certificate, or token is genuine. Keyed on the *decision*, not
+    # on secret material: in a crypto library "this file touches a key" is
+    # true of most files and discriminates nothing, so bare key/hmac/kdf
+    # names are excluded and only verification vocabulary counts.
+    # Transformation (encrypt/decrypt) stays with the S8 round-trip row.
+    (re.compile(
+        r"\bconstant[\s_-]?time[\s_-]?(?:compare|comparison|memcmp|eq|equal)\w*"
+        r"|\btiming[\s_-]?safe|\bCRYPTO_memcmp\b"
+        r"|\b(?:verify|validate|check|compare|authenticate)[_-]?(?:password|passphrase"
+        r"|credential|token|assertion|claim|issuer|audience)\w*"
+        r"|\b(?:password|passphrase|credential|token|assertion|claim|issuer|audience)"
+        r"[_-]?(?:check|verif|valid|match|compar|auth)\w*"
+        r"|\bverify[\s_-]?(?:signature|sig|mac|digest|password|token|cert"
+        r"|chain|assertion|claim|issuer|audience)\w*"
+        r"|\bsignature[\s_-]?verif\w*|\bhost[\s_-]?key\b"
+        r"|\b(?:jwt|saml|oauth|oidc)[_-]?(?:token|assertion|claim|issuer|audience|verif|valid)\w*"
+        r"|\bassertion[\s_-]?(?:valid|verif|select)\w*"
+        r"|\b(?:validate|check)[\s_-]?(?:token|claim|issuer|audience|assertion"
+        r"|signature|certificate|cert[\s_-]?chain)\w*"
+    , re.IGNORECASE), 10, "credential/verification decision"),
+    # S3 — query and template construction: the injection families whose sink
+    # is a grammar rather than a shell. A query assembled by concatenation, or
+    # a template that evaluates a resolved value, crosses into another
+    # parser's syntax exactly the way a shell command does.
+    # Only *construction and escaping* count. The parameterized API alone
+    # (prepare/bind) is evidence the caller did it right, and keying on it
+    # made a database engine match its own safe interface on a fifth of its
+    # files — domain vocabulary, not hazard. The exception is a query text
+    # that is visibly assembled rather than fixed: a statement literal next
+    # to concatenation, interpolation, or a format call is the vulnerable
+    # shape itself, and it carries no helper name to key on.
+    (re.compile(
+        # Identifier-shaped construction vocabulary.  Separators are `_`/`-`
+        # or no separator (camelCase); a space is deliberately excluded so
+        # comments saying "SQL text/string" do not rank a file.
+        r"\b(?:sql|query)(?:[_-]?(?:build|builder|string|text|concat|escape|quote))\w*"
+        r"|\b(?:escape|quote|concat)(?:[_-]?(?:sql|query|identifier|literal|ident))\w*"
+        r"|\bldap[_-]?(?:search|filter|escape)\w*"
+        r"|\bxpath[_-]?(?:eval|expr|compile)\w*"
+        r"|\brender[_-]?template\w*|\btemplate[_-]?(?:render|eval|expand|engine)\w*"
+        r"|\bexpression[_-]?(?:eval|language)\w*|\beval[_-]?(?:expr|template|string)\w*"
+        r"|\b\w*prepare[_-]?(?:fmt|format)\w*\s*\([^;]{0,600}"
+        r"[\"']\s*(?:select|insert|update|delete|with|pragma)\b"
+        # Statement literal followed by concatenation, `%`/format, or an
+        # f-string/template placeholder. The keyword must carry its clause —
+        # bare `delete`/`update` also occur in ordinary message text, and a C
+        # string's escaped `\"` is indistinguishable from a closing quote.
+        # Anchored on the opening quote. Leading with the statement head was
+        # measurably slower: word boundaries outnumber quotes, so the engine
+        # entered the bounded scan far more often.
+        r"|[\"'`][^\"'`\n]{0,120}" + _SQL_STATEMENT + r"[^\"'`\n]{0,120}"
+        r"[\"'`]\s*(?:\+|%|\.format\b|\.join\b)"
+        r"|\bf[\"'][^\"'\n]{0,120}" + _SQL_STATEMENT + r"[^\"'\n]{0,120}\{"
+        r"|`[^`\n]{0,120}" + _SQL_STATEMENT + r"[^`\n]{0,120}\$\{"
+        # C/C++ format-into-statement: sprintf(sql, "SELECT ...%s", value).
+        r"|\b(?:sn?printf|m?asprintf|mprintf|strcat)\s*\([^;\n]{0,120}[\"']\s*"
+        + _SQL_STATEMENT
+        + r"|\bheader[\s_-]?(?:inject|split)\w*|\bcrlf[\s_-]?inject\w*"
+    , re.IGNORECASE), 11, "query/template construction"),
+    # S3 — outbound-request decision: destination and redirect policy for
+    # server-side fetches.  The raw socket/read/write endpoint is S7; this row
+    # is the security rule that decides which URL/host/address may be reached.
+    #
+    # Naming a control is not enough on its own: the vulnerable shape is a
+    # fetch with *no* destination rule, which has no control vocabulary to
+    # match. So the sink counts too, but only when its destination is a
+    # variable — a call whose first argument opens with a quote is a fixed
+    # endpoint and is not attacker-directed.
+    (re.compile(
+        r"\b(?:url|uri|host|hostname|redirect)"
+        r"[_-]?(?:allow|deny|filter|check|valid|canonical|resolve|policy)\w*"
+        r"|\b(?:allow|deny|filter|check|valid|canonical|resolve)"
+        r"[_-]?(?:url|uri|host|hostname|redirect)\w*"
+        r"|\b(?:outbound|fetch|request)[_-]?(?:url|uri|host|address|destination|endpoint)"
+        r"[_-]?(?:allow|deny|filter|check|valid|canonical|resolve|policy)\w*"
+        r"|\b(?:private|loopback|link[_-]?local|metadata)"
+        r"[_-]?(?:address|ip|host|network)\w*"
+        r"|\b(?:follow|validate|check)[_-]?redirect\w*"
+        # Dynamic-destination sinks.
+        r"|\b(?:requests|httpx|session|client)\.(?:get|post|put|patch|delete"
+        r"|head|request)\s*\(\s*[^\"'\s)]"
+        r"|\bhttp\.(?:Get|Post|Head|PostForm|NewRequest)\s*\(\s*[^\"'\s)]"
+        r"|\b(?:urlopen|urlretrieve)\s*\(\s*[^\"'\s)]"
+        r"|(?<![.\w])fetch\s*\(\s*[^\"'\s)]"
+        r"|\bCURLOPT_(?:URL|FOLLOWLOCATION|REDIR_PROTOCOLS)\b"
+        r"|\bHttpURLConnection\b|\bWebClient\b|\bRestTemplate\b"
+    , re.IGNORECASE), 11, "outbound-request decision"),
+    # S3 — filesystem path effect: operations whose target path decides what
+    # gets read, written, or replaced. Traversal, link following, temp-file
+    # races, and archive extraction — an archive member name is attacker-
+    # controlled path input, so zip-slip belongs to the same family.
+    (re.compile(
+        r"\brealpath\s*\(|\bcanonical\w*[\s_-]?path|\bpath[\s_-]?travers\w*"
+        r"|\bsym[\s_-]?link|\breadlink\s*\(|\bunlink\s*\(|\brmdir\s*\("
+        r"|\bmkstemp\w*\s*\(|\bmktemp\s*\(|\btmpnam\s*\(|\btempfile\b"
+        r"|\bchmod\s*\(|\bchown\s*\(|\bumask\s*\("
+        r"|\bbasename\s*\(|\bdirname\s*\(|\bpath[\s_-]?join\b|\bjoin[\s_-]?path\b"
+        r"|\bextract(?:all|_?(?:to|entry|member|file|path))\w*"
+        r"|\b(?:zip|tar|archive)[\s_-]?(?:entry|member|extract|slip)\w*"
+    , re.IGNORECASE), 9, "filesystem path effect"),
+    # S7 — remote-peer endpoint: the socket/TLS surface where the other side
+    # of the boundary is an untrusted network peer rather than a local file.
+    # No URL-literal alternative: `http://` is a namespace/documentation URI
+    # in ordinary source far more often than it is a fetch, and it fired on a
+    # third of one XML library's files.
+    (re.compile(
+        r"\bgetaddrinfo\s*\(|\bgethostby\w*\s*\(|\bsocket\s*\(|\bconnect\s*\("
+        r"|\bsetsockopt\s*\(|\brecv(?:from|msg)?\s*\(|\bsend(?:to|msg)?\s*\("
+        r"|\bSSL_(?:accept|connect|read|read_ex|peek|write|write_ex|shutdown|do_handshake)\s*\("
+        r"|\bTLS_(?:accept|connect|read|write|handshake)\w*\s*\("
+        r"|\bgnutls_(?:handshake|record_(?:recv|send)|bye)\s*\("
+        r"|\bproxy[_-]?(?:auth|host|port|url|server|path|connect|user|pass)\w*"
+        r"|\bhttp[\s_-]?proxy\b|\burl[\s_-]?open\b"
+    , re.IGNORECASE), 9, "remote-peer endpoint"),
     # S7 — raw memory / unbounded-format operation (libc + format family).
     (re.compile(
         r"\bmem(?:cpy|move|set|cmp)\s*\("
@@ -409,7 +607,7 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
         r"|\bPy_X?DECREF\b|->\s*(?:release|Release|unref|Unref)\b"
         r"|\bgoto\s+\w*(?:err|fail|clean|done|bail)\w*"
     ), 12, "lifetime/ownership operation"),
-    # S7 — external-entity surface: XML parsers reachable by XXE.
+    # S3 — external-entity surface: XML parsers reachable by XXE.
     (re.compile(
         r"\bDocumentBuilderFactory\b|\bSAXParser(?:Factory)?\b|\bXMLReader\b"
         r"|\bXMLInputFactory\b|\bTransformerFactory\b|\bSchemaFactory\b"
@@ -499,24 +697,53 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
     ), 6, "size math"),
 )
 
+# Logical-security reasons whose useful first method is S3's rule audit. They
+# get S3 as the primary card even when the same large file also contains the
+# higher-throughput S7/S5/S2 signals below. Otherwise the two-companion cap
+# consumes S5 and S2 before S3, so the rule-audit card is never emitted.
+S3_SECURITY_REASONS: frozenset[str] = frozenset({
+    "access-control decision", "identity/origin decision",
+    "credential/verification decision", "query/template construction",
+    "outbound-request decision", "filesystem path effect",
+    "command/injection surface", "deserialization sink",
+    "external-entity surface",
+})
+
+# All trust-boundary ranking reasons, including the raw peer input endpoint
+# whose correct primary method remains S7 adversarial-input engineering.
+BOUNDARY_REASONS: frozenset[str] = S3_SECURITY_REASONS | {"remote-peer endpoint"}
+
 # Reason → strategy map. Single source of truth shared by strategy_for
-# (returns the first matching bucket) and complementary_strategies
-# (returns every matching bucket). Order is descending expected yield:
+# (logical-security reasons first, otherwise the first matching bucket) and
+# complementary_strategies (returns every matching bucket). Bucket order is
+# descending expected yield for non-security collisions:
 # S7 adversarial-input and S5 lifetime/state are sanitizer-checked so
 # they lead; S2/S3 are code-grounded; S8 is the no-sanitizer oracle.
 # S1 (prior-fix) and S4/S6 (cross-artifact) are not seedable from one
 # file's code features — the rotation owns them, not this table.
+#
+# The boundary rows (access control, identity/origin, credential
+# verification, query/template construction, outbound requests, path
+# effects, injection, deserialization, external entities) belong to S3:
+# every one of them is a defect where the implementation disagrees with
+# the rule it is supposed to enforce — an RFC, a documented quoting or
+# path contract, an API's own authorization semantics. That is the
+# rule-vs-implementation method, so they get the playbook that fits.
+# Injection, deserialization, and external-entity surfaces moved here
+# from S7, whose playbook is seed mutation and could only tell an agent
+# holding a command-injection sink to fuzz its inputs. `remote-peer
+# endpoint` stays with S7: an untrusted stream is adversarial-input work.
 _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
     ("S7", frozenset({
-        "input-consumption entrypoint", "deserialization sink",
-        "command/injection surface", "external-entity surface",
+        "input-consumption entrypoint", "remote-peer endpoint",
         "raw memory operation", "allocation/resize"})),
     ("S5", frozenset({
         "lifetime/ownership operation", "unmanaged escape hatch",
         "concurrency primitive"})),
     ("S2", frozenset({"asserted invariant"})),
     ("S3", frozenset({
-        "cast-heavy path", "size math", "exported API surface"})),
+        "cast-heavy path", "size math", "exported API surface",
+    }) | S3_SECURITY_REASONS),
     ("S8", frozenset({
         "round-trip property surface", "hash/injectivity surface",
         "numerical-domain surface"})),
@@ -929,13 +1156,17 @@ def strategy_for(reasons: list[str]) -> str:
     """Pick the *primary* audit strategy for a file from its code-feature
     reasons.
 
-    Returns the first strategy bucket (highest expected yield first, see
-    `_STRATEGY_BUCKETS`) that any reason falls into — the seed strategy
-    for the file's first card. `complementary_strategies` emits the rest
-    as companion cards. Falls back to S1 (prior-fix default) when no code
-    feature fired.
+    Logical-security decisions are primary S3 work: large parser/protocol
+    files almost always also fire S7/S5/S2, and the two-companion cap would
+    otherwise omit S3 entirely. For all other reasons, returns the first
+    strategy bucket (highest expected yield first, see `_STRATEGY_BUCKETS`).
+    `complementary_strategies` emits the remaining methods so making the rule
+    audit primary does not discard memory/state work. Falls back to S1
+    (prior-fix default) when no code feature fired.
     """
     rset = set(reasons)
+    if rset & S3_SECURITY_REASONS:
+        return "S3"
     for strat, tags in _STRATEGY_BUCKETS:
         if rset & tags:
             return strat
@@ -3882,7 +4113,12 @@ STRATEGY_KEYWORDS: dict[str, tuple[re.Pattern[str], int]] = {
         ),
         2,
     ),
-    # S3 — spec-vs-impl + fast-path.
+    # S3 — spec-vs-impl + fast-path, including the security-boundary rules
+    # a spec states and an implementation can get wrong: who is authorized,
+    # whose identity is believed, which secret verifies, what a path or a
+    # quoting contract permits. Naming the *decision* is the evidence, so
+    # this floor is reached by tracing an authorization or origin rule just
+    # as it is by tracing a documented parser rule.
     "S3": (
         re.compile(
             r"\b(?:spec(?:ification)?"
@@ -3892,7 +4128,19 @@ STRATEGY_KEYWORDS: dict[str, tuple[re.Pattern[str], int]] = {
             r"|optimization[\s_-]?skip"
             r"|short[\s_-]?circuit|early[\s_-]?return"
             r"|undefined[\s_-]?behavi(?:o|ou)r"
-            r"|conformance)",
+            r"|conformance"
+            r"|rule[\s_-]?(?:vs|versus)[\s_-]?implementation"
+            r"|trust[\s_-]?boundary|security[\s_-]?boundary"
+            r"|access[\s_-]?control|authoriz|authentic|privileg|permission"
+            r"|same[\s_-]?origin|cross[\s_-]?origin|origin[\s_-]?check"
+            r"|cookie[\s_-]?(?:scope|domain|path|jar)"
+            r"|host(?:name)?[\s_-]?verif|certificate[\s_-]?verif|host[\s_-]?key"
+            r"|redirect[\s_-]?(?:follow|retain|chain)"
+            r"|outbound[\s_-]?(?:request|fetch)|destination[\s_-]?policy"
+            r"|redirect[\s_-]?target"
+            r"|injection|traversal|ssrf|xxe|external[\s_-]?entity|deserializ"
+            r"|constant[\s_-]?time|timing[\s_-]?safe|signature[\s_-]?verif"
+            r"|credential|sandbox[\s_-]?(?:escape|bypass))",
             re.IGNORECASE,
         ),
         2,

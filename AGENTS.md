@@ -92,7 +92,7 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 |----------|----------|------|
 | **1st (fallback default)** | **S1: Prior-fix + regression variant** | Default ONLY when the queue has no higher-signal card assigned. The harness queue may rank another card above every S1 patch card — follow the assigned strategy when one is given. Mines own fixes AND refactors for unfixed analogues. |
 | **2nd** | **S2: Invariant negation** | Mechanical: break asserts, algorithm assumptions, multi-precondition gates. |
-| **3rd** | **S3: Spec-vs-impl + fast-paths** | LLM-native: spec compliance AND optimization fast-path skips. |
+| **3rd** | **S3: Rule-vs-implementation** | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
 | **4th** | **S4: Advanced differential** | Beyond auto-diff: GC zeal, wasm tiers, cross-build comparison. |
 | **5th** | **S5: Lifetime & state violation** | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
 | **6th** | **S6: Cross-project variant mining** | Mine peer projects' fixes for bug classes in target. |

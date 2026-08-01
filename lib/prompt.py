@@ -19,7 +19,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 _STRATEGIES = {
     "S1": ("S1-prior-fix-review.md", "Prior-fix regression: inspect the named fixes, derive the repaired invariant, and test neighboring paths for unfixed variants."),
     "S2": ("S2-assert-negation.md", "Invariant negation: identify checks and preconditions, then reach a violated assumption through the public boundary."),
-    "S3": ("S3-spec-vs-impl.md", "Spec-vs-implementation: compare documented rules with parser fast paths, normalization, and edge cases."),
+    "S3": ("S3-spec-vs-impl.md", "Rule-vs-implementation: trace a security, published-spec, or fast/slow-path rule to the exact code that must enforce it. For a boundary-ranked card, start with access control, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions."),
     "S4": ("S4-differential.md", "Advanced differential: compare execution modes, tiers, builds, or feature flags using stable divergence as the oracle."),
     "S5": ("S5-reentrancy.md", "Lifetime/state: target re-entrancy, rollback, races, and harmful but valid call sequences."),
     "S6": ("S6-cross-project.md", "Cross-project variant mining: map peer security fixes onto analogous local surfaces and confirm local reachability."),

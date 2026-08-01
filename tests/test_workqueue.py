@@ -172,8 +172,24 @@ class WorkQueueTests(unittest.TestCase):
             ("extern \"C\" int public_api();", "S3", "exported API surface"),
             ("free(node); callback(owner);", "S5", "lifetime/ownership operation"),
             ("return normalize(normalize(value));", "S8", "round-trip property surface"),
-            ("pickle.loads(data)", "S7", "deserialization sink"),
-            ("exec.CommandContext(ctx, userValue)", "S7", "command/injection surface"),
+            # Boundary surfaces are spec-vs-implementation work, not S7 seed
+            # mutation: the defect is a rule the code fails to enforce.
+            ("pickle.loads(data)", "S3", "deserialization sink"),
+            ("exec.CommandContext(ctx, userValue)", "S3", "command/injection surface"),
+            ("system(user_command);", "S3", "command/injection surface"),
+            ("return system (user_command);", "S3", "command/injection surface"),
+            ("if (!auth_check(db, op)) return DENY;", "S3", "access-control decision"),
+            ("dbAuthRead(policy, object);", "S3", "access-control decision"),
+            ("return service_authorize_request(user, object);", "S3", "access-control decision"),
+            ("cookie_domain_scope(jar, host);", "S3", "identity/origin decision"),
+            ("if (verify_signature(sig, pub) != 0) return -1;", "S3",
+             "credential/verification decision"),
+            ("char *q = sql_build_string(name);", "S3", "query/template construction"),
+            ('queryPrepareFmt(ctx, "SELECT %s", value);', "S3", "query/template construction"),
+            ("if (!validate_redirect_target(url)) return DENY;", "S3",
+             "outbound-request decision"),
+            ("if (zip_entry_name(e)) extract_to(dir, e);", "S3", "filesystem path effect"),
+            ("fd = socket(AF_INET, SOCK_STREAM, 0);", "S7", "remote-peer endpoint"),
         )
         for source, strategy, reason in cases:
             with self.subTest(source=source):
@@ -183,6 +199,129 @@ class WorkQueueTests(unittest.TestCase):
                 self.assertEqual(workqueue.strategy_for(reasons), strategy)
         score, reasons = workqueue.code_feature_reasons("int checksum = 0; int thread_count = 1;")
         self.assertEqual((score, reasons), (0, []))
+
+    def test_boundary_rows_ignore_the_prose_that_surrounds_real_source(self) -> None:
+        """Every pattern runs over comments and licence headers too.
+
+        These are the exact phrasings that made whole trees match before the
+        rows were tightened: the MIT grant, an XML namespace URI, a database
+        schema cookie, proxy-locking, and complexity prose.
+        """
+        for benign in (
+            "/* Permission is hereby granted, free of charge, to any person */",
+            'xmlNewNs(node, "http://www.w3.org/XML/1998/namespace", "xml");',
+            "/* Read the schema cookie and the file change counter. */",
+            "/* Check schema cookies before reading the SQL text. */",
+            "/* The returned size is authoritative for this operation. */",
+            'if (!strncmp(vendor, "AuthenticAMD", 12)) return CPU_AMD;',
+            "/* There are no special privileged classes of people. */",
+            "/* Reject formats that fail the hardware capability check. */",
+            "if (!codec_isUpdateAuthorized(parameter)) return INVALID;",
+            "struct LoginOptions { char *password; char *credential; };",
+            "static int proxyLock(unixFile *pFile, int eFileLock){",
+            "/* Insertion completes in constant time on average. */",
+            "int redirect_stdout(int fd);",
+            "sqlite3_bind_parameter_index(pStmt, zName);",
+            "ret = gnutls_x509_privkey_export(key, format, out, &size);",
+            "result = database.exec(statement); match = regex.exec(text);",
+            "/* The descriptor closes on a later execve() call. */",
+            "/* This value may be too large for the current operating system (32-bit). */",
+            "if (!check_address_alignment(pointer)) return INVALID;",
+            "if (!destination_valid(frame)) return INVALID;",
+        ):
+            with self.subTest(benign=benign):
+                _score, reasons = workqueue.code_feature_reasons(benign)
+                self.assertEqual(
+                    workqueue.BOUNDARY_REASONS & set(reasons), set(),
+                )
+
+    def test_logical_boundary_is_primary_when_memory_signals_also_fire(self) -> None:
+        """A boundary reason must reach the rule-audit playbook on real files.
+
+        Parser and protocol files normally also contain input, lifetime, and
+        assertion signals.  With a two-companion cap, leaving S3 behind those
+        generic signals means the boundary card never exists.
+        """
+        source = """
+        int parse_request(const char *input) {
+          assert(input != 0);
+          if (!auth_check(input)) return DENY;
+          memcpy(buffer, input, length);
+          free(buffer);
+          return 0;
+        }
+        """
+        _score, reasons = workqueue.code_feature_reasons(source)
+        self.assertEqual(workqueue.strategy_for(reasons), "S3")
+        self.assertEqual(workqueue.complementary_strategies(reasons, "S3")[:2], ["S7", "S5"])
+
+    def test_unguarded_sinks_rank_even_though_no_control_is_named(self) -> None:
+        """The vulnerable shape is the one with no control to key on.
+
+        Rows that match control vocabulary (`validate_redirect`, `escape_sql`)
+        cannot see code that performs the fetch or builds the statement with
+        no rule at all — which is exactly the reportable case.  A destination
+        or statement counts when it is visibly assembled from a variable.
+        """
+        for source, reason in (
+            ("r = requests.get(user_url, timeout=5)", "outbound-request decision"),
+            ("resp, err := http.Get(userURL)", "outbound-request decision"),
+            ("const r = await fetch(userUrl);", "outbound-request decision"),
+            ("curl_easy_setopt(h, CURLOPT_URL, user_url);", "outbound-request decision"),
+            ("with urllib.request.urlopen(user_url) as f:", "outbound-request decision"),
+            ('cur.execute("SELECT * FROM t WHERE id=" + user_id)',
+             "query/template construction"),
+            ('cur.execute(f"SELECT * FROM t WHERE id={user_id}")',
+             "query/template construction"),
+            ('rows, err := db.Query("SELECT * FROM t WHERE id=" + userID)',
+             "query/template construction"),
+            ('sprintf(sql, "SELECT * FROM t WHERE id=%s", user_id);',
+             "query/template construction"),
+            ("const q = `SELECT * FROM t WHERE id=${id}`;",
+             "query/template construction"),
+        ):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertIn(reason, reasons)
+                self.assertEqual(workqueue.strategy_for(reasons), "S3")
+
+        # A fixed endpoint is not attacker-directed, and a parameterised
+        # statement is the correct construction, so neither may rank.
+        for benign in (
+            'r = requests.get("https://status.example/health")',
+            'resp, err := http.Get("http://localhost:8080/ping")',
+            'const r = await fetch("/api/version");',
+            'sqlite3_prepare_v2(db, "SELECT * FROM t WHERE id=?", -1, &s, 0);',
+            'fprintf(f, "can\'t delete file \\"%s\\"", name);',
+            'av_log(ctx, AV_LOG_INFO, "select filter\\n");',
+        ):
+            with self.subTest(benign=benign):
+                _score, reasons = workqueue.code_feature_reasons(benign)
+                self.assertEqual(
+                    workqueue.BOUNDARY_REASONS & set(reasons), set(),
+                )
+
+    def test_every_code_feature_reason_maps_to_exactly_one_strategy(self) -> None:
+        reasons = {reason for _pattern, _points, reason in workqueue.CODE_PATTERNS}
+        bucketed = [
+            (reason, strategy)
+            for strategy, tags in workqueue._STRATEGY_BUCKETS
+            for reason in tags
+        ]
+        self.assertEqual(reasons, {reason for reason, _ in bucketed})
+        self.assertEqual(len(bucketed), len(set(reason for reason, _ in bucketed)))
+        self.assertLessEqual(workqueue.BOUNDARY_REASONS, reasons)
+
+    def test_s3_evidence_accepts_rule_and_outbound_decision_traces(self) -> None:
+        matcher, threshold = workqueue.STRATEGY_KEYWORDS["S3"]
+        self.assertEqual(threshold, 2)
+        for note in (
+            "rule-vs-implementation trace found the mismatched consumer",
+            "outbound request destination policy rejects the initial URL only",
+            "redirect target retains credentials after the host changes",
+        ):
+            with self.subTest(note=note):
+                self.assertIsNotNone(matcher.search(note))
 
     def test_source_iteration_has_no_hidden_cap_and_skips_excluded_trees(self) -> None:
         for index in range(140):
