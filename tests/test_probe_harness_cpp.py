@@ -251,6 +251,69 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertIn("cached harness build failure", second.stdout + second.stderr)
         self.assertEqual(len(count.read_text().splitlines()), 1)
 
+    def test_process_launcher_carriers_are_rejected_before_build(self) -> None:
+        compiler = self.fake_compiler()
+        count = self.root / "carrier-build-count"
+        for name, body, reason in (
+            (
+                "interpose.c",
+                '#include <stdlib.h>\n#include <unistd.h>\n'
+                'int main(void) { setenv("DYLD_INSERT_LIBRARIES", "shim.dylib", 1); '
+                'execl("app", "app", "-version", (char *)0); }\n',
+                "dynamic-loader interposition",
+            ),
+            (
+                "launcher.c",
+                '#include <unistd.h>\n'
+                'int main(void) { execl("app", "app", "--version", (char *)0); }\n',
+                "version-only process launcher",
+            ),
+        ):
+            with self.subTest(name=name):
+                harness = self.scratch / name
+                harness.write_text(body, encoding="utf-8")
+                testcase = self.write_testcase(
+                    f"{Path(name).stem}.txt", name, f"H-{Path(name).stem}",
+                )
+
+                proc = self.run_probe(
+                    testcase, CC=compiler, FAKE_CXX_COUNT=count,
+                )
+
+                self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+                self.assertIn(reason, proc.stdout + proc.stderr)
+                self.assertFalse(count.exists(), "carrier reached the compiler")
+
+    def test_non_carrier_api_and_input_launcher_harnesses_are_allowed(self) -> None:
+        harness = self.scratch / "commented.cpp"
+        harness.write_text(
+            "/* Do not use LD_PRELOAD or execl() here. */\n"
+            "struct TargetApi { int system() { return 0; } };\n"
+            "int main(int argc, char **argv) { TargetApi api; "
+            "return argc == 2 ? api.system() : 2; }\n",
+            encoding="utf-8",
+        )
+        testcase = self.write_testcase("commented.txt", harness.name, "H-commented")
+
+        proc = self.run_probe(testcase)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        launcher = self.scratch / "input-launcher.c"
+        launcher.write_text(
+            "#include <stdlib.h>\n#include <unistd.h>\n"
+            'int main(int argc, char **argv) { unsetenv("LD_PRELOAD"); return argc == 2 '
+            '? execl("app", "app", argv[1], (char *)0) : 2; }\n',
+            encoding="utf-8",
+        )
+        launcher_testcase = self.write_testcase(
+            "input-launcher.txt", launcher.name, "H-input-launcher",
+        )
+
+        proc = self.run_probe(launcher_testcase)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
