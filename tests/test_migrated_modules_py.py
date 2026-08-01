@@ -1018,6 +1018,38 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "cold-start strategies fan out by available queue load",
     )
 
+    # Card supply is the first key, but a queue that gives every strategy a
+    # comparable share leaves the whole decision to the tie-break. Canonical
+    # S1..S8 numbering would then open the run on the lowest-numbered
+    # methods; expected yield keeps the most productive ones in front.
+    equal_results = root / "equal-share-results"
+    (equal_results / "state").mkdir(parents=True)
+    (equal_results / "work-cards.jsonl").write_text(
+        "".join(
+            json.dumps({
+                "id": f"WORK-{strategy}-{index}",
+                "strategy": strategy,
+                "status": "unclaimed",
+            }) + "\n"
+            for strategy in ("S2", "S3", "S5", "S7", "S8")
+            for index in range(4)
+        ),
+        encoding="utf-8",
+    )
+    audit_runner.initialize_agent_strategies(SimpleNamespace(
+        root=ROOT, target_root=generic_target, target_slug="demo",
+        results=equal_results, repo_type="none", num_agents=3,
+        fixed_strategy="",
+    ))
+    equal(
+        ["S7", "S5", "S2"],
+        [
+            (equal_results / "state" / f"strategy-{agent}").read_text().strip()
+            for agent in range(1, 4)
+        ],
+        "an equal-share queue opens on expected yield, not on strategy number",
+    )
+
     rotation_runtime = SimpleNamespace(
         root=ROOT, target_root=generic_target, target_slug="demo",
         results=strategy_results, repo_type="none", num_agents=1, fixed_strategy="",

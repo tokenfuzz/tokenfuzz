@@ -3212,6 +3212,20 @@ def _unique_rejected(
     return clusters + row_only, bool(row_only)
 
 
+def _cell_worker_seats(cell: dict) -> int | None:
+    """Concurrent agent seats a cell ran, or None when it is not recorded.
+
+    model-direct is one provider session by contract, so its absent count is
+    knowledge rather than a gap. A harness cell that recorded no count is a
+    real gap — old or malformed — and defaulting it to one would silently
+    report a multi-agent cell as single-agent.
+    """
+    agents = cell.get("actual_agents")
+    if isinstance(agents, int) and agents > 0:
+        return agents
+    return 1 if cell.get("condition") == "model-direct" else None
+
+
 def _effective_wall(cell: dict):
     """Active wall: elapsed minus confirmed provider-recovery pauses.
 
@@ -3404,6 +3418,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
             "wall_effective_seconds": (
                 _declared_productive_wall(cell_dir) or _effective_wall(cell)
             ),
+            "actual_agents": cell.get("actual_agents"),
             "metrics": metrics,
         }
         by_condition.setdefault(cond, []).append(merged)
@@ -3553,6 +3568,24 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         # column reflects investigation time, not idle waiting on a reset.
         walls = [c["wall_effective_seconds"] for c in done
                  if c.get("wall_effective_seconds")]
+        # Same wall buys a different amount of work per condition: the harness
+        # runs its agents concurrently while model-direct is one session by
+        # contract, so a wall-only column reads a 3-agent cell as costing what
+        # a 1-agent cell cost. This is worker capacity — seats times time — and
+        # therefore an upper bound: it counts a seat through housekeeping and
+        # through any idle stretch. Real agent-hours need session accounting
+        # the cells do not carry yet, so a harness cell that recorded no agent
+        # count is left out rather than guessed at.
+        # All or nothing against the same cells the wall median used. A median
+        # over the subset that happens to record seats reads as the condition's
+        # capacity while describing fewer replicates than the row claims, and
+        # nothing in the table would show the difference.
+        seats = [_cell_worker_seats(c) for c in done
+                 if c.get("wall_effective_seconds")]
+        worker_walls = (
+            [wall * count for wall, count in zip(walls, seats)]
+            if seats and all(seats) else []
+        )
         token_rows = [_tokens_for_cell(c) for c in done]
         token_usage.extend(token_rows)
         cb = crash_by_cond.get(cond, {})
@@ -3629,6 +3662,12 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                     "findings": finding_waterfall,
                 },
                 "wall_median": _median([float(x) for x in walls]),
+                # None, not 0: an absent capacity must render as the em dash
+                # `_fmt_hours` gives an unparseable value, never as "0.00h".
+                "worker_wall_median": (
+                    _median([float(x) for x in worker_walls])
+                    if worker_walls else None
+                ),
                 "input_tokens_total": sum(r["input_tokens"] for r in token_rows),
                 "cached_input_tokens_total": sum(
                     r["cached_input_tokens"] for r in token_rows
@@ -4520,13 +4559,13 @@ def render_section(report: dict) -> str:
     # Medium+ subset — `N (M M+)` — so the security-yield subset is visible
     # without dropping the Low/unscored remainder.
     lines.append(
-        "| Condition | Replicates | Wall (h) "
+        "| Condition | Replicates | Wall (h) | Worker-h "
         "| Unique rejected findings | Unique accepted findings "
         "| Unique rejected crashes | Unique accepted crashes "
         "| Top crash severity |"
     )
     lines.append(
-        "| --- | --: | --: | --: | --: | --: | --: | :--: |"
+        "| --- | --: | --: | --: | --: | --: | --: | --: | :--: |"
     )
     for c in sorted(conditions,
                     key=lambda c: (-c.get("top_severity_rank", 0),
@@ -4542,11 +4581,12 @@ def render_section(report: dict) -> str:
             bench_dir, c["condition"], "crashes-rejected"
         )
         lines.append(
-            "| {cond} | {rep} | {wall} | {rfi} | {uf} "
+            "| {cond} | {rep} | {wall} | {worker_wall} | {rfi} | {uf} "
             "| {rcr} | {uc} | {sev} |".format(
                 cond=_condition_cell(c["condition"], backend),
                 rep=_replicates_cell(c),
                 wall=_fmt_hours(c.get("wall_median")),
+                worker_wall=_fmt_hours(c.get("worker_wall_median")),
                 uf=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
@@ -4589,7 +4629,15 @@ def render_section(report: dict) -> str:
     lines.append(
         "> **How to read this.** Each condition ran **Replicates** times "
         "under the same per-cell time budget; **Wall (h)** is the median "
-        "hours a cell actually spent. The result columns are grouped by "
+        "hours a cell actually spent. **Worker-h** is that wall times the "
+        "agent seats it ran — an upper bound on effort, not measured agent "
+        "time, since a seat counts through housekeeping and through any idle "
+        "stretch. Read it to see that equal **Wall (h)** across conditions is "
+        "not equal effort; do not use it as the denominator of a yield rate. "
+        "It is blank unless every completed repeat recorded its agent count, "
+        "so it always covers the same repeats as **Wall (h)** rather than "
+        "quietly describing a subset. "
+        "The result columns are grouped by "
         "evidence type. `bin/cluster-findings` / `bin/cluster-crashes` merge "
         "matching evidence signatures on both sides. These deterministic "
         "signature clusters reduce duplicate reports but are not guaranteed "

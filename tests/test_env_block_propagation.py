@@ -436,9 +436,14 @@ assert_eq("unknown", workqueue.subsystem_for("/"),
 # Relative paths still work as before.
 assert_eq("root", workqueue.subsystem_for(""),
           "subsystem_for: empty string → root sentinel")
-# A single-component relative path returns itself.
-assert_eq("foo.c", workqueue.subsystem_for("foo.c"),
-          "subsystem_for: single component → itself")
+# A bucket is the file's directories, never the file. A top-level source
+# has no directory, so it shares the "root" bucket rather than becoming a
+# subsystem of one — a per-file bucket makes the diversity preference
+# vacuous, since no two agents can ever hold the same one.
+assert_eq("root", workqueue.subsystem_for("foo.c"),
+          "subsystem_for: top-level file → root bucket")
+assert_eq("libavcodec", workqueue.subsystem_for("libavcodec/vp8.c"),
+          "subsystem_for: flat tree buckets on the directory, not the file")
 
 
 print()

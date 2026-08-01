@@ -370,10 +370,20 @@ with tempfile.TemporaryDirectory() as td:
     reason_hot = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
     assert_eq("eligible", reason_hot,
               "broad closure: re-discovery alone does NOT close a whole-file card")
-    _set_dry_streak(rdir, "src/parser.c", workqueue._PRODUCTIVE_DECAY_AFTER_ITERS)
+    # The card's own file, not the directory it sits in. Both read the same
+    # counter store, but a directory bucket holds hundreds of other sources,
+    # so aging this card on it would retire it over sibling files it never
+    # covered — and keep it alive whenever any of them stayed productive.
+    _set_dry_streak(rdir, "src", workqueue._PRODUCTIVE_DECAY_AFTER_ITERS)
+    assert_eq("eligible", workqueue.explain_queue(ctx, ["generic"])[0].get("reason"),
+              "broad closure: a sibling file's dry streak does not retire this card")
+    _set_dry_streak(
+        rdir, workqueue.card_dry_scope(_card("WORK-broad", kind="ranked-source")),
+        workqueue._PRODUCTIVE_DECAY_AFTER_ITERS,
+    )
     reason_dry = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
     assert_eq("terminal:crash", reason_dry,
-              "broad closure: retires once its subsystem dry-streak crosses the threshold")
+              "broad closure: retires once its own file's dry streak crosses the threshold")
 
 
 # Expired-lease mask: a re-claimed card whose lease later expires reads back as

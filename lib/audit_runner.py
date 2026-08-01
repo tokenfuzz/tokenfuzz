@@ -795,9 +795,18 @@ def initialize_agent_strategies(runtime: Runtime) -> None:
     if runtime.fixed_strategy:
         return
     counts = _eligible_strategy_counts(runtime)
+    # Card supply first — an agent pinned to a starved strategy stalls — then
+    # expected yield. The tie-break carries the whole decision whenever the
+    # queue gives every strategy a comparable share, and canonical numbering
+    # would then hand the opening portfolio to the lowest-numbered methods
+    # rather than the most productive ones.
     ranked = sorted(
         (strategy for strategy in STRATEGIES[1:] if counts[strategy]),
-        key=lambda strategy: (-counts[strategy], STRATEGIES.index(strategy)),
+        key=lambda strategy: (
+            -counts[strategy],
+            workqueue.expected_yield_rank(strategy),
+            STRATEGIES.index(strategy),
+        ),
     ) or ["S1"]
     state = runtime.results / "state"
     state.mkdir(parents=True, exist_ok=True)
@@ -890,11 +899,16 @@ def update_subsystem_dry_streaks(
     ctx = _queue_context(runtime)
     outcomes: dict[str, bool] = {}
     for agent in range(1, runtime.num_agents + 1):
-        subsystem = workqueue.agent_current_subsystem(ctx, str(agent))
-        if not subsystem:
-            continue
+        subsystem, file = workqueue.agent_current_scopes(ctx, str(agent))
         productive = agent in productive_agents
-        outcomes[subsystem] = outcomes.get(subsystem, False) or productive
+        # Two keys, two questions: the subsystem ages an area for the
+        # productive-relaxation decay, the file ages the one ranked source a
+        # broad card actually covers. Sharing one key made a sibling's dry
+        # pass retire a productive card on a file nobody had touched.
+        for scope in (subsystem, workqueue.card_dry_scope({"file": file}) if file else ""):
+            if not scope:
+                continue
+            outcomes[scope] = outcomes.get(scope, False) or productive
     for subsystem, productive in outcomes.items():
         if not workqueue.record_subsystem_iteration(ctx, subsystem, productive):
             index_log(runtime, f"WARN: could not update dry streak for subsystem {subsystem}")

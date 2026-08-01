@@ -79,6 +79,28 @@ file: real parser files fire four or five rows at once, so the last
 row produced no card on any target, and a strategy that owns no cards
 can never be assigned to an agent.
 
+Scores mean different things per strategy — S8 scores once on presence
+while S7 multiplies per match — so ordering the bounded window by score
+alone orders it by whichever strategy scores highest, and the window
+arrives on a handful of dense files carrying every angle of each. The
+window is instead filled by rotating the strategies, each taking its
+highest-ranked card on a file the window does not already hold, inside
+one buildability tier at a time. Every strategy keeps a share and the
+slots buy distinct files.
+
+The angles those companions carried are not lost. A selected card lists
+the strategies its dropped same-file siblings held, so an agent on any of
+them can claim that file — one card, every angle the file signalled. This
+matters because nothing recreates a dropped card later: the claim path
+reads only persisted cards, and the productive-agent relaxation lifts a
+subsystem restriction on cards that exist rather than minting new ones.
+Without the carried list a file would stay reachable under exactly one
+strategy for the whole run.
+
+What does change is concurrency: two agents can no longer hold the same
+file under different strategies at the same time, because there is one
+card to claim rather than several.
+
 Two other card sources sit on top of the ranked list:
 
 - **Patch cards** (always S1) — one per recent fix commit, with the

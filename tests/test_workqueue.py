@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -134,6 +135,220 @@ class WorkQueueTests(unittest.TestCase):
         }
         values.update(overrides)
         return workqueue.add_run(self.ctx, argparse.Namespace(**values))
+
+    def test_subsystem_buckets_on_directories_not_the_file(self) -> None:
+        """A partition of one file per bucket is not a partition.
+
+        Taking the first `depth` components of the whole path made every
+        source its own subsystem on a tree only `depth` levels deep, so the
+        claim-time diversity preference could never see two agents share
+        one, and the auto-depth scan read that as perfect spread.
+        """
+        self.assertEqual(workqueue.subsystem_bucket("lib/vp8.c", 2), "lib")
+        self.assertEqual(workqueue.subsystem_bucket("lib/hevc/dec.c", 2), "lib/hevc")
+        self.assertEqual(workqueue.subsystem_bucket("main.c", 2), "root")
+
+        flat = [f"lib{n % 4}/unit{n}.c" for n in range(40)]
+        self.assertEqual(workqueue.auto_subsystem_depth(flat), 2)
+        self.assertEqual(
+            len({workqueue.subsystem_bucket(path, 2) for path in flat}), 4,
+            "a flat tree partitions into its directories, not its files",
+        )
+        # A prefix every source shares still forces a deeper split.
+        deep = [f"src/core/mod{n % 5}/unit{n}.c" for n in range(40)]
+        self.assertEqual(workqueue.auto_subsystem_depth(deep), 3)
+
+    def test_bounded_window_spends_slots_on_distinct_files_per_strategy(self) -> None:
+        """A card budget is spent on files, and every strategy keeps a share.
+
+        Scores are not comparable across strategies, so ordering the window
+        globally hands it to the one or two strategies that score highest
+        and, because each file mints a companion card per angle it signals,
+        collapses the window onto a handful of files.
+        """
+        cards = []
+        for index in range(12):
+            for offset, strategy in enumerate(("S7", "S5", "S3", "S8")):
+                # Every angle on a denser file outranks every angle on a
+                # sparser one, so a global slice buys files two at a time.
+                cards.append(self.card(
+                    f"WORK-{index}-{strategy}", f"src/unit{index}.c",
+                    strategy=strategy, score=1000 - index * 10 - offset,
+                ))
+        cards.sort(key=lambda card: (-card["score"], card["id"]))
+        self.assertEqual(
+            len({card["file"] for card in cards[:8]}), 2,
+            "fixture check: rank order alone spends eight slots on two files",
+        )
+        window = workqueue.select_strategy_window(cards, 8)
+
+        self.assertEqual(len(window), 8)
+        self.assertEqual(
+            len({card["file"] for card in window}), 8,
+            "every slot bought a distinct file",
+        )
+        self.assertEqual(
+            {card["strategy"] for card in window}, {"S7", "S5", "S3", "S8"},
+            "no strategy is starved out of the window",
+        )
+        self.assertEqual(
+            [card["id"] for card in window],
+            [card["id"] for card in cards if card["id"] in {c["id"] for c in window}],
+            "membership changes, rank order does not",
+        )
+        # Slots beyond the file supply fall back to rank order, so a small
+        # target still gets its companions.
+        wide = workqueue.select_strategy_window(cards, 40)
+        self.assertEqual(len(wide), 40)
+        self.assertGreater(
+            max(Counter(card["file"] for card in wide).values()), 1,
+            "a file earns a second angle once fresh files run out",
+        )
+
+    def test_coverage_buckets_match_the_identity_cards_carry(self) -> None:
+        """A coverage lookup keyed differently from a card never hits.
+
+        `coverage_gap_score` asks whether a card's subsystem appears in the
+        coverage counts. If the two sides bucket a path differently, every
+        ranked file reads as an uncovered subsystem and collects the gap
+        bonus — including the files the corpus demonstrably reaches.
+        """
+        journal = self.results / "coverage" / "edges-agent-1.journal"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            "COVER-1|lib/a.c:41\n"
+            "COVER-1|lib/nested/b.c:12\n"
+            "COVER-1|top.c:7\n",
+            encoding="utf-8",
+        )
+        counts = workqueue.coverage_subsystem_counts(self.ctx)
+
+        for path in ("lib/a.c", "lib/nested/b.c", "top.c"):
+            with self.subTest(path=path):
+                subsystem = workqueue.subsystem_for(path)
+                self.assertIn(
+                    subsystem, counts,
+                    "a covered file's own bucket must be present",
+                )
+                score, reasons = workqueue.coverage_gap_score(counts, subsystem)
+                self.assertNotIn("coverage gap subsystem", reasons)
+        # An unreached directory still earns the gap bonus.
+        score, reasons = workqueue.coverage_gap_score(
+            counts, workqueue.subsystem_for("other/c.c"),
+        )
+        self.assertEqual((score, reasons), (10, ["coverage gap subsystem"]))
+
+    def test_rank_window_spreads_over_files_and_strategies(self) -> None:
+        """A bounded window reaches many files and keeps many angles live.
+
+        Ordering it by score alone is really ordering it by whichever
+        strategy scores highest, so the window arrives on one angle; the
+        companions that were meant to keep the others assignable are then
+        charged against the same slots.
+        """
+        for index in range(30):
+            # Enough distinct signal families that every file mints
+            # companions across several strategies, and a descending density
+            # so a denser file's companions outrank a sparser file's primary
+            # — which is what let a few files consume the whole window.
+            body = "".join(
+                "void parse_input_{n}(char *dst, const char *src, size_t length) {{\n"
+                "  assert(dst);\n"
+                "  char *copy = malloc(length);\n"
+                "  memcpy(dst, src, length);\n"
+                "  free(copy);\n"
+                "  int clamped = (int)(length > 8 ? 8 : length);\n"
+                "  (void)clamped;\n"
+                "}}\n".format(n=repeat)
+                for repeat in range(30 - index)
+            )
+            (self.target / f"unit{index}.c").write_text(body, encoding="utf-8")
+        limit = 10
+        cards = workqueue.rank_target(self.ctx, limit)
+
+        self.assertEqual(len(cards), limit)
+        self.assertEqual(
+            len({card["file"] for card in cards}), limit,
+            "the window reached as many files as it had slots",
+        )
+        self.assertGreater(
+            len({card["strategy"] for card in cards}), 1,
+            "spreading over files still leaves more than one angle live",
+        )
+
+    def test_a_dropped_angle_stays_claimable_on_the_surviving_card(self) -> None:
+        """Nothing recreates a companion the window dropped.
+
+        `claim_next_card` reads only persisted cards, and the productive-agent
+        relaxation lifts a subsystem restriction on cards that exist rather
+        than minting one. So a file selected under S7 would be reachable under
+        no other strategy for the whole run unless the surviving card carries
+        the angles its dropped siblings held.
+        """
+        cards = []
+        for index in range(6):
+            for offset, strategy in enumerate(("S7", "S5", "S3")):
+                cards.append(self.card(
+                    f"WORK-{index}-{strategy}", f"src/unit{index}.c",
+                    strategy=strategy, score=1000 - index * 10 - offset,
+                ))
+        window = workqueue.select_strategy_window(cards, 6)
+
+        self.assertEqual(len({card["file"] for card in window}), 6)
+        for card in window:
+            with self.subTest(file=card["file"]):
+                claimable = {card["strategy"], *card.get("allowed_strategies", [])}
+                self.assertEqual(
+                    claimable, {"S7", "S5", "S3"},
+                    "every angle the file signalled is still claimable",
+                )
+                for strategy in ("S7", "S5", "S3"):
+                    self.assertTrue(workqueue.card_strategy_matches(card, strategy))
+
+    def test_a_productive_card_retires_on_its_own_file_going_dry(self) -> None:
+        """A broad card covers one file, so only that file can exhaust it.
+
+        Its subsystem is a directory holding hundreds of other sources; aging
+        the card on that counter retires it on evidence from siblings it never
+        covered, and keeps it alive whenever any of them is productive.
+        """
+        card = self.card("WORK-A", "lib/foo.c", strategy="S7")
+        card["subsystem"] = "lib"
+        self.assertEqual(workqueue.card_dry_scope(card), "file::lib/foo.c")
+        closed = lambda: workqueue.card_closed_for_run(  # noqa: E731
+            self.ctx, card, "crash", conclusion_counts={"WORK-A": 1},
+        )
+
+        # Dry passes over sibling files age the directory the card sits in.
+        for _ in range(4):
+            workqueue.record_subsystem_iteration(self.ctx, "lib", False)
+        self.assertGreaterEqual(workqueue.subsystem_dry_streak(self.ctx, "lib"), 2)
+        self.assertFalse(
+            closed(), "a sibling's dry pass must not retire this file's card",
+        )
+
+        # The card's own file going dry is what retires it.
+        for _ in range(4):
+            workqueue.record_subsystem_iteration(
+                self.ctx, workqueue.card_dry_scope(card), False,
+            )
+        self.assertTrue(closed())
+
+    def test_window_rotation_never_promotes_unbuilt_work_over_built(self) -> None:
+        """Strategy spread is a preference among comparable work only.
+
+        Compiled evidence outranks it: a strategy holding no card in the
+        built tier must not pull an optional unit into the window ahead of
+        one that actually compiles.
+        """
+        cards = [
+            self.card("WORK-BUILT", "src/built.c", strategy="S1", score=5,
+                      buildability="built"),
+            self.card("WORK-OPT", "src/optional.c", strategy="S7", score=900,
+                      buildability="not-built"),
+        ]
+        window = workqueue.select_strategy_window(cards, 1)
+        self.assertEqual([card["id"] for card in window], ["WORK-BUILT"])
 
     def test_path_classification_slug_and_subsystem_are_portable(self) -> None:
         self.assertEqual(workqueue.sanitize_slug("My Target++"), "my-target")

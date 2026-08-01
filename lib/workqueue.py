@@ -749,6 +749,22 @@ _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
         "numerical-domain surface"})),
 )
 
+def expected_yield_rank(strategy: str) -> int:
+    """Order strategies by expected yield, best first.
+
+    `_STRATEGY_BUCKETS` is already kept in that order. Callers that would
+    otherwise fall back to the canonical S1..S8 numbering need it: numbering
+    is an identifier, not a ranking, and choosing by it puts a low-yield
+    method in front of a high-yield one. Strategies outside the table sort
+    last, in numbering order, so the result stays total and deterministic.
+    """
+    order = [name for name, _ in _STRATEGY_BUCKETS]
+    strategy = strategy.upper()
+    if strategy in order:
+        return order.index(strategy)
+    return len(order)
+
+
 # Reasons scored once per file regardless of match count (see
 # code_feature_reasons). The S8 property surfaces are presence signals: a
 # file either carries an inverse/idempotence/injectivity/domain oracle or it
@@ -925,6 +941,24 @@ def _subsystem_depth() -> int:
     return _DEFAULT_SUBSYSTEM_DEPTH
 
 
+def subsystem_bucket(path: str, depth: int) -> str:
+    """Partition a source path by its directories at `depth` components.
+
+    The file name is never part of the bucket. Taking the first `depth`
+    components of the whole path made every file its own subsystem on any
+    tree only `depth` levels deep (`libavcodec/vp8.c` at depth 2), which
+    silently voids every consumer: the claim-time diversity preference
+    never sees two agents share a subsystem, the coverage low-water mark
+    has nothing to compare, and "search the same subsystem" guidance names
+    a set of one.
+    """
+    parts = [p for p in path.split("/") if p]
+    directories = parts[:-1]
+    if not directories:
+        return "root"
+    return "/".join(directories[:depth])
+
+
 def subsystem_for(path: str) -> str:
     # Absolute paths leak host-local prefixes into subsystem buckets.
     # Refuse them rather than fabricating buckets from machine-specific
@@ -934,13 +968,7 @@ def subsystem_for(path: str) -> str:
         return "root"
     if path.startswith("/"):
         return "unknown"
-    parts = [p for p in path.split("/") if p]
-    if not parts:
-        return "root"
-    depth = _subsystem_depth()
-    if len(parts) >= depth:
-        return "/".join(parts[:depth])
-    return "/".join(parts)
+    return subsystem_bucket(path, _subsystem_depth())
 
 
 def auto_subsystem_depth(
@@ -960,6 +988,11 @@ def auto_subsystem_depth(
     ``dominance_threshold`` of all source files. Targets with naturally
     diverse 2-component prefixes (browsers, multi-binary repos) stay at
     depth 2.
+
+    Spread is measured over the same directory buckets `subsystem_for`
+    hands out. Measuring it over file-inclusive prefixes reported perfect
+    spread for any flat tree — one file per bucket clears any dominance
+    threshold — so the scan accepted the very depth it was meant to reject.
     """
     paths = [str(p) for p in source_paths if p]
     if not paths:
@@ -968,10 +1001,7 @@ def auto_subsystem_depth(
     for depth in range(default, max_depth + 1):
         buckets: dict[str, int] = {}
         for raw in paths:
-            parts = [p for p in raw.split("/") if p]
-            if not parts:
-                continue
-            bucket = "/".join(parts[: min(depth, len(parts))])
+            bucket = subsystem_bucket(raw, depth)
             buckets[bucket] = buckets.get(bucket, 0) + 1
         if len(buckets) < 2:
             continue
@@ -1628,11 +1658,10 @@ def coverage_subsystem_counts(ctx: Context, depth: int | None = None) -> dict[st
                     edge_file = path.resolve().relative_to(ctx.target_root.resolve()).as_posix()
                 except Exception:
                     edge_file = path.as_posix()
-            rel = normalized_relpath(edge_file)
-            parts = [p for p in rel.split("/") if p]
-            if not parts:
-                continue
-            subsystem = "/".join(parts[: max(1, depth)])
+            # Must be the identity a card carries, or the lookup in
+            # coverage_gap_score can never hit and every ranked file reads as
+            # an uncovered subsystem.
+            subsystem = subsystem_bucket(normalized_relpath(edge_file), max(1, depth))
             counts[subsystem] = counts.get(subsystem, 0) + 1
     return counts
 
@@ -1763,7 +1792,10 @@ def rank_target(ctx: Context, limit: int, patch_cards: Path | None = None) -> li
             # Every fired strategy gets one. A cap dropped them in bucket
             # order, which starves the tail of that order queue-wide rather
             # than per file, and a strategy owning no cards is never
-            # assignable to an agent.
+            # assignable to an agent. On a tree with more ranked files than
+            # window slots these stay candidates: `select_strategy_window`
+            # admits a file's second angle only once the rotation runs out
+            # of fresh files to prefer.
             companions = complementary_strategies(reasons, primary_strategy)
             for idx, comp_strategy in enumerate(companions):
                 ch = hashlib.sha1(
@@ -1801,11 +1833,145 @@ def rank_target(ctx: Context, limit: int, patch_cards: Path | None = None) -> li
     floor_cards = annotate_card_buildability(ctx, floor_cards)
     cards.sort(key=lambda card: (_built_first(card), work_card_sort_key(card)))
     if diversity_floor <= 0 or not floor_cards or len(cards) >= limit and limit <= 1:
-        return cards[:limit]
+        return select_strategy_window(cards, limit)
     reserve = min(diversity_floor, max(1, limit // 5), len(floor_cards))
     selected_floor = select_diversity_floor(floor_cards, reserve, seen_ids)
     main_limit = max(0, limit - len(selected_floor))
-    return dedupe_work_cards(cards[:main_limit] + selected_floor)
+    return dedupe_work_cards(
+        select_strategy_window(cards, main_limit) + selected_floor
+    )
+
+
+def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
+    """Choose which ranked cards fill a bounded window, one file at a time.
+
+    `cards` arrives in final rank order and that order is preserved — only
+    membership changes, so claim ordering and buildability priority are
+    untouched.
+
+    Scores are not comparable across strategies: S8's rows score once on
+    presence while S7's multiply per match, so a single global ordering is
+    really an S7/S3 ordering. Spending the window that way collapses it
+    onto the handful of files those two rank highest — a 120-card window
+    over a large tree reached about 30 files, since every strategy a file
+    signals also mints a companion card for it. Rotating the strategies,
+    each taking its best remaining card on a file the window does not yet
+    hold, spends the same budget across far more files and still leaves
+    every strategy owning assignable work, which is what an unbounded
+    companion count was reaching for.
+
+    Companions therefore stop being pre-minted queue-wide. The angles they
+    carried are not lost: a selected card lists the strategies its dropped
+    same-file siblings held in `allowed_strategies`, so an agent on any of
+    them can still claim that file. Nothing recreates a dropped card later —
+    the claim path only ever reads persisted cards — so without this the file
+    would be reachable under one strategy for the whole run.
+    """
+    if limit <= 0:
+        return []
+    if len(cards) <= limit:
+        return list(cards)
+    chosen_ids: set[str] = set()
+    seen_files: set[str] = set()
+
+    def take(card: dict) -> None:
+        chosen_ids.add(card.get("id", ""))
+        rel = normalized_relpath(card.get("file", ""))
+        if rel:
+            seen_files.add(rel)
+
+    def rotate(tier: list[dict]) -> None:
+        pools: dict[str, list[dict]] = {}
+        for card in tier:
+            if card.get("kind") != "ranked-source":
+                # Patch and peer cards keep their own lane and their own cap.
+                if len(chosen_ids) < limit:
+                    take(card)
+                continue
+            strategy = str(card.get("strategy", "")).upper()
+            # S1 labels a file whose code signalled no strategy at all, and
+            # the patch lane already carries prior-fix work. A share here
+            # would buy files with no code-feature evidence behind them;
+            # they stay eligible as ordinary fill below.
+            if strategy == "S1":
+                continue
+            pools.setdefault(strategy, []).append(card)
+        # dict insertion order is rank order, so the first pick of the first
+        # tier is the highest-ranked card, as a global slice would have given.
+        cursor = {strategy: 0 for strategy in pools}
+        while len(chosen_ids) < limit:
+            placed = False
+            for strategy, pool in pools.items():
+                if len(chosen_ids) >= limit:
+                    break
+                index = cursor[strategy]
+                while (
+                    index < len(pool)
+                    and normalized_relpath(pool[index].get("file", "")) in seen_files
+                ):
+                    index += 1
+                cursor[strategy] = index
+                if index < len(pool):
+                    take(pool[index])
+                    cursor[strategy] = index + 1
+                    placed = True
+            if not placed:
+                break
+        # Fewer distinct files than slots, or a tier no strategy claims:
+        # fall back to rank order, which restores companions and S1 fill.
+        for card in tier:
+            if len(chosen_ids) >= limit:
+                break
+            if card.get("id", "") not in chosen_ids:
+                take(card)
+
+    # Rotate inside each buildability tier, never across one. Spreading
+    # strategies is a preference among comparable work; compiled work
+    # outranks it outright, so a strategy with no card in the built tier
+    # must not pull an optional unit in ahead of one.
+    for tier_rank in sorted({_built_first(card) for card in cards}):
+        if len(chosen_ids) >= limit:
+            break
+        rotate([card for card in cards if _built_first(card) == tier_rank])
+    return _carry_dropped_angles(
+        [card for card in cards if card.get("id", "") in chosen_ids],
+        cards, chosen_ids,
+    )
+
+
+def _carry_dropped_angles(
+    chosen: list[dict], cards: list[dict], chosen_ids: set[str],
+) -> list[dict]:
+    """Let a selected card be claimed under the angles its siblings held.
+
+    A dropped companion is gone for the run: `claim_next_card` reads only
+    persisted cards, and the productive-agent relaxation lifts a subsystem
+    restriction on cards that exist rather than recreating one. Recording the
+    strategies on the surviving card reopens those angles without a second
+    card, a second claim surface, or any mid-run minting.
+    """
+    by_file: dict[str, set[str]] = {}
+    for card in cards:
+        if card.get("kind") != "ranked-source" or card.get("id", "") in chosen_ids:
+            continue
+        rel = normalized_relpath(card.get("file", ""))
+        strategy = str(card.get("strategy", "")).strip().upper()
+        if rel and strategy:
+            by_file.setdefault(rel, set()).add(strategy)
+    out: list[dict] = []
+    for card in chosen:
+        dropped = by_file.get(normalized_relpath(card.get("file", "")))
+        if not dropped or card.get("kind") != "ranked-source":
+            out.append(card)
+            continue
+        extra = sorted(dropped - {str(card.get("strategy", "")).strip().upper()})
+        if not extra:
+            out.append(card)
+            continue
+        carried = dict(card)
+        carried["allowed_strategies"] = extra
+        out.append(carried)
+    return out
 
 
 def select_diversity_floor(cards: list[dict], limit: int, excluded_ids: set[str]) -> list[dict]:
@@ -3104,16 +3270,16 @@ def card_closed_for_run(
     if not cid:
         return True
     if _is_broad_file_card(card):
-        subsystem = str(card.get("subsystem", "") or "")
-        if not subsystem or subsystem == "unknown":
+        scope = card_dry_scope(card)
+        if not scope or scope == "unknown":
             return True
         if dry_streaks is None:
-            streak = subsystem_dry_streak(ctx, subsystem)
+            streak = subsystem_dry_streak(ctx, scope)
         else:
-            streak = dry_streaks.get(subsystem)
+            streak = dry_streaks.get(scope)
             if streak is None:
-                streak = subsystem_dry_streak(ctx, subsystem)
-                dry_streaks[subsystem] = streak
+                streak = subsystem_dry_streak(ctx, scope)
+                dry_streaks[scope] = streak
         return streak >= _PRODUCTIVE_DECAY_AFTER_ITERS
     if distinct_counts is None:
         distinct = card_distinct_hypothesis_count(ctx, cid)
@@ -3176,14 +3342,22 @@ def agent_productive_subsystems(
     return subsystems
 
 
-def agent_current_subsystem(ctx: Context, agent: str) -> str:
-    """Return the subsystem represented by an agent's latest live/result row."""
+def agent_current_scopes(ctx: Context, agent: str) -> tuple[str, str]:
+    """Subsystem and file an agent's latest live/result row sits in.
+
+    Both are dry-streak keys, and they answer different questions. The
+    subsystem says whether an *area* is mined out, which is what the
+    productive-relaxation decay wants. The file says whether one ranked
+    source is exhausted, which is the only valid retirement signal for a
+    card whose search space is that file — a directory holds hundreds of
+    them, so a sibling's dry pass says nothing about this card's file.
+    """
     selected = [
         row for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
         if str(row.get("agent", "")) == str(agent)
     ]
     if not selected:
-        return ""
+        return "", ""
     relevant = [
         row for row in selected
         if str(row.get("status", "")).startswith(
@@ -3192,18 +3366,40 @@ def agent_current_subsystem(ctx: Context, agent: str) -> str:
     ]
     row = relevant[-1] if relevant else selected[-1]
     subsystem = str(row.get("subsystem", "") or "")
-    if not subsystem:
-        card_id = str(row.get("card_id", "") or "")
-        if card_id:
-            cards = {
-                str(card.get("id", "")): card
-                for card in read_jsonl(work_cards_path(ctx))
-            }
-            subsystem = str((cards.get(card_id) or {}).get("subsystem", "") or "")
-    if not subsystem:
-        source = str(row.get("file", "") or "").split(":", 1)[0]
-        subsystem = subsystem_for(source) if source else ""
-    return "" if subsystem == "unknown" else subsystem
+    source = normalized_relpath(str(row.get("file", "") or "").split(":", 1)[0])
+    card_id = str(row.get("card_id", "") or "")
+    if card_id and (not subsystem or not source):
+        card = {
+            str(entry.get("id", "")): entry
+            for entry in read_jsonl(work_cards_path(ctx))
+        }.get(card_id) or {}
+        subsystem = subsystem or str(card.get("subsystem", "") or "")
+        source = source or normalized_relpath(str(card.get("file", "") or ""))
+    if not subsystem and source:
+        subsystem = subsystem_for(source)
+    if subsystem == "unknown":
+        subsystem = ""
+    return subsystem, source
+
+
+def agent_current_subsystem(ctx: Context, agent: str) -> str:
+    """Return the subsystem represented by an agent's latest live/result row."""
+    return agent_current_scopes(ctx, agent)[0]
+
+
+def card_dry_scope(card: dict) -> str:
+    """Dry-streak key for retiring a productive card.
+
+    A broad ranked-source card covers one file, so its exhaustion signal is
+    that file going dry — not its directory. Keyed apart from the subsystem
+    counter so the two cannot be confused: a directory bucket holds hundreds
+    of files, and reading it here retires a productive card on evidence from
+    siblings the card never covered.
+    """
+    file = normalized_relpath(str(card.get("file", "") or ""))
+    if file:
+        return f"file::{file}"
+    return str(card.get("subsystem", "") or "")
 
 
 # Card `mode` describes the execution surface needed by the testcase. The

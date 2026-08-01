@@ -161,9 +161,10 @@ the ranked queue in `work-cards.jsonl`.
 hypothesis. Expires after 30 minutes so a killed agent does not
 strand its card.
 
-**Subsystem.** The leading path components of a source file
-(`parser/xml`, `crypto/aes`, …). Two agents are kept out of the same
-subsystem at once, so a run spreads across the tree.
+**Subsystem.** The leading directories of a source file (`parser/xml`,
+`crypto/aes`, …) — never the file name, or a tree only that deep would
+give every file a subsystem of its own. Two agents are kept out of the
+same subsystem at once, so a run spreads across the tree.
 
 **Hypothesis.** A narrow, falsifiable claim about a specific
 `file:function:line` — the input shape that reaches it, the guard it

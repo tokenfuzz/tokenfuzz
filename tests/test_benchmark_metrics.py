@@ -55,14 +55,18 @@ class BenchmarkMetricsTests(unittest.TestCase):
         findings: int = 0,
         rejected_findings: int = 0,
         refusals: int = 0,
+        actual_agents: int | None = None,
     ) -> Path:
         cell = bench / "cells" / name
-        self.write_json(cell / "cell.json", {
+        payload = {
             "condition": condition,
             "replicate": replicate,
             "status": status,
             "wall_seconds": 42,
-        })
+        }
+        if actual_agents is not None:
+            payload["actual_agents"] = actual_agents
+        self.write_json(cell / "cell.json", payload)
         self.write_json(cell / "metrics.json", {
             "confirmed_crashes": crashes,
             "crash_clusters": crashes,
@@ -865,6 +869,51 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(updated["crash_total"], 4)
         self.assertEqual(updated["incomplete_observed"][0]["crashes"], 6)
         self.assertEqual(updated["incomplete_observed"][0]["findings"], 5)
+
+    def test_wall_is_also_reported_as_worker_capacity(self) -> None:
+        """Equal wall is not equal effort across conditions.
+
+        The harness works several agents concurrently inside one cell while
+        model-direct is a single session by contract, so wall alone credits
+        the harness with work it bought by adding seats. This is capacity —
+        seats times time — and an upper bound on effort. A harness cell that
+        recorded no seat count is a gap, not a single agent, and reporting a
+        median over just the cells that did record one would describe fewer
+        repeats than the row claims, so the whole column goes blank instead.
+        Only model-direct's absent count is knowledge: it is one by contract.
+        """
+        bench = self.root / "bench-worker-hours"
+        self.write_json(bench / "run.json", {
+            "runid": "run1", "target": "sample", "backend": "codex",
+            "replicates": 1, "budget_wall": 60,
+            "conditions": ["model-direct", "harness"],
+            "target_sha": "abc", "harness_sha": "def",
+        })
+        self.make_cell(bench, "model-direct-r1", "model-direct", 1, 0)
+        self.make_cell(bench, "harness-r1", "harness", 1, 1, actual_agents=3)
+        by_condition = {
+            row["condition"]: row
+            for row in benchmark.aggregate(bench)["conditions"]
+        }
+
+        self.assertEqual(by_condition["harness"]["wall_median"], 42)
+        self.assertEqual(by_condition["harness"]["worker_wall_median"], 126)
+        self.assertEqual(by_condition["model-direct"]["wall_median"], 42)
+        self.assertEqual(by_condition["model-direct"]["worker_wall_median"], 42)
+
+        # One unrecorded harness seat count blanks the column rather than
+        # publishing a median that silently covers one of two repeats.
+        self.make_cell(bench, "harness-r2", "harness", 2, 1)
+        unrecorded = {
+            row["condition"]: row
+            for row in benchmark.aggregate(bench)["conditions"]
+        }["harness"]
+        self.assertEqual(unrecorded["replicates_done"], 2)
+        self.assertEqual(unrecorded["wall_median"], 42)
+        self.assertIsNone(
+            unrecorded["worker_wall_median"],
+            "a partial sample must not be shown as the condition's capacity",
+        )
 
     def test_ledger_replaces_same_run_and_reset_archives(self) -> None:
         bench = self.root / "bench-ledger"
