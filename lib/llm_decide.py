@@ -124,6 +124,7 @@ DECISION_TIMEOUT_OSS = 180
 # call needed, so rc=124 lines cannot size these.
 DECISION_TIMEOUT_HOSTED_DEFAULTS = {
     "cluster_expand": 450,
+    "trigger_validator": 600,
     "work_rerank": 150,
 }
 
@@ -145,6 +146,22 @@ def _llm_log(line: str) -> None:
             f.write(f"{_utc_iso()} {line}\n")
     except OSError:
         pass
+
+
+def log_decision(
+    decision: str, status: str, *, prompt_bytes: int, elapsed: int,
+    timeout: int | None = None,
+) -> None:
+    """Record a decision made outside `decide()` on the shared audit trail.
+
+    The validators run their own agent session rather than routing through
+    `decide()`, so without this the largest housekeeping cost in a run leaves
+    no trace in the decision log operators actually read.
+    """
+    line = f"{decision} {status} bytes={prompt_bytes} elapsed={elapsed}s"
+    if timeout is not None:
+        line += f" timeout={timeout}s"
+    _llm_log(line)
 
 
 def _decision_upper(decision: str) -> str:

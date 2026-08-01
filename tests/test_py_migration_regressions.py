@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import runpy
 import shutil
 import signal
@@ -826,6 +827,103 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     check(
         set(partial_final_batch) == {"FIND-1"},
         "trigger batch parser drops an incomplete trailing item",
+    )
+    # The reviewer emits a running envelope so a review killed at its wall still
+    # banks finished items instead of losing the batch. The last envelope stays
+    # authoritative, so a revised verdict still wins over the one it replaces.
+    check(
+        "again — carrying every item decided so far" in batch_prompt
+        and "Never hold" in batch_prompt,
+        "trigger batch prompt asks for a running cumulative emission",
+    )
+    streamed_batch = validator["extract_vote_batch"](
+        '{"items":[{"id":"FIND-1","vote":"Uncertain"}]}\n'
+        '{"items":[{"id":"FIND-1","vote":"Promote"},'
+        '{"id":"FIND-2","vote":"Reject","disproof":"app_parse child.c:91"},'
+        '{"id":"FIND-3","vote":"Prom'
+    )
+    check(
+        {key: vote["vote"] for key, vote in streamed_batch.items()}
+        == {"FIND-1": "Promote", "FIND-2": "Reject"},
+        "trigger batch parser banks a killed run's finished items and takes the latest verdict",
+    )
+    # End to end: a review killed at its wall must land the envelope it banked
+    # on disk before any telemetry pass, or the caller's small grace beyond the
+    # wall kills this process first and the running envelope buys nothing.
+    banked_root = root / "banked"
+    banked_items = []
+    for index in (1, 2):
+        directory = banked_root / f"FIND-{index:03d}"
+        directory.mkdir(parents=True)
+        (directory / "report.md").write_text(_GOOD_REPORT, encoding="utf-8")
+        banked_items.append({
+            "id": directory.name,
+            "finding": str(directory / "report.md"),
+            "output": str(directory / ".trigger-gate.json"),
+        })
+    banked_manifest = banked_root / "manifest.json"
+    banked_manifest.write_text(json.dumps({"items": banked_items}), encoding="utf-8")
+    banked_log = banked_root / "llm-decisions.log"
+    with mock.patch.dict(os.environ, {"LLM_DECIDE_LOG": str(banked_log)}, clear=False), \
+         mock.patch.object(
+            validator["llm_invoke"], "run_agent_prompt", return_value=124,
+         ), mock.patch.object(
+            validator["llm_invoke"], "extract_text",
+            return_value=(
+                '{"items":[{"id":"FIND-001","vote":"Promote","rationale":"r"}]}\n'
+                '{"items":[{"id":"FIND-001","vote":"Promote","rationale":"r"},'
+                '{"id":"FIND-002","vote":"Prom'
+            ),
+         ):
+        banked_rc = validator["main"]([
+            "--batch-manifest", str(banked_manifest),
+            "--target-path", str(root), "--backend", "codex",
+            "--gate", "trigger", "--timeout", "600",
+        ])
+    check(
+        banked_rc == 124
+        and (banked_root / "FIND-001" / ".trigger-gate.json").is_file()
+        and not (banked_root / "FIND-002" / ".trigger-gate.json").is_file(),
+        "a review killed at its wall still banks the items it finished",
+    )
+    banked_line = banked_log.read_text(encoding="utf-8") if banked_log.is_file() else ""
+    check(
+        "votes=1/2" in banked_line and "rc=124" in banked_line
+        and " OK " not in banked_line,
+        "the decision log reports a timed-out review's partial result, not success",
+    )
+    # On the shared trail `OK` means a usable decision, so a backend that exits
+    # zero without a parsable vote is a failure here too -- and the prompt's own
+    # non-ASCII text must not undercount the logged byte size.
+    unparsed_log = banked_root / "unparsed.log"
+    for item in banked_items:
+        Path(item["output"]).unlink(missing_ok=True)
+    sent_prompts: list[str] = []
+    with mock.patch.dict(os.environ, {"LLM_DECIDE_LOG": str(unparsed_log)}, clear=False), \
+         mock.patch.object(
+            validator["llm_invoke"], "run_agent_prompt",
+            side_effect=lambda _backend, prompt, *a, **k: (
+                sent_prompts.append(prompt) or 0
+            ),
+         ), mock.patch.object(
+            validator["llm_invoke"], "extract_text", return_value="no verdict here",
+         ):
+        validator["main"]([
+            "--batch-manifest", str(banked_manifest),
+            "--target-path", str(root), "--backend", "codex",
+            "--gate", "trigger", "--timeout", "600",
+        ])
+    unparsed_line = unparsed_log.read_text(encoding="utf-8") if unparsed_log.is_file() else ""
+    logged_bytes = int(re.search(r"bytes=(\d+)", unparsed_line).group(1))
+    sent = sent_prompts[0]
+    check(
+        "votes=0/2" in unparsed_line and " OK " not in unparsed_line,
+        "a backend that exits zero without a parsable vote is not logged as success",
+    )
+    check(
+        len(sent.encode("utf-8")) > len(sent)
+        and logged_bytes == len(sent.encode("utf-8")),
+        "the decision log counts prompt bytes as UTF-8, not characters",
     )
     # A finding-removing gate must never manufacture a verdict from prose that
     # merely mentions an "items" list or a decoy array not in a `{"items":[`

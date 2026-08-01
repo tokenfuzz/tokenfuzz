@@ -805,6 +805,100 @@ Generated score text.
                 directory / "report.md", directory / ".trigger-gate.json",
             ))
 
+    def test_trigger_review_wall_covers_the_observed_review(self) -> None:
+        """Every review session gets the full wall, batched or single.
+
+        A review that runs out of wall emits no vote at all, so its ids cost a
+        retry wall on top. Measured cost sits in per-session setup rather than
+        per-item work, so the wall does not shrink for a batch or grow with it.
+        """
+        directories = []
+        for index in range(5):
+            directory = self.root / "findings" / f"FIND-{index + 10:03d}"
+            directory.mkdir()
+            (directory / "report.md").write_text(
+                "# State issue\n\nA public request crosses a boundary.\n",
+                encoding="utf-8",
+            )
+            directories.append(directory)
+
+        seen = []
+
+        def run(command, *_args, **_kwargs):
+            manifest = Path(command[command.index("--batch-manifest") + 1])
+            items = json.loads(manifest.read_text(encoding="utf-8"))["items"]
+            seen.append((
+                len(items), int(command[command.index("--timeout") + 1]),
+            ))
+            _write_batch_votes(command)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            triage._batch_finding_trigger_votes(
+                directories, self.root, None, None, False, workers=1,
+            )
+
+        # Five findings split 4 + 1; both reviews get the same full wall.
+        self.assertEqual(seen, [(4, 600), (1, 600)])
+
+        # The wall is the decision's measured default, not a fixed ceiling: an
+        # explicit operator timeout still overrides it, per its documented
+        # contract, and a slow `oss` host still earns the tier's extra room.
+        seen.clear()
+        for directory in directories:
+            (directory / ".trigger-gate.json").unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECISION_TIMEOUT": "30",
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            triage._batch_finding_trigger_votes(
+                directories, self.root, None, None, False, workers=1,
+            )
+        self.assertEqual(seen, [(4, 30), (1, 30)])
+
+    def test_timed_out_trigger_batch_retry_keeps_the_singleton_wall(self) -> None:
+        directories = []
+        for index in range(2):
+            directory = self.root / "findings" / f"FIND-{index + 10:03d}"
+            directory.mkdir()
+            (directory / "report.md").write_text(
+                "# State issue\n\nA public request crosses a boundary.\n",
+                encoding="utf-8",
+            )
+            directories.append(directory)
+
+        seen = []
+
+        def run(command, *_args, **_kwargs):
+            manifest = Path(command[command.index("--batch-manifest") + 1])
+            items = json.loads(manifest.read_text(encoding="utf-8"))["items"]
+            seen.append((
+                len(items), int(command[command.index("--timeout") + 1]),
+            ))
+            if len(seen) == 1:
+                return mock.Mock(returncode=124)
+            _write_batch_votes(command)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            triage._batch_finding_trigger_votes(
+                directories, self.root, None, None, False, workers=1,
+            )
+
+        # The singleton retries a timeout fans out to get the same full wall as
+        # the batch that starved: at 300s those retries were starving too.
+        self.assertEqual(seen, [(2, 600), (1, 600), (1, 600)])
+
     def test_provider_limited_trigger_batch_is_not_retried(self) -> None:
         directory = self.root / "findings" / "FIND-010"
         directory.mkdir()

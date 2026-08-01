@@ -9,11 +9,13 @@ import os
 import re
 import shutil
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import llm_decide
 import llm_invoke
 import llm_usage
 import prompt_render
@@ -22,6 +24,35 @@ import report_identity
 import triage_validate
 
 VOTES = {"Promote": 0, "Reject": 1, "Uncertain": 2}
+
+
+def log_validator_decision(
+    decision: str, status: int, prompt: str, started: float, timeout: int,
+    votes: int, total: int,
+) -> None:
+    """Put this validator session on the shared decision audit trail.
+
+    Call this after parsing: on the shared trail `OK` means a usable decision,
+    so a backend that exited zero without a parsable vote is a failure here
+    too. A timed-out review still reports the votes it banked.
+    """
+    if status == 124:
+        outcome = "FAIL rc=124"
+    elif votes and votes >= total:
+        outcome = "OK"
+    elif status not in (0, 1, 2):
+        outcome = f"FAIL rc={status}"
+    elif votes:
+        outcome = "FAIL partial"
+    else:
+        outcome = "FAIL parse"
+    llm_decide.log_decision(
+        f"{decision} votes={votes}/{total}",
+        outcome,
+        prompt_bytes=len(prompt.encode("utf-8", "replace")),
+        elapsed=int(time.monotonic() - started),
+        timeout=timeout if outcome != "OK" else None,
+    )
 
 
 def parse_args(argv=None):
@@ -331,26 +362,20 @@ def main(argv=None) -> int:
         llm_invoke.apply_memory_policy()
         prompt = render_trigger_batch_prompt(args, items)
         raw = Path(args.batch_manifest).with_suffix(".raw.log")
+        started = time.monotonic()
         status = llm_invoke.run_agent_prompt(
             args.backend, prompt, args.timeout, raw, model=args.model,
             max_turns=0, add_dirs=f"{ROOT},{target}",
             cwd=validator_cwd(findings[0], target),
         )
-        llm_usage.append_usage_event(
-            args.usage_index, backend=args.backend, model=args.model,
-            kind="decision:trigger-validator-batch", prompt_text=prompt, raw_path=raw,
-            usage_complete=status == 0,
-        )
-        transient = status not in (0, 1, 2)
-        if transient:
-            try:
-                import llm_decide
-                llm_decide.record_provider_limit(
-                    raw.read_text(encoding="utf-8", errors="replace")
-                )
-            except (ImportError, OSError):
-                pass
+        # Bank votes before any telemetry pass. A timed-out review has already
+        # spent the whole wall, and the caller allows only a couple of seconds
+        # beyond it, so a full-transcript scan ahead of this would let the
+        # parent kill us before the banked envelope reaches disk. Transcripts
+        # are not size-bounded, and losing them here is what the running
+        # envelope exists to prevent.
         parsed = extract_vote_batch(llm_invoke.extract_text(args.backend, str(raw)))
+        written = 0
         for item_id, output in outputs.items():
             vote = parsed.get(item_id)
             if vote is None:
@@ -362,6 +387,25 @@ def main(argv=None) -> int:
                 artifact_dirs[item_id], probe_evidence[item_id],
             )
             output.write_text(json.dumps(vote, indent=2, sort_keys=True) + "\n")
+            written += 1
+        log_validator_decision(
+            "trigger-validator-batch", status, prompt, started, args.timeout,
+            written, len(items),
+        )
+        llm_usage.append_usage_event(
+            args.usage_index, backend=args.backend, model=args.model,
+            kind="decision:trigger-validator-batch", prompt_text=prompt, raw_path=raw,
+            usage_complete=status == 0,
+        )
+        transient = status not in (0, 1, 2)
+        if transient:
+            try:
+                import llm_decide as _llm_decide
+                _llm_decide.record_provider_limit(
+                    raw.read_text(encoding="utf-8", errors="replace")
+                )
+            except (ImportError, OSError):
+                pass
         # A wall-exhausted source review gets a narrower retry than other
         # backend failures: the caller splits only that batch into singleton
         # reviews. Provider/capacity failures remain 2 and are not hot-retried.
@@ -387,17 +431,25 @@ def main(argv=None) -> int:
     # A stable isolated cwd keeps the CLI's system context identical across
     # validators, allowing the invariant prompt prefix to hit provider caches
     # without letting incidental writes land in the target checkout.
+    started = time.monotonic()
     status = llm_invoke.run_agent_prompt(
         args.backend, prompt, args.timeout, raw, model=args.model,
         max_turns=0, add_dirs=f"{ROOT},{target}", cwd=validator_cwd(finding, target),
+    )
+    # Read the verdict out of the transcript before the telemetry passes, for
+    # the same reason as the batch path above: past its wall this process has
+    # only the caller's small grace left.
+    text = llm_invoke.extract_text(args.backend, str(raw)).replace("\r", "")
+    vote = extract_vote(text)
+    log_validator_decision(
+        f"{args.gate}-validator", status, prompt, started, args.timeout,
+        1 if vote is not None else 0, 1,
     )
     llm_usage.append_usage_event(
         args.usage_index, backend=args.backend, model=args.model,
         kind=f"decision:{args.gate}-validator", prompt_text=prompt, raw_path=raw,
         usage_complete=status == 0,
     )
-    text = llm_invoke.extract_text(args.backend, str(raw)).replace("\r", "")
-    vote = extract_vote(text)
     if vote is None:
         stdout_log = destination.with_suffix(".stdout.log")
         shutil.copy2(raw, stdout_log)

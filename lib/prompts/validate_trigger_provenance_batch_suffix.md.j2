@@ -10,13 +10,20 @@ Review every item independently using the source-reading method above. Do not
 let evidence for one item establish or disprove another. Missing or ambiguous
 evidence must produce `Uncertain`, never a guessed rejection.
 
-Output ONE JSON object on a single line, nothing else:
+Emit the answer object as soon as you have decided your first item, and emit it
+again — carrying every item decided so far — each time you decide another. The
+last object you emit is the answer; earlier ones are only a running record, so
+a review that runs out of wall still banks the items it finished. Never hold
+all items back to a single emission at the end.
+
+Each emission is ONE JSON object on a single line, nothing else:
 
 ```json
 {"items":[{"id":"<exact id>","vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<constructed path or empty>","disproof":"<Reject only: named source invariant and clause (a)-(f)>","rejection_kind":"contract-invalid|unreachable|nonshipping|no-added-boundary|unknown","surface_applies":"yes|no","review_mode":"memory-contract|resource|disclosure|semantic-boundary","vulnerable_boundary_surface":"network|library-api|file-format|cli|dev-tool|internal|unknown","reproducer_carrier":"network|library-api|file-format|cli|harness|runner|unknown","anchors":[{"path":"relative/path.c","line":123,"symbol":"function_or_section","kind":"source|contract|build","excerpt":"exact trimmed source line"}]}]}
 ```
 
-Return exactly one keyed item for every supplied id. The definitions and
-recall-safe rejection standard above apply independently to each item.
+Your final emission must carry exactly one keyed item for every supplied id.
+The definitions and recall-safe rejection standard above apply independently to
+each item.
 
 Budget: {{ timeout_secs }}s wall time. Be calibrated.

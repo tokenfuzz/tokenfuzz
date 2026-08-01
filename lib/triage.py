@@ -1486,6 +1486,21 @@ def _source_review_facts(
 _TRIGGER_BATCH_SIZE = 4
 
 
+def _trigger_review_seconds() -> int:
+    """The wall for one provenance review session, whatever it carries.
+
+    A review that runs out of wall emits no vote at all, so its ids fall
+    through to a retry that pays a fresh wall over again; at the bare hosted
+    tier that was starving 5 of 16 batches and 3 of 20 singletons. Cost sits in
+    per-session setup rather than per-item work — a four-item batch runs about
+    1.4x a singleton, not 4x — so the wall does not scale with the batch. The
+    measured default is registered as a decision default rather than fixed
+    here, so an explicit `LLM_DECISION_TIMEOUT` still overrides it and a slow
+    `oss` host still gets the tier's proportional room.
+    """
+    return llm_decide.decision_timeout("trigger_validator")
+
+
 def _batch_finding_trigger_votes(
     directories: list[Path], results_dir: Path, deadline: float | None,
     usage_index: str | os.PathLike[str] | None,
@@ -1565,7 +1580,7 @@ def _batch_finding_trigger_votes(
         index_and_batch: tuple[int, list[tuple[Path, Path, Path]]],
     ) -> tuple[int, list[tuple[Path, Path, Path]], int | None]:
         index, batch = index_and_batch
-        timeout = _decision_timeout(300, deadline)
+        timeout = _decision_timeout(_trigger_review_seconds(), deadline)
         if timeout <= 0 or llm_decide.provider_limit_open():
             return index, batch, None
         return index, batch, run_batch(batch, str(index), timeout)
@@ -1603,7 +1618,7 @@ def _batch_finding_trigger_votes(
 
     def retry(tag_and_batch: tuple[str, list[tuple[Path, Path, Path]]]) -> None:
         tag, batch = tag_and_batch
-        timeout = _decision_timeout(300, deadline)
+        timeout = _decision_timeout(_trigger_review_seconds(), deadline)
         if timeout <= 0 or llm_decide.provider_limit_open():
             return
         run_batch(batch, tag, timeout)
@@ -1637,7 +1652,7 @@ def _trigger_vote(
         return 2
     if not (report.is_file() and report.stat().st_size) or not target_root.is_dir() or not backend:
         return 2
-    timeout = _decision_timeout(300, deadline)
+    timeout = _decision_timeout(_trigger_review_seconds(), deadline)
     if timeout <= 0:
         return 2
     command = [
