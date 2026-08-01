@@ -1248,8 +1248,42 @@ _NATIVE_COMPILATION_UNIT_EXTS = frozenset({
 })
 
 
-def _sanitizer_object_keys(ctx: Context) -> tuple[set[str], int]:
-    """Return target-relative object identities from available sanitizer builds."""
+# CMake reroutes an object through a per-artifact directory, so the source's
+# own directories survive only on either side of this segment.
+_CMAKE_OBJECT_DIR = re.compile(r"(?:^|/)cmakefiles/[^/]+\.dir/")
+
+
+def _object_identities(key: str) -> Iterable[str]:
+    """Yield the source identities one object path could have come from.
+
+    Build systems keep varying amounts of a source's path, so match on what
+    they preserve rather than on one layout: a generator may reroute the
+    object through a per-artifact directory (`src/parse.c` ->
+    `src/CMakeFiles/lib.dir/parse.c.o`) or glue the artifact name onto the
+    base name (`libfoo_la-parse.o`). Undo both with the source's own
+    directories intact, and keep the leading path optional so an object tree
+    nested under the build root still resolves.
+
+    Never reduce an identity to its bare base name. Same-named files in
+    unrelated directories — an architecture-specific variant, a test copy, a
+    demo — are then indistinguishable, and a card wrongly promoted as built
+    evicts genuinely compiled work from the truncated window.
+    """
+    collapsed = _CMAKE_OBJECT_DIR.sub("/", key).lstrip("/")
+    for variant in dict.fromkeys((key, collapsed)):
+        parts = variant.split("/")
+        for index in range(len(parts)):
+            trailing = "/".join(parts[index:])
+            yield trailing
+            head, _, base = trailing.rpartition("/")
+            cut = base.rfind("-")
+            while cut > 0:
+                yield f"{head}/{base[cut + 1:]}" if head else base[cut + 1:]
+                cut = base.rfind("-", 0, cut)
+
+
+def _sanitizer_object_index(ctx: Context) -> tuple[set[str], int]:
+    """Return source identities compiled by the available sanitizer builds."""
     if ctx._sanitizer_object_cache is not None:
         return ctx._sanitizer_object_cache
     keys: set[str] = set()
@@ -1276,8 +1310,8 @@ def _sanitizer_object_keys(ctx: Context) -> tuple[set[str], int]:
                     (Path(dirpath) / name).relative_to(root).as_posix().lower()
                 )
                 key = relative[: -len(suffix)]
-                keys.add(key)
-                keys.add(key.replace("/.libs/", "/"))
+                keys.update(_object_identities(key))
+                keys.update(_object_identities(key.replace("/.libs/", "/")))
         builds += int(found)
     result = (keys, builds)
     ctx._sanitizer_object_cache = result
@@ -1286,21 +1320,22 @@ def _sanitizer_object_keys(ctx: Context) -> tuple[set[str], int]:
 
 def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
     """Attach advisory compilation evidence without removing source-review work."""
-    object_keys, build_count = _sanitizer_object_keys(ctx)
+    object_index, build_count = _sanitizer_object_index(ctx)
     out: list[dict] = []
     for original in cards:
         card = dict(original)
         relative = normalized_relpath(card.get("file", "")).lower()
         suffix = Path(relative).suffix.lower()
-        if not object_keys or suffix not in _NATIVE_COMPILATION_UNIT_EXTS:
+        if not object_index or suffix not in _NATIVE_COMPILATION_UNIT_EXTS:
             card["buildability"] = "unknown"
         else:
+            # Probe the source's whole path, never a suffix of it: the index
+            # already carries every identity an object could stand for, so
+            # trimming this side too would only match unrelated directories.
+            # Set lookups keep this flat in the number of objects, which a
+            # per-card scan was not.
             stem = relative[: -len(suffix)]
-            matched = any(
-                key == stem or key == relative
-                or key.endswith("/" + stem) or key.endswith("/" + relative)
-                for key in object_keys
-            )
+            matched = relative in object_index or stem in object_index
             card["buildability"] = "built" if matched else "not-built"
             if not matched:
                 card["buildability_reason"] = (
@@ -1308,6 +1343,27 @@ def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
                 )
         out.append(card)
     return out
+
+
+def _buildability_priority(card: dict) -> int:
+    """Rank order for reordering *within* an already-selected card set."""
+    return {"built": 0, "unknown": 1, "not-built": 2}.get(
+        card.get("buildability", "unknown"), 1,
+    )
+
+
+def _built_first(card: dict) -> int:
+    """Rank order for selecting the card set itself: promote only on evidence.
+
+    Truncation drops work, so the window reacts only to an object actually
+    found. `unknown` is absence of evidence, not evidence of absence: it
+    covers every non-native source, every header, and every build layout the
+    object index cannot read, so demoting `not-built` beneath it would hand
+    the window to whatever the classifier says nothing about.
+    `_buildability_priority` keeps the finer three-way order for claim
+    ordering, which reorders a chosen set and never drops from it.
+    """
+    return 0 if card.get("buildability") == "built" else 1
 
 
 def read_sample(path: Path, max_bytes: int = 256_000) -> str:
@@ -1488,7 +1544,14 @@ def load_patch_cards(path: Path, limit: int = 40, ctx: Context | None = None) ->
             "issue_id": card.get("issue_id", ""),
         }
         out.append(work)
-    out.sort(key=lambda c: (-int(c["score"]), c["id"]))
+    # This cap truncates too, so it takes the same promote-on-evidence rule
+    # as the ranked window: an unbuilt prior-fix site must not consume the
+    # patch half of the queue ahead of a compiled one. Cards keep their S1
+    # identity and patch metadata only here, so losing one to the cap loses
+    # more than the ranked-source card that later covers the same file.
+    if ctx is not None:
+        out = annotate_card_buildability(ctx, out)
+    out.sort(key=lambda c: (_built_first(c), -int(c["score"]), c["id"]))
     return dedupe_work_cards(out)[:limit]
 
 
@@ -1730,7 +1793,13 @@ def rank_target(ctx: Context, limit: int, patch_cards: Path | None = None) -> li
                 existing["reason"] = "; ".join(merged)
                 existing["score"] = int(existing.get("score", 0)) + min(feature_score, 20)
                 break
-    cards.sort(key=work_card_sort_key)
+    # Compilation evidence must shape the bounded window, not merely claims
+    # inside it. Otherwise high-scoring optional units — an unselected
+    # backend, a foreign-architecture code path — evict executable work
+    # before a reproduce agent gets the chance to prefer built cards.
+    cards = annotate_card_buildability(ctx, cards)
+    floor_cards = annotate_card_buildability(ctx, floor_cards)
+    cards.sort(key=lambda card: (_built_first(card), work_card_sort_key(card)))
     if diversity_floor <= 0 or not floor_cards or len(cards) >= limit and limit <= 1:
         return cards[:limit]
     reserve = min(diversity_floor, max(1, limit // 5), len(floor_cards))
@@ -3531,8 +3600,6 @@ def _claim_next_card_locked(
     # original ranking, and reproduce sessions reach optional units after the
     # built/unknown queue is exhausted.
     if role == "reproduce" and len(preferred) > 1:
-        order = {"built": 0, "unknown": 1, "not-built": 2}
-
         def _buildability_key(card: dict) -> tuple[int, int]:
             current = latest.get(card.get("id", ""))
             own_active_lease = bool(
@@ -3542,7 +3609,7 @@ def _claim_next_card_locked(
             )
             return (
                 0 if own_active_lease else 1,
-                order.get(card.get("buildability", "unknown"), 1),
+                _buildability_priority(card),
             )
 
         preferred.sort(key=_buildability_key)

@@ -527,6 +527,171 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(reproduced["id"], "WORK-BUILT")
         self.assertEqual(analyzed["id"], "WORK-OPTIONAL")
 
+    def test_rank_limit_keeps_built_source_ahead_of_unbuilt_source(self) -> None:
+        """Unbuilt work must not consume the window before executable work."""
+        (self.target / "src").mkdir()
+        (self.target / "src/built.c").write_text(
+            "int built(void) { return 1; }\n",
+            encoding="utf-8",
+        )
+        (self.target / "src/optional.c").write_text(
+            "void parse(char *dst, const char *src, size_t length) {\n"
+            "  assert(dst);\n"
+            "  char *copy = malloc(length);\n"
+            "  memcpy(dst, src, length);\n"
+            "  free(copy);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        obj = self.target / "build-asan/src/built.o"
+        obj.parent.mkdir(parents=True)
+        obj.touch()
+
+        cards = workqueue.rank_target(self.ctx, 1)
+
+        self.assertEqual(len(cards), 1)
+        self.assertEqual(cards[0]["file"], "src/built.c")
+        self.assertEqual(cards[0]["buildability"], "built")
+
+        expanded = workqueue.rank_target(self.ctx, 10)
+        buildability = {
+            card["file"]: card["buildability"]
+            for card in expanded
+        }
+        self.assertEqual(buildability["src/built.c"], "built")
+        self.assertEqual(buildability["src/optional.c"], "not-built")
+
+    def test_object_identity_survives_rerouted_and_prefixed_layouts(self) -> None:
+        """A generator's object layout must not read as an unbuilt source.
+
+        Objects rerouted through a per-artifact directory or renamed with the
+        artifact prefix keep no contiguous copy of the source's own path, so a
+        path-suffix match alone reports every unit of such a build unbuilt.
+        """
+        for relative in ("src/parse.c", "src/emit.c", "src/absent.c"):
+            path = self.target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("int handler(void);\n", encoding="utf-8")
+        objects = self.target / "build-asan"
+        # Rerouted: the source directory is replaced, not preserved.
+        rerouted = objects / "src/CMakeFiles/lib.dir/parse.c.o"
+        rerouted.parent.mkdir(parents=True)
+        rerouted.touch()
+        # Prefixed: the artifact name is glued onto the base name.
+        prefixed = objects / "src/libsample_la-emit.o"
+        prefixed.touch()
+
+        cards = workqueue.annotate_card_buildability(self.ctx, [
+            self.card("WORK-PARSE", "src/parse.c"),
+            self.card("WORK-EMIT", "src/emit.c"),
+            self.card("WORK-ABSENT", "src/absent.c"),
+        ])
+
+        self.assertEqual(
+            [card["buildability"] for card in cards],
+            ["built", "built", "not-built"],
+        )
+
+    def test_same_base_name_in_another_directory_is_not_built(self) -> None:
+        """Only the compiled directory may claim an object.
+
+        Base names repeat across a tree — an architecture-specific variant, a
+        test copy, a demo — so matching on one would promote uncompiled work
+        into the window and evict the unit that really was built.
+        """
+        for relative in ("src/parse.c", "optional/parse.c"):
+            path = self.target / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("int parse(void);\n", encoding="utf-8")
+        obj = self.target / "build-asan/src/parse.o"
+        obj.parent.mkdir(parents=True)
+        obj.touch()
+
+        cards = workqueue.annotate_card_buildability(self.ctx, [
+            self.card("WORK-OPTIONAL", "optional/parse.c", score=100),
+            self.card("WORK-BUILT", "src/parse.c", score=10),
+        ])
+        self.assertEqual(
+            [card["buildability"] for card in cards], ["not-built", "built"],
+        )
+
+        # The higher-scoring duplicate must not take the compiled unit's slot.
+        window = sorted(cards, key=lambda c: (
+            workqueue._built_first(c), workqueue.work_card_sort_key(c),
+        ))
+        self.assertEqual(window[0]["id"], "WORK-BUILT")
+
+    def test_patch_card_cap_keeps_built_prior_fix_sites(self) -> None:
+        """The patch sub-window truncates, so evidence has to order it too."""
+        (self.target / "src").mkdir()
+        for relative in ("src/built.c", "src/optional.c"):
+            (self.target / relative).write_text("int fn(void);\n", encoding="utf-8")
+        obj = self.target / "build-asan/src/built.o"
+        obj.parent.mkdir(parents=True)
+        obj.touch()
+        patches = self.results / "patch-cards.jsonl"
+        workqueue.write_cards(patches, [
+            {
+                "id": "PATCH-OPTIONAL", "kind": "s1-patch", "score": 100,
+                "touched_files": ["src/optional.c"], "description": "fix",
+            },
+            {
+                "id": "PATCH-BUILT", "kind": "s1-patch", "score": 10,
+                "touched_files": ["src/built.c"], "description": "fix",
+            },
+        ])
+
+        capped = workqueue.load_patch_cards(patches, 1, ctx=self.ctx)
+
+        self.assertEqual([card["id"] for card in capped], ["PATCH-BUILT"])
+        self.assertEqual(capped[0]["kind"], "s1-patch")
+
+    def test_unclassified_work_does_not_outrank_unbuilt_native_work(self) -> None:
+        """Absence of compilation evidence must not act as evidence of absence.
+
+        `unknown` covers every header and non-native source as well as every
+        build layout the object index cannot read. Ranking it above `not-built`
+        would let those displace the native work a truncated window exists to
+        carry.
+        """
+        (self.target / "src").mkdir()
+        (self.target / "src/other.c").write_text(
+            "int other(void) { return 1; }\n", encoding="utf-8",
+        )
+        (self.target / "src/parse.c").write_text(
+            "void parse(char *dst, const char *src, size_t length) {\n"
+            "  assert(dst);\n"
+            "  char *copy = malloc(length);\n"
+            "  memcpy(dst, src, length);\n"
+            "  free(copy);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.target / "src/api.h").write_text(
+            "void parse(char *dst, const char *src, size_t length);\n",
+            encoding="utf-8",
+        )
+        # An object for an unrelated unit: the index is usable, so the other
+        # sources are classified rather than left unknown.
+        obj = self.target / "build-asan/src/other.o"
+        obj.parent.mkdir(parents=True)
+        obj.touch()
+
+        cards = workqueue.rank_target(self.ctx, 40)
+        by_file = {card["file"]: card for card in cards}
+        self.assertEqual(by_file["src/parse.c"]["buildability"], "not-built")
+        self.assertEqual(by_file["src/api.h"]["buildability"], "unknown")
+
+        order = [card["file"] for card in cards]
+        self.assertLess(
+            order.index("src/other.c"), order.index("src/parse.c"),
+            "built work still leads the window",
+        )
+        self.assertLess(
+            order.index("src/parse.c"), order.index("src/api.h"),
+            "unbuilt native work keeps its score-earned slot over unknowns",
+        )
+
     def test_active_hypothesis_reserves_duplicate_surface(self) -> None:
         cards = [
             self.card("WORK-A", "src/app.c", score=20),

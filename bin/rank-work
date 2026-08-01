@@ -55,8 +55,7 @@ def main(argv: list[str]) -> int:
         if c.get("kind") == "s6-peer-fix"
         and c.get("id") not in merged_ids
     ]
-    cards = cards + s6_cards
-    cards = annotate_card_buildability(ctx, cards)
+    cards = cards + annotate_card_buildability(ctx, s6_cards)
     cards = apply_latest_claim_status(ctx, cards)
     write_cards(out, cards)
     if not args.quiet:
