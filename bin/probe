@@ -67,7 +67,17 @@ _PROCESS_LAUNCH_RE = re.compile(
     r"ShellExecute(?:Ex)?(?:A|W)?|WinExec"
     r")\s*\("
 )
-_VERSION_OPTION_RE = re.compile(r"['\"]--?version['\"]")
+_C_LINE_SPLICE_RE = re.compile(r"\\(?:\r\n|\n|\r)")
+_C_LEXEME_RE = re.compile(
+    r'(?P<raw>(?:u8|[uUL])?R"(?P<raw_delimiter>[^ ()\\\t\r\n]{0,16})'
+    r'\(.*?\)(?P=raw_delimiter)")|(?P<string>(?:u8|[uUL])?"(?:\\.|[^"\\])*")|'
+    r"(?P<char>(?:u8|[uUL])?'(?:\\.|[^'\\])*')|"
+    r"(?P<comment>//[^\n]*|/\*.*?(?:\*/|\Z))",
+    re.S,
+)
+_LOADER_STRING_RE = re.compile(
+    r'^"(?:DYLD_INSERT_LIBRARIES|LD_PRELOAD)(?:=[^"]*)?"$'
+)
 HELP = """Usage:
   bin/probe [--confirm | --sanitizer-runs N] [--dry-run] [--mode auto|browser|js|generic] \\
             [--hypothesis-id HYPOTHESIS-ID] \\
@@ -254,82 +264,37 @@ def stat_key(path: str) -> str:
         return ""
 
 
-def _c_without_comments(text: str) -> str:
-    """Remove C-family comments while preserving strings and line structure."""
-    out: list[str] = []
-    index = 0
-    state = "code"
-    while index < len(text):
-        char = text[index]
-        following = text[index + 1] if index + 1 < len(text) else ""
-        if state == "code":
-            if char == "/" and following == "/":
-                state = "line-comment"
-                index += 2
-                continue
-            if char == "/" and following == "*":
-                state = "block-comment"
-                index += 2
-                continue
-            out.append(char)
-            if char == '"':
-                state = "string"
-            elif char == "'":
-                state = "char"
-            index += 1
-            continue
-        if state == "line-comment":
-            if char == "\n":
-                out.append(char)
-                state = "code"
-            index += 1
-            continue
-        if state == "block-comment":
-            if char == "*" and following == "/":
-                state = "code"
-                index += 2
-            else:
-                if char == "\n":
-                    out.append(char)
-                index += 1
-            continue
-        out.append(char)
-        if char == "\\" and following:
-            out.append(following)
-            index += 2
-            continue
-        if (state == "string" and char == '"') or (state == "char" and char == "'"):
-            state = "code"
-        index += 1
-    return "".join(out)
+def _c_carrier_tokens(text: str) -> str:
+    """Keep only carrier-relevant C tokens after translation-phase splicing."""
+    text = _C_LINE_SPLICE_RE.sub("", text)
+
+    def mask(match: re.Match[str]) -> str:
+        string = match.group("string")
+        if string is not None and _LOADER_STRING_RE.fullmatch(string):
+            return string
+        value = match.group(0)
+        return "".join("\n" if char == "\n" else " " for char in value)
+
+    return _C_LEXEME_RE.sub(mask, text)
 
 
 def reject_harness_only_carrier(source: Path) -> None:
     """Reject compiled wrappers that conclusively manufacture a target boundary.
 
     Ordinary launchers can still carry real file/protocol inputs, so ambiguous
-    cases stay for provenance review. Injection and version-only launches have
-    no testcase-derived target state and are safe to stop before confirmation.
+    cases stay for provenance review. Loader injection has no testcase-derived
+    target state and is safe to stop before confirmation.
     """
-    code = _c_without_comments(source.read_text(encoding="utf-8", errors="replace"))
+    code = _c_carrier_tokens(source.read_text(encoding="utf-8", errors="replace"))
     launcher = _PROCESS_LAUNCH_RE.search(code)
     if not launcher:
         return
     interposition = _DYNAMIC_INTERPOSITION_RE.search(code)
-    statement_end = code.find(";", launcher.end())
-    statement = code[
-        launcher.start(): statement_end if statement_end >= 0 else len(code)
-    ]
-    version_option = _VERSION_OPTION_RE.search(statement)
-    if not interposition and not version_option:
+    if not interposition:
         return
-    match = interposition or version_option
-    reason = (
-        "dynamic-loader interposition" if interposition
-        else "version-only process launcher"
-    )
     raise ValueError(
-        f"HARNESS uses a {reason} ({match.group(0).strip()}): {source}; "
+        f"HARNESS uses dynamic-loader interposition "
+        f"({interposition.group(0).strip()}): {source}; "
         "HARNESS code must reach the target through its public API, CLI input, "
         "or protocol, not injected code or state. Run a CLI testcase through "
         "bin/probe, or derive the API call and state from the testcase/public "

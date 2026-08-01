@@ -251,22 +251,20 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertIn("cached harness build failure", second.stdout + second.stderr)
         self.assertEqual(len(count.read_text().splitlines()), 1)
 
-    def test_process_launcher_carriers_are_rejected_before_build(self) -> None:
+    def test_dynamic_interposition_carriers_are_rejected_before_build(self) -> None:
         compiler = self.fake_compiler()
         count = self.root / "carrier-build-count"
-        for name, body, reason in (
+        for name, body in (
             (
                 "interpose.c",
                 '#include <stdlib.h>\n#include <unistd.h>\n'
                 'int main(void) { setenv("DYLD_INSERT_LIBRARIES", "shim.dylib", 1); '
                 'execl("app", "app", "-version", (char *)0); }\n',
-                "dynamic-loader interposition",
             ),
             (
-                "launcher.c",
-                '#include <unistd.h>\n'
-                'int main(void) { execl("app", "app", "--version", (char *)0); }\n',
-                "version-only process launcher",
+                "preload.c",
+                '#include <stdlib.h>\n'
+                'int main(void) { putenv("LD_PRELOAD=shim.so"); system("app input"); }\n',
             ),
         ):
             with self.subTest(name=name):
@@ -281,7 +279,7 @@ class ProbeCppHarnessTests(unittest.TestCase):
                 )
 
                 self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
-                self.assertIn(reason, proc.stdout + proc.stderr)
+                self.assertIn("dynamic-loader interposition", proc.stdout + proc.stderr)
                 self.assertFalse(count.exists(), "carrier reached the compiler")
 
     def test_non_carrier_api_and_input_launcher_harnesses_are_allowed(self) -> None:
@@ -311,6 +309,54 @@ class ProbeCppHarnessTests(unittest.TestCase):
         )
 
         proc = self.run_probe(launcher_testcase)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        version_launcher = self.scratch / "version-launcher.c"
+        version_launcher.write_text(
+            "#include <unistd.h>\n"
+            'int main(void) { return execl("app", "app", "--version", (char *)0); }\n',
+            encoding="utf-8",
+        )
+        version_testcase = self.write_testcase(
+            "version-launcher.txt", version_launcher.name, "H-version-launcher",
+        )
+
+        proc = self.run_probe(version_testcase)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+    def test_comments_line_splices_and_raw_strings_do_not_create_carriers(self) -> None:
+        spliced = self.scratch / "spliced.c"
+        spliced.write_text(
+            "#include <stdlib.h>\n"
+            "int main(void) {\n"
+            '  setenv("LD_PRELOAD", "shim.so", 1);\n'
+            '  // The following launcher is still part of this comment. \\\n'
+            '  execl("app", "app", "-version", (char *)0);\n'
+            "  return 0;\n}\n",
+            encoding="utf-8",
+        )
+        spliced_testcase = self.write_testcase(
+            "spliced.txt", spliced.name, "H-spliced",
+        )
+
+        proc = self.run_probe(spliced_testcase)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        raw = self.scratch / "raw.cpp"
+        raw.write_text(
+            'const char *note = R"carrier(setenv("LD_PRELOAD", "shim.so", 1);\n'
+            'execl("app", "app", "-version", (char *)0);)carrier";\n'
+            'const char *ordinary = "setenv(\\\"LD_PRELOAD\\\", \\"shim.so\\", 1); '
+            'execl(\\"app\\", \\"app\\", \\"-version\\", 0);";\n'
+            "int main(void) { return note[0] == 's' && ordinary[0] == 's' ? 0 : 1; }\n",
+            encoding="utf-8",
+        )
+        raw_testcase = self.write_testcase("raw.txt", raw.name, "H-raw")
+
+        proc = self.run_probe(raw_testcase)
 
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
 

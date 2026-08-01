@@ -145,6 +145,11 @@ testcase, and records the verdict in `state/runs.jsonl`.
 - Use `--dry-run` to inspect mode, sanitizer, output path, and resolved command
   without executing target code.
 - Use `--mode browser|js|generic` only when automatic mode detection is wrong.
+- Compiled C/C++ harnesses that set `LD_PRELOAD` or
+  `DYLD_INSERT_LIBRARIES` and then launch a process are refused before
+  compilation. Injected process state is not a testcase-derived public
+  boundary; ordinary linked API and file/protocol launcher harnesses remain
+  supported.
 
 Run `bin/probe --help` for the rest.
 
