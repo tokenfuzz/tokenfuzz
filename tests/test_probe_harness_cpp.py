@@ -219,6 +219,27 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("asan_lib missing", proc.stdout + proc.stderr)
 
+    def test_header_only_asan_harness_needs_no_library(self) -> None:
+        (self.slug_dir / "target.toml").write_text(
+            'target = "testproject"\nincludes = []\ndefines = []\n'
+            'link_libs = []\n[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        compiler = self.fake_compiler()
+        args_file = self.root / "header-only-args"
+
+        proc = self.run_probe(
+            CXX=compiler, FAKE_CXX_ARGS=args_file, TARGET_ASAN_LIB="",
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        args = args_file.read_text(encoding="utf-8")
+        self.assertIn("fsanitize=address", args)
+        self.assertNotIn("libtarget.a", args)
+        # An undefined-symbol failure after a dropped asan_lib must be
+        # attributable to the config rather than to the testcase.
+        self.assertIn("no target.toml asan_lib", proc.stdout + proc.stderr)
+
     def test_traversal_and_compiler_failure_digest_and_cache(self) -> None:
         bad = self.write_testcase("bad.txt", "../harness.cpp", "H-bad")
         proc = self.run_probe(bad)

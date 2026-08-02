@@ -1234,14 +1234,20 @@ def sanitizer_binary_is_usable(
 
 
 def _find_under(asan_dir: Path, *, name: str | None = None,
-                maxdepth: int = 3) -> list[Path]:
-    """Equivalent to: find <asan_dir> -maxdepth <n> -type f [-name <name>]."""
+                maxdepth: int | None = None) -> list[Path]:
+    """Return build files, pruning directories that cannot own a product.
+
+    CMake is free to add project-specific output directories below the build
+    root.  A fixed depth rejected real products while accepting the build
+    itself, leaving setup in a rebuild loop.  Structural auxiliary-directory
+    pruning bounds the scan without imposing a layout limit on target output.
+    """
     if not asan_dir.is_dir():
         return []
     out: list[Path] = []
 
     def walk(d: Path, depth: int) -> None:
-        if depth > maxdepth:
+        if maxdepth is not None and depth > maxdepth:
             return
         try:
             entries = sorted(d.iterdir())
@@ -1251,7 +1257,11 @@ def _find_under(asan_dir: Path, *, name: str | None = None,
             if e.is_file():
                 if name is None or e.name == name:
                     out.append(e)
-            elif e.is_dir() and not e.is_symlink():
+            elif (
+                e.is_dir()
+                and not e.is_symlink()
+                and e.name.lower() not in _AUX_BUILD_DIRS
+            ):
                 walk(e, depth + 1)
 
     walk(asan_dir, 1)
@@ -1416,6 +1426,47 @@ def detect_sanitizer_build_artifacts(
         _canonical_build_artifact(value, sanitizer) if value else ""
         for value in detected
     )
+
+
+def cmake_build_is_header_only(build_dir: "str | os.PathLike") -> bool:
+    """Whether generated CMake exports describe only interface libraries.
+
+    A successful header-only build has no executable, archive, or shared
+    object for sanitizer artifact discovery to select.  CMake's generated
+    export is the authoritative distinction between that case and a recipe
+    that returned success without producing its declared compiled target.
+
+    Only this build's own exports answer that question.  A FetchContent
+    dependency under `_deps` ships its own export, so reading it would let
+    a header-only dependency vouch for a product that never got built.
+    """
+    interface = re.compile(
+        r"\badd_library\s*\(\s*\S+\s+INTERFACE\s+IMPORTED\b",
+        re.IGNORECASE,
+    )
+    compiled = re.compile(
+        r"\badd_library\s*\(\s*\S+\s+"
+        r"(?:STATIC|SHARED|MODULE|UNKNOWN)\s+IMPORTED\b|"
+        r"\bIMPORTED_(?:IMPLIB|LOCATION)(?:_[A-Z0-9_]+)?\b",
+        re.IGNORECASE,
+    )
+    saw_interface = False
+    root = Path(build_dir)
+    try:
+        exports = root.rglob("*Targets*.cmake")
+        for path in exports:
+            if not path.is_file():
+                continue
+            if "_deps" in path.relative_to(root).parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if compiled.search(text):
+                return False
+            if interface.search(text):
+                saw_interface = True
+    except OSError:
+        return False
+    return saw_interface
 
 
 def detect_browser_sanitizer_bin(

@@ -855,6 +855,48 @@ assert_eq("build-asan/lib/libtgt.a", cfg_mix.asan_lib,
 assert_eq("", tc._detect_sanitizer_lib(seed_root_he / "build-asan", seed_root_he),
           "_detect_sanitizer_lib: empty when no archive or shared object")
 
+# Product output directories are target-defined and may sit below several
+# layers of build-system grouping. Artifact discovery must not turn a complete
+# build into a permanent setup failure merely because the product is deep.
+deep_root = TEST_TMPDIR / "deep-build-product"
+deep_lib = deep_root / "build-asan" / "group" / "platform" / "release" / "libdeep.a"
+deep_lib.parent.mkdir(parents=True)
+deep_lib.write_bytes(b"!<arch>\n")
+assert_eq("build-asan/group/platform/release/libdeep.a",
+          tc.detect_sanitizer_build_artifacts(deep_root, "asan")[1],
+          "artifact detection reaches target-defined nested output")
+
+# A generated CMake interface export is positive evidence that a successful
+# build is header-only, while any imported compiled location keeps the normal
+# artifact requirement in force.
+header_build = seed_root_he / "build-asan"
+header_build.mkdir()
+(header_build / "sampleTargets.cmake").write_text(
+    "add_library(sample::sample INTERFACE IMPORTED)\n",
+    encoding="utf-8",
+)
+assert_eq(True, tc.cmake_build_is_header_only(header_build),
+          "CMake interface-only export identifies a header-only build")
+(header_build / "sampleTargets-release.cmake").write_text(
+    'set_target_properties(sample::sample PROPERTIES IMPORTED_LOCATION_RELEASE "libsample.a")\n',
+    encoding="utf-8",
+)
+assert_eq(False, tc.cmake_build_is_header_only(header_build),
+          "CMake compiled import still requires a selectable artifact")
+
+# A FetchContent dependency ships its own export. Reading it would let a
+# header-only dependency vouch for a compiled product the recipe never
+# produced, so a build whose only interface export sits under _deps stays a
+# build failure.
+dep_build = TEST_TMPDIR / "deps-interface-export" / "build-asan"
+(dep_build / "_deps" / "dep-build").mkdir(parents=True)
+(dep_build / "_deps" / "dep-build" / "depTargets.cmake").write_text(
+    "add_library(dep::dep-header-only INTERFACE IMPORTED)\n",
+    encoding="utf-8",
+)
+assert_eq(False, tc.cmake_build_is_header_only(dep_build),
+          "a dependency's interface export does not excuse a missing product")
+
 # A test-framework static archive under tests/ (Unity, gtest) must NOT be
 # chosen over the project's own shared library at the build root — the
 # cjson case: libcjson.dylib at root + tests/libunity.a. Picking the test

@@ -479,8 +479,20 @@ class HarnessBuilder:
     def _sanitizer_lib(self) -> str:
         raw = self.probe.config.sanitizer_lib(self.probe.sanitizer)
         library = self.probe.config.resolve_path(raw) if raw else ""
-        if self.probe.sanitizer == "asan" and not library:
-            raise ValueError("target.toml asan_lib missing")
+        if not library:
+            if os.environ.get("PROBE_REQUIRE_SANITIZER_LIB") == "1":
+                raise ValueError(
+                    f"target.toml {self.probe.sanitizer}_lib missing"
+                )
+            # Header-only targets link nothing, so this is not an error. Say
+            # so anyway: an undefined-symbol failure that follows a dropped
+            # <san>_lib otherwise reads as a defect in the testcase.
+            print(
+                f"[probe] no target.toml {self.probe.sanitizer}_lib; linking "
+                "the harness against includes and link_libs only",
+                file=sys.stderr,
+            )
+            return ""
         if library and not Path(library).is_file():
             if self.probe.sanitizer == "asan" or os.environ.get("PROBE_REQUIRE_SANITIZER_LIB") == "1":
                 raise ValueError(f"target.toml {self.probe.sanitizer}_lib missing: {library}")

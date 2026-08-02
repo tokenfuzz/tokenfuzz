@@ -65,9 +65,10 @@ bin/setup-target samples/sample-rust --build --no-llm-config
 bin/audit --target samples/sample-rust --backend <backend> 1
 ```
 
-`--no-llm-config` keeps the hand-authored `target.toml` exactly as committed and
-needs no backend. Do not pass `--force` to `bin/setup-target` on a sample: that
-regenerates the config from scratch and discards the shipped one.
+`--no-llm-config` needs no backend. A forced build keeps the sample's
+hand-authored `target.toml` and build recipe, and rematerializes only the build
+output. Running `bin/setup-target ... --force` without `--build` still
+regenerates the config from scratch.
 
 `samples/sample-swift` is the exception that needs no build step — its
 `[runner]` compiles the package under AddressSanitizer on every run, so a

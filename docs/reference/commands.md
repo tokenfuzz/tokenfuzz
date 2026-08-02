@@ -33,7 +33,7 @@ Useful flags:
 | `--browser` / `--no-browser` | Select browser execution mode explicitly. A browser-specific driver such as `mach` is inferred when neither flag is present; shared build systems such as GN require an explicit choice. |
 | `--pull` | Update an existing VCS checkout to the latest upstream source without re-passing its repo URL. Tracked local edits leave the checkout untouched; untracked build trees, `.audit/` overlays, and run leftovers do not block the update. |
 | `--no-update` | Do not pull or fetch an existing VCS checkout. |
-| `--force` | Regenerate generated config, including suggested threat-model and peer sections. Review local edits first. |
+| `--force` | Without `--build`, regenerate generated config, including suggested threat-model and peer sections. With `--build`, preserve reviewed config and recipes but rematerialize their build output from a clean tree. |
 | `--no-llm-config` | Skip best-effort model suggestions for the threat model and S6 peers. |
 
 The suggestion steps can also be rerun independently:

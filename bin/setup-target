@@ -367,17 +367,24 @@ class Setup:
         parsed: dict = {}
         if not self.toml.is_file():
             reason = "missing"
-        elif self.args.force:
-            reason = "requested"
-        elif target_config.config_has_live_placeholder(self.toml, self.target_root):
-            reason = "placeholders"
         else:
             try:
                 parsed = target_config.parse_toml(self.toml)
-                reason = ""
             except Exception:
                 reason = "invalid"
-        if reason in ("", "placeholders") and self.args.browser is not None:
+            else:
+                reason = (
+                    "requested" if self.args.force else
+                    "placeholders" if target_config.config_has_live_placeholder(
+                        self.toml, self.target_root
+                    ) else ""
+                )
+        keep_for_build = self.args.build and reason in (
+            "placeholders", "requested"
+        )
+        if (
+            reason in ("", "placeholders") or keep_for_build
+        ) and self.args.browser is not None:
             if not parsed:
                 parsed = target_config.parse_toml(self.toml)
             current = str(parsed.get("is_browser", "0")).lower() in {
@@ -389,9 +396,9 @@ class Setup:
                     f"Updated output/{self.name}/target.toml browser mode to "
                     f"{1 if self.args.browser else 0}"
                 )
-        if self.args.build and reason == "placeholders":
-            log(f"Keeping output/{self.name}/target.toml as-is (--build does not re-seed; run 'bin/setup-target {self.name}' without --build to refresh placeholders)")
-            reason = ""
+        if keep_for_build:
+            log(f"Keeping output/{self.name}/target.toml as-is (--build does not re-seed; run 'bin/setup-target {self.name}' without --build to regenerate it)")
+            return
         if not reason:
             log(f"Keeping reviewed output/{self.name}/target.toml (pass --force to regenerate)")
             return
@@ -491,7 +498,10 @@ class Setup:
             str(config.is_browser).lower() in {"1", "true"}
             or config.build_system not in target_config.NATIVE_BUILD_SYSTEMS
             or config.runner_bin
-            or (config.runner_args and not self.args.force)
+            or (
+                config.runner_args
+                and (not self.args.force or self.args.build)
+            )
         ):
             return
         if config.first_executable_sanitizer() is None:
@@ -625,7 +635,12 @@ class Setup:
             self.require_launchable(
                 config, Path(config.resolve_path(detected_bin)), sanitizer_name
             )
-        return bool(detected_bin or detected_lib)
+        if detected_bin or detected_lib:
+            return True
+        return (
+            config.build_system == "cmake"
+            and target_config.cmake_build_is_header_only(build_dir)
+        )
 
     def sanitizer_builds(self, config: target_config.Config) -> None:
         audit_dir = self.target_root / ".audit"
@@ -659,20 +674,14 @@ class Setup:
                 candidate = candidate_dir / f"{recipe.name}.{os.getpid()}"
                 candidate.unlink(missing_ok=True)
                 generated = False
-                profile_recipe = (
-                    sanitizer_name == "asan"
-                    and self.profile is not None
-                    and bool(self.profile.build_recipe)
-                )
-                if recipe.is_file() and (
-                    not self.args.force or profile_recipe
-                ):
-                    if profile_recipe and self.args.force:
+                if recipe.is_file():
+                    if self.args.force:
                         log(
-                            f"bootstrap: using target overlay recipe {recipe}"
+                            f"bootstrap: using existing {recipe} "
+                            "(--force rebuilds its output)"
                         )
                     else:
-                        log(f"bootstrap: keeping existing {recipe} (pass --force to regenerate)")
+                        log(f"bootstrap: keeping existing {recipe}")
                 elif os.access(auto_builder, os.X_OK):
                     candidate_dir.mkdir(parents=True, exist_ok=True)
                     environment = {**os.environ, "SCRIPT_ROOT": str(SCRIPT_ROOT)}

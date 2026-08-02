@@ -625,6 +625,110 @@ class SetupTargetTests(unittest.TestCase):
         self.assertNotIn("materializing asan build", repeated.stdout)
         self.assertTrue(sentinel.is_file())
 
+    def test_force_build_preserves_reviewed_config_and_recipe(self) -> None:
+        target = self.make_build_target("reviewedbuild")
+        recipe = self.build_recipe(target)
+        original_recipe = recipe.read_text(encoding="utf-8")
+        config = self.config("reviewedbuild")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "reviewedbuild"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/reviewedbuild"\n'
+            '# REVIEWED_CONFIG\n'
+            '[runner]\nbin = "python3"\nargs = ["driver.py", "{TESTCASE}"]\n',
+            encoding="utf-8",
+        )
+        called = self.temp / "auto-builder-called"
+        auto_builder = self.harness / "bin" / "auto-build-script"
+        auto_builder.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, sys\n"
+            f"pathlib.Path({str(called)!r}).write_text('called\\n')\n"
+            "raise SystemExit(9)\n",
+            encoding="utf-8",
+        )
+        auto_builder.chmod(0o755)
+        runner_called = self.temp / "runner-called"
+        runner = self.harness / "bin" / "suggest-runner"
+        runner.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib\n"
+            f"pathlib.Path({str(runner_called)!r}).write_text('called\\n')\n",
+            encoding="utf-8",
+        )
+        runner.chmod(0o755)
+
+        process = self.setup(
+            "reviewedbuild", "--build", "--force",
+            environment={"LLM_DECIDE_DISABLE": "0"},
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertIn("REVIEWED_CONFIG", config.read_text(encoding="utf-8"))
+        self.assertIn('args = ["driver.py", "{TESTCASE}"]', config.read_text())
+        self.assertEqual(original_recipe, recipe.read_text(encoding="utf-8"))
+        self.assertFalse(called.exists())
+        self.assertFalse(runner_called.exists())
+        self.assertIn("--force rebuilds its output", process.stdout)
+
+    def test_header_only_cmake_build_converges_without_fake_artifact(self) -> None:
+        target = self.harness / "targets" / "headeronly"
+        target.mkdir(parents=True)
+        (target / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.16)\n"
+            "project(headeronly CXX)\n"
+            "add_library(headeronly INTERFACE)\n",
+            encoding="utf-8",
+        )
+        (target / "include").mkdir()
+        (target / "include" / "headeronly.hpp").write_text(
+            "inline int sample_value() { return 1; }\n", encoding="utf-8"
+        )
+        recipe = target / ".audit" / "build.sh"
+        recipe.parent.mkdir()
+        recipe.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, sys\n"
+            "build = pathlib.Path(sys.argv[2])\n"
+            "build.mkdir(parents=True, exist_ok=True)\n"
+            "(build / 'sampleTargets.cmake').write_text("
+            "'add_library(sample::sample INTERFACE IMPORTED)\\n')\n",
+            encoding="utf-8",
+        )
+        recipe.chmod(0o755)
+        config = self.config("headeronly")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "headeronly"\nbuild_system = "cmake"\n'
+            '# asan_lib = "build-asan/FILL_ME.a"\n'
+            'includes = ["include"]\n[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+
+        first = self.setup(
+            "headeronly", "--build", environment={"LLM_DECIDE_DISABLE": "1"}
+        )
+        repeated = self.setup(
+            "headeronly", "--build", environment={"LLM_DECIDE_DISABLE": "1"}
+        )
+        forced = self.setup(
+            "headeronly", "--build", "--force",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        for process in (first, repeated, forced):
+            self.assertEqual(
+                process.returncode, 0, process.stdout + process.stderr
+            )
+        self.assertTrue((target / "build-asan" / "sampleTargets.cmake").is_file())
+        self.assertNotRegex(config.read_text(), r"(?m)^asan_(?:bin|lib)\s*=")
+        self.assertEqual(
+            "fresh",
+            target_config.build_freshness(
+                target, "asan", recipe_path=recipe
+            ),
+        )
+
     def test_mach_browser_uses_deterministic_native_build_route(self) -> None:
         (self.harness / "bin" / "auto-build-script").symlink_to(
             ROOT / "bin" / "auto-build-script"
