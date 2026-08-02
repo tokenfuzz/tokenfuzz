@@ -140,6 +140,72 @@ def recorded_evidence_context(crash_dir: Path) -> dict | None:
     return context
 
 
+class ReceiptError(ValueError):
+    """A probe receipt is present but no longer describes what is on disk."""
+
+
+def _receipt_is_authoritative(crash_dir: Path) -> bool:
+    """Whether a receipt exists and is meant to decide the bundle's contents.
+
+    Raises when one exists and does not parse as the record probe writes. A
+    corrupt receipt is not a crash that has none, and treating it as one hands
+    the decision back to the name-based guess the receipt exists to override.
+    """
+    path = _probe_context_path(crash_dir)
+    if path is None:
+        return False
+    try:
+        context = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ReceiptError(
+            f"{crash_dir}: the probe receipt at {path.name} could not be read "
+            f"({exc}). Re-probe the testcase rather than exporting a bundle "
+            "assembled by guessing which file ran."
+        ) from exc
+    version = context.get("version") if isinstance(context, dict) else None
+    if version != 4:
+        raise ReceiptError(
+            f"{crash_dir}: the probe receipt at {path.name} records unknown "
+            f"version {version!r}. Re-probe the testcase rather than exporting "
+            "a bundle assembled by guessing which file ran."
+        )
+    return True
+
+
+def receipt_artifacts(crash_dir: Path) -> tuple[Path | None, Path | None | bool] | None:
+    """The testcase and harness probe recorded, as `(testcase, harness)`.
+
+    Three outcomes, because collapsing them is how a bundle ends up shipping a
+    reproducer nothing validated:
+
+    * `None` — no receipt. A crash written by hand, as the model-direct
+      condition does, so name-based discovery is all there is.
+    * a pair — the receipt validates and is authoritative. `harness` is `False`
+      when probe recorded that this crash had none, which must not send the
+      caller back to discovery: finding a stray `harness.c` beside the testcase
+      does not make it the thing that ran.
+    * :class:`ReceiptError` — a receipt exists and does not hold: unreadable,
+      the wrong version, or no longer matching the evidence. Falling back to
+      discovery here would export exactly the mismatch the receipt caught.
+    """
+    crash_dir = Path(crash_dir)
+    if not _receipt_is_authoritative(crash_dir):
+        return None
+    context = recorded_evidence_context(crash_dir)
+    if context is None:
+        raise ReceiptError(
+            f"{crash_dir}: the probe receipt does not match the evidence on "
+            "disk; the testcase, harness, or sanitizer output changed after "
+            "filing. Re-probe the testcase rather than exporting a bundle whose "
+            "reproducer was never the one that ran."
+        )
+    testcase = _artifact_path(crash_dir, str(context.get("testcase") or ""))
+    harness = context.get("harness")
+    if not isinstance(harness, dict):
+        return testcase, False
+    return testcase, _artifact_path(crash_dir, str(harness.get("name") or ""))
+
+
 def verified_probe_context(crash_dir: Path) -> dict | None:
     """Return probe-authored context only while its testcase and build still match."""
     path = _probe_context_path(Path(crash_dir))

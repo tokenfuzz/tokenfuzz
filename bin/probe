@@ -75,6 +75,11 @@ _PROCESS_LAUNCH_RE = re.compile(
     r"ShellExecute(?:Ex)?(?:A|W)?|WinExec"
     r")\s*\("
 )
+# Sanitizers name the faulting module beside the offset, in every report format
+# that could not resolve a source line: `(<module>[:<arch>]+0x<offset>)`.
+_SANITIZER_MODULE_RE = re.compile(
+    r"\(([^()\s]+?)(?::[A-Za-z0-9_]+)?\+0x[0-9a-f]+\)"
+)
 _C_LINE_SPLICE_RE = re.compile(r"\\(?:\r\n|\n|\r)")
 _C_LEXEME_RE = re.compile(
     r'(?P<raw>(?:u8|[uUL])?R"(?P<raw_delimiter>[^ ()\\\t\r\n]{0,16})'
@@ -315,6 +320,32 @@ def reject_harness_only_carrier(source: Path) -> None:
         "bin/probe, or derive the API call and state from the testcase/public "
         "protocol boundary."
     )
+
+
+def foreign_crash_images(sanitizer_output: str, ran_binary: str) -> list[str]:
+    """Scratch-built modules in the report that are not the binary probe ran.
+
+    A HARNESS can hand control to a binary the agent compiled itself — through
+    `exec`, a spawned child, or anything else source inspection would have to
+    chase through aliases, macros, and scopes. The sanitizer settles it after
+    the fact: it names the module a fault came from, and a module under the
+    agent's scratch tree that probe did not build is a diagnostic about a
+    binary no bundle can ship.
+
+    Only a module path decides, and only when it is unambiguous. The target's
+    own build and the system libraries are where a legitimate wrapper and an
+    ordinary driver crash, and a report that resolved every frame names no
+    module at all — all of those fall open. A frame's source file is not used:
+    it arrives as a bare name often enough that matching it against scratch
+    turns a target source called `main.c` into a rejected crash, and the shapes
+    it would catch are the ones a module path already names.
+    """
+    ran = os.path.basename(ran_binary)
+    return [
+        module for module in dict.fromkeys(_SANITIZER_MODULE_RE.findall(sanitizer_output))
+        if os.path.basename(module) != ran
+        and re.search(r"/scratch-[^/]*/", module)
+    ]
 
 
 class HarnessBuilder:
@@ -818,6 +849,7 @@ class Probe:
         self.elapsed_seconds = max(0.0, time.monotonic() - started)
         self.environment["SANITIZER_RUNS"] = str(self._actual_sanitizer_runs())
         self._cap_output()
+        probe_verdict = self._reject_foreign_image(probe_verdict)
         self._write_internal_differential_result(probe_verdict)
         print(f"[probe] verdict={probe_verdict}")
         self._record_state(probe_verdict)
@@ -838,6 +870,48 @@ class Probe:
             except ValueError:
                 continue
         return sum(values)
+
+    def _ran_binary(self) -> str:
+        return self.environment.get(
+            f"{self.sanitizer.upper()}_GENERIC_BIN"
+            if self.sanitizer in {"asan", "ubsan", "msan", "tsan"}
+            else "ASAN_GENERIC_BIN",
+            "",
+        )
+
+    def _reject_foreign_image(self, probe_verdict: str) -> str:
+        """Downgrade a diagnostic that did not come from the binary we built.
+
+        This runs before the verdict is recorded, not at filing time. A CRASH
+        written to run state is already a measurement: it raises the strategy's
+        crash yield, marks the session productive, and can satisfy a work
+        card's evidence gate. Refusing only the bundle would leave all of that
+        standing behind a diagnostic about some other binary.
+
+        `NO_EXEC` is what the run actually established — output exists, but it
+        does not attribute a target execution — so nothing downstream needs a
+        new verdict to understand.
+        """
+        if probe_verdict != "CRASH":
+            return probe_verdict
+        try:
+            foreign = foreign_crash_images(
+                self.output.read_text(encoding="utf-8", errors="replace"),
+                self._ran_binary(),
+            )
+        except OSError:
+            return probe_verdict
+        if not foreign:
+            return probe_verdict
+        print(
+            f"[probe] NOT A TARGET CRASH: the diagnostic came from {foreign[0]}, "
+            "which bin/probe did not build. A HARNESS must reach the target "
+            "itself, so the binary that crashes is the one probe compiled and a "
+            "bundle can ship it; handing control to a separately built binary "
+            "leaves evidence about that binary instead.",
+            file=sys.stderr,
+        )
+        return "NO_EXEC"
 
     def _classify(self, returncode: int) -> str:
         if self.output.is_file() and self.output.stat().st_size:
@@ -973,12 +1047,7 @@ class Probe:
                 self.sanitizer, self.mode, harness=self.harness_source, args=self.repro_args,
                 target=self.header["target"], hypothesis=self.header["hypothesis"],
                 card=self.card, strategy=strategy,
-                binary=self.environment.get(
-                    f"{self.sanitizer.upper()}_GENERIC_BIN"
-                    if self.sanitizer in {"asan", "ubsan", "msan", "tsan"}
-                    else "ASAN_GENERIC_BIN",
-                    "",
-                ),
+                binary=self._ran_binary(),
                 build_config=self.selected_build_config,
                 build_recipe=(
                     build_config.recipe_path(self.config.target_root, self.selected_build_config)

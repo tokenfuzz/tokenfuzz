@@ -150,6 +150,12 @@ testcase, and records the verdict in `state/runs.jsonl`.
   compilation. Injected process state is not a testcase-derived public
   boundary; ordinary linked API and file/protocol launcher harnesses remain
   supported.
+- A confirmed crash is filed only when the diagnostic came from the binary
+  `bin/probe` built. If the sanitizer names a module under the agent's scratch
+  tree that probe did not compile, or puts the crashing process's `main` in a
+  scratch source that is not the harness, the crash describes a separately
+  built binary and no bundle could ship it, so it is not filed. Harnesses that
+  drive the target's own executable are unaffected.
 
 Run `bin/probe --help` for the rest.
 

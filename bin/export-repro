@@ -42,6 +42,7 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
 import cluster_common  # noqa: E402
+import crash_bundle  # noqa: E402
 import report_identity  # noqa: E402
 import sanitizer as sanitizer_policy  # noqa: E402
 import stack_frames  # noqa: E402  (runtime sys.path adjustment)
@@ -3359,10 +3360,26 @@ def main(argv: list[str]) -> int:
     )
 
     shell_wrapper = find_shell_wrapper(scan_dirs)
-    testcase = find_testcase(scan_dirs, crash_dir, audit_subdir)
-    # Resolve the harness after the testcase so a source the ASAN_RUN_HEADER
-    # names as the input is staged once (as input.*), never also as harness.*.
-    harness_src = find_harness(scan_dirs, exclude=testcase)
+    # The probe receipt names the exact pair that produced this crash, so when
+    # one exists it decides both — including "there was no harness". Discovery
+    # picks by name, which is only a guess about which of several sources ran,
+    # and a guess must not override a record. Crashes filed before receipts
+    # existed still fall through to discovery.
+    try:
+        recorded = crash_bundle.receipt_artifacts(crash_dir)
+    except crash_bundle.ReceiptError as exc:
+        # A receipt that no longer holds is the one case where there is nothing
+        # safe to export: guessing is what it exists to prevent. Report it the
+        # way every other unusable input is reported, not as a traceback.
+        die(str(exc))
+    if recorded is None:
+        testcase = find_testcase(scan_dirs, crash_dir, audit_subdir)
+        # Resolve the harness after the testcase so a source the ASAN_RUN_HEADER
+        # names as the input is staged once (as input.*), never also as harness.*.
+        harness_src = find_harness(scan_dirs, exclude=testcase)
+    else:
+        testcase, recorded_harness = recorded
+        harness_src = recorded_harness or None
 
     # ── Stage outputs in a temp dir ──────────────────────────────────
     stage = Path(tempfile.mkdtemp(prefix="export-repro-", dir=os.environ.get("TMPDIR", "/tmp")))

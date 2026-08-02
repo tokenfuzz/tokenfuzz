@@ -1459,6 +1459,67 @@ found_cpp = er.find_harness([cpp_harness_dir])
 assert_eq("harness.cpp", found_cpp.name if found_cpp else "",
           "find_harness: discovers C++ harness source")
 
+# The probe receipt decides which source ran. Discovery picks by name, so a
+# crash dir holding two main()-bearing sources otherwise exports whichever is
+# named most like a harness — which is how a bundle ships a reproducer that
+# never ran. A receipt that no longer holds must stop the export, not hand the
+# decision back to that guess.
+import crash_bundle as _cb
+
+receipt_root = TMP / "receipt-export"
+receipt_results = receipt_root / "results"
+built = receipt_root / "H-7-driver.c"
+built.parent.mkdir(parents=True, exist_ok=True)
+built.write_text("int main(void){return 0;}\n", encoding="utf-8")
+tc = receipt_root / "case.dat"
+tc.write_text("input\n", encoding="utf-8")
+san = receipt_root / "case.asan.txt"
+san.write_text("ERROR: AddressSanitizer: heap-buffer-overflow\n", encoding="utf-8")
+_, rid = _cb.materialize(receipt_results, "1", tc, san, "asan", "generic", harness=built)
+rdir = receipt_results / "crashes" / rid
+(rdir / "harness.c").write_text("int main(void){return 1;}\n", encoding="utf-8")
+
+recorded = _cb.receipt_artifacts(rdir)
+assert_eq("H-7-driver.c", getattr(recorded[1], "name", ""),
+          "receipt_artifacts: the recorded harness beats a harness-named sibling")
+assert_eq("case.dat", getattr(recorded[0], "name", ""),
+          "receipt_artifacts: the receipt binds the testcase too")
+
+(rdir / ".probe-context.json").write_text("{ broken json", encoding="utf-8")
+_raised = ""
+try:
+    _cb.receipt_artifacts(rdir)
+except _cb.ReceiptError as exc:
+    _raised = str(exc)
+assert_in("could not be read", _raised,
+          "receipt_artifacts: a malformed receipt stops the export")
+
+import json as _rjson
+(rdir / ".probe-context.json").write_text(_rjson.dumps({"version": 99}), encoding="utf-8")
+_raised = ""
+try:
+    _cb.receipt_artifacts(rdir)
+except _cb.ReceiptError as exc:
+    _raised = str(exc)
+assert_in("unknown", _raised,
+          "receipt_artifacts: an unknown receipt version stops the export")
+
+# Pre-v4 receipts are refused the same way. History wrote v1-v3 and nothing
+# re-probes them automatically, so exporting one is an intentional stop with a
+# re-probe message rather than a silent return to guessing.
+(rdir / ".probe-context.json").write_text(_rjson.dumps({"version": 2}), encoding="utf-8")
+_raised = ""
+try:
+    _cb.receipt_artifacts(rdir)
+except _cb.ReceiptError as exc:
+    _raised = str(exc)
+assert_in("Re-probe the testcase", _raised,
+          "receipt_artifacts: a pre-v4 receipt stops the export with a next step")
+
+(rdir / ".probe-context.json").unlink()
+assert_eq(None, _cb.receipt_artifacts(rdir),
+          "receipt_artifacts: a crash with no receipt still allows discovery")
+
 
 # 5f. C-harness reproduce.sh handles missing / placeholder asan_lib.
 #
@@ -1916,6 +1977,21 @@ result = subprocess.run(
 ok = result.returncode == 0
 assert_eq(0, result.returncode,
           f"export-repro exits 0 (stdout={result.stdout[-200:]!r} stderr={result.stderr[-200:]!r})")
+
+# A receipt that no longer holds stops the export through normal error
+# handling: guessing which source ran is what the receipt exists to prevent.
+broken_dir = crash_dir.parent / "CRASH-BROKEN-1"
+shutil.copytree(crash_dir, broken_dir, dirs_exist_ok=True)
+(broken_dir / ".probe-context.json").write_text("{ broken json", encoding="utf-8")
+broken = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), "CRASH-BROKEN-1"],
+    capture_output=True, text=True, env=env, cwd=output_root,
+)
+assert_eq(1, broken.returncode, "export-repro: a broken receipt exits non-zero")
+assert_in("could not be read", broken.stderr,
+          "export-repro: a broken receipt is reported, not raised as a traceback")
+assert_in("Re-probe the testcase", broken.stderr,
+          "export-repro: a broken receipt names the next step")
 
 if ok:
     # Assert bundle files exist.

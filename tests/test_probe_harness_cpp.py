@@ -307,6 +307,40 @@ class ProbeCppHarnessTests(unittest.TestCase):
                 self.assertIn("dynamic-loader interposition", proc.stdout + proc.stderr)
                 self.assertFalse(count.exists(), "carrier reached the compiler")
 
+    def test_foreign_crash_images_reads_only_an_unambiguous_module(self) -> None:
+        import importlib.machinery
+        import importlib.util
+
+        loader = importlib.machinery.SourceFileLoader("probe_mod", str(ROOT / "bin" / "probe"))
+        spec = importlib.util.spec_from_loader("probe_mod", loader)
+        probe = importlib.util.module_from_spec(spec)
+        loader.exec_module(probe)
+
+        ran = "/w/results/scratch-2/.harness-cache/H-1-runner.c.abc.bin"
+
+        def foreign(text: str) -> list:
+            return probe.foreign_crash_images(text, ran)
+
+        # A module under scratch that probe did not build.
+        self.assertTrue(foreign(
+            "SUMMARY: AddressSanitizer: bad (/w/results/scratch-2/driver.bin:arm64+0x10)\n"))
+        # The binary probe built.
+        self.assertFalse(foreign(
+            "SUMMARY: AddressSanitizer: bad "
+            "(/w/results/scratch-2/.harness-cache/H-1-runner.c.abc.bin:arm64+0x10)\n"))
+        # The target's own build and the system libraries.
+        self.assertFalse(foreign(
+            "SUMMARY: AddressSanitizer: bad (/t/build-asan/ffmpeg:arm64+0x10)\n"))
+        self.assertFalse(foreign(
+            "SUMMARY: AddressSanitizer: bad (/usr/lib/libsystem.dylib:arm64e+0x34)\n"))
+        # A frame's source file is never dispositive: it arrives as a bare name
+        # often enough that matching it would reject a target source that
+        # happens to share a name with something in scratch.
+        self.assertFalse(foreign("    #3 0x1 in main main.c:10\n"))
+        self.assertFalse(foreign("    #5 0x1 in main /w/results/scratch-2/driver.c:49\n"))
+        # A fully symbolized report names no module at all.
+        self.assertFalse(foreign("    #0 0x1 in parse src/parse.c:10\n"))
+
     def test_non_carrier_api_and_input_launcher_harnesses_are_allowed(self) -> None:
         harness = self.scratch / "commented.cpp"
         harness.write_text(

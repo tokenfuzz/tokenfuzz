@@ -580,6 +580,63 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "duplicate confirmation does not rewrite the filing clock",
     )
 
+    # A crash directory can hold more than one main()-bearing source; only the
+    # receipt says which one probe compiled, so exporters must read it rather
+    # than pick by name — and must not fall back to a guess when it says
+    # something they dislike.
+    built_harness = root / "H-9-driver.c"
+    built_harness.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+    harness_case = root / "harness-bundle.dat"
+    harness_case.write_text("input\n", encoding="utf-8")
+    _, harness_id = crash_bundle.materialize(
+        bundle_results, "2", harness_case, bundle_san, "asan", "generic",
+        harness=built_harness,
+    )
+    harness_dir = bundle_results / "crashes" / harness_id
+    (harness_dir / "harness.c").write_text(
+        "int main(void) { return 1; }\n", encoding="utf-8",
+    )
+    recorded = crash_bundle.receipt_artifacts(harness_dir)
+    equal(
+        built_harness.name, getattr(recorded[1], "name", None),
+        "recorded harness wins over a harness-named sibling in the crash dir",
+    )
+    equal(
+        harness_case.name, getattr(recorded[0], "name", None),
+        "the receipt binds the testcase too, not only the harness",
+    )
+
+    nocase = root / "no-harness.dat"
+    nocase.write_text("input\n", encoding="utf-8")
+    _, nohar_id = crash_bundle.materialize(
+        bundle_results, "2", nocase, bundle_san, "asan", "generic",
+    )
+    nohar_dir = bundle_results / "crashes" / nohar_id
+    (nohar_dir / "harness.c").write_text(
+        "int main(void) { return 1; }\n", encoding="utf-8",
+    )
+    equal(
+        False, crash_bundle.receipt_artifacts(nohar_dir)[1],
+        "a receipt recording no harness does not send the caller back to discovery",
+    )
+
+    (harness_dir / built_harness.name).write_text(
+        "int main(void) { return 2; }\n", encoding="utf-8",
+    )
+    raised = ""
+    try:
+        crash_bundle.receipt_artifacts(harness_dir)
+    except crash_bundle.ReceiptError as exc:
+        raised = str(exc)
+    check(
+        "does not match the evidence" in raised,
+        "an edited harness fails the receipt loudly instead of exporting a guess",
+    )
+    equal(
+        None, crash_bundle.receipt_artifacts(root / "no-such-crash"),
+        "a crash with no receipt still leaves discovery in charge",
+    )
+
     original_path_open = Path.open
 
     def fail_bundle_index(path, *args, **kwargs):
