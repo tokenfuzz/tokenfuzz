@@ -321,7 +321,9 @@ def _rejected_label(value: object, upper_bound: bool) -> object:
     return f"up to {value}" if upper_bound else value
 
 
-def _unique_with_medium_plus(unique: int, medium_plus: int) -> str:
+def _unique_with_medium_plus(
+    unique: int, medium_plus: int, unadjudicated: int = 0,
+) -> str:
     """Label a unique-cluster count with its Medium+ subset: `6 (1 M+)`.
 
     The parenthetical surfaces how many of the deduplicated reports the
@@ -329,10 +331,18 @@ def _unique_with_medium_plus(unique: int, medium_plus: int) -> str:
     without dropping the Low/unscored remainder from the headline count.
     A gate on the count itself would zero out findings whose severity is
     still blank/Pending (rank 0). An empty cell stays a bare `0`.
+
+    Reports that never reached a verdict are carried alongside rather than
+    folded into the count. A cell has no way to say "nothing survived review"
+    and "review did not finish" with the same `0`, and the two support opposite
+    conclusions about the condition — so an unjudged remainder is always
+    shown, including next to a zero.
     """
+    unjudged = f"{unadjudicated} unjudged" if unadjudicated > 0 else ""
     if not unique:
-        return "0"
-    return f"{unique} ({medium_plus} M+)"
+        return f"0 ({unjudged})" if unjudged else "0"
+    inner = f"{medium_plus} M+" + (f", {unjudged}" if unjudged else "")
+    return f"{unique} ({inner})"
 
 
 def _condition_pool_dir(bench_dir: Path, condition: str, kind: str) -> Path:
@@ -4590,7 +4600,8 @@ def render_section(report: dict) -> str:
                 uf=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
-                        c.get("medium_plus_findings", 0)),
+                        c.get("medium_plus_findings", 0),
+                        _as_int(c.get("unadjudicated_finding_total"))),
                     cond_findings, "FINDING-CLUSTERS"),
                 rfi=_artifact_report_link(
                     _rejected_label(
@@ -5139,7 +5150,8 @@ def crosstab(bench_root: Path) -> str:
                 uf=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
-                        c.get("medium_plus_findings", 0)),
+                        c.get("medium_plus_findings", 0),
+                        _as_int(c.get("unadjudicated_finding_total"))),
                     findings_dir, "FINDING-CLUSTERS")),
                 rcr=("Pending" if provisional else _rejected_cell(
                     c.get("unique_rejected_crash_clusters"),
@@ -5312,7 +5324,11 @@ def crosstab(bench_root: Path) -> str:
         "- **Unique accepted findings** — reports that survived review and an "
         "agent's own investigation, with no accepted crash behind them, "
         "duplicates merged. Shown as `N (M M+)`: `N` distinct problems, `M` of "
-        "them scored Medium or higher. The count links to the report."
+        "them scored Medium or higher. The count links to the report. A "
+        "`K unjudged` term means `K` reports never reached a verdict — review "
+        "ran out of its finalization budget before reading them, or read them "
+        "without reaching one. They count as unconfirmed either way, so read "
+        "the cell as a floor, not as a measured yield."
     )
     lines.append("")
     lines.append(

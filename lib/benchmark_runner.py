@@ -2398,6 +2398,19 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         results, args.backend, model,
                         require_trigger_confirmation=require_trigger_confirmation,
                     )
+                    # A drain that runs out of finalize_wall leaves findings
+                    # unjudged, and every one of them counts as unconfirmed —
+                    # so the cell reports a yield it never actually measured.
+                    # The regenerate path already says this; a live run is
+                    # where an operator can still act on it.
+                    unjudged = summary.get("findings_unadjudicated", 0)
+                    if args.validate_findings and unjudged:
+                        log(
+                            f"WARN: {name} has {unjudged} finding(s) still "
+                            "un-adjudicated after drain; they count as "
+                            "unconfirmed. Raise --finalize-wall or re-run "
+                            "`bin/benchmark --regenerate` to finish the gate"
+                        )
                     _write_json(cell_dir / "metrics.json", summary)
                 else:
                     summary = {"exists": False}

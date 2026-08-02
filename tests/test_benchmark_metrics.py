@@ -1493,5 +1493,46 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIn("| 3 | 0 |", text)
 
 
+    def test_accepted_findings_cell_separates_none_survived_from_none_judged(
+        self,
+    ) -> None:
+        # A drain cut short by finalize_wall leaves findings unjudged, and they
+        # count as unconfirmed. Without the remainder the cell reads "this
+        # condition found nothing", which is the opposite conclusion.
+        self.assertEqual("0", benchmark._unique_with_medium_plus(0, 0))
+        self.assertEqual(
+            "0 (172 unjudged)", benchmark._unique_with_medium_plus(0, 0, 172),
+        )
+        self.assertEqual("6 (3 M+)", benchmark._unique_with_medium_plus(6, 3))
+        self.assertEqual(
+            "6 (3 M+, 4 unjudged)", benchmark._unique_with_medium_plus(6, 3, 4),
+        )
+
+    def test_crosstab_tells_the_reader_what_an_unjudged_remainder_means(self) -> None:
+        run = self.root / "unjudged" / "codex" / "20260202-000000"
+        report = {
+            "run": {
+                "runid": "20260202-000000", "target": "sample",
+                "backend": "codex", "model": "codex-test",
+            },
+            "bench_dir": str(run),
+            "conditions": [{
+                "condition": "model-direct", "replicates_done": 1,
+                "replicates_total": 1, "wall_median": 3600,
+                "unique_finding_clusters": 0, "medium_plus_findings": 0,
+                "unadjudicated_finding_total": 172, "tokens": {},
+                "validation_waterfall": {
+                    "crashes": {"candidates": 0, "lanes": {}},
+                    "findings": {"candidates": 19, "lanes": {"reportable": 0}},
+                },
+            }],
+        }
+        self.write_json(run / "report.json", report)
+        text = benchmark.crosstab(self.root / "unjudged")
+        self.assertIn("172 unjudged", text)
+        self.assertIn("read the cell as a floor, not as a measured yield", text)
+        self.assertIn("172 unjudged", benchmark.render_section(report))
+
+
 if __name__ == "__main__":
     unittest.main()

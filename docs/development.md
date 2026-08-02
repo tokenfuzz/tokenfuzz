@@ -209,10 +209,16 @@ anything. Three settled rules — do not re-derive them per change:
 2. **The only exclusion is provider-withheld capacity, capped.** A quota reset
    is the vendor removing time from whichever condition straddles it, not work
    either side chose to do. `PROVIDER_PAUSE_MAX_SECONDS` bounds it.
-3. **Post-cell adjudication is untimed, identical for both conditions, and
-   cannot add an artifact.** Terminal crash triage and the find-gate drain
-   score what is already on disk; that is measurement, and it runs under
-   `finalize_wall` rather than the audit wall.
+3. **Post-cell adjudication runs off the audit wall, under one policy and one
+   cap for both conditions, and cannot add an artifact.** Terminal crash triage
+   and the find-gate drain score what is already on disk; that is measurement,
+   and it runs under `finalize_wall` rather than the audit wall. Equal policy
+   is not equal completion: a condition that files more artifacts can exhaust
+   `finalize_wall` and leave some unadjudicated, which counts as unconfirmed
+   and is reported as an unjudged remainder beside the count. Read such a cell
+   as a floor. `finalize_wall` bounds when another bounded group of artifacts
+   may *start*, not when adjudication stops: a group already in flight runs to
+   a recorded disposition, because votes that never become one bought nothing.
 
 The trap rule 1 defends against: excluding a stall converts a performance bug
 into extra budget. A cell that spends 24% of its wall in housekeeping would
