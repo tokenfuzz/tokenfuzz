@@ -161,6 +161,65 @@ class ProbeAutoRouteTests(unittest.TestCase):
         self.assertEqual(runs[0]["card_id"], "WORK-raw")
         self.assertEqual(runs[0]["verdict"], "CLEAN")
 
+    def recorded_run(self) -> dict:
+        state = self.results / "state"
+        runs = [
+            json.loads(line)
+            for line in (state / "runs.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(len(runs), 1)
+        return runs[0]
+
+    def prepare_hypothesis(self) -> None:
+        state = self.results / "state"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "hypotheses.jsonl").write_text(json.dumps({
+            "id": "H-route", "agent": "1", "card_id": "WORK-route",
+            "file": "src/pcre2_jit_compile.c:compile:42",
+            "status": "INVESTIGATING",
+        }) + "\n", encoding="utf-8")
+
+    def test_recorded_duration_covers_the_execution_that_produced_the_verdict(self) -> None:
+        """A run count cannot see inside a harness; the wall it took can.
+
+        `_auto_route` re-runs the whole command once per candidate build and
+        the recorded verdict comes from that later run, so timing only the
+        canonical attempt would undercount exactly the multi-build probes the
+        measurement exists to reveal.
+        """
+        self.prepare_hypothesis()
+        # Only the routed leg is slow, so its cost cannot be confused with
+        # interpreter start-up on the canonical attempt.
+        self.write_runner(self.canonical, False)
+        self.write_runner(self.sibling, True)
+        text = self.sibling.read_text(encoding="utf-8")
+        self.sibling.write_text(
+            text.replace("print(", "import time; time.sleep(1.5); print(", 1),
+            encoding="utf-8",
+        )
+
+        proc = self.run_probe()
+        self.assertRegex(proc.stdout + proc.stderr, r"(?m)^\[probe\] ROUTED: ")
+        duration = self.recorded_run()["duration_seconds"]
+        self.assertGreaterEqual(
+            duration, 1.4,
+            "duration must span the routed execution the verdict came from",
+        )
+
+    def test_an_unrouted_probe_still_records_its_duration(self) -> None:
+        self.prepare_hypothesis()
+        self.write_runner(self.canonical, True)
+        text = self.canonical.read_text(encoding="utf-8")
+        self.canonical.write_text(
+            text.replace("print(", "import time; time.sleep(0.3); print(", 1),
+            encoding="utf-8",
+        )
+
+        proc = self.run_probe(PROBE_AUTO_ROUTE="0")
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertGreaterEqual(self.recorded_run()["duration_seconds"], 0.3)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

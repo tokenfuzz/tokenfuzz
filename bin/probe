@@ -493,6 +493,9 @@ class HarnessBuilder:
 class Probe:
     def __init__(self, args: argparse.Namespace):
         self.args = args
+        # None until `execute` times a run. Recording a state row without one
+        # would mean the control flow changed, so it must not read as 0.0.
+        self.elapsed_seconds: float | None = None
         self.testcase = self._resolve_testcase(Path(args.testcase))
         self.config = load_config(self.testcase)
         self.testcase = self.testcase.resolve()
@@ -803,10 +806,16 @@ class Probe:
         )
         if Path(self.command[0]).name == "run-sanitizer-multi":
             self.actual_runs_path.write_text("0\n", encoding="utf-8")
+        started = time.monotonic()
         completed = subprocess.run(self.command, env=self.environment, check=False)
         result = completed.returncode
         probe_verdict = self._classify(result)
         result, probe_verdict = self._auto_route(result, probe_verdict)
+        # Stop after routing, not after the first attempt: `_auto_route` re-runs
+        # the whole command once per candidate build, and the recorded verdict
+        # is the one it returns. Timing only the canonical attempt would
+        # undercount exactly the multi-build probes worth seeing.
+        self.elapsed_seconds = max(0.0, time.monotonic() - started)
         self.environment["SANITIZER_RUNS"] = str(self._actual_sanitizer_runs())
         self._cap_output()
         self._write_internal_differential_result(probe_verdict)
@@ -927,6 +936,10 @@ class Probe:
             "--asan-output", str(self.output), "--verdict", probe_verdict,
             "--sanitizer", self.sanitizer,
             "--sanitizer-runs", self.environment["SANITIZER_RUNS"],
+            *(
+                ["--duration-seconds", f"{self.elapsed_seconds:.3f}"]
+                if self.elapsed_seconds is not None else []
+            ),
         )
         if probe_verdict == "CRASH" and self.sanitizer != "runner":
             self._state_command(

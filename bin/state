@@ -228,6 +228,7 @@ def main(argv: list[str]) -> int:
     p_run.add_argument("--verdict", required=True)
     p_run.add_argument("--sanitizer", default="", help="sanitizer selected by bin/probe")
     p_run.add_argument("--sanitizer-runs", default="", help="SANITIZER_RUNS count for this run (1 default, 5 for --confirm)")
+    p_run.add_argument("--duration-seconds", default="", help="wall seconds the target execution took, so a sweep is not counted as one cheap run")
     p_run.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_note = sub.add_parser("add-note")

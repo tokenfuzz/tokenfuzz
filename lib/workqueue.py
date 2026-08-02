@@ -13,6 +13,7 @@ import contextlib
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -4527,6 +4528,27 @@ def strategy_completion_status(ctx: Context, agent: str, strategy: str) -> dict:
     }
 
 
+def _run_duration_seconds(value: object) -> float | None:
+    """Seconds a probe execution took, or None when that is not known.
+
+    A run count cannot see inside an agent-authored harness: one invocation
+    can carry a single call or hundreds of thousands. The wall it consumed is
+    the only measure of that visible from outside, so it is worth recording —
+    but only where it was actually measured. Unknown is not zero, and a
+    non-finite value is not JSON.
+    """
+    text = str(value if value is not None else "")
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return round(seconds, 3)
+
+
 def strategy_yield(ctx: Context) -> dict:
     """Read-only attribution of probe outcomes to the strategy that drove them.
 
@@ -4561,9 +4583,14 @@ def strategy_yield(ctx: Context) -> dict:
         b = buckets.setdefault(
             strategy,
             {"strategy": strategy, "runs": 0, "crash": 0,
-             "clean": 0, "no_exec": 0, "other": 0},
+             "clean": 0, "no_exec": 0, "other": 0,
+             "seconds": 0.0, "timed_runs": 0},
         )
         b["runs"] += 1
+        seconds = _run_duration_seconds(run.get("duration_seconds"))
+        if seconds is not None:
+            b["seconds"] += seconds
+            b["timed_runs"] += 1
         # Only CLEAN is a clean execution. Unknown/auxiliary verdicts
         # (EXEC_FAIL, REGEX, NO_HIT, MISSED, TIMEOUT, ...) bucket under
         # `other` rather than silently inflating `clean`.
@@ -4578,6 +4605,15 @@ def strategy_yield(ctx: Context) -> dict:
     rows = []
     for b in buckets.values():
         b["yield"] = round(b["crash"] / b["runs"], 3) if b["runs"] else 0.0
+        b["seconds"] = round(b["seconds"], 1)
+        b["untimed_runs"] = b["runs"] - b["timed_runs"]
+        # Averaged over the rows that were actually measured, never over every
+        # row: a resumed session carries rows written before durations existed,
+        # and counting those as free probes makes the strategy that consumed
+        # the session look like the cheapest one on the board.
+        b["seconds_per_timed_run"] = (
+            round(b["seconds"] / b["timed_runs"], 1) if b["timed_runs"] else 0.0
+        )
         rows.append(b)
     rows.sort(key=lambda r: (-r["yield"], -r["runs"], r["strategy"]))
     return {"strategies": rows}
@@ -4726,6 +4762,9 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
         )
     except (TypeError, ValueError):
         sanitizer_runs = 1
+    # Absent, negative, or non-finite is unknown, never zero: a zero would
+    # average in as a free probe, and an infinity is not serialisable JSON.
+    duration_seconds = _run_duration_seconds(getattr(args, "duration_seconds", ""))
     row = {
         "id": rid,
         "agent": args.agent,
@@ -4740,6 +4779,8 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
         "sanitizer_runs": sanitizer_runs,
         "created_at": now_iso(),
     }
+    if duration_seconds is not None:
+        row["duration_seconds"] = duration_seconds
     append_jsonl(state_dir(ctx.results_dir) / "runs.jsonl", row)
     return row
 

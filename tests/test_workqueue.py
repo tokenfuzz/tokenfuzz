@@ -24,6 +24,11 @@ import report_identity
 import workqueue
 
 
+def _reject_json_constant(name: str):
+    """Python accepts `Infinity`/`NaN`; the JSON spec does not."""
+    raise AssertionError(f"runs.jsonl emitted non-JSON constant {name!r}")
+
+
 class WorkQueueTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="workqueue-")
@@ -1195,6 +1200,68 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(yields["S5"]["other"], 1)
         completion = workqueue.strategy_completion_status(self.ctx, "1", "S8")
         self.assertTrue(completion["complete"])
+
+    def test_run_effort_is_recorded_in_seconds_not_only_invocations(self) -> None:
+        """A run count cannot see inside an agent-authored sweep.
+
+        One invocation can carry a single call or hundreds of thousands, so a
+        strategy that consumed the session reads exactly like one that cost
+        seconds when effort is judged by counting runs.
+        """
+        self.write_cards([
+            self.card("WORK-SWEEP", "src/a.c", strategy="S7"),
+            self.card("WORK-AIMED", "src/b.c", strategy="S5"),
+        ])
+        self.add_hypothesis(hyp_id="H-SWEEP", card_id="WORK-SWEEP", strategy="S7")
+        self.add_hypothesis(hyp_id="H-AIMED", card_id="WORK-AIMED", strategy="S5")
+        self.add_run(
+            card_id="WORK-SWEEP", hypothesis_id="H-SWEEP", verdict="CLEAN",
+            duration_seconds="6840.5",
+        )
+        self.add_run(
+            card_id="WORK-AIMED", hypothesis_id="H-AIMED", verdict="CLEAN",
+            index=2, duration_seconds="3.25",
+        )
+
+        rows = {r["strategy"]: r for r in workqueue.strategy_yield(self.ctx)["strategies"]}
+        self.assertEqual(rows["S7"]["runs"], rows["S5"]["runs"])
+        self.assertEqual(rows["S7"]["seconds"], 6840.5)
+        self.assertEqual(rows["S5"]["seconds"], 3.2)
+        self.assertGreater(
+            rows["S7"]["seconds_per_timed_run"], rows["S5"]["seconds_per_timed_run"],
+        )
+
+        # Unknown is not zero. A resumed session carries rows written before
+        # durations existed; averaging those in as free probes would make the
+        # strategy that consumed the session read as the cheapest one.
+        for index in range(3, 13):
+            self.add_run(card_id="WORK-AIMED", hypothesis_id="H-AIMED",
+                         verdict="CLEAN", index=index)
+        self.add_run(card_id="WORK-AIMED", hypothesis_id="H-AIMED",
+                     verdict="CLEAN", index=13, duration_seconds="not-a-number")
+        rows = {r["strategy"]: r for r in workqueue.strategy_yield(self.ctx)["strategies"]}
+        self.assertEqual(rows["S5"]["runs"], 12)
+        self.assertEqual(rows["S5"]["timed_runs"], 1)
+        self.assertEqual(rows["S5"]["untimed_runs"], 11)
+        self.assertEqual(rows["S5"]["seconds"], 3.2)
+        self.assertEqual(
+            rows["S5"]["seconds_per_timed_run"], 3.2,
+            "eleven unmeasured rows must not dilute the one measurement",
+        )
+
+    def test_an_unmeasurable_duration_never_reaches_the_run_record(self) -> None:
+        """`Infinity` is not JSON, and a negative wall is not a measurement."""
+        self.write_cards([self.card("WORK-A", "src/a.c", strategy="S7")])
+        for index, value in enumerate(("1e309", "-4", "nan", "", "not-a-number"), start=1):
+            with self.subTest(value=value):
+                row = self.add_run(index=index, duration_seconds=value)
+                self.assertNotIn("duration_seconds", row)
+        good = self.add_run(index=9, duration_seconds="12.5")
+        self.assertEqual(good["duration_seconds"], 12.5)
+        # Every row round-trips through strict JSON.
+        text = (self.results / "state" / "runs.jsonl").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            json.loads(line, parse_constant=_reject_json_constant)
 
     def test_rank_work_cli_preserves_and_merges_external_card_sources(self) -> None:
         source = self.target / "src/parser.py"

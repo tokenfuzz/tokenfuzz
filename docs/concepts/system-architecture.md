@@ -107,7 +107,16 @@ A single execution gate (`bin/probe`) runs every testcase. It:
 - reads the testcase header;
 - picks the right runner (browser, JS shell, generic CLI, C/C++ or
   language harness, or the configured `[runner]`);
-- captures output and writes the result to `state/runs.jsonl`.
+- captures output and writes the result to `state/runs.jsonl`, including
+  the wall seconds the execution took — spanning sibling-build routing,
+  since the recorded verdict can come from a routed candidate. A harness
+  can loop internally, so one recorded run may stand for a single call or
+  for hundreds of thousands; the count alone cannot tell those apart.
+  `bin/state strategy-yield` therefore reports `seconds`, `timed_runs`,
+  `untimed_runs`, and `seconds_per_timed_run` beside `runs`, so a strategy
+  that consumed the session does not read as a cheap one. Rows written
+  before durations were recorded, or by a caller that supplies none, count
+  as untimed rather than as free probes.
 
 For API-level testcases, the runner can compile a sibling harness
 source file, cache the compiled binary, and link it against the
