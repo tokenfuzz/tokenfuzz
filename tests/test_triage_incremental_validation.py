@@ -808,6 +808,111 @@ Generated score text.
                 directory / "report.md", directory / ".trigger-gate.json",
             ))
 
+    def _pending_findings(self, count: int, first: int) -> list[Path]:
+        directories = []
+        for index in range(count):
+            directory = self.root / "findings" / f"FIND-{index + first:03d}"
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "report.md").write_text(
+                "# State issue\n\nA public request crosses a boundary.\n",
+                encoding="utf-8",
+            )
+            directories.append(directory)
+        return directories
+
+    def test_a_group_reaches_dispositions_before_the_next_one_opens(self) -> None:
+        # Every stage needs two votes to conclude, so running any of them
+        # across the whole corpus first means a wall that runs out leaves the
+        # field one vote short of everything.
+        self._pending_findings(40, 400)
+        calls: list[str] = []
+
+        def quality(dirs, *_a, **_k):
+            calls.append("quality")
+            return {}
+
+        def trigger(dirs, *_a, **kwargs):
+            calls.append(kwargs.get("vote_name", ".trigger-gate.json"))
+            return set(dirs)
+
+        def finalize(directory, *_a, **_k):
+            calls.append("finalize")
+            return "rejected"
+
+        with mock.patch.object(
+            triage, "_batch_quality_votes", side_effect=quality,
+        ), mock.patch.object(
+            triage, "validate_one_finding", return_value="quality-accepted",
+        ), mock.patch.object(
+            triage, "_batch_reach_field_decisions", return_value=(set(), {}, None),
+        ), mock.patch.object(
+            triage, "_prepare_accepted_finding", return_value=None,
+        ), mock.patch.object(
+            triage, "_cached_trigger_vote", return_value="Reject",
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", side_effect=trigger,
+        ), mock.patch.object(
+            triage, "_finalize_accepted_finding", side_effect=finalize,
+        ):
+            triage.validate_find_gate(self.root, workers=1, deadline=None)
+
+        self.assertGreater(calls.count("quality"), 1, calls)
+        # Nothing from a later group may start before the first group has
+        # recorded a disposition.
+        before_first_disposition = calls[:calls.index("finalize")]
+        self.assertEqual(before_first_disposition.count("quality"), 1, calls)
+        self.assertEqual(
+            before_first_disposition.count(".trigger-gate-2.json"), 1, calls,
+        )
+
+    def test_a_group_that_consumes_the_wall_still_finishes(self) -> None:
+        # The boundary the grouping exists for: the work is paid for, then the
+        # wall expires. Finalizing only after every group would discard it and
+        # publish the same zero-completion outcome the ordering fixes.
+        directories = self._pending_findings(40, 600)
+        expired = {"yes": False}
+        finalized: list[Path] = []
+
+        def trigger(dirs, *_a, **_k):
+            expired["yes"] = True   # the first group's votes spend the wall
+            return set(dirs)
+
+        def finalize(directory, *_a, **_k):
+            finalized.append(directory)
+            return "rejected"
+
+        with mock.patch.object(
+            triage, "_batch_quality_votes", return_value={},
+        ), mock.patch.object(
+            triage, "validate_one_finding", return_value="quality-accepted",
+        ), mock.patch.object(
+            triage, "_batch_reach_field_decisions", return_value=(set(), {}, None),
+        ), mock.patch.object(
+            triage, "_prepare_accepted_finding", return_value=None,
+        ), mock.patch.object(
+            triage, "_cached_trigger_vote", return_value="Reject",
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", side_effect=trigger,
+        ), mock.patch.object(
+            triage, "_finalize_accepted_finding", side_effect=finalize,
+        ), mock.patch.object(
+            triage, "_deadline_expired", side_effect=lambda _d: expired["yes"],
+        ):
+            counts = triage.validate_find_gate(self.root, workers=1, deadline=1.0)
+
+        self.assertTrue(finalized, "the group's work was paid for and discarded")
+        self.assertGreater(counts["rejected"], 0, counts)
+        # The wall still stops the run: later groups are never opened.
+        self.assertLess(len(finalized), len(directories), len(finalized))
+        self.assertGreater(counts["pending"], 0, counts)
+        # Every finding the gate saw is accounted for exactly once, whichever
+        # group it landed in.
+        self.assertEqual(
+            sum(counts.values()),
+            len([p for p in (self.root / "findings").iterdir() if p.is_dir()]),
+            counts,
+        )
+
     def test_trigger_review_wall_covers_the_observed_review(self) -> None:
         """Every review session gets the full wall, batched or single.
 

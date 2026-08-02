@@ -3072,93 +3072,98 @@ def validate_find_gate(
     directories = [
         directory for directory in directories if directory not in cached_set
     ]
-    initial_votes = _batch_quality_votes(
-        directories, results, q, aq, timeout, deadline, workers,
-    ) if directories and not _deadline_expired(deadline) else {}
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        statuses = list(pool.map(
-            lambda directory: validate_one_finding(
-                directory, results, quorum=q, accept_quorum=aq,
-                timeout=timeout, deadline=deadline,
-                target_root_is_product=target_root_is_product,
-                initial_votes=initial_votes.get(directory),
-                defer_trigger=True,
-                reject_missing_report=reject_missing_reports,
-            ),
-            directories,
-        ))
-    accepted_quality = [
-        directory for directory, status in zip(directories, statuses)
-        if status == "quality-accepted"
-    ]
     usage_index = benchmark._find_index_jsonl(results)
-    reach_attempted, reach_decisions, _ = _batch_reach_field_decisions(
-        accepted_quality, usage_index, deadline, workers,
-    )
-    for directory in accepted_quality:
-        report = _report(directory)
-        if report is None:
+    # Carry a bounded group of findings all the way to a recorded disposition
+    # before opening the next one. Every stage here needs two votes to conclude,
+    # so running any of them breadth-first across the whole corpus means a wall
+    # that runs out mid-stage leaves the entire field one vote short of
+    # everything: one benchmark drain spent 46 of its 60 minutes producing 138
+    # single votes and not one disposition. The group is what the wall protects
+    # — once it starts, it finishes, and only the next group is skipped.
+    group_size = max(1, workers) * _DECISION_BATCH_SIZE
+    for start in range(0, len(directories), group_size):
+        group = directories[start:start + group_size]
+        if _deadline_expired(deadline):
+            counts["pending"] += len(group)
             continue
-        _prepare_accepted_finding(
-            directory, report, deadline, usage_index,
-            reach_decisions.get(directory)
-            if directory in reach_attempted else _NO_REACH_DECISION,
+        initial_votes = _batch_quality_votes(
+            group, results, q, aq, timeout, deadline, workers,
         )
-    trigger_attempted = _batch_finding_trigger_votes(
-        accepted_quality, results, deadline, usage_index,
-        target_root_is_product, workers,
-    )
-    second_trigger_directories = []
-    for directory in accepted_quality:
-        report = _report(directory)
-        if (
-            report is not None
-            and _cached_trigger_vote(
-                report, directory / ".trigger-gate.json",
-            ) == "Reject"
-        ):
-            second_trigger_directories.append(directory)
-    second_trigger_attempted = (
-        _batch_finding_trigger_votes(
-            second_trigger_directories, results, deadline, usage_index,
-            target_root_is_product, workers, vote_name=".trigger-gate-2.json",
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            statuses = list(pool.map(
+                lambda directory: validate_one_finding(
+                    directory, results, quorum=q, accept_quorum=aq,
+                    timeout=timeout, deadline=deadline,
+                    target_root_is_product=target_root_is_product,
+                    initial_votes=initial_votes.get(directory),
+                    defer_trigger=True,
+                    reject_missing_report=reject_missing_reports,
+                ),
+                group,
+            ))
+        accepted_quality = [
+            directory for directory, status in zip(group, statuses)
+            if status == "quality-accepted"
+        ]
+        reach_attempted, reach_decisions, _ = _batch_reach_field_decisions(
+            accepted_quality, usage_index, deadline, workers,
         )
-        if second_trigger_directories else set()
-    )
-    for directory, status in zip(directories, statuses):
-        if status == "quality-accepted":
+        for directory in accepted_quality:
             report = _report(directory)
-            if (
-                report is None
-                or (
-                    directory in trigger_attempted
-                    and _cached_trigger_vote(
-                        report, directory / ".trigger-gate.json",
-                    ) is None
-                )
-                or (
-                    directory in second_trigger_attempted
-                    and _cached_trigger_vote(
-                        report, directory / ".trigger-gate-2.json",
-                    ) is None
-                )
-            ):
-                # A batch was already attempted. Missing, malformed, or stale
-                # keyed output stays pending for a later bounded pass instead
-                # of immediately spawning a serial per-finding validator.
-                status = "pending"
-            else:
-                status = (
-                    _finalize_accepted_finding(
-                        directory, results, report, deadline,
-                        usage_index,
-                        target_root_is_product,
-                        prepared=True,
+            if report is None:
+                continue
+            _prepare_accepted_finding(
+                directory, report, deadline, usage_index,
+                reach_decisions.get(directory)
+                if directory in reach_attempted else _NO_REACH_DECISION,
+            )
+        trigger_attempted = _batch_finding_trigger_votes(
+            accepted_quality, results, deadline, usage_index,
+            target_root_is_product, workers,
+        )
+        second_trigger_directories = [
+            directory for directory in accepted_quality
+            if _report(directory) is not None
+            and _cached_trigger_vote(
+                _report(directory), directory / ".trigger-gate.json",
+            ) == "Reject"
+        ]
+        second_trigger_attempted = (
+            _batch_finding_trigger_votes(
+                second_trigger_directories, results, deadline, usage_index,
+                target_root_is_product, workers, vote_name=".trigger-gate-2.json",
+            )
+            if second_trigger_directories else set()
+        )
+        for directory, status in zip(group, statuses):
+            if status == "quality-accepted":
+                report = _report(directory)
+                if (
+                    report is None
+                    or (
+                        directory in trigger_attempted
+                        and _cached_trigger_vote(
+                            report, directory / ".trigger-gate.json",
+                        ) is None
                     )
-                    if report is not None and not _deadline_expired(deadline)
-                    else "pending"
-                )
-        counts[status] += 1
+                    or (
+                        directory in second_trigger_attempted
+                        and _cached_trigger_vote(
+                            report, directory / ".trigger-gate-2.json",
+                        ) is None
+                    )
+                ):
+                    # A batch was already attempted. Missing, malformed, or
+                    # stale keyed output stays pending for a later bounded pass
+                    # instead of immediately spawning a serial per-finding
+                    # validator.
+                    status = "pending"
+                else:
+                    status = _finalize_accepted_finding(
+                        directory, results, report, deadline, usage_index,
+                        target_root_is_product, prepared=True,
+                    )
+            counts[status] += 1
     return counts
 
 
