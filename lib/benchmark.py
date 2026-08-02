@@ -3395,6 +3395,11 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         if not isinstance(run_meta, dict):
             run_meta = {}
 
+    # Every cell in a run is granted the same wall, so the run is the one
+    # place that knows the denominator. 0 means unlimited: no share of the
+    # budget is knowable, and none is reported.
+    budget_wall = max(0, _as_int(run_meta.get("budget_wall")))
+
     by_condition: dict[str, list[dict]] = {}
     for cell_dir in _cell_dirs(bench_dir):
         cell = {}
@@ -3672,6 +3677,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                     "findings": finding_waterfall,
                 },
                 "wall_median": _median([float(x) for x in walls]),
+                "wall_budget_seconds": budget_wall or None,
                 # None, not 0: an absent capacity must render as the em dash
                 # `_fmt_hours` gives an unparseable value, never as "0.00h".
                 "worker_wall_median": (
@@ -4248,6 +4254,25 @@ def _fmt_hours(seconds: object) -> str:
     return f"{s / 3600:.2f}h"
 
 
+def _wall_cell(c: dict) -> str:
+    """Wall as `spent/granted` decimal hours: `0.52/5.00h`.
+
+    Spent alone cannot say whether a condition used the budget it was given,
+    so a cell that quit early reads exactly like one that ran to the deadline —
+    and the direct control is free to stop early, which is the case the reader
+    most needs to see. Carrying the denominator in the same column states it
+    where the comparison is read, without a threshold to tune.
+
+    A run with no knowable budget — `--budget-wall 0`, or a report.json
+    aggregated before this field existed — keeps the bare spent-hours form.
+    """
+    spent = _fmt_hours(c.get("wall_median"))
+    budget = c.get("wall_budget_seconds")
+    if spent == "—" or not isinstance(budget, (int, float)) or budget <= 0:
+        return spent
+    return f"{float(c['wall_median']) / 3600:.2f}/{float(budget) / 3600:.2f}h"
+
+
 def _replicates_cell(c: dict) -> str:
     """`done/total`, plus a hover-annotated `(Np)` when provider limits kept
     N replicates out of the clean totals.
@@ -4595,7 +4620,7 @@ def render_section(report: dict) -> str:
             "| {rcr} | {uc} | {sev} |".format(
                 cond=_condition_cell(c["condition"], backend),
                 rep=_replicates_cell(c),
-                wall=_fmt_hours(c.get("wall_median")),
+                wall=_wall_cell(c),
                 worker_wall=_fmt_hours(c.get("worker_wall_median")),
                 uf=_cluster_report_link(
                     _unique_with_medium_plus(
@@ -4640,7 +4665,10 @@ def render_section(report: dict) -> str:
     lines.append(
         "> **How to read this.** Each condition ran **Replicates** times "
         "under the same per-cell time budget; **Wall (h)** is the median "
-        "hours a cell actually spent. **Worker-h** is that wall times the "
+        "hours a cell actually spent over the hours it was granted "
+        "(`0.52/5.00h`), because a condition is free to stop early and a "
+        "short numerator changes what the counts beside it mean. "
+        "**Worker-h** is that spent wall times the "
         "agent seats it ran — an upper bound on effort, not measured agent "
         "time, since a seat counts through housekeeping and through any idle "
         "stretch. Read it to see that equal **Wall (h)** across conditions is "
@@ -5138,7 +5166,7 @@ def crosstab(bench_root: Path) -> str:
                 rid=run_cell,
                 tgt=target_cell,
                 cond=_condition_cell(cond, backend, model),
-                wall=_fmt_hours(c.get("wall_median")),
+                wall=_wall_cell(c),
                 reps=_replicates_cell(c),
                 # Clustering only runs at pooled finalization, so a provisional
                 # row has no honest count to show and says Pending on both sides.
@@ -5285,11 +5313,12 @@ def crosstab(bench_root: Path) -> str:
     lines.append("**Effort.**")
     lines.append("")
     lines.append(
-        "- **Wall (h)** — median hours a repeat spent actually looking, taken "
-        "across the ones that finished. Time parked waiting on a provider "
-        "session reset does not count. Harness cells usually spend their whole "
+        "- **Wall (h)** — `spent/granted` median hours, taken across the "
+        "repeats that finished. Time parked waiting on a provider session "
+        "reset counts as neither. Harness cells usually spend their whole "
         "budget; a direct cell can stop early, because the model decides when "
-        "it is done."
+        "it is done. When the two numerators differ, the counts beside them "
+        "came from unequal spend even though the grant was the same."
     )
     lines.append(
         "- **Replicates** — repeats of this condition, as `done/total`. A "

@@ -32,6 +32,7 @@ import os
 import shlex
 import stat
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -382,13 +383,28 @@ def _resolve_toml_path(target: Path, script_root: str) -> Path | None:
     return None
 
 
-def _budget_line(wall_seconds: int) -> str:
-    """State the session's wall-clock budget and the surface scale.
+def _budget_line(wall_seconds: int, *, now: datetime | None = None) -> str:
+    """State the budget as an observable deadline, not an effort estimate.
 
-    Without a stated budget both backends pace to a default ~10-60 min audit
-    session and stop far under a multi-hour budget. Naming the duration and the
-    surface scale recalibrates the single pass; it adds no probing enforcement.
+    Sizing the pass in tool calls ("many dozens") gave the model the only
+    target it could check — it has no clock — and sessions ended on reaching
+    that count, far under a multi-hour budget. Name an instant instead, and
+    say that neither coverage nor a finished-feeling pass is a stopping
+    condition. The stated command prints the deadline's own format so the
+    check is a comparison, not a conversion the model has to do at the moment
+    it is looking for a reason to stop. Minutes are the resolution that
+    matters for a multi-hour budget; the deadline rounds up to the next whole
+    minute so it is always in the future, however short the budget.
+
+    Framing only: the control is meant to spend the budget on its own
+    judgement, so nothing enforces it. The prose lives in lib/prompts with the
+    rest of the audit contract; this helper computes only its timestamp and
+    human-readable duration.
     """
+    from prompt_render import render_template  # type: ignore
+
+    clock = "date -u +'%Y-%m-%d %H:%M UTC'"
+    amount = deadline = ""
     if wall_seconds and wall_seconds > 0:
         hours = wall_seconds / 3600.0
         if hours >= 1:
@@ -397,15 +413,17 @@ def _budget_line(wall_seconds: int) -> str:
         else:
             m = max(1, round(wall_seconds / 60.0))
             amount = f"about {m} minute{'s' if m != 1 else ''}"
-        lead = f"You have {amount} of wall-clock time for this single pass — a long session."
-    else:
-        lead = "You have a long, multi-hour wall-clock budget for this single pass."
-    return (
-        f"{lead} A codebase this size holds dozens of subsystems and hundreds "
-        "of audit-worthy call paths, so a thorough pass runs to many dozens of "
-        "tool calls across many subsystems. Do not wrap up after a handful of "
-        "findings — keep moving to fresh subsystems until you have made a broad "
-        "pass or are genuinely low on time."
+        deadline = (
+            (now or datetime.now(timezone.utc))
+            + timedelta(seconds=int(wall_seconds) + 59)
+        ).strftime("%Y-%m-%d %H:%M UTC")
+    template = (
+        "benchmark_model_direct_budget.md.j2"
+        if deadline else "benchmark_model_direct_unbounded.md.j2"
+    )
+    return render_template(
+        template,
+        {"amount": amount, "clock": clock, "deadline": deadline},
     )
 
 

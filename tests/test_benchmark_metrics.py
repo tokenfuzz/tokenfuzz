@@ -1534,5 +1534,111 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIn("172 unjudged", benchmark.render_section(report))
 
 
+class BenchmarkWallBudgetTests(unittest.TestCase):
+    """Wall must be read against the budget the cell was granted.
+
+    A cell that stops far under budget aggregates as a clean replicate, and a
+    spent-only Wall column reads exactly like one that ran to the deadline —
+    so the counts beside it look like the yield of an equal experiment.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="benchmark-wall-")
+        self.root = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+
+    @staticmethod
+    def write_json(path: Path, value: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value) + "\n", encoding="utf-8")
+
+    def make_run(self, bench: Path, budget_wall: int) -> None:
+        self.write_json(bench / "run.json", {
+            "runid": "run1", "target": "sample", "backend": "claude",
+            "replicates": 1, "budget_wall": budget_wall,
+            "conditions": ["model-direct", "harness"],
+            "target_sha": "abc", "harness_sha": "def",
+        })
+
+    def make_cell(self, bench: Path, name: str, condition: str,
+                  wall_seconds: int, *, status: str = "done",
+                  run_quality: str = "clean") -> None:
+        cell = bench / "cells" / name
+        self.write_json(cell / "cell.json", {
+            "condition": condition, "replicate": 1, "status": status,
+            "run_quality": run_quality, "wall_seconds": wall_seconds,
+            "paused_seconds": 0, "wall_effective_seconds": wall_seconds,
+        })
+        self.write_json(cell / "metrics.json", {
+            "confirmed_crashes": 0, "findings": 1, "confirmed_findings": 1,
+        })
+
+    def test_aggregate_carries_the_granted_budget(self) -> None:
+        bench = self.root / "bench-agg"
+        self.make_run(bench, 18000)
+        self.make_cell(bench, "model-direct-r1", "model-direct", 1875)
+        self.make_cell(bench, "harness-r1", "harness", 17940)
+        by_condition = {
+            row["condition"]: row
+            for row in benchmark.aggregate(bench)["conditions"]
+        }
+        self.assertEqual(by_condition["model-direct"]["wall_budget_seconds"], 18000)
+        self.assertEqual(by_condition["harness"]["wall_budget_seconds"], 18000)
+
+    def test_unlimited_budget_reports_no_share(self) -> None:
+        bench = self.root / "bench-unlimited"
+        self.make_run(bench, 0)
+        self.make_cell(bench, "harness-r1", "harness", 900)
+        row = benchmark.aggregate(bench)["conditions"][0]
+        self.assertIsNone(row["wall_budget_seconds"])
+        self.assertEqual(benchmark._wall_cell(row), "0.25h")
+
+    def test_wall_column_carries_the_denominator(self) -> None:
+        self.assertEqual(
+            benchmark._wall_cell(
+                {"wall_median": 17940.0, "wall_budget_seconds": 18000}
+            ),
+            "4.98/5.00h",
+        )
+        self.assertEqual(
+            benchmark._wall_cell(
+                {"wall_median": 1875.0, "wall_budget_seconds": 18000}
+            ),
+            "0.52/5.00h",
+        )
+        # Runs predating the field keep the bare spent-hours form.
+        self.assertEqual(benchmark._wall_cell({"wall_median": 1875.0}), "0.52h")
+        self.assertEqual(
+            benchmark._wall_cell({"wall_median": 0, "wall_budget_seconds": 18000}),
+            "\u2014",
+        )
+
+    def test_short_cell_shows_its_share_and_keeps_the_verdict(self) -> None:
+        """A condition that stops early is a result, not a broken measurement.
+
+        The direct control decides for itself when it is done, so the report
+        states what it spent of what it was granted and still names the
+        strongest bug \u2014 a run-wide refusal to conclude would fire on the
+        control's normal behaviour and on a harness cell that legitimately
+        exhausts its hypotheses early.
+        """
+        report = {
+            "run": {"runid": "run1", "target": "sample", "backend": "claude",
+                    "replicates": 1, "budget_wall": 18000},
+            "conditions": [{
+                "condition": "model-direct", "replicates_done": 1,
+                "replicates_total": 1, "wall_median": 1875,
+                "wall_budget_seconds": 18000,
+            }],
+            "crash_clusters": [{
+                "id": "CRCL-1", "severity_level": "High", "severity_score": 8.0,
+                "severity_rank": 3, "conditions": ["harness"], "members": [],
+            }],
+        }
+        rendered = benchmark.render_section(report)
+        self.assertIn("0.52/5.00h", rendered)
+        self.assertIn("The strongest bug this run", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

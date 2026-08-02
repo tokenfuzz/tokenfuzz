@@ -46,7 +46,11 @@ Every cell gets the same per-cell wall-clock budget. With the defaults,
 `bin/benchmark --target <target>` runs three `model-direct` cells and
 three `harness` cells, each with a 10,800 second budget. That is six
 cells, about 18 hours of audit time if run serially, plus bounded final
-validation.
+validation. Both conditions are told when their budget ends — the direct
+prompt names a UTC deadline and a `date -u` command to check it against —
+but nothing re-enters a finished session to hold it there. A baseline driven
+back to work by the runner would measure the runner, so the Scoreboard
+reports what each condition spent of what it was granted instead.
 
 The benchmark keeps normal audit output separate. Cells run under
 isolated `bin/audit --experiment` trees, then the benchmark pools and
@@ -207,7 +211,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | --- | --- |
 | `Condition` | `tokenfuzz` or the direct baseline label. |
 | `Replicates` | `done/total`. Replicates that recovered from a mid-run provider pause got their full budget and fold in unmarked; a `(Np)` suffix flags N provider-limited replicates excluded from the totals (a same-run-id re-run retries them). |
-| `Wall (h)` | Median hours a cell spent finding things. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
+| `Wall (h)` | Median hours a cell spent finding things, over the hours it was granted (`0.52/5.00h`). Every cell in a run is granted the same wall, but a condition is free to stop early, so read the counts beside a short numerator as the yield of a shorter experiment. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
 | `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
 | `Unique accepted findings` | Distinct evidence-signature clusters of accepted non-crash security reports, shown `N (M M+)`: N clusters, M scored Medium or higher. This is not a guaranteed root-cause count. Links to the finding cluster report. |
 | `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -478,6 +479,58 @@ class BenchmarkReportTests(unittest.TestCase):
         unspecified = self.write_cell(path, results, "")
         self.assertEqual(unspecified["actual_agents"], 2)
         self.assertNotIn("requested_agents", unspecified)
+
+
+class ModelDirectBudgetLineTests(unittest.TestCase):
+    """The budget framing must give the model a checkable stopping condition.
+
+    The prior text sized the pass in tool calls and named no instant, so the
+    count was the only target the model could check against — and sessions
+    ended on reaching it, far under a multi-hour budget.
+    """
+
+    def test_budget_line_names_a_deadline_and_a_way_to_read_the_clock(self) -> None:
+        now = datetime(2026, 8, 2, 22, 50, 10, tzinfo=timezone.utc)
+        line = benchmark_model_direct_render._budget_line(18000, now=now)
+        flat = " ".join(line.split())
+        self.assertIn("about 5 hours", flat)
+        self.assertIn("ending at 2026-08-03 03:51 UTC", flat)
+        # The stated command must print the deadline's own format, or the
+        # check the model is asked to make is a conversion, not a comparison.
+        self.assertIn("date -u +'%Y-%m-%d %H:%M UTC'", line)
+        self.assertIn("before you write any closing summary", flat)
+
+    def test_deadline_rounds_up_so_it_is_never_the_current_minute(self) -> None:
+        now = datetime(2026, 8, 2, 22, 50, 10, tzinfo=timezone.utc)
+        line = benchmark_model_direct_render._budget_line(30, now=now)
+        self.assertIn("ending at 2026-08-02 22:51 UTC", " ".join(line.split()))
+
+    def test_budget_line_no_longer_anchors_effort_on_a_tool_call_count(self) -> None:
+        for wall in (0, 900, 18000):
+            line = benchmark_model_direct_render._budget_line(wall)
+            self.assertNotIn("many dozens", line)
+            self.assertNotIn("tool calls", line)
+            self.assertIn("stopping conditions", line)
+
+    def test_unbudgeted_render_states_no_deadline_it_cannot_know(self) -> None:
+        line = benchmark_model_direct_render._budget_line(0)
+        self.assertNotIn("deadline", line.lower())
+        self.assertNotIn("date -u", line)
+        self.assertIn("genuinely broad pass", line)
+
+    def test_rendered_prompt_carries_the_deadline_framing(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="budget-line-")
+        self.addCleanup(temporary.cleanup)
+        managed = Path(temporary.name) / "managed"
+        managed.mkdir()
+        (managed / "target.toml").write_text(
+            'target = "sample"\n[sanitizer]\nenabled = []\n', encoding="utf-8"
+        )
+        body = benchmark_model_direct_render.render(
+            str(managed), "/abs/out", str(ROOT), 18000,
+        )
+        self.assertIn("date -u", body)
+        self.assertNotIn("many dozens", body)
 
 
 if __name__ == "__main__":
