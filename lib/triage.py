@@ -233,31 +233,48 @@ def _record_unreachable_route(directory: Path, results_dir: Path) -> None:
     answer. Recording the route is advisory only: it never removes a card and
     never blocks a claim, so a different route to the same defect stays open.
     """
-    rows: list[dict] = []
+    row: dict | None = None
     for name in (".trigger-gate.json", ".trigger-gate-2.json"):
         vote = _finding_cache(directory / name)
-        anchors = vote.get("anchors") or []
         summary = _unreachable_route_summary(vote.get("disproof", ""))
-        if not isinstance(anchors, list) or not anchors or not summary:
+        anchors = vote.get("anchors") or []
+        # An unverified anchor set is the reviewer's unchecked claim about
+        # where the code is; keying advice on it would put the note on a file
+        # nobody confirmed it belongs to.
+        if (
+            not summary or vote.get("anchors_verified") is False
+            or not isinstance(anchors, list)
+        ):
             continue
-        anchor = anchors[0] if isinstance(anchors[0], dict) else {}
-        path = workqueue.normalized_relpath(str(anchor.get("path", "")))
-        if not path:
+        sites = [
+            {
+                "file": workqueue.normalized_relpath(str(a.get("path", ""))),
+                "symbol": str(a.get("symbol", "")),
+                "line": a.get("line", ""),
+            }
+            for a in anchors if isinstance(a, dict) and a.get("path")
+        ]
+        sites = [s for s in sites if s["file"]]
+        if not sites:
             continue
-        rows.append({
-            "file": path,
-            "symbol": str(anchor.get("symbol", "")),
-            "line": anchor.get("line", ""),
+        # Every verified anchor, not just the first: the schema fixes no
+        # primary, and on the measured runs the leading anchor was a
+        # different file from the reported one 17 times in 61. Landing the
+        # note on each file the disproof actually names is the recoverable
+        # error; landing it on none of them is not.
+        row = {
+            "sites": sites,
             "artifact": directory.name,
+            "lane": directory.parent.name,
             "summary": summary,
             "recorded_at": workqueue.now_iso(),
-        })
+        }
         break
-    if not rows:
+    if row is None:
         return
     try:
         workqueue.append_jsonl(
-            results_dir / "state" / "unreachable-routes.jsonl", rows[0],
+            results_dir / "state" / "unreachable-routes.jsonl", row,
         )
     except OSError as exc:
         # Advisory context for a later session; never worth failing a
@@ -268,14 +285,43 @@ def _record_unreachable_route(directory: Path, results_dir: Path) -> None:
         )
 
 
+def _retract_unreachable_route(directory: Path, results_dir: Path) -> None:
+    """Retire advice tied to one rejection before its path can be reused."""
+    path = results_dir / "state" / "unreachable-routes.jsonl"
+    if not path.is_file():
+        return
+    lane = directory.parent.name
+    artifact = directory.name
+
+    def remove(rows: list[dict]) -> int:
+        before = len(rows)
+        rows[:] = [
+            row for row in rows
+            if not (
+                isinstance(row, dict)
+                and row.get("lane") == lane
+                and row.get("artifact") == artifact
+            )
+        ]
+        return before - len(rows)
+
+    try:
+        workqueue.update_jsonl(path, remove)
+    except OSError as exc:
+        # The move already reopens the artifact and therefore suppresses the
+        # note. Warn because a later rejection could reuse this path; never
+        # strand an artifact in the rejected lane over advisory context.
+        print(
+            f"WARN: could not retract unreachable route for {artifact}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _reject(
     directory: Path, rejected_root: Path, reason: str, *, category: str = "",
 ) -> Path:
     rejected_root.mkdir(parents=True, exist_ok=True)
     _annotate_rejection(directory, reason)
-    if category == workqueue.UNREACHABLE_REJECTION_CATEGORY:
-        # Before the move: the gate votes live inside `directory`.
-        _record_unreachable_route(directory, rejected_root.parent)
     validation_receipt.write(
         directory,
         kind="crash" if directory.name.startswith("CRASH-") else "finding",
@@ -284,6 +330,13 @@ def _reject(
     )
     destination = _unique_destination(rejected_root, directory.name)
     shutil.move(str(directory), destination)
+    if category == workqueue.UNREACHABLE_REJECTION_CATEGORY:
+        # Only after the move lands, and keyed to where it landed: the note
+        # tells a session not to rebuild a reproducer, so it must never
+        # outlive the rejection it describes. A failed move leaves the
+        # artifact active and records nothing; a later requeue moves the
+        # artifact back out and the note stops rendering with it.
+        _record_unreachable_route(destination, rejected_root.parent)
     try:
         workqueue.record_artifact_rejection(
             rejected_root.parent, directory.name, reason, category=category,
@@ -336,8 +389,16 @@ def _restore_rejected_artifact(
 ) -> Path:
     """Move one superseded rejection back to its active validation lane."""
     active_root.mkdir(parents=True, exist_ok=True)
+    had_route_advice = bool(
+        _TRIGGER_REJECTION_RE.match(_rejection_reason(directory))
+    )
     destination = _unique_destination(active_root, directory.name)
     shutil.move(str(directory), destination)
+    # The rejected path is reusable after this move. Remove its row rather
+    # than relying only on directory absence, or rejecting the reopened
+    # artifact under the same name would make the obsolete route live again.
+    if had_route_advice:
+        _retract_unreachable_route(directory, active_root.parent)
     (destination / "REJECTION.md").unlink(missing_ok=True)
     (destination / "validation.json").unlink(missing_ok=True)
     validation_receipt.write(
@@ -421,6 +482,17 @@ def _restore_stale_trigger_rejections(
             file=sys.stderr,
         )
     return restored
+
+
+def restore_stale_trigger_rejections(
+    results_dir: str | os.PathLike[str],
+) -> int:
+    """Reconcile both rejected lanes before a resumed agent sees their advice."""
+    results = Path(results_dir)
+    return sum(
+        _restore_stale_trigger_rejections(results, kind=kind)
+        for kind in ("crash", "finding")
+    )
 
 
 def _refresh_or_restore_quality_rejections(

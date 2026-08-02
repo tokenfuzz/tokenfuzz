@@ -137,6 +137,9 @@ class AuditClockTests(unittest.TestCase):
         with mock.patch.object(audit_runner, "_activate_runtime"), \
                 mock.patch.object(audit_runner, "index_log"), \
                 mock.patch.object(audit_runner.prompt, "write_static_prompt_file"), \
+                mock.patch.object(
+                    audit_runner.triage, "restore_stale_trigger_rejections",
+                ) as restore_rejections, \
                 mock.patch.object(audit_runner, "refresh_work_cards"), \
                 mock.patch.object(audit_runner, "initialize_agent_strategies"), \
                 mock.patch.object(
@@ -148,6 +151,7 @@ class AuditClockTests(unittest.TestCase):
 
         self.assertEqual(state.housekeeping_seconds, 12.5)
         self.assertEqual(float((self.logs / ".housekeeping_secs").read_text()), 12.5)
+        restore_rejections.assert_called_once_with(results)
 
     def test_target_config_repair_does_not_dirty_source_work_cards(self) -> None:
         results = self.root / "output" / "sampleproj" / "codex" / "results"

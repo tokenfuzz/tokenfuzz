@@ -196,14 +196,22 @@ What happens to each artifact:
 
 When a reviewer rejects an artifact because its triggering state is not
 attacker-reachable, the disproof does not leave with the artifact: the
-anchored reason is appended to
-`state/unreachable-routes.jsonl`, and a later work card on that same file
-renders it. Building a reproducer is the expensive half of an audit, and
-without this each session re-derives the same disproof on the same file —
-over half of all trigger rejections in a measured run landed on a file that
-had already produced one. The note rules out a *route*, never the file: the
-card is still assigned, and reaching the same code through a different
-attacker-controlled path still counts.
+anchored reason is appended to `state/unreachable-routes.jsonl` once the
+move lands, and a later work card on any file the disproof names renders
+it, newest first. Building a reproducer is the expensive half of an audit,
+and without this each session re-derives the same disproof on the same file
+— over half of all trigger rejections in a measured run landed on a file
+that had already produced one.
+
+The note lives exactly as long as the rejection does. A rejected artifact
+is the record of its own rejection, so when the gate requeues one whose
+verdict went stale the directory leaves `findings-rejected/` and its route
+row is retired before that path can be reused. Resumed runs reconcile stale
+trigger rejections before launching their first agents, so an obsolete note
+cannot survive for one cohort. This needs no tombstone and no second copy of
+the gate's validity rules to drift out of step. The note rules out a *route*,
+never the file: the card is still assigned, and reaching the same code
+through a different attacker-controlled path still counts.
 
 Severity annotation is best-effort post-processing. A failed scoring
 run does not remove an otherwise complete crash or finding.

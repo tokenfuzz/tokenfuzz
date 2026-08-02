@@ -206,7 +206,7 @@ def _state_strategy_arg(context: PromptContext, agent: int) -> str:
 
 
 # Enough to show the shape of what was already disproved without crowding the
-# card. The rest stays on disk for `bin/state`.
+# card. The complete evidence remains in the rejected artifact.
 _RULED_OUT_ROUTES_SHOWN = 3
 
 
@@ -228,14 +228,35 @@ def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
     )
     seen: set[str] = set()
     shown: list[str] = []
-    for row in rows:
-        if workqueue.normalized_relpath(str(row.get("file", ""))) != rel:
+    # Newest first. A session repeats the route it just watched fail, so the
+    # oldest three entries are the least useful three to keep showing — and
+    # once a file had three, nothing later could ever appear.
+    for row in reversed(rows):
+        artifact = str(row.get("artifact", ""))
+        lane = str(row.get("lane", ""))
+        # The rejected artifact is the record of its own rejection. When the
+        # gate requeues one because its verdict went stale, the directory
+        # leaves that lane and this note stops with it — no tombstone, no
+        # second copy of the gate's validity rules to drift out of step.
+        if not artifact or not lane:
+            continue
+        if not (context.results_dir / lane / artifact).is_dir():
+            continue
+        site = next(
+            (
+                s for s in (row.get("sites") or [])
+                if isinstance(s, dict)
+                and workqueue.normalized_relpath(str(s.get("file", ""))) == rel
+            ),
+            None,
+        )
+        if site is None:
             continue
         summary = str(row.get("summary", "")).strip()
         if not summary or summary in seen:
             continue
         seen.add(summary)
-        symbol = str(row.get("symbol", "")).strip()
+        symbol = str(site.get("symbol", "")).strip()
         where = f"`{symbol}` — " if symbol else ""
         shown.append(f"  - {where}{summary}")
         if len(shown) >= _RULED_OUT_ROUTES_SHOWN:
@@ -244,11 +265,12 @@ def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
         return []
     return [
         "- **Trigger routes already disproved on this file** (independent "
-        "source review; do not rebuild a reproducer for these):",
+        "source review, most recent first):",
         *shown,
-        "  These rule out a *route*, not the file. Reach the same code through "
-        "a different attacker-controlled path and it counts; argue the "
-        "disproof is wrong if you can show the path.",
+        "  Check the stated invariant before rebuilding a reproducer for one "
+        "of these. They rule out a *route*, not the file: reach the same code "
+        "through a different attacker-controlled path and it counts, and a "
+        "disproof you can show to be wrong is worth arguing.",
     ]
 
 

@@ -1930,6 +1930,11 @@ def initialize_backend(
     )
     housekeeping_started = time.monotonic()
     try:
+        # A resumed tree may carry trigger verdicts from an older report,
+        # revision, threat model, or decision schema. Reconcile them before
+        # the first agent receives work-card advice derived from those votes;
+        # post-iteration triage is one cohort too late.
+        triage.restore_stale_trigger_rejections(runtime.results)
         refresh_work_cards(runtime)
         initialize_agent_strategies(runtime)
     finally:
