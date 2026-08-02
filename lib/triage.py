@@ -208,11 +208,74 @@ def _annotate_rejection(directory: Path, reason: str) -> None:
     )
 
 
+def _unreachable_route_summary(text: str, limit: int = 300) -> str:
+    """A disproof reduced to one bounded line.
+
+    Truncating the whole text keeps the clause label *and* the start of the
+    blocking invariant. Taking the leading sentence instead would keep only
+    "Clause (c)." — the label alone tells a later session nothing about which
+    route was closed.
+    """
+    compact = " ".join(str(text).split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1].rstrip() + "…"
+
+
+def _record_unreachable_route(directory: Path, results_dir: Path) -> None:
+    """Keep the disproof that killed a trigger route where an agent will read it.
+
+    The gate writes a precise, anchored reason for every trigger rejection and
+    then only the artifact moves — nothing carries that reason back to a
+    session. Measured over four targets, 55% of trigger rejections landed on a
+    file that had already produced one in the same run, and each repeat paid a
+    full harness / confirm / bundle / enrich cycle to re-derive the same
+    answer. Recording the route is advisory only: it never removes a card and
+    never blocks a claim, so a different route to the same defect stays open.
+    """
+    rows: list[dict] = []
+    for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+        vote = _finding_cache(directory / name)
+        anchors = vote.get("anchors") or []
+        summary = _unreachable_route_summary(vote.get("disproof", ""))
+        if not isinstance(anchors, list) or not anchors or not summary:
+            continue
+        anchor = anchors[0] if isinstance(anchors[0], dict) else {}
+        path = workqueue.normalized_relpath(str(anchor.get("path", "")))
+        if not path:
+            continue
+        rows.append({
+            "file": path,
+            "symbol": str(anchor.get("symbol", "")),
+            "line": anchor.get("line", ""),
+            "artifact": directory.name,
+            "summary": summary,
+            "recorded_at": workqueue.now_iso(),
+        })
+        break
+    if not rows:
+        return
+    try:
+        workqueue.append_jsonl(
+            results_dir / "state" / "unreachable-routes.jsonl", rows[0],
+        )
+    except OSError as exc:
+        # Advisory context for a later session; never worth failing a
+        # rejection that has already been decided.
+        print(
+            f"WARN: could not record unreachable route for {directory.name}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _reject(
     directory: Path, rejected_root: Path, reason: str, *, category: str = "",
 ) -> Path:
     rejected_root.mkdir(parents=True, exist_ok=True)
     _annotate_rejection(directory, reason)
+    if category == workqueue.UNREACHABLE_REJECTION_CATEGORY:
+        # Before the move: the gate votes live inside `directory`.
+        _record_unreachable_route(directory, rejected_root.parent)
     validation_receipt.write(
         directory,
         kind="crash" if directory.name.startswith("CRASH-") else "finding",

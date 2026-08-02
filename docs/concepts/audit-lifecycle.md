@@ -194,6 +194,17 @@ What happens to each artifact:
   `findings-rejected/` — they are not deleted, so you can review the
   reasoning.
 
+When a reviewer rejects an artifact because its triggering state is not
+attacker-reachable, the disproof does not leave with the artifact: the
+anchored reason is appended to
+`state/unreachable-routes.jsonl`, and a later work card on that same file
+renders it. Building a reproducer is the expensive half of an audit, and
+without this each session re-derives the same disproof on the same file —
+over half of all trigger rejections in a measured run landed on a file that
+had already produced one. The note rules out a *route*, never the file: the
+card is still assigned, and reaching the same code through a different
+attacker-controlled path still counts.
+
 Severity annotation is best-effort post-processing. A failed scoring
 run does not remove an otherwise complete crash or finding.
 

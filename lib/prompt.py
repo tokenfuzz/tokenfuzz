@@ -205,6 +205,53 @@ def _state_strategy_arg(context: PromptContext, agent: int) -> str:
     return f" --strategy {strategy}" if strategy else ""
 
 
+# Enough to show the shape of what was already disproved without crowding the
+# card. The rest stays on disk for `bin/state`.
+_RULED_OUT_ROUTES_SHOWN = 3
+
+
+def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
+    """Trigger routes a source-review gate already disproved on this file.
+
+    Without this the gate's reasoning dies with the artifact, and sessions
+    re-derive it: over four measured targets, 55% of trigger rejections landed
+    on a file that had already produced one in the same run, each after a full
+    harness / confirm / bundle / enrich cycle. This is context, never a filter
+    — the file keeps its card and a different route stays open, so a real
+    defect reachable another way is not lost.
+    """
+    rel = workqueue.normalized_relpath(file)
+    if not rel:
+        return []
+    rows = workqueue.read_jsonl(
+        context.results_dir / "state" / "unreachable-routes.jsonl"
+    )
+    seen: set[str] = set()
+    shown: list[str] = []
+    for row in rows:
+        if workqueue.normalized_relpath(str(row.get("file", ""))) != rel:
+            continue
+        summary = str(row.get("summary", "")).strip()
+        if not summary or summary in seen:
+            continue
+        seen.add(summary)
+        symbol = str(row.get("symbol", "")).strip()
+        where = f"`{symbol}` — " if symbol else ""
+        shown.append(f"  - {where}{summary}")
+        if len(shown) >= _RULED_OUT_ROUTES_SHOWN:
+            break
+    if not shown:
+        return []
+    return [
+        "- **Trigger routes already disproved on this file** (independent "
+        "source review; do not rebuild a reproducer for these):",
+        *shown,
+        "  These rule out a *route*, not the file. Reach the same code through "
+        "a different attacker-controlled path and it counts; argue the "
+        "disproof is wrong if you can show the path.",
+    ]
+
+
 def work_card_directive(context: PromptContext, agent: int, *, force: bool = False) -> str:
     cards = context.results_dir / "work-cards.jsonl"
     if not cards.is_file() or not cards.stat().st_size:
@@ -246,6 +293,7 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
         )
     fixes = card.get("fix_hashes") or []
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
+    lines += _ruled_out_routes(context, card.get("file", ""))
     lines += [
         "",
         "Use this card first unless structured state already has a higher-priority active row.",
