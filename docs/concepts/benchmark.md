@@ -87,7 +87,7 @@ With all defaults, the command means:
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
 | `--budget-wall` | `10800` | Active audit seconds per cell, including housekeeping. Provider-recovery pauses are excluded. `0` is unlimited. |
-| `--finalize-wall` | `3600` | Wall-clock ceiling per final validation phase; crash triage and the finding drain each get their own budget. `0` is unlimited. |
+| `--finalize-wall` | `3600` | Start ceiling per final validation phase; crash triage and the finding drain each get their own budget, and a bounded finding group admitted before the ceiling finishes afterward. `0` is unlimited. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |

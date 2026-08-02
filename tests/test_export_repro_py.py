@@ -1475,7 +1475,10 @@ tc = receipt_root / "case.dat"
 tc.write_text("input\n", encoding="utf-8")
 san = receipt_root / "case.asan.txt"
 san.write_text("ERROR: AddressSanitizer: heap-buffer-overflow\n", encoding="utf-8")
-_, rid = _cb.materialize(receipt_results, "1", tc, san, "asan", "generic", harness=built)
+_, rid = _cb.materialize(
+    receipt_results, "1", tc, san, "asan", "generic", harness=built,
+    args=("--mode", "{TESTCASE}"),
+)
 rdir = receipt_results / "crashes" / rid
 (rdir / "harness.c").write_text("int main(void){return 1;}\n", encoding="utf-8")
 
@@ -1484,6 +1487,8 @@ assert_eq("H-7-driver.c", getattr(recorded[1], "name", ""),
           "receipt_artifacts: the recorded harness beats a harness-named sibling")
 assert_eq("case.dat", getattr(recorded[0], "name", ""),
           "receipt_artifacts: the receipt binds the testcase too")
+assert_eq(["--mode", "{TESTCASE}"], recorded[2],
+          "receipt_artifacts: the receipt binds replay arguments too")
 
 (rdir / ".probe-context.json").write_text("{ broken json", encoding="utf-8")
 _raised = ""
@@ -1992,6 +1997,43 @@ assert_in("could not be read", broken.stderr,
           "export-repro: a broken receipt is reported, not raised as a traceback")
 assert_in("Re-probe the testcase", broken.stderr,
           "export-repro: a broken receipt names the next step")
+
+# An authoritative receipt also excludes discovery-only shell wrappers and
+# argv. Otherwise a no-harness receipt can still export a sibling harness.sh,
+# or stale repro.cmd flags, even though neither was part of the probe run.
+_, bound_id = _cb.materialize(
+    results_dir, "9", crash_dir / "input.bin", crash_dir / "sanitizer.txt",
+    "asan", "generic", args=("--recorded={TESTCASE}", "--tail"),
+)
+bound_dir = results_dir / "crashes" / bound_id
+(bound_dir / "report.md").write_text(
+    "# Bound crash\n\n## Summary\nTest crash.\n\n"
+    "Trigger source: bytes\nBoundary: input file\nCaller controls: bytes\n"
+    "Parameter control: direct\nCaller contract: obeyed\n",
+    encoding="utf-8",
+)
+(bound_dir / "harness.sh").write_text(
+    "#!/bin/sh\necho STALE_WRAPPER\n", encoding="utf-8",
+)
+(bound_dir / "repro.cmd").write_text(
+    "--stale {TESTCASE}\n", encoding="utf-8",
+)
+bound = subprocess.run(
+    [str(ROOT / "bin" / "export-repro"), bound_id],
+    capture_output=True, text=True, env=env, cwd=output_root,
+)
+assert_eq(0, bound.returncode, "export-repro: receipt-bound no-harness export succeeds")
+bound_repro = (bound_dir / "reproduce.sh").read_text(
+    encoding="utf-8", errors="replace",
+)
+assert_in("--recorded", bound_repro,
+          "export-repro: receipt argv overrides discovery-only repro.cmd")
+assert_in('--recorded="$testcase" --tail', bound_repro,
+          "export-repro: embedded receipt testcase keeps its argv position")
+assert_not_in("--stale", bound_repro,
+              "export-repro: stale repro.cmd cannot override receipt argv")
+assert_not_in("STALE_WRAPPER", bound_repro,
+              "export-repro: receipt recording no harness suppresses shell discovery")
 
 if ok:
     # Assert bundle files exist.
@@ -2729,11 +2771,11 @@ er.write_cli_with_input_template(
     _cli_out, build_system="cmake", upstream_url="https://example.invalid/r;1",
     pinned_rev="1", slug="x", san_bin_rel="build-asan/app",
     cmake_target="", input_name="input.bin", sanitizer="asan",
-    cli_args='--flag -o \'(?<=a)(?=b)\' "$testcase"',
+    cli_args='--flag -o \'(?<=a)(?=b)\' \'--input=\'"$testcase"',
 )
-assert_in('"$san_bin" --flag -o \'(?<=a)(?=b)\' "$testcase"',
+assert_in('"$san_bin" --flag -o \'(?<=a)(?=b)\' \'--input=\'"$testcase"',
           _cli_out.read_text(encoding="utf-8"),
-          "write_cli_with_input_template: recorded args render in order")
+          "write_cli_with_input_template: embedded testcase argv renders in order")
 
 er.write_cli_with_input_template(
     _cli_out, build_system="cmake", upstream_url="https://example.invalid/r;1",
@@ -2742,6 +2784,16 @@ er.write_cli_with_input_template(
 )
 assert_in('"$san_bin" "$testcase"', _cli_out.read_text(encoding="utf-8"),
           "write_cli_with_input_template: default is the bare invocation")
+
+_js_out = TMP / "reproduce-js.sh"
+er.write_js_shell_template(
+    _js_out, build_system="mach", upstream_url="https://example.invalid/js",
+    pinned_rev="1", slug="browser-product", san_bin_rel="unused",
+    input_name="input.js", runner_args=["--module={TESTCASE}", "--strict"],
+)
+assert_in('"$san_bin" --module="$testcase" --strict',
+          _js_out.read_text(encoding="utf-8"),
+          "write_js_shell_template: receipt argv and embedded testcase are replayed")
 
 # Browser bundles replay the configured product argv/environment rather than a
 # Firefox-specific command. Embedded testcase/profile tokens stay in position.

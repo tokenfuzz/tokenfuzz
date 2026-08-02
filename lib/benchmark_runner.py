@@ -163,7 +163,7 @@ def drain_find_gate(
                 limit_file.write_text("", encoding="utf-8")
                 counts = triage.validate_find_gate(
                     results, deadline=deadline, target_root_is_product=True,
-                    reject_missing_reports=True,
+                    reject_missing_reports=True, finish_started_group=True,
                 )
                 reset = _find_gate_reset(limit_file)
                 if reset is None:

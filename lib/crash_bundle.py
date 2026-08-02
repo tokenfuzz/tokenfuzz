@@ -172,18 +172,19 @@ def _receipt_is_authoritative(crash_dir: Path) -> bool:
     return True
 
 
-def receipt_artifacts(crash_dir: Path) -> tuple[Path | None, Path | None | bool] | None:
-    """The testcase and harness probe recorded, as `(testcase, harness)`.
+def receipt_artifacts(
+    crash_dir: Path,
+) -> tuple[Path | None, Path | None | bool, list[str]] | None:
+    """The testcase, harness, and argv probe recorded.
 
     Three outcomes, because collapsing them is how a bundle ends up shipping a
     reproducer nothing validated:
 
     * `None` — no receipt. A crash written by hand, as the model-direct
       condition does, so name-based discovery is all there is.
-    * a pair — the receipt validates and is authoritative. `harness` is `False`
-      when probe recorded that this crash had none, which must not send the
-      caller back to discovery: finding a stray `harness.c` beside the testcase
-      does not make it the thing that ran.
+    * a triple — the receipt validates and is authoritative. `harness` is
+      `False` when probe recorded that this crash had none, which must not send
+      the caller back to discovery; `args` is the exact replay argv.
     * :class:`ReceiptError` — a receipt exists and does not hold: unreadable,
       the wrong version, or no longer matching the evidence. Falling back to
       discovery here would export exactly the mismatch the receipt caught.
@@ -201,9 +202,23 @@ def receipt_artifacts(crash_dir: Path) -> tuple[Path | None, Path | None | bool]
         )
     testcase = _artifact_path(crash_dir, str(context.get("testcase") or ""))
     harness = context.get("harness")
+    prerequisites = context.get("prerequisites")
+    args = (
+        prerequisites.get("invocation_template")
+        if isinstance(prerequisites, dict) else None
+    )
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        raise ReceiptError(
+            f"{crash_dir}: the probe receipt has invalid replay arguments. "
+            "Re-probe the testcase rather than exporting a guessed invocation."
+        )
     if not isinstance(harness, dict):
-        return testcase, False
-    return testcase, _artifact_path(crash_dir, str(harness.get("name") or ""))
+        return testcase, False, list(args)
+    return (
+        testcase,
+        _artifact_path(crash_dir, str(harness.get("name") or "")),
+        list(args),
+    )
 
 
 def verified_probe_context(crash_dir: Path) -> dict | None:

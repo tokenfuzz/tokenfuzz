@@ -29,6 +29,7 @@ import crash_bundle
 import languages
 import sanitizer as sanitizer_lib
 import sanitizer_run
+import stack_frames
 import target_config
 import verdict as verdict_lib
 from file_tools import capture_command
@@ -80,6 +81,7 @@ _PROCESS_LAUNCH_RE = re.compile(
 _SANITIZER_MODULE_RE = re.compile(
     r"\(([^()\s]+?)(?::[A-Za-z0-9_]+)?\+0x[0-9a-f]+\)"
 )
+_SOURCE_LOCATION_RE = re.compile(r"^(?P<path>.+?):\d+(?::\d+)?$")
 _C_LINE_SPLICE_RE = re.compile(r"\\(?:\r\n|\n|\r)")
 _C_LEXEME_RE = re.compile(
     r'(?P<raw>(?:u8|[uUL])?R"(?P<raw_delimiter>[^ ()\\\t\r\n]{0,16})'
@@ -322,7 +324,32 @@ def reject_harness_only_carrier(source: Path) -> None:
     )
 
 
-def foreign_crash_images(sanitizer_output: str, ran_binary: str) -> list[str]:
+def _results_scratch_path(path: str, results_dir: str) -> Path | None:
+    """Return an absolute path only when it is below RESULTS_DIR/scratch-N."""
+    candidate = Path(path)
+    if not candidate.is_absolute() or not results_dir:
+        return None
+    try:
+        absolute = Path(os.path.abspath(candidate))
+        results = Path(os.path.abspath(results_dir))
+        resolved = absolute.resolve(strict=False)
+        roots = (results, results.resolve(strict=False))
+    except (OSError, RuntimeError):
+        return None
+    for form in dict.fromkeys((absolute, resolved)):
+        for root in dict.fromkeys(roots):
+            try:
+                relative = form.relative_to(root)
+            except ValueError:
+                continue
+            if relative.parts and re.fullmatch(r"scratch-[0-9]+", relative.parts[0]):
+                return resolved
+    return None
+
+
+def foreign_crash_images(
+    sanitizer_output: str, ran_binary: str, results_dir: str,
+) -> list[str]:
     """Scratch-built modules in the report that are not the binary probe ran.
 
     A HARNESS can hand control to a binary the agent compiled itself — through
@@ -332,20 +359,62 @@ def foreign_crash_images(sanitizer_output: str, ran_binary: str) -> list[str]:
     agent's scratch tree that probe did not build is a diagnostic about a
     binary no bundle can ship.
 
-    Only a module path decides, and only when it is unambiguous. The target's
-    own build and the system libraries are where a legitimate wrapper and an
-    ordinary driver crash, and a report that resolved every frame names no
-    module at all — all of those fall open. A frame's source file is not used:
-    it arrives as a bare name often enough that matching it against scratch
-    turns a target source called `main.c` into a rejected crash, and the shapes
-    it would catch are the ones a module path already names.
+    Only an absolute module below this run's results scratch tree decides. The
+    target's own build and system libraries are where legitimate wrappers and
+    ordinary drivers crash, and similarly named paths outside RESULTS_DIR are
+    unrelated — all of those fall open.
     """
-    ran = os.path.basename(ran_binary)
-    return [
-        module for module in dict.fromkeys(_SANITIZER_MODULE_RE.findall(sanitizer_output))
-        if os.path.basename(module) != ran
-        and re.search(r"/scratch-[^/]*/", module)
-    ]
+    if not ran_binary:
+        # Nothing to compare against: a target with neither a harness nor a
+        # configured runner leaves the binary unset, and treating every scratch
+        # module as foreign there would discard the crash it just proved.
+        return []
+    try:
+        ran = Path(ran_binary).resolve(strict=False)
+    except (OSError, RuntimeError):
+        return []
+    foreign = []
+    for module in dict.fromkeys(_SANITIZER_MODULE_RE.findall(sanitizer_output)):
+        resolved = _results_scratch_path(module, results_dir)
+        if (
+            resolved is not None
+            and resolved != ran
+        ):
+            foreign.append(module)
+    return foreign
+
+
+def foreign_crash_main_sources(
+    sanitizer_output: str, harness_source: Path | None, results_dir: str,
+) -> list[str]:
+    """Absolute scratch sources for another process's ``main`` frame.
+
+    A fully symbolized report can put the fault in a system library and name
+    the separately built carrier only in a lower ``main`` frame.  Absolute
+    source paths are unambiguous, so compare them with the exact harness source
+    probe compiled.  Bare source names deliberately fall open: resolving a
+    ``main.c`` basename against scratch is what rejected target files that
+    happened to share the name.
+    """
+    try:
+        harness = harness_source.resolve(strict=False) if harness_source else None
+    except (OSError, RuntimeError):
+        harness = None
+    foreign = []
+    for line in sanitizer_output.splitlines():
+        frame = stack_frames.parse_asan_frame(line)
+        if frame is None or not re.match(r"^main(?:\(|$)", frame.function):
+            continue
+        match = _SOURCE_LOCATION_RE.match(frame.location)
+        if match is None:
+            continue
+        source = _results_scratch_path(match.group("path"), results_dir)
+        if (
+            source is not None
+            and source != harness
+        ):
+            foreign.append(str(source))
+    return list(dict.fromkeys(foreign))
 
 
 class HarnessBuilder:
@@ -895,10 +964,14 @@ class Probe:
         if probe_verdict != "CRASH":
             return probe_verdict
         try:
+            output = self.output.read_text(encoding="utf-8", errors="replace")
             foreign = foreign_crash_images(
-                self.output.read_text(encoding="utf-8", errors="replace"),
-                self._ran_binary(),
+                output, self._ran_binary(), self.config.results_dir,
             )
+            if not foreign:
+                foreign = foreign_crash_main_sources(
+                    output, self.harness_source, self.config.results_dir,
+                )
         except OSError:
             return probe_verdict
         if not foreign:

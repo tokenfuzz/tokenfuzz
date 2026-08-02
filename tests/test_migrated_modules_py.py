@@ -605,6 +605,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         harness_case.name, getattr(recorded[0], "name", None),
         "the receipt binds the testcase too, not only the harness",
     )
+    equal(
+        ["{TESTCASE}"], recorded[2],
+        "the receipt binds the replay arguments too",
+    )
 
     nocase = root / "no-harness.dat"
     nocase.write_text("input\n", encoding="utf-8")

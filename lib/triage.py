@@ -3021,6 +3021,7 @@ def validate_find_gate(
     deadline: float | None = None,
     target_root_is_product: bool = False,
     reject_missing_reports: bool = False,
+    finish_started_group: bool = False,
 ) -> dict[str, int]:
     results = Path(results_dir)
     findings = results / "findings"
@@ -3073,27 +3074,33 @@ def validate_find_gate(
         directory for directory in directories if directory not in cached_set
     ]
     usage_index = benchmark._find_index_jsonl(results)
-    # Carry a bounded group of findings all the way to a recorded disposition
-    # before opening the next one. Every stage here needs two votes to conclude,
-    # so running any of them breadth-first across the whole corpus means a wall
-    # that runs out mid-stage leaves the entire field one vote short of
-    # everything: one benchmark drain spent 46 of its 60 minutes producing 138
-    # single votes and not one disposition. The group is what the wall protects
-    # — once it starts, it finishes, and only the next group is skipped.
-    group_size = max(1, workers) * _DECISION_BATCH_SIZE
-    for start in range(0, len(directories), group_size):
-        group = directories[start:start + group_size]
+    # Quality batches are wide enough to keep every worker occupied. Within
+    # each quality group, carry trigger-sized disposition groups through reach
+    # fields, both trigger rounds, and finalization before opening the next.
+    # Running a stage breadth-first across the whole corpus produced 138 single
+    # votes and zero dispositions in one drain; making the entire quality group
+    # the finalization unit instead would require four serial trigger waves and
+    # recreate the same starvation one level down.
+    quality_group_size = max(1, workers) * _DECISION_BATCH_SIZE
+    disposition_group_size = max(1, workers) * _TRIGGER_BATCH_SIZE
+    for start in range(0, len(directories), quality_group_size):
+        group = directories[start:start + quality_group_size]
         if _deadline_expired(deadline):
             counts["pending"] += len(group)
             continue
+        # Post-cell measurement may finish a group it admitted before its
+        # ceiling. In-run callers leave this off: their deadline is productive
+        # benchmark time and must remain a hard stop. This distinction avoids
+        # both paid-for vote starvation and hidden extra harness budget.
+        group_deadline = None if finish_started_group else deadline
         initial_votes = _batch_quality_votes(
-            group, results, q, aq, timeout, deadline, workers,
+            group, results, q, aq, timeout, group_deadline, workers,
         )
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             statuses = list(pool.map(
                 lambda directory: validate_one_finding(
                     directory, results, quorum=q, accept_quorum=aq,
-                    timeout=timeout, deadline=deadline,
+                    timeout=timeout, deadline=group_deadline,
                     target_root_is_product=target_root_is_product,
                     initial_votes=initial_votes.get(directory),
                     defer_trigger=True,
@@ -3105,38 +3112,54 @@ def validate_find_gate(
             directory for directory, status in zip(group, statuses)
             if status == "quality-accepted"
         ]
-        reach_attempted, reach_decisions, _ = _batch_reach_field_decisions(
-            accepted_quality, usage_index, deadline, workers,
-        )
-        for directory in accepted_quality:
-            report = _report(directory)
-            if report is None:
-                continue
-            _prepare_accepted_finding(
-                directory, report, deadline, usage_index,
-                reach_decisions.get(directory)
-                if directory in reach_attempted else _NO_REACH_DECISION,
+        for status in statuses:
+            if status != "quality-accepted":
+                counts[status] += 1
+        for disposition_start in range(
+            0, len(accepted_quality), disposition_group_size,
+        ):
+            disposition_group = accepted_quality[
+                disposition_start:disposition_start + disposition_group_size
+            ]
+            # The first disposition group belongs to the quality work already
+            # admitted. Later groups start only while the original ceiling is
+            # open; an admitted group uses group_deadline and therefore finishes
+            # post-cell, while the in-run caller retains its hard deadline.
+            if disposition_start and _deadline_expired(deadline):
+                counts["pending"] += len(accepted_quality) - disposition_start
+                break
+            reach_attempted, reach_decisions, _ = _batch_reach_field_decisions(
+                disposition_group, usage_index, group_deadline, workers,
             )
-        trigger_attempted = _batch_finding_trigger_votes(
-            accepted_quality, results, deadline, usage_index,
-            target_root_is_product, workers,
-        )
-        second_trigger_directories = [
-            directory for directory in accepted_quality
-            if _report(directory) is not None
-            and _cached_trigger_vote(
-                _report(directory), directory / ".trigger-gate.json",
-            ) == "Reject"
-        ]
-        second_trigger_attempted = (
-            _batch_finding_trigger_votes(
-                second_trigger_directories, results, deadline, usage_index,
-                target_root_is_product, workers, vote_name=".trigger-gate-2.json",
+            for directory in disposition_group:
+                report = _report(directory)
+                if report is None:
+                    continue
+                _prepare_accepted_finding(
+                    directory, report, group_deadline, usage_index,
+                    reach_decisions.get(directory)
+                    if directory in reach_attempted else _NO_REACH_DECISION,
+                )
+            trigger_attempted = _batch_finding_trigger_votes(
+                disposition_group, results, group_deadline, usage_index,
+                target_root_is_product, workers,
             )
-            if second_trigger_directories else set()
-        )
-        for directory, status in zip(group, statuses):
-            if status == "quality-accepted":
+            second_trigger_directories = [
+                directory for directory in disposition_group
+                if _report(directory) is not None
+                and _cached_trigger_vote(
+                    _report(directory), directory / ".trigger-gate.json",
+                ) == "Reject"
+            ]
+            second_trigger_attempted = (
+                _batch_finding_trigger_votes(
+                    second_trigger_directories, results, group_deadline,
+                    usage_index, target_root_is_product, workers,
+                    vote_name=".trigger-gate-2.json",
+                )
+                if second_trigger_directories else set()
+            )
+            for directory in disposition_group:
                 report = _report(directory)
                 if (
                     report is None
@@ -3160,10 +3183,10 @@ def validate_find_gate(
                     status = "pending"
                 else:
                     status = _finalize_accepted_finding(
-                        directory, results, report, deadline, usage_index,
+                        directory, results, report, group_deadline, usage_index,
                         target_root_is_product, prepared=True,
                     )
-            counts[status] += 1
+                counts[status] += 1
     return counts
 
 

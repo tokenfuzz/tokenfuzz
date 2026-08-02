@@ -898,7 +898,10 @@ Generated score text.
         ), mock.patch.object(
             triage, "_deadline_expired", side_effect=lambda _d: expired["yes"],
         ):
-            counts = triage.validate_find_gate(self.root, workers=1, deadline=1.0)
+            counts = triage.validate_find_gate(
+                self.root, workers=1, deadline=1.0,
+                finish_started_group=True,
+            )
 
         self.assertTrue(finalized, "the group's work was paid for and discarded")
         self.assertGreater(counts["rejected"], 0, counts)
@@ -911,6 +914,74 @@ Generated score text.
             sum(counts.values()),
             len([p for p in (self.root / "findings").iterdir() if p.is_dir()]),
             counts,
+        )
+
+    def test_post_cell_group_finishes_quality_quorum_after_wall(self) -> None:
+        # Exercise the real quality cache loop. The earlier regression test
+        # mocked validate_one_finding as accepted and the cache reader as a
+        # Reject even when only one provider round had actually written a
+        # vote, so it could not catch paid-for one-vote starvation.
+        self._pending_findings(8, 700)
+        expired = {"yes": False}
+        rounds = {"count": 0}
+
+        def decisions(_decision, _template, _instructions, items, *_a, **_k):
+            rounds["count"] += 1
+            result = {
+                item["id"]: {
+                    "id": item["id"], "accept": True, "reason": "complete",
+                }
+                for item in items
+            }
+            if rounds["count"] == 1:
+                expired["yes"] = True
+            return result
+
+        with mock.patch.object(
+            triage, "_batch_decisions", side_effect=decisions,
+        ), mock.patch.object(
+            triage, "_batch_reach_field_decisions", return_value=(set(), {}, None),
+        ), mock.patch.object(
+            triage, "_prepare_accepted_finding", return_value=None,
+        ), mock.patch.object(
+            triage, "_cached_trigger_vote", return_value="Promote",
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", return_value=set(),
+        ), mock.patch.object(
+            triage, "_finalize_accepted_finding", return_value="accepted",
+        ), mock.patch.object(
+            triage, "_deadline_expired",
+            side_effect=lambda deadline: deadline is not None and expired["yes"],
+        ):
+            counts = triage.validate_find_gate(
+                self.root, workers=1, deadline=1.0,
+                finish_started_group=True,
+            )
+
+        # The admitted quality batch reaches real two-vote quorum without
+        # sacrificing its 16-item batching. One trigger-sized disposition
+        # group (4 findings for one worker) finishes; the next never starts.
+        self.assertEqual(2, rounds["count"], rounds)
+        self.assertEqual(4, counts["accepted"], counts)
+        self.assertEqual(
+            sum(counts.values()),
+            len([p for p in (self.root / "findings").iterdir() if p.is_dir()]),
+            counts,
+        )
+        completed_quality = []
+        for directory in (self.root / "findings").glob("FIND-*"):
+            cache = directory / ".llm-find-quality.json"
+            if not cache.is_file():
+                continue
+            payload = json.loads(
+                cache.read_text(encoding="utf-8")
+            )
+            if len(payload.get("votes", [])) == 2:
+                completed_quality.append(directory)
+        self.assertEqual(
+            len([p for p in (self.root / "findings").glob("FIND-*") if p.is_dir()]),
+            len(completed_quality),
+            completed_quality,
         )
 
     def test_trigger_review_wall_covers_the_observed_review(self) -> None:

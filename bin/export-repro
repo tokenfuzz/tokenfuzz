@@ -1089,7 +1089,7 @@ san_bin="$src/__MACH_OBJDIR__/dist/bin/js"
 testcase="$(cd "$(dirname "$0")" && pwd)/__INPUT_NAME__"
 echo "=== running __SANITIZER_LABEL__ repro: $testcase ===" >&2
 rc=0
-__SANITIZER_ENV_BLOCK__  "$san_bin" "$testcase" || rc=$?
+__SANITIZER_ENV_BLOCK__  "$san_bin" __JS_ARGS__ || rc=$?
 echo "[repro] exit=$rc" >&2
 exit "$rc"
 """
@@ -2709,6 +2709,18 @@ def _browser_shell_args(
     )
 
 
+def _testcase_shell_arg(value: str, testcase_shell: str) -> str:
+    """Quote one replay argument while substituting an embedded testcase token."""
+    parts = value.split(crash_artifacts.TESTCASE_TOKEN)
+    rendered: list[str] = []
+    for index, part in enumerate(parts):
+        if part:
+            rendered.append(shq(part))
+        if index + 1 < len(parts):
+            rendered.append(testcase_shell)
+    return "".join(rendered) or "''"
+
+
 def _browser_shell_env(
     entries: list[str], *, sanitizer: str, slug: str, build_system: str,
 ) -> str:
@@ -2776,8 +2788,16 @@ def write_js_shell_template(out: Path, *, build_system: str, upstream_url: str,
                             input_name: str, sanitizer: str = "asan",
                             extra_options: str = "", mode: str = "js",
                             recorded_env_options: str = "",
-                            audit_build_script: str = "") -> None:
+                            audit_build_script: str = "",
+                            runner_args: list[str] | None = None) -> None:
     meta = sanitizer_meta(sanitizer)
+    effective_args = list(runner_args) if runner_args else [
+        crash_artifacts.TESTCASE_TOKEN,
+    ]
+    shell_args = " ".join(
+        _testcase_shell_arg(value, '"$testcase"')
+        for value in effective_args
+    )
     text = (
         emit_preamble(build_system, upstream_url, pinned_rev, slug, san_bin_rel, sanitizer)
         + emit_build(build_system, sanitizer=sanitizer,
@@ -2787,6 +2807,7 @@ def write_js_shell_template(out: Path, *, build_system: str, upstream_url: str,
             __INPUT_NAME__=input_name,
             __SANITIZER_LABEL__=meta["label"],
             __MACH_OBJDIR__=meta["mach_objdir"],
+            __JS_ARGS__=shell_args,
             __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
                 sanitizer, extra_options, mode, recorded_env_options
             ),
@@ -3359,7 +3380,8 @@ def main(argv: list[str]) -> int:
         or report_md
     )
 
-    shell_wrapper = find_shell_wrapper(scan_dirs)
+    shell_wrapper = None
+    recorded_args: list[str] | None = None
     # The probe receipt names the exact pair that produced this crash, so when
     # one exists it decides both — including "there was no harness". Discovery
     # picks by name, which is only a guess about which of several sources ran,
@@ -3377,8 +3399,9 @@ def main(argv: list[str]) -> int:
         # Resolve the harness after the testcase so a source the ASAN_RUN_HEADER
         # names as the input is staged once (as input.*), never also as harness.*.
         harness_src = find_harness(scan_dirs, exclude=testcase)
+        shell_wrapper = find_shell_wrapper(scan_dirs)
     else:
-        testcase, recorded_harness = recorded
+        testcase, recorded_harness, recorded_args = recorded
         harness_src = recorded_harness or None
 
     # ── Stage outputs in a temp dir ──────────────────────────────────
@@ -3420,10 +3443,14 @@ def main(argv: list[str]) -> int:
             san_bin_rel = f"{sanitizer_meta(sanitizer)['build_dir']}/repro"
         sanitizer_extra_options = cfg.sanitizer_options.get(sanitizer, "")
         is_browser = cfg.is_browser == "1"
-        repro_args = crash_artifacts.find_repro_args(
-            scan_dirs,
-            bin_names=[Path(san_bin_rel).name] if san_bin_rel else [],
-            testcase_name=testcase.name if testcase is not None else "",
+        repro_args = (
+            recorded_args
+            if recorded_args is not None
+            else crash_artifacts.find_repro_args(
+                scan_dirs,
+                bin_names=[Path(san_bin_rel).name] if san_bin_rel else [],
+                testcase_name=testcase.name if testcase is not None else "",
+            )
         )
 
         # A local-only / unpinned target cannot be cloned by reproduce.sh (see
@@ -3536,6 +3563,7 @@ def main(argv: list[str]) -> int:
                     mode=run_mode or "js",
                     recorded_env_options=recorded_env_options,
                     audit_build_script=audit_build_script,
+                    runner_args=repro_args,
                 )
             else:
                 die(f"browser target {cfg.slug}: unsupported testcase ext '{input_ext_lower}'")
@@ -3551,7 +3579,7 @@ def main(argv: list[str]) -> int:
             if repro_args:
                 testcase_shell = f'"$here/{input_name}"' if input_name else ""
                 harness_cli_args = " " + " ".join(
-                    testcase_shell if a == crash_artifacts.TESTCASE_TOKEN else shq(a)
+                    _testcase_shell_arg(a, testcase_shell)
                     for a in repro_args
                 )
             write_c_harness_template(
@@ -3589,7 +3617,7 @@ def main(argv: list[str]) -> int:
             # {TESTCASE} maps to the staged input, the rest is shell-quoted.
             # Defaults to the bare `"$testcase"` for a flag-less CLI crash.
             cli_args = " ".join(
-                '"$testcase"' if a == crash_artifacts.TESTCASE_TOKEN else shq(a)
+                _testcase_shell_arg(a, '"$testcase"')
                 for a in repro_args
             ) or '"$testcase"'
             write_cli_with_input_template(

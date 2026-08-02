@@ -317,9 +317,10 @@ class ProbeCppHarnessTests(unittest.TestCase):
         loader.exec_module(probe)
 
         ran = "/w/results/scratch-2/.harness-cache/H-1-runner.c.abc.bin"
+        results = "/w/results"
 
         def foreign(text: str) -> list:
-            return probe.foreign_crash_images(text, ran)
+            return probe.foreign_crash_images(text, ran, results)
 
         # A module under scratch that probe did not build.
         self.assertTrue(foreign(
@@ -328,18 +329,62 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertFalse(foreign(
             "SUMMARY: AddressSanitizer: bad "
             "(/w/results/scratch-2/.harness-cache/H-1-runner.c.abc.bin:arm64+0x10)\n"))
+        # Identity is the full resolved path, not the basename. A carrier can
+        # choose the harness binary's name in another scratch directory.
+        self.assertTrue(foreign(
+            "SUMMARY: AddressSanitizer: bad "
+            "(/w/results/scratch-3/H-1-runner.c.abc.bin:arm64+0x10)\n"))
         # The target's own build and the system libraries.
         self.assertFalse(foreign(
             "SUMMARY: AddressSanitizer: bad (/t/build-asan/ffmpeg:arm64+0x10)\n"))
         self.assertFalse(foreign(
             "SUMMARY: AddressSanitizer: bad (/usr/lib/libsystem.dylib:arm64e+0x34)\n"))
+        # A similarly named parent outside this run's results tree is not an
+        # agent scratch directory.
+        self.assertFalse(foreign(
+            "SUMMARY: AddressSanitizer: bad "
+            "(/work/scratch-project/targets/app/build-asan/app+0x34)\n"))
         # A frame's source file is never dispositive: it arrives as a bare name
         # often enough that matching it would reject a target source that
         # happens to share a name with something in scratch.
         self.assertFalse(foreign("    #3 0x1 in main main.c:10\n"))
         self.assertFalse(foreign("    #5 0x1 in main /w/results/scratch-2/driver.c:49\n"))
+        # A target with neither a harness nor a configured runner leaves the
+        # binary unset. With nothing to compare against, the crash it just
+        # proved must not be discarded.
+        self.assertFalse(probe.foreign_crash_images(
+            "SUMMARY: AddressSanitizer: bad "
+            "(/w/results/scratch-2/driver.bin:arm64+0x10)\n", "", results))
         # A fully symbolized report names no module at all.
         self.assertFalse(foreign("    #0 0x1 in parse src/parse.c:10\n"))
+
+    def test_foreign_main_source_requires_an_absolute_non_harness_path(self) -> None:
+        import importlib.machinery
+        import importlib.util
+
+        loader = importlib.machinery.SourceFileLoader(
+            "probe_main_source_mod", str(ROOT / "bin" / "probe"),
+        )
+        spec = importlib.util.spec_from_loader("probe_main_source_mod", loader)
+        probe = importlib.util.module_from_spec(spec)
+        loader.exec_module(probe)
+
+        results = "/w/results"
+        harness = Path(results) / "scratch-2" / "harness.cpp"
+
+        def foreign(text: str) -> list:
+            return probe.foreign_crash_main_sources(text, harness, results)
+
+        self.assertTrue(foreign(
+            "#5 0x1 in main /w/results/scratch-2/nested/driver.c:49\n"))
+        self.assertTrue(foreign(
+            "#5 0x1 in main /w/results/scratch-2/nested/driver.c:49:7\n"))
+        self.assertTrue(foreign(
+            "#5 0x1 in main(int, char**) /w/results/scratch-3/harness.cpp:49\n"))
+        self.assertFalse(foreign(
+            "#5 0x1 in main(int, char**) /w/results/scratch-2/harness.cpp:49\n"))
+        self.assertFalse(foreign("#5 0x1 in main main.c:49\n"))
+        self.assertFalse(foreign("#5 0x1 in main /target/src/main.c:49\n"))
 
     def test_non_carrier_api_and_input_launcher_harnesses_are_allowed(self) -> None:
         harness = self.scratch / "commented.cpp"
