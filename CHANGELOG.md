@@ -1,5 +1,124 @@
 # Changelog
 
+## 1.4.0 - 2026-08-02
+
+- **A harness that forges its own crash is refused before it runs.** An agent
+  could compile a driver that injects a constructor into a version-only target
+  process, or hands control to a binary it built itself — the sanitizer trace
+  was real, but about the wrong program, and one run accepted seven of them.
+  Compiled carriers showing loader injection or a version-only launch are now
+  rejected before the compiler runs, a fault whose module lives in the agent's
+  own scratch tree and was not built by the probe is not a crash, and export
+  reads the probe receipt as authoritative instead of guessing which
+  `main()`-bearing source ran.
+
+- **A validation wall now buys verdicts instead of votes.** Every gate stage
+  needed two votes and ran breadth-first across the whole corpus, so a wall
+  that ran out mid-stage left the entire field one vote short of everything:
+  one drain spent 46 of 60 minutes producing 138 trigger votes and not one
+  trigger disposition. Findings are grouped and each group carried through
+  quality, reach fields, both trigger rounds, and finalization before the next
+  opens — same votes, same quorum, same batch sizes. A review that runs out of
+  wall also no longer discards its whole batch.
+
+- **An unfinished gate no longer reports as "found nothing".** Findings the
+  gate never decided were folded into "0 accepted", which reads as the
+  opposite conclusion; one cell published 0 accepted while 172 of its 191
+  findings had no verdict. The count now carries the remainder as
+  `0 (172 unjudged)` and a live run warns while an operator can still act.
+
+- **A disproved route reaches the session that would repeat it.** The
+  provenance gate wrote an anchored disproof for every rejection and then only
+  moved the artifact, so the reasoning never reached an agent — across four
+  targets 55% of trigger rejections landed on a file that had already produced
+  one in the same run, each paying a fresh harness, confirmations, bundle and
+  report to re-derive the same answer. Notes now render newest-first against
+  the rejected artifact itself, so a requeue retracts the note by moving it.
+
+- **Every ranked strategy can actually hold work.** Two lanes could never run:
+  one held zero cards on all four benchmarked targets because ranking kept
+  only the first two companion strategies in bucket order, starving the last
+  bucket queue-wide, and another owned no card generator at all. The rank
+  window is now filled by rotating strategies rather than by score alone,
+  buildability is decided before truncation instead of after, and
+  security-boundary surfaces — authorization checks, cookie scoping, path
+  effects — route to the rule-audit playbook instead of never ranking.
+
+- **An agent that finishes early keeps working.** A finished agent got exactly
+  one replacement and then idled at the iteration barrier for as long as its
+  slowest peer had left: one 5h run left 4.9 of 15 possible agent-hours
+  unused, with a single agent idle 46% of the time. Slots are now reusable for
+  the rest of the iteration.
+
+- **Browser support is structural, and Chromium is a supported target.**
+  Browser handling keyed off four hardcoded slugs and one objdir layout, so a
+  fork or rename silently got generic treatment. Execution is now derived from
+  the build driver, the product executable from bundle role metadata, and page
+  products must load an HTML canary before a route counts as usable. Chromium
+  is added as a gclient workspace overlay with a curated full-product ASan
+  recipe, resolved consistently across audit, benchmark, state, build, export
+  and cleanup.
+
+- **A benchmark run pins one execution contract and holds it.** A five-hour
+  cell left a runtime by-product in the target tree; the next cell read it as
+  a source change and died in four seconds, and the documented recovery
+  repeated the refusal. A fresh run now converges once, then pins the exact
+  runner, executable, library, stamp generation, route and tracked source
+  state it selected — and cell startup, completion, resume and both replay
+  paths verify against that pin rather than asking whether a hypothetical
+  rebuild would be fresh.
+
+- **A model-direct cell is aimed at its whole budget, and a short one is
+  visible.** One cell ended a 5h budget in well under an hour and still
+  aggregated as a clean replicate, so the equal-budget premise behind every
+  comparison failed silently. The baseline prompt sized the pass in tool calls
+  — the only target a model with no clock could check — and now names a UTC
+  deadline with a `date -u` check before any closing summary. The Wall column
+  carries the denominator it was missing and reads `spent/granted`, so a
+  condition that stopped early no longer reads exactly like one that ran to
+  the deadline.
+
+- **Severity is scored on evidence, not on a label.** An asserted `data_race`
+  bought the detector's code-execution row, turning a logic race into a High;
+  detector-confirmed races keep that reading and source-only ones no longer
+  do. A public-boundary exception was republishing source-refuted reports, one
+  at High 8.9. Rewriting a report's fields no longer voids the verdicts
+  already validated against it, and inferred fields survive regeneration
+  instead of decaying into placeholders.
+
+- **Reports read the same whatever backend wrote them.** Prose diverged by
+  backend — 18+ heading names, and an Impact section in 6% of one backend's
+  crash reports against 53% of another's — because no prompt stated audience,
+  section set, or length. One narrative contract now covers both, so a
+  prose-quality difference between conditions is a result rather than an
+  artifact.
+
+- **An agent can no longer kill a process by name.** A cleanup `pkill -f`
+  from one cell SIGKILLed a concurrent benchmark, because the target name also
+  appears in the orchestrator's argv. Every tool-using backend now gets a
+  refusal path for `pkill`/`killall`, including the composed and absolute-path
+  variants.
+
+- **Setup detects a build that compiled but cannot start.** Validation only
+  checked that an executable file existed, so a binary dying in the dynamic
+  loader passed and every run it served returned `NO_EXEC` while the agent was
+  steered toward configuration changes that cannot repair a recipe. Artifact
+  discovery also no longer stops three directories down, so completed
+  header-only builds stop being rebuilt forever, and `--pull` ignores
+  untracked build output instead of reading every target as dirty.
+
+- **A probe records what it cost.** Run records counted invocations, and an
+  agent-authored harness loops inside one — preserved sessions hold single
+  runs carrying over 600,000 target calls, so a card that consumed 1.9
+  agent-hours read exactly like one that cost seconds. Wall time is now
+  recorded per run, unknown stays unknown rather than zero, and every measured
+  decision ceiling is sized from what it observed instead of a fixed guess.
+
+- Internal: per-phase housekeeping timing, discovery-curve points that name
+  their source site, Mercurial parity for recency ranking and peer scans, a
+  dangling reproducer link that no longer aborts a finished run, and the
+  documented rule for what the benchmark wall counts.
+
 ## 1.3.0 - 2026-07-27
 
 - **The cold-start recon stage is gone.** It emitted candidate leads before any
