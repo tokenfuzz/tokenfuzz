@@ -27,7 +27,13 @@ agent rotates, the iteration ends, or the testcase hits a coverage/build wall.
 
 **Skip filing** when the issue is pure correctness, data-integrity,
 robustness, or spec-deviation without a security implication — the harness
-gate quarantines non-security FINDs.
+gate quarantines non-security FINDs. Same for an allocation or loop sized by
+an attacker-controlled count or length, unless you BOTH quantify the
+amplification (attacker bytes in → bytes or CPU consumed) AND show the demand
+surviving the project's own allocation or size ceiling, saying so plainly when
+the project has no such ceiling. Either one alone fails: an amplification a
+cap neutralizes is allocation handling, and a large demand that costs the
+attacker comparably large input is not amplification.
 
 **Exception — work card with a pre-filed FIND:** if your assigned work
 card carries a `find_id` (rendered in the card as a "PRE-FILED FIND"

@@ -190,7 +190,9 @@ not a CVSS input); otherwise it infers the entry from the deepest product frame
 in the sanitizer stack.
 
 `Parameter control` (when value-dependent): direct / mapped /
-harness-only / none. The triage matrix demotes when `Trigger source`
+application-supplied / harness-only / none. Use `application-supplied`
+when the bug needs a non-default mode/codec/filter/option the
+application selects. The triage matrix demotes when `Trigger source`
 falls outside the target's `attacker_controls` (target.toml) — a
 **severity** demotion (security→robustness) that KEEPS the crash in
 `crashes/`, not a move to `findings/`. File any reproducing sanitizer

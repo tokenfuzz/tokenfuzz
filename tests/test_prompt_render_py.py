@@ -189,6 +189,26 @@ ok("must make sure" in sf and "A recommendation that does not define accepted in
 ok("demotes a crash from security to robustness" not in sf and "×0.7" not in sf,
    "safety: reverted robustness/multiplier wording stays removed")
 
+# An operator-enabled non-default mode is application configuration, not
+# attacker input. Both halves must hold or the precondition is lost: the emit
+# side has to record it, and the scorer field has to carry it to MAT:P.
+# Without them a crash reachable only under a non-default filter or codec
+# rates as if the input bytes alone reached it.
+ok("`Parameter control: application-supplied`" in sf,
+   "safety: non-default mode authored in the field bin/severity reads")
+rc, rf = render_named("triage_reachability_fields.md.j2", {})
+ok(rc == 0, "triage_reachability_fields renders")
+ok("that selection is application configuration, not attacker input" in rf,
+   "reach-fields: operator-enabled mode is configuration")
+ok('set parameter_control to "application-supplied"' in rf,
+   "reach-fields: routed through the field bin/severity scores as MAT:P")
+
+rc, ff = render_named("find_first_directive.md.j2",
+                      {"results_dir": "/r", "report_prose": ""})
+ok(rc == 0, "find_first_directive renders")
+ok("AND show the demand surviving the project's own allocation" in ff,
+   "find-first: unsized resource exhaustion is not a FIND")
+
 rc, vp = render_named("validate_trigger_provenance.md.j2", {"target_path": "/t"})
 ok(rc == 0, "validate_trigger_provenance renders")
 ok("MISDESCRIBE its OWN buffer" in vp, "validator: buffer-overclaim reject clause")

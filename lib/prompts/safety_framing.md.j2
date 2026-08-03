@@ -202,6 +202,13 @@ trigger-source-vs-`attacker_controls` math once, in triage — never pre-demote
 a `call-sequence`/`env`/`race` crash at discovery time because the target is
 bytes-only.
 
+If the crash needs a NON-DEFAULT mode, module, codec, filter, or option that
+the application or operator selects — not one the input bytes choose — write
+`Parameter control: application-supplied` and name the required invocation in
+the report. The crash still belongs in `{{ results_dir }}/crashes/`, and it
+stays remotely reachable; the field records the precondition. Left unsaid, an
+operator-enabled path rates as if the input alone reached it.
+
 `Trigger source` tokens are normalized to the same vocabulary as
 `attacker_controls`: `bytes` (`data` is an accepted alias),
 `call-sequence` (synonyms: `call-order`, `sequence`), `timing`, `race`,

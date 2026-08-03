@@ -360,14 +360,19 @@ caller invokes to reach the bug, written call-shaped on its own line, e.g.
 reviewers; it does not change the CVSS score.
 
 `Parameter control` is optional but required when the finding depends on a
-specific offset, size, index, count, callback return, lifetime transition, or
-call order. State one of:
+specific offset, size, index, count, callback return, lifetime transition,
+call order, or a non-default mode the application selects. State one of:
 
 - `direct` — external input is consumed by the target API as that parameter
   under normal contracts, for example a file length field used by the parser's
   own copy loop.
 - `mapped` — trusted product code deliberately maps input to a public API
   parameter as part of normal behavior, and the report names that product path.
+- `application-supplied` — reaching the bug needs the application or operator
+  to have selected a non-default mode, module, codec, filter, or option; the
+  input bytes do not choose it. Name the required invocation in the report.
+  The crash stays byte-shaped and remotely reachable — this records the
+  precondition, it does not narrow reachability.
 - `harness-only` — the testcase/harness reads input and then supplies an
   out-of-contract parameter/offset/lifetime transition; this is robustness, not
   a security crash for a bytes-only target.

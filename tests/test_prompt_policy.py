@@ -240,5 +240,40 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertIn("Prefer one useful range over many narrow overlapping reads", rendered)
 
 
+class SharedPolicyAgreementTests(unittest.TestCase):
+    """Rules restated across prompts, asserted as agreeing rather than present.
+
+    The renderer has no include, so the emit contract, the harness FIND
+    directive and the find-quality gate each carry the resource-exhaustion bar
+    in their own voice. When one said "skip only when NEITHER fact holds"
+    while another said "in scope only when BOTH hold", a report quantifying an
+    amplification the project's own cap already neutralized passed emit and
+    gate while the contract excluded it.
+    """
+
+    def read(self, *parts: str) -> str:
+        return " ".join((ROOT.joinpath(*parts)).read_text(encoding="utf-8").split())
+
+    def test_every_statement_of_the_rule_requires_both_facts(self) -> None:
+        for name in ("audit_bug_contract.md.j2", "find_first_directive.md.j2",
+                     "triage_find_quality.md.j2"):
+            with self.subTest(prompt=name):
+                body = self.read("lib", "prompts", name)
+                self.assertIn("BOTH quantif", body)
+                self.assertIn("AND show", body)
+                # The De Morgan inversion that split them the first time.
+                self.assertNotIn("neither the amplification", body)
+
+    def test_application_supplied_reaches_the_scorer_from_author_docs(self) -> None:
+        # Scoring must not depend on the bounded triage fill-in pass: the
+        # agent needs the value in its own vocabulary and bin/severity has to
+        # recognize it. Either end missing loses the precondition silently.
+        for parts in ((".agents", "references", "session-rules.md"),
+                      (".agents", "references", "session-rules.digest.md"),
+                      ("bin", "severity")):
+            with self.subTest(source=parts[-1]):
+                self.assertIn("application-supplied", self.read(*parts))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

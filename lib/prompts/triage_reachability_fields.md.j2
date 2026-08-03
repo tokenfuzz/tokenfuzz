@@ -83,6 +83,13 @@ Rules:
   (bytes set up the object; the out-of-attacker-control call-sequence fires the
   bug). A single parse of the right bytes cannot reach the bug, so "bytes"
   alone would over-rate it as attacker-byte-reachable.
+- If reaching the fault requires the application or operator to have enabled a
+  NON-DEFAULT mode, module, codec, filter, or option — the same bytes do not
+  reach it under the target's default invocation — that selection is
+  application configuration, not attacker input. Keep caller_controls and
+  trigger_source describing the bytes the attacker still shapes, and set
+  parameter_control to "application-supplied" so the precondition is scored. A
+  path that is on by default needs no such marking.
 - Use trigger_source "call-sequence" ONLY for a purely local call-ordering
   trigger with no attacker byte/content path. If input bytes drive the trigger
   at all — including merely controlling callback timing, or when a single
