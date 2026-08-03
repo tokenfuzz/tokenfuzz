@@ -78,6 +78,14 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     corruption, UAF, bounds access, secret disclosure, or durable security
     impact after the failed allocation. An unchecked string-duplication or
     buffer-allocation helper is not by itself security substance.
+  - Unsized resource exhaustion: an allocation or loop driven by an
+    attacker-controlled count or length. Reject unless the report BOTH
+    quantifies the amplification (attacker bytes in → bytes or CPU consumed)
+    AND shows the demand surviving the project's own allocation or size
+    ceiling (or states the project has none). Either one alone fails: an
+    amplification a cap neutralizes is allocation handling, and a large
+    demand that costs the attacker comparably large input is not
+    amplification. Keep the report when both are argued but one is thin.
   - Caller-contract / trusted-caller misuse. Reject when the primitive
     depends on the caller supplying a bogus length for its own pointer,
     freeing or mutating an object after handing it to the API, passing

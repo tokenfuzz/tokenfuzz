@@ -58,6 +58,14 @@ class BenchmarkReportTests(unittest.TestCase):
             "Use the configured\nrunner", "save that evidence with the FINDING",
             "kill by process name/argv", "`pkill`", "`killall`",
             "including by\nabsolute path", "matched PIDs",
+            # The FIND bar is four named facts, replacing a filing-rate
+            # target a backend satisfied by restating one bug shape.
+            "you can name all four", "One location, one finding",
+            # Execution budget goes to the attacker's boundary, so a crash
+            # lane cannot degenerate into sweeping non-default options.
+            "the attacker controls the **input**, not your command",
+            # Shared bug contract: resource exhaustion needs amplification.
+            "resource exhaustion you cannot size",
         ):
             self.assertIn(required, body)
         for forbidden in (
@@ -65,10 +73,21 @@ class BenchmarkReportTests(unittest.TestCase):
             "writable facade of", "deserialization", "info-leak",
             "protocol-state", "denial-of-service",
             "Mode switch after ~5 FINDs", "roughly five plausible candidates",
+            # No pace or count target: it is satisfied by whichever bug shape
+            # is cheapest to restate, which is never the strongest one.
+            "File generously", "within ~10 tool calls",
+            "beats a perfect finding", "adjust your pace",
+            # Cluster identity is (class, file, line), so a rule that merged
+            # sites across files would suppress countable findings in this
+            # arm only. The evidence bar carries the quality load instead.
+            "one finding with twenty sites",
+            # The old three-fact bar, restated next to the output schema,
+            # defeated the four-fact bar above it.
+            "whenever you can name the file, the function, and the bad",
         ):
             self.assertNotIn(forbidden, body)
         self.assertLess(body.index("For every FINDING:"), body.index("For every CRASH:"))
-        self.assertRegex(body, r"find as many|file generously|breadth and depth")
+        self.assertRegex(body, r"Find as many|breadth and depth")
         self.assertNotRegex(body, r"\{\{\s*(target_path|output_dir)\s*\}\}")
         # The baseline reports fields; it is never handed the harness's own
         # strategy playbook. Reach fields are inferred downstream by
@@ -128,13 +147,21 @@ class BenchmarkReportTests(unittest.TestCase):
         for required in (
             "build-asan/src/sample-cli", "Driving the asan binary directly",
             "Building a one-off harness driver", "build-asan/lib/libsample.a",
-            "fsanitize=address", "When source review identifies a\nplausible sanitizer-class",
-            "file a CRASH only when a real\nsanitizer trace reproduces",
+            "fsanitize=address",
+            # Execution is framed as a way to FIND bugs, not only to confirm
+            # what source review already suspects — the prior verification-only
+            # framing produced crash-free passes. The evidence bar (a real
+            # trace) must survive that reframing unchanged.
+            "both first-class ways to find bugs",
+            "File a CRASH only when a real sanitizer trace reproduces",
             "--input /abs/out/crashes/CRASH-N/input --sink " + os.devnull,
         ):
             self.assertIn(required, native_body)
-        self.assertNotIn("merely to fill the crashes directory", body)
-        self.assertIn("merely to fill the crashes directory", native_body)
+        # The discouragement that suppressed the crash lane is gone from every
+        # framing, crash-capable or not.
+        for absent in (body, native_body):
+            self.assertNotIn("merely to fill the crashes directory", absent)
+            self.assertNotIn("When source review identifies", absent)
 
         # A sanitizer-runner build system (swift) is advertised as
         # crash-capable. Detection keys on build_system, the same structured

@@ -124,36 +124,42 @@ def _select_sanitizer(cfg) -> tuple:
     return None, None, None
 
 
+# Shared body for every crash-capable framing. The prior text made execution a
+# verification step downstream of source review ("when source review identifies
+# a plausible candidate, prioritize driving it") and then discouraged the lane
+# outright. A backend that followed it literally produced zero crashes in a full
+# pass while one that ignored it produced eleven (2026-08-02) — so the crash
+# column measured deviation from the prompt, not capability. Execution is now
+# stated as a way to FIND bugs, not only to confirm them. The evidence bar (a
+# real trace) is unchanged; only the discovery framing moved.
+_CRASH_LANE = (
+    "File every source-proven FINDING as you go. Source review and execution\n"
+    "are both first-class ways to find bugs here — {vehicle} is\n"
+    "not only for confirming what review already suspects, so budget real\n"
+    "time for driving it. File a CRASH only when a real {trace} reproduces.\n"
+)
+
+
 def _build_crash_objective(present: bool, build_dir: Path, label: str,
                            race_runner_present: bool = False,
                            sanitizer_runner_present: bool = False) -> str:
     if race_runner_present:
         return (
             "A race-detector runner is configured through `[runner]` (race).\n"
-            "File every source-proven FINDING as you go. When source review\n"
-            "identifies a plausible concurrency issue, prioritize running it\n"
-            "through the configured runner; file a CRASH only when a real\n"
-            "`WARNING: DATA RACE` trace reproduces. Do not divert unrelated\n"
-            "findings into crash work merely to fill the crashes directory.\n"
+            + _CRASH_LANE.format(vehicle="the configured runner",
+                                 trace="`WARNING: DATA RACE` trace")
         )
     if sanitizer_runner_present:
         return (
             f"A {label} sanitizer runner is configured through `[runner]`.\n"
-            "File every source-proven FINDING as you go. When source review\n"
-            "identifies a plausible sanitizer-class memory-safety issue,\n"
-            "prioritize running it through the configured runner; file a\n"
-            "CRASH only when a real sanitizer trace reproduces. Do not divert\n"
-            "unrelated findings into crash work merely to fill the crashes\n"
-            "directory.\n"
+            + _CRASH_LANE.format(vehicle="the configured runner",
+                                 trace="sanitizer trace")
         )
     if present:
         return (
-            f"A sanitizer build exists at `{build_dir}/` ({label}). File every\n"
-            "source-proven FINDING as you go. When source review identifies a\n"
-            "plausible sanitizer-class memory-safety issue, prioritize driving\n"
-            "it through the instrumented binary; file a CRASH only when a real\n"
-            "sanitizer trace reproduces. Do not divert unrelated findings into\n"
-            "crash work merely to fill the crashes directory.\n"
+            f"A sanitizer build exists at `{build_dir}/` ({label}).\n"
+            + _CRASH_LANE.format(vehicle="the instrumented binary",
+                                 trace="sanitizer trace")
         )
     # Managed / interpreted targets and any project without a usable
     # sanitizer build. Keep the word "sanitizer-instrumented" so callers

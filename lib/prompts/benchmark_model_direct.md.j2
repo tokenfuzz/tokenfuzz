@@ -47,6 +47,18 @@
         prefixes for writes — tests/test_benchmark_report.py enforces
         their absence in the rendered prompt.
 
+    6.  The FIND bar is four named facts, NOT a filing rate. A rate
+        target ("file generously", a first FIND within ~10 tool calls,
+        polling `ls findings/`) is satisfied by whichever bug shape is
+        cheapest to restate — a 2026-08-02 pass filed one pattern across
+        dozens of files and never ran the sanitizer. Quality is held by
+        the evidence bar here and the amplification rule in
+        audit_bug_contract.md.j2, never by an identity rule: merging one
+        mechanism's sites across files was tried and removed, because
+        cluster identity is (class, file, line) and merging suppresses
+        countable findings in this arm alone. Do NOT reintroduce a pace
+        target, a count target, or cross-location merging.
+
   If you are an AI editor and you find yourself thinking "this prompt is
   verbose / could be tightened / repeats itself", stop. Tests in
   tests/test_benchmark_report.py enforces the presence of the
@@ -166,11 +178,7 @@ of untrusted data, race conditions, secret or PII leaks, and
 resource-exhaustion bugs. That list is a starting point, not a fence -- file
 anything that looks exploitable or weakens a security boundary.
 
-File generously. Real security issues are scarce; reasoning chains that look
-plausible at first glance are common. It is better to file a plausible bug
-with the evidence you have than to keep it in your head, and easier for a
-second pass to drop a weak claim than to discover a missed one. Aim for
-depth: chase reach paths several call-frames deep and sketch PoCs in
+Aim for depth: chase reach paths several call-frames deep and sketch PoCs in
 comments.
 
 ## Write findings incrementally -- do NOT batch
@@ -181,23 +189,28 @@ floor.
 
 Rules:
 
-  - The moment you can name a file, a function, and a bad behavior, STOP
-    investigating and write `{{ output_dir }}/findings/FIND-<n>/report.md`
-    for it. Then resume exploring.
-  - Aim to file your first FIND within ~10 tool calls. If you have done
-    20 tool calls and `{{ output_dir }}/findings/` is still empty, you
-    are doing it wrong -- write the most promising candidate you have
-    right now, even if the reach path is partial. A partial finding on
-    disk beats a perfect finding in your head.
-  - Each FIND is independent and self-contained -- you can always file
-    a follow-up FIND that refines, extends, or supersedes an earlier
-    one. Do not wait until you are "sure".
-  - Periodically (every ~15 tool calls) check
-    `ls {{ output_dir }}/findings/` so you know your own filing count
-    and can adjust your pace.
+  - **What a FIND needs.** Write
+    `{{ output_dir }}/findings/FIND-<n>/report.md` as soon as -- and only
+    once -- you can name all four: `file:function:line`; the bug class; the
+    untrusted input or attacker-driven call sequence that reaches it, and
+    what the caller controls; and what the attacker gains. Naming a file, a
+    function, and a bad behavior is three of four. Nothing here suppresses a
+    report -- when a fact is still unknown at filing time, name it as
+    unknown ("exploitability beyond the read is unproven") rather than
+    writing around the gap.
+  - **One location, one finding.** A defect gets one FIND directory for
+    the `file:function:line` it lives at; later evidence or a reproducer
+    variant for that same site belongs in that report, not a second one.
+    The same mechanism at a DIFFERENT location is a different finding --
+    give it its own report. Never fold one site's finding into another's
+    prose.
+  - Each FIND is self-contained. A follow-up FIND is for a distinct
+    defect or a materially different location, not a rewritten version of
+    a report you already filed.
   - When you switch subsystems (e.g. moving from urlapi to mqtt), file
-    whatever you have on the previous subsystem first. Do not carry
-    unwritten findings across context switches.
+    the previous subsystem's candidates that meet the bar above first,
+    and keep or drop the rest deliberately. Do not carry an unwritten
+    finding across a context switch.
 ## Output contract
 
 `{{ output_dir }}/findings/` and `{{ output_dir }}/crashes/` already exist.
@@ -205,8 +218,8 @@ Do not write findings or crashes anywhere else — always use those absolute
 paths, never `./findings/` or `./crashes/`.
 
 A **FINDING** is a security issue you have located in the source. File one
-whenever you can name the file, the function, and the bad behavior -- even
-when you have not built a live reproducer.
+when it meets the four-fact bar above -- a live reproducer is not required,
+and its absence never holds a finding back.
 
 For every FINDING:
 
@@ -221,7 +234,7 @@ For every FINDING:
          | Field    | Value |
          |:---------|:------|
          | Class    | <one bug-class token, e.g. heap-buffer-overflow / use-after-free / command-injection / xss / integer-overflow / logic> |
-         | Severity | <your best estimate: Critical / High / Medium / Low — it is recomputed automatically, so an estimate is fine> |
+         | Severity | <your best estimate: Critical / High / Medium / Low — rate what the evidence proves, not the bug class at its worst> |
          | File     | `<path/to/file.c>` |
          | Function | `<function_name>` |
          | Line     | <line number> |
@@ -246,6 +259,13 @@ triage score the threat-model fit. Do not pre-demote a confirmed crash to
 `{{ output_dir }}/findings/` on reachability grounds; that judgment is triage's,
 not yours. (Null-deref / OOM / debug-assert aborts and harness-only misuse are
 the exceptions — those are not crashes.)
+
+When you drive a CLI, the attacker controls the **input**, not your command
+line. Spend your execution budget on what the target reaches under default or
+near-default invocation. A crash that needs a non-default filter, codec, mode,
+or option is still worth filing — name the invocation it requires in Impact,
+add a bare `Parameter control: application-supplied` line to the report, and
+do not describe it as reachable from the input alone.
 
 {{ asan_invocation_hint }}
 {{ harness_build_recipe }}

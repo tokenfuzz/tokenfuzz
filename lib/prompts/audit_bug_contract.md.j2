@@ -29,8 +29,14 @@ or similar (any bug class, not just memory-safety):
   reachable only because a trusted caller passed NULL or out-of-contract
   arguments to an API that documents valid ones;
 - **OOM / allocation-failure only** — a NULL crash, leaked allocation, or
-  stale error flag when a single allocation fails (not attacker-driven
-  resource exhaustion, which is in scope);
+  stale error flag when a single allocation fails;
+- **resource exhaustion you cannot size** — an allocation or loop driven by
+  an attacker-controlled count or length, unless you BOTH quantify the
+  amplification (attacker bytes in → bytes or CPU consumed) AND show the
+  demand surviving the project's own allocation or size ceiling, saying so
+  plainly when the project has no such ceiling. Either one alone fails: an
+  amplification a cap neutralizes is allocation handling, and a large demand
+  that costs the attacker comparably large input is not amplification;
 - **debug-only `assert` / `*_CHECK`** that the shipped release build
   compiles out;
 - **non-product surface** — code that does not ship in the product: test or
