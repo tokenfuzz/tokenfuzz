@@ -1529,6 +1529,35 @@ class BenchmarkMetricsTests(unittest.TestCase):
             benchmark._unique_with_medium_plus(57, 41, 2, 3, False),
         )
 
+    def test_finalization_tokens_split_by_stamp_not_by_role(self) -> None:
+        """Adjudication tokens are recorded apart from discovery, not displayed.
+
+        Post-cell review writes to the same index the audit does, so one
+        re-review moved a direct cell from 13.9M to 24.9M input. In-run
+        housekeeping decisions steer the audit and stay with it, so the split
+        is by the finalization stamp, never by decision role.
+        """
+        logs = self.root / "tokensplit" / "logs"
+        logs.mkdir(parents=True)
+        index = logs / "index.jsonl"
+        index.write_text("".join(json.dumps(row) + "\n" for row in (
+            {"timestamp": "2026-08-03T01:00:00+00:00", "role": "decision:x",
+             "tokens": {"input": 100, "output": 10}},
+            {"timestamp": "2026-08-03T09:00:00+00:00", "role": "decision:x",
+             "tokens": {"input": 700, "output": 70}},
+        )), encoding="utf-8")
+        # No stamp: a run predating it reports nothing rather than a guess.
+        self.assertEqual(benchmark.harvest_finalization_tokens(index), {})
+        (logs / ".finalization_started").write_text("2026-08-03T08:00:00+00:00")
+        split = benchmark.harvest_finalization_tokens(index)
+        self.assertEqual(split["started_at"], "2026-08-03T08:00:00+00:00")
+        # Only the post-stamp row counts; the in-run decision stays with audit.
+        self.assertEqual(split["input_tokens"], 700)
+        # No scratch file: logs/ is shared across parallel agents and the
+        # orchestrator, so a fixed-name temp there is a concurrent-write hazard.
+        self.assertEqual(sorted(p.name for p in logs.iterdir()),
+                         [".finalization_started", "index.jsonl"])
+
     def test_finding_classes_count_distinct_reviewed_bug_classes(self) -> None:
         findings = self.root / "class-spread"
         names = []

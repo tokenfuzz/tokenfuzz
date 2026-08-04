@@ -86,6 +86,17 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     amplification a cap neutralizes is allocation handling, and a large
     demand that costs the attacker comparably large input is not
     amplification. Keep the report when both are argued but one is thin.
+  - Unsourced residual-memory disclosure: a report claiming that
+    uninitialized, stale, or leftover memory reaches an attacker MUST name
+    the allocation that memory comes from -- the call, buffer, or field the
+    bytes live in. Reject when it does not. Naming it is what makes the claim
+    checkable: an allocation that zero-fills or that only ever holds the
+    caller's own data discloses nothing, and a report that never says where
+    the bytes came from cannot be shown either way. This is about the claim's
+    own evidence, not its polish -- an agent that established the leak can
+    always say what leaked. Does NOT apply to disclosure of a known value
+    (a credential, header, path, or prior response): there the source is the
+    value itself, already named.
   - Caller-contract / trusted-caller misuse. Reject when the primitive
     depends on the caller supplying a bogus length for its own pointer,
     freeing or mutating an object after handing it to the API, passing

@@ -228,7 +228,7 @@ class IncrementalFindingValidationTests(unittest.TestCase):
     def test_report_edit_invalidates_terminal_acceptance_before_retry(self) -> None:
         cache = self.finding / ".llm-find-quality.json"
         cache.write_text(json.dumps({
-            "decision_version": "v13-python",
+            "decision_version": report_identity.FIND_QUALITY_DECISION_VERSION,
             "content_sha1": "stale",
             "accept": True,
             "accept_count": 2,
@@ -247,7 +247,7 @@ class IncrementalFindingValidationTests(unittest.TestCase):
     def test_report_edit_cannot_replay_a_stale_rejection(self) -> None:
         cache = self.finding / ".llm-find-quality.json"
         cache.write_text(json.dumps({
-            "decision_version": "v13-python",
+            "decision_version": report_identity.FIND_QUALITY_DECISION_VERSION,
             "content_sha1": "stale",
             "accept": False,
             "reject_count": 2,
@@ -1788,6 +1788,97 @@ Generated score text.
         )
         ordered = triage._finding_review_order([thin, complete])
         self.assertEqual(ordered, [complete, thin])
+
+    def test_pending_sidecars_clear_where_the_reader_looks(self) -> None:
+        """A verified crash cannot stay PENDING off a marker no pass reaches.
+
+        cluster_common.promotion_pending_reasons searches the bundle and its
+        `.audit/`, where export and pooling move sidecars, but clearing covered
+        only the top level. One crash reproduced 5/5 with sanitizer output and
+        still published as PENDING.
+        """
+        import cluster_common
+        bundle = self.root / "CRASH-900"
+        (bundle / ".audit").mkdir(parents=True)
+        for base in (bundle, bundle / ".audit"):
+            (base / ".promotion_pending").write_text(
+                "sanitizer.txt(valid)\n", encoding="utf-8",
+            )
+        self.assertTrue(cluster_common.promotion_pending_reasons(bundle))
+        triage._clear_promotion_sidecars(bundle)
+        self.assertEqual(cluster_common.promotion_pending_reasons(bundle), [])
+
+    def test_disclosed_content_is_optional_and_enum_bound(self) -> None:
+        """Silence keeps today's severity; only a reviewed value may move it."""
+        self.assertIn("disclosed_content", triage._OPTIONAL_REACH_FIELD_LABELS)
+        self.assertNotIn("disclosed_content", triage._REACH_FIELD_LABELS)
+        # An unclassified report is complete: absence never blocks publication.
+        self.assertNotIn(
+            "disclosed_content", triage._missing_reach_fields("| Class | x |"),
+        )
+        self.assertEqual(
+            triage._valid_reach_field("disclosed_content", "cross-principal"),
+            "cross-principal",
+        )
+        self.assertEqual(
+            triage._valid_reach_field("disclosed_content", "invented"), "",
+        )
+
+    def test_complete_disclosure_report_is_still_asked_once(self) -> None:
+        """A complete report short-circuits the fill; the ask must survive it.
+
+        `_missing_reach_fields` lists only publication-required fields, so an
+        otherwise complete disclosure report returned early and the optional
+        classification could never be populated on the reports it exists for.
+        """
+        required = "".join(
+            f"| {label} | stated |\n"
+            for label in triage._REACH_FIELD_LABELS.values()
+        )
+        disclosure = "| Class | info-disclosure:uninitialized-memory |\n" + required
+        self.assertEqual(triage._missing_reach_fields(disclosure), {})
+        self.assertIn(
+            "disclosed_content", triage._pending_optional_reach_fields(disclosure),
+        )
+        # A non-disclosure report must not buy an extra provider call...
+        self.assertEqual(
+            triage._pending_optional_reach_fields(
+                "| Class | memory-safety:bounds |\n" + required,
+            ),
+            {},
+        )
+        # ...and one already classified is never asked twice.
+        self.assertEqual(
+            triage._pending_optional_reach_fields(
+                disclosure + "| Disclosed content | same-context |\n",
+            ),
+            {},
+        )
+
+        # Exercise the actual report -> decision -> materialization path. A
+        # helper-only test would miss another early return in fill_reach_fields.
+        self.report.write_text(disclosure, encoding="utf-8")
+        self.assertTrue(triage.fill_reach_fields(
+            self.finding,
+            decision_override={"disclosed_content": "same-context"},
+        ))
+        self.assertEqual(
+            triage._field(self.report.read_text(), "Disclosed content"),
+            "same-context",
+        )
+        attempts = json.loads(
+            (self.finding / ".llm_fields.json").read_text(encoding="utf-8"),
+        )["_fill_attempts"]
+        self.assertFalse(triage.fill_reach_fields(
+            self.finding,
+            decision_override={"disclosed_content": "cross-principal"},
+        ))
+        self.assertEqual(
+            json.loads(
+                (self.finding / ".llm_fields.json").read_text(encoding="utf-8"),
+            )["_fill_attempts"],
+            attempts,
+        )
 
     def test_split_disproof_names_still_remove_the_finding(self) -> None:
         """Quorum is on the disproof, not on the name given to it.

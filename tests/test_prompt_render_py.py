@@ -234,6 +234,22 @@ rc, fq = render_named("triage_find_quality.md.j2", {"body": "sample finding"})
 ok(rc == 0, "finding-quality prompt renders")
 ok("protocol, supply-chain, other" in fq, "quality taxonomy includes protocol and supply-chain")
 ok("do not invent a new top-level" in fq, "quality taxonomy closes top-level label drift")
+# A disclosure claim that never says where the bytes come from is unfalsifiable:
+# source review can neither confirm nor refute it, so the reports that named
+# their allocation were rejected while the vague ones survived.
+ok("uninitialized, stale, or leftover memory" in fq,
+   "quality gate names the unsourced residual-disclosure reject bucket")
+ok("MUST name" in fq and "the allocation that memory comes from" in fq,
+   "quality gate requires a disclosure claim to name its memory source")
+ok("known value" in fq,
+   "quality gate exempts disclosure of an already-named value")
+
+rc, reach = render_named("triage_reachability_fields.md.j2", {"body": "sample report"})
+ok(rc == 0, "reach-field prompt renders for disclosure classification")
+ok("not already observable to the attacking principal" in reach,
+   "cross-principal is defined from the attacker's knowledge")
+ok("non-sensitive public constant" in reach and "happens to be fixed" in reach,
+   "fixed-or-zero cannot silently classify a fixed secret as harmless")
 
 rc, tm = render_named("suggest_threat_model.md.j2", {
     "slug": "sampleproj", "upstream_url": "https://example.invalid",

@@ -116,6 +116,19 @@ def _find_gate_reset(path: Path) -> int | None:
     return max(values) if values else 0
 
 
+def _stamp_finalization_start(results: Path) -> None:
+    """Record when the audit stopped and measurement began, once per cell."""
+    marker = metrics._find_index_jsonl(results).parent / ".finalization_started"
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        if not marker.is_file():
+            marker.write_text(
+                datetime.now(timezone.utc).isoformat(), encoding="utf-8",
+            )
+    except OSError:
+        pass
+
+
 def _finalize_deadline(finalize_wall: int) -> float | None:
     """Fresh ceiling for one finalization phase.
 
@@ -2373,6 +2386,11 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     pass
                 finalize_wall = getattr(args, "finalize_wall", 0)
                 finalize_workers = getattr(args, "finalize_workers", 4)
+                # Post-cell adjudication is measurement, not discovery, but its
+                # tokens land in the same index as the audit's. Stamp the
+                # boundary so the two can be told apart after the fact; the
+                # published totals stay combined.
+                _stamp_finalization_start(results)
                 replay_build_ok = not build_drift
                 if (
                     not args.dry_run

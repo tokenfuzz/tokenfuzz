@@ -715,12 +715,16 @@ _OPTIONAL_REACH_FIELD_LABELS = {
     # useful when it differs, but absence is not evidence that the surface is
     # unknown and must not invalidate an otherwise complete report.
     "reproducer_carrier": "Reproducer carrier",
+    # What the disclosed bytes actually are. Optional on purpose: a report that
+    # cannot say leaves severity exactly where it is, so classifying is the only
+    # way this field moves a score and silence never costs a finding.
+    "disclosed_content": "Disclosed content",
 }
 _ALL_REACH_FIELD_LABELS = {
     **_REACH_FIELD_LABELS,
     **_OPTIONAL_REACH_FIELD_LABELS,
 }
-_REACH_FIELD_DECISION_VERSION = "reach-fields-v2-complete-publication"
+_REACH_FIELD_DECISION_VERSION = "reach-fields-v3-disclosed-content"
 _REACH_FIELD_ENUMS = {
     "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
@@ -728,6 +732,9 @@ _REACH_FIELD_ENUMS = {
     "parameter_control": {"direct", "indirect", "application-supplied", "trusted", "harness-only"},
     "trusted_caller_actions": {"normal public call", "private mutation", "callback ordering", "harness-only"},
     "advisory": {"yes", "no"},
+    "disclosed_content": {
+        "cross-principal", "same-context", "attacker-derived", "fixed-or-zero",
+    },
 }
 _SURFACE_KINDS = {"network", "library-api", "file-format", "cli", "dev-tool", "internal", "unknown"}
 _CARRIER_KINDS = {"network", "library-api", "file-format", "cli", "harness", "runner", "unknown"}
@@ -784,6 +791,33 @@ def _missing_reach_fields(text: str) -> dict[str, str]:
         key: label for key, label in _REACH_FIELD_LABELS.items()
         if not _reach_field_present(text, label)
     }
+
+
+# Broad and stable rather than a class list that rots: any report whose own
+# class or primitive says it discloses something is worth one bounded ask.
+_DISCLOSURE_SHAPE_RE = re.compile(r"disclos|info[-_ ]?leak|uninit|residu", re.I)
+
+
+def _pending_optional_reach_fields(text: str) -> dict[str, str]:
+    """The optional classification this report still owes, if it owes one.
+
+    Kept out of `_missing_reach_fields`, which means "publication-required and
+    absent": a report is complete without this, and treating it as missing
+    would make every disclosure report look unfinished. Without a separate ask
+    a complete report short-circuits before the fill prompt ever runs, so the
+    field could never be populated on exactly the reports it exists for.
+    """
+    label = _OPTIONAL_REACH_FIELD_LABELS["disclosed_content"]
+    if _reach_field_present(text, label):
+        return {}
+    for field in ("Class", "Primitive"):
+        match = re.search(
+            rf"^(?:{field}\s*:\s*|\|\s*{field}\s*\|\s*)([^|\n]+)",
+            text, re.IGNORECASE | re.MULTILINE,
+        )
+        if match and _DISCLOSURE_SHAPE_RE.search(match.group(1)):
+            return {"disclosed_content": label}
+    return {}
 
 
 def _accepted_reach_fields(
@@ -914,7 +948,7 @@ def fill_reach_fields(
         return False
     text = full_text[:6000]
     missing = _missing_reach_fields(full_text)
-    if not missing:
+    if not missing and not _pending_optional_reach_fields(full_text):
         return False
     sidecar = directory / ".llm_fields.json"
     cache = _reach_field_cache(sidecar)
@@ -976,7 +1010,7 @@ def _batch_reach_field_decisions(
             continue
         narrative = report_text[:6000]
         missing = _missing_reach_fields(report_text)
-        if not missing:
+        if not missing and not _pending_optional_reach_fields(report_text):
             continue
         cache = _reach_field_cache(directory / ".llm_fields.json")
         cached = _accepted_reach_fields(cache, missing)
@@ -988,7 +1022,7 @@ def _batch_reach_field_decisions(
             report_text = report.read_text(encoding="utf-8", errors="replace")
             narrative = report_text[:6000]
             missing = _missing_reach_fields(report_text)
-            if not missing:
+            if not missing and not _pending_optional_reach_fields(report_text):
                 continue
         try:
             attempts = int(cache.get("_fill_attempts", 0))
@@ -1262,11 +1296,20 @@ def _promotion_pending_max() -> int:
 
 
 def _clear_promotion_sidecars(directory: Path) -> None:
-    for name in _PENDING_SIDECARS:
-        try:
-            (directory / name).unlink(missing_ok=True)
-        except OSError:
-            pass
+    """Retire the pending sidecars wherever a reader will look for them.
+
+    `cluster_common.promotion_pending_reasons` searches beside the report *and*
+    under `.audit/`, where export and pooling move sidecars. Clearing only the
+    top level left the `.audit/` copy behind, so a crash that later reproduced
+    5/5 with sanitizer output still published as PENDING off a marker no pass
+    could reach. Reader and writer now cover the same two places.
+    """
+    for base in (directory, directory / ".audit"):
+        for name in _PENDING_SIDECARS:
+            try:
+                (base / name).unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _bump_promotion_pending(directory: Path, scope: str, missing: list[str]) -> int:

@@ -484,7 +484,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     accepted = findings / "FIND-ACCEPTED"
     accepted.mkdir(parents=True)
     (accepted / "report.md").write_text("# Concrete issue\n\nsrc/a.c:10 bounds issue\n", encoding="utf-8")
-    (accepted / ".llm-find-quality.json").write_text(json.dumps({"decision_version": "v13-python", "accept": True, "accept_count": 2}), encoding="utf-8")
+    (accepted / ".llm-find-quality.json").write_text(json.dumps({"decision_version": triage.report_identity.FIND_QUALITY_DECISION_VERSION, "accept": True, "accept_count": 2}), encoding="utf-8")
     equal(
         "pending",
         triage.validate_one_finding(accepted, rejected_results),
@@ -520,7 +520,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     rejected = findings / "FIND-REJECTED"
     rejected.mkdir()
     (rejected / "report.md").write_text("# Concrete issue\n\nsrc/b.c:20 state issue\n", encoding="utf-8")
-    (rejected / ".llm-find-quality.json").write_text(json.dumps({"decision_version": "v13-python", "accept": False, "reject_count": 2, "reason": "not security relevant"}), encoding="utf-8")
+    (rejected / ".llm-find-quality.json").write_text(json.dumps({"decision_version": triage.report_identity.FIND_QUALITY_DECISION_VERSION, "accept": False, "reject_count": 2, "reason": "not security relevant"}), encoding="utf-8")
     equal("rejected", triage.validate_one_finding(rejected, rejected_results), "finding gate quarantines cached reject quorums")
     check((rejected_results / "findings-rejected" / "FIND-REJECTED" / "REJECTION.md").is_file(), "finding rejection keeps the validator rationale")
 

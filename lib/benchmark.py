@@ -1561,11 +1561,62 @@ def _fmt_usd(value: object, estimated: bool = False) -> str:
     return f"{prefix}${amount:,.4f}"
 
 
+def harvest_finalization_tokens(
+    index_jsonl: Path,
+    default_backend: str = "",
+    default_model: str = "",
+) -> dict:
+    """The measurement subset of a cell's token spend, or {} when unmarked.
+
+    Post-cell adjudication writes to the same index the audit does, so a cell
+    that re-reviews a large corpus reports a token and cost total dominated by
+    work that found nothing -- one re-review moved a direct cell from 13.9M to
+    24.9M input. The published columns stay combined on purpose: this is the
+    breakdown, recorded beside them, not a second number in the table.
+
+    Split by the `.finalization_started` stamp rather than by decision role,
+    because in-run housekeeping decisions steer the audit and belong to it.
+    Runs predating the stamp return {} rather than a guess.
+    """
+    marker = Path(index_jsonl).parent / ".finalization_started"
+    try:
+        started = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    if not started:
+        return {}
+    rows: list[str] = []
+    try:
+        for line in Path(index_jsonl).read_text(
+            encoding="utf-8", errors="replace",
+        ).splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                row = json.loads(stripped)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and str(row.get("timestamp") or "") >= started:
+                rows.append(stripped)
+    except OSError:
+        return {}
+    if not rows:
+        return {"started_at": started}
+    totals = harvest_tokens(
+        Path(index_jsonl), default_backend=default_backend,
+        default_model=default_model, lines=rows,
+    )
+    totals["started_at"] = started
+    return totals
+
+
 def harvest_tokens(
     index_jsonl: Path,
     default_backend: str = "",
     default_model: str = "",
     prompt_estimate_fallback: int = 0,
+    lines: list[str] | None = None,
 ) -> dict:
     """Sum token usage + sanitizer invocations from a logs/index.jsonl.
 
@@ -1607,12 +1658,15 @@ def harvest_tokens(
         "cost_source": "",
         "token_source": "unknown",
     }
-    if not index_jsonl.is_file():
-        return totals
-    try:
-        lines = index_jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return totals
+    if lines is None:
+        if not index_jsonl.is_file():
+            return totals
+        try:
+            lines = index_jsonl.read_text(
+                encoding="utf-8", errors="replace",
+            ).splitlines()
+        except OSError:
+            return totals
 
     def _int(value: object) -> int:
         return _as_nonnegative_int(value)
@@ -2706,6 +2760,11 @@ def harvest(
         default_backend=default_backend,
         default_model=default_model,
         prompt_estimate_fallback=_model_direct_prompt_estimate(results_dir),
+    )
+    metrics["finalization_tokens"] = harvest_finalization_tokens(
+        _find_index_jsonl(results_dir),
+        default_backend=default_backend,
+        default_model=default_model,
     )
     metrics["execution"] = harvest_execution(
         results_dir,

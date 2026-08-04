@@ -25,7 +25,8 @@ evidence for it):
   "parameter_control": "<direct | indirect | application-supplied | trusted | harness-only>",
   "trusted_caller_actions": "<normal public call | private mutation | callback ordering | harness-only>",
   "boundary":        "<short description of the attacker boundary>",
-  "advisory":        "<yes | no, only when the report clearly says so>"
+  "advisory":        "<yes | no, only when the report clearly says so>",
+  "disclosed_content": "<cross-principal | same-context | attacker-derived | fixed-or-zero> — ONLY for a disclosure report, and only when the report names the allocation the bytes come from and says what lives there. cross-principal: data not already observable to the attacking principal, including another user, session, tenant, or unrelated process memory. same-context: data already observable to this same attacking principal/session, but not necessarily the exact disclosed bytes. attacker-derived: the exact bytes the attacker supplied. fixed-or-zero: zeros or a non-sensitive public constant, never merely a value that happens to be fixed. Omit when the report does not settle it"
 }
 
 Allowed primitive_keys:

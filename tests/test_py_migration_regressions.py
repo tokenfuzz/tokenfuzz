@@ -1092,7 +1092,10 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     finding_report = finding / "report.md"
     finding_report.write_text(_GOOD_REPORT, encoding="utf-8")
     (finding / ".llm-find-quality.json").write_text(
-        '{"decision_version":"v13-python","accept":true,"accept_count":2}\n',
+        json.dumps({
+            "decision_version": report_identity.FIND_QUALITY_DECISION_VERSION,
+            "accept": True, "accept_count": 2,
+        }) + "\n",
         encoding="utf-8",
     )
     trigger_source = root / "sample.c"
@@ -1952,7 +1955,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         encoding="utf-8",
     )
     (live_finding / ".llm-find-quality.json").write_text(json.dumps({
-        "decision_version": "v13-python", "accept": True, "accept_count": 2,
+        "decision_version": report_identity.FIND_QUALITY_DECISION_VERSION, "accept": True, "accept_count": 2,
     }), encoding="utf-8")
     with mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision), \
          mock.patch.object(triage, "_finding_trigger_disposition", return_value="accepted"), \

@@ -823,6 +823,40 @@ def _caller_only_modified_impacts(local_only: bool,
                   "(a local caller can only crash its own process)")
 
 
+def _disclosed_content_modified_impacts(
+    fields: dict, metrics: dict[str, str],
+) -> tuple[dict[str, str], str]:
+    """Rate a disclosure on what leaked, using the same Environmental path.
+
+    Every info-disclosure class maps to the ``info_leak`` row (VC:H), so a few
+    bytes of a caller's own prior frame scored exactly like a leaked key: one
+    corpus produced 149 accepted findings, 0 of them Low. The Base row is right
+    for the worst case and stays; what the report actually discloses is an
+    Environmental fact, expressed the way the caller-only floor already does.
+
+    Silence costs nothing: ``disclosed_content`` is optional, so an unclassified
+    report keeps the severity it has and no finding is under-rated by omission.
+
+    The classification is read from the report, not from source review, so it
+    is advisory: it corrects a report that admits its bytes are zeroed or
+    caller-local, and does nothing to a fluent report that claims cross-tenant
+    data it never had. Only lowering is wired for that reason -- a wrong claim
+    keeps today's score rather than earning a higher one.
+    """
+    content = (fields.get("disclosed_content", "") or "").strip().lower()
+    if metrics.get("VC") in (None, "N"):
+        return {}, ""
+    if content in ("fixed-or-zero", "attacker-derived"):
+        return ({"MVC": "N"},
+                f"disclosed content={content} → nothing the attacker did not "
+                "already have or already know → MVC:N")
+    if content == "same-context":
+        return ({"MVC": "L"},
+                "disclosed content=same-context → bytes this caller already "
+                "handled, not another principal's → MVC:L")
+    return {}, ""
+
+
 def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
                    contract_concern: bool,
                    report_dir: Path | None = None) -> tuple[dict[str, str] | None, list[str]]:
@@ -878,6 +912,8 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
     # through Environmental M* metrics, never a post-score cap.
     caller_mods, caller_mods_note = _caller_only_modified_impacts(local_only, metrics)
     metrics.update(caller_mods)
+    content_mods, content_note = _disclosed_content_modified_impacts(fields, metrics)
+    metrics.update(content_mods)
     notes = [
         f"surface={surface_label} → AV:{surface_av}/UI:{ui}",
         f"class={prim_key} → VC:{vc}/VI:{vi}/VA:{va}/SC:{sc}/SI:{si}/SA:{sa}",
@@ -895,6 +931,8 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
         e_note,
         req_note,
     ]
+    if content_note:
+        notes.append(content_note)
     if contract_concern:
         notes.append("caller contract concern → MAT:P")
     if limited_note:
@@ -1480,7 +1518,8 @@ def _accepted_finding_primitive(report_dir: Path) -> tuple[str, str]:
         votes = int(payload.get("accept_count", 0))
     except (OSError, ValueError, TypeError):
         return "", ""
-    if (payload.get("decision_version") != "v13-python"
+    if (payload.get("decision_version")
+            != report_identity.FIND_QUALITY_DECISION_VERSION
             or payload.get("accept") is not True or votes < 2):
         return "", ""
     label = str(payload.get("class") or "").strip().lower()
@@ -1807,7 +1846,7 @@ _BARE_FIELD_RE = re.compile(
 _FIELD_KEYS = {
     "surface", "trigger source", "caller contract", "caller controls",
     "trusted caller actions", "parameter control", "reproduction rate",
-    "boundary", "primitive", "class", "advisory",
+    "boundary", "primitive", "class", "advisory", "disclosed content",
 }
 
 
@@ -1853,6 +1892,7 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
 
     fields = {
         "surface":           out.get("surface", ""),
+        "disclosed_content": out.get("disclosed content", ""),
         "trigger_source":    out.get("trigger source", ""),
         "caller_contract":   out.get("caller contract", ""),
         "caller_controls":   out.get("caller controls", ""),
@@ -2534,6 +2574,7 @@ _SURFACED_REACH_FIELDS = (
     ("class_field",     "Class"),
     ("primitive_field", "Primitive"),
     ("surface",         "Surface"),
+    ("disclosed_content", "Disclosed content"),
     ("trigger_source",  "Trigger source"),
     ("caller_contract", "Caller contract"),
     ("caller_controls", "Caller controls"),
@@ -2551,7 +2592,7 @@ _KNOWN_FIELD_LABELS = frozenset({
     "build config",
     "primitive", "surface", "trigger source", "caller contract",
     "caller controls", "trusted caller actions", "parameter control",
-    "boundary", "advisory",
+    "boundary", "advisory", "disclosed content",
 })
 
 # A `|` table is the report's Fields table only when a row carries one of these

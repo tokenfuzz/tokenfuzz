@@ -855,7 +855,7 @@ class SeverityTests(unittest.TestCase):
             surface="library-api",
         )
         (accepted / ".llm-find-quality.json").write_text(json.dumps({
-            "decision_version": "v13-python", "accept": True, "accept_count": 2,
+            "decision_version": severity.report_identity.FIND_QUALITY_DECISION_VERSION, "accept": True, "accept_count": 2,
             "class": "dos:algorithmic", "severity": "critical",
         }))
         accepted_result = self.score(accepted)
@@ -868,7 +868,7 @@ class SeverityTests(unittest.TestCase):
             finding=True,
         )
         (review / ".llm-find-quality.json").write_text(json.dumps({
-            "decision_version": "v13-python", "accept": True, "accept_count": 2,
+            "decision_version": severity.report_identity.FIND_QUALITY_DECISION_VERSION, "accept": True, "accept_count": 2,
             "class": "boundary:new-unmapped-kind",
         }))
         self.assertEqual((self.score(review)["level"], self.score(review)["score"]), ("Needs review", None))
@@ -918,7 +918,7 @@ class SeverityTests(unittest.TestCase):
                     extra_fields=(("Primitive", "undefined_behavior"),),
                 )
                 (report / ".llm-find-quality.json").write_text(json.dumps({
-                    "decision_version": "v13-python",
+                    "decision_version": severity.report_identity.FIND_QUALITY_DECISION_VERSION,
                     "accept": True,
                     "accept_count": 2,
                     "class": finding_class,
@@ -928,6 +928,129 @@ class SeverityTests(unittest.TestCase):
                 self.assertIsNotNone(scored["score"])
                 if expected == "allocator_mismatch":
                     self.assert_metrics(scored, VC="N", VI="N", VA="H")
+
+    def test_disclosed_content_reaches_the_scorer_from_the_report(self) -> None:
+        """report -> extract_report_fields -> scorer, not a hand-built dict.
+
+        The unit test for the modifier passed while the field never left the
+        parser: `disclosed content` was absent from _FIELD_KEYS, so the scorer
+        saw an empty value on every real report and the modifier was dead.
+        """
+        self.assertIn(
+            "disclosed_content",
+            severity.extract_report_fields(
+                "| Field | Value |\n| Disclosed content | same-context |\n",
+            ),
+        )
+        scored = {}
+        for reproduction in ("", "5/5"):
+            for value in ("cross-principal", "same-context", "fixed-or-zero"):
+                report_dir = self.make_report(
+                    "uninitialized read disclosed to the caller",
+                    report_id=f"FIND-disc-{reproduction or 'unproven'}-{value}",
+                    finding=True,
+                    reproduction=reproduction,
+                    extra_fields=[("Primitive", "info_leak"),
+                                  ("Disclosed content", value)],
+                )
+                scored[(reproduction, value)] = self.score(report_dir)
+
+        # Source-only findings are E:U. The modifier moves caller-local or
+        # fixed contents from Medium to Low despite info_leak's VA:L row.
+        for value in ("same-context", "fixed-or-zero"):
+            self.assertEqual(
+                (scored[("", value)]["level"], scored[("", value)]["score"]),
+                ("Low", 2.7),
+            )
+        self.assertEqual(
+            (scored[("", "cross-principal")]["level"],
+             scored[("", "cross-principal")]["score"]),
+            ("Medium", 6.7),
+        )
+
+        # A reproducing disclosure is E:P. VA:L keeps the modified score in
+        # Medium, while a cross-principal disclosure remains High.
+        for value in ("same-context", "fixed-or-zero"):
+            self.assertEqual(
+                (scored[("5/5", value)]["level"],
+                 scored[("5/5", value)]["score"]),
+                ("Medium", 5.5),
+            )
+        self.assertEqual(
+            (scored[("5/5", "cross-principal")]["level"],
+             scored[("5/5", "cross-principal")]["score"]),
+            ("High", 7.8),
+        )
+
+        # Base impact stays VC:H; only the Environmental metric moves.
+        self.assertEqual(scored[("", "cross-principal")]["metrics"]["VC"], "H")
+        self.assertNotIn("MVC", scored[("", "cross-principal")]["cvss"]["vector"])
+        self.assertIn("MVC:L", scored[("", "same-context")]["cvss"]["vector"])
+        self.assertIn("MVC:N", scored[("", "fixed-or-zero")]["cvss"]["vector"])
+
+        # The scorer surfaces the input it used into the canonical Fields
+        # table even when triage materialized it as a bare label.
+        surfaced = self.make_report(
+            "uninitialized read disclosed to the caller",
+            report_id="FIND-disc-surfaced",
+            finding=True,
+            reproduction="",
+            extra_fields=(("Primitive", "info_leak"),),
+            extra="\nDisclosed content: same-context\n",
+        )
+        severity.update_report(surfaced / "report.md", self.score(surfaced))
+        self.assertRegex(
+            (surfaced / "report.md").read_text(encoding="utf-8"),
+            r"(?m)^\|\s*Disclosed content\s*\|\s*same-context\s*\|$",
+        )
+
+        # Silence must cost nothing: an unclassified report scores as before.
+        unset = self.score(self.make_report(
+            "uninitialized read disclosed to the caller",
+            report_id="FIND-disc-unset",
+            extra_fields=[("Primitive", "info_leak")],
+        ))
+        self.assertEqual(
+            unset["cvss"]["score"],
+            scored[("5/5", "cross-principal")]["cvss"]["score"],
+        )
+
+    def test_accepted_finding_primitive_tracks_the_quality_version(self) -> None:
+        """A quality-version bump must not silently disable the fallback.
+
+        The scorer hardcoded the version string, so bumping it for an unrelated
+        prompt change would make every new receipt unreadable exactly when
+        field-filling is missing or provider-limited.
+        """
+        self.assertNotIn("v13-python", Path(severity.__file__).read_text())
+
+    def test_disclosed_content_modifier_units(self) -> None:
+        """Each enum value maps to the modifier it claims, DoS untouched."""
+        # Every info-disclosure class maps to info_leak (VC:H), so a few bytes
+        # of the caller's own prior frame scored exactly like a leaked key: one
+        # corpus produced 149 accepted findings and 0 Low. What actually leaked
+        # is an Environmental fact; the Base row stays right for the worst case.
+        unclassified, _ = severity._cvss4_metrics("info_leak", "library", {}, False)
+        self.assertEqual(unclassified["VC"], "H")
+        self.assertNotIn("MVC", unclassified)  # silence must not move a score
+        for value, expected in (
+            ("fixed-or-zero", "N"), ("attacker-derived", "N"),
+            ("same-context", "L"),
+        ):
+            scoped, _ = severity._cvss4_metrics(
+                "info_leak", "library", {"disclosed_content": value}, False,
+            )
+            self.assertEqual(scoped["VC"], "H", value)
+            self.assertEqual(scoped["MVC"], expected, value)
+        cross, _ = severity._cvss4_metrics(
+            "info_leak", "library", {"disclosed_content": "cross-principal"}, False,
+        )
+        self.assertNotIn("MVC", cross)
+        # A DoS-only class has nothing to disclose; the field cannot touch it.
+        dos, _ = severity._cvss4_metrics(
+            "null_deref", "library", {"disclosed_content": "fixed-or-zero"}, False,
+        )
+        self.assertNotIn("MVC", dos)
 
         file_write, _ = severity._cvss4_metrics(
             "arbitrary_file_write", "library", {}, False,
@@ -1048,6 +1171,18 @@ class SeverityTests(unittest.TestCase):
         )
         self.assertIn("CVSS:4.0/", marker["vector"])
         self.assertEqual(marker["level"], marker["level"].capitalize())
+
+        # The content hash alone cannot detect a scorer-semantics change. A
+        # receipt from the preceding scorer must be stale even when its report
+        # and rendered severity still agree byte-for-byte.
+        marker["scorer_version"] = "severity-v1-caller-only-set-difference"
+        (finding / "severity.json").write_text(
+            json.dumps(marker), encoding="utf-8",
+        )
+        self.assertIsNone(severity_receipt.read_current(finding, report))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(severity.main(["--report", str(finding)]), 0)
+        self.assertIsNotNone(severity_receipt.read_current(finding, report))
 
         # Re-scoring is idempotent: rewriting the Severity row and rationale
         # must not invalidate the marker the same run just wrote.

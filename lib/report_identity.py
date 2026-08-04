@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 
 
-FIND_QUALITY_DECISION_VERSION = "v13-python"
+FIND_QUALITY_DECISION_VERSION = "v14-sourced-disclosure"
 REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md")
 PLACEHOLDER_FIELD_VALUES = frozenset(
     {"", "-", "—", "?", "tbd", "unknown / not assessed"}
