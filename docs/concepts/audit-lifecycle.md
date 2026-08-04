@@ -177,9 +177,10 @@ the crash.
 Because no sanitizer vouches for a finding, each report is read
 independently — with none of the filing agent's context — and voted
 accept or reject. Two accepts promote it; two rejects move it to
-`findings-rejected/`. A promoted finding then gets one more
-source-reading review that can demote it, and only with a concrete
-disproof.
+`findings-rejected/`. A promoted finding then receives source review of its
+trigger and exact claimed security consequence. It is quarantined only when
+two anchored reviewers agree on a concrete disproof; missing or ambiguous
+evidence fails open.
 
 What happens to each artifact:
 

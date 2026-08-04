@@ -13,7 +13,7 @@ from pathlib import Path
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v5-public-boundary"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v6-consequence-disproof"
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.
@@ -34,7 +34,7 @@ REPRODUCER_CARRIERS = {
 }
 REJECTION_KINDS = {
     "contract-invalid", "unreachable", "nonshipping", "no-added-boundary",
-    "unknown",
+    "consequence-disproved", "unknown",
 }
 
 

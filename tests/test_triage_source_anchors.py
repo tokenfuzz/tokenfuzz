@@ -78,13 +78,13 @@ class SourceAnchorTests(unittest.TestCase):
             triage_validate.source_review_facts({
                 "vulnerable_boundary_surface": " File-Format ",
                 "reproducer_carrier": "CLI",
-                "rejection_kind": "No-Added-Boundary",
+                "rejection_kind": "Consequence-Disproved",
                 "target_specific_detail": "ignored",
             }),
             {
                 "vulnerable_boundary_surface": "file-format",
                 "reproducer_carrier": "cli",
-                "rejection_kind": "no-added-boundary",
+                "rejection_kind": "consequence-disproved",
             },
         )
         self.assertEqual(

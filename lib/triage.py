@@ -368,10 +368,16 @@ def _rejection_reason(directory: Path) -> str:
 _DISPOSITIVE_REJECTION_KINDS = frozenset({
     "contract-invalid", "unreachable", "nonshipping",
 })
+# A reachable trigger whose exact claimed consequence source contradicts. Only
+# a source-only finding may be removed this way: a sanitizer diagnostic stays
+# concrete crash evidence even when its report overstates the impact, and crash
+# classification and severity handle that case.
+_CONSEQUENCE_REJECTION_KIND = "consequence-disproved"
 
 
 def _trigger_rejection_is_dispositive(
     report: Path | None, vote_files: tuple[Path, ...],
+    *, allow_consequence: bool = False,
 ) -> bool:
     """Whether reviewed trigger evidence may remove a security artifact.
 
@@ -382,20 +388,23 @@ def _trigger_rejection_is_dispositive(
     `unreachable` vote is the affirmative disproof it says it is, and a public
     surface is where the reviewer most often has the source to prove one.
 
-    Quorum is on the disproof, not on its label. The three kinds here all say
+    Quorum is on the disproof, not on its label. Every kind admitted here says
     "the claimed defect is not one"; they differ only in why. Requiring the two
     reviewers to spell the same one published findings that both had refuted
-    with the same cited source. `no-added-boundary` is a different claim — a
-    real defect at no security boundary — so a vote for it never joins this
-    quorum, and a split against it falls through to the softer outcome.
+    with the same cited source, and clause (g) widens that trap — one reviewer
+    may name an unreachable trigger where the other names the refuted
+    consequence. `no-added-boundary` is a different claim — a real defect at no
+    security boundary — so a vote for it never joins this quorum, and a split
+    against it falls through to the softer outcome.
     """
+    allowed = _DISPOSITIVE_REJECTION_KINDS | (
+        {_CONSEQUENCE_REJECTION_KIND} if allow_consequence else set()
+    )
     kinds = [
         triage_validate.source_review_facts(payload).get("rejection_kind", "")
         for payload in _trigger_vote_payloads(report, vote_files, "Reject")
     ]
-    return len(kinds) >= 2 and all(
-        kind in _DISPOSITIVE_REJECTION_KINDS for kind in kinds
-    )
+    return len(kinds) >= 2 and all(kind in allowed for kind in kinds)
 
 
 def _trigger_vote_payloads(
@@ -493,7 +502,9 @@ def _restore_stale_trigger_rejections(
         )
         if (
             current_votes == ["Reject", "Reject"]
-            and _trigger_rejection_is_dispositive(report, vote_files)
+            and _trigger_rejection_is_dispositive(
+                report, vote_files, allow_consequence=kind == "finding",
+            )
         ):
             if validation_receipt.read_current(directory) is None:
                 validation_receipt.write(
@@ -2575,7 +2586,13 @@ def _finding_trigger_disposition(
             return "native-hardening"
         if _trigger_rejection_is_dispositive(
             report, (finding_dir / ".trigger-gate.json", second),
+            allow_consequence=True,
         ):
+            # Only when both reviewers named it; a split disproof keeps the
+            # generic reachability reason rather than claiming a consequence
+            # finding neither of them fully asserted.
+            if facts.get("rejection_kind") == _CONSEQUENCE_REJECTION_KIND:
+                return "rejected-consequence"
             return "rejected"
         return "accepted"
     if vote == "Promote":
@@ -2741,6 +2758,12 @@ def _finalize_accepted_finding(
             finding_dir, results_dir / "findings-rejected",
             "trigger-provenance: triggering state not attacker-reachable",
             category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
+        )
+        return "rejected"
+    if disposition == "rejected-consequence":
+        _reject(
+            finding_dir, results_dir / "findings-rejected",
+            "trigger-provenance: exact claimed security consequence is source-disproved",
         )
         return "rejected"
     if disposition == "pending":

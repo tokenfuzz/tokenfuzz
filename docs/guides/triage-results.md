@@ -52,9 +52,11 @@ severity, patch, and cluster annotations do not.
 
 **Findings** use a parallel two-vote mechanism: the substance gate
 needs two accepts to confirm, or two rejects to move a FIND to
-`findings-rejected/`. An accepted finding then receives one
-source-reading trigger-provenance review; only a Reject carrying a
-concrete disproof can demote it.
+`findings-rejected/`. An accepted finding then receives source review of its
+trigger and exact claimed security consequence. One Reject opens an independent
+second review; only two anchored Rejects agreeing that the trigger is
+unreachable or the consequence is source-disproved can quarantine it. Missing
+or ambiguous evidence fails open.
 
 ## Common rejection reasons
 

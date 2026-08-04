@@ -1202,6 +1202,14 @@ Generated score text.
             cache.write_text(json.dumps({**legacy, "vote": "Reject"}))
             self.assertEqual(  # legacy Reject never reused -> fresh review
                 triage._trigger_vote(self.report, cache, "codex", "x", self.root), 2)
+            superseded = {
+                "decision_version": "trigger-v5-public-boundary",
+                "content_sha1": sha,
+                "vote": "Promote",
+            }
+            cache.write_text(json.dumps(superseded))
+            self.assertEqual(  # v5 never considered the claimed consequence
+                triage._trigger_vote(self.report, cache, "codex", "x", self.root), 2)
 
     def test_trigger_cache_binds_to_revision_and_live_source_anchor(self) -> None:
         cache = self.finding / ".trigger-gate.json"
@@ -1880,6 +1888,81 @@ Generated score text.
             vote.write_text(json.dumps(payload), encoding="utf-8")
         self.assertFalse(
             triage._trigger_rejection_is_dispositive(self.report, votes),
+        )
+
+    def test_consequence_disproof_requires_two_anchored_reviewers(self) -> None:
+        """A reachable trigger cannot preserve a source-refuted impact claim."""
+        payload = trigger_vote(self.report, self.root, "Reject")
+        payload["review_facts"] = {
+            "rejection_kind": "consequence-disproved",
+            "vulnerable_boundary_surface": "file-format",
+            "reproducer_carrier": "file-format",
+        }
+        first = self.finding / ".trigger-gate.json"
+        second = self.finding / ".trigger-gate-2.json"
+        first.write_text(json.dumps(payload), encoding="utf-8")
+
+        self.assertEqual(
+            triage._source_review_facts(
+                self.report, (first, second), rejection_quorum=2,
+            ),
+            {
+                "vulnerable_boundary_surface": "file-format",
+                "reproducer_carrier": "file-format",
+            },
+        )
+
+        second.write_text(json.dumps(payload), encoding="utf-8")
+        facts = triage._source_review_facts(
+            self.report, (first, second), rejection_quorum=2,
+        )
+        self.assertEqual(facts["rejection_kind"], "consequence-disproved")
+        votes = (first, second)
+        self.assertTrue(triage._trigger_rejection_is_dispositive(
+            self.report, votes, allow_consequence=True,
+        ))
+        # A sanitizer-backed crash keeps its diagnostic: consequence disproof
+        # is only dispositive for a source-only finding.
+        self.assertFalse(
+            triage._trigger_rejection_is_dispositive(self.report, votes),
+        )
+        # One reviewer naming the refuted consequence and the other an
+        # unreachable trigger are still two anchored disproofs.
+        mixed = dict(payload)
+        mixed["review_facts"] = {**payload["review_facts"],
+                                 "rejection_kind": "unreachable"}
+        second.write_text(json.dumps(mixed), encoding="utf-8")
+        self.assertTrue(triage._trigger_rejection_is_dispositive(
+            self.report, votes, allow_consequence=True,
+        ))
+        second.write_text(json.dumps(payload), encoding="utf-8")
+        with mock.patch.dict(
+            os.environ,
+            {"ACTIVE_BACKEND": "", "BACKEND": "", "TARGET_ROOT": str(self.root)},
+            clear=False,
+        ):
+            self.assertEqual(
+                triage._finding_trigger_disposition(
+                    self.finding, self.report, None,
+                ),
+                "rejected-consequence",
+            )
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None,
+                    prepared=True,
+                ),
+                "rejected",
+            )
+
+        rejected = self.root / "findings-rejected" / self.finding.name
+        self.assertTrue(rejected.is_dir())
+        self.assertIn(
+            "exact claimed security consequence is source-disproved",
+            (rejected / "REJECTION.md").read_text(encoding="utf-8"),
+        )
+        self.assertFalse(
+            (self.root / "state" / "unreachable-routes.jsonl").exists(),
         )
 
     def test_lone_unreachable_reject_keeps_the_finding(self) -> None:

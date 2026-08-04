@@ -220,6 +220,12 @@ ok("PUBLIC contract requires a NUL-terminated C string" in vp, "validator: docum
 ok("keep it (Uncertain)" in vp, "validator: ambiguous minimum preserved as Uncertain")
 ok("must make sure" in vp and "does not make a documented-invalid node type supported" in vp,
    "validator: documented node-type preconditions reject caller misuse")
+ok("exact claimed security consequence" in vp,
+   "validator: source review covers the report's exact consequence")
+ok("consequence-disproved" in vp,
+   "validator: affirmative consequence disproof has a closed rejection kind")
+ok("different scenario" in vp,
+   "validator: an alternate scenario cannot rescue a refuted report")
 
 
 # ─── Closed class vocabulary and threat-model semantics ────────────

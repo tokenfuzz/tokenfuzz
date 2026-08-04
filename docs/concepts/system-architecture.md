@@ -151,7 +151,10 @@ Crash class and bundle completeness are deterministic. A source-reading
 trigger reviewer needs two disproof-backed Reject votes to remove a
 sanitizer-confirmed crash and otherwise fails open. Findings need two
 substance-gate accepts to confirm (or two rejects to quarantine), followed by
-one source-reading trigger review that rejects only with concrete disproof.
+source review of the trigger and exact claimed security consequence. A finding
+is quarantined only when two anchored reviewers agree that the trigger is
+unreachable or the claimed consequence is affirmatively source-disproved;
+missing evidence fails open.
 
 Empty FIND directories stay in place marked `.needs-content`.
 Findings rejected twice by the substance gate are quarantined to
