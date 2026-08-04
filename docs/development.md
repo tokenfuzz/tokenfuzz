@@ -212,11 +212,17 @@ anything. Three settled rules — do not re-derive them per change:
 3. **Post-cell adjudication runs off the audit wall, under one policy and one
    cap for both conditions, and cannot add an artifact.** Terminal crash triage
    and the find-gate drain score what is already on disk; that is measurement,
-   and it runs under `finalize_wall` rather than the audit wall. Equal policy
-   is not equal completion: a condition that files more artifacts can exhaust
-   `finalize_wall` and leave some unadjudicated, which counts as unconfirmed
-   and is reported as an unjudged remainder beside the count. Read such a cell
-   as a floor. `finalize_wall` bounds when another bounded group of artifacts
+   and it runs under `finalize_wall` rather than the audit wall. That cap is
+   unlimited by default and equal for both conditions, so a condition that
+   files more artifacts pays more measurement time rather than publishing an
+   unmeasured count — the artifact set is frozen when the audit wall ends, so
+   the extra time cannot buy it a finding. Equal policy is still not equal
+   completion: a finite cap, or a review that answers for some ids and not
+   others, leaves artifacts unadjudicated, and each counts as unconfirmed and
+   is reported as an unjudged remainder beside the count. Read such a cell as
+   a floor; when the remainder outnumbers the verdicts the count itself is
+   marked `≥`, because the part review never reached is not a sample of the
+   part it did. `finalize_wall` bounds when another bounded group of artifacts
    may *start*, not when adjudication stops: a group already in flight runs to
    a recorded disposition, because votes that never become one bought nothing.
 

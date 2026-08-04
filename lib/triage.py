@@ -365,7 +365,14 @@ def _rejection_reason(directory: Path) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _trigger_rejection_is_dispositive(facts: dict[str, str]) -> bool:
+_DISPOSITIVE_REJECTION_KINDS = frozenset({
+    "contract-invalid", "unreachable", "nonshipping",
+})
+
+
+def _trigger_rejection_is_dispositive(
+    report: Path | None, vote_files: tuple[Path, ...],
+) -> bool:
     """Whether reviewed trigger evidence may remove a security artifact.
 
     A scope mismatch — a contract-obeying public boundary that this target's
@@ -375,13 +382,38 @@ def _trigger_rejection_is_dispositive(facts: dict[str, str]) -> bool:
     `unreachable` vote is the affirmative disproof it says it is, and a public
     surface is where the reviewer most often has the source to prove one.
 
-    Recall is protected by the quorum, not by the surface: the facts reaching
-    here come from two current, anchored reviewers that agree on the kind, and
-    a vote from a superseded prompt fails open and is requeued.
+    Quorum is on the disproof, not on its label. The three kinds here all say
+    "the claimed defect is not one"; they differ only in why. Requiring the two
+    reviewers to spell the same one published findings that both had refuted
+    with the same cited source. `no-added-boundary` is a different claim — a
+    real defect at no security boundary — so a vote for it never joins this
+    quorum, and a split against it falls through to the softer outcome.
     """
-    return facts.get("rejection_kind", "") in {
-        "contract-invalid", "unreachable", "nonshipping",
-    }
+    kinds = [
+        triage_validate.source_review_facts(payload).get("rejection_kind", "")
+        for payload in _trigger_vote_payloads(report, vote_files, "Reject")
+    ]
+    return len(kinds) >= 2 and all(
+        kind in _DISPOSITIVE_REJECTION_KINDS for kind in kinds
+    )
+
+
+def _trigger_vote_payloads(
+    report: Path | None, vote_files: tuple[Path, ...], vote: str,
+) -> list[dict]:
+    """`review_facts` from each current vote file carrying `vote`."""
+    if report is None:
+        return []
+    payloads = []
+    for vote_file in vote_files:
+        if _cached_trigger_vote(report, vote_file) != vote:
+            continue
+        try:
+            payload = json.loads(vote_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        payloads.append(payload.get("review_facts"))
+    return payloads
 
 
 def _restore_rejected_artifact(
@@ -461,7 +493,7 @@ def _restore_stale_trigger_rejections(
         )
         if (
             current_votes == ["Reject", "Reject"]
-            and _trigger_rejection_is_dispositive(facts)
+            and _trigger_rejection_is_dispositive(report, vote_files)
         ):
             if validation_receipt.read_current(directory) is None:
                 validation_receipt.write(
@@ -1872,15 +1904,13 @@ def _crash_trigger_gate(
         target_root_is_product,
     ) != 1:
         return False
-    facts = _source_review_facts(
+    return _trigger_rejection_is_dispositive(
         report,
         (
             crash_dir / ".trigger-gate.json",
             crash_dir / ".trigger-gate-2.json",
         ),
-        rejection_quorum=2,
     )
-    return _trigger_rejection_is_dispositive(facts)
 
 
 def _review_ambiguous_crash_surface(
@@ -2543,7 +2573,9 @@ def _finding_trigger_disposition(
         )
         if facts.get("rejection_kind") == "no-added-boundary":
             return "native-hardening"
-        if _trigger_rejection_is_dispositive(facts):
+        if _trigger_rejection_is_dispositive(
+            report, (finding_dir / ".trigger-gate.json", second),
+        ):
             return "rejected"
         return "accepted"
     if vote == "Promote":
@@ -3012,6 +3044,59 @@ def record_finding_discovery(results_dir: str | os.PathLike[str]) -> int:
     return len(fresh)
 
 
+# Enough of a report to reach its fields table. Ranking reads its own head
+# rather than read_report_bounded, whose oversize warning names a real
+# false-negative risk in a gate and must not also fire for a sort key.
+_FIND_RANK_HEAD_BYTES = 8192
+
+
+def _finding_review_rank(directory: Path) -> tuple[str, int, str]:
+    """Sort key for one queued finding: bug class, evidence gaps, then name."""
+    report = _report(directory)
+    text = ""
+    if report is not None:
+        try:
+            with report.open(encoding="utf-8", errors="replace") as stream:
+                text = stream.read(_FIND_RANK_HEAD_BYTES)
+        except OSError:
+            text = ""
+    match = re.search(
+        r"^(?:Class\s*:\s*|\|\s*Class\s*\|\s*)([^|\n]+)",
+        text, re.IGNORECASE | re.MULTILINE,
+    )
+    klass = " ".join((match.group(1) if match else "").split()).lower()
+    missing = len(_missing_reach_fields(text))
+    return klass, missing, directory.name
+
+
+def _finding_review_order(directories: list[Path]) -> list[Path]:
+    """Rotate the review queue over bug classes, best-evidenced first.
+
+    Queue order decides what a partial result represents, and a drain stops
+    mid-queue whenever a provider limit or an operator ceiling ends it. Plain
+    name order made the remainder a whole class rather than a sample: one cell
+    adjudicated 80 of 274 reports and every one came from a single class,
+    while every other class it filed went unread. Rotating classes makes any
+    prefix span the corpus.
+
+    Within a class, reports carrying the fields a reviewer needs go first, so
+    the earliest reviews are the ones that can reach a verdict. That ordering
+    only ranks -- an incomplete report is still reviewed in its turn, because
+    thin writing is not evidence that the bug is unreal.
+    """
+    groups: dict[str, list[Path]] = {}
+    for klass, missing, name, directory in sorted(
+        (*_finding_review_rank(directory), directory)
+        for directory in directories
+    ):
+        groups.setdefault(klass, []).append(directory)
+    ordered: list[Path] = []
+    lanes = [groups[klass] for klass in sorted(groups)]
+    for index in range(max((len(lane) for lane in lanes), default=0)):
+        ordered.extend(lane[index] for lane in lanes if index < len(lane))
+    return ordered
+
+
 def validate_find_gate(
     results_dir: str | os.PathLike[str],
     *,
@@ -3070,9 +3155,9 @@ def validate_find_gate(
         for status in cached_statuses:
             counts[status] += 1
     cached_set = set(cached_directories)
-    directories = [
+    directories = _finding_review_order([
         directory for directory in directories if directory not in cached_set
-    ]
+    ])
     usage_index = benchmark._find_index_jsonl(results)
     # Quality batches are wide enough to keep every worker occupied. Within
     # each quality group, carry trigger-sized disposition groups through reach

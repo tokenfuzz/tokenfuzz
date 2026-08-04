@@ -200,6 +200,45 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         benchmark_runner._finalize_deadline(0) is None,
         "an unbounded finalize budget yields no deadline",
     )
+
+    # A review batch that returns no keyed output leaves its ids pending, so an
+    # unlimited wall alone still ends with them unadjudicated. Repeat while the
+    # remainder falls; stop when it stops falling, so a stuck id cannot loop.
+    drain_root = root / "drain-completion"
+    (drain_root / "findings").mkdir(parents=True)
+    (drain_root.parent / "logs").mkdir(exist_ok=True)
+    passes = iter([
+        {"accepted": 1, "rejected": 0, "pending": 4},
+        {"accepted": 3, "rejected": 0, "pending": 2},
+        {"accepted": 3, "rejected": 0, "pending": 2},
+    ])
+    seen_workers: list[int] = []
+
+    def _completion_pass(_results, **kwargs):
+        seen_workers.append(kwargs.get("workers"))
+        return next(passes, {"accepted": 5, "rejected": 0, "pending": 0})
+
+    with mock.patch.object(
+        benchmark_runner, "benchmark_target_config",
+        return_value=SimpleNamespace(attacker_controls_csv=lambda: "bytes"),
+    ), mock.patch.object(
+        benchmark_runner, "_evidence_scope", return_value=("rev", "digest"),
+    ), mock.patch.object(
+        triage, "validate_find_gate", side_effect=_completion_pass,
+    ):
+        drain_counts = benchmark_runner.drain_find_gate(
+            drain_root, "codex", "fixture", root, "sampleproj", workers=11,
+        )
+    check(
+        drain_counts["pending"] == 2 and len(seen_workers) == 3,
+        "the drain repeats while its unjudged remainder falls, then stops",
+        repr((drain_counts, seen_workers)),
+    )
+    check(
+        seen_workers == [11, 11, 11],
+        "finalization concurrency is the operator's, not the audit's agent count",
+        repr(seen_workers),
+    )
     check(
         budget_cell["status"] == "done" and budget_cell["run_quality"] == "clean",
         "budget-complete harness cell remains done and clean",
@@ -736,22 +775,76 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
             and votes.call_count == 2,
             "unclassified reject votes cannot suppress a sanitizer-confirmed crash",
         )
+    anchor_excerpt = "int app_parse(void) { return 0; }"
+    (root / "anchor.c").write_text(anchor_excerpt + "\n", encoding="utf-8")
+
+    def _reject_votes(*kinds: str):
+        """Write real Reject vote files so the gate reads its own quorum."""
+        def _vote(report, vote_file, *_args, **_kwargs):
+            index = 0 if vote_file.name == ".trigger-gate.json" else 1
+            evidence = triage.crash_bundle.recorded_evidence_context(report.parent)
+            payload = {
+                "vote": "Reject",
+                "content_sha1": report_identity.content_sha1(report),
+                "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+                "attacker_controls": triage_validate.trigger_attacker_controls(),
+                "anchors": [{
+                    "path": "anchor.c", "line": 1, "symbol": "app_parse",
+                    "kind": "source", "excerpt": anchor_excerpt,
+                    "excerpt_sha256": hashlib.sha256(
+                        anchor_excerpt.encode()
+                    ).hexdigest(),
+                }],
+                "anchors_verified": True,
+                "target_revision": str(
+                    (evidence or {}).get("target_revision")
+                    or os.environ.get("TARGET_REV", ""),
+                ),
+                "target_config_sha256": str(
+                    (evidence or {}).get("target_config_sha256")
+                    or os.environ.get("TARGET_CONFIG_SHA256", ""),
+                ),
+                "review_facts": {"rejection_kind": kinds[index]},
+            }
+            if evidence is not None:
+                payload["evidence_id"] = evidence["evidence_id"]
+            vote_file.write_text(json.dumps(payload), encoding="utf-8")
+            return 1
+        return _vote
+
+    for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+        (root / name).unlink(missing_ok=True)
     with mock.patch.object(
-        triage, "_trigger_vote", side_effect=[1, 1],
-    ) as votes, mock.patch.object(
-        triage, "_source_review_facts",
-        return_value={"rejection_kind": "contract-invalid"},
-    ):
+        triage, "_trigger_vote",
+        side_effect=_reject_votes("contract-invalid", "contract-invalid"),
+    ) as votes:
         check(
             triage._crash_trigger_gate(root, report_path, root) is True
             and votes.call_count == 2,
             "two source-classified trigger rejects satisfy the crash gate quorum",
         )
+    # Both reviewers refuted it with an anchored disproof and differed only on
+    # which name to give the same refutation. Requiring the labels to match
+    # republished artifacts that two independent reviews had removed.
     with mock.patch.object(
-        triage, "_trigger_vote", side_effect=[1, 1],
-    ), mock.patch.object(
-        triage, "_source_review_facts",
-        return_value={"rejection_kind": "no-added-boundary"},
+        triage, "_trigger_vote",
+        side_effect=_reject_votes("unreachable", "contract-invalid"),
+    ):
+        check(
+            triage._crash_trigger_gate(root, report_path, root) is True,
+            "quorum is on the disproof, not on the name the reviewers gave it",
+        )
+    with mock.patch.object(
+        triage, "_trigger_vote",
+        side_effect=_reject_votes("no-added-boundary", "contract-invalid"),
+    ):
+        check(
+            triage._crash_trigger_gate(root, report_path, root) is False,
+            "a split over an added boundary falls to the softer outcome",
+        )
+    with mock.patch.object(
+        triage, "_trigger_vote",
+        side_effect=_reject_votes("no-added-boundary", "no-added-boundary"),
     ):
         check(
             triage._crash_trigger_gate(root, report_path, root) is False,

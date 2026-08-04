@@ -2165,8 +2165,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
 
     check(
-        benchmark_runner.parser().parse_args([]).finalize_wall == 3600,
-        "benchmark final validation defaults to a one-hour safety window",
+        benchmark_runner.parser().parse_args([]).finalize_wall == 0
+        and benchmark_runner.parser().parse_args([]).finalize_workers == 4,
+        "benchmark final validation runs to completion by default",
     )
     layout_root = root / "usage-layouts"
     harness_results = layout_root / "harness" / "results"

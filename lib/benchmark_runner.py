@@ -127,9 +127,16 @@ def _finalize_deadline(finalize_wall: int) -> float | None:
     return time.monotonic() + finalize_wall if finalize_wall else None
 
 
+# Repeat passes over a gate that still holds pending ids. Three is enough for
+# the observed failure — a batch that answered for some ids and not others —
+# without turning a genuinely stuck reviewer into an unbounded retry loop; the
+# strictly-falling remainder below is what actually ends it.
+_FIND_GATE_COMPLETION_PASSES = 3
+
+
 def drain_find_gate(
     results: Path, backend: str, model: str, target: Path, target_slug: str,
-    *, deadline: float | None = None,
+    *, deadline: float | None = None, workers: int = 4,
 ) -> dict[str, int]:
     """Adjudicate a finished cell, pausing only for a confirmed provider cap."""
     import triage
@@ -153,7 +160,10 @@ def drain_find_gate(
     ):
         previous_limit = os.environ.get("LLM_DECIDE_LIMIT_FILE")
         os.environ["LLM_DECIDE_LIMIT_FILE"] = str(limit_file)
-        try:
+
+        def drain_once() -> dict[str, int]:
+            nonlocal paused
+            result = {"accepted": 0, "rejected": 0, "pending": 0}
             for attempt in range(max_pauses + 1):
                 # The first pass must still enumerate expired findings so the
                 # cell is marked incomplete; validate_find_gate's own deadline
@@ -161,9 +171,10 @@ def drain_find_gate(
                 if attempt and deadline is not None and time.monotonic() >= deadline:
                     break
                 limit_file.write_text("", encoding="utf-8")
-                counts = triage.validate_find_gate(
+                result = triage.validate_find_gate(
                     results, deadline=deadline, target_root_is_product=True,
                     reject_missing_reports=True, finish_started_group=True,
+                    workers=workers,
                 )
                 reset = _find_gate_reset(limit_file)
                 if reset is None:
@@ -182,6 +193,26 @@ def drain_find_gate(
                 log(f"Find-gate provider limit: pausing {wait}s before retry")
                 time.sleep(wait)
                 paused += wait
+            return result
+
+        try:
+            counts = drain_once()
+            # A review batch that returns no keyed output leaves its ids
+            # pending, and the pass ends with them unadjudicated even on an
+            # unlimited wall — so an unbounded budget alone does not finish the
+            # gate. Cached receipts make a repeat pass pay only for what is
+            # still missing, so retry while the remainder actually falls. A
+            # pass that converges, stalls, or runs past the ceiling ends the
+            # drain instead of looping on a stuck id.
+            for _ in range(_FIND_GATE_COMPLETION_PASSES):
+                if not counts.get("pending"):
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                before = counts["pending"]
+                counts = drain_once()
+                if counts.get("pending", 0) >= before:
+                    break
         finally:
             if previous_limit is None:
                 os.environ.pop("LLM_DECIDE_LIMIT_FILE", None)
@@ -401,9 +432,16 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     result.add_argument(
-        "--finalize-wall", type=_nonnegative, default=3600,
+        "--finalize-wall", type=_nonnegative, default=0,
         help="wall-clock ceiling per final validation phase; crash triage and the "
-             "finding drain each get their own budget (0 = unlimited)",
+             "finding drain each get their own budget (0 = unlimited, the default)",
+    )
+    result.add_argument(
+        "--finalize-workers", type=_positive, default=4,
+        help="concurrent reviewers per final validation phase; independent of "
+             "--agents, which sizes the audit itself. Also scales the find "
+             "gate's admission groups, so raising it coarsens where a finite "
+             "--finalize-wall can cut",
     )
     result.add_argument("--agents", type=_positive)
     result.add_argument("--conditions", default="model-direct,harness")
@@ -2047,7 +2085,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             "model": model, "resolved_effort": llm_invoke.default_effort(args.backend),
             "replicates": args.replicates,
             "budget_wall": args.budget_wall, "harness_agents": args.agents,
-            "finalize_wall": getattr(args, "finalize_wall", 3600),
+            "finalize_wall": getattr(args, "finalize_wall", 0),
+            "finalize_workers": getattr(args, "finalize_workers", 4),
             "model_direct_agents": 1, "conditions": conditions,
             "target_sha": target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target),
             "tokenfuzz_sha": _git_rev(SCRIPT_ROOT), "harness_sha": _git_rev(SCRIPT_ROOT, True),
@@ -2332,7 +2371,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     ))
                 except (OSError, ValueError):
                     pass
-                finalize_wall = getattr(args, "finalize_wall", 3600)
+                finalize_wall = getattr(args, "finalize_wall", 0)
+                finalize_workers = getattr(args, "finalize_workers", 4)
                 replay_build_ok = not build_drift
                 if (
                     not args.dry_run
@@ -2355,7 +2395,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         ):
                             crash_counts = triage_cell_crashes(
                                 results, target_root, args.target,
-                                workers=args.agents or 4,
+                                workers=finalize_workers,
                                 deadline=_finalize_deadline(finalize_wall),
                                 require_replay=condition == "model-direct",
                             )
@@ -2379,6 +2419,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             results, args.backend, model,
                             (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
                             deadline=_finalize_deadline(finalize_wall),
+                            workers=finalize_workers,
                         )
                         # A pause inside the drain sits in the untimed
                         # measurement phase, so it is not subtracted from the
@@ -2398,18 +2439,18 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         results, args.backend, model,
                         require_trigger_confirmation=require_trigger_confirmation,
                     )
-                    # A drain that runs out of finalize_wall leaves findings
-                    # unjudged, and every one of them counts as unconfirmed —
-                    # so the cell reports a yield it never actually measured.
-                    # The regenerate path already says this; a live run is
-                    # where an operator can still act on it.
+                    # A drain that stops early leaves findings unjudged, and
+                    # every one of them counts as unconfirmed — so the cell
+                    # reports a yield it never actually measured. The
+                    # regenerate path already says this; a live run is where an
+                    # operator can still act on it.
                     unjudged = summary.get("findings_unadjudicated", 0)
                     if args.validate_findings and unjudged:
                         log(
                             f"WARN: {name} has {unjudged} finding(s) still "
                             "un-adjudicated after drain; they count as "
-                            "unconfirmed. Raise --finalize-wall or re-run "
-                            "`bin/benchmark --regenerate` to finish the gate"
+                            "unconfirmed. Re-run `bin/benchmark --regenerate` "
+                            "to finish the gate"
                         )
                     _write_json(cell_dir / "metrics.json", summary)
                 else:
@@ -2464,7 +2505,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 _write_json(cell_dir / "cell.json", cell)
             if results.is_dir():
                 finalizers_ok = True
-                finalize_wall = getattr(args, "finalize_wall", 3600)
+                finalize_wall = getattr(args, "finalize_wall", 0)
+                finalize_workers = getattr(args, "finalize_workers", 4)
                 replay_build_ok = True
                 if (results / "crashes").is_dir():
                     replay_build_ok, reason = _replay_build_status(
@@ -2499,7 +2541,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         ):
                             triage_cell_crashes(
                                 results, target_root, args.target,
-                                workers=args.agents or 4,
+                                workers=finalize_workers,
                                 deadline=_finalize_deadline(finalize_wall),
                                 require_replay=cell.get("condition") == "model-direct",
                                 age_pending=False,
@@ -2514,6 +2556,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             results, args.backend, model,
                             (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
                             deadline=_finalize_deadline(finalize_wall),
+                            workers=finalize_workers,
                         )
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {cell_dir.name}: {exc}")

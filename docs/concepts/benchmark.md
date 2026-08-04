@@ -91,7 +91,8 @@ With all defaults, the command means:
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
 | `--budget-wall` | `10800` | Active audit seconds per cell, including housekeeping. Provider-recovery pauses are excluded. `0` is unlimited. |
-| `--finalize-wall` | `3600` | Start ceiling per final validation phase; crash triage and the finding drain each get their own budget, and a bounded finding group admitted before the ceiling finishes afterward. `0` is unlimited. |
+| `--finalize-wall` | `0` | Start ceiling per final validation phase; crash triage and the finding drain each get their own budget, and a bounded finding group admitted before the ceiling finishes afterward. `0`, the default, is unlimited: the artifact set is frozen when the audit wall ends, so the phase runs to completion rather than publishing a partly-judged cell. |
+| `--finalize-workers` | `4` | Concurrent reviewers per final validation phase, for crash triage and the finding drain alike. Independent of `--agents`, which sizes the audit itself. It also scales the find gate's admission groups, so raising it shortens the closing pass but coarsens where a finite `--finalize-wall` can cut. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
@@ -124,6 +125,10 @@ validating its findings before metrics are read. That closing pass is
 measurement, not extra finding time, and it is budgeted separately
 (`--finalize-wall`) so a crash-heavy cell cannot starve finding validation.
 
+The drain repeats while its unjudged remainder falls, because a review batch
+that returns no keyed output leaves its ids unadjudicated even on an unlimited
+budget. Cached receipts make each repeat pay only for what is still missing.
+
 Anything still unadjudicated is handled conservatively rather than guessed at:
 an unvalidated finding does not enter the finding total, and a sanitizer-backed
 crash with unfinished validation remains a visible crash candidate rather than
@@ -131,7 +136,11 @@ receiving final credit or an assumed severity. A cell that was cut short —
 provider limit, interruption, failed post-processing — is marked incomplete
 and kept out of the medians, but the evidence it did produce is still reported
 as an observed count, so an interrupted productive cell is never mistaken for
-a barren one.
+a barren one. A cell that finished but still holds unjudged findings keeps its
+place and its evidence; its finding count carries the remainder, and a count
+whose remainder outnumbers its verdicts is marked `≥` — a lower bound on that
+condition, not a yield to compare. `bin/benchmark --regenerate` finishes the
+gate from cached receipts and removes the mark.
 
 The run report also shows a publication waterfall: candidate,
 evidence-complete, validated, routed, final, and exact-signature counts.

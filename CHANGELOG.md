@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.4.0 - 2026-08-02
+## 1.4.0 - 2026-08-03
 
 - **A harness that forges its own crash is refused before it runs.** An agent
   could compile a driver that injects a constructor into a version-only target
@@ -21,11 +21,74 @@
   opens — same votes, same quorum, same batch sizes. A review that runs out of
   wall also no longer discards its whole batch.
 
+- **Two reviewers who refuted a report no longer disagree it back into the
+  totals.** Removing a finding took a quorum on the *name* the reviewers gave
+  their disproof, not on the disproof. On one cell five reports drew two
+  independent anchored Rejects citing the same source line, split only over
+  whether to file it as `unreachable` or `contract-invalid` — and all five
+  published as conditional, counted as confirmed, and sat inside the row's
+  Medium+ subset. The three kinds that all say "the claimed defect is not one"
+  now satisfy the quorum together. `no-added-boundary` is a different claim, so
+  a split against it still falls to the softer outcome, and no Promote or
+  Uncertain vote is affected.
+
+- **Final validation runs to completion instead of to a clock.**
+  `--finalize-wall` defaulted to one hour with four reviewers, so a cell that
+  filed more than that hour could read left 194 of 274 findings unjudged and
+  still published a count. The artifact set is frozen when the audit wall ends
+  and every per-call timeout and provider pause is already bounded, so the
+  default is now unlimited. An unlimited wall alone does not finish the gate —
+  a review batch that returns no keyed output leaves its ids pending — so the
+  drain repeats while that remainder falls, paying only for what cached
+  receipts do not already cover. `--finalize-workers` sizes the closing pass
+  explicitly, at the same default 4 both phases already used, instead of crash
+  triage inheriting the audit's agent count.
+
+- **A gate cut short leaves a sample, not one whole class.** The review queue
+  ran in directory-name order, so the cell above adjudicated 80 reports that
+  were 41/43 a single bug class and never opened the other thirteen it had
+  filed — a prefix that is not a floor of the same corpus. The queue now
+  rotates bug classes, and on that corpus the first 16 reviewed span all 14
+  classes instead of 2. Within a class, reports carrying the fields a reviewer
+  needs go first; that only ranks the queue — thin writing is not evidence
+  that a bug is unreal, so nothing is dropped.
+
 - **An unfinished gate no longer reports as "found nothing".** Findings the
   gate never decided were folded into "0 accepted", which reads as the
   opposite conclusion; one cell published 0 accepted while 172 of its 191
   findings had no verdict. The count now carries the remainder as
   `0 (172 unjudged)` and a live run warns while an operator can still act.
+  When the remainder outnumbers the verdicts the count also reads `≥N`: review
+  stopped partway down a queue, so it is a lower bound rather than a yield to
+  compare. The cell keeps its place and its evidence either way — dropping it
+  would take its confirmed crashes out of the comparison too.
+
+- **The findings column says how much of the target a condition covered.**
+  Cluster identity is (class, file, line), so one mechanism restated at N
+  locations is N countable findings — correctly, since N sites need N fixes,
+  but it makes the count alone a poor read of a run. A cell reporting `≥57 (41
+  M+, 3 classes, 194 unjudged)` and one reporting `30 (23 M+, 21 classes)` are
+  not the same result; the class term is now beside the count. It ranks
+  nothing and gates nothing.
+
+- **A finding bar built on evidence, not on filing rate.** The baseline prompt
+  set a pace target with no evidence floor, and both backends optimized for
+  the cheapest legible artifact — one restated a single unchecked-allocation
+  pattern across dozens of files and never drove the sanitizer. A FIND now
+  needs four named facts: location, class, the reaching input with what the
+  caller controls, and what the attacker gains. Resource exhaustion needs
+  quantified amplification *and* a demand that survives the project's own
+  ceiling, stated identically in the bug contract, the find-quality gate, and
+  the baseline prompt.
+
+- **An operator-enabled path is scored as configuration, not as input.** A
+  crash reachable only once the application turns on a non-default mode,
+  codec, or filter was indistinguishable from one the bytes reach on their
+  own, because the author-facing vocabulary had no value for it — so the
+  precondition went unwritten and the crash scored as fully byte-reachable.
+  `application-supplied` joins the documented Parameter control values and the
+  agent writes it directly. The crash stays remotely reachable; this records a
+  precondition rather than narrowing reachability.
 
 - **A disproved route reaches the session that would repeat it.** The
   provenance gate wrote an anchored disproof for every rejection and then only
@@ -98,6 +161,15 @@
   appears in the orchestrator's argv. Every tool-using backend now gets a
   refusal path for `pkill`/`killall`, including the composed and absolute-path
   variants.
+
+- **A runner that never reads the input is not a runner.** Bootstrap picked
+  the first binary in the build tree, so a project whose install list is led
+  by a test-suite driver got a runner that ignores the testcase entirely and
+  replayed every crash as CLEAN. CMake `ALIAS`/`IMPORTED` entries — which name
+  a reference, not a binary — no longer count as executables and stop
+  suppressing the fallback that holds the real programs, and runner selection
+  is now offered every instrumented CLI with its help text so the one that
+  consumes attacker-supplied input is the one that gets chosen.
 
 - **Setup detects a build that compiled but cannot start.** Validation only
   checked that an executable file existed, so a binary dying in the dynamic

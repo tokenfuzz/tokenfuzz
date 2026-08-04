@@ -323,6 +323,7 @@ def _rejected_label(value: object, upper_bound: bool) -> object:
 
 def _unique_with_medium_plus(
     unique: int, medium_plus: int, unadjudicated: int = 0,
+    classes: int = 0, floor: bool = False,
 ) -> str:
     """Label a unique-cluster count with its Medium+ subset: `6 (1 M+)`.
 
@@ -337,12 +338,29 @@ def _unique_with_medium_plus(
     and "review did not finish" with the same `0`, and the two support opposite
     conclusions about the condition — so an unjudged remainder is always
     shown, including next to a zero.
+
+    `K classes` says how much of the target the count covers. A condition can
+    reach the same number by finding one mechanism at many sites or many
+    mechanisms at few, and those are different results; the class term is the
+    only place the difference is visible. Findings only — crashes cluster by
+    stack signature, which already carries it.
+
+    `floor` prefixes `≥`. Every cell with an unjudged remainder is a floor, but
+    a residue beside an adjudicated majority still reads as a measurement,
+    while a remainder that outnumbers the verdicts does not: review stopped
+    partway down a queue, and the part it never read is not a sample of the
+    part it did. The count keeps its link and its artifacts either way — the
+    mark says only that it cannot be compared as a measured yield.
     """
     unjudged = f"{unadjudicated} unjudged" if unadjudicated > 0 else ""
     if not unique:
         return f"0 ({unjudged})" if unjudged else "0"
-    inner = f"{medium_plus} M+" + (f", {unjudged}" if unjudged else "")
-    return f"{unique} ({inner})"
+    inner = f"{medium_plus} M+"
+    if classes > 0:
+        inner += f", {classes} classes"
+    if unjudged:
+        inner += f", {unjudged}"
+    return f"{'≥' if floor else ''}{unique} ({inner})"
 
 
 def _condition_pool_dir(bench_dir: Path, condition: str, kind: str) -> Path:
@@ -921,6 +939,54 @@ def confirmed_finding_cluster_count(findings_dir: Path, names: list[str]) -> int
             cluster = match.group(1).strip() if match else ""
         clusters.add(cluster if cluster and cluster not in {"—", "-"} else name)
     return len(clusters)
+
+
+def confirmed_finding_class_count(findings_dir: Path, names: list[str]) -> int:
+    """Distinct bug classes across confirmed findings.
+
+    Cluster identity is (class, file, line), so one mechanism restated at N
+    locations is N countable findings -- correctly, since N sites need N fixes.
+    That makes the finding count alone a poor read of what a condition covered:
+    one cell reached 57 accepted findings across 3 classes while its peer
+    reached 30 across 21, and the counts alone say the opposite of the
+    coverage. This counts the classes so the report can carry both. It ranks
+    nothing and gates nothing.
+
+    The reviewed class from the quality gate is preferred over the report's own
+    free-text field, which varies per report for the same defect.
+    """
+    classes: set[str] = set()
+    for name in names:
+        directory = findings_dir / name
+        value = ""
+        try:
+            cache = json.loads(
+                (directory / ".llm-find-quality.json").read_text(
+                    encoding="utf-8",
+                )
+            )
+            value = str(cache.get("class") or "")
+        except (OSError, ValueError):
+            value = ""
+        if not value:
+            report = next(
+                (path for path in (directory / "report.md", directory / "REPORT.md")
+                 if path.is_file()),
+                None,
+            )
+            if report is not None:
+                try:
+                    text = report.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    text = ""
+                match = re.search(
+                    r"^(?:Class\s*:\s*|\|\s*Class\s*\|\s*)([^|\n]+)",
+                    text, re.IGNORECASE | re.MULTILINE,
+                )
+                value = match.group(1) if match else ""
+        normalized = " ".join(value.split()).lower()
+        classes.add(normalized if normalized and normalized not in {"—", "-"} else name)
+    return len(classes)
 
 
 # Backends whose `input` token field already includes the cached prefix
@@ -2626,6 +2692,9 @@ def harvest(
         ),
         "confirmed_finding_dirs": confirmed_finding_dirs,
         "finding_clusters": finding_clusters,
+        "finding_classes": confirmed_finding_class_count(
+            findings_dir, confirmed_finding_dirs,
+        ),
         "findings_rejected": count_subdirs(
             results_dir / "findings-rejected", "FIND-"
         ),
@@ -3490,6 +3559,19 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         pooled_rejected_finding_dirs[cond_name] = (
             pooled_rejected_finding_dirs.get(cond_name, 0) + 1
         )
+    # One mechanism restated at N locations is N accepted findings -- correctly,
+    # since N sites need N fixes -- so the count alone cannot say whether a
+    # condition covered the target or farmed one shape. Count the classes it
+    # actually reached beside it.
+    pooled_finding_names: dict[str, list[str]] = {}
+    for _name, _cond in members.get("findings", {}).items():
+        pooled_finding_names.setdefault(_cond, []).append(_name)
+    finding_classes_by_cond = {
+        _cond: confirmed_finding_class_count(
+            bench_dir / "pool" / "findings", _names,
+        )
+        for _cond, _names in pooled_finding_names.items()
+    }
     # Crashes a post-pool gate demoted out of the accepted pool keep their
     # pooled-accepted name (CRASH-NNNN); cell-level rejects are CRASH-REJECTED-*.
     # Reconcile re-files demoted entries under crashes-rejected, so a plain
@@ -3661,12 +3743,22 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 # confirmed with a non-zero remainder is "gate unfinished", not
                 # "nothing found". Mirrors the per-cell findings_unadjudicated.
                 "unadjudicated_finding_total": sum(unadjudicated_findings),
+                # A remainder that outnumbers the verdicts means review stopped
+                # partway down the queue, so the count is a lower bound on this
+                # condition rather than its measured yield. Kept as a flag on
+                # the number instead of a status: dropping the cell would take
+                # its confirmed crashes out of the comparison with it.
+                "finding_total_is_floor": (
+                    sum(unadjudicated_findings)
+                    > sum(confirmed_findings) + sum(rejected_findings)
+                ),
                 "unique_crash_clusters": cb.get("unique_clusters", 0),
                 "novel_crash_clusters": cb.get("novel_clusters", 0),
                 "top_severity_level": cb.get("top_severity_level", "—"),
                 "top_severity_rank": cb.get("top_severity_rank", 0),
                 "medium_plus_bugs": cb.get("medium_plus", 0),
                 "unique_finding_clusters": fb.get("unique_clusters", 0),
+                "unique_finding_classes": finding_classes_by_cond.get(cond, 0),
                 "medium_plus_findings": fb.get("medium_plus", 0),
                 "unique_rejected_crash_clusters": unique_rejected_crashes,
                 "rejected_crash_clusters_upper_bound": rejected_crashes_upper_bound,
@@ -4626,7 +4718,9 @@ def render_section(report: dict) -> str:
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0),
-                        _as_int(c.get("unadjudicated_finding_total"))),
+                        _as_int(c.get("unadjudicated_finding_total")),
+                        _as_int(c.get("unique_finding_classes")),
+                        bool(c.get("finding_total_is_floor"))),
                     cond_findings, "FINDING-CLUSTERS"),
                 rfi=_artifact_report_link(
                     _rejected_label(
@@ -5179,7 +5273,9 @@ def crosstab(bench_root: Path) -> str:
                     _unique_with_medium_plus(
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0),
-                        _as_int(c.get("unadjudicated_finding_total"))),
+                        _as_int(c.get("unadjudicated_finding_total")),
+                        _as_int(c.get("unique_finding_classes")),
+                        bool(c.get("finding_total_is_floor"))),
                     findings_dir, "FINDING-CLUSTERS")),
                 rcr=("Pending" if provisional else _rejected_cell(
                     c.get("unique_rejected_crash_clusters"),
@@ -5352,12 +5448,19 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "- **Unique accepted findings** — reports that survived review and an "
         "agent's own investigation, with no accepted crash behind them, "
-        "duplicates merged. Shown as `N (M M+)`: `N` distinct problems, `M` of "
-        "them scored Medium or higher. The count links to the report. A "
+        "duplicates merged. Shown as `N (M M+, C classes)`: `N` distinct "
+        "problems, `M` of them scored Medium or higher, spread across `C` bug "
+        "classes. The count links to the report. Read `N` and `C` together: "
+        "one mechanism found at thirty locations is thirty findings and one "
+        "class, and it is not the same result as thirty classes, even though "
+        "each of those thirty sites needs its own fix. A "
         "`K unjudged` term means `K` reports never reached a verdict — review "
-        "ran out of its finalization budget before reading them, or read them "
-        "without reaching one. They count as unconfirmed either way, so read "
-        "the cell as a floor, not as a measured yield."
+        "did not finish before the run was published. They count as "
+        "unconfirmed, so read the cell as a floor, not as a measured yield. "
+        "A leading `≥` means the remainder outnumbers the verdicts: review "
+        "stopped partway down the queue, so that count is a lower bound and "
+        "not a result to compare. `bin/benchmark --regenerate` finishes the "
+        "gate and removes the mark."
     )
     lines.append("")
     lines.append(

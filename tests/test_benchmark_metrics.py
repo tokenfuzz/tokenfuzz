@@ -1508,6 +1508,51 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "6 (3 M+, 4 unjudged)", benchmark._unique_with_medium_plus(6, 3, 4),
         )
 
+    def test_accepted_findings_cell_carries_class_spread_and_floor_mark(
+        self,
+    ) -> None:
+        # Same count, different results: one mechanism at 57 sites is not the
+        # same coverage as 30 findings over 21 classes, and the count alone
+        # cannot say which. A remainder that outnumbers the verdicts marks the
+        # count as a lower bound rather than a yield to compare.
+        self.assertEqual(
+            "30 (23 M+, 21 classes)",
+            benchmark._unique_with_medium_plus(30, 23, 0, 21),
+        )
+        self.assertEqual(
+            "≥57 (41 M+, 3 classes, 194 unjudged)",
+            benchmark._unique_with_medium_plus(57, 41, 194, 3, True),
+        )
+        # A residue beside an adjudicated majority still reads as measured.
+        self.assertEqual(
+            "57 (41 M+, 3 classes, 2 unjudged)",
+            benchmark._unique_with_medium_plus(57, 41, 2, 3, False),
+        )
+
+    def test_finding_classes_count_distinct_reviewed_bug_classes(self) -> None:
+        findings = self.root / "class-spread"
+        names = []
+        for index, klass in enumerate(
+            ["info-disclosure:uninit"] * 3 + ["memory-safety:bounds"],
+        ):
+            name = f"FIND-{index:04d}"
+            names.append(name)
+            directory = findings / name
+            directory.mkdir(parents=True)
+            (directory / ".llm-find-quality.json").write_text(
+                json.dumps({"accept": True, "class": klass}), encoding="utf-8",
+            )
+        # No reviewed class: the report's own field carries it instead.
+        names.append("FIND-0004")
+        fallback = findings / "FIND-0004"
+        fallback.mkdir()
+        (fallback / "report.md").write_text(
+            "| Class | dos:resource-exhaustion |\n", encoding="utf-8",
+        )
+        self.assertEqual(
+            3, benchmark.confirmed_finding_class_count(findings, names),
+        )
+
     def test_crosstab_tells_the_reader_what_an_unjudged_remainder_means(self) -> None:
         run = self.root / "unjudged" / "codex" / "20260202-000000"
         report = {

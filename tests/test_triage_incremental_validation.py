@@ -1732,6 +1732,102 @@ Generated score text.
             {"rejection_kind": "no-added-boundary"},
         )
 
+    def test_review_order_rotates_classes_before_it_exhausts_one(self) -> None:
+        """A drain cut short must leave a sample, not one whole class unread.
+
+        Name order made the prefix a single class: one cell adjudicated 80 of
+        274 reports and every one shared a class, while every other class it
+        filed went unread. That prefix is not a floor of the same corpus.
+        """
+        findings = self.root / "findings"
+        for index, klass in enumerate(
+            ["uninit"] * 6 + ["overflow"] * 2 + ["credential"],
+        ):
+            directory = findings / f"FIND-{index:03d}"
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "report.md").write_text(
+                f"| Class | {klass} |\n", encoding="utf-8",
+            )
+        directories = sorted(findings.glob("FIND-*"))
+        ordered = triage._finding_review_order(directories)
+        self.assertCountEqual(ordered, directories)
+
+        def klass_of(directory: Path) -> str:
+            return triage._finding_review_rank(directory)[0]
+
+        # Every class the cell filed appears in the first three reviewed.
+        self.assertEqual(
+            {klass_of(directory) for directory in ordered[:3]},
+            {"uninit", "overflow", "credential"},
+        )
+
+    def test_review_order_puts_the_settleable_report_first(self) -> None:
+        """Evidence completeness ranks the queue; it never drops a report."""
+        findings = self.root / "findings"
+        complete = findings / "FIND-100"
+        thin = findings / "FIND-010"
+        for directory in (complete, thin):
+            directory.mkdir(parents=True, exist_ok=True)
+        (thin / "report.md").write_text("| Class | uninit |\n", encoding="utf-8")
+        (complete / "report.md").write_text(
+            "| Class | uninit |\n"
+            + "".join(
+                f"| {label} | stated |\n"
+                for key, label in triage._REACH_FIELD_LABELS.items()
+                if key != "class"
+            ),
+            encoding="utf-8",
+        )
+        ordered = triage._finding_review_order([thin, complete])
+        self.assertEqual(ordered, [complete, thin])
+
+    def test_split_disproof_names_still_remove_the_finding(self) -> None:
+        """Quorum is on the disproof, not on the name given to it.
+
+        Two anchored reviewers refuted one report with the same cited source
+        and filed it under different dispositive kinds. Requiring an identical
+        label voided the quorum and republished the finding as conditional,
+        where it counted toward the confirmed total and its Medium+ subset.
+        """
+        common = trigger_vote(self.report, self.root, "Reject")
+        votes = (
+            self.finding / ".trigger-gate.json",
+            self.finding / ".trigger-gate-2.json",
+        )
+        for vote, kind in zip(votes, ("unreachable", "contract-invalid")):
+            vote.write_text(json.dumps({
+                **common, "review_facts": {"rejection_kind": kind},
+            }))
+        # The label disagreement still means no agreed fact to publish.
+        self.assertEqual(
+            triage._source_review_facts(
+                self.report, votes, rejection_quorum=2,
+            ),
+            {},
+        )
+        self.assertTrue(
+            triage._trigger_rejection_is_dispositive(self.report, votes),
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"ACTIVE_BACKEND": "", "BACKEND": "", "TARGET_ROOT": str(self.root)},
+            clear=False,
+        ):
+            self.assertEqual(
+                triage._finding_trigger_disposition(
+                    self.finding, self.report, None,
+                ),
+                "rejected",
+            )
+        # A split over whether any boundary was added is a real disagreement
+        # about the claim, so it keeps the softer outcome.
+        votes[1].write_text(json.dumps({
+            **common, "review_facts": {"rejection_kind": "no-added-boundary"},
+        }))
+        self.assertFalse(
+            triage._trigger_rejection_is_dispositive(self.report, votes),
+        )
+
     def test_unreachable_disproof_is_dispositive_at_a_public_surface(self) -> None:
         """Two anchored `unreachable` Rejects remove the finding anywhere.
 
@@ -1765,17 +1861,26 @@ Generated score text.
                 ),
                 "rejected",
             )
+        votes = (
+            self.finding / ".trigger-gate.json",
+            self.finding / ".trigger-gate-2.json",
+        )
         for surface in ("library-api", "network", "file-format", "cli",
                         "internal", "unknown"):
-            self.assertTrue(triage._trigger_rejection_is_dispositive({
-                **payload["review_facts"],
-                "vulnerable_boundary_surface": surface,
-            }), surface)
+            payload["review_facts"]["vulnerable_boundary_surface"] = surface
+            for vote in votes:
+                vote.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertTrue(
+                triage._trigger_rejection_is_dispositive(self.report, votes),
+                surface,
+            )
         # A public surface still cannot turn a non-dispositive kind into one.
-        self.assertFalse(triage._trigger_rejection_is_dispositive({
-            **payload["review_facts"],
-            "rejection_kind": "no-added-boundary",
-        }))
+        payload["review_facts"]["rejection_kind"] = "no-added-boundary"
+        for vote in votes:
+            vote.write_text(json.dumps(payload), encoding="utf-8")
+        self.assertFalse(
+            triage._trigger_rejection_is_dispositive(self.report, votes),
+        )
 
     def test_lone_unreachable_reject_keeps_the_finding(self) -> None:
         """One Reject is not the quorum: recall comes from agreement, not surface."""
