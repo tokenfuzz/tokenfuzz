@@ -1,7 +1,7 @@
 # Pinned to match the GitHub Pages workflow (.github/workflows/pages.yml).
 # Bump in lockstep with CI so local previews and the deployed site stay aligned.
-mkdocs-material==9.7.6
-# 10.21.3 is the newest release and the version that fixes the
-# pymdownx.snippets path traversal, so it is both the ceiling and the
-# security floor. There is no 11.x on PyPI — pinning one fails install.
-pymdown-extensions==10.21.3
+mkdocs-material==9.7.7
+# Security floor: 11.0.0 fixes the pymdownx.b64 path traversal
+# (CVE-2026-61632) that affects every release through 10.21.3. The 11.x line
+# needs Python >= 3.10, so docs builds no longer run under 3.9.
+pymdown-extensions==11.0.1
