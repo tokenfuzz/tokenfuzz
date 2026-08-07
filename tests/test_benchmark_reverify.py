@@ -738,8 +738,8 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 mock.patch.object(benchmark_runner.metrics, "relocate_experiments"), \
                 mock.patch.object(benchmark_runner, "benchmark_target_config"), \
                 mock.patch.object(
-                    benchmark_runner, "_pool_severity_not_current",
-                    return_value=["findings/FIND-0001"],
+                    benchmark_runner, "_pool_receipt_problems",
+                    return_value=([], ["findings/FIND-0001"]),
                 ), \
                 mock.patch.object(benchmark_runner, "_run_tool", fake_run_tool):
             with self.assertRaisesRegex(

@@ -1055,8 +1055,91 @@ def _batch_reach_field_decisions(
     )
 
 
+def reach_fields_open(directory: Path) -> bool:
+    """Fields still missing here with retry budget left — no provider call.
+
+    Lets the cached fast paths ask whether an artifact owes convergence before
+    entering it. Those paths exist to finish already-reviewed work before
+    anything asks a provider, so an artifact whose fields are already settled
+    must not be handed to the batch decider merely to be told so.
+    """
+    report = _report(directory)
+    if report is None:
+        return False
+    try:
+        text = report.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not _missing_reach_fields(text) and not _pending_optional_reach_fields(text):
+        return False
+    cache = _reach_field_cache(directory / ".llm_fields.json")
+    try:
+        attempts = int(cache.get("_fill_attempts", 0))
+    except (TypeError, ValueError):
+        return True
+    return attempts < _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
+
+
+def converge_reach_fields(
+    directories: list[Path],
+    usage_index: str | os.PathLike[str] | None = None,
+    deadline: float | None = None,
+    workers: int = 4,
+) -> None:
+    """Batch reach-field fill until nothing is pending or the budget is spent.
+
+    One batched pass applies what one answer supplies and stops. When an
+    answer is omitted or unparsable it still spends an attempt and
+    materializes nothing, so a later pass — the pool rebuild runs one —
+    rewrites a report that a validation receipt already covers. That
+    invalidates the receipt, bin/severity declines to score a report its
+    review no longer describes, and the artifact publishes unrated.
+
+    Repeating the pass here spends the same per-artifact attempt ceiling
+    before the receipt binds, at the same batch width, so the later pass has
+    nothing left to change. Provider calls keep their count and their shape —
+    only their timing moves.
+
+    Termination rides on the batch pass itself: it already skips a converged
+    report and one that has spent its attempts, so the set it reports as
+    attempted shrinks to empty. Looping on that set, rather than on "did the
+    report change", is what keeps an answerless pass retrying.
+    """
+    remaining = [Path(directory) for directory in directories]
+    for _ in range(_positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2) + 1):
+        if _deadline_expired(deadline):
+            return
+        attempted, decisions, _ = _batch_reach_field_decisions(
+            remaining, usage_index, deadline, workers,
+        )
+        if not attempted:
+            return
+        for directory in remaining:
+            if directory not in attempted:
+                continue
+            # An omitted id yields None, which spends this artifact's attempt
+            # without a second single-report call; the next pass re-batches it.
+            fill_reach_fields(
+                directory, usage_index,
+                decision_override=decisions.get(directory),
+            )
+        remaining = sorted(attempted)
+
+
 def fill_reach_fields_tree(root: Path) -> int:
-    """Apply reach-field convergence to every pooled crash and finding."""
+    """Apply reach-field convergence to every pooled crash and finding.
+
+    A report already covered by a current final receipt is left alone. This
+    pass runs over pooled copies, after review, so materializing a field here
+    rewrites the very text a review concluded on — which invalidates that
+    receipt, and is how an adjudicated artifact ends up published unrated.
+    Converging upstream is what keeps fields from being left open; this makes
+    the pool unable to reopen them regardless of why one still is (an expired
+    deadline, an unavailable provider, a spent attempt budget).
+
+    Whatever a cell left open, it left open under a receipt that describes the
+    report as it stands, and that is the report the score must reflect.
+    """
     if os.environ.get("LLM_FIELD_FILL_DISABLE", "0") == "1":
         return 0
     changed: set[Path] = set()
@@ -1064,8 +1147,15 @@ def fill_reach_fields_tree(root: Path) -> int:
     directories: list[Path] = []
     for kind, prefix in (("findings", "FIND-*"), ("crashes", "CRASH-*")):
         for directory in sorted((Path(root) / kind).glob(prefix)):
-            if directory.is_dir():
-                directories.append(directory)
+            if not directory.is_dir():
+                continue
+            receipt = validation_receipt.read_current(directory)
+            if (
+                receipt is not None
+                and receipt.get("state") in validation_receipt.FINAL_STATES
+            ):
+                continue
+            directories.append(directory)
     attempted, batched, prefilled = _batch_reach_field_decisions(
         directories, usage_index,
     )
@@ -2259,7 +2349,16 @@ def triage_crash_dirs(
         ):
             cached_ready.append(directory)
     counts["promoted"] += len(finalized)
+    usage_index = benchmark._find_index_jsonl(results)
     if cached_ready:
+        # Converge before this shortcut writes their receipts, for the same
+        # reason the main path does below: a receipt must cover a report no
+        # later pass needs to rewrite. Filtered first so the settled artifacts
+        # this fast path exists for still reach finalization without a
+        # provider-shaped call in front of them.
+        owed = [d for d in cached_ready if reach_fields_open(d)]
+        if owed:
+            converge_reach_fields(owed, usage_index, deadline, workers)
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             cached_statuses = list(pool.map(
                 lambda directory: triage_one_crash(
@@ -2287,18 +2386,16 @@ def triage_crash_dirs(
             and not autodiscard_reason(sanitizer_text)
         ):
             reach_directories.append(directory)
-    usage_index = benchmark._find_index_jsonl(results)
-    reach_attempted, reach_decisions, _ = _batch_reach_field_decisions(
-        reach_directories, usage_index, deadline, workers,
-    )
+    # Converge before the per-crash pass, so the verdict and the receipt it
+    # produces cover a report no later pass needs to rewrite.
+    converge_reach_fields(reach_directories, usage_index, deadline, workers)
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         statuses = pool.map(
             lambda directory: triage_one_crash(
                 directory, results, Path(target_root), target_slug, controls,
                 findings_only, deadline,
                 target_root_is_product,
-                reach_decisions.get(directory)
-                if directory in reach_attempted else _NO_REACH_DECISION,
+                _NO_REACH_DECISION,
                 directory in bypasses,
                 age_pending,
             ),
@@ -3207,7 +3304,16 @@ def validate_find_gate(
         directory for directory in directories
         if _finding_ready_for_cached_finalization(directory, q, aq)
     ]
+    usage_index = benchmark._find_index_jsonl(results)
     if cached_directories:
+        # Converge before this shortcut writes their receipts, for the same
+        # reason the disposition groups below do: a receipt must cover a
+        # report no later pass needs to rewrite. Filtered first so the settled
+        # artifacts this fast path exists for still reach finalization without
+        # a provider-shaped call in front of them.
+        owed = [d for d in cached_directories if reach_fields_open(d)]
+        if owed:
+            converge_reach_fields(owed, usage_index, deadline, workers)
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             cached_statuses = list(pool.map(
                 lambda directory: validate_one_finding(
@@ -3224,7 +3330,6 @@ def validate_find_gate(
     directories = _finding_review_order([
         directory for directory in directories if directory not in cached_set
     ])
-    usage_index = benchmark._find_index_jsonl(results)
     # Quality batches are wide enough to keep every worker occupied. Within
     # each quality group, carry trigger-sized disposition groups through reach
     # fields, both trigger rounds, and finalization before opening the next.
@@ -3279,7 +3384,9 @@ def validate_find_gate(
             if disposition_start and _deadline_expired(deadline):
                 counts["pending"] += len(accepted_quality) - disposition_start
                 break
-            reach_attempted, reach_decisions, _ = _batch_reach_field_decisions(
+            # Converge before the trigger vote binds a receipt to the report,
+            # so the pool's later pass has nothing left to rewrite.
+            converge_reach_fields(
                 disposition_group, usage_index, group_deadline, workers,
             )
             for directory in disposition_group:
@@ -3288,8 +3395,6 @@ def validate_find_gate(
                     continue
                 _prepare_accepted_finding(
                     directory, report, group_deadline, usage_index,
-                    reach_decisions.get(directory)
-                    if directory in reach_attempted else _NO_REACH_DECISION,
                 )
             trigger_attempted = _batch_finding_trigger_votes(
                 disposition_group, results, group_deadline, usage_index,

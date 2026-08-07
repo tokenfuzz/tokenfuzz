@@ -282,6 +282,23 @@ def rewrite_tree_after_equivalent_transform(
             rewrite_after_equivalent_transform(directory, receipt)
 
 
+def claims_state(directory: Path, states: frozenset[str]) -> bool:
+    """Whether the receipt on disk claims one of `states`, ignoring freshness.
+
+    `read_current` returning None conflates "never reviewed" with "reviewed,
+    then the report changed underneath". Only the raw state separates those,
+    and they need different handling: the first is expected, the second means
+    a concluded review lost its subject.
+    """
+    try:
+        payload = json.loads(
+            (Path(directory) / "validation.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("state") in states
+
+
 def read_current(directory: Path) -> dict | None:
     """Return a receipt only while its report, artifacts, and scope still match.
 

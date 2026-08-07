@@ -1411,31 +1411,102 @@ def _pool_replay_blocked(
     return blocked
 
 
-def _pool_severity_not_current(pool: Path) -> list[str]:
-    """Accepted pooled artifacts whose Severity row no scorer run vouches for.
+_POOL_RESERVED_DIRS = frozenset(
+    {"crashes", "crashes-rejected", "findings", "findings-rejected", "logs"}
+)
 
-    Clustering reads severity out of the report, so a score bound to different
-    report content — or produced by an older scorer — is credited as if it were
-    current. The marker makes that visible instead of silent.
+
+def _pool_artifact_roots(pool: Path) -> list[Path]:
+    """The combined tree plus every condition subtree split out of it.
+
+    split_pool copies each condition into its own subtree and
+    _finalize_condition_pools then maintains indexes there, so a check that
+    walked only the combined tree could not see a receipt that went stale
+    during that step.
     """
-    stale: list[str] = []
-    for kind, prefix in (("crashes", "CRASH-"), ("findings", "FIND-")):
-        for directory in sorted((pool / kind).glob(f"{prefix}*")):
-            receipt = validation_receipt.read_current(directory)
-            # Only artifacts that carry a published score: an unrated one
-            # (pending, native hardening) has no marker by design.
-            if (
-                receipt is None
-                or receipt.get("state")
-                not in validation_receipt.SECURITY_STATES
-            ):
-                continue
-            report = report_identity.find_report(directory)
-            if report is None:
-                continue
-            if severity_receipt.read_current(directory, report) is None:
-                stale.append(f"{kind}/{directory.name}")
-    return stale
+    if not pool.is_dir():
+        return []
+    return [pool] + [
+        child for child in sorted(pool.iterdir())
+        if child.is_dir()
+        and not child.name.startswith(".")
+        and child.name not in _POOL_RESERVED_DIRS
+    ]
+
+
+def _pool_receipt_problems(pool: Path) -> tuple[list[str], list[str]]:
+    """Pooled artifacts no scorer run vouches for, split by cause.
+
+    Both causes publish an artifact with no severity, so they read alike from
+    the outside — and only one of them was ever looked at. Returns
+    (stale_validation, stale_severity):
+
+    * stale_validation — the receipt claims a final security state but no
+      longer matches its report, so bin/severity declines to score it. The
+      old `continue` skipped exactly this case, which is why a run whose gate
+      reported `pending=0` could still publish unrated artifacts with nothing
+      in the log to say so.
+    * stale_severity — validation is current but the score is not: bound to
+      different report content, or produced by an older scorer. Clustering
+      reads severity out of the report, so such a score would be credited as
+      if it were current.
+
+    An artifact that is legitimately unrated (pending review, native
+    hardening) is in neither list — it carries no final security state.
+    """
+    stale_validation: list[str] = []
+    stale_severity: list[str] = []
+    for root in _pool_artifact_roots(pool):
+        scope = "" if root == pool else f"{root.name}/"
+        for kind, prefix in (("crashes", "CRASH-"), ("findings", "FIND-")):
+            for directory in sorted((root / kind).glob(f"{prefix}*")):
+                name = f"{scope}{kind}/{directory.name}"
+                receipt = validation_receipt.read_current(directory)
+                if receipt is None:
+                    if validation_receipt.claims_state(
+                        directory, validation_receipt.SECURITY_STATES,
+                    ):
+                        stale_validation.append(name)
+                    continue
+                if receipt.get("state") not in validation_receipt.SECURITY_STATES:
+                    continue
+                report = report_identity.find_report(directory)
+                if report is None:
+                    continue
+                if severity_receipt.read_current(directory, report) is None:
+                    stale_severity.append(name)
+    return stale_validation, stale_severity
+
+
+def _audit_pool_receipts(pool: Path, reason: str) -> None:
+    """Refuse to publish a pool whose receipts no longer cover its reports.
+
+    Both failures block. `count_confirmed_findings` does skip an artifact
+    whose receipt has gone stale, but the published aggregate does not: it
+    sums the per-cell totals recorded while those receipts were still fresh
+    (`benchmark.aggregate`) and counts every member of the unfiltered cluster
+    JSON. A warning would therefore leave a run crediting findings no current
+    review covers, with `unadjudicated_finding_total` reading 0 — which is the
+    one thing the benchmark must never do.
+
+    Both are recoverable by revalidating the named artifacts, and neither
+    should happen once reach fields converge before their receipt binds.
+    """
+    unvalidated, unscored = _pool_receipt_problems(pool)
+    problems = [
+        (unvalidated, "hold a final validation receipt that no longer matches "
+                      "their report; revalidate them"),
+        (unscored, "carry a severity the current scorer did not produce"),
+    ]
+    for names, why in problems:
+        if not names:
+            continue
+        detail = (
+            f"{len(names)} pooled artifact(s) {why} ({reason}): "
+            f"{', '.join(names[:5])}"
+        )
+        log(f"WARN: {detail}; refusing to publish")
+        raise RuntimeError(detail)
 
 
 def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dry_run: bool, reason: str) -> None:
@@ -1523,14 +1594,7 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
     # hold back.
     with (bench_dir / "severity.log").open("w", encoding="utf-8") as output:
         _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
-    unscored = _pool_severity_not_current(pool)
-    if unscored:
-        detail = (
-            f"{len(unscored)} pooled artifact(s) carry a severity the current "
-            f"scorer did not produce ({reason}): {', '.join(unscored[:5])}"
-        )
-        log(f"WARN: {detail}; refusing to publish stale severity")
-        raise RuntimeError(detail)
+    _audit_pool_receipts(pool, reason)
     prior_cluster_validations = validation_receipt.snapshot_current_tree(pool)
     clustering_succeeded = True
     for kind, tool, output_name in (
@@ -1587,6 +1651,11 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             [str(SCRIPT_ROOT / "bin" / "render-md"), *map(str, rejected_indexes), "--html-sibling"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
+    # Re-audit immediately before the swap. Everything above — clustering,
+    # split_pool, per-condition index maintenance, rendering — rewrites
+    # reports, so the pre-clustering audit cannot speak for the tree that
+    # actually publishes, and it never saw the condition subtrees at all.
+    _audit_pool_receipts(pool, reason)
     live = bench_dir / "pool"
     old = bench_dir / ".pool.old"
     shutil.rmtree(old, ignore_errors=True)

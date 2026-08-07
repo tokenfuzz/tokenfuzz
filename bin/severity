@@ -2959,21 +2959,32 @@ def main(argv: list[str] | None = None) -> int:
             receipt is None
             or receipt.get("state") not in validation_receipt.FINAL_STATES
         ):
+            # Two different failures land here and used to read alike. A
+            # receipt that claims a final state but no longer matches its
+            # report is STALE — the review happened and something rewrote
+            # what it covered — while "pending" says the review never
+            # concluded. Reporting both as pending hid a completed gate
+            # behind a label that reads as unfinished work.
+            stale = receipt is None and validation_receipt.claims_state(
+                report_dir, validation_receipt.FINAL_STATES,
+            )
+            label = "validation stale" if stale else "validation pending"
             clear_report_severity(
-                report_md, report_dir, "Unknown (validation pending)",
+                report_md, report_dir, f"Unknown ({label})",
             )
             unvalidated = {
                 "level": "Unknown",
                 "score": None,
                 "primitive": "unvalidated",
-                "reason": "no current final validation receipt",
+                "reason": (
+                    "final validation receipt no longer matches the report"
+                    if stale else "no current final validation receipt"
+                ),
             }
             if args.json:
                 print(json.dumps({"severity": unvalidated}, indent=2, sort_keys=True))
             else:
-                print(
-                    "Severity: Unknown (no current final validation receipt)",
-                )
+                print(f"Severity: Unknown ({unvalidated['reason']})")
             return 0
 
     cluster_size = _detect_cluster_size(report_text)
