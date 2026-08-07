@@ -1,195 +1,178 @@
 # Changelog
 
-## 1.4.0 - 2026-08-03
+## 1.4.0 - 2026-08-07
 
-- **A harness that forges its own crash is refused before it runs.** An agent
-  could compile a driver that injects a constructor into a version-only target
-  process, or hands control to a binary it built itself — the sanitizer trace
-  was real, but about the wrong program, and one run accepted seven of them.
-  Compiled carriers showing loader injection or a version-only launch are now
-  rejected before the compiler runs, a fault whose module lives in the agent's
-  own scratch tree and was not built by the probe is not a crash, and export
-  reads the probe receipt as authoritative instead of guessing which
-  `main()`-bearing source ran.
+- **Chromium is a supported target, and browser support is structural.**
+  Browser handling is now derived from the build driver instead of four
+  hardcoded slugs and one objdir layout, so forks and renames get full
+  treatment: the product executable comes from bundle role metadata, page
+  products must load an HTML canary before a route counts as usable, and the
+  post-preflight configuration is frozen per backend so a concurrent edit
+  cannot change runner selection mid-session. Chromium lands as a gclient
+  workspace overlay with a curated full-product ASan recipe, resolved
+  consistently across setup, audit, benchmark, state, build, export and
+  cleanup.
 
-- **A validation wall now buys verdicts instead of votes.** Every gate stage
-  needed two votes and ran breadth-first across the whole corpus, so a wall
-  that ran out mid-stage left the entire field one vote short of everything:
-  one drain spent 46 of 60 minutes producing 138 trigger votes and not one
-  trigger disposition. Findings are grouped and each group carried through
-  quality, reach fields, both trigger rounds, and finalization before the next
-  opens — same votes, same quorum, same batch sizes. A review that runs out of
-  wall also no longer discards its whole batch.
+- **Audit coverage now reaches security-boundary code, not just memory
+  handling.** Card ranking scored only memory primitives, so an authorization
+  check, a cookie-scoping rule, or a path effect never became a work card
+  under any strategy. Seven boundary surface families — access control,
+  identity and origin, credential verification, query and template
+  construction, outbound-request policy, path effects, and remote peers — now
+  route directly to the rule-vs-implementation playbook, keyed on the
+  security decision rather than domain vocabulary, with every measured fire
+  rate at or below 9.1% and no memory work displaced.
 
-- **Two reviewers who refuted a report no longer disagree it back into the
-  totals.** Removing a finding took a quorum on the *name* the reviewers gave
-  their disproof, not on the disproof. On one cell five reports drew two
-  independent anchored Rejects citing the same source line, split only over
-  whether to file it as `unreachable` or `contract-invalid` — and all five
-  published as conditional, counted as confirmed, and sat inside the row's
-  Medium+ subset. The three kinds that all say "the claimed defect is not one"
-  now satisfy the quorum together. `no-added-boundary` is a different claim, so
-  a split against it still falls to the softer outcome, and no Promote or
-  Uncertain vote is affected.
+- **Every ranked strategy holds work, and the rank window spreads across
+  files.** Two lanes could never run — one held zero cards on all benchmarked
+  targets, another owned no card generator and is now retired as reserved. A
+  card is emitted for every strategy a file's own signals fire, the window is
+  filled by rotating strategies rather than by score alone (reaching 120
+  files where score ordering reached 30), a surviving card carries its
+  same-file siblings' strategies so no angle is lost, and buildability is
+  decided before truncation so compiled work still leads every window.
 
-- **Final validation runs to completion instead of to a clock.**
-  `--finalize-wall` defaulted to one hour with four reviewers, so a cell that
-  filed more than that hour could read left 194 of 274 findings unjudged and
-  still published a count. The artifact set is frozen when the audit wall ends
-  and every per-call timeout and provider pause is already bounded, so the
-  default is now unlimited. An unlimited wall alone does not finish the gate —
-  a review batch that returns no keyed output leaves its ids pending — so the
-  drain repeats while that remainder falls, paying only for what cached
-  receipts do not already cover. `--finalize-workers` sizes the closing pass
-  explicitly, at the same default 4 both phases already used, instead of crash
-  triage inheriting the audit's agent count.
+- **Published results are bound to verifiable evidence — and stay bound.** A
+  content-addressed validation receipt is now the publication authority
+  across triage, severity, benchmark counting and export: it binds the
+  report, testcase, diagnostic, harness, invocation, build, revision and
+  threat model, and an artifact whose evidence changes returns to pending
+  instead of keeping stale credit. Verdicts survive the harness's own
+  severity rewrite, inferred report fields survive regeneration, and
+  primitives classify from the first complete runtime diagnostic so narrative
+  prose can no longer outrank the sanitizer. Pooling honors the receipts too:
+  reach fields converge before a receipt is cut, a rebuild pass skips any
+  artifact under a current final receipt, and a stale receipt blocks
+  publication rather than warning past it.
 
-- **A gate cut short leaves a sample, not one whole class.** The review queue
-  ran in directory-name order, so the cell above adjudicated 80 reports that
-  were 41/43 a single bug class and never opened the other thirteen it had
-  filed — a prefix that is not a floor of the same corpus. The queue now
-  rotates bug classes, and on that corpus the first 16 reviewed span all 14
-  classes instead of 2. Within a class, reports carrying the fields a reviewer
-  needs go first; that only ranks the queue — thin writing is not evidence
-  that a bug is unreal, so nothing is dropped.
+- **A finding must prove its claimed consequence, not just its trigger.** The
+  independent source-reading review asked one question — can an attacker
+  reach the triggering state — so a reachable finding was promoted whatever
+  consequence it claimed; 63% of one cell's corpus took that path. Promote
+  now requires source support for the exact claimed consequence under four
+  language-neutral modes, source that affirmatively contradicts the claim
+  rejects it, and a residual-memory disclosure must name the allocation the
+  bytes live in — the claim's own evidence, not its polish. Merely unproven
+  or deployment-dependent stays Uncertain, and a sanitizer diagnostic remains
+  concrete crash evidence however much its report overstates impact.
 
-- **An unfinished gate no longer reports as "found nothing".** Findings the
-  gate never decided were folded into "0 accepted", which reads as the
-  opposite conclusion; one cell published 0 accepted while 172 of its 191
-  findings had no verdict. The count now carries the remainder as
-  `0 (172 unjudged)` and a live run warns while an operator can still act.
-  When the remainder outnumbers the verdicts the count also reads `≥N`: review
-  stopped partway down a queue, so it is a lower bound rather than a yield to
-  compare. The cell keeps its place and its evidence either way — dropping it
-  would take its confirmed crashes out of the comparison too.
+- **A forged crash is refused before it costs anything.** An agent-built
+  carrier that injects a loader module into a version-only process, or hands
+  control to a binary the probe never built, produced real sanitizer traces
+  about the wrong program. Conclusive carriers are now rejected before the
+  compiler runs, a fault whose module lives in the agent's own scratch tree
+  and was not built by the probe is not a crash, and export reads the probe
+  receipt as authoritative for the testcase and harness that actually ran.
 
-- **The findings column says how much of the target a condition covered.**
-  Cluster identity is (class, file, line), so one mechanism restated at N
-  locations is N countable findings — correctly, since N sites need N fixes,
-  but it makes the count alone a poor read of a run. A cell reporting `≥57 (41
-  M+, 3 classes, 194 unjudged)` and one reporting `30 (23 M+, 21 classes)` are
-  not the same result; the class term is now beside the count. It ranks
-  nothing and gates nothing.
+- **The finding gate delivers verdicts and runs to completion.** Bounded
+  groups are carried through quality, reach fields, both trigger rounds and
+  finalization before the next opens — same votes, same quorum, same batch
+  sizes — and a review killed at its wall banks the items it completed.
+  `--finalize-wall` now defaults to unlimited, since the artifact set is
+  frozen when the audit wall ends, and the drain repeats while its pending
+  remainder falls, paying only for what cached receipts do not already
+  cover. Two reviewers who each anchored a disproof also no longer disagree
+  a dead finding back into the totals: the three reject kinds that all say
+  "the claimed defect is not one" satisfy the quorum together.
 
-- **A finding bar built on evidence, not on filing rate.** The baseline prompt
-  set a pace target with no evidence floor, and both backends optimized for
-  the cheapest legible artifact — one restated a single unchecked-allocation
-  pattern across dozens of files and never drove the sanitizer. A FIND now
-  needs four named facts: location, class, the reaching input with what the
-  caller controls, and what the attacker gains. Resource exhaustion needs
-  quantified amplification *and* a demand that survives the project's own
-  ceiling, stated identically in the bug contract, the find-quality gate, and
-  the baseline prompt.
+- **A findings count says what it covers.** An unfinished gate reports its
+  remainder — `0 (172 unjudged)`, with `≥N` when the remainder outnumbers
+  the verdicts — instead of folding into "found nothing", and a live run
+  warns while an operator can still act. The review queue rotates bug
+  classes, so a gate cut short leaves a sample of the corpus rather than one
+  whole class, and the findings column carries its class spread:
+  `≥57 (41 M+, 3 classes, 194 unjudged)` and `30 (23 M+, 21 classes)` are
+  not the same result.
 
-- **An operator-enabled path is scored as configuration, not as input.** A
-  crash reachable only once the application turns on a non-default mode,
-  codec, or filter was indistinguishable from one the bytes reach on their
-  own, because the author-facing vocabulary had no value for it — so the
-  precondition went unwritten and the crash scored as fully byte-reachable.
-  `application-supplied` joins the documented Parameter control values and the
-  agent writes it directly. The crash stays remotely reachable; this records a
-  precondition rather than narrowing reachability.
+- **An agent that finishes early keeps working.** A finished slot is now
+  relaunched repeatedly for the rest of the iteration, gated on evidence of
+  remaining work rather than elapsed time, and every session is clamped to
+  one epoch deadline. One five-hour run had left 4.9 of 15 possible
+  agent-hours idle at the iteration barrier; that capacity now goes to the
+  audit.
 
 - **A disproved route reaches the session that would repeat it.** The
-  provenance gate wrote an anchored disproof for every rejection and then only
-  moved the artifact, so the reasoning never reached an agent — across four
-  targets 55% of trigger rejections landed on a file that had already produced
-  one in the same run, each paying a fresh harness, confirmations, bundle and
-  report to re-derive the same answer. Notes now render newest-first against
-  the rejected artifact itself, so a requeue retracts the note by moving it.
+  provenance gate's anchored disproofs now render, newest first, on later
+  work cards for the same file and against the rejected artifact itself —
+  previously 55% of trigger rejections re-derived an answer the run already
+  had, each paying a fresh harness, confirmations, bundle and report. The
+  note is advisory, rules out a route rather than a file, and a requeue
+  retracts it by moving the artifact.
 
-- **Every ranked strategy can actually hold work.** Two lanes could never run:
-  one held zero cards on all four benchmarked targets because ranking kept
-  only the first two companion strategies in bucket order, starving the last
-  bucket queue-wide, and another owned no card generator at all. The rank
-  window is now filled by rotating strategies rather than by score alone,
-  buildability is decided before truncation instead of after, and
-  security-boundary surfaces — authorization checks, cookie scoping, path
-  effects — route to the rule-audit playbook instead of never ranking.
+- **Benchmark conditions compare on the same evidence bar, the same clock,
+  and the same prose contract.** A model-direct finding now needs four named
+  facts — location, class, reaching input with caller control, attacker gain
+  — and resource exhaustion needs quantified amplification that survives the
+  project's own ceiling, replacing a filing-rate target both backends farmed.
+  The baseline names a UTC deadline with a clock check, and the Wall column
+  reads `spent/granted` so an early stop is disclosed where the comparison is
+  read. One narrative contract covers every backend's reports, so a
+  prose-quality difference is a result rather than an artifact, and refuted
+  findings and stale severities are no longer credited.
 
-- **An agent that finishes early keeps working.** A finished agent got exactly
-  one replacement and then idled at the iteration barrier for as long as its
-  slowest peer had left: one 5h run left 4.9 of 15 possible agent-hours
-  unused, with a single agent idle 46% of the time. Slots are now reusable for
-  the rest of the iteration.
+- **A benchmark run pins one immutable execution contract.** A fresh run
+  converges once, then pins the exact runner, executable, library, stamp
+  generation, route and tracked source state it selected; cell startup,
+  completion, resume and both replay paths verify against that pin. A
+  runtime by-product left in the target tree no longer reads as a source
+  change that kills the next cell, and parallel runs safely share one
+  checkout under build leases.
 
-- **Browser support is structural, and Chromium is a supported target.**
-  Browser handling keyed off four hardcoded slugs and one objdir layout, so a
-  fork or rename silently got generic treatment. Execution is now derived from
-  the build driver, the product executable from bundle role metadata, and page
-  products must load an HTML canary before a route counts as usable. Chromium
-  is added as a gclient workspace overlay with a curated full-product ASan
-  recipe, resolved consistently across audit, benchmark, state, build, export
-  and cleanup.
+- **Severity records preconditions without inventing or losing reach.**
+  `application-supplied` joins the Parameter control vocabulary, so a crash
+  gated on a non-default mode carries that precondition to MAT:P while
+  staying remotely reachable. Detector-confirmed races keep the
+  code-execution reading and source-only ones score the integrity consequence
+  they defeat, and a mixed trigger — attacker bytes plus a public call
+  sequence — keeps its public attack vector instead of a zero-impact floor.
+  A new optional `disclosed_content` field records what a disclosure
+  actually leaked and is wired to lower only, so zeroed or caller-local
+  bytes stop rating as a cross-principal leak while silence can never
+  under-rate a finding.
 
-- **A benchmark run pins one execution contract and holds it.** A five-hour
-  cell left a runtime by-product in the target tree; the next cell read it as
-  a source change and died in four seconds, and the documented recovery
-  repeated the refusal. A fresh run now converges once, then pins the exact
-  runner, executable, library, stamp generation, route and tracked source
-  state it selected — and cell startup, completion, resume and both replay
-  paths verify against that pin rather than asking whether a hypothetical
-  rebuild would be fresh.
+- **Runner selection lands on a program that reads the input.** Bootstrap
+  picked the first binary in the build tree, so a project whose install list
+  is led by a test-suite driver got a runner that ignores the testcase and
+  replays every crash as CLEAN. CMake `ALIAS`/`IMPORTED` entries — a
+  reference, not a binary — no longer count as executables or suppress the
+  fallback that holds the real programs, and every instrumented CLI is
+  offered with its help text so the one that consumes attacker-supplied
+  input is the one chosen.
 
-- **A model-direct cell is aimed at its whole budget, and a short one is
-  visible.** One cell ended a 5h budget in well under an hour and still
-  aggregated as a clean replicate, so the equal-budget premise behind every
-  comparison failed silently. The baseline prompt sized the pass in tool calls
-  — the only target a model with no clock could check — and now names a UTC
-  deadline with a `date -u` check before any closing summary. The Wall column
-  carries the denominator it was missing and reads `spent/granted`, so a
-  condition that stopped early no longer reads exactly like one that ran to
-  the deadline.
+- **Setup proves a build can start and lets finished builds converge.** A
+  selected sanitizer binary must survive one bounded launch, so a recipe that
+  compiled but dies in the dynamic loader is rebuilt — and a persistent
+  loader diagnostic reaches the recipe-repair loop instead of steering the
+  agent toward configuration changes that cannot help. Artifact discovery
+  works at any depth, so completed header-only builds stop being rebuilt
+  forever, and `--pull` ignores untracked build output instead of reading
+  every target as dirty.
 
-- **Severity is scored on evidence, not on a label.** An asserted `data_race`
-  bought the detector's code-execution row, turning a logic race into a High;
-  detector-confirmed races keep that reading and source-only ones no longer
-  do. A public-boundary exception was republishing source-refuted reports, one
-  at High 8.9. Rewriting a report's fields no longer voids the verdicts
-  already validated against it, and inferred fields survive regeneration
-  instead of decaying into placeholders.
+- **Concurrent runs are protected from each other's cleanup.** Every
+  tool-using backend gets a refusal path for `pkill`/`killall`, including
+  composed and absolute-path variants — a name-based kill from one cell
+  could SIGKILL a concurrent benchmark whose orchestrator argv carried the
+  same target name.
 
-- **Reports read the same whatever backend wrote them.** Prose diverged by
-  backend — 18+ heading names, and an Impact section in 6% of one backend's
-  crash reports against 53% of another's — because no prompt stated audience,
-  section set, or length. One narrative contract now covers both, so a
-  prose-quality difference between conditions is a result rather than an
-  artifact.
+- **Runs measure what they actually spend.** Probe wall time is recorded per
+  run — a single record can hide hundreds of thousands of looped target
+  calls — with unknown reported as unknown rather than zero. Housekeeping
+  records one span per phase instead of an aggregate, every measured decision
+  ceiling is sized from observed completions instead of a fixed guess, and
+  trigger reviews get an equal wall whether batched or single.
 
-- **An agent can no longer kill a process by name.** A cleanup `pkill -f`
-  from one cell SIGKILLed a concurrent benchmark, because the target name also
-  appears in the orchestrator's argv. Every tool-using backend now gets a
-  refusal path for `pkill`/`killall`, including the composed and absolute-path
-  variants.
-
-- **A runner that never reads the input is not a runner.** Bootstrap picked
-  the first binary in the build tree, so a project whose install list is led
-  by a test-suite driver got a runner that ignores the testcase entirely and
-  replayed every crash as CLEAN. CMake `ALIAS`/`IMPORTED` entries — which name
-  a reference, not a binary — no longer count as executables and stop
-  suppressing the fallback that holds the real programs, and runner selection
-  is now offered every instrumented CLI with its help text so the one that
-  consumes attacker-supplied input is the one that gets chosen.
-
-- **Setup detects a build that compiled but cannot start.** Validation only
-  checked that an executable file existed, so a binary dying in the dynamic
-  loader passed and every run it served returned `NO_EXEC` while the agent was
-  steered toward configuration changes that cannot repair a recipe. Artifact
-  discovery also no longer stops three directories down, so completed
-  header-only builds stop being rebuilt forever, and `--pull` ignores
-  untracked build output instead of reading every target as dirty.
-
-- **A probe records what it cost.** Run records counted invocations, and an
-  agent-authored harness loops inside one — preserved sessions hold single
-  runs carrying over 600,000 target calls, so a card that consumed 1.9
-  agent-hours read exactly like one that cost seconds. Wall time is now
-  recorded per run, unknown stays unknown rather than zero, and every measured
-  decision ceiling is sized from what it observed instead of a fixed guess.
+- **The delivery pipeline is pinned and patched.** Every CI action is pinned
+  by commit SHA with the publish scopes isolated to the deploy job, weekly
+  grouped dependency updates keep those pins current, and the handbook
+  toolchain moves to pymdown-extensions 11, off the b64 path-traversal line
+  (CVE-2026-61632).
 
 - Internal: per-phase housekeeping timing, discovery-curve points that name
-  their source site, Mercurial parity for recency ranking and peer scans, a
-  dangling reproducer link that no longer aborts a finished run, and the
-  documented rule for what the benchmark wall counts.
+  their source site, Mercurial parity for recency ranking and peer scans,
+  promotion sidecars cleared where pooling and export read them, a dangling
+  reproducer link that no longer aborts a finished run, the documented rule
+  for what the benchmark wall counts, and a hermetic plain-target build
+  test.
 
 ## 1.3.0 - 2026-07-27
 
