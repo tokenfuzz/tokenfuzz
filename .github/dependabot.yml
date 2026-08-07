@@ -1,0 +1,30 @@
+version: 2
+
+# Workflow actions are pinned by commit SHA, which never moves on its own — without
+# these updates the pins silently rot on whatever was current the day they landed.
+# Dependabot rewrites both the SHA and its `# vX.Y.Z` comment. Updates are grouped
+# so a week's bumps arrive as one reviewable PR per ecosystem rather than five.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
+
+  # Docs-only: requirements.txt feeds bin/docs and the Pages workflow, never the
+  # audit harness, which is stdlib plus an optional tomli fallback.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      docs:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: docs
