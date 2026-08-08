@@ -27,6 +27,7 @@ import audit_helpers
 import build_preflight
 import build_config
 import build_session_seed
+import callgraph
 import cluster_common
 import housekeeping
 import llm_decide
@@ -613,6 +614,12 @@ def _work_card_signature(
     inputs: list[str] = []
     inputs.extend(str(path) for path in sorted((runtime.results / "coverage").glob("edges-agent-*.journal")))
     inputs.extend(str(path) for path in sorted((runtime.results / "corpus").glob("COVER-*/metadata.md")))
+    # The call-neighbourhood graph keys on inputs this signature does not see
+    # — the sanitizer route, the built artifact, the parser version. Without
+    # this the gate can return before rank-work runs, so installing trailmark
+    # or retargeting a binary never rebuilds the graph. Empty when the
+    # analysis is unavailable, which is the common case and changes nothing.
+    callgraph_signature = callgraph.cache_signature(runtime.target_root, runtime.results)
     config = getattr(runtime, "config", None)
     rank_config = json.dumps(
         {
@@ -627,7 +634,8 @@ def _work_card_signature(
         )
     return housekeeping.signature(
         "work-cards-refresh", inputs,
-        f"{source_signature or runtime.target_rev}\nrank_config={rank_config}",
+        f"{source_signature or runtime.target_rev}\nrank_config={rank_config}"
+        f"\ncallgraph={callgraph_signature}",
     )
 
 
@@ -1922,6 +1930,7 @@ def initialize_backend(
     index_log(runtime, f"LLM backend: provider={runtime.backend} model={runtime.model}")
     index_log(runtime, f"Target: slug={runtime.target_slug} path={runtime.target_root}")
     index_log(runtime, f"Output: results={runtime.results} logs={runtime.logs}")
+    index_log(runtime, callgraph.status())
     context = runtime.prompt_context(guide)
     prompt.write_static_prompt_file(context)
     state = BackendState(

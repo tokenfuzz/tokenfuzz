@@ -8,6 +8,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+import callgraph
 import structured_state
 import target_config
 import workqueue
@@ -316,6 +317,7 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
     fixes = card.get("fix_hashes") or []
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
     lines += _ruled_out_routes(context, card.get("file", ""))
+    lines += callgraph.block_for(context.results_dir, card.get("file", ""))
     lines += [
         "",
         "Use this card first unless structured state already has a higher-priority active row.",

@@ -95,7 +95,11 @@ The paths an operator inspects after a run:
 The tree also holds the work queue and structured state the harness
 manages itself. One file is worth knowing: `state/runs.jsonl` has one
 row per `bin/probe` invocation, so `wc -l` on it answers "did anything
-actually run?". The rest is internal bookkeeping.
+actually run?". `state/callgraph.json` is present only with the optional
+[call-neighbourhood analysis](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
+installed; it holds the per-file call maps work-card prompts quote, and
+deleting it costs prompt context and nothing else. The rest is internal
+bookkeeping.
 
 FIND directories without a report get a `.needs-content` marker and
 surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with

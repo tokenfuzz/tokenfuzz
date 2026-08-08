@@ -11,6 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import callgraph
 from llm_decide import decision_timeout
 from workqueue import add_common_args, annotate_card_buildability, apply_latest_claim_status, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
 
@@ -36,6 +37,12 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     ctx = context_from_args(args)
+    # Same cadence as the cards themselves: this is gated on the target's VCS
+    # content signature, so a run parses the tree once per source revision
+    # rather than once per iteration. The neighbourhood never enters ranking —
+    # it is read at prompt time, keyed by the card's file — so a failure here
+    # costs context, not work.
+    callgraph_status = callgraph.refresh(ctx)
     patch_cards = Path(args.patch_cards).expanduser().resolve() if args.patch_cards else None
     out = Path(args.output).expanduser().resolve() if args.output else ctx.results_dir / "work-cards.jsonl"
     cards = rank_target(ctx, args.limit, patch_cards)
@@ -63,7 +70,7 @@ def main(argv: list[str]) -> int:
             for card in cards:
                 print(json.dumps(card, sort_keys=True))
         else:
-            print_compact_summary(cards, out, args.summary_limit)
+            print_compact_summary(cards, out, args.summary_limit, callgraph_status)
     return 0
 
 
@@ -87,9 +94,21 @@ def _counter_text(cards: list[dict], key: str) -> str:
     return ",".join(f"{name}:{count}" for name, count in sorted(counts.items()))
 
 
-def print_compact_summary(cards: list[dict], out: Path, summary_limit: int) -> None:
+def print_compact_summary(cards: list[dict], out: Path, summary_limit: int,
+                          callgraph_status: str = "") -> None:
     limit = max(0, summary_limit)
-    print(f"rank-work: wrote {len(cards)} card(s) to {out}")
+    # Reported on the existing line, never a new one: this is a bounded
+    # summary an operator scans between iterations, and an optional analysis
+    # does not get to grow it. Only states worth acting on are named — not
+    # "fresh", which is what every iteration that changed nothing would say,
+    # and not an absent trailmark, which is the default and would read as a
+    # fault rather than an absence.
+    quiet_states = ("fresh", "no trailmark interpreter")
+    suffix = (
+        f" (call neighbourhood: {callgraph_status})"
+        if callgraph_status and callgraph_status not in quiet_states else ""
+    )
+    print(f"rank-work: wrote {len(cards)} card(s) to {out}{suffix}")
     if cards:
         print(f"rank-work: by_strategy={_counter_text(cards, 'strategy')} by_status={_counter_text(cards, 'status')}")
     if limit:

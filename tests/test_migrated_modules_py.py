@@ -1242,7 +1242,13 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
          mock.patch.object(audit_runner.housekeeping, "mark_clean") as marked_clean, \
          mock.patch.object(audit_runner.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as launched:
         refreshed = audit_runner.refresh_work_cards(refresh_runtime)
-    launched_tools = [Path(call.args[0][0]).name for call in launched.call_args_list]
+    # Only the refresh passes themselves. Computing the signature may probe
+    # for the optional call-neighbourhood interpreter, which is a lookup, not
+    # a refresh pass, and must not be pinned here.
+    launched_tools = [
+        Path(call.args[0][0]).name for call in launched.call_args_list
+        if Path(call.args[0][0]).name in ("patch-cards", "peer-fix-cards", "rank-work")
+    ]
     check(
         refreshed and launched_tools == ["patch-cards", "peer-fix-cards", "rank-work"],
         "work-card refresh includes patch, peer-fix, and rank passes",
