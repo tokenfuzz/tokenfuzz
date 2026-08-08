@@ -15,6 +15,12 @@ bin/audit --target <target> --backend <backend> [--model <model>]
 bin/audit --target <target> --backend all
 ```
 
+Agent launches default to `--agent-security sandboxed`, which runs the backend
+inside its own OS sandbox and refuses backends whose sandbox cannot host an
+audit. `--agent-security external-bypass` drops that boundary for an outer one
+you administer, and is refused unless the environment asserts `IS_SANDBOX=1`.
+See [Agent security modes](#agent-security-modes).
+
 | Backend | CLI | Model behavior |
 | --- | --- | --- |
 | `claude` | Claude Code (`claude`) | Uses `config/models.toml` unless `--model` is passed. |
@@ -22,7 +28,7 @@ bin/audit --target <target> --backend all
 | `gemini` | Antigravity CLI (`agy`) by default | A config model slug is mapped to an `agy models` label. Set `USE_GEMINI_CLI=1` to use Google Gemini CLI instead. |
 | `grok` | Grok Build (`grok`) | Uses `config/models.toml` unless `--model` is passed. |
 | `oss` | OpenCode (`opencode`) | `--model` is required and must match the exact id served by the local endpoint. |
-| `all` | Installed hosted CLIs | Cycles `claude → codex → gemini → grok`; excludes `oss`. |
+| `all` | Installed hosted CLIs | Cycles `claude → codex → gemini → grok`; excludes `oss`, and skips any backend the selected [security mode](#agent-security-modes) cannot launch. |
 
 Use an explicit `--backend` and `--model` in any reproduction or benchmark
 record. Omitting `--backend` is the same as `--backend all`.
@@ -61,13 +67,85 @@ Run one direct, non-interactive check before an audit. A backend that is waiting
 for login can otherwise look like a stalled agent. Credentials remain owned by
 the CLI; do not put keys in `target.toml` or reports.
 
+## Agent security modes
+
+Every agent launch runs under one of two modes. `sandboxed` is the default and
+needs no flag; `external-bypass` must be asked for and is refused unless the
+environment asserts `IS_SANDBOX=1`.
+
+| Mode | What enforces the boundary | When to use it |
+| --- | --- | --- |
+| `sandboxed` (default) | The backend CLI's own OS sandbox — Seatbelt on macOS, Landlock/seccomp or bubblewrap on Linux. Approval prompts are turned off, because a headless run cannot answer one and an approval the model can request is not a boundary. | Normal runs on a machine you also use for other things. |
+| `external-bypass` | Nothing in the CLI. You are asserting that an outer container or VM enforces filesystem, process, credential, and egress policy. | Inside a container or VM you administer, and for the backends `sandboxed` refuses. |
+
+A third, classifier-reviewed `auto` mode is deliberately absent: it would add
+provider calls, latency, and variable decisions to the audit and benchmark
+contract without creating a stronger boundary.
+
+### What the sandbox does and does not buy
+
+A native sandbox gives **integrity and process containment**: the agent cannot
+write outside its workspace or reach the network. It is **not a confidentiality
+boundary** — every one of these sandboxes still reads the whole filesystem, and
+whatever the model reads travels to its provider by design. If secrets on the
+machine are in scope, the boundary is a hardened outer container or VM with only
+the target mounted, entered before the audit starts.
+
+### Backend support
+
+A backend is listed as supported only where the sandbox was measured doing the
+two things an audit needs — reading the target tree and writing results — while
+still containing the agent. Where it is not, TokenFuzz refuses the launch rather
+than filing the run as contained.
+
+| Backend | `sandboxed` | What it enforces, or why it is refused |
+| --- | --- | --- |
+| Claude Code | Supported | Writes confined to the workspace (cwd plus `--add-dir`, including through the benchmark facade's symlinks); outbound network and DNS blocked; loopback kept open so local client/server harnesses still probe; web tools denied; unsandboxed commands denied and an unavailable sandbox is a hard error. |
+| Codex | Supported | `workspace-write` with `approval_policy="never"`: writes confined to the workspace roots the harness supplies, reads unrestricted, and **all** network blocked — including loopback, which it has no setting to re-open. |
+| Antigravity (`agy`) | Refused | Its terminal sandbox runs commands in a scratch directory, refuses writes to the launch directory, denies reads outside it, and auto-denies its file-writing tool headless. An audit could neither read the target nor file a result. |
+| Google Gemini CLI | Refused | Its container mounts only the launch directory — `--include-directories` adds workspace context, not a mount — so a cell runs blind to the target. Its macOS profile allows outbound network. |
+| Grok Build | Refused | `workspace` reads the whole host, including `$HOME` (only writes to credential paths are blocked) and allows outbound network — measured, not inferred. Its one read-restricting profile sees nothing outside `--cwd`, which would leave a model-direct control blind to the target it is scored against. |
+| OpenCode (`oss`) | Refused | Its permissions are an approval policy, not an OS sandbox. Read-only decision calls still run, with external directories and web tools denied. |
+
+Refused backends stay fully available under `external-bypass`. On a plain host
+the default therefore selects Claude Code or Codex; `--backend all` skips the
+rest and says which and why.
+
+### Egress and socket-driving targets
+
+A target whose harness drives a real socket will fail its probes under
+`sandboxed` rather than report a finding — a silent recall loss, not an error
+visible in the counts. Claude Code keeps loopback for exactly this reason; Codex
+cannot. Audit such a target under `external-bypass` in a hardened environment,
+and do not publish sandboxed benchmark rows for it.
+
+### Using the modes
+
+```bash
+# Default: the backend's own sandbox, no flag needed.
+bin/audit --target <target> --backend codex 1
+
+# Compatibility path, only after entering an externally hardened shell.
+bin/audit --target <target> --backend grok --agent-security external-bypass 1
+```
+
+The chosen mode is written to `state/run-config.json` and inherited by every
+subprocess of the run, including source-reading validators. `bin/benchmark`
+accepts the same flag, applies it to both model-direct and harness cells, writes
+it to `run.json`, refuses to resume a run under a different mode, and re-scores
+a `--regenerate` under the mode that run recorded. `--backend all` skips a
+backend the mode cannot launch and says so; a backend named on the command line
+is a hard error instead.
+
 ### Grok Build
 
 Grok needs its CLI credentials (commonly `XAI_API_KEY`) before launch:
 
 ```bash
 grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
-bin/audit --target <target> --backend grok 1
+# Grok is refused by the default mode; run it inside a boundary you
+# administer (see Agent security modes).
+bin/audit --target <target> --backend grok --agent-security external-bypass 1
 ```
 
 TokenFuzz uses headless streaming JSON, disables nested Grok subagents, applies

@@ -24,6 +24,7 @@ CLI subcommands (`python3 lib/llm_invoke.py …`):
       Print the backend-native reasoning effort from config/models.toml.
 
   agent-flags <backend> [--model …] [--max-turns N] [--add-dirs CSV]
+      [--agent-security sandboxed|external-bypass]
       Print the agent-mode flag list, one flag per line. Used for
       interactive tool-using agent calls.
 
@@ -84,6 +85,9 @@ def _load_tomllib():
 
 
 _KNOWN_BACKENDS = ("claude", "codex", "oss", "gemini", "grok")
+AGENT_SECURITY_MODES = ("sandboxed", "external-bypass")
+DEFAULT_AGENT_SECURITY = "sandboxed"
+AGENT_SECURITY_ENV = "TOKENFUZZ_AGENT_SECURITY"
 
 # Per-backend env var that overrides the configured default (CI / throttled
 # runs). When unset, the default comes from config/models.toml.
@@ -147,6 +151,71 @@ def known_backend(backend: str) -> bool:
 def use_gemini_cli() -> bool:
     """Return true when the gemini backend should invoke Google Gemini CLI."""
     return os.environ.get("USE_GEMINI_CLI", "").strip() == "1"
+
+
+def external_sandbox_active() -> bool:
+    """Whether the operator launched through an asserted outer sandbox."""
+    return os.environ.get("IS_SANDBOX", "").strip() == "1"
+
+
+def inherited_agent_security() -> str:
+    """Security profile selected by the parent audit or benchmark process."""
+    return os.environ.get(AGENT_SECURITY_ENV, DEFAULT_AGENT_SECURITY).strip()
+
+
+def resolve_agent_security(agent_security: str | None) -> str:
+    """One resolution rule: an explicit choice, else the inherited profile."""
+    resolved = agent_security or inherited_agent_security()
+    if resolved not in AGENT_SECURITY_MODES:
+        raise ValueError(f"unknown agent security mode: {resolved}")
+    return resolved
+
+
+def agent_security_problem(backend: str, agent_security: str) -> str:
+    """Why this backend cannot launch a tool-using agent under this profile.
+
+    Read-only decide calls do not consult this: they carry no execution
+    boundary to assert.
+    """
+    if agent_security not in AGENT_SECURITY_MODES:
+        return f"unknown agent security mode: {agent_security}"
+    if agent_security == "external-bypass":
+        if not external_sandbox_active():
+            return (
+                "--agent-security external-bypass requires an externally "
+                "hardened sandbox that sets IS_SANDBOX=1"
+            )
+        return ""
+    if backend == "oss":
+        return (
+            "the OpenCode backend has no native OS sandbox; run it inside an "
+            "externally hardened sandbox and select --agent-security "
+            "external-bypass"
+        )
+    if backend == "grok":
+        # workspace reads the whole host including credential paths (only
+        # writes to them are blocked) and allows child network, and the
+        # stricter profiles' network block is Linux-only. An agent reading a
+        # hostile tree could read a key and curl it out.
+        return (
+            "Grok's sandbox profiles leave host-wide reads and child network "
+            "available on macOS, so they cannot contain an agent reading a "
+            "hostile tree; run it inside an externally hardened sandbox and "
+            "select --agent-security external-bypass"
+        )
+    if backend == "gemini":
+        # Measured: Antigravity's terminal sandbox runs commands in a scratch
+        # directory, refuses workspace writes and reads outside the launch
+        # directory, and auto-denies its file-writing tool headless; Google
+        # Gemini CLI's container mounts only the launch directory, so
+        # --include-directories leaves the target unmounted.
+        return (
+            "neither Gemini dialect's sandbox can host an audit: Antigravity "
+            "denies workspace writes and outside reads, and Google Gemini CLI "
+            "mounts only the launch directory; run it inside an externally "
+            "hardened sandbox and select --agent-security external-bypass"
+        )
+    return ""
 
 
 def gemini_default_bin() -> str:
@@ -596,12 +665,12 @@ def opencode_model_ref(model: str) -> str:
     return f"local/{resolved}" if resolved else "local"
 
 
-def opencode_config(model: str) -> dict:
+def opencode_config(model: str, agent_security: str | None = None) -> dict:
     resolved = (model or default_model("oss")).strip()
     if not resolved:
         raise ValueError("oss model is required")
     api_key = os.environ.get("AUDIT_LOCAL_API_KEY") or "EMPTY"
-    return {
+    config = {
         "$schema": "https://opencode.ai/config.json",
         "provider": {
             "local": {
@@ -619,6 +688,17 @@ def opencode_config(model: str) -> dict:
             },
         },
     }
+    if resolve_agent_security(agent_security) == "sandboxed":
+        # OpenCode permissions are an approval policy, not an OS sandbox, so
+        # agent launches refuse this backend in sandboxed mode. These denies
+        # bound what a read-only decide call can still reach.
+        config["permission"] = {
+            "*": "allow",
+            "external_directory": "deny",
+            "webfetch": "deny",
+            "websearch": "deny",
+        }
+    return config
 
 
 def local_model_available(model: str) -> bool:
@@ -689,16 +769,18 @@ def agent_flags(
     max_turns: int = 80,
     add_dirs: str = "",
     allow_subagents: bool = True,
+    agent_security: str | None = None,
 ) -> list[str]:
     """Build the flag array for an interactive tool-using agent call.
 
-    Codex inside our docker container needs --sandbox danger-full-access
-    + --dangerously-bypass-approvals-and-sandbox because the inner bwrap
-    can't create a user namespace; the outer container is the sandbox
-    boundary (same reasoning as IS_SANDBOX=1 for claude).
+    ``sandboxed`` puts each backend's native OS sandbox between the agent and
+    the host: the kernel boundary is what holds, so approval prompts are
+    turned off rather than relied on. ``external-bypass`` drops that boundary
+    for an explicitly asserted outer sandbox.
     """
     resolved_model = resolve_model_name(backend, model)
     effort = default_effort(backend)
+    bypass = resolve_agent_security(agent_security) == "external-bypass"
 
     if backend == "claude":
         flags = [
@@ -706,8 +788,28 @@ def agent_flags(
             "--safe-mode",
             "--verbose",
             "--output-format", "stream-json",
-            "--dangerously-skip-permissions",
         ]
+        if bypass:
+            flags.append("--dangerously-skip-permissions")
+        else:
+            # The sandbox is the boundary, so dontAsk only keeps the session
+            # from blocking on a prompt; a tool it cannot sandbox is denied.
+            # allowLocalBinding keeps loopback probes (client/server harnesses
+            # in network targets) working while egress stays blocked.
+            settings = {
+                "permissions": {"deny": ["WebFetch", "WebSearch"]},
+                "sandbox": {
+                    "enabled": True,
+                    "autoAllowBashIfSandboxed": True,
+                    "allowUnsandboxedCommands": False,
+                    "failIfUnavailable": True,
+                    "network": {"allowLocalBinding": True},
+                },
+            }
+            flags += [
+                "--permission-mode", "dontAsk",
+                "--settings", json.dumps(settings, separators=(",", ":")),
+            ]
         # Audit sessions pass TURN_SOFT_CAP here because Claude can end at its
         # own structured turn boundary and retain terminal usage. Other callers
         # use max_turns for their own contract (for example, preflight=1).
@@ -737,9 +839,17 @@ def agent_flags(
             *_CODEX_PLUGIN_OFF_FLAGS,
             *_CODEX_PROJECT_ROOT_FLAGS,
             "--skip-git-repo-check",
-            "--sandbox", "danger-full-access",
-            "--dangerously-bypass-approvals-and-sandbox",
         ]
+        if bypass:
+            flags += [
+                "--sandbox", "danger-full-access",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ]
+        else:
+            flags += [
+                "--sandbox", "workspace-write",
+                "-c", 'approval_policy="never"',
+            ]
         if resolved_model:
             flags += ["--model", resolved_model]
         if effort:
@@ -756,11 +866,9 @@ def agent_flags(
         return flags
 
     if backend == "oss":
-        # OpenCode has no per-directory grant flag like codex/gemini --add-dir;
-        # --dangerously-skip-permissions auto-approves tool use and filesystem
-        # access is scoped by the launch cwd, so add_dirs is intentionally
-        # unused here.
-        flags = ["run", "--pure", "--dangerously-skip-permissions"]
+        # OpenCode has no native OS sandbox. Its current non-interactive switch
+        # is --auto; the entry points permit it only under external-bypass.
+        flags = ["run", "--pure", "--auto"]
         if resolved_model:
             flags += ["--model", opencode_model_ref(resolved_model)]
         flags += ["--format", "json"]
@@ -797,8 +905,9 @@ def agent_flags(
                     flags += ["--include-directories", d]
             return flags
 
-        # Antigravity CLI (agy): plain stdout in --print mode.
-        # --dangerously-skip-permissions keeps the run non-interactive.
+        # Antigravity CLI (agy): plain stdout in --print mode. Outside an
+        # asserted outer boundary, accept edits while terminal commands run
+        # only through its native sandbox and proceed-in-sandbox setting.
         # agy 1.0.5+ takes --model, but only as the `agy models` display
         # label (mapped from the config slug) — and silently falls back on an
         # unrecognized value, so the audit preflight verifies it was honored.
@@ -822,8 +931,11 @@ def agent_flags(
         flags = [
             "--no-auto-update",
             "--no-subagents",
-            "--always-approve",
             "--output-format", "streaming-json",
+            # No sandbox profile: the sandboxed profile refuses this backend,
+            # and --permission-mode is not enforced for anything but bypass.
+            "--always-approve",
+            "--disable-web-search",
         ]
         flags.append("--experimental-memory" if memory_enabled() else "--no-memory")
         if max_turns > 0:
@@ -895,8 +1007,13 @@ def run_agent_prompt(
     watchdog_marker_dir: str | os.PathLike[str] | None = None,
     turn_cap: int | None = None,
     allow_subagents: bool = True,
+    agent_security: str | None = None,
 ) -> int:
     """Launch a tool-using backend and write its combined raw transcript."""
+    agent_security = resolve_agent_security(agent_security)
+    problem = agent_security_problem(backend, agent_security)
+    if problem:
+        raise ValueError(problem)
     binary = backend_bin(backend)
     requested_cap = max(0, int(turn_cap)) if turn_cap is not None else None
     native_session_cap = (
@@ -907,6 +1024,7 @@ def run_agent_prompt(
     flags = agent_flags(
         backend, model, native_session_cap, add_dirs,
         allow_subagents=allow_subagents,
+        agent_security=agent_security,
     )
     first_dir = next((p.strip() for p in add_dirs.split(",") if p.strip()), "")
     working_dir = Path(cwd or first_dir or Path.cwd())
@@ -944,7 +1062,9 @@ def run_agent_prompt(
     elif backend == "codex":
         command, input_text = [binary, "exec", *flags, "-"], prompt
     elif backend == "oss":
-        environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config(model), separators=(",", ":"))
+        environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            opencode_config(model, agent_security), separators=(",", ":")
+        )
         command, input_text = [binary, *flags, prompt], None
     elif backend == "gemini":
         command = [binary, *flags]
@@ -1332,7 +1452,9 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
 
         # Antigravity CLI (agy) decide mode: --print emits plain text.
         # --dangerously-skip-permissions keeps decide calls non-interactive.
-        # See agent_flags for the --model label-mapping rationale.
+        # Its --mode plan is not a read-only guarantee (measured: a shell write
+        # under plan still lands), and its sandbox cannot read the tree a
+        # decision must judge, so neither is used here.
         flags = ["--dangerously-skip-permissions"]
         label = agy_model_label(resolved_model, effort)
         if label:
@@ -1954,6 +2076,7 @@ def _cmd_agent_flags(args) -> int:
             model=args.model or "",
             max_turns=args.max_turns,
             add_dirs=args.add_dirs or "",
+            agent_security=args.agent_security,
         ))
     except ValueError:
         return 1
@@ -1961,10 +2084,7 @@ def _cmd_agent_flags(args) -> int:
 
 def _cmd_decide_flags(args) -> int:
     try:
-        return _print_flags(decide_flags(
-            args.backend,
-            model=args.model or "",
-        ))
+        return _print_flags(decide_flags(args.backend, model=args.model or ""))
     except ValueError:
         return 1
 
@@ -2049,6 +2169,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--model", default="")
     s.add_argument("--max-turns", type=int, default=80)
     s.add_argument("--add-dirs", default="")
+    s.add_argument("--agent-security", choices=AGENT_SECURITY_MODES, default=None)
     s.set_defaults(func=_cmd_agent_flags)
 
     s = sub.add_parser("decide-flags")

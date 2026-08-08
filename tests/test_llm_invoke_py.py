@@ -128,7 +128,17 @@ proc = run(["agent-flags", "claude"], check=True)
 f = flags(proc)
 ok("--print" in f, "claude has --print", f)
 ok("stream-json" in f, "claude has stream-json")
-ok("--dangerously-skip-permissions" in f, "claude has skip-permissions")
+ok("--dangerously-skip-permissions" not in f, "claude sandboxed mode omits skip-permissions")
+assert_eq("dontAsk", f[f.index("--permission-mode") + 1], "claude never blocks on a prompt")
+claude_settings = json.loads(f[f.index("--settings") + 1])
+ok(claude_settings["sandbox"]["enabled"] is True, "claude enables its native sandbox")
+ok(claude_settings["sandbox"]["failIfUnavailable"] is True, "claude sandbox fails closed")
+ok(claude_settings["sandbox"]["allowUnsandboxedCommands"] is False,
+   "claude denies sandbox escape requests")
+ok(claude_settings["sandbox"]["network"]["allowLocalBinding"] is True,
+   "claude keeps loopback harnesses runnable while egress stays blocked")
+ok(claude_settings["permissions"]["deny"] == ["WebFetch", "WebSearch"],
+   "claude denies web tools, the one rule a permission mode still enforces")
 ok("--max-turns" in f, "claude has --max-turns")
 ok("80" in f, "claude default max-turns 80")
 ok("claude-opus-5" in f, "claude default model wired")
@@ -137,8 +147,9 @@ assert_eq("high", f[f.index("--effort") + 1], "claude agent wires configured eff
 proc = run(["agent-flags", "codex"], check=True)
 f = proc.stdout
 ok("--json" in f, "codex has --json", f)
-ok("danger-full-access" in f, "codex has danger-full-access sandbox")
-ok("--dangerously-bypass-approvals-and-sandbox" in f, "codex bypasses approvals")
+ok("workspace-write" in f, "codex uses its workspace-write sandbox")
+ok("--dangerously-bypass-approvals-and-sandbox" not in f, "codex omits the bypass flag")
+ok('approval_policy="never"' in f, "codex runs non-interactively without approval prompts")
 ok('model_reasoning_effort="high"' in f, "codex agent wires configured effort")
 ok("project_root_markers=[]" in f,
    "codex agent stops project instruction discovery at --cd")
@@ -146,7 +157,7 @@ ok("project_root_markers=[]" in f,
 proc = run(["agent-flags", "oss"], check=True)
 f = flags(proc)
 assert_eq(
-    ["run", "--pure", "--dangerously-skip-permissions", "--format", "json"],
+    ["run", "--pure", "--auto", "--format", "json"],
     f,
     "oss agent flags do not invent a model when none is supplied",
 )
@@ -154,7 +165,7 @@ assert_eq(
 proc = run(["agent-flags", "oss", "--model", "qwen3-8b"], check=True)
 f = flags(proc)
 assert_eq("local/qwen3-8b", f[f.index("--model") + 1], "oss model uses shared local provider ref for vLLM")
-ok("--dangerously-skip-permissions" in f, "oss agent auto-approves OpenCode permissions")
+ok("--auto" in f, "oss uses OpenCode's current auto-approval flag")
 
 proc = run(["agent-flags", "oss", "--model", "qwen3:8b"], check=True)
 f = flags(proc)
@@ -182,10 +193,16 @@ assert_eq(
     cfg["provider"]["local"]["options"]["baseURL"],
     "oss OpenCode config uses normalized vLLM base URL",
 )
+ok(cfg["permission"]["external_directory"] == "deny",
+   "oss sandboxed config denies external directories")
+ok(cfg["permission"]["webfetch"] == "deny",
+   "oss sandboxed config denies web fetch tools")
 
 proc = run(["agent-flags", "gemini"], check=True)
 f = flags(proc)
-ok("--dangerously-skip-permissions" in f, "gemini has --dangerously-skip-permissions")
+ok("--dangerously-skip-permissions" in f,
+   "agy has one usable mode: its sandbox cannot write a workspace")
+ok("--sandbox" not in f, "agy omits a sandbox that denies the audit its own tree")
 # agy 1.0.5+ pins the model via its `agy models` display label, mapped from
 # the config slug — it resolves labels, not API slugs.
 model_idx = f.index("--model")
@@ -199,6 +216,8 @@ env.pop("GEMINI_MODEL_DEFAULT", None)
 proc = run(["agent-flags", "gemini", "--add-dirs", "/a,/b"], env=env, check=True)
 f = flags(proc)
 ok("--approval-mode=yolo" in f, "Gemini CLI agent uses yolo approval mode")
+ok("--sandbox" not in f,
+   "Gemini CLI omits a sandbox that would mount only the launch directory")
 ok("--skip-trust" in f, "Gemini CLI agent skips workspace trust prompt")
 ok("--output-format" in f and "stream-json" in f, "Gemini CLI agent uses stream-json output")
 model_idx = f.index("--model")
@@ -211,7 +230,10 @@ ok("--dangerously-skip-permissions" not in f, "Gemini CLI agent omits agy skip-p
 
 proc = run(["agent-flags", "grok", "--max-turns", "23"], check=True)
 f = flags(proc)
-ok("--always-approve" in f, "Grok agent auto-approves tools")
+ok("--sandbox" not in f, "Grok omits a profile that cannot contain a hostile tree")
+ok("--permission-mode" not in f, "Grok skips a permission mode its CLI does not enforce")
+ok("--disable-web-search" in f,
+   "Grok disables web tools in every profile: no outer sandbox withholds them")
 ok("streaming-json" in f, "Grok agent uses streaming JSON")
 ok("--no-auto-update" in f, "Grok agent disables background updates")
 ok("--no-subagents" in f, "Grok agent keeps harness-owned concurrency")
@@ -219,6 +241,29 @@ ok("--no-memory" in f, "Grok agent disables cross-run memory by default")
 assert_eq("23", f[f.index("--max-turns") + 1], "Grok agent wires max turns")
 assert_eq("grok-4.5", f[f.index("--model") + 1], "Grok agent wires default model")
 assert_eq("high", f[f.index("--reasoning-effort") + 1], "Grok agent wires configured effort")
+
+external = {
+    "claude": "--dangerously-skip-permissions",
+    "codex": "--dangerously-bypass-approvals-and-sandbox",
+    "gemini": "--dangerously-skip-permissions",
+    "grok": "--always-approve",
+}
+for backend, bypass_flag in external.items():
+    proc = run([
+        "agent-flags", backend,
+        "--agent-security", "external-bypass",
+    ], check=True)
+    f = flags(proc)
+    ok(bypass_flag in f,
+       f"{backend} external-bypass preserves its explicit legacy bypass")
+    ok("--sandbox" not in f or backend == "codex",
+       f"{backend} external-bypass drops the native sandbox it replaces")
+
+env = os.environ.copy()
+env["TOKENFUZZ_AGENT_SECURITY"] = "external-bypass"
+proc = run(["agent-flags", "claude"], env=env, check=True)
+ok("--dangerously-skip-permissions" in flags(proc),
+   "an unflagged launch inherits the profile its parent run selected")
 
 assert_eq(1, run(["agent-flags", "openai"]).returncode, "unknown backend → rc=1")
 
@@ -278,7 +323,9 @@ ok("project_root_markers=[]" in f,
 
 proc = run(["decide-flags", "gemini"], check=True)
 f = flags(proc)
-ok("--dangerously-skip-permissions" in f, "decide gemini has --dangerously-skip-permissions")
+ok("--dangerously-skip-permissions" in f, "Antigravity decision stays non-interactive")
+ok("--sandbox" not in f and "--mode" not in f,
+   "a decision claims no boundary agy would not enforce")
 model_idx = f.index("--model")
 assert_eq("Gemini 3.6 Flash (High)", f[model_idx + 1], "decide gemini agy wires the mapped model label")
 for legacy in ("--output-format", "--approval-mode"):
@@ -433,6 +480,39 @@ with tempfile.TemporaryDirectory() as td:
 print("\nimportable API")
 sys.path.insert(0, str(ROOT / "lib"))
 import llm_invoke as inv  # noqa: E402
+
+with mock.patch.dict(os.environ, {}, clear=True):
+    ok("native OS sandbox" in inv.agent_security_problem("oss", "sandboxed"),
+       "OpenCode sandboxed audits fail closed because approvals are not isolation")
+    try:
+        inv.run_agent_prompt("oss", "hi", 5, os.devnull, model="qwen3-8b")
+        refused = ""
+    except ValueError as exc:
+        refused = str(exc)
+    ok("native OS sandbox" in refused,
+       "an agent launch fails closed before it reaches the backend")
+    ok(inv.decide_flags("oss"),
+       "a read-only decision carries no execution boundary and still runs")
+    ok("child network" in inv.agent_security_problem("grok", "sandboxed"),
+       "Grok is refused: its profiles leave reads and egress open on macOS")
+    ok("mounts only the launch directory"
+       in inv.agent_security_problem("gemini", "sandboxed"),
+       "both Gemini dialects are refused: neither sandbox can host an audit")
+    assert_eq(
+        inv.agent_flags("gemini"),
+        inv.agent_flags("gemini", agent_security="external-bypass"),
+        "a backend with one usable mode builds one flag list",
+    )
+    ok("IS_SANDBOX=1" in inv.agent_security_problem("codex", "external-bypass"),
+       "external bypass is refused without an asserted outer sandbox")
+with mock.patch.dict(os.environ, {"IS_SANDBOX": "1"}, clear=True):
+    assert_eq("", inv.agent_security_problem("codex", "external-bypass"),
+              "external bypass is available only inside an asserted boundary")
+with mock.patch.dict(
+    os.environ, {inv.AGENT_SECURITY_ENV: "external-bypass"}, clear=True,
+):
+    assert_eq("external-bypass", inv.inherited_agent_security(),
+              "child agent launches inherit the parent orchestration profile")
 import llm_decide as decide_mod  # noqa: E402
 
 with tempfile.TemporaryDirectory() as td:
@@ -479,7 +559,9 @@ with tempfile.TemporaryDirectory() as td:
             inv, "backend_bin", return_value=binary,
         ), mock.patch.object(
             inv, "_run_agent_process", return_value=0,
-        ) as process:
+        ) as process, mock.patch.object(
+            inv, "agent_security_problem", return_value="",
+        ):
             inv.run_agent_prompt(
                 backend, "prompt", 0, raw, model="fixture-model", max_turns=999,
                 turn_cap=cap, cwd=launch_root,
@@ -647,6 +729,20 @@ with tempfile.TemporaryDirectory() as td, \
     assert_eq(Path(td), agy_run.call_args.kwargs["cwd"],
               "Antigravity decision is rooted at SCRIPT_ROOT")
 
+with mock.patch.dict(os.environ, {"MODEL": "qwen3-8b"}, clear=True), \
+        mock.patch.object(decide_mod, "_which", return_value="/fake/opencode"), \
+        mock.patch.object(
+            decide_mod, "run_timeout",
+            return_value=SimpleNamespace(returncode=0, stdout="ok", stderr=""),
+        ) as oss_decide_run:
+    assert_eq("ok", decide_mod._invoke_backend("oss", "DECISION_PROMPT", 5),
+              "an OpenCode decision reads source without asserting a sandbox")
+    oss_config = json.loads(
+        oss_decide_run.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"]
+    )
+    assert_eq("deny", oss_config["permission"]["webfetch"],
+              "an OpenCode decision still runs under the sandboxed denies")
+
 # A decision timeout must reap the backend's whole process tree. Backend CLIs
 # may launch helpers; killing only the direct process leaves those helpers
 # consuming CPU after the decision has already failed open.
@@ -697,6 +793,8 @@ with tempfile.TemporaryDirectory() as td:
                 mock.patch.object(
                     inv.subprocess, "run",
                     return_value=SimpleNamespace(returncode=0),
+                ), mock.patch.object(
+                    inv, "agent_security_problem", return_value="",
                 ):
             assert_eq(
                 0,
@@ -746,6 +844,7 @@ with tempfile.TemporaryDirectory() as td, \
         mock.patch.object(
             inv, "ensure_project_root", side_effect=OSError("read-only root"),
         ), mock.patch.object(inv.subprocess, "run") as backend_run, \
+        mock.patch.object(inv, "agent_security_problem", return_value=""), \
         mock.patch.object(inv.sys, "stderr", boundary_error):
     raw = Path(td) / "raw.log"
     assert_eq(

@@ -52,6 +52,17 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     references.mkdir()
     (references / "session-rules.digest.md").write_text("digest\n", encoding="utf-8")
 
+    run_config = root / "run-config.json"
+    audit_runner._write_run_config(
+        run_config, 1, 0, 1, "codex", "fixture-model", "sample",
+        "sandboxed",
+    )
+    check(
+        json.loads(run_config.read_text(encoding="utf-8"))["agent_security"]
+        == "sandboxed",
+        "audit run metadata records the selected agent security profile",
+    )
+
     prompt_results = root / "prompt-results"
     (prompt_results / "state").mkdir(parents=True)
     (prompt_results / "state" / "strategy-1").write_text("S5\n", encoding="utf-8")
@@ -216,6 +227,14 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         stream_results, stream_logs, stream_raw,
         stream_logs / "index.log", stream_logs / "index.jsonl",
         1, 0, 1, (), "", 45,
+    )
+    stream_runtime.agent_security = "external-bypass"
+    with mock.patch.dict(os.environ, {}, clear=True):
+        audit_runner._activate_runtime(stream_runtime)
+        inherited_security = os.environ.get(llm_invoke.AGENT_SECURITY_ENV)
+    check(
+        inherited_security == "external-bypass",
+        "audit propagates its security profile to validator subprocesses",
     )
     stream_context = mock.Mock()
     stream_context.role.return_value = "reproduce"
@@ -500,6 +519,29 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         "default all-backend mode uses recoverable single-backend orchestration when only one exists",
     )
 
+    filtered_runtime = object()
+    filtered_target = root / "filtered-target"
+    filtered_target.mkdir()
+    with mock.patch.dict(os.environ, {"SCRIPT_ROOT": str(ROOT)}, clear=False), \
+         mock.patch.object(
+             audit_runner, "discover_backends", return_value=["grok", "codex"],
+         ), \
+         mock.patch.object(
+             audit_runner, "prepare_runtime", return_value=filtered_runtime,
+         ) as filtered_prepare, \
+         mock.patch.object(audit_runner, "run_backend", return_value=0), \
+         mock.patch.object(audit_runner, "run_ensemble", return_value=0):
+        filtered_rc = audit_runner.main([
+            "--target-path", str(filtered_target), "--backend", "all", "1",
+        ])
+    filtered_backends = [
+        call.args[4] for call in filtered_prepare.call_args_list
+    ]
+    check(
+        filtered_rc == 0 and filtered_backends == ["codex"],
+        "an ensemble spends its iteration limit on backends the profile can launch",
+    )
+
     overlay_root = root / "overlay-harness"
     overlay = overlay_root / "lib" / "target-overlays"
     chromium_source = overlay_root / "targets" / "chromium" / "src"
@@ -529,7 +571,8 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         overlay_rc == 0
         and len(overlay_args) >= 4
         and overlay_args[1] == chromium_source
-        and overlay_args[2:4] == ("chromium/src", "chromium/src"),
+        and overlay_args[2:4] == ("chromium/src", "chromium/src")
+        and overlay_args[-1] == "sandboxed",
         "audit target overlay resolves source and output identity before runtime setup",
     )
 

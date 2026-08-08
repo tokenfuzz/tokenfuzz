@@ -113,6 +113,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-concurrent", action="store_true")
     parser.add_argument("--enable-memory", action="store_true")
     parser.add_argument(
+        "--agent-security", choices=llm_invoke.AGENT_SECURITY_MODES, default=None,
+        help="backend execution boundary (default: sandboxed)",
+    )
+    parser.add_argument(
         "--refill-workers", action=argparse.BooleanOptionalAction, default=True,
         help="relaunch a finished worker slot while an initial session is still running",
     )
@@ -214,6 +218,7 @@ class Runtime:
     fixed_strategy: str
     decision_timeout: int  # operator's explicit ceiling; 0 when they set none
     refill_workers: bool = True
+    agent_security: str = llm_invoke.DEFAULT_AGENT_SECURITY
     cluster_expansion_attempted: set[Path] = field(default_factory=set, repr=False)
 
     def prompt_context(self, guide: str) -> prompt.PromptContext:
@@ -291,6 +296,7 @@ def prepare_runtime(
     backend: str, model_override: str, fixed_strategy: str,
     max_iterations: int, decision_timeout_override: str | None = None,
     refill_workers: bool = True,
+    agent_security: str = llm_invoke.DEFAULT_AGENT_SECURITY,
 ) -> Runtime:
     output_root = root / "output" / output_slug
     config = _load_config(root, target_root, output_root, target_slug)
@@ -313,7 +319,10 @@ def prepare_runtime(
     target_rev = target_config.detect_rev(target_root)
     repo_type = target_config.detect_repo_type(target_root)
     target_config.write_session_env(results, str(results), str(target_root), target_slug, target_rev, str(logs))
-    _write_run_config(results / "state" / "run-config.json", total, browser, shell, backend, model, target_slug)
+    _write_run_config(
+        results / "state" / "run-config.json", total, browser, shell,
+        backend, model, target_slug, agent_security,
+    )
     _log_tour(logs)
     runtime = Runtime(
         root, target_root, target_slug, output_slug, backend, model, config,
@@ -321,7 +330,7 @@ def prepare_runtime(
         results, logs, raw, logs / "index.log", logs / "index.jsonl",
         total, browser, shell, roles, fixed_strategy,
         _operator_decision_timeout(decision_timeout_override),
-        refill_workers,
+        refill_workers, agent_security,
     )
     _activate_runtime(runtime)
     return runtime
@@ -338,6 +347,7 @@ def _activate_runtime(runtime: Runtime) -> None:
         LLM_DECIDE_LOG=str(runtime.logs / "llm-decisions.log"),
         LLM_DECIDE_COUNTER_FILE=str(runtime.logs / ".llm_decisions_harness"),
     )
+    os.environ[llm_invoke.AGENT_SECURITY_ENV] = runtime.agent_security
     try:
         config_digest = target_config.read_session_env(runtime.results).get(
             "TARGET_CONFIG_SHA256", "",
@@ -424,6 +434,7 @@ def validate_model(runtime: Runtime) -> None:
                 model=runtime.model, max_turns=6 if runtime.backend == "oss" else 1,
                 add_dirs=str(preflight_dir if runtime.backend == "oss" else runtime.root),
                 cwd=preflight_dir if runtime.backend == "oss" else runtime.root,
+                agent_security=runtime.agent_security,
             )
             llm_usage.append_usage_event(
                 getattr(runtime, "index_jsonl", runtime.logs / "index.jsonl"),
@@ -475,11 +486,14 @@ def validate_model(runtime: Runtime) -> None:
     raise RuntimeError(message)
 
 
-def _write_run_config(path, total, browser, shell, backend, model, slug) -> None:
+def _write_run_config(
+    path, total, browser, shell, backend, model, slug, agent_security,
+) -> None:
     payload = {
         "num_agents": total, "browser_agents": browser, "shell_agents": shell,
         "backend": backend, "model": model,
         "resolved_effort": llm_invoke.default_effort(backend), "target_slug": slug,
+        "agent_security": agent_security,
         "agent_count_overridden": bool(os.environ.get("NUM_AGENTS")),
     }
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -1088,6 +1102,7 @@ def run_agent(
             cwd=runtime.root, extra_env=extra_env,
             watchdog_marker_dir=context.scratch_dir(agent),
             turn_cap=turn_cap,
+            agent_security=runtime.agent_security,
         )
 
     rc = invoke(timeout)
@@ -2469,6 +2484,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FATAL: {exc}", file=sys.stderr)
         return 1
     requested = args.backend or os.environ.get("AUDIT_BACKEND", "all")
+    try:
+        args.agent_security = llm_invoke.resolve_agent_security(args.agent_security)
+    except ValueError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 1
     if requested == "all":
         if args.model:
             print("FATAL: --model requires a single backend", file=sys.stderr)
@@ -2477,8 +2497,6 @@ def main(argv: list[str] | None = None) -> int:
         if not backends:
             print("FATAL: no installed and configured hosted backend found", file=sys.stderr)
             return 1
-        if args.max_iterations:
-            backends = backends[:args.max_iterations]
     else:
         if requested == "oss" and not args.model:
             print("FATAL: --backend oss requires --model", file=sys.stderr)
@@ -2487,6 +2505,32 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FATAL: backend '{requested}' is not installed or configured", file=sys.stderr)
             return 1
         backends = [requested]
+    # An ensemble drops a backend this profile cannot launch; a backend the
+    # operator named by hand is a hard error instead of a silent substitution.
+    usable = []
+    for backend in backends:
+        problem = llm_invoke.agent_security_problem(backend, args.agent_security)
+        if not problem:
+            usable.append(backend)
+            continue
+        message = (
+            f"backend '{backend}' cannot use agent security "
+            f"'{args.agent_security}': {problem}"
+        )
+        if requested != "all":
+            print(f"FATAL: {message}", file=sys.stderr)
+            return 1
+        print(f"WARN: skipping {message}", file=sys.stderr)
+    if not usable:
+        print(
+            f"FATAL: no backend can run under agent security "
+            f"'{args.agent_security}'", file=sys.stderr,
+        )
+        return 1
+    # Limit last: an ensemble cannot rotate more backends than it has
+    # iterations, and slicing before the filter could spend the whole limit on
+    # backends this profile then drops.
+    backends = usable[:args.max_iterations] if args.max_iterations else usable
     try:
         guide = (root / "AGENTS.md").read_text(encoding="utf-8")
     except OSError:
@@ -2499,6 +2543,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.model, args.strategy, args.max_iterations,
                 decision_timeout_override,
                 args.refill_workers,
+                args.agent_security,
             )
             for backend in backends
         ]

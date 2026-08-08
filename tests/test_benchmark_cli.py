@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
@@ -55,12 +56,67 @@ class BenchmarkCliTests(unittest.TestCase):
             (("--target", "sample", "--conditions", "unknown", "--dry-run"), "unknown condition"),
             (("--target", "sample", "--unknown-option"), "unrecognized arguments"),
             (("--target", " , ", "--dry-run"), "must contain at least one non-empty slug"),
+            (
+                ("--target", "samples/sample-python", "--backend", "grok", "--dry-run"),
+                "cannot use agent security 'sandboxed'",
+            ),
         )
         for arguments, expected in cases:
             with self.subTest(arguments=arguments):
                 result = self.run_cli(*arguments, "--bench-root", str(self.bench_root))
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn(expected, result.stdout)
+
+    def test_agent_security_environment_is_scoped(self) -> None:
+        key = benchmark_runner.llm_invoke.AGENT_SECURITY_ENV
+        with mock.patch.dict(os.environ, {key: "sandboxed"}, clear=False):
+            with benchmark_runner._agent_security_environment("external-bypass"):
+                self.assertEqual(os.environ[key], "external-bypass")
+            self.assertEqual(os.environ[key], "sandboxed")
+
+    def _regen_args(self, **changes) -> SimpleNamespace:
+        base = dict(
+            backend="codex", regenerate=True, agent_security=None, target="t",
+        )
+        base.update(changes)
+        return SimpleNamespace(**base)
+
+    def test_regeneration_scores_a_run_under_the_profile_it_recorded(self) -> None:
+        args = self._regen_args()
+        recorded = {"agent_security": "external-bypass"}
+        with mock.patch.dict(
+            os.environ, {"IS_SANDBOX": "1"}, clear=False,
+        ):
+            self.assertEqual(
+                "", benchmark_runner._resolve_run_agent_security(args, recorded),
+            )
+        self.assertEqual(args.agent_security, "external-bypass")
+
+    def test_regeneration_refuses_a_profile_the_run_never_used(self) -> None:
+        args = self._regen_args(agent_security="sandboxed")
+        problem = benchmark_runner._resolve_run_agent_security(
+            args, {"agent_security": "external-bypass"},
+        )
+        self.assertIn("was measured under agent security", problem)
+
+    def test_a_run_without_a_recorded_profile_uses_the_default(self) -> None:
+        args = self._regen_args()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual("", benchmark_runner._resolve_run_agent_security(args, {}))
+        self.assertEqual(
+            args.agent_security, benchmark_runner.llm_invoke.DEFAULT_AGENT_SECURITY,
+        )
+
+    def test_a_new_run_keeps_the_operator_choice_for_the_settings_check(self) -> None:
+        args = self._regen_args(regenerate=False)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                "",
+                benchmark_runner._resolve_run_agent_security(
+                    args, {"agent_security": "external-bypass"},
+                ),
+            )
+        self.assertEqual(args.agent_security, "sandboxed")
 
     def test_dry_run_resume_regenerate_and_atomic_pool_lifecycle(self) -> None:
         targets = ("samples/sample-python", "samples/sample-rust")
@@ -89,6 +145,7 @@ class BenchmarkCliTests(unittest.TestCase):
             metadata = json.loads((run / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["target"], target)
             self.assertEqual(metadata["harness_agents"], 2)
+            self.assertEqual(metadata["agent_security"], "sandboxed")
             self.assertEqual(
                 metadata["finding_confirmation"],
                 benchmark.FINDING_CONFIRMATION_VERSION,

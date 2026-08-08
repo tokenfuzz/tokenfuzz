@@ -145,7 +145,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     budget_args = SimpleNamespace(
         model="test-model", backend="codex", target="sampleproj", replicates=2,
         budget_wall=1, finalize_wall=7, agents=1, dry_run=False,
-        regenerate=False, validate_findings=True,
+        regenerate=False, validate_findings=True, agent_security="sandboxed",
     )
     empty_report = {"conditions": []}
     budget_clock = iter([0])
@@ -1070,7 +1070,11 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "source validators place changing facts after their cacheable preamble",
     )
     validator_output = root / "validator-output.json"
-    with mock.patch.object(
+    with mock.patch.dict(
+        os.environ,
+        {validator["llm_invoke"].AGENT_SECURITY_ENV: "external-bypass"},
+        clear=False,
+    ), mock.patch.object(
         validator["llm_invoke"], "run_agent_prompt", return_value=0,
     ) as validator_launch, mock.patch.object(
         validator["llm_invoke"], "extract_text",
@@ -1081,10 +1085,16 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
             "--backend", "codex", "--gate", "trigger",
             "--output", str(validator_output),
         ])
+        # Resolved inside the patched environment: the launch inherits the
+        # parent profile rather than restating it.
+        validator_profile = validator["llm_invoke"].resolve_agent_security(
+            validator_launch.call_args.kwargs.get("agent_security")
+        )
     check(
         validator_rc == 2
-        and validator_launch.call_args.kwargs.get("cwd") == root / ".validator-cwd",
-        "validator launches reuse a stable isolated cwd",
+        and validator_launch.call_args.kwargs.get("cwd") == root / ".validator-cwd"
+        and validator_profile == "external-bypass",
+        "validator launches reuse a stable cwd and the parent security profile",
     )
     finding_root = root / "finding-trigger"
     finding = finding_root / "findings" / "FIND-001"

@@ -67,8 +67,11 @@ class BenchmarkCellTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
-    def benchmark_command(self, backend: str, bench_root: Path | str, wall: int = 5) -> list[str]:
-        return [
+    def benchmark_command(
+        self, backend: str, bench_root: Path | str, wall: int = 5,
+        agent_security: str = "",
+    ) -> list[str]:
+        command = [
             sys.executable,
             str(ROOT / "bin" / "benchmark"),
             "--target", self.slug,
@@ -78,6 +81,9 @@ class BenchmarkCellTests(unittest.TestCase):
             "--budget-wall", str(wall),
             "--bench-root", str(bench_root),
         ]
+        if agent_security:
+            command += ["--agent-security", agent_security]
+        return command
 
     @staticmethod
     def run_command(command: list[str], environment: dict[str, str], cwd: Path | None = None):
@@ -162,24 +168,33 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
                 ROOT,
             ),
             "gemini": (
-                self.benchmark_command("gemini", gemini_root),
+                self.benchmark_command(
+                    "gemini", gemini_root, agent_security="external-bypass",
+                ),
                 base | {
                     "GEMINI_BIN": str(fake_gemini),
                     "FAKE_BACKEND_RELATIVE_WRITE": junk,
+                    "IS_SANDBOX": "1",
                 },
                 None,
             ),
             "unlimited": (
-                self.benchmark_command("gemini", unlimited_root, wall=0),
-                base | {"GEMINI_BIN": str(fake_gemini)},
+                self.benchmark_command(
+                    "gemini", unlimited_root, wall=0,
+                    agent_security="external-bypass",
+                ),
+                base | {"GEMINI_BIN": str(fake_gemini), "IS_SANDBOX": "1"},
                 None,
             ),
             "cli": (
-                self.benchmark_command("gemini", cli_root, wall=0),
+                self.benchmark_command(
+                    "gemini", cli_root, wall=0, agent_security="external-bypass",
+                ),
                 base | {
                     "GEMINI_BIN": str(fake_gemini),
                     "GEMINI_API_KEY": "fake-benchmark-key",
                     "USE_GEMINI_CLI": "1",
+                    "IS_SANDBOX": "1",
                 },
                 None,
             ),
@@ -442,6 +457,9 @@ raise SystemExit(23)
         self.assertEqual(Path(command[0]), launch_facade / "bin" / "audit")
         self.assertEqual(kwargs["cwd"], launch_facade)
         self.assertNotIn("--no-refill-workers", command)
+        self.assertEqual(
+            command[command.index("--agent-security") + 1], "sandboxed",
+        )
         self.assertEqual(
             json.loads(
                 kwargs["env"][build_preflight.BENCHMARK_BUILD_PIN_ENV]

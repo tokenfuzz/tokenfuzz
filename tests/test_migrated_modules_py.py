@@ -960,7 +960,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         root=ROOT, logs=root / "model-preflight-logs",
         raw=root / "model-preflight-logs" / ".raw",
         index=root / "model-preflight-logs" / "index.log",
-        backend="gemini", model="fixture-model",
+        backend="gemini", model="fixture-model", agent_security="sandboxed",
     )
     model_runtime.raw.mkdir(parents=True)
     with mock.patch.dict(
@@ -1233,7 +1233,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         target_rev="rev1", repo_type="none", results=refresh_results,
         logs=refresh_logs, backend="codex", model="fixture-model",
         config=generic_config, index=refresh_logs / "index.log",
-        decision_timeout=0,
+        decision_timeout=0, agent_security="sandboxed",
     )
     with mock.patch.object(
          audit_runner.target_config, "vcs_source_signature",
@@ -1396,7 +1396,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         root=ROOT, target_root=generic_target, target_slug="demo",
         results=launch_results, logs=launch_logs, raw=launch_raw,
         index=launch_logs / "index.log", index_jsonl=launch_logs / "index.jsonl",
-        backend="codex", model="fixture-model",
+        backend="codex", model="fixture-model", agent_security="sandboxed",
     )
     launch_context = mock.Mock()
     launch_context.role.return_value = "reproduce"

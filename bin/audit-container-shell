@@ -37,7 +37,8 @@ Options:
 The image includes Claude Code, Codex, Antigravity CLI (`agy`), Google Gemini
 CLI, and Grok Build. Host ~/.claude, ~/.codex, ~/.gemini, and ~/.grok are never
 mounted. `IS_SANDBOX=1` is set because the container is the sandbox boundary
-for Claude's dangerously-skip-permissions mode.
+assertion required by `--agent-security external-bypass`; the profile must
+still be selected explicitly after reviewing the container's mounts and egress.
 
 Authenticating the CLIs:
   # codex login
@@ -51,7 +52,10 @@ Then confirm auth; if a command hangs, press Ctrl+C:
   # grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
 
 Run from /root/work:
+  # Default: the CLI's own sandbox, which needs a runtime that permits it.
   ./bin/audit --backend <backend> --target <target-name> [--model <model>]
+  # When the container blocks nested sandboxing, and it is your boundary:
+  ./bin/audit --backend <backend> --target <target-name> --agent-security external-bypass
 '''
 
 

@@ -107,9 +107,14 @@ replicates per condition, at the default 3-hour cell budget:
 ```bash
 bin/benchmark --target <target> --backend claude --replicates 2 --budget-wall 10800
 bin/benchmark --target <target> --backend codex  --replicates 2 --budget-wall 10800
-bin/benchmark --target <target> --backend gemini --replicates 2 --budget-wall 10800
-bin/benchmark --target <target> --backend grok   --replicates 2 --budget-wall 10800
+bin/benchmark --target <target> --backend gemini --replicates 2 --budget-wall 10800 --agent-security external-bypass
+bin/benchmark --target <target> --backend grok   --replicates 2 --budget-wall 10800 --agent-security external-bypass
 ```
+
+The Gemini and Grok rows need `--agent-security external-bypass` because the
+default mode refuses those backends, and they must run inside an environment you
+hardened; a row measured under a different mode is not comparable to the
+others (see [agent security modes](../guides/backends.md#agent-security-modes)).
 
 That target has to be bootstrapped first: source in
 `targets/<target>/`, build artifacts where the config says they are,
@@ -178,9 +183,17 @@ output/benchmark/
       pool/
 ```
 
-`run.json` records the model and the reasoning effort actually passed to the
-CLI, so an archived run stays reproducible even if your global backend settings
-later change.
+`run.json` records the model, reasoning effort, and agent-security profile
+actually passed to the CLI, so an archived run stays reproducible even if your
+global backend settings later change.
+
+One profile covers both conditions of a run, so a cell and its control always
+face the same boundary, and `--regenerate` re-scores a run under the profile
+that run recorded rather than today's default. Across backends the boundaries
+differ: each CLI's sandbox differs, most visibly in egress (see
+[agent security modes](../guides/backends.md#agent-security-modes)). Read a
+cross-backend row as two products under their own boundaries, and compare runs
+only against runs that recorded the same profile.
 
 The root `benchmark-result.html` is the cross-backend comparison. You can open
 it while the run is going: it refreshes as cells finish, under a

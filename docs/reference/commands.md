@@ -98,6 +98,7 @@ Common flags:
 | `--strategy S1|S2|S3|S5|S6|S7|S8` | Pin one investigation strategy and suspend rotation. S4 is reserved. |
 | `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer's initial session is still running. |
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
+| `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. `sandboxed` is the default and refuses backends whose sandbox cannot host an audit; the bypass mode requires an asserted outer sandbox. |
 | `--new-target <slug>` | Generate starter config and exit without starting an audit. |
 
 One audit at a time owns a result tree: a second run on the same target and
@@ -105,8 +106,9 @@ backend exits with `another bin/audit instance is writing to …`. A lock left b
 a killed run is reclaimed automatically — there is nothing to clean up.
 
 Omitting `--backend`, or using `--backend all`, cycles installed hosted
-backends in `claude → codex → gemini → grok` order. Each writes its own result
-tree. Use an explicit backend and model in reproducibility notes.
+backends in `claude → codex → gemini → grok` order, skipping any the selected
+`--agent-security` mode cannot launch. Each writes its own result tree. Use
+an explicit backend and model in reproducibility notes.
 
 Turning off learned memory does not make an agent forgetful: the audit contract
 and the run's own structured state still apply. It only stops conclusions from
@@ -296,6 +298,7 @@ is not part of routine target auditing:
 
 ```bash
 bin/benchmark --target "$TARGET" --backend "$BACKEND"
+bin/benchmark --target "$TARGET" --backend "$BACKEND" --agent-security sandboxed
 bin/export-benchmark --target "$TARGET" --backend "$BACKEND" --format zip
 ```
 

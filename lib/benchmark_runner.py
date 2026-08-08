@@ -108,6 +108,21 @@ def _decision_environment(
                 os.environ[key] = value
 
 
+@contextmanager
+def _agent_security_environment(agent_security: str):
+    """Propagate one CLI-selected profile to validator subprocesses."""
+    key = llm_invoke.AGENT_SECURITY_ENV
+    previous = os.environ.get(key)
+    os.environ[key] = agent_security
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
 def _find_gate_reset(path: Path) -> int | None:
     try:
         values = [int(line) for line in path.read_text().splitlines() if line.isdigit()]
@@ -436,6 +451,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--target", default="")
     result.add_argument("--backend", default="codex", choices=("claude", "codex", "gemini", "grok", "oss"))
     result.add_argument("--model", default="")
+    result.add_argument(
+        "--agent-security", choices=llm_invoke.AGENT_SECURITY_MODES, default=None,
+        help="backend execution boundary used by both conditions",
+    )
     result.add_argument("--replicates", type=_positive, default=3)
     result.add_argument(
         "--budget-wall", type=_nonnegative, default=10800,
@@ -963,6 +982,7 @@ def run_harness(
     cell_dir: Path, target_slug: str, backend: str, model: str,
     experiment: str, wall: int, agents: int | None, build_identity: dict,
     config_snapshot: Path | None = None,
+    agent_security: str = llm_invoke.DEFAULT_AGENT_SECURITY,
 ) -> tuple[int, Path]:
     facade = prepare_facade(cell_dir, target_slug, config_snapshot)
     target = (SCRIPT_ROOT / "targets" / target_slug).resolve()
@@ -970,6 +990,7 @@ def run_harness(
     command = [
         str(facade / "bin" / "audit"), "--target", target_slug,
         "--backend", backend,
+        "--agent-security", agent_security,
     ]
     if model:
         command += ["--model", model]
@@ -2023,9 +2044,44 @@ def run_single(args: argparse.Namespace, bench_root: Path) -> int:
         bench_dir.mkdir(parents=True, exist_ok=True)
         cells_dir.mkdir(parents=True, exist_ok=True)
         previous = _recorded_run(bench_dir)
+        problem = _resolve_run_agent_security(args, previous)
+        if problem:
+            print(f"FATAL: {problem}", file=sys.stderr)
+            return 1
         console_path = bench_dir / "console.log"
-        with console_path.open("a", encoding="utf-8") as console, redirect_stdout(Tee(sys.stdout, console)), redirect_stderr(Tee(sys.stderr, console)), _build_suffix(_resolve_build_suffix(args, previous)):
-            return _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions, previous)
+        with _agent_security_environment(args.agent_security):
+            with console_path.open("a", encoding="utf-8") as console, redirect_stdout(Tee(sys.stdout, console)), redirect_stderr(Tee(sys.stderr, console)), _build_suffix(_resolve_build_suffix(args, previous)):
+                return _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions, previous)
+
+
+def _resolve_run_agent_security(args: argparse.Namespace, previous: dict) -> str:
+    """Fix this invocation's profile, or say why it cannot run.
+
+    Regeneration re-scores artifacts already on disk, so the profile the run
+    recorded is the truth about them and an omitted flag inherits it. A resume
+    adds new agent work instead, so it keeps the operator's choice and lets the
+    settings check refuse a boundary the earlier cells never ran under.
+    """
+    recorded = str((previous or {}).get("agent_security") or "")
+    if args.regenerate and recorded:
+        if args.agent_security and args.agent_security != recorded:
+            return (
+                f"this run was measured under agent security {recorded!r}; "
+                f"re-scoring it under {args.agent_security!r} would report one "
+                f"experiment's artifacts under another's boundary"
+            )
+        args.agent_security = recorded
+    try:
+        args.agent_security = llm_invoke.resolve_agent_security(args.agent_security)
+    except ValueError as exc:
+        return str(exc)
+    problem = llm_invoke.agent_security_problem(args.backend, args.agent_security)
+    if problem:
+        return (
+            f"backend '{args.backend}' cannot use agent security "
+            f"'{args.agent_security}': {problem}"
+        )
+    return ""
 
 
 def _source_pin_mismatch(previous: dict, source: str) -> str:
@@ -2137,6 +2193,7 @@ def _settings_mismatch(previous: dict, args: argparse.Namespace, model: str) -> 
     fields = (
         ("model", model),
         ("resolved_effort", llm_invoke.default_effort(args.backend)),
+        ("agent_security", args.agent_security),
         ("budget_wall", args.budget_wall),
         ("harness_agents", args.agents),
         ("target_sha", target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target)),
@@ -2165,6 +2222,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         run_data = {
             "runid": run_id, "target": args.target, "backend": args.backend,
             "model": model, "resolved_effort": llm_invoke.default_effort(args.backend),
+            "agent_security": args.agent_security,
             "replicates": args.replicates,
             "budget_wall": args.budget_wall, "harness_agents": args.agents,
             "finalize_wall": getattr(args, "finalize_wall", 0),
@@ -2388,7 +2446,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     rc, results = run_harness(
                         cell_dir, args.target, args.backend, model, experiment,
                         args.budget_wall, args.agents, cell_build_identity,
-                        config_snapshot,
+                        config_snapshot, args.agent_security,
                     )
                 # Stop the clock where the finding work stops. Everything below
                 # — crash triage, the find-gate drain, metrics — is measurement

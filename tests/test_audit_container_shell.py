@@ -71,7 +71,7 @@ class AuditContainerShellTests(unittest.TestCase):
             "# codex login status", '# claude -p "Reply exactly: tokenfuzz-claude-auth-ok"',
             '# agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"',
             '# grok -p "Reply exactly: tokenfuzz-grok-auth-ok"', "press Ctrl+C",
-            "IS_SANDBOX=1", "dangerously-skip-permissions",
+            "IS_SANDBOX=1", "--agent-security external-bypass",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, output)
