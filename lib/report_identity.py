@@ -27,6 +27,53 @@ def field_value_is_placeholder(field: str, value: str) -> bool:
     )
 
 
+# Structured report fields, written as bare `Label: value` lines below the
+# `## Fields` table so regex consumers keep working, and promoted into that
+# table for readers. Canonical for the writer (lib/triage.py), the promoter
+# (bin/severity), the extractor (bin/export-repro) and the renderer
+# (bin/render-md): each held its own copy, so a label added to the writers and
+# missed by the renderer was neither recognized as a duplicate of the grid nor
+# folded into it, and rendered as stray key/value text beside it.
+FIELD_LABELS = {
+    "surface": "Surface",
+    "primitive": "Primitive",
+    "class": "Class",
+    "caller_contract": "Caller contract",
+    "caller_controls": "Caller controls",
+    "trigger_source": "Trigger source",
+    "parameter_control": "Parameter control",
+    "trusted_caller_actions": "Trusted caller actions",
+    "boundary": "Boundary",
+    "advisory": "Advisory",
+    "reproducer_carrier": "Reproducer carrier",
+    "disclosed_content": "Disclosed content",
+    "strategy": "Strategy",
+}
+# Cluster, dedup and verification identity stamped into the same block. Table
+# material like the fields above, but harness bookkeeping rather than authored
+# evidence, so a renderer may drop them rather than surface them.
+IDENTITY_FIELD_LABELS = (
+    "Cluster", "Dedup key", "Dedup frames", "ClusterFuzz key frames",
+    "Reproduction rate",
+)
+ALL_FIELD_LABELS = tuple(FIELD_LABELS.values()) + IDENTITY_FIELD_LABELS
+
+# The one signature that marks a report's Fields table: a `| Field | Value |`
+# header over a GFM separator. Shared by the writer (`bin/severity`, which
+# appends scored rows) and the renderer (`bin/render-md`, which draws the
+# grid) so the two cannot disagree about which table they mean — holding two
+# lookalike regexes is how they came to disagree over `| : | : |`, a
+# separator one accepted and the other rejected, leaving severity writing
+# rows into a table that then rendered as no grid at all.
+_FIELDS_HEADER_RE = re.compile(r"^\s*\|\s*field\s*\|\s*value\s*\|\s*$", re.IGNORECASE)
+# GFM requires at least one dash per column, with optional alignment colons.
+FIELDS_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
+
+
+def is_fields_table_header(line: str, following: str) -> bool:
+    """True when `line`/`following` open the report's Fields table."""
+    return bool(_FIELDS_HEADER_RE.match(line) and FIELDS_SEPARATOR_RE.match(following))
+
 # Single source of truth for the harness-owned report vocabulary. Writers
 # (triage's contract-concern setter, the report enricher) and this stripper
 # share these so a renamed heading or boundary cannot silently desync them and

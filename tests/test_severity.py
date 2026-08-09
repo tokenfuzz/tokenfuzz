@@ -7,6 +7,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import itertools
 import json
 import sys
 import tempfile
@@ -1479,6 +1480,69 @@ class SeverityTests(unittest.TestCase):
         self.assertRegex(
             synchronized, r"(?m)^\|\s*Parameter control\s*\|\s*direct\s*\|",
         )
+
+    def test_an_ordinary_table_is_not_mistaken_for_the_fields_table(self) -> None:
+        # The Fields table is identified by its `| Field | Value |` header,
+        # not by row labels: every label distinctive enough to name the table
+        # (Strategy, Class, File) is also a plausible first column of an
+        # ordinary comparison table. Matching one appended reach rows into
+        # that table and left the report with no real Fields grid.
+        # A report whose only table is that comparison — no `## Fields` grid
+        # ahead of it to find first.
+        report_dir = self.make_report(
+            "parser reads past the record while decoding attacker bytes",
+            report_id="FIND-CMPTABLE", finding=True, trigger="bytes",
+            extra_fields=(("Primitive", "heap_read_small"),),
+        )
+        report = report_dir / "report.md"
+        report.write_text(
+            "# FIND-CMPTABLE: strategy comparison\n\n"
+            "Primitive: heap_read_small\nSurface: library-api\n"
+            "Trigger source: bytes\n\n## Root Cause\n\n"
+            "parser reads past the record while decoding attacker bytes\n\n"
+            "| Strategy | Result |\n|:---------|:-------|\n"
+            "| S1 | missed |\n| S3 | found |\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            severity._find_fields_table_end(
+                report.read_text(encoding="utf-8").splitlines()),
+            -1,
+        )
+        severity.update_report(report, self.score(report_dir))
+        text = report.read_text(encoding="utf-8")
+        # The comparison table keeps exactly its own rows: separator, S1, S3.
+        block = list(itertools.takewhile(
+            lambda line: line.startswith("|"),
+            text.split("| Strategy | Result |\n")[1].splitlines(),
+        ))
+        self.assertEqual(len(block), 3, block)
+        # The score went into a real Fields grid instead.
+        self.assertRegex(text, r"(?m)^\|\s*Field\s*\|\s*Value\s*\|")
+        self.assertRegex(text, r"(?m)^\|\s*Severity\s*\|\s*\w+\s*\(CVSS")
+        self.assertRegex(text, r"(?m)^\|\s*Primitive\s*\|\s*heap_read_small\s*\|")
+
+    def test_writer_and_renderer_agree_on_the_fields_table(self) -> None:
+        # The scorer appends rows to the Fields table and render-md draws the
+        # grid; both must mean the same table. Holding two lookalike regexes
+        # is how they came to disagree over `| : | : |` — a separator the
+        # scorer accepted and the renderer rejected, so the scorer wrote rows
+        # into a table that then rendered as no grid at all.
+        malformed = "| Field | Value |\n| : | : |\n| Boundary | bytes |\n"
+        self.assertEqual(severity._find_fields_table_end(malformed.splitlines()), -1)
+        # Every GFM separator the renderer accepts, the scorer accepts too —
+        # and both read it from one predicate, so they cannot drift apart.
+        for separator in ("|:-|:-|", "| --- | --- |", "| :--- | ---: |",
+                          "|:-:|:-:|", "| ---------- | ----- |"):
+            document = f"| Field | Value |\n{separator}\n| Boundary | bytes |\n"
+            self.assertEqual(
+                severity._find_fields_table_end(document.splitlines()), 2, separator,
+            )
+            self.assertTrue(
+                severity.report_identity.is_fields_table_header(
+                    *document.splitlines()[:2]),
+                separator,
+            )
 
     def test_prose_caller_controls_stays_prose(self) -> None:
         report = self.make_report(

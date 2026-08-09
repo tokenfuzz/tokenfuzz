@@ -1114,12 +1114,18 @@ def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
     shows pill-shaped badges and chips. Operates on the raw cell text
     (pre-render) so Critical/High/Medium/Low don't have to be matched
     inside HTML markup. `row_key` carries the row's key column when the
-    cell is the value side of a Fields-style key/value row — used to
-    add inline hints for Advisory / Strategy / Cluster cells whose raw
-    value (`yes`, `S1`, a CL-id) is too generic to detect by content
-    shape alone."""
+    cell is the value side of a Fields-style key/value row — used to add
+    inline hints for Advisory / Strategy / Cluster cells whose raw value
+    (`yes`, `S1`, a CL-id) is too generic to detect by content shape
+    alone."""
     raw = raw_cell.strip()
     key = row_key.strip().lower()
+
+    # Cluster placeholder before bin/cluster-crashes has run — render as a
+    # muted dash instead of the literal "(set by ...)" text, which reads as
+    # broken to a triager.
+    if _CLUSTER_PLACEHOLDER_RE.match(raw):
+        return '<span style="color: var(--muted)">—</span>'
 
     # Severity pill: "Critical (CVSS-BTE 4.0: 9.3)" → span.sev-Critical
     m = _SEV_CELL_RE.match(raw)
@@ -1133,11 +1139,6 @@ def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
             return (f'<span class="sev {klass}">{level}'
                     f'<span class="sev-score">{score}</span></span>')
         return f'<span class="sev {klass}">{level}</span>'
-
-    # Cluster placeholder before bin/cluster-crashes has run — render
-    # as a muted dash instead of the literal "(set by ...)" text.
-    if _CLUSTER_PLACEHOLDER_RE.match(raw):
-        return '<span style="color: var(--muted)">—</span>'
 
     # Surface chip: "library-api — reason" / "cli" / "maint-tool"
     surface_m = re.match(r"^\s*(library-api|cli|maint-tool|unknown)\b(?:\s*—\s*(.+))?\s*$", raw)
@@ -1176,11 +1177,9 @@ def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
             f'<span class="chip-reason">— {_ADVISORY_HINTS[verdict]}</span>'
         )
 
-    # Cluster cell carries the cluster id plus a parenthesized list of
-    # sibling CRASH-* / FIND-* IDs — turn each one into a click-through
-    # to the sibling REPORT.html. Linkification is applied to the
-    # already-rendered HTML so existing markdown links (if any) are
-    # preserved untouched.
+    # A Cluster cell that survives to the grid — the hero card did not render
+    # one — carries sibling CRASH-* / FIND-* ids. Linkify them so the grid
+    # offers the same click-through the hero would have.
     if key == "cluster":
         return _linkify_cluster_siblings(rendered_html)
 
@@ -1208,23 +1207,42 @@ def _align_class(align: str) -> str:
     return f' class="{align}"' if align in ("left", "right", "center") else ""
 
 
+def _ordered_field_rows(rows: list[list[str]],
+                        omitted: frozenset[str]) -> list[list[str]]:
+    """Fields-grid rows in canonical order, `omitted` labels removed. The
+    sort is stable, so the author's own labels keep document order among
+    themselves and land after the fields the reviewer came for."""
+    kept = [
+        row for row in rows
+        if row and row[0].strip().casefold() not in omitted
+    ]
+    return sorted(
+        kept,
+        key=lambda row: _FIELD_RANK.get(row[0].strip().casefold(), len(_FIELD_ORDER)),
+    )
+
+
 def _render_table_html(header: list[str], align: list[str], body: list[list[str]],
-                       extra_rows: list[tuple[str, str]] | None = None) -> str:
+                       extra_rows: list[tuple[str, str]] | None = None,
+                       omitted: frozenset[str] = frozenset()) -> str:
     extra = _table_extra_class(header)
-    if extra_rows and extra == "fields-table":
+    if extra == "fields-table":
         # Fill the field's existing row when it has one — the table
         # usually already carries the key with a placeholder value, and
         # appending would print the field twice. Only a key with no row
-        # at all is added. `_orphan_field_labels` yields keys the table
-        # has no real value for, so filling never clobbers one.
+        # at all is added. `_report_fields` yields keys the table has no
+        # real value for, so filling never clobbers one.
         body = [list(row) for row in body]
         by_key = {row[0].strip().casefold(): row for row in body if len(row) >= 2}
-        for key, value in extra_rows:
+        for key, value in extra_rows or ():
             row = by_key.get(key.casefold())
             if row is None:
                 body.append([key, value])
             else:
                 row[1] = value
+        body = _ordered_field_rows(body, omitted)
+        if not body:
+            return ""  # nothing left to show; an empty grid is noise
     cls = f' class="{extra}"' if extra else ""
     out = ['<div class="table-wrap">', f"<table{cls}>", "<thead><tr>"]
     for i, c in enumerate(header):
@@ -1234,7 +1252,7 @@ def _render_table_html(header: list[str], align: list[str], body: list[list[str]
     out.append("<tbody>")
     # For Fields-style key/value tables the value cell can be decorated
     # with hints derived from the key column (Advisory yes/no, Strategy
-    # code, Cluster CRASH-* siblings). Threading the row's column-0 text
+    # code). Threading the row's column-0 text
     # to `_decorate_cell` keeps the decorator stateless across rows.
     is_kv_table = extra == "fields-table"
     for row in body:
@@ -1261,51 +1279,100 @@ def _render_table_html(header: list[str], align: list[str], body: list[list[str]
 _UL_ITEM_RE = re.compile(r"^(?P<indent>\s*)[-*]\s+(?P<body>.*)$")
 _OL_ITEM_RE = re.compile(r"^(?P<indent>\s*)\d+\.\s+(?P<body>.*)$")
 
-# Structured fields the harness duplicates *below* the Fields table as
-# bare-label lines for downstream regex parsers (bin/severity,
-# bin/cluster-crashes, lib/triage.py). They render as a wall of broken
-# key:value text in HTML and the same data is already on screen one
-# table up, so we drop the block from HTML output only — the markdown
-# source is left untouched so parsers keep working.
-_BARE_LABEL_KEYS = (
-    "Surface", "Trigger source", "Caller contract", "Caller controls",
-    "Parameter control", "Boundary", "Trusted caller actions", "Reproduction rate",
-    "Cluster", "Primitive", "Strategy", "Dedup frames", "Advisory",
-    "ClusterFuzz key frames",
-    # Finding-side regex-extraction keys: FIND-* reports carry bare
-    # `Cluster:` / `Dedup key:` lines that downstream parsers
-    # (cluster-findings, finding_signature) consume. Hide them from HTML
-    # output — the hero card already shows the cluster, and the audit-only
-    # metadata would just clutter an upstream-facing view.
-    "Dedup key",
-)
-_BARE_LABEL_RE = re.compile(
-    r"^(?P<key>" + "|".join(re.escape(k) for k in _BARE_LABEL_KEYS) + r"):\s+\S"
+# The harness duplicates the Fields table below itself as bare `Label: value`
+# lines so regex parsers (bin/severity, bin/cluster-crashes, lib/triage.py)
+# keep reading them. On the page that is a wall of broken key:value text
+# answering what the grid one screen up already answers, so the duplicate is
+# dropped from HTML only — the markdown source is left untouched.
+#
+# Which lines are report fields is decided per report rather than from a list
+# of labels. A private list here went stale against the writers, and report
+# authors add labels of their own (`Entry:`, `Issue class:`, a card id) that
+# no list can anticipate; both kinds then rendered beside the grid instead of
+# inside it. The report's own grid is the authority, with the shared
+# vocabulary as the fallback for fields the grid does not carry yet.
+_FIELD_LABEL_RE = re.compile(
+    r"^(?P<key>[A-Za-z][A-Za-z0-9 /_-]{1,48}):\s+(?P<val>\S.*)$"
 )
 _SEVERITY_LINE_RE = re.compile(r"^- \*\*Severity\*\*:\s+\S")
 
-# Report fields a later pass writes as a bare label *after* the bundle's
-# Fields table was built (lib/triage.py infers reach fields; enrichment adds
-# the strategy), and that bin/severity or the next re-export then promotes
-# into the table. Until that promotion lands the bare label is the report's
-# only copy, so it renders. The remaining keys above are cluster/dedup
-# metadata the hero card already carries — always hidden, table or not.
-_PROMOTABLE_LABEL_KEYS = frozenset({
-    "surface", "trigger source", "caller contract", "caller controls",
-    "parameter control", "boundary", "trusted caller actions",
-    "primitive", "advisory", "strategy",
+# The harness vocabulary, used to recognize a run of `Label: value` lines as
+# the report's metadata block. Includes the cluster/dedup identity labels:
+# they mark a metadata run just as well as a contract field, and a run they
+# seed carries the author's own labels into the grid with them.
+_KNOWN_LABELS = frozenset(
+    label.casefold() for label in report_identity.ALL_FIELD_LABELS
+)
+# Rows the grid omits, for two reasons and no others. Everything else a
+# report author writes stays on the page, redundant or not — that judgment is
+# theirs, not the renderer's.
+#
+# 1. A harness-internal id: a string with no meaning outside the run that
+#    produced it, so dropping it costs a maintainer nothing.
+_INTERNAL_ID_LABELS = frozenset({
+    "card-id", "hypothesis-id", "card", "hypothesis",
 })
+# 2. Identity the hero card renders better: a cluster id there comes with
+#    click-through links to its siblings. Keyed to the hero field carrying
+#    it, because this omission is conditional — see `_omitted_grid_labels`.
+#
+#    Only cluster qualifies. The dedup signature is deliberately NOT here:
+#    the hero's frames are the sanitizer stack, which usually describes the
+#    same chain but is not the same string, and an exact dedup signature is
+#    identity evidence worth its own row. `Reproduction rate` likewise stays
+#    — verification evidence a reviewer scans for.
+_HERO_OWNED_LABELS = {
+    "cluster": "cluster",
+}
+
+
+def _omitted_grid_labels(hero: dict, hero_html: str) -> frozenset[str]:
+    """Labels this report's grid omits.
+
+    Hero-owned identity is omitted only when the hero card is really on the
+    page carrying it. Suppressing a value before its replacement renders is
+    how a field leaves the report altogether — so the condition is what the
+    page actually shows, never what it usually shows."""
+    omitted = set(_INTERNAL_ID_LABELS)
+    if hero_html:
+        omitted.update(
+            label for label, key in _HERO_OWNED_LABELS.items() if hero.get(key)
+        )
+    return frozenset(omitted)
+
+
+# Canonical grid order — the questions a reviewer asks, in the order they ask
+# them: what is it and how bad, where is it, who can reach it, how well is it
+# proven. Report authors order fields however they like, so the renderer
+# imposes one instead of shipping a different layout per report. Labels not
+# listed here are the author's own and keep document order, after these.
+_FIELD_ORDER = (
+    "severity", "class", "primitive",
+    "file", "function", "line", "location", "entry", "sink", "allocation",
+    "surface", "boundary", "trigger source", "caller controls",
+    "caller contract", "trusted caller actions", "parameter control",
+    "disclosed content",
+    "reproduction rate", "reproducer carrier", "advisory", "build config",
+    # How the bug was found: about the audit rather than the bug, so it sits
+    # last of the known fields — but it stays on the page, because nothing
+    # else on it says why the auditor looked here.
+    "strategy",
+    # Cluster/dedup identity, here only on the pages whose hero card did not
+    # render it (see `_omitted_grid_labels`). Last: it answers "is this a
+    # duplicate", which a reviewer asks after everything above.
+    "cluster", "dedup key", "dedup frames", "clusterfuzz key frames",
+)
+_FIELD_RANK = {label: rank for rank, label in enumerate(_FIELD_ORDER)}
 
 
 def _populated_table_fields(lines: list[str]) -> set[str]:
-    """Return labels with real values in a visible Fields key/value table."""
+    """Return every label carrying a real value in a visible Fields
+    key/value table — the set whose bare-label copies are already on screen."""
     populated: set[str] = set()
     index = 0
     while index + 1 < len(lines):
-        header = _split_row(lines[index])
-        if (
-            [cell.casefold() for cell in header[:2]] != ["field", "value"]
-            or not _TABLE_SEP_RE.match(lines[index + 1])
+        if not report_identity.is_fields_table_header(
+            lines[index], lines[index + 1],
         ):
             index += 1
             continue
@@ -1314,10 +1381,7 @@ def _populated_table_fields(lines: list[str]) -> set[str]:
             cells = _split_row(lines[index])
             if len(cells) >= 2:
                 key, value = cells[0].casefold(), cells[1].casefold()
-                if (
-                    key in _PROMOTABLE_LABEL_KEYS
-                    and not report_identity.field_value_is_placeholder(key, value)
-                ):
+                if not report_identity.field_value_is_placeholder(key, value):
                     populated.add(key)
             index += 1
     return populated
@@ -1325,75 +1389,118 @@ def _populated_table_fields(lines: list[str]) -> set[str]:
 
 def _has_fields_table(lines: list[str]) -> bool:
     return any(
-        [cell.casefold() for cell in _split_row(line)[:2]] == ["field", "value"]
-        and index + 1 < len(lines)
-        and _TABLE_SEP_RE.match(lines[index + 1])
-        for index, line in enumerate(lines)
+        report_identity.is_fields_table_header(line, lines[index + 1])
+        for index, line in enumerate(lines[:-1])
     )
 
 
-def _orphan_field_labels(lines: list[str], populated: set[str]) -> list[tuple[str, str]]:
-    """Bare labels carrying a value the Fields table does not have, in
-    document order.
+def _label_rows(lines: list[str], known: set[str]) -> list[tuple[str, str]]:
+    """Report fields carried as bare labels, in document order.
 
-    A later pass (lib/triage.py, bin/severity) normally promotes these
-    into the table, but until it runs — or when it never does — the bare
-    label is the report's only copy. Rendering it where it sits leaves an
-    orphan key/value list at the foot of the page, divorced from the grid
-    that answers the same questions. The caller folds these into that
-    grid instead. Only meaningful when a Fields table exists to fold
-    into; otherwise the label must render in place or the value is lost."""
-    if not _has_fields_table(lines):
-        return []
-    orphans: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    A field line is only recognizable from the run it sits in: report authors
+    extend the harness's metadata block with labels of their own, and prose
+    uses colons too. So a run of consecutive `Label: value` lines is the
+    report's metadata when at least one of its labels is `known` — a row of
+    the report's own grid, or a harness contract field — and then every label
+    in that run is a field. A run without one is prose (a Data Flow step
+    list, a labelled classification block) and stays where the author put
+    it."""
+    rows: list[tuple[str, str]] = []
+    run: list[tuple[str, str]] = []
+    seeded = False
+    fenced = False
+
+    def close() -> None:
+        nonlocal run, seeded
+        if seeded:
+            rows.extend(run)
+        run, seeded = [], False
+
     for line in lines:
-        match = _BARE_LABEL_RE.match(line)
-        if not match:
+        if line.strip().startswith("```"):
+            fenced = not fenced
+            close()
             continue
-        key = match.group("key").casefold()
-        if key in populated or key in seen or key not in _PROMOTABLE_LABEL_KEYS:
+        match = None if fenced else _FIELD_LABEL_RE.match(line)
+        if match is None:
+            close()
             continue
-        _, _, value = line.partition(":")
-        value = value.strip()
-        if not value or report_identity.field_value_is_placeholder(key, value.casefold()):
-            continue
-        seen.add(key)
-        orphans.append((match.group("key").strip(), value))
-    return orphans
+        key = match.group("key").strip()
+        run.append((key, match.group("val").strip()))
+        seeded = seeded or key.casefold() in known
+    close()
+    return rows
 
 
-def _is_bare_label_line(line: str, populated_table_fields: set[str] | None = None,
-                        folded_fields: set[str] | None = None) -> bool:
-    """A line that belongs to the regex-extraction duplicate block that
-    follows the Fields table in REPORT.md. Suppress it only when the value
-    is on screen already — in the visible table, or folded into it by the
-    caller; otherwise the bare label is the report's sole data."""
+def _report_fields(
+    lines: list[str], omitted: frozenset[str],
+) -> tuple[list[tuple[str, str]], set[str]]:
+    """Bare report fields destined for the Fields grid, and the labels the
+    rendered body must then stop repeating.
+
+    A value belongs on the page once. Whatever the grid already answers is
+    hidden wherever else it appears; whatever it does not is folded into it,
+    rather than left as an orphan key/value list at the foot of the page
+    answering the same questions as the grid at the top.
+
+    Every label added to `hidden` is one this page shows somewhere else — in
+    the grid, or (for `omitted`) in the hero card the caller already rendered.
+    Nothing else is hidden, so a value can never leave the report."""
+    populated = _populated_table_fields(lines)
+    rows: list[tuple[str, str]] = []
+    hidden = set(populated)
+    for key, value in _label_rows(lines, populated | _KNOWN_LABELS):
+        label = key.casefold()
+        if label in hidden or label in omitted:
+            hidden.add(label)
+            continue
+        if report_identity.field_value_is_placeholder(label, value.casefold()):
+            continue
+        rows.append((key, value))
+        hidden.add(label)
+    return rows, hidden
+
+
+def _is_hidden_label_line(line: str, hidden_labels: set[str]) -> bool:
+    """A bare label whose value is already on the page — in the Fields grid or
+    the hero card — or the auto Severity bullet the grid's Severity row
+    duplicates."""
     if _SEVERITY_LINE_RE.match(line):
         return True
-    match = _BARE_LABEL_RE.match(line)
-    if not match:
+    match = _FIELD_LABEL_RE.match(line)
+    if match is None:
         return False
-    key = match.group("key").casefold()
-    if populated_table_fields is None or key not in _PROMOTABLE_LABEL_KEYS:
-        return True
-    return key in populated_table_fields or key in (folded_fields or set())
+    return match.group("key").strip().casefold() in hidden_labels
+
+
+def _synthesized_fields_grid(rows: list[tuple[str, str]]) -> str:
+    """Render a report's bare-label block as its Fields grid.
+
+    `bin/severity` writes a `## Fields` table only when it resolved more than
+    Severity, so the reports carrying the least structured data had no grid at
+    all and every field landed on the page as a loose key/value list. The rows
+    are the same either way, so the renderer builds the table itself.
+
+    Rows are already filtered by the caller, so nothing is omitted here — an
+    empty grid would mean the fields went nowhere."""
+    return _render_table_html(
+        ["Field", "Value"], ["left", "left"], [[key, value] for key, value in rows],
+    ) if rows else ""
 
 
 _REPORT_LABEL_HEADING_RE = re.compile(
     r"^(Summary|Classification|Boundary|Caller controls|Parameter control|Trusted caller actions|"
     r"Root Cause|Data Flow|Triage decision):\s*$"
 )
-_REPORT_DEFINITION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9 /_-]{1,48}):\s+(.+)$")
 
 
 def _render_definition_list(lines: list[str]) -> str | None:
     rows: list[tuple[str, str]] = []
     for line in lines:
-        m = _REPORT_DEFINITION_RE.match(line)
+        m = _FIELD_LABEL_RE.match(line)
         if not m:
             return None
-        rows.append((m.group(1).strip(), m.group(2).strip()))
+        rows.append((m.group("key").strip(), m.group("val").strip()))
     if len(rows) < 2:
         return None
     out = ['<dl class="report-definition">']
@@ -1781,16 +1888,24 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
     blockquotes, inline code/bold/italic/links, fenced code blocks) to a
     self-contained HTML document, styled with the Material 3 stylesheet."""
     lines = text.splitlines()
-    populated_table_fields = _populated_table_fields(lines)
-    # Fields the table is missing but the body carries as bare labels.
-    # Folded into the grid below rather than left as an orphan key/value
-    # list at the foot of the page.
-    orphan_fields = _orphan_field_labels(lines, populated_table_fields)
-    folded_fields = {key.casefold() for key, _ in orphan_fields}
+    # Render the hero first: what it shows decides what the grid may omit, so
+    # a value is only ever suppressed once its replacement is on the page.
+    hero = _extract_hero(text)
+    hero_html = _render_hero(hero)
+    omitted_labels = _omitted_grid_labels(hero, hero_html)
+    # Fields the body carries as bare labels, and the labels it must stop
+    # repeating once the grid answers them. The rows fold into the report's
+    # own grid, or become that grid when it has none — `_label_rows` only
+    # yields a run seeded by a known field, so an index or a crosstab never
+    # grows a Fields table out of a stray label line.
+    field_rows, hidden_labels = _report_fields(lines, omitted_labels)
+    synthesized_grid = (
+        "" if _has_fields_table(lines) else _synthesized_fields_grid(field_rows)
+    )
+    orphan_fields = [] if synthesized_grid else field_rows
     body: list[str] = []
     i = 0
     paragraph: list[str] = []
-    hero = _extract_hero(text)
     hero_emitted = False
     in_collapsible = False
     # Heading anchors must be unique within the document — the benchmark
@@ -1819,7 +1934,7 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
         # lines out before rendering so they do not get folded into prose.
         paragraph[:] = [
             line for line in paragraph
-            if not _is_bare_label_line(line, populated_table_fields, folded_fields)
+            if not _is_hidden_label_line(line, hidden_labels)
         ]
         if not paragraph:
             paragraph.clear()
@@ -1913,9 +2028,7 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
             ttext = stripped[2:].strip()
             body.append(f"<h1>{_render_inline(ttext)}</h1>")
             if not hero_emitted:
-                hero_html = _render_hero(hero)
-                if hero_html:
-                    body.append(hero_html)
+                body.extend(part for part in (hero_html, synthesized_grid) if part)
                 hero_emitted = True
             i += 1
             continue
@@ -2019,7 +2132,8 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
             # would otherwise consume the orphans and drop them.
             is_fields = _table_extra_class(header) == "fields-table"
             body.append(_render_table_html(
-                header, align, body_rows, orphan_fields if is_fields else None))
+                header, align, body_rows,
+                orphan_fields if is_fields else None, omitted_labels))
             if is_fields:
                 orphan_fields = []
             i = j
@@ -2040,11 +2154,10 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
                 body.append(f"<blockquote>{_render_inline(joined)}</blockquote>")
             continue
 
-        # Bare-label lines (regex-extraction duplicates of the Fields
-        # table) must reach _flush_paragraph for suppression — including
-        # the `- **Severity**: ...` line that would otherwise be claimed
-        # by the list handler below.
-        if _is_bare_label_line(line):
+        # The auto `- **Severity**: ...` bullet duplicates the grid's
+        # Severity row, and must reach _flush_paragraph for suppression
+        # rather than be claimed by the list handler below.
+        if _SEVERITY_LINE_RE.match(line):
             paragraph.append(stripped)
             i += 1
             continue
@@ -2145,9 +2258,7 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
     # whether the author wrote an H1. `_render_hero` returns "" when there is no
     # useful signal, so non-report docs (INDEX.md, crosstabs) stay heroless.
     if not hero_emitted:
-        hero_html = _render_hero(hero)
-        if hero_html:
-            body.insert(0, hero_html)
+        body[0:0] = [part for part in (hero_html, synthesized_grid) if part]
     return (
         _HTML_HEAD.format(title=html.escape(title), theme_css=_MATERIAL_CSS)
         + "\n".join(body) + "\n" + _HTML_FOOT

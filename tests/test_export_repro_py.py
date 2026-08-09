@@ -1177,6 +1177,20 @@ assert_not_in("| Severity  | Low (26)", rendered_body,
               "render_agent_body: Fields severity row stripped")
 assert_not_in("score=26", rendered_body,
               "render_agent_body: Severity rationale section stripped")
+
+# A bare label may only be stripped when `build_report_md` re-emits it as a
+# Fields row. Reproducer carrier and Disclosed content have no such row, so
+# stripping them deletes the value from the exported bundle outright — and
+# Disclosed content feeds confidentiality scoring, so losing it inflates
+# severity on the very reports the export is meant to hand upstream.
+_unemitted = er.render_agent_body(
+    "## Summary\n\nThe parser reads past the buffer.\n\n"
+    "Reproducer carrier: cli\nDisclosed content: same-context\n"
+)
+for _label, _value in (("Reproducer carrier", "cli"),
+                       ("Disclosed content", "same-context")):
+    assert_in(_value, _unemitted,
+              f"render_agent_body: {_label} survives (no Fields row re-emits it)")
 # The stray H1 is demoted to an H2 subsection (no second top-level heading).
 assert_in("## Mechanism", rendered_body,
           "render_agent_body: stray body H1 demoted to H2")

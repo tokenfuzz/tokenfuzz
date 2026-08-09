@@ -1542,6 +1542,12 @@ _END_SKIP_LABEL_RE = re.compile(
     r"^(?:Data Flow|Patch|Supplemental|Evidence|Boundary|Classification|Summary|Root Cause|Suggested fix|Notes)[: ]"
 )
 _FULL_ORIGINAL_RE = re.compile(r"^Full original output:")
+# Bare labels stripped from the exported narrative. Deliberately NOT the
+# shared report vocabulary: a label may only be stripped here when
+# `build_report_md` re-emits it as a Fields row, or the export silently drops
+# the value. Reproducer carrier and Disclosed content have no such row —
+# and Disclosed content feeds confidentiality scoring, so losing it inflates
+# severity.
 _BARE_LABEL_RES = (
     re.compile(r"^[Ss]urface:\s"),
     re.compile(r"^[Cc]luster:\s"),
@@ -1938,6 +1944,21 @@ def render_agent_body(body_text: str) -> str:
     return _ensure_leading_heading(_squash_blank_runs(demote_body_headings(rendered)))
 
 
+# A structured field line ends a preceding block-valued field. Built from the
+# shared report vocabulary plus the two labels that are not fields — the
+# severity stamp and the work-card id — so a field added there terminates a
+# block here without a second list to update.
+_FIELD_LINE_RE = re.compile(
+    r"^(?:"
+    + "|".join(
+        re.escape(label)
+        for label in (*report_identity.ALL_FIELD_LABELS, "Severity", "CARD-ID")
+    )
+    + r"):(?:[ \t].*)?$",
+    re.IGNORECASE,
+)
+
+
 def read_field_from_fields_table(path: Optional[Path], label: str) -> str:
     """Lookup `label` in the first `## Fields` Markdown table in `path`.
 
@@ -2005,16 +2026,6 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
     block_pattern = re.compile(rf"^{re.escape(label)}:[ \t]*$", re.IGNORECASE)
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         lines = list(f)
-    # A skeleton commonly has several empty fields in a row.  Stop a block
-    # value at the next structured field instead of folding every following
-    # label and cluster stamp into the first empty field.
-    field_line = re.compile(
-        r"^(?:Surface|Primitive|Class|Severity|Boundary|Caller controls|"
-        r"Parameter control|Trusted caller actions|Caller contract|"
-        r"Trigger source|Strategy|CARD-ID|Cluster|Dedup frames|"
-        r"Reproduction rate):(?:[ \t].*)?$",
-        re.IGNORECASE,
-    )
 
     def usable(value: str) -> str:
         value = value.strip()
@@ -2042,7 +2053,11 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
                     if vals:
                         break
                     continue
-                if (field_line.match(stripped) or stripped.startswith(("#", "|", "<!--"))):
+                # A skeleton commonly has several empty fields in a row. Stop
+                # the block at the next structured field instead of folding
+                # every following label and cluster stamp into the first one.
+                if (_FIELD_LINE_RE.match(stripped)
+                        or stripped.startswith(("#", "|", "<!--"))):
                     break
                 vals.append(stripped)
             if value := usable(" ".join(vals)):

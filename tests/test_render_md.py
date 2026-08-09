@@ -221,14 +221,138 @@ Boundary: caller-supplied sample bytes
         self.assertEqual(placeholder_grid.count("caller-supplied sample bytes"), 1)
         self.assertNotIn(">—<", placeholder_grid)
 
-        # Fall open: with no Fields table to fold into, the bare labels are
-        # the report's only copy and must still render.
+        # A report the scorer never gave a Fields table gets one built from
+        # its own bare labels, rather than a loose key/value list.
         loose = self.markdown(
             "loose",
             "# CRASH-2\n\n## Summary\n\nprose\n\n"
+            "Primitive: double-free\n"
             "Trusted caller actions: reuses the handle\nStrategy: S5\n",
         )
-        self.assertIn("reuses the handle", self.html(loose))
+        loose_page = self.html(loose).split("<body>")[1]
+        loose_grid = loose_page.split('class="fields-table"')[1].split("</table>")[0]
+        self.assertIn("reuses the handle", loose_grid)
+        self.assertNotIn("report-definition", loose_page)
+
+    def test_every_report_field_lands_in_the_grid_not_beside_it(self) -> None:
+        # Field-ness is decided by the run a label sits in, not by a list of
+        # label names kept here. A private list went stale against the
+        # writers, and report authors add labels of their own, so both kinds
+        # rendered beside the grid as an orphan key/value list.
+        report = self.markdown(
+            "fields",
+            """# CRASH-1
+
+Strategy: S3
+CARD-ID: WORK-abc123
+Entry: `app_parse()` on a caller-supplied buffer
+
+## Fields
+
+| Field | Value |
+|:------|:------|
+| Primitive | heap-use-after-free |
+| Class | memory-safety |
+
+## Summary
+
+prose
+
+## Data Flow
+
+step 1: app_parse (app.c:12) - takes the buffer
+step 2: app_free (app.c:44) - releases it
+
+Class: memory-safety
+Reproducer carrier: cli
+Disclosed content: cross-principal
+""",
+        )
+        page = self.html(report).split("<body>")[1]
+        grid, rest = page.split('class="fields-table"')[1].split("</table>", 1)
+
+        # Contract fields the grid lacks, and an author's own label from the
+        # same metadata run, are folded into the grid and not left beside it.
+        for field, value in (
+            ("Entry", "caller-supplied buffer"), ("Reproducer carrier", "cli"),
+            ("Disclosed content", "cross-principal"), ("Strategy", "S3"),
+        ):
+            self.assertIn(field, grid, field)
+            self.assertIn(value, grid, field)
+            self.assertNotIn(value, rest, field)
+        # A bare label the grid already answers is dropped, not repeated.
+        self.assertNotIn("memory-safety", rest)
+        # A harness-internal id means nothing outside the run that made it —
+        # it leaves the page rather than landing in a maintainer's grid.
+        for internal in ("CARD-ID", "WORK-abc123"):
+            self.assertNotIn(internal, page, internal)
+
+        # Canonical order: the verdict leads, then location, then who can
+        # reach it, then verification, then the author's own labels.
+        self.assertLess(grid.index("Class"), grid.index("Primitive"))
+        self.assertLess(grid.index("Primitive"), grid.index("Entry"))
+        self.assertLess(grid.index("Disclosed content"), grid.index("Reproducer carrier"))
+        self.assertLess(grid.index("Reproducer carrier"), grid.index("Strategy"))
+
+        # A run of label lines carrying no known field is prose, and stays
+        # where the author put it — a Data Flow step list is not metadata.
+        self.assertNotIn("step 1", grid)
+        self.assertIn("app_parse (app.c:12)", rest)
+
+    def test_a_field_is_hidden_only_where_something_else_shows_it(self) -> None:
+        # Suppressing a bare label before its replacement renders is how a
+        # field leaves the report entirely. Each case below is a page the
+        # grid or hero does NOT cover, so the value has to survive.
+        bare = self.markdown(     # no grid to fold into, no hero to carry it
+            "bare", "# FIND-1\n\nBoundary: network request\nStrategy: S3\n",
+        )
+        bare_page = self.html(bare).split("<body>")[1]
+        for value in ("network request", "S3"):
+            self.assertIn(value, bare_page, value)
+
+        # Cluster is dropped only when a hero card actually renders it. With
+        # no hero, the grid keeps the row rather than losing the value.
+        heroless = self.markdown(
+            "heroless",
+            "# FIND-2\n\n| Field | Value |\n|:--|:--|\n| Boundary | file bytes |\n\n"
+            "Cluster: CL-abc (2 reports: FIND-3)\n",
+        )
+        heroless_page = self.html(heroless).split("<body>")[1]
+        self.assertNotIn("triage-card", heroless_page)
+        self.assertIn("CL-abc", heroless_page)
+
+        # With a hero card carrying it, the same row leaves the grid — the
+        # hero shows it with click-through links to the siblings.
+        with_hero = self.markdown(
+            "with_hero",
+            "# CRASH-7\n\n| Field | Value |\n|:--|:--|\n"
+            "| Severity | High (CVSS-BT 4.0: 7.8) |\n"
+            "| Primitive | heap-use-after-free |\n"
+            "| Cluster | CL-q (2 reports: CRASH-3) |\n\n## Summary\n\nprose\n",
+        )
+        hero_page = self.html(with_hero).split("<body>")[1]
+        hero_card = hero_page.split("</div>")[0]
+        self.assertIn("triage-card", hero_card)
+        self.assertIn("CL-q", hero_page)
+        grid = hero_page.split('class="fields-table"')[1].split("</table>")[0]
+        self.assertNotIn("CL-q", grid)
+
+        # Cluster is the ONLY hero-owned label. The dedup signature keeps its
+        # row even when the hero shows sanitizer frames: those frames usually
+        # describe the same chain but are not the same string, and an exact
+        # dedup signature is identity evidence in its own right.
+        dedup = self.markdown(
+            "dedup",
+            "# CRASH-6\n\n| Field | Value |\n|:--|:--|\n"
+            "| Severity | High (CVSS-BT 4.0: 7.8) |\n"
+            "| Dedup frames | app_parse app.c:91 -> app_free app.c:44 |\n\n"
+            "## Expected sanitizer output\n\n```\n"
+            "    #0 0x1 in app_parse app.c:91\n    #1 0x2 in app_free app.c:44\n```\n",
+        )
+        dedup_page = self.html(dedup).split("<body>")[1]
+        dedup_grid = dedup_page.split('class="fields-table"')[1].split("</table>")[0]
+        self.assertIn("triage-card", dedup_page)     # a hero did render
+        self.assertIn("app.c:91", dedup_grid)        # ...and the row stayed
 
     def test_lists_and_structured_label_suppression(self) -> None:
         lists = self.markdown(
@@ -464,6 +588,8 @@ The duplicate keeps callback data.
             self.assertIn(required, labels_html)
         self.assertNotIn("<p>Classification: Category:", labels_html)
 
+        # No hero card renders this report's cluster, so the grid keeps the
+        # row — and mutes the placeholder, which reads as broken to a triager.
         placeholder = self.markdown(
             "placeholder", "# Sample\n\n| Field | Value |\n|:------|:------|\n| Cluster | (set by bin/cluster-crashes) |\n"
         )

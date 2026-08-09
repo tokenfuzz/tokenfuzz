@@ -698,27 +698,30 @@ def _field(text: str, name: str) -> str:
     return label.group(1).strip() if label else ""
 
 
+# Labels come from the shared report vocabulary so a field added here is known
+# to the promoter and the renderer too.
 _REACH_FIELD_LABELS = {
-    "surface": "Surface",
-    "primitive": "Primitive",
-    "class": "Class",
-    "caller_contract": "Caller contract",
-    "caller_controls": "Caller controls",
-    "trigger_source": "Trigger source",
-    "parameter_control": "Parameter control",
-    "trusted_caller_actions": "Trusted caller actions",
-    "boundary": "Boundary",
-    "advisory": "Advisory",
+    key: report_identity.FIELD_LABELS[key]
+    for key in (
+        "surface", "primitive", "class", "caller_contract", "caller_controls",
+        "trigger_source", "parameter_control", "trusted_caller_actions",
+        "boundary", "advisory",
+    )
 }
 _OPTIONAL_REACH_FIELD_LABELS = {
-    # Older reports correctly describe only the vulnerable surface. Carrier is
-    # useful when it differs, but absence is not evidence that the surface is
-    # unknown and must not invalidate an otherwise complete report.
-    "reproducer_carrier": "Reproducer carrier",
-    # What the disclosed bytes actually are. Optional on purpose: a report that
-    # cannot say leaves severity exactly where it is, so classifying is the only
-    # way this field moves a score and silence never costs a finding.
-    "disclosed_content": "Disclosed content",
+    key: report_identity.FIELD_LABELS[key]
+    for key in (
+        # Older reports correctly describe only the vulnerable surface. Carrier
+        # is useful when it differs, but absence is not evidence that the
+        # surface is unknown and must not invalidate an otherwise complete
+        # report.
+        "reproducer_carrier",
+        # What the disclosed bytes actually are. Optional on purpose: a report
+        # that cannot say leaves severity exactly where it is, so classifying is
+        # the only way this field moves a score and silence never costs a
+        # finding.
+        "disclosed_content",
+    )
 }
 _ALL_REACH_FIELD_LABELS = {
     **_REACH_FIELD_LABELS,

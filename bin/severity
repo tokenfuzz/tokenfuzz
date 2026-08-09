@@ -2569,41 +2569,31 @@ def _replace_severity_section(text: str, new_section: str) -> str:
 
 # Reach fields the scorer resolves from the report and surfaces into the Fields
 # table when the author used bare labels. Missing fields remain unknown and
-# score conservatively; the scorer never invents reachability evidence.
+# score conservatively; the scorer never invents reachability evidence. Labels
+# come from the shared report vocabulary so the renderer knows every field the
+# scorer can put in the table.
+_FIELD_LABELS = report_identity.FIELD_LABELS
 _SURFACED_REACH_FIELDS = (
-    ("class_field",     "Class"),
-    ("primitive_field", "Primitive"),
-    ("surface",         "Surface"),
-    ("disclosed_content", "Disclosed content"),
-    ("trigger_source",  "Trigger source"),
-    ("caller_contract", "Caller contract"),
-    ("caller_controls", "Caller controls"),
-    ("trusted_caller_actions", "Trusted caller actions"),
-    ("parameter_control", "Parameter control"),
-    ("boundary",        "Boundary"),
-    ("advisory",        "Advisory"),
+    ("class_field",     _FIELD_LABELS["class"]),
+    ("primitive_field", _FIELD_LABELS["primitive"]),
+    ("surface",         _FIELD_LABELS["surface"]),
+    ("disclosed_content", _FIELD_LABELS["disclosed_content"]),
+    ("trigger_source",  _FIELD_LABELS["trigger_source"]),
+    ("caller_contract", _FIELD_LABELS["caller_contract"]),
+    ("caller_controls", _FIELD_LABELS["caller_controls"]),
+    ("trusted_caller_actions", _FIELD_LABELS["trusted_caller_actions"]),
+    ("parameter_control", _FIELD_LABELS["parameter_control"]),
+    ("boundary",        _FIELD_LABELS["boundary"]),
+    ("advisory",        _FIELD_LABELS["advisory"]),
 )
 
-# Labels recognized when locating and extending the report's Fields table.
-# Substantive table cells are authored evidence and remain untouched;
-# generated placeholder cells may be filled from validated reachability data.
-_KNOWN_FIELD_LABELS = frozenset({
-    "class", "severity", "file", "function", "line", "target",
-    "build config",
-    "primitive", "surface", "trigger source", "caller contract",
-    "caller controls", "trusted caller actions", "parameter control",
-    "boundary", "advisory", "disclosed content",
-})
-
-# A `|` table is the report's Fields table only when a row carries one of these
-# identity labels: the `Field` header cell, the always-present Severity/Class
-# rows, or a reach label. File/Function/Line/Target are deliberately excluded —
-# they double as evidence/stack-table column headers (`| File | Note |`), so
-# matching them would mistake an evidence table for the Fields table, either
-# suppressing synthesis or appending reach rows into the wrong table.
-_FIELDS_TABLE_IDENTITY = frozenset(
-    {"field"} | (_KNOWN_FIELD_LABELS - {"file", "function", "line", "target"})
-)
+# The Fields table is identified by the shared `| Field | Value |` signature
+# in report_identity — the same predicate `bin/render-md` draws its grid from,
+# so the writer and the renderer agree on which table they mean by
+# construction. Inferring it from row labels instead cannot work: every label
+# distinctive enough to identify the table (Strategy, Class, File) is also a
+# plausible first column of an ordinary comparison table, and matching one
+# would append reach rows into that table and synthesize no real grid.
 
 
 def _sync_table_field(text: str, field: str, value: str) -> tuple[str, bool]:
@@ -2635,24 +2625,19 @@ def _sync_table_field(text: str, field: str, value: str) -> tuple[str, bool]:
 
 
 def _find_fields_table_end(lines: list[str]) -> int:
-    """Index of the last row of the report's Fields table — the first
-    contiguous run of `|` rows carrying a known structured field label
-    (Class/Severity/File/…). Returns -1 when the report has no such table."""
-    i, n = 0, len(lines)
-    while i < n:
-        if lines[i].lstrip().startswith("|"):
-            j = i
-            has_known = False
-            while j < n and lines[j].lstrip().startswith("|"):
-                parts = lines[j].split("|")
-                if len(parts) >= 3 and parts[1].strip().lower() in _FIELDS_TABLE_IDENTITY:
-                    has_known = True
-                j += 1
-            if has_known:
-                return j - 1
-            i = j
-        else:
-            i += 1
+    """Index of the last row of the report's Fields table — the run of `|`
+    rows under the first `| Field | Value |` header and its separator.
+    Returns -1 when the report has no such table."""
+    n = len(lines)
+    for i, line in enumerate(lines):
+        if i + 1 >= n or not report_identity.is_fields_table_header(
+            line, lines[i + 1],
+        ):
+            continue
+        end = i + 1
+        while end + 1 < n and lines[end + 1].lstrip().startswith("|"):
+            end += 1
+        return end
     return -1
 
 
