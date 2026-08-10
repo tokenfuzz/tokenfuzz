@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 import sanitizer
 import sanitizer_run
 import target_config
+import sanitizer_helpers
 from sanitizer_helpers import (
     _BROWSER_NOISE, copy_file, copy_filtered,
     firefox_fuzz_targets,
@@ -111,6 +112,13 @@ def runtime_env(
     return environment
 
 
+def run_symbolized(command: list[str], timeout: int, environment: dict[str, str], **kwargs):
+    """This runner's binding of the shared symbolizing execution helper."""
+    return sanitizer_helpers.run_symbolized(
+        command, timeout, environment, "ASAN_OPTIONS", **kwargs,
+    )
+
+
 def run_browser(option_string: str, timeout: int, args: list[str]) -> int:
     if CONFIG and not target_config.browser_page_launch_configured(CONFIG):
         print(
@@ -144,8 +152,13 @@ def run_browser(option_string: str, timeout: int, args: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
+        # The browser writes its ASan reports to log_path rather than stdout, so
+        # it symbolizes those files below instead of routing through
+        # run_symbolized.
+        offline = sanitizer.symbolize_available()
         environment = runtime_env(
-            f"{option_string}:log_path={output_dir / 'asan.log'}",
+            f"{option_string}:log_path={output_dir / 'asan.log'}"
+            + (":symbolize=0" if offline else ""),
             profile=profile,
             testcase=sanitizer_run.browser_testcase_value(args),
         )
@@ -162,6 +175,10 @@ def run_browser(option_string: str, timeout: int, args: list[str]) -> int:
             )
             reports = [path for path in output_dir.glob("asan.log.*") if path.stat().st_size]
             for report in reports:
+                if offline:
+                    # Before the copies below, so the persisted log carries the
+                    # source locations too.
+                    sanitizer.symbolize_file(report)
                 print(f"=== ASan report: {report.name} ===")
                 copy_file(report, sys.stdout.buffer)
             if reports:
@@ -199,7 +216,9 @@ def run_js(option_string: str, timeout: int, args: list[str]) -> int:
         return 1
     testcase, flags, script_args = split_js_args(args)
     js = BASE_ENV.get("ASAN_JS", str(BUILD_DIR / "dist/bin/js"))
-    completed = run_timeout([js, *flags, *testcase, *script_args], timeout, env=runtime_env(option_string))
+    completed = run_symbolized(
+        [js, *flags, *testcase, *script_args], timeout, runtime_env(option_string),
+    )
     if completed.returncode == 124:
         print(f"[run-asan] JS shell timed out after {timeout}s", file=sys.stderr)
     elif completed.returncode == 0:
@@ -227,7 +246,7 @@ def run_xpcshell(option_string: str, timeout: int, args: list[str]) -> int:
         return 2
     environment = runtime_env(option_string)
     environment["MOZ_DISABLE_CONTENT_SANDBOX"] = "1"
-    completed = run_timeout([*command, *extra], timeout, env=environment)
+    completed = run_symbolized([*command, *extra], timeout, environment)
     if completed.returncode == 124:
         print(f"[run-asan] xpcshell timed out after {timeout}s", file=sys.stderr)
     elif completed.returncode == 0:
@@ -264,25 +283,17 @@ def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
         return 2
     disabled = BASE_ENV.get("ASAN_GENERIC_DISABLE_OPTIONS") == "1" or bool(CONFIG and CONFIG.sanitizers_explicitly_disabled)
     environment = runtime_env(option_string, "none" if disabled else "asan")
-    offline = not disabled and sanitizer.symbolize_available()
-    if offline:
-        environment["ASAN_OPTIONS"] += ":symbolize=0"
     command = [binary]
     if BASE_ENV.get("ASAN_GENERIC_SKIP_TESTCASE", "0") != "1":
         command.append(testcase)
     command.extend(extra)
-    if offline:
-        with capture_timeout(
-            command, timeout, rss_mb=sanitizer.generic_rss_limit_mb(BASE_ENV),
-            env=environment,
-        ) as (completed, report):
-            sanitizer.symbolize_file(report)
-            copy_file(report, sys.stdout.buffer)
+    rss_mb = sanitizer.generic_rss_limit_mb(BASE_ENV)
+    if disabled:
+        # Options are off by operator choice, so there is no ASAN_OPTIONS to
+        # turn symbolization off in and nothing to symbolize.
+        completed = run_timeout(command, timeout, rss_mb=rss_mb, env=environment)
     else:
-        completed = run_timeout(
-            command, timeout, rss_mb=sanitizer.generic_rss_limit_mb(BASE_ENV),
-            env=environment,
-        )
+        completed = run_symbolized(command, timeout, environment, rss_mb=rss_mb)
     if completed.returncode == 124:
         print(f"[run-asan] generic runner timed out after {timeout}s", file=sys.stderr)
     elif completed.returncode == 0:
@@ -332,9 +343,9 @@ def run_fuzz(option_string: str, timeout: int, args: list[str], repro: bool = Fa
     ]
     crash_dir = Path(BASE_ENV.get("FUZZ_CRASH_DIR", str(sanitizer.default_fuzz_crash_dir(BASE_ENV))))
     crash_dir.mkdir(parents=True, exist_ok=True)
-    completed = run_timeout(
-        [browser_binary(), *clean_args], timeout, kill=True, cwd=crash_dir,
-        env=fuzz_environment(option_string, fuzzer),
+    completed = run_symbolized(
+        [browser_binary(), *clean_args], timeout,
+        fuzz_environment(option_string, fuzzer), kill=True, cwd=crash_dir,
     )
     if completed.returncode in {124, 137}:
         print(f"[run-asan] Fuzz {'repro ' if repro else ''}killed after {timeout}s", file=sys.stderr)
@@ -362,7 +373,10 @@ def run_fuzz_js(option_string: str, timeout: int, args: list[str]) -> int:
     ]
     crash_dir = Path(BASE_ENV.get("FUZZ_CRASH_DIR", str(sanitizer.default_fuzz_crash_dir(BASE_ENV))))
     crash_dir.mkdir(parents=True, exist_ok=True)
-    run_timeout([str(binary), *clean_args], timeout, cwd=crash_dir, env=runtime_env(option_string) | {"FUZZER": fuzzer})
+    run_symbolized(
+        [str(binary), *clean_args], timeout,
+        runtime_env(option_string) | {"FUZZER": fuzzer}, cwd=crash_dir,
+    )
     print(f"[run-asan] Fuzz artifacts (if any): {crash_dir}", file=sys.stderr)
     return 0
 

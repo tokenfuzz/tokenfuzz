@@ -14,6 +14,40 @@ from pathlib import Path
 from verdict import CLEAN_PATTERN, CRASH_PATTERNS
 
 
+def run_symbolized(
+    command, timeout: int, environment: dict, options_var: str, **kwargs,
+):
+    """Run a sanitizer target and emit its report with source locations.
+
+    In-process symbolization has to spawn a child, which a sandboxed agent shell
+    can refuse; the report then names functions but carries no source line. So
+    the run captures with symbolization off and the report is symbolized offline
+    against the same build. One helper for every mode of every runner — the modes
+    that grew their own execution path are exactly the ones that kept shipping
+    addresses. Without an offline symbolizer to fall back on, the command streams
+    as it did before.
+
+    ``options_var`` is the sanitizer's options variable within ``environment``
+    (``ASAN_OPTIONS``, ``UBSAN_OPTIONS``, …); later values win, so appending is
+    enough to turn symbolization off.
+    """
+    import sanitizer  # deferred: sanitizer imports this module
+    from timeout import capture_timeout, run_timeout
+
+    if not sanitizer.symbolize_available():
+        return run_timeout(command, timeout, env=environment, **kwargs)
+    environment = dict(environment)
+    environment[options_var] = (
+        f"{environment.get(options_var, '')}:symbolize=0".lstrip(":")
+    )
+    with capture_timeout(
+        command, timeout, env=environment, **kwargs
+    ) as (completed, report):
+        sanitizer.symbolize_file(report)
+        copy_file(report, sys.stdout.buffer)
+    return completed
+
+
 def file_contains(path: Path, needle: bytes) -> bool:
     """Search a potentially large diagnostic without loading it into memory."""
     overlap = b""

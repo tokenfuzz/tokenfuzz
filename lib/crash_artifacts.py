@@ -538,31 +538,52 @@ def testcase_from_sanitizer_header(sanitizer_files: Iterable[Path], bases: Itera
     return None
 
 
+SANITIZER_NAME = "sanitizer.txt"
+# The names a saved diagnostic may have. Kept as one list so a consumer that has
+# to visit every diagnostic cannot fall behind the one that picks a primary.
+SANITIZER_ALIASES = frozenset({
+    "asan.txt", "asan-output.txt", "asan_output.txt",
+    "msan.txt", "msan-output.txt", "msan_output.txt",
+    "tsan.txt", "tsan-output.txt", "tsan_output.txt",
+    "ubsan.txt", "ubsan-output.txt", "ubsan_output.txt",
+})
+SANITIZER_SUFFIXES = (".asan.txt", ".msan.txt", ".tsan.txt", ".ubsan.txt")
+
+
+def is_sanitizer_name(name: str) -> bool:
+    return (
+        name == SANITIZER_NAME
+        or name.lower() in SANITIZER_ALIASES
+        or name.endswith(SANITIZER_SUFFIXES)
+    )
+
+
 def find_primary_sanitizer(scan_dirs: Iterable[Path]) -> Optional[Path]:
     dirs = [Path(d) for d in scan_dirs]
     for d in dirs:
-        p = d / "sanitizer.txt"
+        p = d / SANITIZER_NAME
         if _nonempty_file(p):
             return p
     matches: list[Path] = []
-    aliases = {
-        "asan.txt", "asan-output.txt", "asan_output.txt",
-        "msan.txt", "msan-output.txt", "msan_output.txt",
-        "tsan.txt", "tsan-output.txt", "tsan_output.txt",
-        "ubsan.txt", "ubsan-output.txt", "ubsan_output.txt",
-    }
     for d in dirs:
         for p in _visible_files(d):
-            name = p.name
-            if (
-                name.lower() in aliases
-                or name.endswith(".asan.txt")
-                or name.endswith(".msan.txt")
-                or name.endswith(".tsan.txt")
-                or name.endswith(".ubsan.txt")
-            ):
+            if p.name != SANITIZER_NAME and is_sanitizer_name(p.name):
                 matches.append(p)
     return sorted(matches, key=lambda p: p.name.casefold())[0] if matches else None
+
+
+def sanitizer_diagnostics(artifact_dir: Path) -> list[Path]:
+    """Every saved diagnostic for one artifact, not just the primary.
+
+    A consumer that rewrites diagnostics has to reach all of them; repairing the
+    primary alone would leave a second copy disagreeing with it.
+    """
+    found: list[Path] = []
+    for directory in crash_evidence_dirs(artifact_dir):
+        for path in sorted(_visible_files(directory)):
+            if is_sanitizer_name(path.name) and _nonempty_file(path):
+                found.append(path)
+    return found
 
 
 def crash_evidence_dirs(crash_dir: Path) -> list[Path]:

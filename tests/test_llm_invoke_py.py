@@ -299,6 +299,32 @@ assert_eq(2, len(indices), "gemini emits two --add-dir flags")
 ok(f[indices[0] + 1] == "/a", "first gemini add-dir = /a")
 ok(f[indices[1] + 1] == "/b", "second gemini add-dir = /b")
 
+# A benchmark cell reaches the target tree by symlink, and Claude Code matches
+# its sandbox write rules against the resolved path: granting only the facade
+# spelling left the target readable and unwritable, which took out the build
+# lease and with it every sanitizer entry point.
+print("\nclaude grants the resolved spelling of a symlinked directory")
+# Resolved up front: the platform temp root is itself a symlink on macOS, which
+# would make even the non-symlinked control case resolve to something else.
+_sandbox_tmp = Path(tempfile.mkdtemp(prefix="granted-dirs-")).resolve()
+try:
+    _real = _sandbox_tmp / "real"
+    _real.mkdir()
+    _facade = _sandbox_tmp / "facade"
+    _facade.symlink_to(_real)
+    proc = run(["agent-flags", "claude", "--add-dirs", str(_facade)], check=True)
+    f = flags(proc)
+    granted = [f[i + 1] for i, x in enumerate(f) if x == "--add-dir"]
+    ok(str(_facade) in granted, "the facade spelling stays granted")
+    ok(str(_real.resolve()) in granted, "the resolved target tree is granted too")
+    # An ordinary directory must not be granted twice.
+    proc = run(["agent-flags", "claude", "--add-dirs", str(_real)], check=True)
+    f = flags(proc)
+    assert_eq(1, len([x for x in f if x == "--add-dir"]),
+              "a path that is already resolved is granted once")
+finally:
+    shutil.rmtree(_sandbox_tmp, ignore_errors=True)
+
 
 # ── decide-flags ────────────────────────────────────────────────────
 print("\ndecide-flags")

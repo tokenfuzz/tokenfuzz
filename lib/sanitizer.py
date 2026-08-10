@@ -24,7 +24,16 @@ SANITIZER_ENV = {
     "tsan": "TSAN_OPTIONS",
 }
 FUZZER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-RAW_FRAME = re.compile(r"^ *#[0-9]+ +0x[0-9a-f]+ +\([^)]*\+0x[0-9a-f]+\)", re.M)
+# A frame with no source location: either bare (symbolize=0) or ASan's dladdr
+# fallback, which names the function but not the file — `#0 0xADDR in func+0x4a0
+# (/lib/foo.dylib:arm64+0x84f30)`. Recognition anchors on the trailing
+# module+offset, which is what makes such a frame repairable, and treats
+# whatever sits between it and the address as opaque: a demangled C++ name
+# carries spaces and parentheses (`operator new(unsigned long)+0x20`), so any
+# pattern that constrains that text only recognizes plain C identifiers. A
+# fully symbolized frame has no such trailer.
+RAW_FRAME = re.compile(
+    r"^ *#[0-9]+ +0x[0-9a-f]+ +(?:in +.*? +)?\([^)]*\+0x[0-9a-f]+\)", re.M)
 
 
 def build_dir(name: str, target_root: str = "", env: Mapping[str, str] | None = None) -> Path:
@@ -146,13 +155,21 @@ def symbolize_available() -> bool:
     return (Path(tool).is_file() and os.access(tool, os.X_OK)) or bool(shutil.which("atos") or shutil.which("addr2line"))
 
 
-def symbolize_file(path: str | os.PathLike[str]) -> None:
+def symbolize_file(path: str | os.PathLike[str]) -> bool:
+    """Rewrite a sanitizer report in place with source locations.
+
+    Returns whether the report is free of unsymbolized frames afterwards. A
+    failure is never fatal — the raw report is still evidence — but it must not
+    be silent: this returned quietly when the symbolizer could not start, and a
+    whole benchmark run shipped address-only stacks while reporting itself
+    clean. Anything that leaves a raw frame behind says so on stderr.
+    """
     report = Path(path)
     if not report.is_file() or not report.stat().st_size or not SYMBOLIZER.is_file():
-        return
+        return False
     raw = report.read_text(errors="replace")
     if not RAW_FRAME.search(raw):
-        return
+        return True
     args = [sys.executable, str(SYMBOLIZER)]
     if sys.platform == "darwin" and shutil.which("atos"):
         args.append("--no-llvm-symbolizer")
@@ -163,12 +180,41 @@ def symbolize_file(path: str | os.PathLike[str]) -> None:
             [sys.executable, str(Path(__file__).with_name("timeout.py")), "60", "TERM", "0", *args],
             stdin=source,
             stdout=rendered,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             check=False,
         )
         rendered.flush()
-        if completed.returncode == 0 and Path(rendered.name).stat().st_size:
-            report.write_bytes(Path(rendered.name).read_bytes())
+        if completed.returncode != 0 or not Path(rendered.name).stat().st_size:
+            _warn_unsymbolized(report, completed)
+            return False
+        # Replaced, never truncated in place: this rewrites saved evidence now,
+        # not just a runner's scratch output, and a write interrupted halfway
+        # would leave the only copy of a diagnostic damaged.
+        staged = report.with_name(f"{report.name}.symbolized")
+        staged.write_bytes(Path(rendered.name).read_bytes())
+        os.replace(staged, report)
+    if RAW_FRAME.search(report.read_text(errors="replace")):
+        # The symbolizer ran and answered, and frames still carry no source
+        # location: a stripped build, a moved binary, or a debug-info mismatch.
+        _warn_unsymbolized(report, None)
+        return False
+    return True
+
+
+def _warn_unsymbolized(report: Path, completed) -> None:
+    """Say that a report kept raw frames, and why, on the runner's stderr."""
+    detail = "symbolizer left raw frames"
+    if completed is not None:
+        tail = (completed.stderr or b"").decode(errors="replace").strip().splitlines()
+        reason = tail[-1] if tail else f"rc={completed.returncode}"
+        detail = f"symbolizer failed: {reason}"
+        if completed.returncode == 124:
+            detail = "symbolizer timed out after 60s"
+    print(
+        f"[sanitizer] WARN: {report.name} keeps unsymbolized frames "
+        f"({detail}); stacks will have no source lines",
+        file=sys.stderr,
+    )
 
 
 def warn_if_disabled(name: str, config=None) -> None:

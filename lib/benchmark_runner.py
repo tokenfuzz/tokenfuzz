@@ -37,6 +37,7 @@ import llm_usage
 import process_tree
 import report_identity
 import runner_preflight
+import sanitizer as sanitizer_lib
 import severity_receipt
 import stack_frames
 import target_config
@@ -1100,6 +1101,14 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
     binary = fields.get("BIN", "")
     testcase = fields.get("TESTCASE", "")
     sanitizer_name = fields.get("SAN", "asan")
+    # A model-direct cell drives the sanitizer binary itself, and a sandbox can
+    # deny the in-process symbolizer its spawn, so the artifact arrives naming
+    # functions but no source lines. This is the one point that already rewrites
+    # it, still holds the build lease that guarantees matching debug info, and
+    # runs for both conditions under the same policy — so repair it here rather
+    # than let a report render addresses. Cheap and idempotent: a report with no
+    # raw frame left returns immediately.
+    sanitizer_lib.symbolize_file(crash_dir / "sanitizer.txt")
     try:
         original = (crash_dir / "sanitizer.txt").read_text(
             encoding="utf-8", errors="replace"
@@ -1297,6 +1306,100 @@ def _measured_crash_rate(path: Path) -> tuple[int, int] | None:
         return None
     crashes, runs = rates[-1]
     return int(crashes), int(runs)
+
+
+def repair_pool_report_symbols(pool: Path, skip: "set[str] | frozenset[str]" = frozenset()) -> int:
+    """Give every pooled diagnostic its source locations. Returns repairs made.
+
+    The last point where an artifact's origin no longer matters. A report can
+    arrive without source lines from any of several routes — a model-direct cell
+    driving the binary itself, a runner mode that hands its output straight to
+    stdout, an agent shell whose sandbox refused the in-process symbolizer its
+    spawn — and reverification reaches only crashes it has a rate to measure.
+    Clustering and the rendered report read these files afterwards, so this runs
+    before them and covers findings as well as crashes, in the combined tree and
+    in every condition subtree split out of it. Idempotent: a report with no
+    unsymbolized frame left returns immediately.
+
+    ``skip`` names artifacts whose build could not be verified. Symbolization is
+    a representation-only rewrite, so a repaired artifact's validation receipt is
+    rebound rather than left stale — which would block publication of a pool
+    whose reports never changed meaning.
+    """
+    repaired = 0
+    for root, reports in _pool_diagnostics(pool, skip).items():
+        snapshots = validation_receipt.snapshot_current_tree(root)
+        rebind = False
+        for report in reports:
+            before = report.read_bytes()
+            sanitizer_lib.symbolize_file(report)
+            if report.read_bytes() != before:
+                repaired += 1
+                rebind = True
+        if rebind:
+            validation_receipt.rewrite_tree_after_equivalent_transform(snapshots)
+    return repaired
+
+
+def _pool_diagnostics(
+    pool: Path, skip: "set[str] | frozenset[str]" = frozenset(),
+) -> "dict[Path, list[Path]]":
+    """Pooled sanitizer diagnostics, grouped by the tree that owns their receipts."""
+    grouped: dict[Path, list[Path]] = {}
+    for root in _pool_artifact_roots(pool):
+        for kind, prefix in (
+            ("crashes", "CRASH-"), ("crashes-rejected", "CRASH-"),
+            ("findings", "FIND-"), ("findings-rejected", "FIND-"),
+        ):
+            for artifact_dir in sorted((root / kind).glob(f"{prefix}*")):
+                if artifact_dir.name in skip:
+                    continue
+                found = crash_artifacts.sanitizer_diagnostics(artifact_dir)
+                if found:
+                    grouped.setdefault(root, []).extend(found)
+    return grouped
+
+
+def pool_reports_missing_symbols(pool: Path) -> bool:
+    """Whether any pooled diagnostic still has a frame with no source location.
+
+    Only asked when the build gate refused the repair, so that a run with
+    nothing to symbolize does not report a problem it does not have.
+    """
+    return any(
+        sanitizer_lib.RAW_FRAME.search(report.read_text(errors="replace"))
+        for reports in _pool_diagnostics(pool).values()
+        for report in reports
+    )
+
+
+def _pool_build_unverified(bench_dir: Path, target: Path, target_slug: str) -> str:
+    """Why the run's pinned build cannot be trusted to symbolize its reports.
+
+    A pooled finding records the condition it came from, not the cell, so there
+    is no per-artifact build to check it against — and a run pins one build
+    generation for every cell, so the run's own recorded identity is the gate.
+    It has to hold: symbolizing against a build that has moved on puts a
+    different function and line on the frame, and plausible-but-wrong evidence is
+    worse than an address. `--regenerate` continues over exactly that, so this
+    cannot be assumed.
+    """
+    snapshot = bench_dir / "target.toml"
+    try:
+        config = _benchmark_config(
+            target, target_slug, snapshot if snapshot.is_file() else None,
+        )
+    except (OSError, ValueError):
+        config = None
+    try:
+        recorded = json.loads(
+            (bench_dir / "run.json").read_text(encoding="utf-8")
+        ).get("build_identity")
+    except (OSError, ValueError):
+        recorded = None
+    if not isinstance(recorded, dict) or not recorded:
+        return "the run recorded no build identity"
+    return "; ".join(build_preflight.pinned_build_problems(target, recorded, config))
 
 
 def reverify_pool_crash_rates(
@@ -1556,8 +1659,27 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             target_config_sha256=config_digest,
         ):
             triage.fill_reach_fields_tree(pool)
+        blocked = (
+            _pool_replay_blocked(bench_dir, pool, target, target_slug)
+            if (pool / "crashes").is_dir() else {}
+        )
+        # Ordered after the build gate on purpose: symbolizing against a build
+        # that has moved on would name a different function on the frame.
+        unverified = _pool_build_unverified(bench_dir, target, target_slug)
+        if unverified:
+            if pool_reports_missing_symbols(pool):
+                log(
+                    f"WARN: pooled diagnostics left unsymbolized — {unverified}; "
+                    "original evidence was left unchanged"
+                )
+        else:
+            repaired = repair_pool_report_symbols(pool, skip=set(blocked))
+            if repaired:
+                log(
+                    f"Symbolized {repaired} pooled diagnostic(s) that arrived "
+                    "without source lines"
+                )
         if (pool / "crashes").is_dir():
-            blocked = _pool_replay_blocked(bench_dir, pool, target, target_slug)
             for message in sorted(set(blocked.values())):
                 count = sum(1 for value in blocked.values() if value == message)
                 log(

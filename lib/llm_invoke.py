@@ -763,6 +763,28 @@ def agy_model_label(model: str, effort: str = "") -> str:
     return labels[selected]
 
 
+def granted_dirs(add_dirs: str) -> list[str]:
+    """Each granted directory, plus its resolved path when that differs.
+
+    Claude Code matches its sandbox write rules against the resolved path, so a
+    directory reached by symlink comes out readable and silently unwritable.
+    That is exactly what a benchmark cell grants, because its facade reaches
+    the target tree through a symlink: the agent could then not open the
+    target's build lease, and every sanitizer entry point died before it ran.
+    Granting both spellings widens nothing — the resolved path is the one the
+    kernel was already checking.
+    """
+    granted: list[str] = []
+    for raw in (add_dirs or "").split(","):
+        directory = raw.strip()
+        if not directory:
+            continue
+        for spelling in (directory, os.path.realpath(directory)):
+            if spelling not in granted:
+                granted.append(spelling)
+    return granted
+
+
 def agent_flags(
     backend: str,
     model: str = "",
@@ -826,10 +848,8 @@ def agent_flags(
             # Deny both current and legacy delegation tool names so local
             # Claude settings cannot silently expand that concurrency.
             flags += ["--disallowedTools", "Agent,Task"]
-        for d in (add_dirs or "").split(","):
-            d = d.strip()
-            if d:
-                flags += ["--add-dir", d]
+        for d in granted_dirs(add_dirs):
+            flags += ["--add-dir", d]
         return flags
 
     if backend == "codex":

@@ -298,6 +298,113 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     check("sample.c:42" in raw_report.read_text(), "offline symbolization replaces raw frames in place")
 
+    # A sandboxed agent shell can be refused a pty, and atos behind a pty is the
+    # only path that symbolizes a macOS debug-map build. Losing it silently cost
+    # a whole run its file:line frames, so the converter runs the child per
+    # address instead of giving up.
+    import clusterfuzz_symbolizer  # noqa: E402
+    echo_answer = ["/bin/sh", "-c",
+                   'printf "got symbolicator for x\\nANSWER %s\\n" "$1"', "sh"]
+    with mock.patch.object(clusterfuzz_symbolizer.pty, "fork",
+                           side_effect=OSError("out of pty devices")):
+        converter = clusterfuzz_symbolizer.UnbufferedLineConverter(echo_answer)
+    equal("ANSWER 0x2a", converter.convert("0x2a"),
+          "no pty available still converts an address")
+    # A frame nothing can resolve must keep its module and offset: that is all
+    # the forensics it has left. Rendering an empty answer as "<addr> in "
+    # destroyed it, on the pty path as well as the per-address fallback.
+    with mock.patch.object(clusterfuzz_symbolizer.pty, "fork",
+                           side_effect=OSError("out of pty devices")):
+        darwin = clusterfuzz_symbolizer.DarwinSymbolizer(
+            "0x1000", "/nonexistent/sample-bin", "arm64")
+
+    def _keeps_provenance(label):
+        frame = darwin.symbolize("0x1000", "/nonexistent/sample-bin", "0x20")
+        check(
+            bool(frame) and "/nonexistent/sample-bin" in frame[0] and "0x20" in frame[0],
+            f"an unresolvable frame keeps its module and offset ({label})",
+            repr(frame),
+        )
+
+    darwin.atos.args = ["/nonexistent/atos"]
+    _keeps_provenance("per-address child cannot run")
+    # The same harm on the pty path, where a dead child yields an empty line.
+    darwin.atos.convert = lambda line: ""
+    _keeps_provenance("symbolizer answers nothing")
+    # atos echoes the address back for an offset it cannot resolve inside a
+    # binary it did open. Accepting that as a symbol produced "<addr> in 0x…",
+    # which no longer looks raw, so the loss was reported as success.
+    darwin.atos.convert = lambda line: line
+    _keeps_provenance("symbolizer echoes the address back")
+
+    # ASan's dladdr fallback names the function but not the file. Those frames
+    # went unrecognized, so a report full of them was declared nothing-to-do.
+    dladdr = "    #0 0x1036d4f30 in xmlBufGetChildContent+0x4a0 (/t/libxml2.dylib:arm64+0x84f30)\n"
+    check(bool(sanitizer.RAW_FRAME.search(dladdr)),
+          "a dladdr frame counts as needing symbolization")
+    check(bool(clusterfuzz_symbolizer.STACK_TRACE_LINE_REGEX.match(dladdr)),
+          "the symbolizer parses a dladdr frame instead of passing it through")
+    check(not sanitizer.RAW_FRAME.search("    #0 0x123 in app_parse sample.c:42\n"),
+          "an already symbolized frame is not re-symbolized")
+    check(not sanitizer.RAW_FRAME.search("    #4 0x180b37dfc in start (in dyld) + 6988\n"),
+          "a resolved frame naming its module is not mistaken for a raw one")
+
+    # A demangled C++ name carries spaces and parentheses. Constraining the
+    # symbol text recognized only plain C identifiers, which is why a libxml2
+    # validation passed while a C++ target stayed unrepaired and unwarned.
+    for name in ("operator new(unsigned long)", "foo::bar(std::__1::string const&)"):
+        frame = f"    #0 0x1000 in {name}+0x20 (/tmp/a.dylib:arm64+0x30)\n"
+        check(bool(sanitizer.RAW_FRAME.search(frame)),
+              f"a dladdr frame named `{name[:24]}` counts as needing symbolization")
+        check(bool(clusterfuzz_symbolizer.STACK_TRACE_LINE_REGEX.match(frame)),
+              f"the symbolizer parses a dladdr frame named `{name[:24]}`")
+        equal(("0", "0x1000", "/tmp/a.dylib", "0x30", "arm64"),
+              clusterfuzz_symbolizer.SymbolizationLoop()._line_parser(frame),
+              "the module, offset and arch survive a name containing spaces")
+    check(not sanitizer.RAW_FRAME.search(
+              "    #0 0x1000 in foo::bar(std::string const&) a.cc:10\n"),
+          "a symbolized C++ frame is not re-symbolized")
+
+    # An alternate build tree carries a '+' in its directory name, and stopping
+    # the module at the first '+' left the whole frame unparsed.
+    plus_frame = ("    #0 0x1000 in app_parse+0x20 "
+                  "(targets/t/build-asan+cfg-widened-0000000000/lib.dylib:arm64+0x30)\n")
+    equal(("0", "0x1000", "targets/t/build-asan+cfg-widened-0000000000/lib.dylib", "0x30", "arm64"),
+          clusterfuzz_symbolizer.SymbolizationLoop()._line_parser(plus_frame),
+          "a module path containing '+' anchors on the trailing offset")
+
+    # Every backend has an answer that means "resolved nothing": atos echoes the
+    # address, with or without the module it opened, and llvm-symbolizer and
+    # addr2line answer `??`. Rendering any of them as a symbol discarded the
+    # module and offset, so the test is the result, not each tool's shape.
+    equal("", clusterfuzz_symbolizer.get_stack_frame("/t/lib.dylib", "0x1000", "??", "??:0:0"),
+          "an unresolved llvm/addr2line answer yields no frame at all")
+    darwin.atos.convert = lambda line: "0x00000001 (in lib.dylib)"
+    _keeps_provenance("symbolizer answers an address plus a module")
+    darwin.atos.convert = lambda line: "wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124"
+    frame = darwin.symbolize("0x1000", "/nonexistent/sample-bin", "0x20")
+    check(bool(frame) and "wrap_free" in frame[0],
+          "a real symbol with no source file is still kept", repr(frame))
+    kept = clusterfuzz_symbolizer.SymbolizationLoop().process_stacktrace(
+        "    #0 0x1000  (/t/definitely-not-here.dylib:arm64+0x30)\n")
+    check("/t/definitely-not-here.dylib" in kept and "0x30" in kept,
+          "a frame nothing could resolve survives the pass intact", repr(kept))
+
+    # Silence is what let a whole run ship address-only stacks while reporting
+    # itself clean, so a report that keeps raw frames must say so.
+    stubborn = root / "stubborn-symbols.txt"
+    stubborn.write_text(dladdr, encoding="utf-8")
+    def _no_op_symbolizer(command, **kwargs):
+        kwargs["stdout"].write(dladdr.encode())
+        return SimpleNamespace(returncode=0)
+    with mock.patch.object(sanitizer.sys, "platform", "darwin"), \
+         mock.patch.object(sanitizer.shutil, "which", side_effect=lambda name: "/usr/bin/atos" if name == "atos" else None), \
+         mock.patch.object(sanitizer.subprocess, "run", side_effect=_no_op_symbolizer):
+        symbolized = sanitizer.symbolize_file(stubborn)
+    check(symbolized is False, "a report that keeps raw frames reports failure")
+    check(dladdr.strip() in stubborn.read_text(),
+          "a failed symbolization leaves the original frames intact")
+
     completed = run_timeout([sys.executable, "-c", "print('timeout-ok')"], 2, capture_output=True)
     check(completed.returncode == 0 and completed.stdout.strip() == b"timeout-ok", "timeout runner captures successful commands")
     completed = run_timeout([sys.executable, "-c", "import time; time.sleep(2)"], 1, capture_output=True)

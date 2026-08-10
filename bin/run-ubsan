@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import sanitizer
+import sanitizer_helpers
 import sanitizer_run
 import target_config
 from sanitizer_helpers import (
@@ -99,8 +100,13 @@ def run_browser(options: str, timeout: int, args: list[str]) -> int:
             )
             return 2
         runner = SanitizerRunner("ubsan", CONFIG, ENV)
+        # The browser writes its reports to log_path rather than to stdout, so
+        # those files are symbolized below instead of routing through the shared
+        # execution helper.
+        offline = sanitizer.symbolize_available()
         environment = runner.runtime_env(
-            f"{options}:log_path={output_dir / 'ubsan.log'}",
+            f"{options}:log_path={output_dir / 'ubsan.log'}"
+            + (":symbolize=0" if offline else ""),
             profile=profile,
             testcase=sanitizer_run.browser_testcase_value(args),
         )
@@ -119,6 +125,10 @@ def run_browser(options: str, timeout: int, args: list[str]) -> int:
             )
             reports = [path for path in output_dir.glob("ubsan.log.*") if path.stat().st_size]
             for report in reports:
+                if offline:
+                    # Before the copies below, so a persisted log carries the
+                    # source locations too.
+                    sanitizer.symbolize_file(report)
                 print(f"=== UBSan report: {report.name} ===")
                 copy_file(report, sys.stdout.buffer)
             if reports:
@@ -159,7 +169,9 @@ def browser_fuzz(options: str, timeout: int, args: list[str], repro: bool) -> in
         "MOZ_DISABLE_CONTENT_SANDBOX": "1",
         "UBSAN_OPTIONS": sanitizer.runtime_options("ubsan", options, ENV),
     }
-    return run_timeout([browser_binary(), *clean_args], timeout, env=environment).returncode
+    return sanitizer_helpers.run_symbolized(
+        [browser_binary(), *clean_args], timeout, environment, "UBSAN_OPTIONS",
+    ).returncode
 
 
 def main(argv: list[str]) -> int:

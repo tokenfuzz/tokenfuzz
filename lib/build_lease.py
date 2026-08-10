@@ -112,18 +112,33 @@ def _pending_writer_alive(lock: Path) -> bool:
     return False
 
 
-def _acquire(lock: Path, operation: int, deadline: float) -> "int | None":
-    """Poll for the lock until the deadline. Returns an fd, or None on timeout."""
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+# Why a lease could not be taken, so a caller reports the one that happened.
+_UNWRITABLE = "unwritable"
+_TIMEOUT = "timeout"
+
+
+def _acquire(lock: Path, operation: int, deadline: float) -> "tuple[int | None, str]":
+    """Poll for the lock until the deadline. Returns an fd, or why not.
+
+    A tree the caller cannot write has no lease to take at all: a read-only
+    checkout, or an agent shell whose sandbox denies writes under the target.
+    This lock exists to keep a rebuild out of a tree in use, so being unable to
+    take it falls open with a warning exactly like contention does — raising
+    here instead killed every sanitizer entry point before it ran a testcase.
+    """
+    try:
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None, _UNWRITABLE
     while True:
         try:
             fcntl.flock(fd, operation | fcntl.LOCK_NB)
-            return fd
+            return fd, ""
         except OSError:
             if time.monotonic() >= deadline:
                 os.close(fd)
-                return None
+                return None, _TIMEOUT
             time.sleep(_POLL_SECONDS)
 
 
@@ -158,15 +173,20 @@ def _lease(
             time.sleep(_POLL_SECONDS)
 
     started = time.monotonic()
-    fd = _acquire(lock, operation, deadline)
+    fd, reason = _acquire(lock, operation, deadline)
     waited = time.monotonic() - started
     try:
         if fd is None:
             if logger:
+                cause = (
+                    "cannot write the build lease for"
+                    if reason == _UNWRITABLE
+                    else f"timed out after {int(waited)}s waiting for the "
+                    f"{'exclusive' if writer else 'shared'} build lease on"
+                )
                 logger(
-                    f"WARN: timed out after {int(waited)}s waiting for the "
-                    f"{'exclusive' if writer else 'shared'} build lease on "
-                    f"{build_dir_name}; continuing without it | lock={lock}"
+                    f"WARN: {cause} {build_dir_name}; continuing without it "
+                    f"| lock={lock}"
                 )
             yield False
             return
@@ -315,12 +335,15 @@ def hold_shared(
     defer_until = min(deadline, time.monotonic() + PENDING_DEFER_SECONDS)
     while time.monotonic() < defer_until and _pending_writer_alive(lock):
         time.sleep(_POLL_SECONDS)
-    fd = _acquire(lock, fcntl.LOCK_SH, deadline)
+    fd, reason = _acquire(lock, fcntl.LOCK_SH, deadline)
     if fd is None:
         if logger:
+            detail = "it is not writable from here" if reason == _UNWRITABLE \
+                else "it stayed contended"
             logger(
-                f"WARN: could not take the build lease on {build_dir_name}; a "
-                f"concurrent rebuild could replace it mid-run | lock={lock}"
+                f"WARN: could not take the build lease on {build_dir_name} "
+                f"({detail}); a concurrent rebuild could replace it mid-run "
+                f"| lock={lock}"
             )
         return False
     _KEPT.append(fd)

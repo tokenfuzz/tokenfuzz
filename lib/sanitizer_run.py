@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 import sanitizer
+import sanitizer_helpers
 from sanitizer_helpers import copy_file
 from timeout import capture_timeout, run_timeout
 
@@ -145,19 +146,10 @@ class SanitizerRunner:
         if self.env.get("SANITIZER_GENERIC_SKIP_TESTCASE", self.env.get("ASAN_GENERIC_SKIP_TESTCASE", "0")) != "1":
             command.append(args[0])
         command.extend(args[1:])
-        offline = sanitizer.symbolize_available()
-        if offline:
-            with capture_timeout(
-                command, timeout, rss_mb=sanitizer.generic_rss_limit_mb(self.env),
-                env=self.runtime_env(options, "symbolize=0"),
-            ) as (completed, report):
-                sanitizer.symbolize_file(report)
-                copy_file(report, sys.stdout.buffer)
-        else:
-            completed = run_timeout(
-                command, timeout, rss_mb=sanitizer.generic_rss_limit_mb(self.env),
-                env=self.runtime_env(options),
-            )
+        completed = self._run_symbolized(
+            command, options, timeout,
+            rss_mb=sanitizer.generic_rss_limit_mb(self.env),
+        )
         if completed.returncode == 124:
             print(f"[run-{self.name}] generic runner timed out after {timeout}s", file=sys.stderr)
         elif completed.returncode == 0:
@@ -166,11 +158,22 @@ class SanitizerRunner:
             print(f"[run-{self.name}] generic EXECUTION INCONCLUSIVE (post-run, rc={completed.returncode})", file=sys.stderr)
         return completed.returncode
 
+    def _run_symbolized(
+        self, command: list[str], options: str, timeout: int,
+        *, extra_env: dict[str, str] | None = None, **kwargs,
+    ):
+        """This runner family's binding of the shared symbolizing helper."""
+        return sanitizer_helpers.run_symbolized(
+            command, timeout,
+            {**self.runtime_env(options), **(extra_env or {})},
+            f"{self.upper}_OPTIONS", **kwargs,
+        )
+
     def js(self, options: str, timeout: int, args: Sequence[str]) -> int:
         binary = self.env.get(f"{self.upper}_JS") or str(
             sanitizer.build_dir(self.name, self.config.target_root if self.config else "", self.env) / "dist/bin/js"
         )
-        completed = run_timeout([binary, *args], timeout, env=self.runtime_env(options))
+        completed = self._run_symbolized([binary, *args], options, timeout)
         if completed.returncode == 124:
             print(f"[run-{self.name}] JS shell timed out after {timeout}s", file=sys.stderr)
         elif completed.returncode == 0:
@@ -198,9 +201,9 @@ class SanitizerRunner:
         crash_dir = Path(self.env.get("FUZZ_CRASH_DIR", str(sanitizer.default_fuzz_crash_dir(self.env))))
         crash_dir.mkdir(parents=True, exist_ok=True)
         clean_args = [arg for arg in args if not arg.startswith("-fork=")]
-        run_timeout(
-            [binary, *clean_args], timeout, kill=True, cwd=crash_dir,
-            env={**self.runtime_env(options), "FUZZER": fuzzer},
+        self._run_symbolized(
+            [binary, *clean_args], options, timeout, kill=True, cwd=crash_dir,
+            extra_env={"FUZZER": fuzzer},
         )
         print(f"[run-{self.name}] Fuzz artifacts (if any): {crash_dir}", file=sys.stderr)
         return 0
@@ -214,7 +217,9 @@ class SanitizerRunner:
             print(f"[run-{self.name}] fuzz-repro target missing: {binary or '<unset>'}", file=sys.stderr)
             return 2
         resolved = [str(Path(arg).resolve()) if not arg.startswith("-") and Path(arg).is_file() else arg for arg in args]
-        return run_timeout([binary, *resolved], timeout, kill=True, env=self.runtime_env(options)).returncode
+        return self._run_symbolized(
+            [binary, *resolved], options, timeout, kill=True,
+        ).returncode
 
     def fuzz_js(self, options: str, timeout: int, args: Sequence[str]) -> int:
         fuzzer = self._require_fuzzer()
@@ -231,9 +236,9 @@ class SanitizerRunner:
         crash_dir = Path(self.env.get("FUZZ_CRASH_DIR", str(sanitizer.default_fuzz_crash_dir(self.env))))
         crash_dir.mkdir(parents=True, exist_ok=True)
         clean_args = [arg for arg in args if not arg.startswith("-fork=")]
-        run_timeout(
-            [str(binary), *clean_args], timeout, cwd=crash_dir,
-            env={**self.runtime_env(options), "FUZZER": fuzzer},
+        self._run_symbolized(
+            [str(binary), *clean_args], options, timeout, cwd=crash_dir,
+            extra_env={"FUZZER": fuzzer},
         )
         print(f"[run-{self.name}] Fuzz artifacts (if any): {crash_dir}", file=sys.stderr)
         return 0

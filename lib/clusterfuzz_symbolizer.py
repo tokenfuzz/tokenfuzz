@@ -60,8 +60,27 @@ pipes = []
 symbolizers = {}
 
 # 0 0x7f6e35cf2e45  (/blah/foo.so+0x11fe45)
+# DIVERGENCE: the optional `in <symbol>` segment. When ASan cannot spawn its
+# external symbolizer it falls back to dladdr and emits
+# `#0 0xADDR in func+0x4a0 (/blah/foo.dylib:arm64+0x11fe45)` — a name but no
+# source line. Upstream's pattern requires the module to follow the address
+# directly, so those frames passed through untouched and the report kept
+# addresses for a build whose debug info was right there. The match anchors on
+# the trailing `(module+0xoffset)`, which is what makes the frame repairable,
+# and treats the symbol text as opaque: a demangled C++ name contains spaces
+# and parentheses, so constraining it would recognize only plain C identifiers.
+# `_line_parser` already strips the `:arch` suffix.
+# The module group is greedy rather than plus-free: an alternate build tree is
+# named `build-asan+cfg-<hash>`, and stopping at the first `+` left the whole
+# frame unparsed. Backtracking anchors it on the trailing `+0xoffset`.
 STACK_TRACE_LINE_REGEX = re.compile(
-    r'^( *#([0-9]+) *)(0x[0-9a-f]+) *\(([^+]*)\+(0x[0-9a-f]+)\)')
+    r'^( *#([0-9]+) *)(0x[0-9a-f]+) *(?:in +.*? +)?\((.*)\+(0x[0-9a-f]+)\)')
+
+# An answer that starts with an address is the tool saying it resolved nothing:
+# atos echoes the address alone, or with the module it did open
+# (`0x00000001 (in foo.dylib)`). No symbol name begins with `0x`, so the test is
+# the leading token rather than the whole answer.
+BARE_ADDRESS = re.compile(r'^0x[0-9a-fA-F]+\b')
 
 
 def _log(message):
@@ -98,10 +117,13 @@ def get_stack_frame(binary, addr, function_name, file_name):
   file_name = fix_filename(file_name)
   function_name = fix_function_name(function_name)
 
-  # Check if we don't have any symbols at all. If yes, this is probably
-  # a system library. In this case, just return the binary name.
+  # DIVERGENCE: no symbol at all means the tool resolved nothing —
+  # llvm-symbolizer and addr2line both answer `??`. Upstream renders that as
+  # the binary's basename, which is strictly less than the raw frame it would
+  # replace: that still carries the full module path, the architecture and the
+  # offset. Return nothing so the caller keeps the original line.
   if not function_name and not file_name:
-    return '%s in %s' % (addr, os.path.basename(binary))
+    return ''
 
   # We just have a file name. Probably running in global context.
   if not function_name:
@@ -279,10 +301,22 @@ class UnbufferedLineConverter:
   """Wrap a child process that responds to each line of input with one line of output.
 
   Uses pty to trick the child into providing unbuffered output.
+
+  Local modification: a sandboxed agent shell can be denied a pty entirely
+  ("out of pty devices"), and this is the only path that symbolizes a macOS
+  debug-map build. Rather than lose every frame to raw addresses, fall back to
+  running the child once per address — slower, but only where the fast path is
+  unavailable, and a report is read far more often than it is rendered.
   """
 
   def __init__(self, args, close_stderr=False):
-    pid, fd = pty.fork()
+    self.args = args
+    self.r = None
+    self.w = None
+    try:
+      pid, fd = pty.fork()
+    except OSError:
+      return
     if pid == 0:
       # We're the child. Transfer control to command.
       if close_stderr:
@@ -299,10 +333,33 @@ class UnbufferedLineConverter:
       self.w = os.fdopen(os.dup(fd), 'w', 1)
 
   def convert(self, line):
+    if self.r is None:
+      return self._convert_once(line)
     self.w.write(line + '\n')
     return self.readline()
 
+  def _convert_once(self, line):
+    """One child per address, for when no pty could be allocated.
+
+    Raises rather than returning empty: a caller treats whatever comes back as
+    the answer, and DarwinSymbolizer renders an empty one as "<addr> in ",
+    discarding the module and offset that are all a reader has left to go on.
+    Its except-branch keeps them, so a failure belongs there.
+    """
+    completed = subprocess.run(
+        self.args + [line], stdin=subprocess.DEVNULL,
+        capture_output=True, text=True, check=False)
+    # Same progress chatter the pty path skips past in DarwinSymbolizer.
+    answers = [row.strip() for row in (completed.stdout or '').splitlines()
+               if row.strip() and 'got symbolicator for' not in row]
+    if not answers:
+      raise RuntimeError(
+          '%s gave no answer for %s' % (self.args[0], line))
+    return answers[-1]
+
   def readline(self):
+    if self.r is None:
+      return ''
     return self.r.readline().rstrip()
 
 
@@ -327,6 +384,14 @@ class DarwinSymbolizer(Symbolizer):
       atos_line = self.atos.convert('0x%x' % int(offset, 16))
       while 'got symbolicator for' in atos_line:
         atos_line = self.atos.readline()
+      # DIVERGENCE: a non-answer is a failure, not a symbolization. atos says
+      # nothing for a binary it cannot open (one deleted since the run, or a
+      # child that died) and echoes the address back for an offset it cannot
+      # resolve inside a binary it did open. Rendering either as "<addr> in
+      # <answer>" below threw away the module and offset, the only forensics
+      # such a frame has left. The except-branch keeps them.
+      if not atos_line or BARE_ADDRESS.match(atos_line):
+        raise RuntimeError('atos gave no symbol for %s' % offset)
       # A well-formed atos response looks like this:
       #   foo(type1, type2) (in object.name) (filename.cc:80)
       match = re.match(r'^(.*) \(in (.*)\) \((.*:\d*)\)$', atos_line)
@@ -453,6 +518,13 @@ class SymbolizationLoop:
         self.frame_no = 0
       symbolized_line = self.symbolize_address(addr, binary, offset, arch)
 
+      # DIVERGENCE: a frame the tool resolved nothing for comes back empty
+      # (see get_stack_frame). Never trade a frame down — the original line
+      # names the module, architecture and offset, which is what a reader
+      # needs to symbolize it later by hand.
+      symbolized_line = [
+          frame for frame in (symbolized_line or []) if frame and frame.strip()
+      ]
       if not symbolized_line:
         symbolized_crash_stacktrace += '%s\n' % self.current_line
       else:

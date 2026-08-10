@@ -217,6 +217,110 @@ class BenchmarkReverifyTests(unittest.TestCase):
     def reverify(pool: Path, target: Path, slug: str) -> int:
         return benchmark_runner.reverify_pool_crash_rates(pool, target, slug, "test")
 
+    def test_every_pooled_diagnostic_is_offered_source_locations(self) -> None:
+        """Reverification only reaches crashes it has a rate to measure, and a
+        report can arrive without source lines from a model-direct cell or from
+        a runner mode that never captured. The pool pass is what makes repair
+        independent of an artifact's origin, so it must visit findings and
+        already-measured crashes too."""
+        pool = self.root / "pool"
+        raw = "    #0 0x1000 in app_parse+0x20 (/t/lib.dylib:arm64+0x30)\n"
+        measured = pool / "crashes" / "CRASH-0002" / "sanitizer.txt"
+        expected = {
+            pool / "crashes" / "CRASH-0001" / "sanitizer.txt",
+            pool / "crashes" / "CRASH-0002" / ".audit" / "sanitizer.txt",
+            pool / "findings" / "FIND-0001" / "sanitizer.txt",
+            # A rejected tree is still rendered, and a diagnostic may be saved
+            # under any of the names crash_artifacts recognizes.
+            pool / "crashes-rejected" / "CRASH-REJECTED-0001" / "asan.txt",
+            pool / "findings-rejected" / "FIND-REJECTED-0001" / "ubsan-output.txt",
+            measured,
+        }
+        for path in sorted(expected):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(raw, encoding="utf-8")
+        # A crash that already carries a rate: reverification skips it entirely.
+        measured.write_text(raw + "CRASH_RATE: 3/5\n", encoding="utf-8")
+        (pool / "findings" / "FIND-0002").mkdir(parents=True, exist_ok=True)
+
+        visited: list[Path] = []
+
+        def _repair(path):
+            visited.append(Path(path))
+            Path(path).write_text("    #0 0x1000 in app_parse lib.c:7\n", encoding="utf-8")
+            return True
+
+        with mock.patch.object(
+            benchmark_runner.sanitizer_lib, "symbolize_file", side_effect=_repair,
+        ):
+            repaired = benchmark_runner.repair_pool_report_symbols(pool)
+        self.assertEqual(expected, set(visited))
+        self.assertEqual(len(expected), repaired)
+        self.assertIn(
+            "lib.c:7",
+            (pool / "findings" / "FIND-0001" / "sanitizer.txt").read_text(encoding="utf-8"),
+        )
+
+    def test_a_pooled_diagnostic_left_alone_is_not_counted(self) -> None:
+        """The count is what the operator is told was repaired, so a report the
+        symbolizer did not change must not inflate it."""
+        pool = self.root / "pool"
+        report = pool / "crashes" / "CRASH-0001" / "sanitizer.txt"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("    #0 0x1000 in app_parse lib.c:7\n", encoding="utf-8")
+        with mock.patch.object(
+            benchmark_runner.sanitizer_lib, "symbolize_file", return_value=True,
+        ):
+            self.assertEqual(0, benchmark_runner.repair_pool_report_symbols(pool))
+
+    def test_an_artifact_whose_build_moved_on_is_left_alone(self) -> None:
+        """Symbolizing against a build that has moved on names a different
+        function on the frame. Plausible-but-wrong evidence is worse than an
+        address, so a blocked artifact keeps its raw frames."""
+        pool = self.root / "pool"
+        raw = "    #0 0x1000 in app_parse+0x20 (/t/lib.dylib:arm64+0x30)\n"
+        for name in ("CRASH-0001", "CRASH-0002"):
+            path = pool / "crashes" / name / "sanitizer.txt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(raw, encoding="utf-8")
+        with mock.patch.object(
+            benchmark_runner.sanitizer_lib, "symbolize_file",
+            side_effect=lambda p: Path(p).write_text("repaired\n", encoding="utf-8"),
+        ):
+            repaired = benchmark_runner.repair_pool_report_symbols(
+                pool, skip={"CRASH-0001"},
+            )
+        self.assertEqual(1, repaired)
+        self.assertEqual(
+            raw, (pool / "crashes" / "CRASH-0001" / "sanitizer.txt").read_text(encoding="utf-8"),
+        )
+
+    def test_repair_rebinds_the_validation_receipt_it_invalidates(self) -> None:
+        """A receipt binds the diagnostic's bytes, so rewriting them would mark
+        a concluded review stale and refuse to publish the pool. Symbolization
+        changes representation, not meaning, so the receipt is rebound."""
+        pool = self.root / "pool"
+        finding = pool / "findings" / "FIND-0001"
+        finding.mkdir(parents=True, exist_ok=True)
+        (finding / "sanitizer.txt").write_text(
+            "    #0 0x1000 in app_parse+0x20 (/t/lib.dylib:arm64+0x30)\n", encoding="utf-8",
+        )
+        (finding / "REPORT.md").write_text("# report\n", encoding="utf-8")
+        validation_receipt.write(
+            finding, kind="finding", state="reportable", detail="",
+            target_revision="rev", target_config_sha256="cfg", attacker_controls=[],
+        )
+        self.assertIsNotNone(validation_receipt.read_current(finding))
+        with mock.patch.object(
+            benchmark_runner.sanitizer_lib, "symbolize_file",
+            side_effect=lambda p: Path(p).write_text(
+                "    #0 0x1000 in app_parse lib.c:7\n", encoding="utf-8"),
+        ):
+            self.assertEqual(1, benchmark_runner.repair_pool_report_symbols(pool))
+        current = validation_receipt.read_current(finding)
+        self.assertIsNotNone(current, "a rewritten diagnostic must not strand its receipt")
+        self.assertEqual("reportable", current.get("state"))
+
     def test_reverification_outcomes_and_replay_contracts(self) -> None:
         crash_target, crash_slug = self.make_target("crash-target")
         clean_target, clean_slug = self.make_target("clean-target", "clean")
