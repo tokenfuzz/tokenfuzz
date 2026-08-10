@@ -496,6 +496,121 @@ Generated score text.
         )
         self.assertNotEqual(before, report_identity.content_sha1(self.report))
 
+    def test_a_raw_pipe_in_one_cell_does_not_repad_every_row_s_identity(self) -> None:
+        # A value holding a raw `|` reads as a cell break, so padding widens the
+        # whole table. That is still padding: it must not restate the identity a
+        # severity or validation receipt already bound, or the pool audit fails
+        # a finished run over its own cosmetic rewrite.
+        for stray in ("parse with FLAG_LOAD | FLAG_VALID", "parse with FLAG_LOAD |"):
+            with self.subTest(stray=stray):
+                self.report.write_text(
+                    "# State issue\n\n| Field | Value |\n| --- | --- |\n"
+                    "| Boundary | caller-controlled request |\n"
+                    f"| Trusted caller actions | {stray} |\n",
+                    encoding="utf-8",
+                )
+                before = report_identity.content_sha1(self.report)
+                subprocess.run(
+                    [sys.executable, str(ROOT / "bin" / "render-md"), str(self.report)],
+                    check=True,
+                )
+                header = self.report.read_text(encoding="utf-8").splitlines()[2]
+                self.assertEqual(len(header.strip().strip("|").split("|")), 3)
+                self.assertEqual(before, report_identity.content_sha1(self.report))
+                self.report.write_text(
+                    self.report.read_text().replace("caller-controlled", "trusted"),
+                    encoding="utf-8",
+                )
+                self.assertNotEqual(before, report_identity.content_sha1(self.report))
+
+    def _receipt_bound_to(self, sha1: str) -> None:
+        """Stand in for a receipt a prior version of this module wrote."""
+        validation_receipt.write(
+            self.finding, kind="finding", state="reportable",
+            attacker_controls=triage_validate.trigger_attacker_controls(),
+        )
+        path = self.finding / "validation.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["report_sha1"] = sha1
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_a_receipt_bound_before_padding_trimming_stays_current(self) -> None:
+        # Trimming padded columns moved the identity of every already-widened
+        # report. Carrying the prior identity keeps their concluded reviews —
+        # the alternative is the pool audit refusing a finished run over a
+        # harness-side identity change no reviewer caused.
+        self.report.write_text(
+            "# State issue\n\n| Field | Value | |\n| --- | --- | --- |\n"
+            "| Boundary | caller-controlled | |\n",
+            encoding="utf-8",
+        )
+        report_text = self.report.read_text(encoding="utf-8")
+        legacy_sha1 = report_identity.legacy_padded_table_semantic_text_sha1(report_text)
+        self.assertNotEqual(legacy_sha1, report_identity.content_sha1(self.report))
+        self._receipt_bound_to(legacy_sha1)
+        self.assertIsNotNone(validation_receipt.read_current(self.finding))
+
+    def test_a_receipt_bound_before_enrich_stripping_stays_current(self) -> None:
+        # Enrich stripping predates padding trimming, so the identities that
+        # helper reproduces were written at the padded width. Trimming them too
+        # computes a combination no version ever wrote and strands the receipts
+        # the helper exists to keep — and reads identical to the correct value
+        # unless a padded report is compared against its unpadded twin.
+        body = (
+            "# State issue\n\n{table}\n"
+            "<!-- enrich:callers -->\n```\napp_parse\n```\n<!-- /enrich:callers -->\n"
+        )
+        narrow = body.format(table=(
+            "| Field | Value |\n| --- | --- |\n| Boundary | caller-controlled |\n"
+        ))
+        padded = body.format(table=(
+            "| Field | Value | |\n| --- | --- | --- |\n| Boundary | caller-controlled | |\n"
+        ))
+        self.assertEqual(
+            report_identity.semantic_text_sha1(narrow),
+            report_identity.semantic_text_sha1(padded),
+        )
+        self.assertNotEqual(
+            report_identity.legacy_enrich_semantic_text_sha1(narrow),
+            report_identity.legacy_enrich_semantic_text_sha1(padded),
+        )
+        self.report.write_text(padded, encoding="utf-8")
+        self._receipt_bound_to(
+            report_identity.legacy_enrich_semantic_text_sha1(padded),
+        )
+        self.assertIsNotNone(validation_receipt.read_current(self.finding))
+
+    def test_a_short_separator_table_survives_rendering(self) -> None:
+        # `| - | - |` is a valid GFM separator that render-md pads. Identity has
+        # to recognize the same tables the padder does, or the padding it calls
+        # cosmetic invalidates a concluded review.
+        self.report.write_text(
+            "# State issue\n\n| Field | Value |\n| - | - |\n"
+            "| Boundary | caller-controlled |\n",
+            encoding="utf-8",
+        )
+        self._receipt_bound_to(report_identity.content_sha1(self.report))
+        subprocess.run(
+            [sys.executable, str(ROOT / "bin" / "render-md"), str(self.report)],
+            check=True,
+        )
+        self.assertIsNotNone(validation_receipt.read_current(self.finding))
+
+    def test_an_emptied_third_column_still_changes_report_identity(self) -> None:
+        # Ignoring padding cells must not blind identity to a real column: a
+        # table whose third column carries content keeps all three.
+        self.report.write_text(
+            "# State issue\n\n| Metric | Value | Derived from |\n| --- | --- | --- |\n"
+            "| Attack Vector | N | surface tier |\n",
+            encoding="utf-8",
+        )
+        before = report_identity.content_sha1(self.report)
+        self.report.write_text(
+            self.report.read_text().replace("surface tier", ""),
+            encoding="utf-8",
+        )
+        self.assertNotEqual(before, report_identity.content_sha1(self.report))
+
     def test_read_only_consumers_reject_a_stale_new_quality_cache(self) -> None:
         report_text = triage.read_report_bounded(self.report)
         cache = self.finding / ".llm-find-quality.json"

@@ -67,6 +67,9 @@ ALL_FIELD_LABELS = tuple(FIELD_LABELS.values()) + IDENTITY_FIELD_LABELS
 # rows into a table that then rendered as no grid at all.
 _FIELDS_HEADER_RE = re.compile(r"^\s*\|\s*field\s*\|\s*value\s*\|\s*$", re.IGNORECASE)
 # GFM requires at least one dash per column, with optional alignment colons.
+# The same predicate decides which tables identity canonicalizes below: a
+# separator `bin/render-md` pads but this module does not recognize is a table
+# whose padding moves report identity.
 FIELDS_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
 
 
@@ -90,7 +93,6 @@ _GENERATED_SECTIONS = {
 }
 _CODE_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
-_TABLE_SEP_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
 _ENRICH_OPEN_RE = re.compile(r"<!-- enrich:[A-Za-z0-9_-]+ -->")
 _ENRICH_CLOSE_RE = re.compile(r"<!-- /enrich:[A-Za-z0-9_-]+ -->")
 _GENERATED_LINE_RE = re.compile(
@@ -100,7 +102,27 @@ _GENERATED_LINE_RE = re.compile(
 )
 
 
-def _canonicalize_tables(lines: list[str]) -> list[str]:
+def _table_columns(rows: list[list[str]]) -> int:
+    """Columns a table carries content in, ignoring padding-only cells.
+
+    `bin/render-md` pads a table to its widest row: shorter rows gain empty
+    cells and the separator gains a bar. Width is therefore presentation, not
+    content — and one row whose value holds a raw `|` (`FLAG_A | FLAG_B`, which
+    Markdown reads as a cell break) widens the whole table, so counting cells
+    would let that row rewrite every sibling row's identity the first time a
+    padder ran.
+    """
+    columns = 0
+    for position, cells in enumerate(rows):
+        if position == 1:
+            continue  # separator: bars are shape, never content
+        for column, cell in enumerate(cells, start=1):
+            if cell:
+                columns = max(columns, column)
+    return columns or max((len(cells) for cells in rows), default=0)
+
+
+def _canonicalize_tables(lines: list[str], trim_padding: bool = True) -> list[str]:
     """Remove renderer-only padding from recognized Markdown tables."""
     canonical: list[str] = []
     index = 0
@@ -120,21 +142,27 @@ def _canonicalize_tables(lines: list[str]) -> list[str]:
             index += 1
             continue
         following = lines[index + 1] if index + 1 < len(lines) else ""
-        if _TABLE_ROW_RE.match(line) and _TABLE_SEP_RE.match(following):
-            row = 0
+        if _TABLE_ROW_RE.match(line) and FIELDS_SEPARATOR_RE.match(following):
+            rows: list[list[str]] = []
             while index < len(lines) and _TABLE_ROW_RE.match(lines[index]):
                 cells = lines[index].strip()[1:-1].split("|")
-                cells = [cell.strip() for cell in cells]
-                if row == 1:
+                rows.append([cell.strip() for cell in cells])
+                index += 1
+            columns = _table_columns(rows) if trim_padding else None
+            for position, cells in enumerate(rows):
+                if position == 1:
                     cells = [
                         (":" if cell.startswith(":") else "")
                         + "---"
                         + (":" if cell.endswith(":") else "")
                         for cell in cells
                     ]
+                    filler = "---"
+                else:
+                    filler = ""
+                if columns is not None:
+                    cells = (cells + [filler] * columns)[:columns]
                 canonical.append("|" + "|".join(cells) + "|")
-                index += 1
-                row += 1
             continue
         canonical.append(line)
         index += 1
@@ -155,29 +183,33 @@ _MAX_CACHED_REPORT_CHARS = 256 * 1024
 def _semantic_report_text(
     report_text: str, *, canonicalize_tables: bool,
     strip_enrich_fenced_code: bool = True,
+    trim_table_padding: bool = True,
 ) -> str:
     if len(report_text) > _MAX_CACHED_REPORT_CHARS:
         return _semantic_report_text_impl(
             report_text, canonicalize_tables, strip_enrich_fenced_code,
+            trim_table_padding,
         )
     return _semantic_report_text_cached(
         report_text, canonicalize_tables, strip_enrich_fenced_code,
+        trim_table_padding,
     )
 
 
 @functools.lru_cache(maxsize=48)
 def _semantic_report_text_cached(
     report_text: str, canonicalize_tables: bool,
-    strip_enrich_fenced_code: bool,
+    strip_enrich_fenced_code: bool, trim_table_padding: bool,
 ) -> str:
     return _semantic_report_text_impl(
         report_text, canonicalize_tables, strip_enrich_fenced_code,
+        trim_table_padding,
     )
 
 
 def _semantic_report_text_impl(
     report_text: str, canonicalize_tables: bool,
-    strip_enrich_fenced_code: bool,
+    strip_enrich_fenced_code: bool, trim_table_padding: bool = True,
 ) -> str:
     """Remove only harness-owned annotations from report cache identity.
 
@@ -231,7 +263,7 @@ def _semantic_report_text_impl(
         if normalized:
             stripped.append(line)
     if canonicalize_tables:
-        stripped = _canonicalize_tables(stripped)
+        stripped = _canonicalize_tables(stripped, trim_padding=trim_table_padding)
     return "\n".join(stripped) + ("\n" if stripped else "")
 
 
@@ -249,14 +281,27 @@ def legacy_semantic_text_sha1(report_text: str) -> str:
     return hashlib.sha1(text.encode()).hexdigest()
 
 
+def legacy_padded_table_semantic_text_sha1(report_text: str) -> str:
+    """Identity written before padded table columns became cache-neutral."""
+    text = _semantic_report_text(
+        report_text, canonicalize_tables=True, trim_table_padding=False,
+    )
+    return hashlib.sha1(text.encode()).hexdigest()
+
+
 def legacy_enrich_semantic_text_sha1(
     report_text: str, *, canonicalize_tables: bool = True,
 ) -> str:
-    """Identity from before fenced enrich snippets were fully stripped."""
+    """Identity from before fenced enrich snippets were fully stripped.
+
+    Padding trimming came after that change, so the identities this reproduces
+    were all written with tables canonicalized at their padded width.
+    """
     text = _semantic_report_text(
         report_text,
         canonicalize_tables=canonicalize_tables,
         strip_enrich_fenced_code=False,
+        trim_table_padding=False,
     )
     return hashlib.sha1(text.encode()).hexdigest()
 
@@ -270,6 +315,7 @@ def content_sha1_candidates(path: Path) -> frozenset[str]:
     return frozenset({
         semantic_text_sha1(report_text),
         legacy_semantic_text_sha1(report_text),
+        legacy_padded_table_semantic_text_sha1(report_text),
         legacy_enrich_semantic_text_sha1(report_text),
         legacy_enrich_semantic_text_sha1(
             report_text, canonicalize_tables=False,
