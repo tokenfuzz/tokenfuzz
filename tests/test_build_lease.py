@@ -72,26 +72,17 @@ class BuildLeaseTests(unittest.TestCase):
         self.assertTrue(ready.exists(), "holder never acquired the shared lease")
         return holder
 
-    def _seal_lock_dir(self) -> Path:
-        """Make the lease unopenable the way a sandboxed agent shell sees it."""
-        audit = self.target / ".audit"
-        audit.mkdir(parents=True, exist_ok=True)
-        audit.chmod(0o500)
-        # Cleanups run after tearDown has already removed the tree, so restore
-        # the mode only if something still needs it writable to be deleted.
-        self.addCleanup(self._unseal, audit)
-        return audit
-
-    @staticmethod
-    def _unseal(audit: Path) -> None:
-        if audit.exists():
-            audit.chmod(0o700)
+    def _block_the_lease(self) -> None:
+        """Deny the lease the way a sandboxed shell hits it, at the open."""
+        # A directory where the lock file must be: root walks through mode
+        # bits, as it does in the container job, but not through EISDIR.
+        build_lease.lease_path(self.target, "build-asan").mkdir(parents=True)
 
     def test_an_unwritable_lease_falls_open(self) -> None:
         """An agent shell sandboxed away from the target tree cannot open the
         lease at all. Raising there killed every sanitizer entry point before it
         ran a testcase, so it must fall open like contention does."""
-        self._seal_lock_dir()
+        self._block_the_lease()
         warnings: list[str] = []
         with build_lease.shared(self.target, "build-asan", logger=warnings.append) as held:
             self.assertFalse(held, "an unopenable lease cannot be reported as held")
@@ -101,7 +92,7 @@ class BuildLeaseTests(unittest.TestCase):
     def test_an_unwritable_whole_run_lease_falls_open(self) -> None:
         """hold_shared takes the same lock for a whole run, so it must survive
         the same denial — and say which of the two reasons it hit."""
-        self._seal_lock_dir()
+        self._block_the_lease()
         warnings: list[str] = []
         self.assertFalse(
             build_lease.hold_shared(self.target, "build-asan", logger=warnings.append)
