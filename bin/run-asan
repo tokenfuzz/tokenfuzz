@@ -284,7 +284,7 @@ def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
     disabled = BASE_ENV.get("ASAN_GENERIC_DISABLE_OPTIONS") == "1" or bool(CONFIG and CONFIG.sanitizers_explicitly_disabled)
     environment = runtime_env(option_string, "none" if disabled else "asan")
     command = [binary]
-    if BASE_ENV.get("ASAN_GENERIC_SKIP_TESTCASE", "0") != "1":
+    if not sanitizer.generic_skips_testcase("asan", BASE_ENV):
         command.append(testcase)
     command.extend(extra)
     rss_mb = sanitizer.generic_rss_limit_mb(BASE_ENV)

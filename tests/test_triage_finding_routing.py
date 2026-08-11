@@ -89,6 +89,68 @@ class FindingCrashRoutingTests(unittest.TestCase):
         self.assertEqual(triage.route_finding_diagnostics(self.results), 0)
         self.assertTrue(directory.is_dir())
 
+    def test_historical_unmeasured_replay_demotion_can_be_reconsidered(self) -> None:
+        directory = self.finding("FIND-007")
+        (directory / "input.bin").write_bytes(b"input")
+        with (directory / "report.md").open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\n## Triage disposition\n\n"
+                "Demoted from `crashes/`: configured-target replay produced no "
+                "measurement of the original fault (see .audit/reverify.log).\n"
+            )
+        self.assertEqual(
+            triage.route_finding_diagnostics(
+                self.results, reconsider_unmeasured_replay=True,
+            ),
+            1,
+        )
+        self.assertTrue((self.results / "crashes" / "CRASH-007").is_dir())
+
+    def test_rejected_historical_replay_demotion_is_reconsidered_too(self) -> None:
+        directory = self.results / "findings-rejected" / "FIND-008"
+        directory.mkdir(parents=True)
+        (directory / "report.md").write_text(
+            "# Bounds issue\n\n"
+            "Demoted from `crashes/`: configured-target replay produced no "
+            "measurement of the original fault (see .audit/reverify.log).\n",
+            encoding="utf-8",
+        )
+        (directory / "sanitizer.txt").write_text(DIAGNOSTIC, encoding="utf-8")
+        (directory / "input.bin").write_bytes(b"input")
+        (directory / "REJECTION.md").write_text(
+            "Reason: finding quality reject\n", encoding="utf-8",
+        )
+        validation_receipt.write(
+            directory, kind="finding", state="rejected",
+        )
+        self.assertEqual(
+            triage.route_finding_diagnostics(
+                self.results, reconsider_unmeasured_replay=True,
+            ),
+            1,
+        )
+        routed = self.results / "crashes" / "CRASH-008"
+        self.assertTrue(routed.is_dir())
+        self.assertFalse((routed / "REJECTION.md").exists())
+
+    def test_a_newer_replay_verdict_is_not_reopened_by_the_old_marker(self) -> None:
+        directory = self.finding("FIND-009")
+        (directory / "input.bin").write_bytes(b"input")
+        with (directory / "report.md").open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\nDemoted from `crashes/`: configured-target replay produced "
+                "no measurement of the original fault (see .audit/reverify.log).\n"
+                "\nDemoted from `crashes/`: sanitizer evidence did not reproduce "
+                "through the configured target invocation.\n"
+            )
+        self.assertEqual(
+            triage.route_finding_diagnostics(
+                self.results, reconsider_unmeasured_replay=True,
+            ),
+            0,
+        )
+        self.assertTrue(directory.is_dir())
+
     def test_quarantine_class_is_not_misrouted_as_corruption(self) -> None:
         directory = self.finding(
             "FIND-004",

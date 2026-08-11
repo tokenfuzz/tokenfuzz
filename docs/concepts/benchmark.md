@@ -159,7 +159,12 @@ state, and CVSS severity are reported independently.
 
 Both conditions are held to the same evidence bar. The baseline's crashes are
 replayed through the target's normal invocation before they count, so a
-diagnostic that does not reproduce is not counted as a crash. On either side, a
+diagnostic that does not reproduce is not counted as a crash. A replay that
+never ran is a different thing and is not read as a verdict: the crash keeps
+its place under `crashes/`, takes no verdict, and is reported as an
+unadjudicated remainder, so broken replay infrastructure can neither destroy a
+real crash nor credit an unproven one. The failure is logged where the
+operator sees it. On either side, a
 crash that `bin/probe --confirm` reproduced 5/5 through the ordinary target
 binary, faulting in the target's own code on an attacker-controlled input,
 skips the trigger review it would otherwise get — the evidence already answers
@@ -545,8 +550,9 @@ Any crash without a measured reproduction rate is re-run through the same
 wrapper the harness uses, under exactly the runtime options its diagnostic
 recorded, and only while the build artifacts that crash needs are still
 available. Otherwise the pool keeps an unset `?` rather than a guess;
-model-direct triage preserves unmeasured evidence as a finding rather than a
-confirmed crash. Each pooled crash is checked against its owning cell and only
+model-direct triage keeps unmeasured evidence under `crashes/` but withholds
+its verdict, so it counts as unadjudicated rather than as a confirmed crash.
+Each pooled crash is checked against its owning cell and only
 its own replay artifacts, so one changed binary does not cost unrelated
 crashes their rates. A rate counts only runs that reproduced the original
 fault — same sanitizer, primitive, faulting function, and normalized source

@@ -56,6 +56,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         rejected_findings: int = 0,
         refusals: int = 0,
         actual_agents: int | None = None,
+        unadjudicated_crashes: int = 0,
     ) -> Path:
         cell = bench / "cells" / name
         payload = {
@@ -69,6 +70,9 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.write_json(cell / "cell.json", payload)
         self.write_json(cell / "metrics.json", {
             "confirmed_crashes": crashes,
+            "crash_candidates": crashes + unadjudicated_crashes,
+            "finalized_crashes": crashes,
+            "crashes_unadjudicated": unadjudicated_crashes,
             "crash_clusters": crashes,
             "crash_dirs": [f"CRASH-{i}" for i in range(crashes)],
             "findings": findings,
@@ -869,6 +873,24 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(updated["crash_total"], 4)
         self.assertEqual(updated["incomplete_observed"][0]["crashes"], 6)
         self.assertEqual(updated["incomplete_observed"][0]["findings"], 5)
+
+    def test_aggregate_and_report_surface_unadjudicated_crashes(self) -> None:
+        bench = self.root / "unjudged-crashes"
+        self.write_json(bench / "run.json", {
+            "runid": "run1", "target": "sample", "backend": "codex",
+            "replicates": 1, "budget_wall": 60,
+            "conditions": ["model-direct"],
+            "target_sha": "abc", "harness_sha": "def",
+        })
+        self.make_cell(
+            bench, "model-direct-r1", "model-direct", 1, 0,
+            unadjudicated_crashes=2,
+        )
+        report = benchmark.aggregate(bench)
+        condition = report["conditions"][0]
+        self.assertEqual(condition["unadjudicated_crash_total"], 2)
+        self.assertTrue(condition["crash_total_is_floor"])
+        self.assertIn("2 unjudged", benchmark.render_section(report))
 
     def test_wall_is_also_reported_as_worker_capacity(self) -> None:
         """Equal wall is not equal effort across conditions.

@@ -61,6 +61,33 @@ def hold_build(name: str, target_root: str = "", env: Mapping[str, str] | None =
     )
 
 
+def generic_skips_testcase(name: str, env: Mapping[str, str] | None = None) -> bool:
+    """Whether the generic runner was told its target takes no testcase.
+
+    One reader for a decision three processes make: run-sanitizer-multi guards
+    on it and the child runner it launches acts on it. bin/run-asan (asan,
+    race, runner) reads only its own spelling, the others prefer the shared
+    one, and a guard reading them differently from its child could reject a
+    placeholder the child ignores — or admit a path the child never opens.
+    """
+    environment = os.environ if env is None else env
+    if name in {"asan", "race", "runner"}:
+        return environment.get("ASAN_GENERIC_SKIP_TESTCASE", "0") == "1"
+    return environment.get(
+        "SANITIZER_GENERIC_SKIP_TESTCASE",
+        environment.get("ASAN_GENERIC_SKIP_TESTCASE", "0"),
+    ) == "1"
+
+
+#: Carrier for a loader search path a caller needs the executed binary to have.
+#: A caller cannot set DYLD_LIBRARY_PATH itself and have it survive: every
+#: bin/ entry point starts `#!/usr/bin/env python3`, and macOS SIP strips
+#: DYLD_* at the exec of the protected /usr/bin/env, so the variable is gone
+#: before the runner reads it. This name is not DYLD_*, so it crosses every
+#: hop, and prepare_runtime_env is the last point before the binary launches.
+LIBRARY_PATH_ENV = "SANITIZER_LIBRARY_PATH"
+
+
 def prepare_runtime_env(selected: str, env: Mapping[str, str] | None = None) -> dict[str, str]:
     result = dict(os.environ if env is None else env)
     selected_name = SANITIZER_ENV.get(selected)
@@ -69,6 +96,13 @@ def prepare_runtime_env(selected: str, env: Mapping[str, str] | None = None) -> 
     for name in SANITIZER_ENV.values():
         if name != selected_name:
             result.pop(name, None)
+    carried = result.get(LIBRARY_PATH_ENV, "")
+    if carried:
+        for variable in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+            existing = result.get(variable, "")
+            result[variable] = (
+                f"{carried}{os.pathsep}{existing}" if existing else carried
+            )
     return result
 
 

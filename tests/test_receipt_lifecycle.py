@@ -330,6 +330,35 @@ class CachedFinalizationConverges(unittest.TestCase):
                 triage.triage_crash_dirs(results, results, "slug", ["bytes"])
         self.assertEqual(order, ["finalize"])
 
+    def test_a_held_crash_takes_no_verdict(self) -> None:
+        # A crash whose replay never ran keeps its place without being
+        # adjudicated: a receipt here would credit a crash nothing measured,
+        # because the benchmark counts any sanitizer-backed crash holding one.
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp)
+            directory = _artifact(results, "crashes", "CRASH-0001")
+            (directory / "sanitizer.txt").write_text(
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+                "    #0 0x0 in app_parse sampleproj.c:91\n",
+                encoding="utf-8",
+            )
+            validation_receipt.write(
+                directory, kind="crash", state="reportable",
+            )
+            with mock.patch.dict(os.environ, {"CRASH_TRIGGER_GATE": "0"}), \
+                mock.patch.object(
+                    triage, "triage_one_crash",
+                    lambda directory, *a, **k: "promoted",
+                ):
+                counts = triage.triage_crash_dirs(
+                    results, results, "slug", ["bytes"], held={directory},
+                )
+            self.assertEqual(counts["promoted"], 0)
+            self.assertTrue(directory.is_dir())
+            receipt = validation_receipt.read_current(directory)
+            self.assertIsNotNone(receipt)
+            self.assertEqual(receipt["state"], "pending")
+
 
 class PooledReportsAreImmutableOnceReviewed(unittest.TestCase):
     """The pool pass must not reopen fields a review already concluded on.

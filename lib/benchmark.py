@@ -3683,6 +3683,19 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         ]
         crashes = [c["metrics"].get("confirmed_crashes", 0) for c in done]
         pending_crashes = [c["metrics"].get("crashes_pending", 0) for c in done]
+        unadjudicated_crashes = [
+            _as_int(
+                c["metrics"].get(
+                    "crashes_unadjudicated",
+                    max(
+                        0,
+                        _as_int(c["metrics"].get("crash_candidates"))
+                        - _as_int(c["metrics"].get("finalized_crashes")),
+                    ),
+                ),
+            )
+            for c in done
+        ]
         findings = [c["metrics"].get("findings", 0) for c in done]
         confirmed_findings = [
             c["metrics"].get("confirmed_findings", 0) for c in done
@@ -3791,6 +3804,11 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "crash_median": _median([float(x) for x in crashes]),
                 "crash_total": crash_total,
                 "pending_crash_total": sum(pending_crashes),
+                "unadjudicated_crash_total": sum(unadjudicated_crashes),
+                "crash_total_is_floor": (
+                    sum(unadjudicated_crashes)
+                    > crash_total + rejected_crash_total
+                ),
                 "rejected_crash_total": rejected_crash_total,
                 "discarded_hypothesis_total": sum(discarded_hypotheses),
                 "rejected_finding_total": sum(rejected_findings),
@@ -4792,7 +4810,9 @@ def render_section(report: dict) -> str:
                 uc=_cluster_report_link(
                     _unique_with_medium_plus(
                         c.get("unique_crash_clusters", 0),
-                        c.get("medium_plus_bugs", 0)),
+                        c.get("medium_plus_bugs", 0),
+                        _as_int(c.get("unadjudicated_crash_total")),
+                        floor=bool(c.get("crash_total_is_floor"))),
                     cond_crashes, "CRASH-CLUSTERS"),
                 rcr=_artifact_report_link(
                     _rejected_label(
@@ -5344,7 +5364,9 @@ def crosstab(bench_root: Path) -> str:
                 uc=("Pending" if provisional else _crosstab_count(
                     _unique_with_medium_plus(
                         c.get("unique_crash_clusters", 0),
-                        c.get("medium_plus_bugs", 0)),
+                        c.get("medium_plus_bugs", 0),
+                        _as_int(c.get("unadjudicated_crash_total")),
+                        floor=bool(c.get("crash_total_is_floor"))),
                     crashes_dir, "CRASH-CLUSTERS")),
                 sev=("Pending" if provisional else
                      _severity_cell(c.get("top_severity_level", "—"))),
@@ -5558,7 +5580,9 @@ def crosstab(bench_root: Path) -> str:
         "- **Unique accepted crashes** — crashes with sanitizer output and "
         "reproducer material on disk, duplicates merged by stack signature. "
         "Shown as `N (M M+)`: `N` distinct crashes, `M` of them scored Medium "
-        "or higher — the number to read first. The count links to the report."
+        "or higher — the number to read first. A `K unjudged` remainder and "
+        "leading `≥` have the same meaning as for findings. The count links to "
+        "the report."
     )
     lines.append("")
     lines.append(
@@ -5918,7 +5942,7 @@ def metric_gate_summary(metrics: dict) -> str:
     """Format accepted, pending, and rejected benchmark artifact counts."""
     return (
         "findings: rejected={fr} confirmed={fc} pending={fp} roots={ft}; "
-        "crashes: rejected={cr} confirmed={cc} unique={cu}"
+        "crashes: rejected={cr} confirmed={cc} unjudged={cp} unique={cu}"
     ).format(
         fr=(
             _as_int(metrics.get("findings_rejected"))
@@ -5929,6 +5953,7 @@ def metric_gate_summary(metrics: dict) -> str:
         ft=_as_int(metrics.get("findings")),
         cr=_as_int(metrics.get("crashes_rejected")),
         cc=_as_int(metrics.get("confirmed_crashes")),
+        cp=_as_int(metrics.get("crashes_unadjudicated")),
         cu=_as_int(metrics.get("crash_clusters")),
     )
 
@@ -6058,6 +6083,9 @@ def _cmd_cell_metrics_summary(args: argparse.Namespace) -> int:
     unadjudicated = _as_int(metrics.get("findings_unadjudicated"))
     if unadjudicated:
         parts.append(f"unadjudicated_findings={unadjudicated}")
+    unadjudicated_crashes = _as_int(metrics.get("crashes_unadjudicated"))
+    if unadjudicated_crashes:
+        parts.append(f"unadjudicated_crashes={unadjudicated_crashes}")
     probes = _as_int(tokens.get("asan_invocations"))
     if probes:
         parts.append(f"probes={probes}")
@@ -6214,9 +6242,13 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
             )
             else ""
         )
+        # bin/probe hands a compiled harness its testcase as argv, so the
+        # replay does too: a driver that reads argv keeps reproducing after
+        # its bundle is renamed or pooled, which a path baked into the source
+        # at discovery time does not survive.
         print(
             f"SAN={sanitizer}\nMODE=harness\nBIN={harness}\n"
-            f"LIBDIR={library_dir}\nTESTCASE="
+            f"LIBDIR={library_dir}\nTESTCASE={testcase or ''}"
         )
         return 0
     if harness_source is not None:

@@ -290,7 +290,7 @@ class BenchmarkReportTests(unittest.TestCase):
         self.assertIn("Cell model-direct-r1 validation: DISABLED", output)
         self.assertIn(
             "findings: rejected=0 confirmed=0 pending=0 roots=0; "
-            "crashes: rejected=0 confirmed=0 unique=0",
+            "crashes: rejected=0 confirmed=0 unjudged=0 unique=0",
             output,
         )
         cells = list(bench_root.glob("codex/*/cells/model-direct-r1"))

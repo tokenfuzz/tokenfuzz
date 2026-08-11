@@ -855,24 +855,54 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         and (unreplayable_results / "findings" / "FIND-1" / "sanitizer.txt").is_file(),
         "unreplayable model-direct sanitizer evidence is preserved as a finding",
     )
-    failed_replay_results = root / "failed-replay-results"
-    failed_replay = failed_replay_results / "crashes" / "CRASH-1"
-    shutil.copytree(unreplayable_results / "findings" / "FIND-1", failed_replay)
-    with mock.patch.object(
-        benchmark_runner.triage, "triage_crash_dirs",
-        return_value={"promoted": 0, "rejected": 0, "demoted": 0, "pending": 0},
-    ), mock.patch.object(
-        benchmark_runner, "_resolve_reverify_fields", return_value=({"MODE": "generic", "BIN": "fixture"}, []),
-    ), mock.patch.object(benchmark_runner, "reverify_one_crash", return_value=False):
-        failed_replay_counts = benchmark_runner.triage_cell_crashes(
-            failed_replay_results, direct_target, "direct-target", workers=1,
-            require_replay=True,
+    def _replay_outcome(status, name):
+        outcome_results = root / name
+        shutil.copytree(
+            unreplayable_results / "findings" / "FIND-1",
+            outcome_results / "crashes" / "CRASH-1",
         )
+        adjudicated = {}
+
+        def _record(*_args, **kwargs):
+            adjudicated.update(kwargs)
+            return {"promoted": 0, "rejected": 0, "demoted": 0, "pending": 0}
+
+        with mock.patch.object(
+            benchmark_runner.triage, "triage_crash_dirs", side_effect=_record,
+        ), mock.patch.object(
+            benchmark_runner, "_resolve_reverify_fields",
+            return_value=({"MODE": "generic", "BIN": "fixture"}, []),
+        ), mock.patch.object(
+            benchmark_runner, "reverify_one_crash", return_value=status,
+        ):
+            counts = benchmark_runner.triage_cell_crashes(
+                outcome_results, direct_target, "direct-target", workers=1,
+                require_replay=True,
+            )
+        return outcome_results, counts, adjudicated.get("held") or set()
+
+    # A replay that never ran says nothing about the crash — neither that it is
+    # real nor that it is not. Demoting on it emptied a whole condition's crash
+    # column; adjudicating on it would credit crashes no replay ever measured.
+    unmeasured_results, unmeasured_counts, unmeasured_held = _replay_outcome(
+        "unmeasured", "unmeasured-replay-results",
+    )
+    check(
+        unmeasured_counts["demoted"] == 0
+        and unmeasured_counts["unreplayed"] == 1
+        and (unmeasured_results / "crashes" / "CRASH-1").is_dir()
+        and not (unmeasured_results / "findings" / "FIND-1").exists()
+        and unmeasured_held == {unmeasured_results / "crashes" / "CRASH-1"},
+        "a model-direct crash whose replay could not run is withheld, not demoted",
+    )
+    failed_replay_results, failed_replay_counts, _ = _replay_outcome(
+        "mismatch", "failed-replay-results",
+    )
     check(
         failed_replay_counts["promoted"] == 0
         and failed_replay_counts["demoted"] == 1
         and (failed_replay_results / "findings" / "FIND-1").is_dir(),
-        "an executable model-direct crash that cannot be measured remains a finding",
+        "a model-direct crash whose replay returned another fault becomes a finding",
     )
     standard_replay = root / "standard-replay" / "CRASH-1"
     shutil.copytree(failed_replay_results / "findings" / "FIND-1", standard_replay)
@@ -880,7 +910,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     def _record_standard_replay(crash_dir, _target, _slug):
         with (crash_dir / "sanitizer.txt").open("a", encoding="utf-8") as stream:
             stream.write("CRASH_RATE: 5/5\n")
-        return True
+        return "reproduced"
 
     with mock.patch.object(
         benchmark_runner.triage, "_direct_probe_trigger_bypass", return_value=False,

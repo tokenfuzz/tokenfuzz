@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import benchmark_runner
 import crash_bundle
+import sanitizer
 import validation_receipt
 
 
@@ -210,7 +211,10 @@ class BenchmarkReverifyTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}), \
                 mock.patch.object(benchmark_runner.subprocess, "run", fake_run):
-            self.assertTrue(benchmark_runner.reverify_one_crash(crash, target, slug))
+            self.assertEqual(
+                "reproduced",
+                benchmark_runner.reverify_one_crash(crash, target, slug),
+            )
         return command_used, captured
 
     @staticmethod
@@ -400,6 +404,34 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertIn("CRASH_RATE: 5/5", (normalized / "sanitizer.txt").read_text())
         self.assertIn("CRASH_RATE: 5/5", (ordered / "sanitizer.txt").read_text())
 
+    def test_direct_triage_reconsiders_only_unmeasured_legacy_demotions(self) -> None:
+        target, slug = self.make_target("reconsider-target")
+        results = self.root / "reconsider-results"
+        finding = results / "findings" / "FIND-0001"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text(
+            "# Bounds issue\n\n"
+            "Demoted from `crashes/`: configured-target replay produced no "
+            "measurement of the original fault (see .audit/reverify.log).\n",
+            encoding="utf-8",
+        )
+        (finding / "sanitizer.txt").write_text(DIAGNOSTIC, encoding="utf-8")
+        (finding / "poc.bin").write_bytes(b"input")
+        with mock.patch.object(
+            benchmark_runner, "_verify_model_direct_crash",
+            return_value="reproduced",
+        ) as verify, mock.patch.object(
+            benchmark_runner.triage, "triage_crash_dirs",
+            return_value={"promoted": 1, "rejected": 0, "pending": 0, "demoted": 0},
+        ):
+            counts = benchmark_runner.triage_cell_crashes(
+                results, target, slug, workers=1, require_replay=True,
+            )
+        self.assertEqual(counts["promoted"], 1)
+        routed = results / "crashes" / "CRASH-0001"
+        self.assertEqual(verify.call_args.args[0], routed)
+        self.assertTrue(routed.is_dir())
+
     def test_split_config_suffix_and_unsafe_path_resolution(self) -> None:
         nonce = uuid.uuid4().hex
         split_slug = f"reverify-split-{nonce}"
@@ -445,7 +477,10 @@ class BenchmarkReverifyTests(unittest.TestCase):
     def test_a_hand_compiled_harness_replay_gets_the_library_directory(self) -> None:
         # bin/probe bakes this directory in as an rpath; a harness the agent
         # compiled by hand has none, so without it the replay dies in the
-        # loader and a reproducing crash is demoted.
+        # loader and a reproducing crash is demoted. It travels as the runner
+        # carrier, never as DYLD_LIBRARY_PATH: macOS strips DYLD_* at the exec
+        # of the protected /usr/bin/env every bin/ entry point starts with, so
+        # setting it here would be dropped before any runner read it.
         target, slug = self.make_target(
             "harness-target", "missing", library="build-asan/lib/libthing.dylib",
         )
@@ -453,8 +488,10 @@ class BenchmarkReverifyTests(unittest.TestCase):
             self.make_harness_crash("harness-pool"), target, slug,
         )
         expected = str(target / "build-asan" / "lib")
+        self.assertEqual(expected, captured.get(sanitizer.LIBRARY_PATH_ENV))
+        runtime = sanitizer.prepare_runtime_env("asan", captured)
         for variable in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
-            self.assertIn(expected, captured.get(variable, "").split(os.pathsep))
+            self.assertIn(expected, runtime.get(variable, "").split(os.pathsep))
 
     def test_replay_restores_the_options_the_crash_was_found_under(self) -> None:
         # AGENTS.md tells agents to shape the allocator to surface a fault
@@ -543,7 +580,7 @@ class BenchmarkReverifyTests(unittest.TestCase):
         def reverify(directory, *_args, **_kwargs):
             with (directory / "sanitizer.txt").open("a", encoding="utf-8") as stream:
                 stream.write("\nCRASH_RATE: 5/5\n")
-            return True
+            return "reproduced"
 
         with mock.patch.object(
             benchmark_runner, "reverify_one_crash", side_effect=reverify,
@@ -579,10 +616,11 @@ class BenchmarkReverifyTests(unittest.TestCase):
         # the others fall back to it through lib/sanitizer_run.py.
         for flag in ("ASAN_GENERIC_SKIP_TESTCASE", "SANITIZER_GENERIC_SKIP_TESTCASE"):
             self.assertEqual(captured.get(flag), "1")
-        for variable in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
-            entries = captured.get(variable, "").split(os.pathsep)
-            self.assertIn(str(target / "build-ubsan" / "lib"), entries)
-            self.assertNotIn(str(target / "build-asan" / "lib"), entries)
+        entries = sanitizer.prepare_runtime_env("ubsan", captured).get(
+            "LD_LIBRARY_PATH", "",
+        ).split(os.pathsep)
+        self.assertIn(str(target / "build-ubsan" / "lib"), entries)
+        self.assertNotIn(str(target / "build-asan" / "lib"), entries)
 
     def test_raw_diagnostics_select_their_own_sanitizer(self) -> None:
         target, slug = self.make_target("raw-sanitizers", "missing")
@@ -766,7 +804,10 @@ class BenchmarkReverifyTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}), \
                 mock.patch.object(benchmark_runner.subprocess, "run", fake_run):
-            self.assertFalse(benchmark_runner.reverify_one_crash(crash, target, slug))
+            self.assertEqual(
+                "unmeasured",
+                benchmark_runner.reverify_one_crash(crash, target, slug),
+            )
         self.assertIn(
             "Library not loaded",
             (crash / ".audit" / "reverify.log").read_text(encoding="utf-8"),
@@ -1301,6 +1342,154 @@ class BenchmarkReverifyTests(unittest.TestCase):
             bench, pool, target, slug,
         )
         self.assertEqual(list(blocked), ["CRASH-0002"])
+
+
+# $CC, then clang, then cc. The documented Debian/Fedora prerequisites install
+# clang and not gcc, while a stock node:lts-bookworm has cc and no clang —
+# taking either alone silently skips this suite on one of the two.
+CC = next(
+    (
+        found for name in (os.environ.get("CC"), "clang", "cc") if name
+        for found in [shutil.which(name)] if found
+    ),
+    None,
+)
+
+
+@unittest.skipUnless(CC, "a C compiler is required")
+class ReverifyDrivesTheRealRunnerTests(unittest.TestCase):
+    """Replay a compiled harness with nothing stubbed between contract and exec.
+
+    Every other replay test fakes bin/run-sanitizer-multi, so the chain from a
+    resolved contract to a launched process was never exercised, and two faults
+    lived in it through a green suite: a placeholder argument the runner
+    rejected before writing any output, and a loader path that cannot survive
+    its own tool chain. Both read downstream as "this crash did not reproduce".
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="reverify-e2e-")
+        self.root = Path(self.temporary.name)
+        self.target = self.root / "target"
+        self.build = self.target / "build-asan"
+        self.build.mkdir(parents=True)
+        self.library = self.build / (
+            "libthing.dylib" if sys.platform == "darwin" else "libthing.so"
+        )
+        source = self.root / "thing.c"
+        source.write_text(
+            "#include <stdio.h>\n#include <stdlib.h>\n"
+            "void thing_fault(void) {\n"
+            f"    fputs({json.dumps(DIAGNOSTIC)}, stderr);\n"
+            "    fflush(stderr);\n"
+            "    _Exit(1);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        # The library resolves only through a loader search path: on macOS its
+        # install name is @rpath and the driver gets no LC_RPATH; on ELF the
+        # driver records a bare SONAME and no RUNPATH. That is exactly the
+        # shape an agent-compiled driver has, and it is what makes this test
+        # fail if the search path stops reaching the process.
+        shared = (
+            [CC, "-dynamiclib", "-fPIC", "-o", str(self.library), str(source),
+             "-Wl,-install_name,@rpath/libthing.dylib"]
+            if sys.platform == "darwin" else
+            [CC, "-shared", "-fPIC", "-o", str(self.library), str(source),
+             "-Wl,-soname,libthing.so"]
+        )
+        subprocess.run(shared, check=True)
+        (self.target / "target.toml").write_text(
+            'target = "e2e"\n'
+            f'asan_lib = "build-asan/{self.library.name}"\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def bundle(self, name: str, body: str, *, testcase: str = "") -> Path:
+        crash = self.root / name / "crashes" / "CRASH-0001"
+        crash.mkdir(parents=True)
+        (crash / "sanitizer.txt").write_text(DIAGNOSTIC, encoding="utf-8")
+        if testcase:
+            (crash / "input.bin").write_text(testcase, encoding="utf-8")
+        source = crash / "harness.c"
+        source.write_text(
+            "#include <stdio.h>\nvoid thing_fault(void);\n"
+            f"int main(int argc, char **argv) {{\n{body}\n"
+            '    printf("ran clean\\n");\n    return 0;\n}\n',
+            encoding="utf-8",
+        )
+        link = (
+            [str(self.library)] if sys.platform == "darwin"
+            else ["-L", str(self.build), "-lthing"]
+        )
+        subprocess.run(
+            [CC, "-o", str(crash / "harness"), str(source), *link], check=True,
+        )
+        return crash
+
+    def replay(self, crash: Path) -> str:
+        with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}):
+            return benchmark_runner.reverify_one_crash(crash, self.target, "e2e")
+
+    def test_a_harness_replays_against_its_saved_testcase(self) -> None:
+        crash = self.bundle(
+            "with-input",
+            "    if (argc > 1 && fopen(argv[1], \"r\")) thing_fault();",
+            testcase="reproducer\n",
+        )
+        self.assertEqual("reproduced", self.replay(crash))
+        self.assertIn(
+            "CRASH_RATE: 5/5",
+            (crash / "sanitizer.txt").read_text(encoding="utf-8"),
+        )
+
+    def test_a_harness_carrying_its_own_input_still_runs(self) -> None:
+        # No testcase in the bundle, so the replay passes the placeholder the
+        # runner used to reject outright — leaving no output to read and every
+        # such crash demoted as unmeasurable.
+        crash = self.bundle("no-input", "    if (argc == 1) thing_fault();")
+        self.assertEqual("reproduced", self.replay(crash))
+
+    def test_a_harness_that_does_not_fault_is_not_reproduced(self) -> None:
+        crash = self.bundle("clean", "    (void)argc; (void)argv;")
+        self.assertEqual("not-reproduced", self.replay(crash))
+        self.assertIn(
+            "CRASH_RATE: 0/5",
+            (crash / "sanitizer.txt").read_text(encoding="utf-8"),
+        )
+
+    def test_a_driver_written_to_the_older_recipe_still_reproduces(self) -> None:
+        # That recipe ran the driver with no arguments while separately
+        # requiring the input to be saved beside it. A driver that branches on
+        # argc therefore goes quiet the moment the replay passes that input,
+        # and reads as "the fault is gone" — the crash would be demoted on an
+        # invocation it was never written for.
+        crash = self.bundle(
+            "legacy-argv",
+            "    if (argc == 1) thing_fault();",
+            testcase="saved beside the driver\n",
+        )
+        self.assertEqual("reproduced", self.replay(crash))
+        self.assertIn(
+            "CRASH_RATE: 5/5",
+            (crash / "sanitizer.txt").read_text(encoding="utf-8"),
+        )
+
+    def test_one_ambiguous_invocation_failing_to_run_stays_unmeasured(self) -> None:
+        crash = self.bundle(
+            "ambiguous-unmeasured",
+            "    if (argc == 1) return 2;",
+            testcase="saved beside the driver\n",
+        )
+        self.assertEqual("unmeasured", self.replay(crash))
+        self.assertNotIn(
+            "CRASH_RATE:",
+            (crash / "sanitizer.txt").read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":

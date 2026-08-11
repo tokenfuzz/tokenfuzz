@@ -311,12 +311,14 @@ def _evidence_scope(
     return revision, config_digest
 
 
-# Why a direct-condition crash lost its promotion. "unmeasured" is distinct
-# from "no-contract" because the replay did launch: the missing measurement
-# points at the run, not at the crash's evidence.
+# Why a direct-condition crash lost its promotion. Every reason here is a
+# statement about the crash. A replay that never ran is not one of them: it
+# says the harness failed, and demoting on it silently disqualified real
+# crashes for months when one placeholder argument stopped the runner before
+# it produced any output. Those keep the crash and warn instead.
 _REPLAY_DEMOTION_REASONS = {
     "clean": "sanitizer evidence did not reproduce through the configured target invocation",
-    "unmeasured": "configured-target replay produced no measurement of the original fault (see .audit/reverify.log)",
+    "mismatch": "configured-target replay crashed on a different fault than the one reported",
     "no-contract": "sanitizer evidence has no executable configured-target replay contract",
 }
 
@@ -337,8 +339,16 @@ def triage_cell_crashes(
             crash_bundle.restore_probe_context(sources, destination)
     config = benchmark_target_config(results, target, target_slug)
     bypasses: set[Path] = set()
+    held: set[Path] = set()
     pre_demoted = 0
     if require_replay:
+        # Old versions demoted a runner failure as if it disproved the crash.
+        # Reconsider only that exact historical disposition. Other deliberate
+        # demotions must not loop back, while newly routed sanitizer findings
+        # must cross the same replay gate as native crash bundles.
+        triage.route_finding_diagnostics(
+            results, reconsider_unmeasured_replay=True,
+        )
         candidates = sorted((results / "crashes").glob("CRASH-*"))
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(2, len(candidates) or 1)
@@ -354,14 +364,32 @@ def triage_cell_crashes(
             for crash_dir in candidates:
                 try:
                     replay_results[crash_dir] = futures[crash_dir].result()
-                except (OSError, subprocess.SubprocessError, ValueError):
-                    replay_results[crash_dir] = "no-contract"
+                except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                    # The WARN below points at this log, so put the cause in
+                    # it: the replay died before anything else could write one.
+                    _write_reverify_log(
+                        crash_dir, f"replay raised {type(exc).__name__}: {exc}\n",
+                    )
+                    replay_results[crash_dir] = "unmeasured"
         for crash_dir in candidates:
             status = replay_results[crash_dir]
             if status == "bypass":
                 bypasses.add(crash_dir)
                 continue
             if status == "reproduced":
+                continue
+            if status == "unmeasured":
+                # The replay never ran, so it says nothing about this crash —
+                # not that it is real, and not that it is not. Keep the
+                # artifact, withhold the verdict, and make the harness failure
+                # loud. It counts as unadjudicated, so a broken replay can
+                # neither destroy a crash nor inflate the condition.
+                held.add(crash_dir)
+                log(
+                    f"WARN: model-direct replay could not measure "
+                    f"{crash_dir.name} - left unadjudicated under crashes/ "
+                    f"(see {crash_dir.name}/.audit/reverify.log)"
+                )
                 continue
             triage.demote_to_finding(
                 crash_dir, results, _REPLAY_DEMOTION_REASONS[status]
@@ -375,8 +403,10 @@ def triage_cell_crashes(
         target_root_is_product=True,
         confirmed_trigger_bypasses=bypasses,
         age_pending=age_pending,
+        held=held,
     )
     counts["demoted"] = counts.get("demoted", 0) + pre_demoted
+    counts["unreplayed"] = len(held)
     return counts
 
 
@@ -384,7 +414,13 @@ def _verify_model_direct_crash(
     crash_dir: Path, target: Path, target_slug: str,
     attacker_controls: list[str],
 ) -> str:
-    """Return bypass/reproduced/clean/unmeasured/no-contract for one crash."""
+    """Return bypass/reproduced/clean/mismatch/unmeasured/no-contract.
+
+    All but `unmeasured` are verdicts about the crash — `no-contract` included,
+    because a bundle carrying nothing runnable is an artifact deficiency.
+    `unmeasured` alone says the replay did not happen, and the caller then
+    keeps the artifact and withholds the verdict.
+    """
     controls = {str(value).strip().lower() for value in attacker_controls}
     if triage._direct_probe_trigger_bypass(crash_dir, target, attacker_controls):
         return "bypass"
@@ -392,8 +428,9 @@ def _verify_model_direct_crash(
     if resolved is None:
         return "no-contract"
     fields, replay_args = resolved
-    if not reverify_one_crash(crash_dir, target, target_slug):
-        return "unmeasured"
+    replayed = reverify_one_crash(crash_dir, target, target_slug)
+    if replayed in {"unmeasured", "no-contract", "mismatch"}:
+        return replayed
     rate = _measured_crash_rate(crash_dir / "sanitizer.txt")
     if rate is None or rate[0] == 0:
         return "clean"
@@ -1092,10 +1129,25 @@ def _write_reverify_log(crash_dir: Path, measured: str) -> None:
         pass
 
 
-def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> bool:
+#: A replay that recorded a rate, whether or not the fault came back. Only
+#: these two leave `CRASH_RATE` on the artifact.
+_REVERIFY_MEASURED = frozenset({"reproduced", "not-reproduced"})
+
+
+def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> str:
+    """Replay one crash and say what the replay established.
+
+    Returns `reproduced` / `not-reproduced` (the replay ran and a rate is now
+    on the artifact), `mismatch` (it ran and crashed, but on another fault),
+    `unmeasured` (nothing ran to completion), or `no-contract` (the bundle
+    carries nothing runnable). Only `unmeasured` is a harness fault rather
+    than a statement about the crash, and callers must not read it as a
+    verdict — collapsing every outcome into one false return let a broken
+    replay silently disqualify real crashes.
+    """
     resolved = _resolve_reverify_fields(crash_dir, target_root, target_slug)
     if resolved is None:
-        return False
+        return "no-contract"
     fields, replay_args = resolved
     mode = fields.get("MODE", "none")
     binary = fields.get("BIN", "")
@@ -1140,67 +1192,97 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         recorded_options = crash_artifacts.recorded_sanitizer_options(original)
     except ValueError as exc:
         _write_reverify_log(crash_dir, f"recorded sanitizer options are unusable: {exc}\n")
-        return False
+        return "unmeasured"
     if recorded_options is not None:
         environment[f"{upper}_OPTIONS"] = recorded_options
     arguments = [testcase, *replay_args] if replay_args else [testcase]
     if mode == "harness":
-        # The harness carries its own input, and keeps the sanitizer it was
-        # built with: under the ASan wrapper a UBSan harness never gets
-        # UBSAN_OPTIONS, so halt_on_error is unset and a real crash exits 0.
-        # Both skip flags, because bin/run-asan reads only its own.
-        arguments = ["/dev/null"]
-        environment.update({
-            "ASAN_GENERIC_SKIP_TESTCASE": "1", "SANITIZER_GENERIC_SKIP_TESTCASE": "1",
-        })
         # An agent-compiled harness carries no rpath, so it dies in the loader
         # before main() and its crash looks unmeasurable. Supply the directory
-        # bin/probe would have baked in. Harness mode only: a configured target
-        # binary is launched the way the target itself is, and overriding the
-        # loader path there could change which library a clean run resolves.
-        # Guard the empty string too — Path("") is the working directory.
+        # bin/probe would have baked in, through the carrier the runners read:
+        # DYLD_LIBRARY_PATH set here would be stripped by SIP at the first
+        # `#!/usr/bin/env` hop and never reach the binary. Harness mode only: a
+        # configured target binary is launched the way the target itself is,
+        # and overriding the loader path there could change which library a
+        # clean run resolves. Guard the empty string too — Path("") is cwd.
         library_dir = fields.get("LIBDIR", "")
         if library_dir and Path(library_dir).is_dir():
-            for variable in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
-                existing = environment.get(variable, "")
-                environment[variable] = (
-                    f"{library_dir}{os.pathsep}{existing}" if existing else library_dir
-                )
+            environment[sanitizer_lib.LIBRARY_PATH_ENV] = library_dir
     elif replay_args:
         environment.update({"ASAN_GENERIC_SKIP_TESTCASE": "1", "SANITIZER_GENERIC_SKIP_TESTCASE": "1"})
-    subprocess.run(
-        [str(SCRIPT_ROOT / "bin" / "run-sanitizer-multi"), sanitizer_name, "generic", *arguments],
-        env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-    )
-    try:
-        measured = temporary.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        measured = ""
-    finally:
+
+    def attempt(arguments: list[str], skip: bool = False) -> tuple[str, int, int, str]:
+        """One 5-run replay, classified. Writes nothing to the artifact."""
+        if mode == "harness":
+            # A harness keeps the sanitizer it was built with: under the ASan
+            # wrapper a UBSan harness never gets UBSAN_OPTIONS, so halt_on_error
+            # is unset and a real crash exits 0. Both spellings, because
+            # bin/run-asan reads only its own.
+            flag = "1" if skip else "0"
+            environment.update({
+                "ASAN_GENERIC_SKIP_TESTCASE": flag,
+                "SANITIZER_GENERIC_SKIP_TESTCASE": flag,
+            })
         temporary.unlink(missing_ok=True)
-    rate_match = re.search(r"^CRASH_RATE:\s*([0-9]+)/([0-9]+)", measured, re.MULTILINE)
-    crashes = int(rate_match.group(1)) if rate_match else 0
-    runs = int(rate_match.group(2)) if rate_match else 0
-    success_match = re.search(r"^\[run-sanitizer-multi\]\s+SUCCESS_RATE:\s*([0-9]+/[0-9]+)", measured, re.MULTILINE)
-    clean_runs = int(success_match.group(1).split("/", 1)[0]) if success_match else 0
-    if not rate_match or (crashes == 0 and clean_runs == 0):
-        # Nothing ran to completion: no summary at all, or a rate with neither
-        # a crash nor a clean exit behind it (a loader or exec failure). Keep
-        # the output so the demotion is diagnosable without re-running the cell.
-        _write_reverify_log(crash_dir, measured)
-        return False
-    if crashes:
-        crashes = _runs_reproducing(original, measured)
-        if (
-            not crashes
-            or triage.autodiscard_reason(measured)
-            or not triage._has_memory_safety_signal(measured)
+        subprocess.run(
+            [str(SCRIPT_ROOT / "bin" / "run-sanitizer-multi"), sanitizer_name, "generic", *arguments],
+            env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        )
+        try:
+            measured = temporary.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            measured = ""
+        finally:
+            temporary.unlink(missing_ok=True)
+        rate_match = re.search(r"^CRASH_RATE:\s*([0-9]+)/([0-9]+)", measured, re.MULTILINE)
+        crashes = int(rate_match.group(1)) if rate_match else 0
+        runs = int(rate_match.group(2)) if rate_match else 0
+        success_match = re.search(r"^\[run-sanitizer-multi\]\s+SUCCESS_RATE:\s*([0-9]+/[0-9]+)", measured, re.MULTILINE)
+        clean_runs = int(success_match.group(1).split("/", 1)[0]) if success_match else 0
+        if not rate_match or (crashes == 0 and clean_runs == 0):
+            # Nothing ran to completion: no summary at all, or a rate with
+            # neither a crash nor a clean exit behind it (a loader or exec
+            # failure).
+            return "unmeasured", 0, runs, measured
+        if crashes:
+            crashes = _runs_reproducing(original, measured)
+            if (
+                not crashes
+                or triage.autodiscard_reason(measured)
+                or not triage._has_memory_safety_signal(measured)
+            ):
+                # The replay crashed, but not with the original's fault. That
+                # is evidence about the crash, not a failure to run it.
+                return "mismatch", 0, runs, measured
+        return ("reproduced" if crashes else "not-reproduced"), crashes, runs, measured
+
+    status, crashes, runs, measured = attempt(
+        [testcase or os.devnull] if mode == "harness" else arguments,
+        skip=mode == "harness" and not testcase,
+    )
+    if mode == "harness" and testcase and status != "reproduced":
+        # The invocation is not recorded anywhere, and the recipe has changed:
+        # drivers written to the older one are run with no arguments and can
+        # branch on argc. Passing a saved input to one of those would read as
+        # "the fault is gone" and cost a real crash, so try the other
+        # invocation before concluding anything. Paid only when the documented
+        # one already failed.
+        legacy = attempt([os.devnull], skip=True)
+        # Both invocations are plausible for an unversioned harness, so a
+        # reproduction from either settles it, and neither one's clean result
+        # can settle it while the other did not run to completion.
+        if legacy[0] == "reproduced":
+            status, crashes, runs, measured = legacy
+        elif status == "unmeasured":
+            pass
+        elif legacy[0] == "unmeasured" or (
+            legacy[0] == "mismatch" and status == "not-reproduced"
         ):
-            # The replay crashed, but not with the original's fault. Nothing
-            # here confirms the crash, so it demotes like an unmeasured one —
-            # and the operator needs the output to see which it was.
-            _write_reverify_log(crash_dir, measured)
-            return False
+            status, crashes, runs, measured = legacy
+    if status in {"unmeasured", "mismatch"}:
+        # Keep the output so the outcome is diagnosable without re-running.
+        _write_reverify_log(crash_dir, measured)
+        return status
     rate = f"{crashes}/{runs}"
     note = (
         f"reproduced in {rate} reverification runs" if crashes
@@ -1208,7 +1290,7 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
     )
     with (crash_dir / "sanitizer.txt").open("a", encoding="utf-8") as output:
         output.write(f"\nCRASH_RATE: {rate}\n[run-sanitizer-multi] REVERIFY: {rate} - {note}\n")
-    return True
+    return status
 
 
 _REPLAY_RUN_SPLIT_RE = re.compile(r"^=== Run [0-9]+/[0-9]+ ===$", re.MULTILINE)
@@ -1421,7 +1503,7 @@ def reverify_pool_crash_rates(
         crash_dir: validation_receipt.read_current(crash_dir)
         for crash_dir in candidates
     }
-    results: dict[Path, bool] = {}
+    results: dict[Path, str] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(2, len(candidates) or 1)) as executor:
         futures = {
             crash_dir: executor.submit(
@@ -1433,10 +1515,10 @@ def reverify_pool_crash_rates(
             try:
                 results[crash_dir] = futures[crash_dir].result()
             except (OSError, subprocess.SubprocessError, ValueError):
-                results[crash_dir] = False
+                results[crash_dir] = "unmeasured"
     reverified = 0
     for crash_dir in candidates:
-        if results.get(crash_dir):
+        if results.get(crash_dir) in _REVERIFY_MEASURED:
             reverified += 1
             prior_validation = prior_validations.get(crash_dir)
             if prior_validation is not None:
@@ -1444,7 +1526,11 @@ def reverify_pool_crash_rates(
                     crash_dir, prior_validation,
                 )
         else:
-            log(f"WARN: reverify could not measure {crash_dir.name} - leaving rate unset ({reason})")
+            log(
+                f"WARN: reverify could not measure {crash_dir.name} "
+                f"[{results.get(crash_dir, 'unmeasured')}] - leaving rate "
+                f"unset ({reason})"
+            )
     if reverified:
         log(f"reverified crash repro rates: {reverified} ({reason})")
     return reverified

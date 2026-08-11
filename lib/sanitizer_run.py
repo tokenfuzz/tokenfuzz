@@ -143,7 +143,7 @@ class SanitizerRunner:
             )
             return 2
         command = [binary]
-        if self.env.get("SANITIZER_GENERIC_SKIP_TESTCASE", self.env.get("ASAN_GENERIC_SKIP_TESTCASE", "0")) != "1":
+        if not sanitizer.generic_skips_testcase(self.name, self.env):
             command.append(args[0])
         command.extend(args[1:])
         completed = self._run_symbolized(

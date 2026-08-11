@@ -21,6 +21,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 LIB_DIR = Path(os.environ.get("SCRIPT_ROOT", SCRIPT_DIR.parent)) / "lib"
 sys.path.insert(0, str(LIB_DIR))
 
+import sanitizer
 from file_tools import cap_output_file, capture_command
 from verdict import CRASH_PATTERNS
 
@@ -469,7 +470,13 @@ def main(argv: list[str]) -> int:
     if not args:
         print("[run-sanitizer-multi] ERROR: mode argument required.", file=sys.stderr)
         return 2
-    if len(args) >= 2 and not Path(args[1]).is_file():
+    # The testcase is positional even when the runner is told not to pass it on
+    # (a compiled harness carrying its own input). Requiring the file to exist
+    # in that case rejected the placeholder callers had to invent, and the run
+    # ended before any output file was written — indistinguishable from a
+    # target that never executed. Read the flag the way the child will.
+    skipped = sanitizer.generic_skips_testcase(sanitizer_name)
+    if len(args) >= 2 and not skipped and not Path(args[1]).is_file():
         print(f"[run-sanitizer-multi] ERROR: testcase not found: {args[1]}", file=sys.stderr)
         return 2
     try:

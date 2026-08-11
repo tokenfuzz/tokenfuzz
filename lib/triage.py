@@ -612,33 +612,58 @@ def demote_to_finding(directory: Path, results_dir: Path, reason: str) -> Path:
 _CRASH_DEMOTION_MARKER = re.compile(
     r"Demoted from `crashes/`", re.IGNORECASE,
 )
+_UNMEASURED_REPLAY_DEMOTION_MARKER = re.compile(
+    r"Demoted from `crashes/`: configured-target replay produced no "
+    r"measurement of the original fault",
+    re.IGNORECASE,
+)
 
 
-def route_finding_diagnostics(results_dir: str | os.PathLike[str]) -> int:
+def _last_crash_demotion_was_unmeasured_replay(report_text: str) -> bool:
+    dispositions = re.findall(
+        r"^Demoted from `crashes/`:[^\n]*$",
+        report_text, re.IGNORECASE | re.MULTILINE,
+    )
+    return bool(
+        dispositions
+        and _UNMEASURED_REPLAY_DEMOTION_MARKER.search(dispositions[-1])
+    )
+
+
+def route_finding_diagnostics(
+    results_dir: str | os.PathLike[str], *,
+    reconsider_unmeasured_replay: bool = False,
+) -> int:
     """Move complete sanitizer-backed FIND bundles into crash triage.
 
     Only a dedicated sanitizer artifact is authoritative, and only a bundle
     with a runnable testcase or harness crosses lanes.  Source-only memory
     findings remain findings and receive a crash-lead marker; they must not be
-    lost merely because reproduction is incomplete.  Artifacts deliberately
-    demoted from crash triage are never promoted back.
+    lost merely because reproduction is incomplete. Artifacts deliberately
+    demoted from crash triage are never promoted back, except when the caller
+    explicitly reconsiders the one historical demotion caused by an
+    unmeasurable replay.
 
     The scan is limited to directories containing a sanitizer sidecar, so
     calling it before crash triage does not add another full finding-gate pass.
     """
     results = Path(results_dir)
     findings = results / "findings"
-    if not findings.is_dir():
+    roots = [findings]
+    if reconsider_unmeasured_replay:
+        roots.append(results / "findings-rejected")
+    if not any(root.is_dir() for root in roots):
         return 0
     routed = 0
     candidates: set[Path] = set()
-    for pattern in ("FIND-*/sanitizer.txt", "FIND-*/.audit/sanitizer.txt"):
-        for path in findings.glob(pattern):
-            if path.is_file():
-                candidates.add(
-                    path.parent.parent
-                    if path.parent.name == ".audit" else path.parent
-                )
+    for root in roots:
+        for pattern in ("FIND-*/sanitizer.txt", "FIND-*/.audit/sanitizer.txt"):
+            for path in root.glob(pattern):
+                if path.is_file():
+                    candidates.add(
+                        path.parent.parent
+                        if path.parent.name == ".audit" else path.parent
+                    )
     for directory in sorted(candidates):
         report = _report(directory)
         sanitizer = _sanitizer_file(directory)
@@ -646,7 +671,11 @@ def route_finding_diagnostics(results_dir: str | os.PathLike[str]) -> int:
             continue
         report_text = _read(report)
         if _CRASH_DEMOTION_MARKER.search(report_text):
-            continue
+            if not (
+                reconsider_unmeasured_replay
+                and _last_crash_demotion_was_unmeasured_replay(report_text)
+            ):
+                continue
         sanitizer_text = _read(sanitizer)
         if not (
             has_valid_diagnostic(sanitizer_text)
@@ -671,6 +700,14 @@ def route_finding_diagnostics(results_dir: str | os.PathLike[str]) -> int:
                 },
             )
             continue
+        if directory.parent.name == "findings-rejected":
+            directory = _restore_rejected_artifact(
+                directory, findings, kind="finding",
+                detail="requeued after unmeasured crash replay was repaired",
+            )
+            report = _report(directory)
+            if report is None:
+                continue
         (directory / ".crash-lead.json").unlink(missing_ok=True)
         with report.open("a", encoding="utf-8") as stream:
             stream.write(
@@ -2302,7 +2339,14 @@ def triage_crash_dirs(
     target_root_is_product: bool = False,
     confirmed_trigger_bypasses: set[Path] | None = None,
     age_pending: bool = True,
+    held: set[Path] | None = None,
 ) -> dict[str, int]:
+    """Triage the crash bundles in one results tree.
+
+    `held` names bundles this pass must not adjudicate. They keep their place
+    under `crashes/` and take no verdict, so they carry no final receipt and
+    are counted as unadjudicated rather than as confirmed crashes.
+    """
     results = Path(results_dir)
     _restore_stale_trigger_rejections(results, kind="crash")
     route_finding_diagnostics(results)
@@ -2310,7 +2354,20 @@ def triage_crash_dirs(
     crashes.mkdir(parents=True, exist_ok=True)
     controls = attacker_controls or ["bytes"]
     bypasses = confirmed_trigger_bypasses or set()
-    directories = [path for path in sorted(crashes.glob("CRASH-*")) if path.is_dir()]
+    withheld = held or set()
+    for directory in withheld:
+        if directory.is_dir():
+            # A prior pass may already have finalized this exact artifact.
+            # Merely skipping it would leave that receipt current and keep
+            # publication credit for a crash this pass could not measure.
+            validation_receipt.write(
+                directory, kind="crash", state="pending",
+                detail="configured-target replay could not be measured",
+            )
+    directories = [
+        path for path in sorted(crashes.glob("CRASH-*"))
+        if path.is_dir() and path not in withheld
+    ]
     for directory in directories:
         sanitizer = _sanitizer_file(directory)
         sanitizer_text = _read(sanitizer) if sanitizer else ""
