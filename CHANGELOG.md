@@ -1,5 +1,129 @@
 # Changelog
 
+## 1.4.1 - 2026-08-10
+
+- **A work card carries the source call graph instead of asking for a grep.**
+  An assigned card had no structural context, so every agent re-derived who
+  calls this and how input reaches it by hand. The card block now shows the
+  file's callers, its callees, and the shortest route from the binary named
+  in `target.toml`. The parsing and graph queries are
+  [trailmark](https://github.com/trailofbits/trailmark) by
+  [Trail of Bits](https://www.trailofbits.com/), Apache-2.0 — the same
+  licence as TokenFuzz, and an optional dependency the operator installs
+  rather than vendored code. Support is discovered, never configured: with
+  trailmark absent nothing changes, and every run records which case it was
+  in so a run without the context is not mistaken for one that found
+  nothing.
+
+  The audited tree does not get to author this evidence. trailmark reads a
+  link file from the root it parses, and an entry there may declare any call
+  edge at "certain" confidence — a target-supplied file minted a route from
+  the entry point to a sensitive sink that the entry point never calls. The
+  parse now runs against a mirror of exactly the files rank-work considers
+  auditable, which drops that config and stops a test driver or example
+  becoming an entry root in the same move. Reachability is context and never
+  a filter: counting direct call edges alone leaves most of a C tree looking
+  unreachable until callback roots are folded in, so an unobserved edge is
+  reported as unobserved and nothing gates on it. Only edges resolved
+  syntactically are counted, and where symbol coverage is too low to speak
+  for the boundary the entry route is withheld while the caller lists —
+  which a partial parse can still state truthfully — remain.
+
+- **Agent backends run inside an OS sandbox by default.** Every launch passed
+  the backend CLI's blanket permission bypass unconditionally, so a
+  prompt-injected agent reading untrusted source held the operator's account.
+  Launches now default to `--agent-security sandboxed`, which puts the
+  backend's own OS sandbox — Seatbelt on macOS, Landlock/seccomp or bubblewrap
+  on Linux — between the agent and the machine: the target tree is readable
+  and the results tree writable, while writes elsewhere, DNS and outbound
+  network are denied. Approval prompts are turned off rather than relied on,
+  because a headless run cannot answer one and a boundary the model can ask
+  past is not a boundary; a tool the CLI cannot sandbox is denied outright.
+  Claude keeps loopback binding, since the network targets here drive local
+  client/server harnesses and without it those probes fail as environment
+  errors and count as clean. `--agent-security external-bypass` drops the CLI
+  boundary in favour of an outer container or VM you administer, and is
+  refused unless the environment asserts `IS_SANDBOX=1`.
+
+  The sandbox buys integrity and process containment, not confidentiality:
+  these sandboxes still read the whole filesystem, and what a model reads
+  reaches its provider by design. A backend is credited with a boundary only
+  where its sandbox was measured doing both things an audit needs — reading
+  the target tree and writing results — while still containing the agent.
+  Claude Code and Codex do. Antigravity runs commands in a scratch directory
+  and auto-denies its file-writing tool headless; the Gemini CLI mounts only
+  the launch directory, leaving the target unmounted; Grok reads `$HOME` and
+  reaches the network; OpenCode has no OS sandbox at all. Those four are
+  refused rather than filed as contained, and all stay available under
+  external-bypass. `bin/benchmark` applies one mode to both conditions and
+  records it, and `--regenerate` inherits the mode a run was measured under
+  instead of re-scoring its artifacts beneath a boundary they never ran with.
+
+  Turning the sandbox on then broke the tooling it contains, and that is
+  fixed in the same release. Claude Code matches its write rules against the
+  resolved path, so a target tree reached through a symlink came out readable
+  and silently unwritable; the build lease raised `EPERM` instead of falling
+  open, killing `bin/probe`, `run-asan` and `run-ubsan` before they ran a
+  testcase in every agent session of a sandboxed run. Each `--add-dir` is now
+  granted in both spellings, and a lease that cannot be opened at all warns
+  rather than raises.
+
+- **A crash frame keeps its source line, whatever produced it.** Agents cut
+  off from the runner had hand-compiled their sanitizer runs, and the sandbox
+  also denies ASan's in-process symbolizer, so frames arrived naming a
+  function and no file or line — and three defects in the offline path then
+  kept them that way. A location-less frame was unrecognized by both the
+  raw-frame test and the symbolizer's own parser, so a report full of them
+  was declared nothing-to-do; recognition now anchors on the trailing
+  module and offset and treats the symbol text as opaque, matched greedily
+  so a build directory containing a `+` cannot truncate it. A frame is also
+  never traded down for an answer that resolved nothing — `atos` returning
+  the address alone and `??` from llvm-symbolizer or addr2line were each
+  rendered as a symbol, discarding the module path, architecture and offset
+  that were all such a frame had left — and a failure is no longer silent.
+  Coverage no longer depends on which mode ran: one shared execution helper
+  captures and symbolizes for every mode of every runner, browser modes
+  symbolize before persisting, and a pool pass repairs every pooled crash and
+  finding, accepted or rejected, including a model-direct cell that drove the
+  binary itself. That repair is gated on build identity, since symbolizing
+  against a build that has moved on would name a different function and line:
+  it runs after the build gate, skips blocked crashes, and refuses outright
+  when the run's pinned build cannot be verified. A repaired artifact's
+  validation receipt is rebound as the representation-only transform it is,
+  rather than going stale and refusing to publish a pool whose reports never
+  changed meaning.
+
+- **Model-direct crashes are measured, not assumed.** Harness replay of a
+  model-direct cell could not run end to end: the runner ignored the skip
+  flag for a driver carrying its own input, the loader path was lost at each
+  `#!/usr/bin/env` hop, and a driver never received its saved testcase. All
+  three are fixed, with the older no-argument invocation retried so existing
+  bundles keep reproducing, and crashes an earlier version filed as findings
+  rejoin crash triage. Replay outcomes are also distinct at last: a fault
+  that does not come back demotes, while a replay that *could not run* keeps
+  the crash under `crashes/` and is reported as an unjudged remainder through
+  the cell, the condition and the crosstab, instead of silently reading as a
+  clean zero.
+
+- **Every report field renders inside the Fields grid, and rendering no
+  longer invalidates a receipt.** `render-md` matched bare `Label: value`
+  lines against a private list that had rotted against the writers and could
+  never cover an author-invented label, so fields across the corpus rendered
+  loose beside the grid, some reports had no grid at all, and ordering was
+  author-dependent. Field-ness now comes from the run a label sits in, seeded
+  by the report's own grid and a shared vocabulary, and a label is hidden
+  only once the page shows its value somewhere else. `severity` and
+  `render-md` identify the table through one shared predicate, settling a
+  disagreement between two lookalike separator patterns, and no value visible
+  on a parent's page goes missing from the rendered one. Separately, a raw
+  `|` in an authored value reads as a cell break and padded the whole table a
+  column wider, and report identity canonicalized padding but not column
+  count — so clustering's re-render invalidated the severity receipt written
+  minutes earlier and the pool audit failed a finished run. Canonical width now
+  ignores padding-only cells, identity recognizes the same separators
+  `render-md` pads, and prior identities are carried as legacy candidates so
+  older reports still reproduce what wrote them.
+
 ## 1.4.0 - 2026-08-07
 
 - **Chromium is a supported target, and browser support is structural.**
