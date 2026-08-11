@@ -233,19 +233,20 @@ class BenchmarkMetricsTests(unittest.TestCase):
         )
         self.assertEqual(benchmark.harvest(legacy)["crashes_rejected"], 2)
 
-    def test_native_hardening_is_final_but_not_security_credit(self) -> None:
-        results = self.root / "native"
+    def test_not_reportable_is_excluded_but_a_reportable_low_counts(self) -> None:
+        """The two meanings of "low" must not merge into one column."""
+        results = self.root / "not-reportable"
         crash = results / "crashes" / "CRASH-001"
         finding = results / "findings" / "FIND-001"
         for directory, kind in ((crash, "crash"), (finding, "finding")):
             directory.mkdir(parents=True)
             (directory / "report.md").write_text(
-                "# Native state issue\n", encoding="utf-8",
+                "# Retained engineering defect\n", encoding="utf-8",
             )
             validation_receipt.write(
                 directory,
                 kind=kind,
-                state="native-hardening",
+                state="not-reportable",
                 attacker_controls=["bytes"],
             )
         (crash / "sanitizer.txt").write_text(ASAN, encoding="utf-8")
@@ -253,26 +254,49 @@ class BenchmarkMetricsTests(unittest.TestCase):
         validation_receipt.write(
             crash,
             kind="crash",
-            state="native-hardening",
+            state="not-reportable",
+            attacker_controls=["bytes"],
+        )
+        # A security report whose CVSS band happens to be Low still counts.
+        reportable_low = results / "crashes" / "CRASH-002"
+        reportable_low.mkdir(parents=True)
+        (reportable_low / "report.md").write_text(
+            "# Reportable low-severity issue\n\n"
+            "- **Severity**: Low (CVSS-BT 4.0: 3.3 Low; primitive=sample)\n",
+            encoding="utf-8",
+        )
+        (reportable_low / "sanitizer.txt").write_text(ASAN, encoding="utf-8")
+        (reportable_low / "input.bin").write_bytes(b"fixture")
+        validation_receipt.write(
+            reportable_low,
+            kind="crash",
+            state="reportable",
             attacker_controls=["bytes"],
         )
 
         metrics = benchmark.harvest(results)
-        self.assertEqual(metrics["confirmed_crashes"], 0)
+        self.assertEqual(metrics["confirmed_crashes"], 1)
+        self.assertEqual(metrics["crash_dirs"], ["CRASH-002"])
         self.assertEqual(metrics["confirmed_findings"], 0)
-        self.assertEqual(metrics["finalized_crashes"], 1)
+        self.assertEqual(metrics["finalized_crashes"], 2)
         self.assertEqual(metrics["finalized_findings"], 1)
         self.assertEqual(metrics["crashes_unadjudicated"], 0)
         self.assertEqual(metrics["findings_unadjudicated"], 0)
         self.assertEqual(
             metrics["validation_waterfall"]["crashes"]["lanes"][
-                "native-hardening"
+                "reportable"
+            ],
+            1,
+        )
+        self.assertEqual(
+            metrics["validation_waterfall"]["crashes"]["lanes"][
+                "not-reportable"
             ],
             1,
         )
         self.assertEqual(
             metrics["validation_waterfall"]["findings"]["lanes"][
-                "native-hardening"
+                "not-reportable"
             ],
             1,
         )
@@ -946,9 +970,9 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.make_cell(bench, "harness-r1", "harness", 1, 1)
         ledger = self.root / "ledger.md"
         section = benchmark.render_section(benchmark.aggregate(bench))
-        self.assertIn("### Publication waterfall", section)
-        self.assertIn("Legacy provisional", section)
-        self.assertIn("Reviewed root families", section)
+        self.assertIn("### Security decisions", section)
+        self.assertNotIn("Legacy provisional", section)
+        self.assertNotIn("Reviewed root families", section)
         self.assertIn("| all conditions | crashes |", section)
         benchmark.append_to_ledger(ledger, section)
         benchmark.append_to_ledger(ledger, section)
@@ -1350,11 +1374,11 @@ class BenchmarkMetricsTests(unittest.TestCase):
         }
         self.write_json(run / "report.json", report)
         text = benchmark.crosstab(self.root / "crosstab")
-        # Rejected columns precede accepted ones; upper bounds are explicit.
+        # Rejected columns precede reportable ones; upper bounds are explicit.
         for expected in (
-            "can appear on both sides if it was accepted in one write-up",
-            "Unique rejected findings | Unique accepted findings",
-            "Unique rejected crashes | Unique accepted crashes",
+            "can appear on both sides if it was reportable in one write-up",
+            "Unique rejected findings | Security findings to report",
+            "Unique rejected crashes | Unique Security crashes to report",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
@@ -1406,6 +1430,25 @@ class BenchmarkMetricsTests(unittest.TestCase):
         # The reader is told which runs need regenerating, and why.
         self.assertIn("bin/benchmark --regenerate", text)
         self.assertIn("regenerate", text)
+
+        # A schema-v1 report does have lanes, but its conditional lane was
+        # counted as security yield. It is equally superseded and must not
+        # preserve those old headline numbers.
+        report["conditions"][0]["validation_waterfall"] = {
+            "crashes": {"lanes": {
+                "reportable": 1, "conditional": 6,
+                "native-hardening": 0,
+            }},
+            "findings": {"lanes": {
+                "reportable": 2, "conditional": 3,
+                "native-hardening": 0,
+            }},
+        }
+        self.write_json(run / "report.json", report)
+        superseded = benchmark.crosstab(self.root / "stale")
+        self.assertIn("Pending", superseded)
+        self.assertNotIn("7 (4 M+)", superseded)
+        self.assertNotIn("5 (2 M+)", superseded)
 
     def test_crosstab_shows_receipt_backed_subset_without_migration_noise(self) -> None:
         run = self.root / "partial" / "codex" / "20260302-000000"

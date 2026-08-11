@@ -804,6 +804,8 @@ class SeverityTests(unittest.TestCase):
             "heap-buffer-overflow\nREAD of size 1", report_id="CRASH-SCORE-READ"
         ))
         self.assertEqual((small_read["score"], small_read["level"]), (5.5, "Medium"))
+        self.assert_metrics(small_read, VC="N", VI="N", VA="L")
+        self.assertNotIn("MVC", small_read.get("metrics", {}))
         unknown = self.score(self.make_report("process exited abnormally", report_id="CRASH-UNKNOWN"))
         self.assertEqual((unknown["score"], unknown["level"]), (None, "Unknown"))
 
@@ -1317,10 +1319,56 @@ class SeverityTests(unittest.TestCase):
         self.assertEqual(payload["severity"]["level"], "Unknown")
         self.assertFalse((finding / "severity.json").exists())
 
-    def test_native_hardening_receives_no_security_rating(self) -> None:
+    def test_clearing_an_unrated_report_twice_changes_nothing(self) -> None:
+        """An unrated artifact is re-examined on every triage pass.
+
+        `_strip_auto_sections` drops the bullet the clear writes, so a blind
+        rewrite re-inserts it one line lower each pass and the report grows
+        without end — while the content-addressed receipt is rebound to each
+        new form.
+        """
+        for report_id, body in (
+            ("FIND-CLEAR-BULLET",
+             "# Issue\n\n## Classification\n\n"
+             "- **Severity**: High (CVSS-BT 4.0: 8.9)\n"),
+            ("FIND-CLEAR-BARE", "# Issue\n\nBoundary: network\n"),
+        ):
+            with self.subTest(report_id=report_id):
+                report_dir = self.root / "findings" / report_id
+                report_dir.mkdir(parents=True)
+                report = report_dir / "report.md"
+                report.write_text(body, encoding="utf-8")
+                severity.clear_report_severity(
+                    report, report_dir, "Not a security report",
+                )
+                once = report.read_text(encoding="utf-8")
+                severity.clear_report_severity(
+                    report, report_dir, "Not a security report",
+                )
+                self.assertEqual(report.read_text(encoding="utf-8"), once)
+                self.assertIn("Not a security report", once)
+
+    def test_claimed_leak_cannot_restore_read_confidentiality(self) -> None:
+        """An invalid read proves a fault, not that its value escapes.
+
+        `disclosed_content` is authored in the report, so it may only lower.
+        Letting it raise would hand every fluent read claim back the impact
+        the class rows were changed to stop assuming.
+        """
+        report_dir = self.make_report(
+            "heap-buffer-overflow\nREAD of size 64",
+            report_id="CRASH-LEAK",
+            extra_fields=(("Disclosed content", "cross-principal"),),
+        )
+        claimed = self.score(report_dir)
+        self.assert_metrics(claimed, VC="N", VI="N", VA="L")
+        self.assertNotIn("MVC", claimed.get("metrics", {}))
+        self.assertEqual(claimed["level"], "Medium")
+
+    def test_not_reportable_defect_receives_no_numeric_rating(self) -> None:
         finding = self.make_report(
             "heap-buffer-overflow\nWRITE of size 8",
-            report_id="FIND-NATIVE-HARDENING",
+            report_id="FIND-NOT-REPORTABLE",
             finding=True,
         )
         severity.validation_receipt.write(
@@ -1331,7 +1379,7 @@ class SeverityTests(unittest.TestCase):
             self.assertEqual(severity.main(["--report", str(finding)]), 0)
         self.assertTrue((finding / "severity.json").is_file())
         severity.validation_receipt.write(
-            finding, kind="finding", state="native-hardening",
+            finding, kind="finding", state="not-reportable",
             attacker_controls=["bytes"],
         )
         output = io.StringIO()
@@ -1340,11 +1388,13 @@ class SeverityTests(unittest.TestCase):
                 severity.main(["--report", str(finding), "--json"]), 0,
             )
         payload = json.loads(output.getvalue())["severity"]
-        self.assertEqual(payload["level"], "No security rating")
+        # Never "Low": that band is a security report with a small impact, and
+        # a reader cannot tell the two apart once they share a word.
+        self.assertEqual(payload["level"], "Not a security report")
         self.assertIsNone(payload["score"])
         self.assertFalse((finding / "severity.json").exists())
         report = (finding / "report.md").read_text(encoding="utf-8")
-        self.assertIn("No security rating (native hardening)", report)
+        self.assertIn("Not a security report", report)
         self.assertNotIn("## Severity rationale", report)
         self.assertIsNotNone(
             severity.validation_receipt.read_current(finding),

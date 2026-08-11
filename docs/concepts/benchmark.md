@@ -147,15 +147,30 @@ whose remainder outnumbers its verdicts is marked `≥` — a lower bound on tha
 condition, not a yield to compare. `bin/benchmark --regenerate` finishes the
 gate from cached receipts and removes the mark.
 
-The run report also shows a publication waterfall: candidate,
-evidence-complete, validated, routed, final, and exact-signature counts.
-Strong/reportable, conditional, pending, native-hardening, rejected, and
-legacy-provisional lanes remain separate. These are condition-local artifact
-occurrences until the exact-signature column; TokenFuzz leaves reviewed root
-families blank rather than guessing that similar stacks or locations share one
-cause and fix. Native-hardening is final engineering evidence but stays outside
-the security total and numeric severity. Reproduction confidence, validation
-state, and CVSS severity are reported independently.
+The run report also shows one compact security-decision table. A settled review
+ends as **Report**, **Not reportable**, or **Rejected**; an artifact whose
+review never finished, or finished without settling the claim, stays under
+**Review unsettled** and receives no credit either way. Only Report enters
+security yield or receives numeric severity. Not reportable preserves a real
+engineering defect on disk without presenting it as a security bug, and it
+states something a review established — an admitted contract violation, or
+reviewers agreeing the trigger needs a control the threat model does not list.
+An `Uncertain` verdict and two reviewers who disagree establish neither, so
+they stay unsettled rather than being written off as out of scope: that
+remainder is the reason a count can carry the `≥` floor mark. Content-addressing
+reopens the review when the report, the evidence, or the prompt version changes.
+Runtime signature details remain available in the linked crash and finding
+indexes rather than adding another count to the benchmark headline.
+
+The scope half of that decision — is the trigger inside `attacker_controls`? —
+is not taken from the report. A report's `Trigger source` is written by whoever
+found the bug, and it errs in both directions: a driver that exercises
+documented entry points reads as caller-driven even when attacker bytes decide
+the fault, and an unreproduced claim reads as byte-driven even when only a
+caller can reach it. Left uncorrected, that penalises the condition that builds
+reproducers and rewards the one that does not. The trigger-provenance reviewer
+reads the source and answers the question itself, and its answer decides when
+the two disagree.
 
 Both conditions are held to the same evidence bar. The baseline's crashes are
 replayed through the target's normal invocation before they count, so a
@@ -240,12 +255,12 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Replicates` | `done/total`. Replicates that recovered from a mid-run provider pause got their full budget and fold in unmarked; a `(Np)` suffix flags N provider-limited replicates excluded from the totals (a same-run-id re-run retries them). |
 | `Wall (h)` | Median hours a cell spent finding things, over the hours it was granted (`0.52/5.00h`). Every cell in a run is granted the same wall, but a condition is free to stop early, so read the counts beside a short numerator as the yield of a shorter experiment. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
 | `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
-| `Unique accepted findings` | Distinct evidence-signature clusters of accepted non-crash security reports, shown `N (M M+)`: N clusters, M scored Medium or higher. This is not a guaranteed root-cause count. Links to the finding cluster report. |
+| `Security findings to report` | Distinct evidence-signature clusters of reportable non-crash security findings, shown `N (M M+)`: N clusters, M scored Medium or higher. Links to the finding cluster report. |
 | `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
-| `Unique accepted crashes` | Distinct sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. This is not a guaranteed unique-fix count. Links to the crash cluster report. |
+| `Unique Security crashes to report` | Distinct reportable sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. The existing crash-cluster link includes reportable crashes at every numeric severity, including Low. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
 
-Accepted and rejected results go through the same deduplication, because a raw
+Reportable and rejected results go through the same deduplication, because a raw
 directory tally counts matching evidence many times over and would not be
 comparable with a clustered one. Signature clustering is a deterministic
 deduplication proxy: one root cause can split across different sites, and
@@ -259,11 +274,11 @@ that produced the number.
 
 **Time to discovery**, below the table, plots those same numbers over time: one
 row per target revision, findings and crashes side by side. Each step is one
-deduplicated accepted result placed at the hour it was found, so the curve only
-climbs and ends exactly on the `Unique accepted` count. The chip above each
-curve shows what the gate accepted and rejected. When a result's discovery time
+deduplicated reportable result placed at the hour it was found, so the curve only
+climbs and ends exactly on the security-report count. The chip above each
+curve shows what the gate made reportable and rejected. When a result's discovery time
 can't be recovered, the panel flags the timing as approximate rather than
-faking precision. Accepted and rejected results are deduplicated separately, and
+faking precision. Reportable and rejected results are deduplicated separately, and
 an `up to` rejected count is a conservative upper bound — neither figure is
 *precision*, which needs the answer key described below.
 

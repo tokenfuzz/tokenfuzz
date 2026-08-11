@@ -183,7 +183,9 @@ ok("Deriving that size from untrusted input is fine" in sf, "safety: attacker-de
 ok("you MUST still file" in sf, "safety: KEEP mirror (accurate-len / truthful capacity)")
 ok("requires a NUL-terminated C string" in sf, "safety: documented C-string qualifier")
 ok("no untrusted byte sets" not in sf, "safety: absolute allocation-provenance wording removed")
-ok("CVSS `MAT:P`" in sf, "safety: outside controls use the live CVSS mechanism")
+ok("a source reviewer reads the code and" in sf
+   and "crosses no security boundary" in sf,
+   "safety: outside controls go to a source reviewer, not a fixed demotion")
 ok("must make sure" in sf and "A recommendation that does not define accepted input" in sf,
    "safety: documented normative preconditions are caller contracts")
 ok("demotes a crash from security to robustness" not in sf and "×0.7" not in sf,
@@ -191,7 +193,7 @@ ok("demotes a crash from security to robustness" not in sf and "×0.7" not in sf
 
 # An operator-enabled non-default mode is application configuration, not
 # attacker input. Both halves must hold or the precondition is lost: the emit
-# side has to record it, and the scorer field has to carry it to MAT:P.
+# side has to record it, and triage has to make the final report/Low decision.
 # Without them a crash reachable only under a non-default filter or codec
 # rates as if the input bytes alone reached it.
 ok("`Parameter control: application-supplied`" in sf,
@@ -201,7 +203,7 @@ ok(rc == 0, "triage_reachability_fields renders")
 ok("that selection is application configuration, not attacker input" in rf,
    "reach-fields: operator-enabled mode is configuration")
 ok('set parameter_control to "application-supplied"' in rf,
-   "reach-fields: routed through the field bin/severity scores as MAT:P")
+   "reach-fields: non-default setup reaches the triage decision")
 
 rc, ff = render_named("find_first_directive.md.j2",
                       {"results_dir": "/r", "report_prose": ""})
@@ -226,6 +228,16 @@ ok("consequence-disproved" in vp,
    "validator: affirmative consequence disproof has a closed rejection kind")
 ok("different scenario" in vp,
    "validator: an alternate scenario cannot rescue a refuted report")
+# Scope is what the whole trigger fit needs, not what any one component
+# contributes: on a bytes-only target, crafted bytes plus an application call
+# order the attacker cannot issue is out of the model, and publication follows
+# this answer directly.
+ok("cover ALL of them" in vp and "never sufficient" in vp,
+   "validator: trigger fit needs every required component covered")
+ok("AND a specific application call order is `outside`" in vp,
+   "validator: a mixed bytes-plus-call-order trigger is out of a bytes model")
+ok("calling the documented entry point that consumes the input" in vp,
+   "validator: ordinary fixed setup is not a trigger component")
 
 
 # ─── Closed class vocabulary and threat-model semantics ────────────
@@ -256,13 +268,15 @@ rc, tm = render_named("suggest_threat_model.md.j2", {
     "readme": "sample", "api_surface": "sample.h",
 })
 ok(rc == 0, "threat-model prompt renders")
-ok("`MAT:P` precondition" in tm, "threat-model prompt names the live CVSS mechanism")
+ok("a source reviewer confirms leaves the" in tm and "not reportable" in tm,
+   "threat-model prompt names the reviewed reportable/not-reportable decision")
 ok("demoted from security to robustness" not in tm,
    "threat-model prompt does not describe the reverted disposition")
 
 agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
-ok("×0.7" not in agents and "CVSS `MAT:P`" in agents,
-   "runtime agent contract matches scorer semantics")
+ok("×0.7" not in agents and "a source reviewer decides" in agents
+   and "no numeric CVSS score" in agents,
+   "runtime agent contract matches the reviewed publication decision")
 
 
 print(f"\n  \033[1m{PASSED}/{PASSED + FAILED} passed\033[0m")

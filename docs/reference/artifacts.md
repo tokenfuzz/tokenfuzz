@@ -112,11 +112,12 @@ review; mechanical severity, patch, enrichment, and cluster annotations do not.
 
 Every adjudicated artifact has a content-addressed `validation.json`. It binds
 the publication state to the report, saved evidence, target revision/config,
-and threat model. Its states are `reportable`, `conditional`,
-`native-hardening`, `pending`, and `rejected`. Pending and legacy artifacts
-remain visible on disk. Only current `reportable` and `conditional` receipts
-enter the security benchmark total or receive numeric severity;
-`native-hardening` is final but reported separately without a security score.
+and threat model. Its states are `reportable`, `not-reportable`, `pending`, and
+`rejected`. Pending and legacy artifacts remain visible on disk. Only a current
+`reportable` receipt enters the security benchmark total or receives numeric
+severity. `not-reportable` is a final retained engineering defect, not a
+security report; `pending` is an artifact no review settled, which is neither
+credited nor written off.
 Changing the report, testcase, harness, sanitizer diagnostic, invocation
 evidence, target/config identity, or review evidence invalidates the receipt
 and returns the artifact to review.
@@ -241,7 +242,8 @@ to `findings-rejected/`.
 
 The severity scorer writes `severity.json` and updates severity text only
 after a current final-state validation receipt exists. A pending FIND remains
-available for review without being silently interpreted as Low severity.
+available for review without being silently interpreted as a low-severity
+security bug.
 
 `severity.json` records the published level, score, and vector together with
 the scorer version and a hash of the report content they were derived from.

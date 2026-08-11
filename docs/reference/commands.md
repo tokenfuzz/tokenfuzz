@@ -273,8 +273,8 @@ bin/export-repro CRASH-001-1 --slug "$TARGET" \
 Use the pair together for detached artifacts. It prevents an unrelated live
 session for the same slug from supplying either the revision or build recipe.
 
-`bin/severity --batch` scores accepted crashes and findings together in one
-offline process.
+`bin/severity --batch` scores reportable crashes and findings together in one
+offline process; `not-reportable` artifacts remain unscored.
 
 See [Triage results](../guides/triage-results.md) before overriding or
 regenerating an artifact.

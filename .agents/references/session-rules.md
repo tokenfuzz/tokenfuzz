@@ -399,13 +399,14 @@ component is outside the target's `attacker_controls` (declared in
 
 `Caller contract: violated` always rejects regardless of trigger.
 
-The verdict above is a **severity** outcome triage applies, not a filing decision
-for you. A `robustness` verdict KEEPS the crash in `crashes/` (triage flags it and
-the severity scorer deprioritizes it) — it is not moved to `findings/`. So when
+The verdict above starts triage's publication decision, not a filing decision
+for you, and a source reviewer settles it against the code. A `robustness`
+verdict KEEPS the crash in `crashes/` as a defect that crosses no security
+boundary: no numeric security score, no security yield. So when
 a testcase reproduces a sanitizer diagnostic through a public boundary and clears
 conditions 1–3, file it under `crashes/` regardless of trigger source. Do not
 pre-demote a `call-sequence`/`env`/`race` crash to `findings/` just because the
-target is bytes-only; triage does that math once.
+target is bytes-only; triage makes that call once.
 
 ## FIND Quality Bar
 

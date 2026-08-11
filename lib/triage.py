@@ -764,7 +764,7 @@ _ALL_REACH_FIELD_LABELS = {
     **_REACH_FIELD_LABELS,
     **_OPTIONAL_REACH_FIELD_LABELS,
 }
-_REACH_FIELD_DECISION_VERSION = "reach-fields-v3-disclosed-content"
+_REACH_FIELD_DECISION_VERSION = "reach-fields-v4-fixed-setup"
 _REACH_FIELD_ENUMS = {
     "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
@@ -1282,6 +1282,13 @@ def cluster_expansion_decision(
 
 
 def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, str]:
+    """Compare the report's self-declared trigger against the threat model.
+
+    `contract-flag` is the report admitting caller misuse and is dispositive.
+    `out-of-model` is only the set difference against `attacker_controls`, and
+    a source reviewer may correct it in either direction — see
+    `_final_publication_state`.
+    """
     contract = _field(report_text, "Caller contract").lower()
     parameter = _field(report_text, "Parameter control").lower().replace("_", "-")
     trigger = _field(report_text, "Trigger source").lower()
@@ -1306,8 +1313,68 @@ def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, 
     accepted = {aliases.get(item.strip(), item.strip()) for item in controls}
     missing = sorted(required - accepted)
     if missing:
-        return "contract-flag", f"trigger requires {','.join(missing)} outside attacker_controls={','.join(controls)}"
+        return "out-of-model", f"trigger requires {','.join(missing)} outside attacker_controls={','.join(controls)}"
     return "promote", f"trigger within attacker_controls={','.join(controls)}"
+
+
+_UNSETTLED_REVIEW_DETAIL = (
+    "source review did not settle whether the trigger is in the threat model"
+)
+
+
+def _final_publication_state(
+    reach_verdict: str,
+    trigger_votes: set[str | None] | frozenset[str | None] = frozenset(),
+    review_facts: dict[str, str] | None = None,
+    *,
+    direct_trigger_proof: bool = False,
+) -> str:
+    """Resolve a kept artifact to a security report, a retained defect, or neither.
+
+    Rejection remains a separate, two-review decision. `not-reportable` asserts
+    a fact somebody established — the report admitting caller misuse, agreeing
+    reviewers placing the trigger outside the declared controls, or agreeing
+    reviewers finding no added security boundary. A review that ran and did not
+    settle the question establishes none of those, so the artifact stays
+    `pending`: not security yield, and not a defect anyone showed is out of
+    scope. The benchmark then carries it as the unjudged remainder that marks
+    its counts a floor, where writing a negative would instead publish an
+    adjudication that never happened. Nothing re-asks a cached vote, so
+    `pending` costs no provider call, and content-addressing reopens the review
+    when the report, its evidence, or the prompt version changes.
+
+    Scope comes from `trigger_controls_fit` — the reviewer's own threat-model
+    comparison, read from source and supplied by `_source_review_facts` only
+    from anchor-verified reviewers that agree. The report's self-declared
+    `Trigger source` is not evidence for it: the finder writes that field and
+    gets it wrong in both directions. So a review that ran and did not answer
+    the scope question cannot carry an artifact to `reportable`. Only a path
+    that needed no review — a machine trigger proof, an operator opt-out, or a
+    human pin — falls back to the report's own comparison, because there is no
+    reviewer to have answered.
+    """
+    facts = review_facts or {}
+    fit = facts.get("trigger_controls_fit", "")
+    if (
+        reach_verdict == "contract-flag"
+        or facts.get("rejection_kind") == "no-added-boundary"
+    ):
+        return "not-reportable"
+    if direct_trigger_proof:
+        # A confirmed probe already answered the scope question by machine.
+        # The ambiguous-surface reviewer still runs, to settle boundary and
+        # carrier; its opinion about a proved byte path is not evidence
+        # against that proof.
+        return "reportable"
+    if fit == "outside":
+        return "not-reportable"
+    if any(vote in {"Reject", "Uncertain"} for vote in trigger_votes):
+        return "pending"
+    if fit == "within":
+        return "reportable"
+    if any(vote is not None for vote in trigger_votes):
+        return "pending"
+    return "not-reportable" if reach_verdict == "out-of-model" else "reportable"
 
 
 def _set_contract_concern(report: Path, reason: str) -> None:
@@ -1810,6 +1877,7 @@ def _source_review_facts(
         "vulnerable_boundary_surface": {},
         "reproducer_carrier": {},
         "rejection_kind": {},
+        "trigger_controls_fit": {},
     }
     for vote_file in vote_files:
         if _cached_trigger_vote(report, vote_file) not in {"Promote", "Reject"}:
@@ -2248,7 +2316,7 @@ def triage_one_crash(
             ["Caller contract or Trigger source"], age_pending=age_pending,
         )
     _clear_promotion_sidecars(crash_dir)
-    if verdict == "contract-flag":
+    if verdict in {"contract-flag", "out-of-model"}:
         _set_contract_concern(report, detail)
     else:
         _clear_contract_concern(report)
@@ -2309,22 +2377,26 @@ def triage_one_crash(
         ),
         rejection_quorum=2,
     )
-    if review_facts.get("rejection_kind") == "no-added-boundary":
-        state = "native-hardening"
-    elif (
-        verdict == "contract-flag"
-        or any(vote in {"Reject", "Uncertain"} for vote in trigger_votes)
-    ):
-        state = "conditional"
-    else:
-        state = "reportable"
+    state = _final_publication_state(
+        verdict, trigger_votes, review_facts,
+        direct_trigger_proof=direct_trigger_proof,
+    )
     validation_receipt.write(
-        crash_dir, kind="crash", state=state, detail=detail,
+        crash_dir, kind="crash", state=state,
+        detail=_UNSETTLED_REVIEW_DETAIL if state == "pending" else detail,
         attacker_controls=attacker_controls, review_facts=review_facts,
     )
-    if _decision_timeout(1, deadline):
-        _score_validated_report(crash_dir, report, env=environment)
-    return "promoted"
+    if state == "pending":
+        return "pending"
+    # A not-reportable decision must synchronously remove a score an earlier
+    # receipt published, or an obsolete rating outlives the decision that
+    # voided it. Reportable scoring may still yield to the triage deadline.
+    if state == "not-reportable" or _decision_timeout(1, deadline):
+        state = _score_final_report(
+            crash_dir, report, "crash", state,
+            attacker_controls=attacker_controls, env=environment,
+        )
+    return "pending" if state == "pending" else "promoted"
 
 
 def triage_crash_dirs(
@@ -2739,23 +2811,27 @@ def _prepare_accepted_finding(
     return report
 
 
+def _trigger_bypass_confirmed(directory: Path) -> bool:
+    """Whether a machine probe already proved this artifact's byte path."""
+    try:
+        bypass = json.loads(
+            (directory / ".trigger-gate-bypass.json").read_text(
+                encoding="utf-8",
+            )
+        )
+    except (OSError, ValueError):
+        return False
+    return isinstance(bypass, dict) and bypass.get("bypass") is True
+
+
 def _finding_trigger_disposition(
     finding_dir: Path, report: Path, deadline: float | None = None,
     usage_index: str | os.PathLike[str] | None = None,
     target_root_is_product: bool = False,
 ) -> str:
     """Return accepted, rejected, or pending from current trigger evidence."""
-    if (finding_dir / ".trigger-gate-bypass.json").is_file():
-        try:
-            bypass = json.loads(
-                (finding_dir / ".trigger-gate-bypass.json").read_text(
-                    encoding="utf-8",
-                )
-            )
-        except (OSError, ValueError):
-            bypass = {}
-        if isinstance(bypass, dict) and bypass.get("bypass") is True:
-            return "accepted"
+    if _trigger_bypass_confirmed(finding_dir):
+        return "accepted"
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     target_root = Path(os.environ.get("TARGET_ROOT", ""))
     if backend and target_root.is_dir():
@@ -2783,7 +2859,7 @@ def _finding_trigger_disposition(
             rejection_quorum=2,
         )
         if facts.get("rejection_kind") == "no-added-boundary":
-            return "native-hardening"
+            return "not-reportable"
         if _trigger_rejection_is_dispositive(
             report, (finding_dir / ".trigger-gate.json", second),
             allow_consequence=True,
@@ -2799,23 +2875,15 @@ def _finding_trigger_disposition(
         return "accepted"
     if vote == "Uncertain":
         # A legacy positive or inconclusive current review cannot justify
-        # suppressing a quality-confirmed finding. Publish it conditionally;
-        # _finalize_accepted_finding binds that weaker state into the receipt.
+        # suppressing a quality-confirmed finding. Keep it on disk and let
+        # _final_publication_state record the doubt as unadjudicated.
         return "accepted"
     return "pending"
 
 
 def _cached_trigger_resolution(directory: Path, report: Path) -> bool:
     """Whether trigger adjudication can finish without a provider call."""
-    try:
-        bypass = json.loads(
-            (directory / ".trigger-gate-bypass.json").read_text(
-                encoding="utf-8",
-            )
-        )
-    except (OSError, ValueError):
-        bypass = {}
-    if isinstance(bypass, dict) and bypass.get("bypass") is True:
+    if _trigger_bypass_confirmed(directory):
         return True
     first = _cached_trigger_vote(report, directory / ".trigger-gate.json")
     if first in {"Promote", "Uncertain"}:
@@ -2935,6 +3003,33 @@ def _score_validated_report(
     return rc
 
 
+def _score_final_report(
+    directory: Path, report: Path, kind: str, state: str,
+    *, attacker_controls: list[str] | None = None,
+    env: dict | None = None,
+) -> str:
+    """Score a final artifact, or hold it pending when unscoring failed.
+
+    A `not-reportable` decision voids any numeric severity an earlier receipt
+    published, and only the scorer removes it. Leaving the final receipt in
+    place after a failed removal would freeze a report that carries both a
+    numeric CVSS line and the decision that voided it, and the next pass skips
+    current final receipts, so nothing would ever retry. Hold the artifact
+    retryable instead and say so.
+    """
+    if _score_validated_report(directory, report, env=env) == 0:
+        return state
+    if state != "not-reportable":
+        return state
+    detail = "obsolete numeric severity could not be cleared"
+    validation_receipt.write(
+        directory, kind=kind, state="pending", detail=detail,
+        attacker_controls=attacker_controls,
+    )
+    print(f"WARN: {directory.name}: {detail}; held pending", file=sys.stderr)
+    return "pending"
+
+
 def _finalize_accepted_finding(
     finding_dir: Path, results_dir: Path, report: Path,
     deadline: float | None,
@@ -2972,7 +3067,8 @@ def _finalize_accepted_finding(
             detail="source review is uncertain, stale, or incomplete",
         )
         return "pending"
-    if disposition == "native-hardening":
+    controls = triage_validate.trigger_attacker_controls()
+    if disposition == "not-reportable":
         review_facts = _source_review_facts(
             report,
             (
@@ -2982,13 +3078,16 @@ def _finalize_accepted_finding(
             rejection_quorum=2,
         )
         validation_receipt.write(
-            finding_dir, kind="finding", state="native-hardening",
-            detail="real native defect with no added security boundary",
-            attacker_controls=triage_validate.trigger_attacker_controls(),
+            finding_dir, kind="finding", state="not-reportable",
+            detail="real defect that crosses no security boundary",
+            attacker_controls=controls,
             review_facts=review_facts,
         )
-        return "accepted"
-    controls = triage_validate.trigger_attacker_controls()
+        state = _score_final_report(
+            finding_dir, report, "finding", "not-reportable",
+            attacker_controls=controls,
+        )
+        return "pending" if state == "pending" else "accepted"
     reach_verdict, reach_detail = evaluate_crash_verdict(_read(report), controls)
     if reach_verdict == "incomplete":
         validation_receipt.write(
@@ -3008,28 +3107,30 @@ def _finalize_accepted_finding(
     trigger_vote = _cached_trigger_vote(
         report, finding_dir / ".trigger-gate.json",
     )
-    state = (
-        "conditional"
-        if reach_verdict == "contract-flag"
-        or trigger_vote in {"Reject", "Uncertain"}
-        else "reportable"
+    state = _final_publication_state(
+        reach_verdict, {trigger_vote}, review_facts,
+        direct_trigger_proof=_trigger_bypass_confirmed(finding_dir),
     )
     validation_receipt.write(
         finding_dir, kind="finding", state=state,
-        detail=reach_detail,
+        detail=_UNSETTLED_REVIEW_DETAIL if state == "pending" else reach_detail,
         attacker_controls=controls,
         review_facts=review_facts,
     )
-    # Numeric severity is published only after source-backed validation.  A
-    # missing consequence or boundary therefore remains unrated rather than
-    # being interpreted as Low.
+    if state == "pending":
+        return "pending"
+    # Numeric severity is published only after source-backed validation. A
+    # missing consequence or boundary stays unrated rather than being read as
+    # a weak security rating.
     #
     # Score only after source-backed validation. Severity may canonicalize the
     # report while doing so; _score_validated_report carries the current gate
     # caches across that exact harness-owned rewrite. Scoring first would score
     # a report no receipt vouches for.
-    _score_validated_report(finding_dir, report)
-    return "accepted"
+    state = _score_final_report(
+        finding_dir, report, "finding", state, attacker_controls=controls,
+    )
+    return "pending" if state == "pending" else "accepted"
 
 
 def validate_one_finding(
@@ -3097,17 +3198,16 @@ def validate_one_finding(
                 attacker_controls=controls,
             )
             return "pending"
-        state = (
-            "conditional"
-            if reach_verdict == "contract-flag" else "reportable"
-        )
+        state = _final_publication_state(reach_verdict)
         validation_receipt.write(
             finding_dir, kind="finding", state=state,
             detail=f"human override; {reach_detail}",
             attacker_controls=controls,
         )
-        _score_validated_report(finding_dir, report)
-        return "accepted"
+        state = _score_final_report(
+            finding_dir, report, "finding", state, attacker_controls=controls,
+        )
+        return "pending" if state == "pending" else "accepted"
     report_text = read_report_bounded(report)
     report_sha1 = report_identity.content_sha1(report)
     cache_path = finding_dir / ".llm-find-quality.json"

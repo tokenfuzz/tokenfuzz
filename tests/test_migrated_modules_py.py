@@ -559,14 +559,16 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "triage does not promote reports missing contract and trigger fields",
     )
     verdict, reason = triage.evaluate_crash_verdict("Trigger source: env\n", ["bytes"])
-    check(verdict == "contract-flag" and "env" in reason, "triage flags out-of-contract triggers without discarding")
+    check(verdict == "out-of-model" and "env" in reason, "triage flags out-of-contract triggers without discarding")
     verdict, _ = triage.evaluate_crash_verdict(
         "Caller controls: bytes\nParameter control: harness-only\nTrigger source: input\n",
         ["bytes"],
     )
+    # Admitted misuse is the report's own words, so it is dispositive; only the
+    # threat-model set difference is a self-report a reviewer may correct.
     equal("contract-flag", verdict, "triage reads Parameter control independently from Caller controls")
     verdict, _ = triage.evaluate_crash_verdict("Trigger source: both\n", ["bytes"])
-    equal("contract-flag", verdict, "triage expands both into bytes plus call-sequence")
+    equal("out-of-model", verdict, "triage expands both into bytes plus call-sequence")
 
     rejected_results = root / "triage-results"
     crash = rejected_results / "crashes" / "CRASH-001"

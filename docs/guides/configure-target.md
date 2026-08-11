@@ -289,7 +289,7 @@ fields are refined later.
 | C harness compile fails on missing headers | Add source or build include directories to `includes`. |
 | C harness compile fails on missing macros | Add required compiler flags to `defines`. |
 | Link fails during harness compile | Add the ASan library to `asan_lib`; add required system libraries, target-relative archives, or target-relative source files to `link_libs`. |
-| Triage rejects a report as out of scope | Recheck `attacker_controls` and report `Trigger source`. Do not widen the model unless the product actually exposes that control. |
+| Triage marks a defect not reportable | Recheck `attacker_controls` and the report's `Trigger source` — it names what decides the fault, not every call the driver makes. Do not widen the model unless the product actually exposes that control. |
 
 For field-by-field details, see
 [Target config reference](../reference/target-toml.md).

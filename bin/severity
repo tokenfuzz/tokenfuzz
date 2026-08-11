@@ -16,7 +16,7 @@ Environmental metrics. No network access.
 Usage:
   bin/severity --report path/to/CRASH-XXX/   # rewrite Severity + write
                                              # severity.json
-  bin/severity --batch path/to/results/      # score every accepted crash/finding
+  bin/severity --batch path/to/results/      # process every crash/finding report
   bin/severity --report path/to/CRASH-XXX/ --harness-rooted-check
                                              # read-only: is the crash rooted
                                              # entirely in the audit harness?
@@ -107,7 +107,8 @@ def _parse_target_toml(path: Path) -> dict:
 # (Attack Requirements) override for classes whose exploitation is inherently
 # conditional. Values are the standard CVSS-B readings the class warrants:
 #   • code-execution-capable corruption → VC/VI/VA = H/H/H,
-#   • out-of-bounds reads → VC reflecting disclosure, VA:L for the crash,
+#   • invalid reads → availability only; a sanitizer proves the fault, not
+#     that the value escapes (see _disclosed_content_modified_impacts),
 #   • DoS-only → availability impact only.
 # SC/SI/SA (subsequent system) are N unless the class characteristically
 # crosses a security boundary (SSRF, XSS, open redirect). Each entry is a
@@ -127,14 +128,14 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     # This row is the race-DETECTOR reading; a race argued from source alone is
     # scored as `race_condition` below (see compute_severity).
     "data_race":         ("H", "H", "H", "N", "N", "N", "P"),
-    # ── Memory reads — disclosure (+ crash availability) ──────────────────
-    "uaf_read":          ("H", "N", "L", "N", "N", "N", None),
-    "heap_read_big":     ("H", "N", "L", "N", "N", "N", None),
+    # ── Invalid reads prove crash availability, not disclosure ─────────
+    "uaf_read":          ("N", "N", "L", "N", "N", "N", None),
+    "heap_read_big":     ("N", "N", "L", "N", "N", "N", None),
     "info_leak":         ("H", "N", "L", "N", "N", "N", None),
-    "global_read":       ("L", "N", "L", "N", "N", "N", None),
-    "stack_read":        ("L", "N", "L", "N", "N", "N", None),
-    "heap_read_small":   ("L", "N", "L", "N", "N", "N", None),
-    "wild_read":         ("L", "N", "H", "N", "N", "N", None),
+    "global_read":       ("N", "N", "L", "N", "N", "N", None),
+    "stack_read":        ("N", "N", "L", "N", "N", "N", None),
+    "heap_read_small":   ("N", "N", "L", "N", "N", "N", None),
+    "wild_read":         ("N", "N", "H", "N", "N", "N", None),
     # ── DoS-only (availability) ───────────────────────────────────────────
     "null_deref":        ("N", "N", "H", "N", "N", "N", None),
     "stack_exhaustion":  ("N", "N", "H", "N", "N", "N", None),
@@ -586,12 +587,11 @@ def _active_attacker_controls(fields: dict) -> set[str]:
     }
 
 
-# NOTE: reachability is a CVSS input here, not a separate verdict. Promoting this
-# signal into a four-state technical/scope "disposition" shadow was tried and
-# reverted: it bound scope to report-content hashes that pooling rewrites (so it
-# collapsed to needs-review on real data) and mis-ranked real crashes below
-# softer findings. Keep scope in the score; do not rebuild an adjudication layer
-# over mutable report text.
+# Publication review decides reportable versus not before numeric scoring, and
+# a non-reportable receipt exits above without a score. This derivation still
+# runs for reports scored outside that flow — detached directories and legacy
+# artifacts — where a defensive vector beats treating a trusted local caller as
+# a network attacker. It is a severity input, never a publication verdict.
 def _local_caller_only(fields: dict) -> tuple[bool, str]:
     """Whether the primitive is reachable only by a trusted local caller.
 
@@ -842,6 +842,16 @@ def _disclosed_content_modified_impacts(
     caller-local, and does nothing to a fluent report that claims cross-tenant
     data it never had. Only lowering is wired for that reason -- a wrong claim
     keeps today's score rather than earning a higher one.
+
+    That asymmetry leaves one gap open on purpose. An invalid read scores
+    ``VC:N`` because a sanitizer proves a fault, not that the value escapes, so
+    a read whose bytes genuinely do reach another principal is capped at the
+    class base. Raising it needs a disclosure fact a source reviewer verified;
+    this field is not one, and neither is a publication receipt, which says the
+    trigger is in the threat model and says nothing about what leaked. Until
+    such a fact exists, the under-rating stands: it costs a band on a rare
+    proven leak, where the alternative hands every fluent read claim the impact
+    the class rows were changed to stop assuming.
     """
     content = (fields.get("disclosed_content", "") or "").strip().lower()
     if metrics.get("VC") in (None, "N"):
@@ -2745,20 +2755,26 @@ def update_report(report_path: Path, severity: dict) -> None:
 def clear_report_severity(
     report_path: Path, report_dir: Path, replacement: str,
 ) -> None:
-    """Remove a previously published numeric score from an unrated artifact."""
-    text = _strip_auto_sections(
-        report_path.read_text("utf-8", errors="replace"),
-    )
+    """Remove a previously published numeric score from an unrated artifact.
+
+    Idempotent: an unrated artifact is re-examined on every triage pass, and
+    `_strip_auto_sections` drops the bullet this function writes, so rewriting
+    blind re-inserts it one line lower each time and the report grows without
+    end. Nothing is left to clear once the bullet already reads the
+    replacement and no score file remains.
+    """
+    receipt_path = report_dir / severity_receipt.FILENAME
+    bullet = f"- **Severity**: {replacement} (auto: validation state)"
+    original = report_path.read_text("utf-8", errors="replace")
+    if bullet in original and not receipt_path.exists():
+        return
     text, field_updated = _replace_structured_field(
-        text, "Severity", replacement,
+        _strip_auto_sections(original), "Severity", replacement,
     )
     if not field_updated:
-        text = _replace_severity_line(
-            text,
-            f"- **Severity**: {replacement} (auto: validation state)",
-        )
+        text = _replace_severity_line(text, bullet)
     report_path.write_text(text, "utf-8")
-    (report_dir / severity_receipt.FILENAME).unlink(missing_ok=True)
+    receipt_path.unlink(missing_ok=True)
 
 
 # ─── Human-readable summary ───────────────────────────────────────────────
@@ -2785,7 +2801,7 @@ def render_human(severity: dict) -> str:
 
 
 def _run_batch(results_dir: Path) -> int:
-    """Score every crash and finding report in one interpreter process.
+    """Process every report: score the reportable, unscore the rest.
 
     Per-report failures don't stop the loop — they're logged and the run
     continues. A single summary table prints at the end.
@@ -2801,7 +2817,7 @@ def _run_batch(results_dir: Path) -> int:
             )
     dirs.sort()
     if not dirs:
-        print(f"severity: no accepted reports under {results_dir}", file=sys.stderr)
+        print(f"severity: no reports under {results_dir}", file=sys.stderr)
         return 0
     rows: list[tuple[str, str, str, str]] = []
     for cdir in dirs:
@@ -2921,24 +2937,27 @@ def main(argv: list[str] | None = None) -> int:
             receipt = None
         if (
             receipt is not None
-            and receipt.get("state") == "native-hardening"
+            and receipt.get("state") == "not-reportable"
         ):
+            # Deliberately not "Low": a CVSS Low is a security report with a
+            # small impact, and reusing that word for "not a security bug"
+            # merges two answers a reader has to keep apart.
             clear_report_severity(
-                report_md, report_dir, "No security rating (native hardening)",
+                report_md, report_dir, "Not a security report",
             )
             validation_receipt.rewrite_after_equivalent_transform(
                 report_dir, receipt,
             )
             unscored = {
-                "level": "No security rating",
+                "level": "Not a security report",
                 "score": None,
-                "primitive": "native-hardening",
-                "reason": "real native defect without an added security boundary",
+                "primitive": "not-reportable",
+                "reason": "real defect that crosses no security boundary",
             }
             if args.json:
                 print(json.dumps({"severity": unscored}, indent=2, sort_keys=True))
             else:
-                print("Severity: No security rating (native hardening)")
+                print("Severity: Not a security report")
             return 0
         if (
             receipt is None

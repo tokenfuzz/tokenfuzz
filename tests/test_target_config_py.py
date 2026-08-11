@@ -455,8 +455,8 @@ assert_not_in("pinned_rev", text,
 assert_in("[threat_model]", text, "seeded toml has [threat_model] header")
 assert_in('attacker_controls = ["bytes"]', text,
           "seeded toml has bytes-only default for non-browser target")
-assert_in("outside component adds CVSS MAT:P", text,
-          "seeded toml explains the live reachability scoring mechanism")
+assert_in("outside component a reviewer confirms is not reportable", text,
+          "seeded toml explains the reviewed reachability decision")
 assert_not_in("demotes it from security to robustness", text,
               "seeded toml omits reverted disposition wording")
 # Round-trip back through the loader.

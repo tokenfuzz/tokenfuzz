@@ -72,14 +72,22 @@ Most operators arrive on this page because something landed in
 | Harness-only misuse | The testcase violates a contract no real caller can violate. |
 | Missing files | No testcase, no sanitizer output, or an incomplete report. |
 
-**Not a rejection — kept but downgraded.** A reproducing sanitizer crash whose
-`Trigger source` falls outside the target's `attacker_controls` (for example a
-`call-sequence`, `env`, or `race` trigger on a bytes-only target) is **not**
-moved to `crashes-rejected/`. Triage keeps it in `crashes/`, adds a
-`## Contract concern` block, and the scorer sets CVSS **MAT:P** (Modified
-Attack Requirements: present) so it ranks below in-scope crashes in the
-CVSS-BTE score. It still counts as an accepted crash. Agents file the
-reproducible crash; triage scores the threat-model fit.
+**Not reportable — keep the engineering defect, do not security-report it.** A
+reproducing sanitizer crash whose `Trigger source` falls outside the target's
+`attacker_controls` (for example a `call-sequence`, `env`, or `race` trigger on
+a bytes-only target) is **not** moved to `crashes-rejected/`. Triage keeps it in
+`crashes/` with the final `not-reportable` decision: no numeric CVSS score, no
+security yield. Agents still file the reproducible crash.
+
+That scope call is not the report's to make. `Trigger source` is written by
+whoever found the bug and is wrong in both directions — a driver exercising
+documented entry points reads as caller-driven even when attacker bytes decide
+the fault, and an unreproduced claim reads as byte-driven even when only a
+caller can reach it. The trigger-provenance reviewer reads the source and
+answers `trigger_controls_fit` (`within` / `outside` / `unclear`); where the two
+disagree, the reviewer decides. An admitted caller-contract violation or
+`harness-only` parameter control is the report's own words, so no reviewer
+opinion promotes it.
 
 Before filing a similar crash, check:
 
@@ -104,13 +112,18 @@ the `Status` column:
 internal marker and does not appear in this column.
 
 Open `validation.json` when a report's publication status is unclear.
-`reportable`, `conditional`, and `native-hardening` are final lanes;
-`pending` preserves an uncertain or incomplete candidate without granting
-benchmark credit or severity; `rejected` preserves the evidence in the
-rejected tree. Native-hardening remains visible as a final engineering defect,
-but it is outside the security finding total and has no numeric security
-severity. The receipt is content-addressed, so stale review decisions do not
-survive changes to their report, evidence, configuration, or target identity.
+`reportable` and `not-reportable` are final decisions; `pending` preserves a
+candidate no review settled, without granting benchmark credit or severity;
+`rejected` preserves the evidence in the rejected tree. `not-reportable` states
+a fact a review established — an admitted contract violation, or reviewers
+agreeing the trigger needs something `attacker_controls` does not list. A
+review that returns `Uncertain`, or two reviewers who disagree, established
+neither, so those stay `pending` and are counted in the unadjudicated remainder
+rather than written off. A `not-reportable` artifact remains visible as an
+engineering defect, but it is outside the security total and has no numeric
+security severity. The receipt is content-addressed, so stale review decisions
+do not survive changes to their report, evidence, configuration, or target
+identity.
 
 ## What a strong crash looks like
 
@@ -179,11 +192,11 @@ Notes:
   `cli + bytes`; the boundary must come from configured or source-reviewed
   evidence. An unset `Surface` defaults to `unknown` and
   under-scores real findings, so always set it.
-- `Trigger source` is compared against `attacker_controls` to set
-  *severity*, not to decide filing: a trigger fully within
-  `attacker_controls` scores as security; one with a component outside it
-  stays in `crashes/` but is flagged with a contract concern (CVSS
-  MAT:P), lowering the CVSS-BTE score. It is not moved out of `crashes/` on this basis.
+- `Trigger source` is compared against `attacker_controls` to open the security
+  reportability question: a trigger fully within the configured controls can be
+  reportable; one with an outside component the source reviewer confirms stays
+  in `crashes/` as `not-reportable`, with no numeric CVSS or security credit.
+  Write what actually decides the fault, not everything the driver calls.
 - `Parameter control` is especially important for C harnesses. It
   tells triage whether a value is externally controlled or only
   invented by the harness.
@@ -205,7 +218,7 @@ illustration.)
 | Field                 | Value |
 |:----------------------|:------|
 | Primitive             | heap-buffer-overflow READ of size 4 |
-| Severity              | Medium (CVSS-BT 4.0: 5.5) |
+| Severity              | Medium (CVSS-BTE 4.0: 5.5) |
 | Surface               | library-api (C harness calls app_read_memory) |
 | Trigger source        | bytes |
 | Caller contract       | obeyed |
@@ -226,7 +239,7 @@ Boundary: Untrusted document bytes parsed by the library.
 Caller controls: Document contents and length.
 Parameter control: direct
 Strategy: S7
-- **Severity**: Medium (CVSS-BT 4.0: 5.5 Medium; CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:N/VA:L/SC:N/SI:N/SA:N/E:P; primitive=heap READ of 4 byte(s); surface=library)
+- **Severity**: Medium (CVSS-BTE 4.0: 5.5 Medium; CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N/E:P; primitive=heap READ of 4 byte(s); surface=library)
 
 Out-of-bounds 4-byte read in `app_next_char` reached from
 `app_parse_char_ref` while consuming a malformed numeric character
@@ -265,8 +278,8 @@ Notes on the fields:
   `bin/severity` on every triage pass; hand-edits there are lost.
 - Severity is a **CVSS v4.0 score**, computed offline by the vendored FIRST
   reference scorer — no house metric. The label says which metric groups were
-  populated: `CVSS-BT` (base + threat) normally, `CVSS-BTE` once an
-  Environmental metric applies, such as the `MAT:P` a contract concern adds.
+  populated: `CVSS-BT` (base + threat) normally, `CVSS-BTE` once a verified
+  Environmental prerequisite applies, such as an alternate-build requirement.
 - The vector is derived mechanically from the report's own fields:
   attack vector and user interaction from the surface, the impact metrics from
   the primitive class, exploit maturity from the reproducer evidence, and the
@@ -324,7 +337,7 @@ Boundary: Requests crossing the public service boundary.
 Caller controls: request bytes
 Trusted caller actions: Creates the handle before policy loading completes.
 Caller contract: obeyed
-Trigger source: call-sequence
+Trigger source: bytes
 Strategy: S5
 
 ## Issue

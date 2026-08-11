@@ -96,9 +96,16 @@ Rules:
   at all — including merely controlling callback timing, or when a single
   parse of attacker bytes itself reaches the fault — keep trigger_source
   "bytes" and record any local precondition in caller_controls instead;
-  mislabelling a byte-reachable bug as call-sequence (or "both") would wrongly
-  localise it (AV:L) and under-score it. Reserve "both" for the case above,
+  mislabelling a byte-reachable bug as call-sequence (or "both") sends a valid
+  security report out of the threat model. Reserve "both" for the case above,
   where attacker bytes are only setup for a caller-driven destructive sequence.
+- A fixed, contract-obeying application setup is not automatically a trigger
+  component. For example, creating or reusing a context, or enabling a
+  supported parser mode, belongs in `parameter_control` and
+  `trusted_caller_actions`. Hold that setup fixed and ask whether changing the
+  attacker bytes decides whether the fault occurs. If it does, use `bytes`, not
+  `both`; if the same fault occurs independently of those bytes, the setup or
+  call-sequence is the trigger.
 - "env" and "fs-state" are for state the fuzz input does NOT control: "env" is
   process environment variables; "fs-state" is filesystem path/presence/
   permission/symlink layout. The CONTENTS of an attacker-supplied input file,

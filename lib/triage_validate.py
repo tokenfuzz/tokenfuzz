@@ -13,7 +13,7 @@ from pathlib import Path
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v6-consequence-disproof"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v7-controls-fit"
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.
@@ -36,6 +36,13 @@ REJECTION_KINDS = {
     "contract-invalid", "unreachable", "nonshipping", "no-added-boundary",
     "consequence-disproved", "unknown",
 }
+# The reviewer's own threat-model comparison, read from source. The report's
+# self-declared `Trigger source` is written by whoever found the bug and is
+# wrong in both directions: a driver that calls the target's documented entry
+# points reads as caller-driven, while an unreproduced claim reads as
+# byte-driven. This fact lets the deterministic comparison be corrected by a
+# reviewer that read the code, in either direction.
+TRIGGER_CONTROLS_FIT = {"within", "outside", "unclear"}
 
 
 def source_review_facts(value: object) -> dict[str, str]:
@@ -47,6 +54,7 @@ def source_review_facts(value: object) -> dict[str, str]:
         ("vulnerable_boundary_surface", BOUNDARY_SURFACES),
         ("reproducer_carrier", REPRODUCER_CARRIERS),
         ("rejection_kind", REJECTION_KINDS),
+        ("trigger_controls_fit", TRIGGER_CONTROLS_FIT),
     ):
         normalized = str(value.get(key) or "").strip().lower()
         if normalized in allowed:

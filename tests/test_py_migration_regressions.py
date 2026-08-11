@@ -514,7 +514,11 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
 
     with mock.patch.object(triage, "_run_tool", side_effect=_fake_export), \
          mock.patch.object(triage, "_crash_trigger_gate", side_effect=_record_gate), \
-         mock.patch.object(triage, "_cached_trigger_vote", return_value="Promote"):
+         mock.patch.object(triage, "_cached_trigger_vote", return_value="Promote"), \
+         mock.patch.object(
+             triage, "_source_review_facts",
+             return_value={"trigger_controls_fit": "within"},
+         ):
         gate_status = triage.triage_one_crash(
             gate_crash, gate_root, root, "sampleproj", ["bytes"]
         )
@@ -1969,7 +1973,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     }), encoding="utf-8")
     with mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision), \
          mock.patch.object(triage, "_finding_trigger_disposition", return_value="accepted"), \
-         mock.patch.object(triage, "_run_tool") as finding_tools:
+         mock.patch.object(triage, "_run_tool", return_value=0) as finding_tools:
         finding_status = triage.validate_one_finding(live_finding, live_finding_root)
     check(finding_status == "accepted", "live finding finalization fills reach fields")
     check(

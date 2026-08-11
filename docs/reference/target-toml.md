@@ -328,7 +328,13 @@ the operator fills it in.
 
 `attacker_controls` describes what an external caller can
 legitimately control. Triage compares crash report
-`Trigger source` values against this list.
+`Trigger source` values against this list, then lets the source reviewer
+correct that comparison from the code. A settled review is reportable only when
+every required trigger component is in the list — crafted bytes deciding the
+fault is not enough when the fault also needs an application call order the
+list does not cover. A defect the reviewer confirms is outside the list is
+retained as `not-reportable`, with no security credit or numeric CVSS; one no
+review settled stays unadjudicated instead.
 
 | Token | Meaning |
 | --- | --- |

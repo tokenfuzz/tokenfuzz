@@ -97,7 +97,7 @@ class ValidationReceiptTests(unittest.TestCase):
         )
         sanitizer.write_text("CRASH_RATE: 0/5\n", encoding="utf-8")
         validation_receipt.write(
-            self.directory, kind="finding", state="conditional",
+            self.directory, kind="finding", state="not-reportable",
         )
         self.assertIsNotNone(validation_receipt.read_current(self.directory))
         result.write_text(
@@ -105,7 +105,7 @@ class ValidationReceiptTests(unittest.TestCase):
         )
         self.assertIsNone(validation_receipt.read_current(self.directory))
         validation_receipt.write(
-            self.directory, kind="finding", state="conditional",
+            self.directory, kind="finding", state="not-reportable",
         )
         self.assertIsNotNone(validation_receipt.read_current(self.directory))
         sanitizer.write_text("CRASH_RATE: 5/5\n", encoding="utf-8")
@@ -118,7 +118,7 @@ class ValidationReceiptTests(unittest.TestCase):
             encoding="utf-8",
         )
         validation_receipt.write(
-            self.directory, kind="finding", state="conditional",
+            self.directory, kind="finding", state="not-reportable",
             attacker_controls=["bytes"],
         )
         self.assertIsNotNone(validation_receipt.read_current(self.directory))
@@ -138,7 +138,7 @@ class ValidationReceiptTests(unittest.TestCase):
             encoding="utf-8",
         )
         payload = validation_receipt.write(
-            self.directory, kind="finding", state="conditional",
+            self.directory, kind="finding", state="not-reportable",
             attacker_controls=["bytes"],
         )
         self.assertIsNotNone(payload)

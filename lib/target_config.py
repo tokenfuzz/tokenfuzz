@@ -2838,7 +2838,7 @@ def seed_toml(
         "# ── Threat model (drives lib/triage.py verdict matrix) ──────────",
         "# attacker_controls lists what an attacker can supply to the target.",
         "# A crash report's Trigger source: is compared with this set. An",
-        "# outside component adds CVSS MAT:P; caller-only triggers can floor Low.",
+        "# outside component a reviewer confirms is not reportable, unscored.",
         "#   bytes           input file/stream/packet bytes (most parsers)",
         "#   call-sequence   ordered API/script calls (browsers, JS engines,",
         "#                   plugin SDKs); call-order is accepted as a synonym",

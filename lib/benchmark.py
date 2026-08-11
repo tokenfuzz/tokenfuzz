@@ -2146,14 +2146,11 @@ def validation_waterfall(
                     for row in rows
                 )
                 for state in (
-                    "reportable", "conditional", "native-hardening",
+                    "reportable", "not-reportable",
                     "pending", "rejected", "legacy-provisional",
                 )
             },
             "exact_signatures": signatures,
-            # Root-cause equivalence needs reviewed shared-invariant/fix
-            # evidence. Never infer it from stack or signal similarity.
-            "reviewed_root_families": None,
         }
     return out
 
@@ -2162,7 +2159,7 @@ def _sum_cell_waterfalls(cells: list[dict], kind: str) -> dict:
     """Sum condition-local occurrences; exact signatures are filled later."""
     stages = ("candidates", "evidence_complete", "validated", "routed", "reportable")
     lane_names = (
-        "reportable", "conditional", "native-hardening",
+        "reportable", "not-reportable",
         "pending", "rejected", "legacy-provisional",
     )
     result = {stage: 0 for stage in stages}
@@ -3765,8 +3762,6 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         finding_waterfall = _sum_cell_waterfalls(done, "findings")
         crash_waterfall["exact_signatures"] = cb.get("unique_clusters", 0)
         finding_waterfall["exact_signatures"] = fb.get("unique_clusters", 0)
-        crash_waterfall["reviewed_root_families"] = None
-        finding_waterfall["reviewed_root_families"] = None
         # Cell sums stay authoritative — they alone carry the rejection-ledger
         # auto-rejected signature rows that never get a crash dir. Only re-book
         # the post-pool demotions: subtract them from accepted, add to rejected.
@@ -4593,8 +4588,8 @@ def _render_ground_truth(scoring: dict | None,
     return lines
 
 
-def _render_validation_waterfall(
-    conditions: list[dict], backend: str, exact_signatures: dict[str, int],
+def _render_security_decisions(
+    conditions: list[dict], backend: str,
 ) -> list[str]:
     rows: list[tuple[str, str, dict]] = []
     for condition in sorted(conditions, key=lambda item: item["condition"]):
@@ -4611,13 +4606,10 @@ def _render_validation_waterfall(
         if not matching:
             continue
         total = {
-            stage: sum(
-                _as_nonnegative_int(values.get(stage)) for values in matching
-            )
-            for stage in (
-                "candidates", "evidence_complete", "validated", "routed",
-                "reportable",
-            )
+            "candidates": sum(
+                _as_nonnegative_int(values.get("candidates"))
+                for values in matching
+            ),
         }
         total["lanes"] = {
             lane: sum(
@@ -4625,72 +4617,46 @@ def _render_validation_waterfall(
                 for values in matching
             )
             for lane in (
-                "reportable", "conditional", "native-hardening",
-                "pending", "rejected", "legacy-provisional",
+                "reportable", "not-reportable", "pending", "rejected",
+                "legacy-provisional",
             )
         }
-        total["exact_signatures"] = exact_signatures.get(kind, 0)
-        total["reviewed_root_families"] = None
         totals.append(("all conditions", kind, total))
     rows.extend(totals)
 
     lines = [
-        "### Publication waterfall",
+        "### Security decisions",
         "",
-        "| Condition | Lane | Candidates | Evidence complete | Validated "
-        "| Routed | Final | Exact signatures | Reviewed root families |",
-        "| --- | --- | --: | --: | --: | --: | --: | --: | --: |",
+        "| Condition | Artifact | Candidates | **Report** | Not reportable "
+        "| Review unsettled | Rejected |",
+        "| --- | --- | --: | --: | --: | --: | --: |",
     ]
-    for condition, kind, values in rows:
-        root_families = values.get("reviewed_root_families")
-        lines.append(
-            "| {condition} | {kind} | {candidates} | {evidence} | "
-            "{validated} | {routed} | {final} | {signatures} | {families} |".format(
-                condition=_condition_label(condition, backend),
-                kind=kind,
-                candidates=_as_nonnegative_int(values.get("candidates")),
-                evidence=_as_nonnegative_int(values.get("evidence_complete")),
-                validated=_as_nonnegative_int(values.get("validated")),
-                routed=_as_nonnegative_int(values.get("routed")),
-                final=_as_nonnegative_int(values.get("reportable")),
-                signatures=_as_nonnegative_int(values.get("exact_signatures")),
-                families=(
-                    _as_nonnegative_int(root_families)
-                    if root_families is not None else "—"
-                ),
-            )
-        )
-    lines.extend([
-        "",
-        "| Condition | Lane | Strong/reportable | Conditional | Pending "
-        "| Native hardening | Rejected | Legacy provisional |",
-        "| --- | --- | --: | --: | --: | --: | --: | --: |",
-    ])
     for condition, kind, values in rows:
         lanes = values.get("lanes") or {}
         lines.append(
-            "| {condition} | {kind} | {strong} | {conditional} | {pending} "
-            "| {native} | {rejected} | {legacy} |".format(
+            "| {condition} | {kind} | {candidates} | {reportable} | "
+            "{unreportable} | {pending} | {rejected} |".format(
                 condition=_condition_label(condition, backend),
                 kind=kind,
-                strong=_as_nonnegative_int(lanes.get("reportable")),
-                conditional=_as_nonnegative_int(lanes.get("conditional")),
-                pending=_as_nonnegative_int(lanes.get("pending")),
-                native=_as_nonnegative_int(lanes.get("native-hardening")),
+                candidates=_as_nonnegative_int(values.get("candidates")),
+                reportable=_as_nonnegative_int(lanes.get("reportable")),
+                unreportable=_as_nonnegative_int(lanes.get("not-reportable")),
+                pending=(
+                    _as_nonnegative_int(lanes.get("pending"))
+                    + _as_nonnegative_int(lanes.get("legacy-provisional"))
+                ),
                 rejected=_as_nonnegative_int(lanes.get("rejected")),
-                legacy=_as_nonnegative_int(lanes.get("legacy-provisional")),
             )
         )
     lines.extend([
         "",
-        "> **Final** contains reportable and conditional security artifacts; "
-        "native-hardening stays visible in its separate lane without entering "
-        "that total. Counts are condition-local artifact occurrences. "
-        "**Exact signatures** deduplicate matching evidence without claiming "
-        "a shared fix. **Reviewed root families** stays blank until a reviewer "
-        "establishes the shared invariant and remediation. Pending and legacy "
-        "provisional artifacts remain visible but receive neither final "
-        "benchmark credit nor numeric severity.",
+        "> **Report** is the security yield: an anchor-verified source review "
+        "placed the trigger inside the target's declared attacker controls. "
+        "**Not reportable** is a real defect a review showed crosses no "
+        "security boundary — kept on disk, never counted, never scored. "
+        "**Review unsettled** is the remainder no review settled: evidence is "
+        "missing, no verdict came back, or the reviewers were uncertain or "
+        "disagreed, so the counts above read as a floor until it settles.",
         "",
     ])
     return lines
@@ -4759,13 +4725,13 @@ def render_section(report: dict) -> str:
     # ran, how long each took), then results grouped by evidence type. Results
     # are deduplicated whenever the artifacts carry clustering evidence.
     # A rejected upper bound is marked in its cell rather than passed off as an
-    # exact unique count. The accepted columns carry their
-    # Medium+ subset — `N (M M+)` — so the security-yield subset is visible
-    # without dropping the Low/unscored remainder.
+    # exact unique count. The reportable columns carry their
+    # Medium+ subset — `N (M M+)` — so severity is visible while the total
+    # still includes reportable artifacts scored Low or left unscored.
     lines.append(
         "| Condition | Replicates | Wall (h) | Worker-h "
-        "| Unique rejected findings | Unique accepted findings "
-        "| Unique rejected crashes | Unique accepted crashes "
+        "| Unique rejected findings | Security findings to report "
+        "| Unique rejected crashes | Unique Security crashes to report "
         "| Top crash severity |"
     )
     lines.append(
@@ -4859,17 +4825,15 @@ def render_section(report: dict) -> str:
         "**Unique rejected findings** "
         "are FIND reports that failed the independent validator gate and link "
         "to a table showing the reachability / guards / primitive booleans. "
-        "**Unique accepted findings** counts only "
-        "FIND reports accepted by the find-quality gate or pinned by a human. "
-        "Findings carry no on-disk crash; **Unique accepted crashes** counts only crash "
+        "**Security findings to report** counts only reportable FIND reports. "
+        "Findings carry no on-disk crash; **Unique Security crashes to report** counts only crash "
         "directories with real sanitizer output on disk — an agent "
-        "claiming a crash in prose never counts. The accepted columns are "
+        "claiming a crash in prose never counts. The reportable columns are "
         "annotated `N (M "
         "M+)` where `M` is how many of the `N` clusters `bin/severity` "
         "scored Medium or higher — the security-yield subset, on one scale "
-        "across both conditions. Both accepted columns count the reportable "
-        "and conditional lanes together; the validation waterfall below splits "
-        "them, and reportable is the primary yield. "
+        "across both conditions. A defect that crosses no security boundary is "
+        "retained on disk but never enters these columns. "
         "**Top crash severity** is the highest crash "
         "severity in the row. "
         f"`{baseline_label}` is a bare \"find the vulnerabilities\" prompt "
@@ -4879,14 +4843,7 @@ def render_section(report: dict) -> str:
         "and the severity columns are what that extra work buys."
     )
     lines.append("")
-    lines.extend(_render_validation_waterfall(
-        conditions,
-        backend,
-        {
-            "crashes": len(report.get("crash_clusters", [])),
-            "findings": len(report.get("finding_clusters", [])),
-        },
-    ))
+    lines.extend(_render_security_decisions(conditions, backend))
 
     # ── Ground truth (precision / recall) ────────────────────────────────
     lines.extend(_render_ground_truth(report.get("ground_truth_scoring"),
@@ -5080,7 +5037,7 @@ def _benchmark_roots(bench_root: Path) -> list[Path]:
 
 
 def _condition_validation_state(condition: object) -> str:
-    """Return complete, pre-receipt, or incomplete for one condition."""
+    """Return complete, superseded, pre-receipt, or incomplete."""
     if not isinstance(condition, dict):
         return "incomplete"
     waterfall = condition.get("validation_waterfall")
@@ -5090,6 +5047,10 @@ def _condition_validation_state(condition: object) -> str:
         lanes = (waterfall.get(kind) or {}).get("lanes")
         if not isinstance(lanes, dict):
             return "incomplete"
+        # Lane names are the decision vocabulary, so a report carrying a
+        # retired one was counted under a policy this code no longer applies.
+        if {"conditional", "native-hardening", "low"} & lanes.keys():
+            return "superseded"
         if _as_nonnegative_int(lanes.get("legacy-provisional")):
             return "incomplete"
     return "complete"
@@ -5109,6 +5070,8 @@ def _report_validation_state(report: dict) -> str:
         _condition_validation_state(condition)
         for condition in (report.get("conditions") or ())
     ]
+    if "superseded" in states:
+        return "pre-receipt"
     if states and all(state == "pre-receipt" for state in states):
         return "pre-receipt"
     return (
@@ -5252,8 +5215,8 @@ def crosstab(bench_root: Path) -> str:
 
     lines.append(
         "| Target | Backend | Condition | Run | Wall (h) | Replicates "
-        "| Unique rejected findings | Unique accepted findings "
-        "| Unique rejected crashes | Unique accepted crashes "
+        "| Unique rejected findings | Security findings to report "
+        "| Unique rejected crashes | Unique Security crashes to report "
         "| Top crash severity "
         "| Input | Output | Cost |"
     )
@@ -5527,8 +5490,8 @@ def crosstab(bench_root: Path) -> str:
         "duplicates merged. The linked index gives the reason for each."
     )
     lines.append(
-        "- **Unique accepted findings** — reports that survived review and an "
-        "agent's own investigation, with no accepted crash behind them, "
+        "- **Security findings to report** — reports that survived review and an "
+        "agent's own investigation, with no reportable crash behind them, "
         "duplicates merged. Shown as `N (M M+, C classes)`: `N` distinct "
         "problems, `M` of them scored Medium or higher, spread across `C` bug "
         "classes. The count links to the report. Read `N` and `C` together: "
@@ -5546,21 +5509,20 @@ def crosstab(bench_root: Path) -> str:
     lines.append("")
     lines.append(
         "The two columns are merged separately, so one underlying problem can "
-        "appear on both sides if it was accepted in one write-up and rejected "
+        "appear on both sides if it was reportable in one write-up and rejected "
         "in another. Do not divide them into a pass rate."
     )
     lines.append("")
     lines.append(
-        "**What accepted covers.** Both accepted columns count two lanes "
-        "together: *reportable* — the trigger is inside the target's declared "
-        "attacker controls and source review agreed — and *conditional* — the "
-        "artifact survived review but carries an attack precondition, most "
-        "often a trigger component the threat model does not list, or a "
-        "reviewer who kept it without confirming it. A conditional artifact is "
-        "a real result that needs one more fact before it can be reported as "
-        "it stands, and most accepted artifacts are conditional. The "
-        "validation waterfall below splits the lanes per condition, so the "
-        "reportable subset is the one to read as primary security yield."
+        "**What the report columns cover.** Only artifacts whose trigger is "
+        "inside the declared attacker controls and whose source review supports "
+        "the claimed consequence. That scope call is the reviewer's, read from "
+        "source: a report's own `Trigger source` is written by whoever found "
+        "the bug and understates a driver that exercises documented entry "
+        "points just as readily as it overstates an unreproduced claim. A real "
+        "defect that crosses no security boundary stays on disk and is not "
+        "security yield; one no reviewer settled is carried as an unjudged "
+        "remainder instead."
     )
     lines.append("")
 
@@ -5577,7 +5539,7 @@ def crosstab(bench_root: Path) -> str:
         "are merged by stack signature; `up to N` marks an upper bound."
     )
     lines.append(
-        "- **Unique accepted crashes** — crashes with sanitizer output and "
+        "- **Unique Security crashes to report** — crashes with sanitizer output and "
         "reproducer material on disk, duplicates merged by stack signature. "
         "Shown as `N (M M+)`: `N` distinct crashes, `M` of them scored Medium "
         "or higher — the number to read first. A `K unjudged` remainder and "
@@ -5596,12 +5558,12 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "One scorer rates findings and crashes on the same scale, so impact "
         "can be compared rather than report count. That score is what `M+` "
-        "reports in the two accepted columns; **Top crash severity** is the "
+        "reports in the two reportable columns; **Top crash severity** is the "
         "same scale but crashes only."
     )
     lines.append("")
     lines.append(
-        "- **Top crash severity** — the highest-severity accepted crash in the "
+        "- **Top crash severity** — the highest-severity reportable crash in the "
         "row, or `—` when the row has none."
     )
     lines.append("")

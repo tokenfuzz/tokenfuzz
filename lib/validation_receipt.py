@@ -12,9 +12,13 @@ import crash_artifacts
 import report_identity
 import triage_validate
 
-SCHEMA_VERSION = 1
-SECURITY_STATES = frozenset({"reportable", "conditional"})
-FINAL_STATES = SECURITY_STATES | {"native-hardening"}
+SCHEMA_VERSION = 2
+# Security yield is one state, not a family: an artifact either carries the
+# evidence a security report needs or it does not. `not-reportable` is a real
+# defect that crosses no security boundary — final, visible on disk, never
+# counted as yield and never scored.
+SECURITY_STATES = frozenset({"reportable"})
+FINAL_STATES = SECURITY_STATES | {"not-reportable"}
 ALL_STATES = FINAL_STATES | {"pending", "rejected"}
 _FIXED_EVIDENCE_NAMES = (
     "sanitizer.txt",

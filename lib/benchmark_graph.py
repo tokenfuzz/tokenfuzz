@@ -499,7 +499,7 @@ _KEY = """
  <div class="ki"><svg viewBox="0 0 26 12"><path d="M1 10 L8 10 L8 5 L17 5 L17 2 L25 2" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
   <div class="kt"><b>The curve — what was kept, over time</b><span>Count on the y-axis, hours of audit time on the x. Each step is one separate problem that held up when checked, placed at the hour it was first seen, so the line only ever climbs and ends on the table's number; where it runs flat to the right edge, the audit kept going but found nothing new.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><polygon points="13,1 19,6 13,11 7,6" fill="currentColor"/></svg>
-  <div class="kt"><b>◇ Final total</b><span>Where that row ended up — the same number as the Unique accepted column above.</span></div></div>
+  <div class="kt"><b>◇ Final total</b><span>Where that row ended up — the same number as the security bugs to report column above.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><polygon points="8,1 8,11 19,6" fill="none" stroke="currentColor" stroke-width="2"/></svg>
   <div class="kt"><b>▷ the model on its own</b><span>The same model with no harness around it, asked plainly to find vulnerabilities — one attempt, so it lands as a single point at the hour it stopped. It is judged by the same rules as the curve: the same checks, and the same bug reported twice counted once. Only the prompt is different. Its crashes have one extra bar to clear — each has to crash again when the target is run normally.</span></div></div>
  <div class="ki"><svg viewBox="0 0 26 12"><circle cx="3" cy="6" r="3" fill="#2a78d6"/><circle cx="8" cy="6" r="3" fill="#d64f92"/><circle cx="13" cy="6" r="3" fill="#6f52c9"/><circle cx="18" cy="6" r="3" fill="#00897b"/><circle cx="23" cy="6" r="3" fill="#c45d00"/></svg>
@@ -621,7 +621,7 @@ function panel(host,kind,rows){
    .concat(sites(m,null).map(function(w){return {text:w,site:true}}))
    .concat([
    {text:"over a "+hrs(r.wall_h)+" audit"},
-   {text:"Counted across this run's repeat attempts with duplicates merged — the same number as the Unique accepted column above.",dim:true}]);
+   {text:"Counted across this run's repeat attempts with duplicates merged — the same number as the security bugs to report column above.",dim:true}]);
   if(m.approx_timing)finalLines.push({text:"discovery timing approximate",italic:true});
   hover(dia,name+" · tokenfuzz",finalLines);
   s.appendChild(el("text",{x:ex+10,y:Y(end[1])+4,"font-size":11.5,"font-weight":700,fill:"#202124"},[tx(m.accepted)]))});

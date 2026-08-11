@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import hashlib
 import os
@@ -86,6 +88,10 @@ def trigger_vote(
         payload["evidence_id"] = evidence["evidence_id"]
     if vote == "Reject":
         payload["review_facts"] = {"rejection_kind": "contract-invalid"}
+    elif vote == "Promote":
+        # A compliant reviewer answers the scope question on every Promote;
+        # tests for a review that did not set `review_facts` themselves.
+        payload["review_facts"] = {"trigger_controls_fit": "within"}
     return payload
 
 
@@ -1785,6 +1791,7 @@ Generated score text.
                 "anchors": [anchor],
                 "vulnerable_boundary_surface": "file-format",
                 "reproducer_carrier": "cli",
+                "trigger_controls_fit": "within",
             },
             "report-sha1", self.root,
         )
@@ -1793,8 +1800,21 @@ Generated score text.
             {
                 "vulnerable_boundary_surface": "file-format",
                 "reproducer_carrier": "cli",
+                "trigger_controls_fit": "within",
             },
         )
+
+        # A scope answer decides publication, so an off-schema value is
+        # dropped rather than guessed at.
+        off_schema = validator["stamp_trigger_vote"](
+            args, {
+                "vote": "Promote",
+                "anchors": [anchor],
+                "trigger_controls_fit": "probably in scope",
+            },
+            "report-sha1", self.root,
+        )
+        self.assertEqual(off_schema["review_facts"], {})
 
         unanchored = validator["stamp_trigger_vote"](
             args, {
@@ -2000,8 +2020,8 @@ Generated score text.
 
         Two anchored reviewers refuted one report with the same cited source
         and filed it under different dispositive kinds. Requiring an identical
-        label voided the quorum and republished the finding as conditional,
-        where it counted toward the confirmed total and its Medium+ subset.
+        label voided the quorum and republished the finding as reportable,
+        where it counted toward the security total and its Medium+ subset.
         """
         common = trigger_vote(self.report, self.root, "Reject")
         votes = (
@@ -2200,7 +2220,13 @@ Generated score text.
             None,
         )
 
-    def test_disagreeing_trigger_review_keeps_finding_conditionally(self) -> None:
+    def test_disagreeing_trigger_review_leaves_the_finding_unsettled(self) -> None:
+        """One reviewer disproved it, the other promoted it: unevidenced.
+
+        The finding earns no security credit, but nothing established that it
+        is out of scope either, so it is carried as unadjudicated and the
+        evidence stays on disk for a later review to reopen.
+        """
         first = trigger_vote(self.report, self.root, "Reject")
         first["review_facts"] = {
             "rejection_kind": "contract-invalid",
@@ -2235,12 +2261,12 @@ Generated score text.
                     self.finding, self.root, self.report, None,
                     prepared=True,
                 ),
-                "accepted",
+                "pending",
             )
 
         receipt = validation_receipt.read_current(self.finding)
         self.assertIsNotNone(receipt)
-        self.assertEqual(receipt["state"], "conditional")
+        self.assertEqual(receipt["state"], "pending")
         self.assertEqual(
             receipt["evidence"]["review_facts"],
             {"reproducer_carrier": "harness"},
@@ -2368,7 +2394,12 @@ Generated score text.
         self.assertEqual(triage._field(report.read_text(), "Class"), "memory-safety")
         self.assertEqual(triage._cached_trigger_vote(report, vote), "Uncertain")
 
-    def test_legacy_positive_finding_vote_publishes_conditionally(self) -> None:
+    def test_legacy_positive_finding_vote_is_not_security_yield(self) -> None:
+        """A legacy vote is not a current review, so it evidences nothing.
+
+        It cannot publish the finding, and it is equally no evidence that the
+        trigger is out of scope, so the finding stays unadjudicated.
+        """
         payload = trigger_vote(self.report, self.root)
         payload["decision_version"] = "trigger-v4-source-anchors"
         (self.finding / ".trigger-gate.json").write_text(
@@ -2398,11 +2429,11 @@ Generated score text.
                 triage._finalize_accepted_finding(
                     self.finding, self.root, self.report, None,
                 ),
-                "accepted",
+                "pending",
             )
         receipt = validation_receipt.read_current(self.finding)
         self.assertIsNotNone(receipt)
-        self.assertEqual(receipt["state"], "conditional")
+        self.assertEqual(receipt["state"], "pending")
 
     def test_optional_severity_fields_do_not_block_cached_finalization(self) -> None:
         self.report.write_text(
@@ -2469,7 +2500,12 @@ Generated score text.
         )
         self.assertEqual(cache["_fill_attempts"], 1)
 
-    def test_legacy_positive_crash_vote_publishes_conditionally(self) -> None:
+    def test_legacy_positive_crash_vote_is_not_security_yield(self) -> None:
+        """A legacy vote is not a current review, so it evidences nothing.
+
+        It cannot publish the crash, and it is equally no evidence that the
+        trigger is out of scope, so the crash stays unadjudicated.
+        """
         crash = self.root / "crashes" / "CRASH-001"
         crash.mkdir(parents=True)
         report = crash / "report.md"
@@ -2512,11 +2548,11 @@ Generated score text.
                 triage.triage_one_crash(
                     crash, self.root, self.root, "sampleproj", ["bytes"],
                 ),
-                "promoted",
+                "pending",
             )
         receipt = validation_receipt.read_current(crash)
         self.assertIsNotNone(receipt)
-        self.assertEqual(receipt["state"], "conditional")
+        self.assertEqual(receipt["state"], "pending")
 
     def test_ambiguous_surface_review_honors_operator_opt_out(self) -> None:
         with mock.patch.dict(
@@ -2527,7 +2563,123 @@ Generated score text.
             )
         vote.assert_not_called()
 
-    def test_no_added_boundary_is_preserved_as_native_hardening(self) -> None:
+    def test_source_review_corrects_the_finder_scope_label_both_ways(self) -> None:
+        """`Trigger source` is a self-report and is wrong in both directions.
+
+        A driver that exercises documented entry points reads as caller-driven
+        even when attacker bytes decide the fault; an unreproduced claim reads
+        as byte-driven even when only a caller can reach it. Only the
+        anchor-verified source reviewer read the code, so its
+        `trigger_controls_fit` decides scope when the two disagree.
+        """
+        resolve = triage._final_publication_state
+        promote = frozenset({"Promote"})
+        # Finder says out of model; the reviewer read the code and disagrees.
+        self.assertEqual(
+            resolve("out-of-model", promote, {"trigger_controls_fit": "within"}),
+            "reportable",
+        )
+        # Finder says in model; the reviewer disagrees.
+        self.assertEqual(
+            resolve("promote", promote, {"trigger_controls_fit": "outside"}),
+            "not-reportable",
+        )
+        # A review that ran and did not answer cannot carry an artifact to
+        # security yield on the finder's word alone — in either direction. Nor
+        # is its silence evidence against the claim, so it settles nothing.
+        for verdict in ("out-of-model", "promote"):
+            for facts in ({}, {"trigger_controls_fit": "unclear"}):
+                with self.subTest(verdict=verdict, facts=facts):
+                    self.assertEqual(
+                        resolve(verdict, promote, facts), "pending",
+                    )
+        # With no review at all — a machine trigger proof, an operator opt-out,
+        # or a human pin — there is no reviewer to have answered, so the
+        # report's own comparison is all there is.
+        self.assertEqual(resolve("promote"), "reportable")
+        self.assertEqual(resolve("out-of-model"), "not-reportable")
+        # Admitted caller misuse is the report's own words, not a scope guess,
+        # so no reviewer opinion promotes it.
+        self.assertEqual(
+            resolve("contract-flag", promote, {"trigger_controls_fit": "within"}),
+            "not-reportable",
+        )
+
+    def test_unsettled_review_is_unadjudicated_not_a_negative(self) -> None:
+        """Doubt is not a finding that the trigger is out of scope.
+
+        `not-reportable` asserts something about the artifact that neither an
+        Uncertain vote nor two disagreeing reviewers established, and it is
+        final — recording it would drop the artifact out of the unjudged
+        remainder that marks the benchmark counts a floor.
+        """
+        resolve = triage._final_publication_state
+        for votes in (frozenset({"Uncertain"}), frozenset({"Promote", "Reject"})):
+            with self.subTest(votes=sorted(votes)):
+                self.assertEqual(
+                    resolve("promote", votes, {"trigger_controls_fit": "within"}),
+                    "pending",
+                )
+        # An affirmative out-of-scope fact still settles it against the claim.
+        self.assertEqual(
+            resolve(
+                "promote", frozenset({"Uncertain"}),
+                {"trigger_controls_fit": "outside"},
+            ),
+            "not-reportable",
+        )
+
+    def test_machine_trigger_proof_survives_an_unsettled_surface_review(self) -> None:
+        """A 5/5 direct byte-path proof is not negated by a boundary review.
+
+        The ambiguous-surface reviewer runs only to settle boundary and
+        carrier, but writes to the same vote file the trigger gate reads, so
+        its doubt about an already-proved byte path would otherwise decide
+        scope.
+        """
+        resolve = triage._final_publication_state
+        for votes in (
+            frozenset({"Uncertain"}), frozenset({"Promote"}), frozenset({None}),
+        ):
+            with self.subTest(votes=sorted(votes, key=str)):
+                self.assertEqual(
+                    resolve(
+                        "out-of-model", votes, {}, direct_trigger_proof=True,
+                    ),
+                    "reportable",
+                )
+        # The report's own admission of caller misuse still decides.
+        self.assertEqual(
+            resolve("contract-flag", frozenset(), {}, direct_trigger_proof=True),
+            "not-reportable",
+        )
+
+    def test_reviewed_in_model_trigger_publishes_despite_finder_label(self) -> None:
+        """The correction reaches a finding through a real vote file."""
+        payload = trigger_vote(self.report, self.root)
+        payload["review_facts"] = {"trigger_controls_fit": "within"}
+        (self.finding / ".trigger-gate.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        with mock.patch.object(
+            triage, "evaluate_crash_verdict",
+            return_value=("out-of-model", "trigger requires call-sequence"),
+        ), mock.patch.object(triage, "_run_tool", return_value=0):
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None, prepared=True,
+                ),
+                "accepted",
+            )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "reportable")
+        self.assertEqual(
+            receipt["evidence"]["review_facts"]["trigger_controls_fit"],
+            "within",
+        )
+
+    def test_no_added_boundary_is_preserved_as_not_reportable(self) -> None:
         vote_path = self.finding / ".trigger-gate.json"
         payload = trigger_vote(self.report, self.root, "Reject")
         payload["review_facts"] = {
@@ -2538,7 +2690,9 @@ Generated score text.
         (self.finding / ".trigger-gate-2.json").write_text(
             json.dumps(payload), encoding="utf-8",
         )
-        with mock.patch.object(triage, "_run_tool") as scorer:
+        with mock.patch.object(
+            triage, "_run_tool", return_value=0,
+        ) as scorer:
             self.assertEqual(
                 triage._finalize_accepted_finding(
                     self.finding, self.root, self.report, None, None,
@@ -2548,8 +2702,42 @@ Generated score text.
             )
         receipt = validation_receipt.read_current(self.finding)
         self.assertIsNotNone(receipt)
-        self.assertEqual(receipt["state"], "native-hardening")
-        scorer.assert_not_called()
+        self.assertEqual(receipt["state"], "not-reportable")
+        scorer.assert_called_once_with(
+            "severity", "--report", str(self.finding),
+        )
+
+    def test_failed_severity_clear_holds_the_artifact_retryable(self) -> None:
+        """A final receipt must not freeze a voided score onto the report.
+
+        The scorer is what removes it, and the next pass skips current final
+        receipts, so a swallowed failure would leave a numeric CVSS line beside
+        the decision that voided it for good.
+        """
+        vote_path = self.finding / ".trigger-gate.json"
+        payload = trigger_vote(self.report, self.root, "Reject")
+        payload["review_facts"] = {
+            "rejection_kind": "no-added-boundary",
+            "vulnerable_boundary_surface": "dev-tool",
+        }
+        vote_path.write_text(json.dumps(payload), encoding="utf-8")
+        (self.finding / ".trigger-gate-2.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        with mock.patch.object(
+            triage, "_run_tool", return_value=1,
+        ), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None, None,
+                    prepared=True,
+                ),
+                "pending",
+            )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "pending")
+        self.assertIn("obsolete numeric severity", stderr.getvalue())
 
 
 class DecisionTimeoutBackoffTests(unittest.TestCase):

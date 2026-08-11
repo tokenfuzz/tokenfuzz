@@ -1651,7 +1651,7 @@ def _pool_receipt_problems(pool: Path) -> tuple[list[str], list[str]]:
     the outside — and only one of them was ever looked at. Returns
     (stale_validation, stale_severity):
 
-    * stale_validation — the receipt claims a final security state but no
+    * stale_validation — the receipt claims a reportable security state but no
       longer matches its report, so bin/severity declines to score it. The
       old `continue` skipped exactly this case, which is why a run whose gate
       reported `pending=0` could still publish unrated artifacts with nothing
@@ -1661,8 +1661,9 @@ def _pool_receipt_problems(pool: Path) -> tuple[list[str], list[str]]:
       reads severity out of the report, so such a score would be credited as
       if it were current.
 
-    An artifact that is legitimately unrated (pending review, native
-    hardening) is in neither list — it carries no final security state.
+    An artifact that is legitimately unrated is in neither list: pending
+    review has no final state, and `not-reportable` is final but not a
+    security state.
     """
     stale_validation: list[str] = []
     stale_severity: list[str] = []

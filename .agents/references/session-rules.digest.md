@@ -193,11 +193,12 @@ in the sanitizer stack.
 application-supplied / harness-only / none. Use `application-supplied`
 when the bug needs a non-default mode/codec/filter/option the
 application selects. The triage matrix demotes when `Trigger source`
-falls outside the target's `attacker_controls` (target.toml) — a
-**severity** demotion (security→robustness) that KEEPS the crash in
-`crashes/`, not a move to `findings/`. File any reproducing sanitizer
+falls outside the target's `attacker_controls` (target.toml) and a source
+reviewer agrees — a **not-reportable** decision (security→robustness) that
+KEEPS the crash in `crashes/` without numeric CVSS or security credit, not a
+move to `findings/`. File any reproducing sanitizer
 crash that clears conditions 1–3 under `crashes/` regardless of trigger
-source and let triage score severity; do not pre-demote a
+source and let triage make that call; do not pre-demote a
 `call-sequence`/`env`/`race` crash to `findings/` on a bytes-only target.
 Caller contract violations always reject. `violated` = the target's own
 docs state a rule the testcase breaks (ordering, ownership, lifetime,

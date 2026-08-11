@@ -156,11 +156,10 @@ Triage decides whether an artifact is useful and in scope.
   sanitizer error), `MOZ_CRASH`/panic, timeout-only, or a plain
   stack overflow.
 
-A trigger source outside the target's declared attacker surface is
-*not* a rejection: the crash stays in `crashes/` with a contract
-concern noted. The scorer represents that local precondition with
-CVSS-BTE Environmental **MAT:P**, because the threat-model fit is a
-scoring question, not a filing question.
+A trigger source outside the target's declared attacker surface is not a
+rejection: the crash stays in `crashes/`, and when the source reviewer agrees
+the fault needs something outside those controls, it ends `not-reportable` —
+no numeric CVSS score, no security yield.
 
 Those checks are mechanical. On top of them, a reviewer reads the source and can
 still throw out a sanitizer-confirmed crash — but only on two independent

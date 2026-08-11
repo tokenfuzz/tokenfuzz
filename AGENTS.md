@@ -150,13 +150,14 @@ targets, it means reachable through the documented input boundary
 **Trigger outside the threat model is triage's call, not yours.** A reproducing
 memory-safety crash through a public boundary still goes under `crashes/` even
 when its `Trigger source` (e.g. `call-sequence`, `env`, `race`) falls outside the
-target's `attacker_controls`. Triage keeps it in `crashes/`, adds a contract
-concern, and records the precondition through CVSS `MAT:P`; a truly
-caller-only trigger also receives modified impacts that can floor it to Low.
-There is no flat score multiplier, and triage does not reject it. Do not
-pre-demote such a crash to `findings/` or discard it: file the reproducer and let
-triage score it. (Only harness-only misuse and the auto-quarantine classes below
-are kept out of `crashes/`.)
+target's `attacker_controls`. Triage keeps the engineering evidence in
+`crashes/`, and a source reviewer decides from the code whether anything in
+`attacker_controls` decides the fault. When nothing does, the crash is kept as
+a defect that crosses no security boundary: not a security report, no security
+yield, and no numeric CVSS score. Do not
+pre-demote such a crash to `findings/` or discard it: file the reproducer and
+let triage make that call. (Only source-disproved misuse and
+the auto-quarantine classes below are kept out of `crashes/`.)
 
 **Auto-quarantined by harness:** null deref (`0x0+` SEGV, "null-deref"), OOM,
 ABRT without sanitizer error, MOZ_CRASH/RustMozCrash/panic, timeout-only,
