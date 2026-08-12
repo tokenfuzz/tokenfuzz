@@ -19,9 +19,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Sequence
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 
 def run_timeout(
@@ -39,6 +42,14 @@ def run_timeout(
     text: bool = False,
 ) -> subprocess.CompletedProcess:
     """Run a command through the portable process-tree timeout wrapper."""
+    kwargs: dict = {"cwd": cwd, "env": env, "stdout": stdout, "stderr": stderr, "text": text, "check": False}
+    if capture_output:
+        kwargs["capture_output"] = True
+    if input is not None:
+        kwargs["input"] = input
+    elif not capture_output:
+        kwargs["stdin"] = subprocess.DEVNULL
+
     return subprocess.run(
         [
             sys.executable,
@@ -48,14 +59,7 @@ def run_timeout(
             str(rss_mb),
             *command,
         ],
-        cwd=cwd,
-        env=env,
-        capture_output=capture_output,
-        stdout=stdout,
-        stderr=stderr,
-        input=input,
-        text=text,
-        check=False,
+        **kwargs,
     )
 
 
