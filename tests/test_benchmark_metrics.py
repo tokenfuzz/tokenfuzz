@@ -1752,6 +1752,36 @@ class BenchmarkWallBudgetTests(unittest.TestCase):
             "\u2014",
         )
 
+    def test_a_counted_terminated_replicate_cannot_hide_in_the_median(self) -> None:
+        """A terminated cell counts, so the reader has to see that it did.
+
+        With one repeat the short **Wall (h)** numerator says it. With several,
+        the median comes back to the full-budget repeats and the truncated one
+        becomes invisible - which is the shape that would silently understate
+        the direct control against a full-budget harness cell.
+        """
+        bench = self.root / "bench-terminated"
+        self.make_run(bench, 18000)
+        self.make_cell(bench, "model-direct-r1", "model-direct", 17940)
+        self.make_cell(bench, "model-direct-r2", "model-direct", 17940)
+        self.make_cell(
+            bench, "model-direct-r3", "model-direct", 1875,
+            run_quality="backend_terminated",
+        )
+        self.make_cell(bench, "harness-r1", "harness", 17940)
+        by_condition = {
+            row["condition"]: row
+            for row in benchmark.aggregate(bench)["conditions"]
+        }
+        direct = by_condition["model-direct"]
+        self.assertEqual(direct["replicates_done"], 3)
+        self.assertEqual(direct["replicates_backend_terminated"], 1)
+        # The median wall is a full-budget repeat: the marker is the only signal.
+        self.assertEqual(benchmark._wall_cell(direct), "4.98/5.00h")
+        self.assertIn("(1t)", benchmark._replicates_cell(direct))
+        self.assertEqual(by_condition["harness"]["replicates_backend_terminated"], 0)
+        self.assertNotIn("t)", benchmark._replicates_cell(by_condition["harness"]))
+
     def test_short_cell_shows_its_share_and_keeps_the_verdict(self) -> None:
         """A condition that stops early is a result, not a broken measurement.
 

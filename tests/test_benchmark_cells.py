@@ -237,6 +237,41 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
         self.assertFalse((direct_cells[0] / ".git").exists())
         self.assertIn("budget=unlimited", results["unlimited"].stdout)
 
+    def test_productive_terminal_backend_failure_keeps_its_evidence(self) -> None:
+        fake_codex = self.executable(
+            "fake-codex-terminal-failure",
+            """import json
+import sys
+from pathlib import Path
+cell = Path(sys.argv[sys.argv.index("--cd") + 1])
+finding = cell / "findings" / "FIND-before-terminal-exit"
+finding.mkdir(parents=True)
+(finding / "report.md").write_text("substantive report\\n", encoding="utf-8")
+print(json.dumps({"type": "turn.failed", "error": {"message": "terminal backend failure"}}))
+raise SystemExit(1)
+""",
+        )
+        bench_root = self.work / "terminal-failure"
+        process = self.run_command(
+            self.benchmark_command("codex", bench_root)
+            + ["--run-id", "terminal-failure", "--no-validate-findings"],
+            os.environ | {"CODEX_BIN": str(fake_codex)},
+        )
+        self.assertEqual(process.returncode, 0, process.stdout)
+        cell_dir = (
+            bench_root / "codex" / "terminal-failure" / "cells"
+            / "model-direct-r1"
+        )
+        cell = json.loads((cell_dir / "cell.json").read_text(encoding="utf-8"))
+        metrics = json.loads((cell_dir / "metrics.json").read_text(encoding="utf-8"))
+        self.assertEqual(cell["status"], "done")
+        self.assertEqual(cell["run_quality"], "backend_terminated")
+        self.assertEqual(metrics["model_refusals"], 0)
+        self.assertTrue((cell_dir / ".backend-terminated").is_file())
+        self.assertTrue(
+            (cell_dir / "findings" / "FIND-before-terminal-exit" / "report.md").is_file()
+        )
+
     def test_a_crash_free_cell_is_excluded_when_its_runner_changes(self) -> None:
         runner = self.target / "target-runner"
         runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -348,14 +383,15 @@ print(json.dumps({"type": "item.completed", "usage": {
                 )
             ]
         for process in completed:
-            self.assertNotEqual(process.returncode, 0, process.stdout)
+            self.assertEqual(process.returncode, 0, process.stdout)
         cells = list(bench_root.glob(
             "codex/parallel-*/cells/model-direct-r1/cell.json"
         ))
         self.assertEqual(len(cells), 2)
         for cell_json in cells:
             cell = json.loads(cell_json.read_text(encoding="utf-8"))
-            self.assertEqual(cell["status"], "incomplete")
+            self.assertEqual(cell["status"], "done")
+            self.assertEqual(cell["run_quality"], "unowned_artifacts")
             self.assertFalse(
                 any(
                     path.name.startswith("FIND-")
@@ -376,6 +412,7 @@ import os
 from pathlib import Path
 finding = Path(os.environ["MISPLACED_TARGET"]) / "findings" / "FIND-failed"
 finding.mkdir(parents=True)
+(finding / "report.md").write_text("misplaced\\n", encoding="utf-8")
 print(json.dumps({"type": "item.completed", "usage": {
     "input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}}))
 raise SystemExit(23)

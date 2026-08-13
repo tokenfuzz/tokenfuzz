@@ -72,10 +72,10 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 FINDING_CONFIRMATION_VERSION = "quality-trigger-v1"
 CELL_RUN_QUALITIES = frozenset({
     "clean", "incomplete", "provider_recovered", "provider_limited",
-    "source_drift", "build_drift", "unowned_artifacts",
+    "source_drift", "build_drift", "unowned_artifacts", "backend_terminated",
 })
 NONCOMPARABLE_RUN_QUALITIES = frozenset({
-    "provider_limited", "source_drift", "build_drift", "unowned_artifacts",
+    "provider_limited", "source_drift", "build_drift",
 })
 
 
@@ -95,6 +95,13 @@ def cell_run_quality(cell_dir: Path, status: str) -> str:
         and quality not in {"provider_limited", "source_drift", "build_drift"}
     ):
         quality = "unowned_artifacts"
+    if (
+        (cell_dir / ".backend-terminated").is_file()
+        and quality not in {
+            "provider_limited", "source_drift", "build_drift", "unowned_artifacts",
+        }
+    ):
+        quality = "backend_terminated"
     if status == "incomplete" and quality == "clean":
         quality = "incomplete"
     return quality
@@ -3678,6 +3685,11 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         provider_recovered = [
             c for c in done if c.get("run_quality") == "provider_recovered"
         ]
+        # Counted, but on a wall its peers did not stop at. With one repeat the
+        # Wall column already shows that; with several, the median hides it.
+        backend_terminated = [
+            c for c in done if c.get("run_quality") == "backend_terminated"
+        ]
         crashes = [c["metrics"].get("confirmed_crashes", 0) for c in done]
         pending_crashes = [c["metrics"].get("crashes_pending", 0) for c in done]
         unadjudicated_crashes = [
@@ -3794,6 +3806,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "replicates_incomplete": len(incomplete),
                 "replicates_provider_limited": len(provider_limited),
                 "replicates_provider_recovered": len(provider_recovered),
+                "replicates_backend_terminated": len(backend_terminated),
                 "incomplete_observed": incomplete_observed,
                 "crashes": crashes,
                 "crash_median": _median([float(x) for x in crashes]),
@@ -4439,14 +4452,18 @@ def _wall_cell(c: dict) -> str:
 
 def _replicates_cell(c: dict) -> str:
     """`done/total`, plus a hover-annotated `(Np)` when provider limits kept
-    N replicates out of the clean totals.
+    N replicates out of the clean totals, and `(Nt)` when N counted replicates
+    stopped early on a terminal backend exit.
 
     Replicates that recovered from a mid-run provider pause got their full
     time budget (the pause is excluded from wall) and fold into the totals
     unchanged, so they carry no marker — their run_quality is retained in
     state for fairness auditing and to drive same-run-id retries, not shown
-    here. A `(Np)` is wrapped in `<abbr>` so the HTML view explains it on
-    hover; the legend below carries the same wording for the plain markdown.
+    here. A terminated replicate does count, so the median beside it came
+    partly from a shorter experiment; **Wall (h)** alone cannot say that once
+    other repeats pull the median back. A `(Np)`/`(Nt)` is wrapped in `<abbr>`
+    so the HTML view explains it on hover; the legend below carries the same
+    wording for the plain markdown.
     """
     done = int(c.get("replicates_done", 0) or 0)
     total = int(c.get("replicates_total", 0) or 0)
@@ -4459,6 +4476,15 @@ def _replicates_cell(c: dict) -> str:
             'and were excluded from the clean totals; a same-run-id re-run '
             'retries them">'
             f"({limited}p)</abbr>"
+        )
+    terminated = int(c.get("replicates_backend_terminated", 0) or 0)
+    if terminated > 0:
+        cell += (
+            ' <abbr title="'
+            f"{terminated} counted replicate(s) whose backend exited early "
+            'after writing evidence; their counts came from the shorter wall '
+            'they actually spent">'
+            f"({terminated}t)</abbr>"
         )
     return cell
 
@@ -5465,7 +5491,9 @@ def crosstab(bench_root: Path) -> str:
         "repeat that paused for a provider reset and recovered still got its "
         "full budget, so it folds in unmarked. A `(Np)` suffix means N repeats "
         "never came back and are excluded; re-running the same run id retries "
-        "them."
+        "them. A `(Nt)` suffix means N repeats *are* counted but stopped early "
+        "on a terminal backend exit, so their share of the counts came from a "
+        "shorter wall than the grant."
     )
     lines.append("")
 

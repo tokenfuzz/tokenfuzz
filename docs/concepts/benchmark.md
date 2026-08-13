@@ -137,14 +137,17 @@ budget. Cached receipts make each repeat pay only for what is still missing.
 Anything still unadjudicated is handled conservatively rather than guessed at:
 an unvalidated finding does not enter the finding total, and a sanitizer-backed
 crash with unfinished validation remains a visible crash candidate rather than
-receiving final credit or an assumed severity. A cell that was cut short —
-provider limit, interruption, failed post-processing — is marked incomplete
-and kept out of the medians, but the evidence it did produce is still reported
-as an observed count, so an interrupted productive cell is never mistaken for
-a barren one. A cell that finished but still holds unjudged findings keeps its
-place and its evidence; its finding count carries the remainder, and a count
-whose remainder outnumbers its verdicts is marked `≥` — a lower bound on that
-condition, not a yield to compare. `bin/benchmark --regenerate` finishes the
+receiving final credit or an assumed severity. A cell that could not produce a
+usable measurement — provider limit, interruption before substantive evidence,
+failed post-processing — is marked incomplete and kept out of the medians, but
+any evidence it did produce is still reported as an observed count. A direct
+backend that terminates after substantive evidence is instead retained and
+counted, carrying its shorter actual wall and a replicate marker that says the
+count came from a shorter experiment. A cell that finished but still
+holds unjudged findings keeps its place and its evidence; its finding count
+carries the remainder, and a count whose remainder outnumbers its verdicts is
+marked `≥` — a lower bound on that condition, not a yield to compare.
+`bin/benchmark --regenerate` finishes the
 gate from cached receipts and removes the mark.
 
 The run report also shows one compact security-decision table. A settled review
@@ -252,13 +255,20 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | Column | Meaning |
 | --- | --- |
 | `Condition` | `tokenfuzz` or the direct baseline label. |
-| `Replicates` | `done/total`. Replicates that recovered from a mid-run provider pause got their full budget and fold in unmarked; a `(Np)` suffix flags N provider-limited replicates excluded from the totals (a same-run-id re-run retries them). |
+| `Replicates` | `done/total`. Replicates that recovered from a mid-run provider pause got their full budget and fold in unmarked; a `(Np)` suffix flags N provider-limited replicates excluded from the totals (a same-run-id re-run retries them); a `(Nt)` suffix flags N counted replicates whose backend exited early, so their share of the counts came from a shorter wall than the grant. |
 | `Wall (h)` | Median hours a cell spent finding things, over the hours it was granted (`0.52/5.00h`). Every cell in a run is granted the same wall, but a condition is free to stop early, so read the counts beside a short numerator as the yield of a shorter experiment. The triage and validation that follow the audit are measurement, not finding work, so they are not counted. |
 | `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
 | `Security findings to report` | Distinct evidence-signature clusters of reportable non-crash security findings, shown `N (M M+)`: N clusters, M scored Medium or higher. Links to the finding cluster report. |
 | `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
 | `Unique Security crashes to report` | Distinct reportable sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. The existing crash-cluster link includes reportable crashes at every numeric severity, including Low. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
+
+A direct backend that exits nonzero after writing substantive finding or crash
+evidence becomes an early terminal outcome rather than losing the entire cell.
+It counts, so it carries a `(Nt)` marker in `Replicates` and its shorter actual
+wall in `Wall (h)`; only independently valid cell artifacts enter the totals. A
+backend exit with no substantive evidence still fails, and a cell already
+excluded for a provider limit or drift keeps that stronger reason.
 
 Reportable and rejected results go through the same deduplication, because a raw
 directory tally counts matching evidence many times over and would not be
@@ -426,8 +436,10 @@ writers serialize only their short file updates, not whole runs.
 
 Artifacts belong in the cell's results directory. A `FIND-*` or `CRASH-*`
 written into the shared target tree has no trustworthy run owner. The harness
-leaves that evidence in place and excludes the cell that observes it instead of
-assigning it to whichever run finishes first.
+leaves substantive evidence in place and marks the observing cell instead of
+assigning it to whichever run finishes first. It never enters that cell's
+metrics, so the cell's independent results remain comparable. An empty or
+incomplete directory is not evidence and does not create a marker.
 
 A run pins one build generation:
 
@@ -451,8 +463,12 @@ averaged in. Their artifacts are always kept:
   the cell ends.
 - `build_drift` — the build changed since the run pinned it, which only a build
   command run outside the harness can cause.
-- `unowned_artifacts` — evidence appeared in the shared target tree without a
-  run identifier, so assigning it to this or a concurrent cell would be unsafe.
+
+`unowned_artifacts` records a separate provenance warning: substantive evidence
+appeared in the shared target tree without a run identifier. It remains
+unassigned and uncounted. Because it is never imported into the cell, it does
+not invalidate evidence already written through the cell's private results
+directory.
 
 Each run also pins the *source state* it is auditing, at the checkout rather
 than at the build directory. Start a run while another has pinned a different

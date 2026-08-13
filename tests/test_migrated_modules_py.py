@@ -148,7 +148,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     equal(
         "unowned_artifacts",
         json.loads((cli_cell_dir / "cell.json").read_text())["run_quality"],
-        "benchmark metadata CLI preserves unowned-artifact exclusion",
+        "benchmark metadata CLI preserves the unowned-artifact warning",
     )
 
     # A productive session whose usage was never recorded (the zero-token
@@ -1049,10 +1049,22 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         new.mkdir()
     check(
         old.is_dir() and new.is_dir()
+        and not (destination / ".target-artifacts-unowned").exists()
+        and not (destination / ".run-quality").exists(),
+        "an empty target artifact shell is not benchmark evidence",
+    )
+    with benchmark_runner._target_artifact_guard(
+        artifact_target, destination,
+    ):
+        evidence = artifact_target / "findings" / "FIND-EVIDENCE"
+        evidence.mkdir()
+        (evidence / "report.md").write_text("substantive report\n")
+    check(
+        evidence.is_dir()
         and (destination / ".target-artifacts-unowned").is_file()
         and (destination / ".run-quality").read_text().strip()
         == "unowned_artifacts",
-        "benchmark preserves unowned target artifacts and excludes the cell",
+        "benchmark preserves and marks substantive unowned target evidence",
     )
     propagated = False
     try:

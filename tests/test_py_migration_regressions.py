@@ -306,9 +306,44 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     (unowned_dir / "cell.json").write_text(json.dumps({
         "condition": "harness", "replicate": 4, "experiment": "unowned",
         "results_dir": str(unowned_results), "wall_seconds": 1,
-        # This is the shape written by the first unowned-artifact implementation:
-        # regeneration must migrate it rather than promote it.
+        # This is the shape written by the first unowned-artifact implementation;
+        # regeneration must recover its independent cell results.
         "status": "incomplete", "run_quality": "incomplete",
+    }), encoding="utf-8")
+    terminated_dir = cells_dir / "model-direct-r5"
+    terminated_dir.mkdir()
+    terminated_finding = terminated_dir / "findings" / "FIND-001"
+    terminated_finding.mkdir(parents=True)
+    (terminated_finding / "report.md").write_text(
+        "substantive report\n", encoding="utf-8",
+    )
+    (terminated_dir / "backend.raw.log").write_text(
+        json.dumps({
+            "type": "turn.failed", "error": {"message": "terminal failure"},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    (terminated_dir / "prompt.txt").write_text("Review the target.\n", encoding="utf-8")
+    (terminated_dir / "cell.json").write_text(json.dumps({
+        "condition": "model-direct", "replicate": 5, "experiment": "terminated",
+        "results_dir": str(terminated_dir), "wall_seconds": 1,
+        # Older runners discarded all evidence after any nonzero backend exit.
+        "status": "failed", "run_quality": "clean",
+    }), encoding="utf-8")
+    drifted_dir = cells_dir / "model-direct-r6"
+    drifted_dir.mkdir()
+    drifted_finding = drifted_dir / "findings" / "FIND-001"
+    drifted_finding.mkdir(parents=True)
+    (drifted_finding / "report.md").write_text(
+        "substantive report\n", encoding="utf-8",
+    )
+    (drifted_dir / ".run-quality").write_text("source_drift\n", encoding="utf-8")
+    (drifted_dir / "cell.json").write_text(json.dumps({
+        "condition": "model-direct", "replicate": 6, "experiment": "drifted",
+        "results_dir": str(drifted_dir), "wall_seconds": 1,
+        # A drifted cell that also exited nonzero: its evidence came off source
+        # its peers never read, so no later recovery may make it comparable.
+        "status": "failed", "run_quality": "source_drift",
     }), encoding="utf-8")
     regenerate_args = SimpleNamespace(**{**vars(budget_args), "regenerate": True})
     regenerate_age_pending = []
@@ -328,6 +363,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     recovered = json.loads((cells_dir / "harness-r1" / "cell.json").read_text())
     provider = json.loads((provider_dir / "cell.json").read_text())
     unowned = json.loads((unowned_dir / "cell.json").read_text())
+    terminated = json.loads((terminated_dir / "cell.json").read_text())
     still_pending = json.loads((cells_dir / "harness-r2" / "cell.json").read_text())
     check(
         recovered["status"] == "done" and recovered["run_quality"] == "clean",
@@ -340,16 +376,31 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         repr(provider),
     )
     check(
-        unowned["status"] == "incomplete"
+        unowned["status"] == "done"
         and unowned["run_quality"] == "unowned_artifacts",
-        "regenerate cannot launder ambiguous target-tree evidence into metrics",
+        "regenerate counts independent cell results without importing unowned evidence",
         repr(unowned),
+    )
+    check(
+        terminated["status"] == "done"
+        and terminated["run_quality"] == "backend_terminated"
+        and (terminated_dir / ".backend-terminated").is_file(),
+        "regenerate recovers old evidence discarded after a terminal backend exit",
+        repr(terminated),
     )
     check(
         still_pending["status"] == "done"
         and still_pending["run_quality"] == "clean",
         "regenerate recovers an artifact-pending cell after finalizers return normally",
         repr(still_pending),
+    )
+    drifted = json.loads((drifted_dir / "cell.json").read_text())
+    check(
+        drifted["status"] == "failed"
+        and drifted["run_quality"] == "source_drift"
+        and not (drifted_dir / ".backend-terminated").is_file(),
+        "terminal-exit recovery cannot relabel a drifted cell into the totals",
+        repr(drifted),
     )
     check(
         regenerate_age_pending and all(value is False for value in regenerate_age_pending),

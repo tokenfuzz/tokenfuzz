@@ -820,17 +820,46 @@ def mark_target_artifacts(target: Path) -> set[Path]:
         for parent in target.rglob(parent_name):
             if ".git" in parent.parts or not parent.is_dir():
                 continue
-            marked.update(entry.resolve() for entry in parent.glob(glob))
+            for entry in parent.glob(glob):
+                if not entry.is_dir():
+                    continue
+                if _artifact_has_evidence(entry, parent_name):
+                    marked.add(entry.resolve())
     return marked
+
+
+def _artifact_has_evidence(entry: Path, parent_name: str) -> bool:
+    if parent_name == "findings":
+        report = report_identity.find_report(entry)
+        try:
+            return bool(report and report.stat().st_size)
+        except OSError:
+            return False
+    return metrics.dir_has_sanitizer_output(entry)
+
+
+def _has_substantive_artifacts(results: Path) -> bool:
+    for parent_name, glob in (("findings", "FIND-*"), ("crashes", "CRASH-*")):
+        parent = results / parent_name
+        if not parent.is_dir():
+            continue
+        if any(
+            entry.is_dir() and _artifact_has_evidence(entry, parent_name)
+            for entry in parent.glob(glob)
+        ):
+            return True
+    return False
 
 
 @contextmanager
 def _target_artifact_guard(target: Path, cell_dir: Path):
-    """Exclude a cell that writes unowned evidence into the shared target.
+    """Record evidence written outside the cell's private results tree.
 
     A target-tree FIND/CRASH carries no run id, so moving it into this cell is
-    unsafe whenever peer benchmarks share the checkout. Leave it untouched and
-    count only evidence written through the cell's RESULTS_DIR contract.
+    unsafe whenever peer benchmarks share the checkout. Leave it untouched;
+    only the independent evidence written through the cell's RESULTS_DIR enters
+    its metrics. Incomplete directory shells cannot enter metrics and are not
+    evidence, so they do not create a marker.
     """
     marked = mark_target_artifacts(target)
     try:
@@ -849,8 +878,8 @@ def _target_artifact_guard(target: Path, cell_dir: Path):
             )
             log(
                 f"WARN: Cell {cell_dir.name}: target-tree artifacts have no "
-                f"benchmark owner ({names}); evidence left in place and this cell "
-                "excluded from the comparison"
+                f"benchmark owner ({names}); evidence left unassigned and excluded "
+                "from this cell's metrics"
             )
 
 
@@ -946,7 +975,10 @@ def run_model_direct(
     )
     (cell_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     raw = cell_dir / "backend.raw.log"
-    for marker in (".quota-exhausted", ".backend-unavailable", ".run-quality"):
+    for marker in (
+        ".quota-exhausted", ".backend-unavailable", ".backend-terminated",
+        ".run-quality",
+    ):
         (cell_dir / marker).unlink(missing_ok=True)
     previous_logdir = os.environ.get("LOGDIR")
     os.environ["LOGDIR"] = str(cell_dir / "logs")
@@ -986,6 +1018,19 @@ def run_model_direct(
     )
     issue = _record_provider_quality(cell_dir, cell_dir, rc)
     if issue == "capacity_limited" and (cell_dir / ".backend-unavailable").is_file():
+        return 0
+    if rc not in (0, 124) and _has_substantive_artifacts(cell_dir):
+        # The scoreboard reports actual wall beside the granted wall, so an
+        # early backend termination remains a visible model outcome. Discarding
+        # its independently valid evidence would instead reward the failure.
+        # Only the marker is written: `cell_run_quality` resolves it against a
+        # drift or provider reason recorded before or after this point, so the
+        # stronger exclusion always outranks it.
+        (cell_dir / ".backend-terminated").touch()
+        log(
+            f"WARN: model-direct backend exited rc={rc} after writing "
+            "substantive evidence; retaining the cell as an early terminal outcome"
+        )
         return 0
     if backend == "gemini" and not raw.stat().st_size and not _has_artifacts(cell_dir):
         return 44
@@ -2704,8 +2749,6 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     provider_unavailable = True
                 elif rc:
                     status = "failed"
-                elif (cell_dir / ".target-artifacts-unowned").exists():
-                    status = "incomplete"
                 elif source_drift or build_drift:
                     status = "incomplete"
                 paused = 0
@@ -2850,6 +2893,24 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 results = Path(cell.get("results_dir", ""))
             except (OSError, ValueError):
                 continue
+            termination_recovered = (
+                cell.get("condition") == "model-direct"
+                and cell.get("status") == "failed"
+                # A drifted or provider-limited cell never becomes comparable.
+                # Its recorded reason has to gate the recovery, or relabelling
+                # would launder it into the totals it is excluded from.
+                and metrics.cell_run_quality(cell_dir, cell.get("status", ""))
+                not in metrics.NONCOMPARABLE_RUN_QUALITIES
+                and results.is_dir()
+                and results.resolve() == cell_dir.resolve()
+                and _has_substantive_artifacts(results)
+            )
+            if termination_recovered:
+                (cell_dir / ".backend-terminated").touch()
+                cell["run_quality"] = metrics.cell_run_quality(
+                    cell_dir, cell.get("status", ""),
+                )
+                _write_json(cell_dir / "cell.json", cell)
             if (
                 (cell_dir / ".target-artifacts-unowned").is_file()
                 and cell.get("run_quality")
@@ -2923,22 +2984,26 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 remaining = summary.get("findings_unadjudicated", 0)
                 if args.validate_findings and remaining:
                     log(f"WARN: {cell_dir.name} has {remaining} finding(s) still un-adjudicated after drain")
-                # `incomplete` is reserved for a provider-limited run or a
-                # finalizer that actually failed. Older runners also used it
-                # for an otherwise successful cell containing one unfinished
-                # artifact; recover that stale status after fresh finalizers
-                # return normally. Residual artifacts remain visible in
-                # metrics without erasing confirmed evidence from the cell.
+                # Recover old accounting-only incomplete cells and model-direct
+                # exits that left substantive cell evidence. Empty or unusable
+                # process failures stay failed. Residual artifacts remain
+                # visible without erasing confirmed evidence from the cell.
                 if (
                     finalizers_ok
-                    and cell.get("status") == "incomplete"
+                    and (
+                        cell.get("status") == "incomplete"
+                        or (
+                            cell.get("status") == "failed"
+                            and termination_recovered
+                        )
+                    )
                     # A provider-limited cell never ran its budget; a drifted one
                     # read or executed something its peers did not. Neither
                     # becomes comparable later, so regeneration must not promote
-                    # them back into the totals.
+                    # them back into the totals. Unowned target-tree evidence is
+                    # left out of this cell's results and does not taint them.
                     and cell.get("run_quality")
                     not in metrics.NONCOMPARABLE_RUN_QUALITIES
-                    and not (cell_dir / ".target-artifacts-unowned").is_file()
                     and not (cell_dir / ".backend-unavailable").is_file()
                 ):
                     cell["status"] = "done"
