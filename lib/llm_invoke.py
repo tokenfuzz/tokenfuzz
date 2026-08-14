@@ -1225,8 +1225,9 @@ def _run_agent_process(
     if turn_cap <= 0 and not health_watchdog:
         with raw.open("w", encoding="utf-8") as sink:
             completed = subprocess.run(
-                launch_command, input=input_text, stdout=sink,
-                stderr=subprocess.STDOUT, text=True, cwd=cwd, env=environment,
+                launch_command, input=input_text,
+                stdin=subprocess.DEVNULL if input_text is None else None,
+                stdout=sink, stderr=subprocess.STDOUT, text=True, cwd=cwd, env=environment,
                 check=False,
             )
         return _normalize_native_turn_limit(
@@ -1241,7 +1242,7 @@ def _run_agent_process(
     with raw.open("w", encoding="utf-8") as sink:
         process = subprocess.Popen(
             launch_command,
-            stdin=subprocess.PIPE if input_text is not None else None,
+            stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
             stdout=sink,
             stderr=subprocess.STDOUT,
             text=True,

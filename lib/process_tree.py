@@ -138,6 +138,42 @@ def _pids_with_token(token: str) -> list[int]:
                 continue
         return pids
 
+    if sys.platform == "darwin":
+        import ctypes
+        raw = token.encode()
+        try:
+            output = subprocess.check_output(["ps", "-ax", "-o", "pid="], text=True)
+        except (OSError, subprocess.SubprocessError):
+            return []
+        CTL_KERN, KERN_PROCARGS2 = 1, 49
+        libc = ctypes.CDLL(None)
+        for line in output.splitlines():
+            pid_text = line.strip()
+            if not pid_text.isdigit():
+                continue
+            pid = int(pid_text)
+            mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+                continue
+            buf = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+                continue
+            data = buf.raw
+            if len(data) < 4:
+                continue
+            argc = int.from_bytes(data[:4], sys.byteorder)
+            idx = 4
+            while idx < len(data) and data[idx] != 0:
+                idx += 1
+            while idx < len(data) and data[idx] == 0:
+                idx += 1
+            strings = data[idx:].split(b"\0")
+            env_strings = strings[argc:]
+            if raw in env_strings:
+                pids.append(pid)
+        return pids
+
     # Environment snapshot first: a pid it holds that the later argv snapshot
     # has lost merely exited, whereas taking argv first drops any process born
     # between the two calls — the still-spawning leak this exists to catch.

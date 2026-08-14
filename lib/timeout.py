@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -53,6 +54,7 @@ def run_timeout(
         capture_output=capture_output,
         stdout=stdout,
         stderr=stderr,
+        stdin=subprocess.DEVNULL if input is None else None,
         input=input,
         text=text,
         check=False,
@@ -173,7 +175,18 @@ def main():
     if not cmd:
         _die("missing command")
 
-    pid = os.fork()
+    # Keep this compatibility warning out of command diagnostics without
+    # changing the warning policy of processes that import this module.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=(
+                r"This process .* is multi-threaded, use of fork\(\) may "
+                r"lead to deadlocks in the child\."
+            ),
+            category=DeprecationWarning,
+        )
+        pid = os.fork()
     if pid == 0:
         # setsid (not setpgrp) so the child has no controlling terminal.
         # setpgrp alone moves the child to a background pgrp while leaving

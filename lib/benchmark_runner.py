@@ -1162,7 +1162,7 @@ def run_harness(
                         env=environment, stdout=stream, stderr=subprocess.STDOUT,
                     ).returncode
                 else:
-                    rc = subprocess.run(command, cwd=facade, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False).returncode
+                    rc = subprocess.run(command, cwd=facade, env=environment, stdin=subprocess.DEVNULL, stdout=stream, stderr=subprocess.STDOUT, check=False).returncode
             finally:
                 # Reap escaped cell processes even if the launch raised
                 # (OSError, timeout-helper failure) — the leak this guards
