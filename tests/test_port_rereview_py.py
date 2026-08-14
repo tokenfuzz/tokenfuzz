@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import mock
@@ -102,6 +103,45 @@ with tempfile.TemporaryDirectory(prefix="port-rereview-") as temporary:
     ) as (completed, output):
         check(completed.returncode == 0 and output.stat().st_size == 2_000_000,
               "timeout capture keeps large child output file-backed")
+
+    read_fd, write_fd = os.pipe()
+    try:
+        stdin_check = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import sys;"
+                f"sys.path.insert(0,{str(ROOT / 'lib')!r});"
+                "from timeout import run_timeout;"
+                "completed=run_timeout("
+                "[sys.executable,'-c','import sys;sys.stdin.read()'],"
+                "1,capture_output=True);"
+                "raise SystemExit(completed.returncode)",
+            ],
+            stdin=read_fd, capture_output=True, text=True, check=False,
+        )
+    finally:
+        for descriptor in (read_fd, write_fd):
+            os.close(descriptor)
+    check(
+        stdin_check.returncode == 0,
+        "timeout capture closes inherited stdin when no input is supplied",
+    )
+
+    warning_check = subprocess.run(
+        [
+            sys.executable, "-W", "error", "-c",
+            "import sys,warnings;"
+            f"sys.path.insert(0,{str(ROOT / 'lib')!r});"
+            "import timeout;"
+            "warnings.warn('unrelated warning',DeprecationWarning)",
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    check(
+        warning_check.returncode != 0
+        and "unrelated warning" in warning_check.stderr,
+        "importing timeout preserves the caller's deprecation-warning policy",
+    )
 
     probe = load_script("probe_rereview", ROOT / "bin" / "probe")
     multi = load_script("sanitizer_multi_rereview", ROOT / "bin" / "run-sanitizer-multi")

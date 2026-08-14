@@ -24,8 +24,6 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Sequence
 
-warnings.filterwarnings("ignore", category=DeprecationWarning)
-
 
 def run_timeout(
     command: Sequence[str],
@@ -42,14 +40,6 @@ def run_timeout(
     text: bool = False,
 ) -> subprocess.CompletedProcess:
     """Run a command through the portable process-tree timeout wrapper."""
-    kwargs: dict = {"cwd": cwd, "env": env, "stdout": stdout, "stderr": stderr, "text": text, "check": False}
-    if capture_output:
-        kwargs["capture_output"] = True
-    if input is not None:
-        kwargs["input"] = input
-    elif not capture_output:
-        kwargs["stdin"] = subprocess.DEVNULL
-
     return subprocess.run(
         [
             sys.executable,
@@ -59,7 +49,15 @@ def run_timeout(
             str(rss_mb),
             *command,
         ],
-        **kwargs,
+        cwd=cwd,
+        env=env,
+        capture_output=capture_output,
+        stdout=stdout,
+        stderr=stderr,
+        stdin=subprocess.DEVNULL if input is None else None,
+        input=input,
+        text=text,
+        check=False,
     )
 
 
@@ -177,7 +175,18 @@ def main():
     if not cmd:
         _die("missing command")
 
-    pid = os.fork()
+    # Keep this compatibility warning out of command diagnostics without
+    # changing the warning policy of processes that import this module.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=(
+                r"This process .* is multi-threaded, use of fork\(\) may "
+                r"lead to deadlocks in the child\."
+            ),
+            category=DeprecationWarning,
+        )
+        pid = os.fork()
     if pid == 0:
         # setsid (not setpgrp) so the child has no controlling terminal.
         # setpgrp alone moves the child to a background pgrp while leaving
