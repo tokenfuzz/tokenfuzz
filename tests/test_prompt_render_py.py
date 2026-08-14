@@ -239,6 +239,62 @@ ok("AND a specific application call order is `outside`" in vp,
 ok("calling the documented entry point that consumes the input" in vp,
    "validator: ordinary fixed setup is not a trigger component")
 
+# The batch reviewer is the single template's prefix (everything before the
+# finding marker) plus the batch suffix, so anything below that marker is
+# dropped from every batched vote. A schema that cannot carry
+# `trigger_controls_fit` sends each promoted finding to `pending`, which reads
+# as a zero-yield audit rather than as a gate that never asked the question.
+rc, vpb = render_named("validate_trigger_provenance_batch_suffix.md.j2",
+                       {"candidates_json": "[]", "timeout_secs": "700"})
+ok(rc == 0, "validate_trigger_provenance batch suffix renders")
+batch_prefix, marker, _ = vp.partition("# Finding under review (opaque facts)")
+ok(bool(marker), "validator: batch split marker present in the single template")
+batch = batch_prefix + vpb
+ok('"trigger_controls_fit":"within|outside|unclear"' in batch,
+   "batch validator: scope answer has a slot in the emitted schema")
+ok("is your own threat-model comparison" in batch,
+   "batch validator: scope answer keeps its definition")
+ok("Default to preserving the finding" in batch,
+   "batch validator: recall-safe rejection standard survives the split")
+ok("at least one verifiable source anchor" in batch,
+   "batch validator: anchor requirement survives the split")
+ok("**Promote**" in batch and "**Uncertain**" in batch,
+   "batch validator: vote definitions survive the split")
+
+# Every batched decision emits its own hand-written schema. A field that exists
+# only in the single-item schema is unanswerable in a batch, and the batch path
+# is the one production uses — so the gate reads a silent omission as the model
+# declining to answer. Two shipped gates drifted this way: `trigger_controls_fit`
+# (scope, sending promoted findings to `pending`) and `disclosed_content`
+# (disclosure severity). Compare the field sets instead of trusting review.
+PROMPT_DIR = ROOT / "lib" / "prompts"
+
+
+def prompt_schema_keys(name):
+    text = (PROMPT_DIR / name).read_text()
+    keys = set(re.findall(r'"([a-z_]+)"\s*:', text))
+    # The quality prompt documents its single-item object as a typed key list
+    # instead of a JSON example; those fields must still survive batching.
+    keys.update(re.findall(
+        r"^  ([a-z_]+)\s+(?:boolean|string)\b", text, re.MULTILINE,
+    ))
+    return keys
+
+
+SCHEMA_PAIRS = (
+    ("triage_find_quality.md.j2", "triage_find_quality_batch.md.j2"),
+    ("triage_reachability_fields.md.j2", "triage_reachability_fields_batch.md.j2"),
+    ("validate_trigger_provenance.md.j2",
+     "validate_trigger_provenance_batch_suffix.md.j2"),
+)
+for single_name, batch_name in SCHEMA_PAIRS:
+    single_keys = prompt_schema_keys(single_name)
+    batch_keys = prompt_schema_keys(batch_name)
+    dropped = sorted(single_keys - batch_keys)
+    ok(not dropped,
+       f"batch schema keeps every field of {single_name}",
+       f"missing from {batch_name}: {', '.join(dropped)}" if dropped else "")
+
 
 # ─── Closed class vocabulary and threat-model semantics ────────────
 print("\nclass vocabulary and threat-model semantics")

@@ -4357,6 +4357,17 @@ def _fmt_tokens(value: object) -> str:
     return f"{n / 1_000_000:.1f}M"
 
 
+def _fmt_bound(rendered: str, source: object) -> str:
+    """Mark known telemetry as a floor when some sessions are absent."""
+    if source == "unknown" and rendered != "—":
+        return f"≥{rendered}"
+    return rendered
+
+
+def _fmt_token_bound(value: object, source: object) -> str:
+    return _fmt_bound(_fmt_tokens(value), source)
+
+
 def _fmt_input_cell(agg: dict) -> str:
     """Input column for the cross-backend rollup, with an estimated fallback.
 
@@ -4368,11 +4379,11 @@ def _fmt_input_cell(agg: dict) -> str:
     """
     measured = int(agg.get("input_tokens_total") or 0)
     if measured > 0:
-        return _fmt_tokens(measured)
+        return _fmt_token_bound(measured, agg.get("token_source"))
     estimate = int(agg.get("prompt_estimate_tokens_total") or 0)
     if estimate > 0:
         return f"~{_fmt_tokens(estimate)}"
-    return _fmt_tokens(measured)
+    return _fmt_token_bound(measured, agg.get("token_source"))
 
 
 def _fmt_output_cell(agg: dict) -> str:
@@ -4385,15 +4396,22 @@ def _fmt_output_cell(agg: dict) -> str:
     """
     measured = int(agg.get("output_tokens_total") or 0)
     if measured > 0:
-        return _fmt_tokens(measured)
+        return _fmt_token_bound(measured, agg.get("token_source"))
     if int(agg.get("prompt_estimate_tokens_total") or 0) > 0:
         return "—"
-    return _fmt_tokens(measured)
+    return _fmt_token_bound(measured, agg.get("token_source"))
+
+
+def _fmt_cost_bound(
+    value: object, source: object, *, estimated: bool = False,
+) -> str:
+    return _fmt_bound(_fmt_usd(value, estimated=estimated), source)
 
 
 def _fmt_cost_cell(agg: dict) -> str:
-    return _fmt_usd(
+    return _fmt_cost_bound(
         agg.get("cost_usd_total"),
+        agg.get("token_source"),
         estimated=bool(agg.get("cost_estimated"))
         or str(agg.get("token_source") or "") == "estimated",
     )
@@ -4411,7 +4429,7 @@ def _fmt_cost_compact_cell(agg: dict) -> str:
         bool(agg.get("cost_estimated"))
         or str(agg.get("token_source") or "") == "estimated"
     ) else ""
-    return f"{prefix}${amount:,}"
+    return _fmt_bound(f"{prefix}${amount:,}", agg.get("token_source"))
 
 
 def _fmt_hours(seconds: object) -> str:
@@ -4903,6 +4921,7 @@ def render_section(report: dict) -> str:
         for cond, rows in by_cond.items():
             label = _condition_cell(cond, backend)
             for row in rows:
+                source = _row_token_source(row)
                 exp = row.get("experiment") or row.get("cell") or "?"
                 cell = row.get("cell")
                 # The experiment links to its cell directory — cell.json,
@@ -4916,14 +4935,19 @@ def render_section(report: dict) -> str:
                         rep=row.get("replicate") or "—",
                         exp=exp_cell,
                         wall=_fmt_hours(row.get("wall_seconds")),
-                        source=_row_token_source(row),
-                        inp=_fmt_tokens(row.get("input_tokens")),
-                        create=_fmt_tokens(row.get("cache_creation_tokens")),
-                        cached=_fmt_tokens(row.get("cached_input_tokens")),
-                        out=_fmt_tokens(row.get("output_tokens")),
+                        source=source,
+                        inp=_fmt_token_bound(row.get("input_tokens"), source),
+                        create=_fmt_token_bound(
+                            row.get("cache_creation_tokens"), source,
+                        ),
+                        cached=_fmt_token_bound(
+                            row.get("cached_input_tokens"), source,
+                        ),
+                        out=_fmt_token_bound(row.get("output_tokens"), source),
                         prompt=_fmt_tokens(row.get("prompt_estimate_tokens")),
-                        cost=_fmt_usd(
+                        cost=_fmt_cost_bound(
                             row.get("cost_usd"),
+                            source,
                             estimated=bool(
                                 row.get("estimated") or row.get("cost_estimated")
                             ),
@@ -4932,6 +4956,7 @@ def render_section(report: dict) -> str:
                 )
             # Per-condition totals — the line an operator compares cost on.
             agg = cond_agg.get(cond, {})
+            agg_source = agg.get("token_source") or _token_source(rows)
             n = len(rows)
             lines.append(
                 "| **{cond}** | — | **{n} cell{s}** | **{wall}** | {source} "
@@ -4943,11 +4968,15 @@ def render_section(report: dict) -> str:
                     wall=_fmt_hours(
                         sum(r.get("wall_seconds", 0) or 0 for r in rows)
                     ),
-                    source=agg.get("token_source") or _token_source(rows),
-                    inp=_fmt_tokens(agg.get("input_tokens_total")),
-                    create=_fmt_tokens(agg.get("cache_creation_tokens_total")),
-                    cached=_fmt_tokens(agg.get("cached_input_tokens_total")),
-                    out=_fmt_tokens(agg.get("output_tokens_total")),
+                    source=agg_source,
+                    inp=_fmt_token_bound(agg.get("input_tokens_total"), agg_source),
+                    create=_fmt_token_bound(
+                        agg.get("cache_creation_tokens_total"), agg_source,
+                    ),
+                    cached=_fmt_token_bound(
+                        agg.get("cached_input_tokens_total"), agg_source,
+                    ),
+                    out=_fmt_token_bound(agg.get("output_tokens_total"), agg_source),
                     prompt=_fmt_tokens(agg.get("prompt_estimate_tokens_total")),
                     cost=_fmt_cost_cell(agg),
                 )
@@ -4996,7 +5025,10 @@ def render_section(report: dict) -> str:
         lines.append(
             "> - **Source** — where the numbers came from: `measured` "
             "(backend telemetry), `estimated` (character counts), "
-            "`unknown` (no usage signal), `mixed` across cells."
+            "`unknown` (at least one session had no usage signal), "
+            "`mixed` across cells. With `unknown`, displayed token and cost "
+            "totals include only sessions with telemetry and carry `≥` as "
+            "lower bounds."
         )
         lines.append("")
 

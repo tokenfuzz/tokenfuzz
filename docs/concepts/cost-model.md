@@ -157,6 +157,9 @@ harness recovers exact cache buckets from its per-request events but marks the
 row `estimated: true` because fresh input and output remain lower bounds. A
 terminated Codex session with no usage stays unknown. Antigravity and Grok rows
 without native usage are estimated from prompt and transcript size.
+When a cell's source is `unknown`, its displayed token and cost totals include
+only sessions with telemetry and carry `≥` as lower bounds, not complete
+totals.
 
 One-shot harness decisions use the same ledger. Claude, Codex, native Gemini,
 and OpenCode keep their structured usage transport, then separate the

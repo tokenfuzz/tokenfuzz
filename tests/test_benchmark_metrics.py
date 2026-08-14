@@ -988,6 +988,22 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIsNone(benchmark.reset_ledger(ledger, hard=True))
         self.assertFalse(ledger.exists())
 
+    def test_unknown_token_source_renders_known_totals_as_lower_bounds(self) -> None:
+        bench = self.root / "bench-unknown-tokens"
+        self.write_json(bench / "run.json", {
+            "runid": "run1", "target": "sample", "backend": "codex",
+            "conditions": ["harness"], "replicates": 1,
+        })
+        cell = self.make_cell(bench, "harness-r1", "harness", 1, 1)
+        metrics = json.loads((cell / "metrics.json").read_text())
+        metrics["tokens"]["token_source"] = "unknown"
+        self.write_json(cell / "metrics.json", metrics)
+
+        section = benchmark.render_section(benchmark.aggregate(bench))
+        self.assertIn("| unknown |", section)
+        self.assertGreaterEqual(section.count("≥111"), 2)
+        self.assertIn("carry `≥` as lower bounds", section)
+
     def test_pool_and_split_preserve_condition_membership_and_rejections(self) -> None:
         bench = self.root / "pool-bench"
         self.write_json(bench / "run.json", {

@@ -145,6 +145,63 @@ def _stamp_finalization_start(results: Path) -> None:
         pass
 
 
+def _audit_accounting(results: Path) -> tuple[int, int]:
+    """Read audit-only pause and housekeeping clocks from their ledger."""
+    logs = metrics._find_index_jsonl(results).parent
+    paused = housekeeping = 0
+    try:
+        paused = int((logs / ".paused_secs").read_text().strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        housekeeping = int(float(
+            (logs / ".housekeeping_secs").read_text().strip()
+        ))
+    except (OSError, ValueError):
+        pass
+    return paused, housekeeping
+
+
+def _recover_interrupted_wall(cell_dir: Path, cell: dict, results: Path) -> bool:
+    """Restore a legacy audit wall not checkpointed before finalization.
+
+    Current cells persist their monotonic wall and audit accounting before the
+    first finalizer starts. The timestamp subtraction remains for cells stopped
+    by an older runner: both ends of their audit are on disk, so regeneration
+    can score the frozen evidence instead of charging another full audit.
+    """
+    if cell.get("status") != "running" or cell.get("wall_seconds"):
+        return False
+    started = str(cell.get("started_at") or "")
+    if not started:
+        return False
+    try:
+        marker = metrics._find_index_jsonl(results).parent / ".finalization_started"
+        ended = datetime.fromisoformat(marker.read_text(encoding="utf-8").strip())
+        begun = datetime.fromisoformat(started)
+        # A naive/aware mix raises TypeError here; one unrecoverable cell must
+        # not abort the regeneration of every other cell in the run.
+        wall = int((ended - begun).total_seconds())
+    except (OSError, TypeError, ValueError):
+        return False
+    if wall <= 0:
+        return False
+    paused, housekeeping = _audit_accounting(results)
+    cell["wall_seconds"] = wall
+    cell["paused_seconds"] = paused
+    cell["housekeeping_seconds"] = housekeeping
+    cell["wall_effective_seconds"] = max(0, wall - paused)
+    # Hand the cell to the existing incomplete-cell recovery, which promotes it
+    # to done only once this regeneration's finalizers actually succeed.
+    cell["status"] = "incomplete"
+    _write_json(cell_dir / "cell.json", cell)
+    log(
+        f"Regenerate: recovered {cell_dir.name} audit wall "
+        f"{format_duration(wall)} from the finalization stamp"
+    )
+    return True
+
+
 def _finalize_deadline(finalize_wall: int) -> float | None:
     """Fresh ceiling for one finalization phase.
 
@@ -616,8 +673,7 @@ def write_cell(
     paused: int = 0, started_at: str = "", housekeeping: int = 0,
     build_identity: dict | None = None,
 ) -> None:
-    # Source/build drift and unowned evidence leave the headline comparison, so
-    # their persistent reason must survive into the cell record.
+    # Run-quality markers must survive every rewrite of the cell record.
     quality = metrics.cell_run_quality(path.parent, status)
     drift: dict = {}
     try:
@@ -1069,7 +1125,9 @@ def run_harness(
 ) -> tuple[int, Path]:
     facade = prepare_facade(cell_dir, target_slug, config_snapshot)
     target = (SCRIPT_ROOT / "targets" / target_slug).resolve()
-    result_dir = facade / "output" / f"{target_slug}-{experiment}" / backend / "results"
+    result_dir = (
+        facade / "output" / f"{target_slug}-{experiment}" / backend / "results"
+    )
     command = [
         str(facade / "bin" / "audit"), "--target", target_slug,
         "--backend", backend,
@@ -2673,17 +2731,23 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     failed += 1
                     continue
                 cell_build_identity = run_identity
+                started_at = datetime.now(timezone.utc).isoformat()
+                # Record the start before the cell runs. Finalization is
+                # unbounded by default, so an operator stopping a run during it
+                # is ordinary; without this the killed cell keeps wall_seconds=0
+                # and only a fresh audit could score it.
                 write_cell(
                     cell_json, condition, replicate, experiment, predicted, 0,
-                    "running", args.agents,
+                    "running", args.agents, started_at=started_at,
                     build_identity=cell_build_identity,
                 )
                 # Regen fires again on completion; do it at start too so a
                 # just-started long cell (the trailing harness cell) shows in the
                 # shared dashboard for its whole run, not only after it finishes.
                 update_live_result(bench_root, f"start {name}")
+                # Dashboard generation is orchestration before the cell, not
+                # agent time or in-run steering. Keep it outside the audit wall.
                 start = time.monotonic()
-                started_at = datetime.now(timezone.utc).isoformat()
                 status = "done"
                 if args.dry_run:
                     results = dryrun_cell(cell_dir, condition, replicate, args.backend)
@@ -2751,20 +2815,21 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     status = "failed"
                 elif source_drift or build_drift:
                     status = "incomplete"
-                paused = 0
-                housekeeping = 0
-                try:
-                    paused = int((results.parent / "logs" / ".paused_secs").read_text().strip())
-                except (OSError, ValueError):
-                    pass
-                try:
-                    housekeeping = int(float(
-                        (results.parent / "logs" / ".housekeeping_secs").read_text().strip()
-                    ))
-                except (OSError, ValueError):
-                    pass
+                paused, housekeeping = _audit_accounting(results)
                 finalize_wall = getattr(args, "finalize_wall", 0)
                 finalize_workers = getattr(args, "finalize_workers", 4)
+                # Finalization is deliberately outside the audit wall and may
+                # be unbounded. Persist the exact monotonic wall and audit
+                # clocks before entering it, so an operator stop loses only
+                # unfinished adjudication—not the completed measurement.
+                checkpoint_status = (
+                    "incomplete" if status == "done" else status
+                )
+                write_cell(
+                    cell_json, condition, replicate, experiment, results, wall,
+                    checkpoint_status, args.agents, paused=paused,
+                    started_at=started_at, housekeeping=housekeeping,
+                )
                 # Post-cell adjudication is measurement, not discovery, but its
                 # tokens land in the same index as the audit's. Stamp the
                 # boundary so the two can be told apart after the fact; the
@@ -2919,6 +2984,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 cell["run_quality"] = "unowned_artifacts"
                 _write_json(cell_dir / "cell.json", cell)
             if results.is_dir():
+                _recover_interrupted_wall(cell_dir, cell, results)
                 finalizers_ok = True
                 finalize_wall = getattr(args, "finalize_wall", 0)
                 finalize_workers = getattr(args, "finalize_workers", 4)

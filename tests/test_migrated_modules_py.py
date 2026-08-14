@@ -397,13 +397,17 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     def _no_op_symbolizer(command, **kwargs):
         kwargs["stdout"].write(dladdr.encode())
         return SimpleNamespace(returncode=0)
-    with mock.patch.object(sanitizer.sys, "platform", "darwin"), \
+    warning = io.StringIO()
+    with contextlib.redirect_stderr(warning), \
+         mock.patch.object(sanitizer.sys, "platform", "darwin"), \
          mock.patch.object(sanitizer.shutil, "which", side_effect=lambda name: "/usr/bin/atos" if name == "atos" else None), \
          mock.patch.object(sanitizer.subprocess, "run", side_effect=_no_op_symbolizer):
         symbolized = sanitizer.symbolize_file(stubborn)
     check(symbolized is False, "a report that keeps raw frames reports failure")
     check(dladdr.strip() in stubborn.read_text(),
           "a failed symbolization leaves the original frames intact")
+    check("some stack frames may lack source lines" in warning.getvalue(),
+          "a partial symbolization warning does not claim every frame is raw")
 
     completed = run_timeout([sys.executable, "-c", "print('timeout-ok')"], 2, capture_output=True)
     check(completed.returncode == 0 and completed.stdout.strip() == b"timeout-ok", "timeout runner captures successful commands")

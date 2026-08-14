@@ -518,5 +518,87 @@ raise SystemExit(23)
             self.assertTrue((scratch_cell / relative).is_dir())
 
 
+class InterruptedCellRecoveryTests(unittest.TestCase):
+    """Cells stopped after the audit wall but before metrics are saved."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="benchmark-recover-")
+        self.work = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+
+    def test_a_cell_stopped_during_finalization_recovers_its_wall(self) -> None:
+        results = self.work / "cell"
+        (results / "logs").mkdir(parents=True)
+        (results / "logs" / "index.jsonl").touch()
+        (results / "logs" / ".paused_secs").write_text(
+            "120\n", encoding="utf-8",
+        )
+        (results / "logs" / ".housekeeping_secs").write_text(
+            "42.9\n", encoding="utf-8",
+        )
+        (results / "logs" / ".finalization_started").write_text(
+            "2026-08-13T23:14:26.748847+00:00", encoding="utf-8",
+        )
+        cell = {
+            "status": "running", "wall_seconds": 0, "paused_seconds": 0,
+            "started_at": "2026-08-13T13:14:24.000000+00:00",
+        }
+        self.assertTrue(
+            benchmark_runner._recover_interrupted_wall(results, cell, results)
+        )
+        self.assertEqual(cell["wall_seconds"], 36002)
+        self.assertEqual(cell["paused_seconds"], 120)
+        self.assertEqual(cell["housekeeping_seconds"], 42)
+        self.assertEqual(cell["wall_effective_seconds"], 35882)
+        # Handed to the incomplete-cell path, which promotes to done only once
+        # this regeneration's finalizers succeed.
+        self.assertEqual(cell["status"], "incomplete")
+        saved = json.loads((results / "cell.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved["wall_seconds"], 36002)
+
+    def test_recovery_leaves_finished_and_unstamped_cells_alone(self) -> None:
+        results = self.work / "other"
+        (results / "logs").mkdir(parents=True)
+        (results / "logs" / "index.jsonl").touch()
+        done = {"status": "done", "wall_seconds": 100, "started_at": "x"}
+        self.assertFalse(
+            benchmark_runner._recover_interrupted_wall(results, done, results)
+        )
+        self.assertEqual(done["wall_seconds"], 100)
+        checkpointed = {
+            "status": "incomplete", "wall_seconds": 100,
+            "paused_seconds": 7, "started_at": "x",
+        }
+        self.assertFalse(
+            benchmark_runner._recover_interrupted_wall(
+                results, checkpointed, results,
+            )
+        )
+        self.assertEqual(checkpointed["paused_seconds"], 7)
+        # No finalization stamp means the audit never reached measurement, so
+        # there is no audit wall to recover and the cell must not be scored.
+        unstamped = {
+            "status": "running", "wall_seconds": 0,
+            "started_at": "2026-08-13T13:14:24+00:00",
+        }
+        self.assertFalse(
+            benchmark_runner._recover_interrupted_wall(results, unstamped, results)
+        )
+        self.assertEqual(unstamped["wall_seconds"], 0)
+
+    def test_audit_accounting_follows_the_harness_results_layout(self) -> None:
+        results = self.work / "backend" / "results"
+        logs = self.work / "backend" / "logs"
+        results.mkdir(parents=True)
+        logs.mkdir()
+        (logs / "index.jsonl").touch()
+        (logs / ".paused_secs").write_text("9\n", encoding="utf-8")
+        (logs / ".housekeeping_secs").write_text("17.8\n", encoding="utf-8")
+        self.assertEqual(
+            benchmark_runner._audit_accounting(results),
+            (9, 17),
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

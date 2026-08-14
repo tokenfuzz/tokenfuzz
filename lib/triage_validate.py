@@ -13,10 +13,13 @@ from pathlib import Path
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v7-controls-fit"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v8-batch-controls-fit"
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.
+# v7 is deliberately absent: its batch votes could not answer
+# `trigger_controls_fit`, so reusing them as advisory would re-derive the
+# `pending` they already produced instead of asking the question.
 TRIGGER_GATE_ADVISORY_VERSIONS = {
     "trigger-v2-caller-buffer",
     "trigger-v3-scoped-controls",

@@ -2500,6 +2500,33 @@ Generated score text.
         )
         self.assertEqual(cache["_fill_attempts"], 1)
 
+    def test_pre_batch_schema_retry_exhaustion_is_reopened(self) -> None:
+        """A fixed prompt must not inherit the broken prompt's retry ceiling."""
+        required = "".join(
+            f"{label}: stated\n"
+            for key, label in triage._REACH_FIELD_LABELS.items()
+            if key != "class"
+        )
+        self.report.write_text(
+            "Class: info-disclosure\n" + required,
+            encoding="utf-8",
+        )
+        sidecar = self.finding / ".llm_fields.json"
+        sidecar.write_text(json.dumps({
+            "_decision_version": "reach-fields-v4-fixed-setup",
+            "_fill_attempts": 2,
+        }), encoding="utf-8")
+        self.assertTrue(triage.fill_reach_fields(
+            self.finding,
+            decision_override={"disclosed_content": "cross-principal"},
+        ))
+        cache = json.loads(sidecar.read_text(encoding="utf-8"))
+        self.assertEqual(
+            cache["_decision_version"],
+            triage._REACH_FIELD_DECISION_VERSION,
+        )
+        self.assertEqual(cache["_fill_attempts"], 1)
+
     def test_legacy_positive_crash_vote_is_not_security_yield(self) -> None:
         """A legacy vote is not a current review, so it evidences nothing.
 

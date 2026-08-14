@@ -339,6 +339,28 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq(real, ca.find_testcase([cd]),
               "find_testcase: repro.cmd excluded, real input chosen")
 
+# The crash contract handed to a model-direct agent names the testcase exactly
+# `input`, while derived renderings and alternate routes use prefixed names. The
+# canonical input must rank first or replay measures different bytes.
+for sibling in ("input.hex", "input_via_demuxer.bin", "input-notes.dat"):
+    with tempfile.TemporaryDirectory() as td:
+        cd = Path(td)
+        real = cd / "input"
+        real.write_bytes(b"\x00\x01\x02payload")
+        (cd / sibling).write_bytes(b"00 01 02 payload rendering")
+        assert_eq(real, ca.find_testcase([cd]),
+                  f"find_testcase: bare `input` outranks {sibling}")
+        assert_eq(real, ca.find_reproducer_artifact([cd]),
+                  "find_reproducer_artifact: bare `input` is canonical evidence")
+
+# A prefixed sibling is still the testcase when no bare `input` sits beside it.
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td)
+    only = cd / "input.hex"
+    only.write_bytes(b"00 01 02")
+    assert_eq(only, ca.find_testcase([cd]),
+              "find_testcase: prefixed input still found on its own")
+
 
 total = _PASSED + _FAILED
 if _FAILED == 0:

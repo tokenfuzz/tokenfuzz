@@ -181,12 +181,6 @@ choice with no untrusted boundary, for example intentional dynamic module
 loading, local config selecting a file path, serializer API parameters chosen
 by the caller, or a build/test/codegen utility that is not shipped.
 {{ skeptic_block }}
-# Finding under review (opaque facts)
-
-```json
-{{ candidate_json }}
-```
-
 # Vote
 
 Default to preserving the finding. A wrong Reject permanently hides a real
@@ -212,12 +206,6 @@ An anchor cites one exact line in the audited tree: a target-relative path and
 whitespace removed. The harness verifies those fields, computes and persists
 the excerpt SHA-256, and downgrades an unverifiable Promote or Reject to
 Uncertain.
-
-Output ONE JSON object on a single line, nothing else:
-
-```json
-{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the blocking invariant, plus which of (a)-(g) applies>","rejection_kind":"contract-invalid|unreachable|nonshipping|no-added-boundary|consequence-disproved|unknown","surface_applies":"yes|no","review_mode":"memory-contract|resource|disclosure|semantic-boundary","vulnerable_boundary_surface":"network|library-api|file-format|cli|dev-tool|internal|unknown","reproducer_carrier":"network|library-api|file-format|cli|harness|runner|unknown","trigger_controls_fit":"within|outside|unclear","anchors":[{"path":"relative/path.c","line":123,"symbol":"function_or_section","kind":"source|contract|build","excerpt":"exact trimmed source line"}]}
-```
 
 Definitions:
 - **Promote**: you constructed a concrete attacker-reachable path (bytes or a
@@ -272,5 +260,19 @@ Definitions:
   Use `consequence-disproved` only when source contradicts the report's exact
   security consequence, not when evidence is missing or a different scenario
   would be required.
+
+# Finding under review (opaque facts)
+
+```json
+{{ candidate_json }}
+```
+
+# Answer
+
+Output ONE JSON object on a single line, nothing else:
+
+```json
+{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the blocking invariant, plus which of (a)-(g) applies>","rejection_kind":"contract-invalid|unreachable|nonshipping|no-added-boundary|consequence-disproved|unknown","surface_applies":"yes|no","review_mode":"memory-contract|resource|disclosure|semantic-boundary","vulnerable_boundary_surface":"network|library-api|file-format|cli|dev-tool|internal|unknown","reproducer_carrier":"network|library-api|file-format|cli|harness|runner|unknown","trigger_controls_fit":"within|outside|unclear","anchors":[{"path":"relative/path.c","line":123,"symbol":"function_or_section","kind":"source|contract|build","excerpt":"exact trimmed source line"}]}
+```
 
 Budget: {{ timeout_secs }}s wall time, ~60 tool calls. Be calibrated.

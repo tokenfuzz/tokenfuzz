@@ -246,7 +246,7 @@ def _warn_unsymbolized(report: Path, completed) -> None:
             detail = "symbolizer timed out after 60s"
     print(
         f"[sanitizer] WARN: {report.name} keeps unsymbolized frames "
-        f"({detail}); stacks will have no source lines",
+        f"({detail}); some stack frames may lack source lines",
         file=sys.stderr,
     )
 

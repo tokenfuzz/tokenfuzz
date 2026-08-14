@@ -764,7 +764,10 @@ _ALL_REACH_FIELD_LABELS = {
     **_REACH_FIELD_LABELS,
     **_OPTIONAL_REACH_FIELD_LABELS,
 }
-_REACH_FIELD_DECISION_VERSION = "reach-fields-v4-fixed-setup"
+# Bump when a prompt/schema defect could have consumed the bounded retry budget
+# without asking for a field. Complete reports still short-circuit; only reports
+# that remain open receive fresh attempts.
+_REACH_FIELD_DECISION_VERSION = "reach-fields-v5-batch-schema"
 _REACH_FIELD_ENUMS = {
     "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},

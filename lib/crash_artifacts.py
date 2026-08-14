@@ -67,6 +67,9 @@ TESTCASE_PREFIXES = (
     "repro-",
     "reproducer",
 )
+# The model-direct crash contract names its testcase exactly `input`; it must
+# rank ahead of a derived rendering such as `input.hex`.
+TESTCASE_EXACT_NAMES = frozenset({"input"})
 
 # Explicit self-contained reproducer roles. These are accepted alongside normal
 # testcase discovery, but only for non-metadata files. In particular,
@@ -274,7 +277,9 @@ def looks_like_shell_wrapper(path: Path) -> bool:
 def _sort_key(path: Path) -> tuple[int, str]:
     name = path.name
     priority = 1
-    if name.startswith("input."):
+    if name.casefold() in TESTCASE_EXACT_NAMES:
+        priority = 0
+    elif name.startswith("input."):
         priority = 0
     elif any(name.startswith(p) for p in TESTCASE_PREFIXES):
         priority = 0
@@ -390,9 +395,12 @@ def _looks_like_harness_source(path: Path) -> bool:
 
 
 def _is_testcase_named(path: Path) -> bool:
-    """A name matching TESTCASE_PREFIXES advertises an input, not a harness."""
+    """A canonical testcase name advertises an input, not a harness."""
     lower = path.name.lower()
-    return any(lower.startswith(p) for p in TESTCASE_PREFIXES)
+    return (
+        lower in TESTCASE_EXACT_NAMES
+        or any(lower.startswith(p) for p in TESTCASE_PREFIXES)
+    )
 
 
 def _is_harness_named(path: Path) -> bool:
@@ -685,7 +693,7 @@ def find_reproducer_artifact(scan_dirs: Iterable[Path]) -> Optional[Path]:
     if testcase is None:
         return None
     lower = testcase.name.lower()
-    if any(lower.startswith(prefix) for prefix in TESTCASE_PREFIXES):
+    if _is_testcase_named(testcase):
         return testcase
 
     # Non-canonical input names (min.xml, payload.bin) need a second artifact
