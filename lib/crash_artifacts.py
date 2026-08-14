@@ -99,7 +99,7 @@ NONINPUT_TEXT_STEMS = {
     "comment", "comments", "changelog", "todo", "output", "out",
     "log", "logs", "analysis", "writeup", "write-up", "explanation",
 }
-_BIN_FILE_RE = re.compile(r"executable|Mach-O|ELF|shared object|dSYM", re.IGNORECASE)
+_BIN_FILE_RE = re.compile(r"executable|Mach-O|ELF|shared object", re.IGNORECASE)
 _ASAN_TESTCASE_RE = re.compile(r"\btestcase=([^ \t\r\n]+)")
 _SHELL_SHEBANG_RE = re.compile(r"^\s*#!.*\b(?:sh|bash|zsh|ksh)\b")
 _SHELL_WRAPPER_HINT_RE = re.compile(
@@ -310,11 +310,15 @@ def _nonempty_file(path: Path) -> bool:
 
 
 def is_executable_binary(path: Path) -> bool:
-    if not os.access(path, os.X_OK):
+    # X_OK on a directory means "searchable", not "runnable", so the regular-file
+    # test has to come first: a build leaves `harness.dSYM/` beside `harness`.
+    if not path.is_file() or not os.access(path, os.X_OK):
         return False
     try:
         out = subprocess.run(
-            ["file", str(path)],
+            # -b describes the file without echoing its path, so a directory
+            # component can never supply the match instead of the content.
+            ["file", "-b", str(path)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -614,10 +618,18 @@ def crash_sanitizer(crash_dir: Path) -> str:
 
 
 def crash_harness_binary(crash_dir: Path) -> Optional[Path]:
-    """The self-contained harness a crash carries, if it carries one."""
-    for candidate in sorted(Path(crash_dir).glob("harness*")):
-        if is_executable_binary(candidate):
-            return candidate
+    """The self-contained harness a crash carries, if it carries one.
+
+    Scans the evidence dirs every sibling resolver scans. export-repro migrates
+    the compiled harness into `.audit/` and leaves only source and the debug
+    bundle at the root, so a root-only scan stops finding the binary as soon as
+    a bundle is exported — and a later replay would then read a crash that
+    still reproduces as having no replay contract at all.
+    """
+    for directory in crash_evidence_dirs(crash_dir):
+        for candidate in sorted(directory.glob("harness*")):
+            if is_executable_binary(candidate):
+                return candidate
     return None
 
 

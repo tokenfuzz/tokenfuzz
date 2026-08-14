@@ -362,6 +362,66 @@ with tempfile.TemporaryDirectory() as td:
               "find_testcase: prefixed input still found on its own")
 
 
+# ─── The harness survives its own exporter ──────────────────────────
+# export-repro migrates files into .audit/ but skips directories, so an
+# exported bundle keeps `harness.c` and the `harness.dSYM/` debug bundle at the
+# root while the executable lives at `.audit/harness`. Resolving that layout has
+# to reach the executable: a replay that selects the debug bundle instead cannot
+# exec it and reports a reproducing crash as unmeasured, while one that finds
+# nothing at all demotes the crash as having no replay contract.
+
+
+def _make_executable(path: Path) -> Path:
+    path.write_text("#!/bin/sh\nexit 0\n")
+    path.chmod(0o755)
+    return path
+
+
+# `file <path>` prefixes its description with the caller-supplied pathname.
+# The classifier must inspect only the description: an executable-looking name
+# does not turn arbitrary execute-marked text into a runnable harness.
+with tempfile.TemporaryDirectory() as td:
+    misleading = Path(td) / "harness-executable-notes"
+    misleading.write_text("review notes\n")
+    misleading.chmod(0o755)
+
+    assert_eq(False, ca.is_executable_binary(misleading),
+              "is_executable_binary: pathname cannot supply the file type")
+
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td) / "CRASH-1"
+    (cd / ".audit").mkdir(parents=True)
+    (cd / "harness.c").write_text("int main(void) { return 0; }\n")
+    (cd / "harness.dSYM" / "Contents").mkdir(parents=True)
+    exported = _make_executable(cd / ".audit" / "harness")
+
+    assert_eq(False, ca.is_executable_binary(cd / "harness.dSYM"),
+              "is_executable_binary: a searchable directory is not a binary")
+    assert_eq(exported, ca.crash_harness_binary(cd),
+              "crash_harness_binary: finds the harness export-repro migrated")
+
+# The pre-export layout keeps resolving to the root binary.
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td) / "CRASH-1"
+    cd.mkdir(parents=True)
+    (cd / "harness.c").write_text("int main(void) { return 0; }\n")
+    root_bin = _make_executable(cd / "harness")
+
+    assert_eq(root_bin, ca.crash_harness_binary(cd),
+              "crash_harness_binary: unexported bundle still resolves at root")
+
+# A bundle carrying no compiled harness must stay None, or a runner-based crash
+# would be replayed as if it shipped its own driver.
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td) / "CRASH-1"
+    (cd / ".audit").mkdir(parents=True)
+    (cd / "harness.c").write_text("int main(void) { return 0; }\n")
+
+    assert_eq(None, ca.crash_harness_binary(cd),
+              "crash_harness_binary: source-only bundle carries no binary")
+
+
 total = _PASSED + _FAILED
 if _FAILED == 0:
     print(f"  {_GREEN}{_PASSED}/{total} passed{_NC}")
