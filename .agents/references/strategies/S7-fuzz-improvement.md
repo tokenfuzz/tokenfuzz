@@ -140,6 +140,10 @@ of session time here** — seed generation is the deliverable, not fuzzer runtim
 impractical for short sessions). For JS-only targets (`fuzz-tests` binary), short runs
 (60s) are acceptable since init is fast.
 
+When you do run one, pass `-artifact_prefix=${RESULTS_DIR}/scratch-N/`. libFuzzer
+otherwise saves `crash-<sha1>` into the directory it was launched from, which leaves
+the artifact in the source tree where it belongs to no run.
+
 ### Harness gaps to document
 
 When reading a fuzz harness, note gaps in `${RESULTS_DIR}/scratch-N/fuzz-harness-notes.md`:

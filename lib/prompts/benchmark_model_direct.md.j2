@@ -106,6 +106,11 @@ elsewhere is lost. The source tree is your read/run corpus, not your
 scratch space; keep generated files out of it so the operator's checkout
 stays clean.
 
+That rule covers the tools you run, not just the files you write. A
+libFuzzer binary saves `crash-<sha1>` next to whatever directory you
+launched it from, so pass `-artifact_prefix={{ output_dir }}/scratch/`
+whenever you run one.
+
 ## Audit scope — what NOT to file
 
 Only file a FINDING or CRASH whose primary source location is in code

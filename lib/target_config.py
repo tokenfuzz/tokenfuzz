@@ -1971,6 +1971,14 @@ _FRESHNESS_PRUNE_DIRS = {".git", ".hg", ".audit", "__pycache__", "node_modules"}
 _SANITIZER_BUILD_DIR_RE = re.compile(
     r"^build-(?:asan|ubsan|msan|tsan)(?:[-+].*)?$"
 )
+# libFuzzer names an artifact <kind>-<sha1 of the input> and writes it into the
+# fuzzer's working directory unless -artifact_prefix moves it, so fuzzing inside
+# a checkout drops one into the source tree. The kinds are the ones libFuzzer
+# itself emits; the 40-hex stamp is what separates them from a source file that
+# merely starts with "crash-".
+_FUZZ_ARTIFACT_RE = re.compile(
+    r"^(?:crash|leak|oom|timeout|slow-unit)-[0-9a-f]{40}$"
+)
 _FRESHNESS_VCS_TIMEOUT_SECONDS = 60
 # A plain `git status` refreshes and rewrites .git/index under index.lock.
 # Audit agents run git in the same checkout concurrently, so a probe that took
@@ -2060,6 +2068,17 @@ def _path_is_pruned(relative: str) -> bool:
     build-asan is source, and dropping it would err toward "fresh".
     """
     return any(_freshness_pruned(part) for part in relative.split("/")[:-1])
+
+
+def _is_untracked_fuzz_artifact(status: str, relative: str) -> bool:
+    """Whether a VCS-reported path is a fuzz run's own output rather than source.
+
+    Only untracked paths qualify. A regression input committed under this name
+    is product source, so editing one must still stale the build.
+    """
+    return status == "?" and bool(
+        _FUZZ_ARTIFACT_RE.fullmatch(relative.rpartition("/")[2])
+    )
 
 
 def _mode_tag(path: Path) -> str:
@@ -2176,8 +2195,11 @@ def _iter_status_paths(records: "list[str]") -> "list[tuple[str, str]] | None":
                 index += 1
         else:
             return None
-        if path and not _path_is_pruned(path):
-            pairs.append((metadata, path))
+        if not path or _path_is_pruned(path):
+            continue
+        if _is_untracked_fuzz_artifact(kind, path):
+            continue
+        pairs.append((metadata, path))
     return pairs
 
 
@@ -2259,9 +2281,12 @@ def _hg_status_paths(records: list[str]) -> list[str]:
     """Paths from `hg status -0` records, which are "<code> <path>"."""
     paths = []
     for record in records:
-        _, separator, path = record.partition(" ")
-        if separator and path and not _path_is_pruned(path):
-            paths.append(path)
+        status, separator, path = record.partition(" ")
+        if not separator or not path or _path_is_pruned(path):
+            continue
+        if _is_untracked_fuzz_artifact(status, path):
+            continue
+        paths.append(path)
     return paths
 
 
@@ -2337,8 +2362,9 @@ def _source_state_signature(
     """Content identity of the source a build would compile.
 
     Prefers VCS state, content-hashed. Build freshness includes non-ignored
-    untracked paths; benchmark identity opts out because generated testcases are
-    not product source. Content identity makes both policies immune to the two
+    untracked paths apart from a fuzz run's own artifacts; benchmark identity
+    opts out of untracked paths entirely, because generated testcases are not
+    product source. Content identity makes both policies immune to the two
     false-staleness classes a path+mtime walk cannot tell apart: ignored output
     a target writes during a test run, and an edit that is applied and then
     reverted. Both used to force a rebuild, and on a shared checkout a rebuild

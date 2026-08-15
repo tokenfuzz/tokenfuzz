@@ -420,6 +420,54 @@ class DriftAccountingTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertEqual(target_config.build_freshness(target, "asan"), "fresh")
 
+    def test_a_fuzz_artifact_does_not_stale_the_build(self) -> None:
+        """A fuzz run naming its own output is not a source edit.
+
+        The artifact lands wherever the fuzzer was launched, typically the
+        target root, where no directory prune reaches it. It used to strand
+        every later run behind a build that read as stale and could not be
+        rebuilt while a peer run held the build lease.
+        """
+        target = self.tmp / "fuzz-artifact"
+        _native_target(target)
+        _git_commit_all(target)
+        (target / "build-asan").mkdir()
+        target_config.build_write_stamp(target, "asan")
+        self.assertEqual("fresh", target_config.build_freshness(target, "asan"))
+
+        stamp = "a" * 40
+        (target / f"crash-{stamp}").write_bytes(b"\x0f<!DOCTYPE HTML>")
+        (target / "fuzz").mkdir()
+        (target / "fuzz" / f"oom-{stamp}").write_bytes(b"seed")
+        self.assertEqual("fresh", target_config.build_freshness(target, "asan"))
+        self.assertEqual([], target_config.source_changed_paths(target))
+
+        # Only the exact libFuzzer stamp: a near miss is source like any other.
+        (target / "crash-notasha1.c").write_text("int f(void){return 0;}\n")
+        self.assertEqual("stale", target_config.build_freshness(target, "asan"))
+        self.assertEqual(
+            ["crash-notasha1.c"], target_config.source_changed_paths(target),
+        )
+
+    def test_a_committed_artifact_name_still_stales_the_build(self) -> None:
+        """The rule is scoped to untracked paths.
+
+        A project that commits a crash-<sha1> regression input has made it
+        product source, so editing one must still force a rebuild.
+        """
+        target = self.tmp / "tracked-artifact"
+        _native_target(target)
+        name = f"crash-{'b' * 40}"
+        (target / name).write_bytes(b"seed")
+        _git_commit_all(target)
+        (target / "build-asan").mkdir()
+        target_config.build_write_stamp(target, "asan")
+        self.assertEqual("fresh", target_config.build_freshness(target, "asan"))
+
+        (target / name).write_bytes(b"edited")
+        self.assertEqual("stale", target_config.build_freshness(target, "asan"))
+        self.assertEqual([name], target_config.source_changed_paths(target))
+
 
 class ResumeAndSuffixTests(unittest.TestCase):
     """A resumed run must land on the generation it pinned, or refuse."""
