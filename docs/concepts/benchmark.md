@@ -583,6 +583,11 @@ recorded, and only while the build artifacts that crash needs are still
 available. Otherwise the pool keeps an unset `?` rather than a guess;
 model-direct triage keeps unmeasured evidence under `crashes/` but withholds
 its verdict, so it counts as unadjudicated rather than as a confirmed crash.
+A bundle whose replay contract cannot be resolved at all — a build that is
+gone, a harness nobody compiled — is held the same way; one that carries no
+reproducer to run at all is left to the completeness gate instead, which holds
+it pending before it rejects. Only a replay that ran and disagreed with the
+report moves a crash into `findings/`.
 Each pooled crash is checked against its owning cell and only
 its own replay artifacts, so one changed binary does not cost unrelated
 crashes their rates. A rate counts only runs that reproduced the original

@@ -100,11 +100,56 @@ class FindingCrashRoutingTests(unittest.TestCase):
             )
         self.assertEqual(
             triage.route_finding_diagnostics(
-                self.results, reconsider_unmeasured_replay=True,
+                self.results, reconsider_unverifiable_replay=True,
             ),
             1,
         )
         self.assertTrue((self.results / "crashes" / "CRASH-007").is_dir())
+
+    def test_historical_no_contract_demotion_can_be_reconsidered(self) -> None:
+        # The resolver answered "no contract" for every bundle whose harness
+        # export-repro had migrated into .audit/, and that demotion was
+        # permanent — the crash never came back on a later pass.
+        directory = self.finding("FIND-010")
+        (directory / ".audit").mkdir()
+        (directory / ".audit" / "input").write_bytes(b"input")
+        with (directory / "report.md").open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\n## Triage disposition\n\n"
+                "Demoted from `crashes/`: sanitizer evidence has no executable "
+                "configured-target replay contract.\n"
+            )
+        self.assertEqual(triage.route_finding_diagnostics(self.results), 0)
+        self.assertEqual(
+            triage.route_finding_diagnostics(
+                self.results, reconsider_unverifiable_replay=True,
+            ),
+            1,
+        )
+        self.assertTrue((self.results / "crashes" / "CRASH-010").is_dir())
+
+    def test_historical_harness_only_demotion_can_be_reconsidered(self) -> None:
+        # Ordinary source-only findings stay findings, but this artifact was a
+        # crash before the withdrawn replay demotion. A harness that embeds its
+        # input must not be stranded merely because it has no separate testcase.
+        directory = self.finding("FIND-011")
+        (directory / "harness.c").write_text(
+            "int main(void) { return 0; }\n", encoding="utf-8",
+        )
+        with (directory / "report.md").open("a", encoding="utf-8") as stream:
+            stream.write(
+                "\n## Triage disposition\n\n"
+                "Demoted from `crashes/`: sanitizer evidence has no executable "
+                "configured-target replay contract.\n"
+            )
+
+        self.assertEqual(
+            triage.route_finding_diagnostics(
+                self.results, reconsider_unverifiable_replay=True,
+            ),
+            1,
+        )
+        self.assertTrue((self.results / "crashes" / "CRASH-011").is_dir())
 
     def test_rejected_historical_replay_demotion_is_reconsidered_too(self) -> None:
         directory = self.results / "findings-rejected" / "FIND-008"
@@ -125,7 +170,7 @@ class FindingCrashRoutingTests(unittest.TestCase):
         )
         self.assertEqual(
             triage.route_finding_diagnostics(
-                self.results, reconsider_unmeasured_replay=True,
+                self.results, reconsider_unverifiable_replay=True,
             ),
             1,
         )
@@ -145,7 +190,7 @@ class FindingCrashRoutingTests(unittest.TestCase):
             )
         self.assertEqual(
             triage.route_finding_diagnostics(
-                self.results, reconsider_unmeasured_replay=True,
+                self.results, reconsider_unverifiable_replay=True,
             ),
             0,
         )

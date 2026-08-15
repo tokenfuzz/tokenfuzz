@@ -612,37 +612,46 @@ def demote_to_finding(directory: Path, results_dir: Path, reason: str) -> Path:
 _CRASH_DEMOTION_MARKER = re.compile(
     r"Demoted from `crashes/`", re.IGNORECASE,
 )
-_UNMEASURED_REPLAY_DEMOTION_MARKER = re.compile(
-    r"Demoted from `crashes/`: configured-target replay produced no "
-    r"measurement of the original fault",
+# The two demotion reasons that were never verdicts about the crash: a replay
+# that produced no measurement, and one no runnable contract could be resolved
+# for. Both blamed the crash for a harness failure, both have been withdrawn,
+# and both are reconsidered when a caller asks. Every other reason states what
+# a replay that ran actually saw, and stays permanent.
+_UNVERIFIABLE_REPLAY_DEMOTION_MARKER = re.compile(
+    r"Demoted from `crashes/`: (?:"
+    r"configured-target replay produced no measurement of the original fault"
+    r"|sanitizer evidence has no executable configured-target replay contract"
+    r")",
     re.IGNORECASE,
 )
 
 
-def _last_crash_demotion_was_unmeasured_replay(report_text: str) -> bool:
+def _last_crash_demotion_was_unverifiable_replay(report_text: str) -> bool:
     dispositions = re.findall(
         r"^Demoted from `crashes/`:[^\n]*$",
         report_text, re.IGNORECASE | re.MULTILINE,
     )
     return bool(
         dispositions
-        and _UNMEASURED_REPLAY_DEMOTION_MARKER.search(dispositions[-1])
+        and _UNVERIFIABLE_REPLAY_DEMOTION_MARKER.search(dispositions[-1])
     )
 
 
 def route_finding_diagnostics(
     results_dir: str | os.PathLike[str], *,
-    reconsider_unmeasured_replay: bool = False,
+    reconsider_unverifiable_replay: bool = False,
 ) -> int:
     """Move complete sanitizer-backed FIND bundles into crash triage.
 
     Only a dedicated sanitizer artifact is authoritative, and only a bundle
-    with a runnable testcase or harness crosses lanes.  Source-only memory
+    with a runnable testcase crosses lanes — or, on the reconsidered path
+    below, any saved reproducer, because that artifact was already a crash
+    before a demotion since withdrawn.  Source-only memory
     findings remain findings and receive a crash-lead marker; they must not be
     lost merely because reproduction is incomplete. Artifacts deliberately
     demoted from crash triage are never promoted back, except when the caller
-    explicitly reconsiders the one historical demotion caused by an
-    unmeasurable replay.
+    explicitly reconsiders the historical demotions a replay that established
+    nothing caused.
 
     The scan is limited to directories containing a sanitizer sidecar, so
     calling it before crash triage does not add another full finding-gate pass.
@@ -650,7 +659,7 @@ def route_finding_diagnostics(
     results = Path(results_dir)
     findings = results / "findings"
     roots = [findings]
-    if reconsider_unmeasured_replay:
+    if reconsider_unverifiable_replay:
         roots.append(results / "findings-rejected")
     if not any(root.is_dir() for root in roots):
         return 0
@@ -670,11 +679,13 @@ def route_finding_diagnostics(
         if report is None or sanitizer is None:
             continue
         report_text = _read(report)
+        reconsidered_replay_demotion = False
         if _CRASH_DEMOTION_MARKER.search(report_text):
-            if not (
-                reconsider_unmeasured_replay
-                and _last_crash_demotion_was_unmeasured_replay(report_text)
-            ):
+            reconsidered_replay_demotion = bool(
+                reconsider_unverifiable_replay
+                and _last_crash_demotion_was_unverifiable_replay(report_text)
+            )
+            if not reconsidered_replay_demotion:
                 continue
         sanitizer_text = _read(sanitizer)
         if not (
@@ -687,7 +698,10 @@ def route_finding_diagnostics(
             (directory, directory / ".audit"),
             sanitizer_files=(sanitizer,),
         )
-        if testcase is None:
+        if testcase is None and not (
+            reconsidered_replay_demotion
+            and crash_artifacts.carries_replay_evidence(directory)
+        ):
             _write_atomic_json(
                 directory / ".crash-lead.json",
                 {
@@ -695,7 +709,7 @@ def route_finding_diagnostics(
                     "state": "unreproduced",
                     "reason": (
                         "saved memory-safety diagnostic without a runnable "
-                        "testcase"
+                        "testcase or harness"
                     ),
                 },
             )

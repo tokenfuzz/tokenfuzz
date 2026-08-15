@@ -672,6 +672,27 @@ def find_testcase(scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] 
     return None
 
 
+def carries_replay_evidence(artifact_dir: Path) -> bool:
+    """Whether a saved artifact carries anything a replay could run.
+
+    Testcase discovery includes every recorded sanitizer header: an input may
+    still exist at the exact path captured by the crashing run even when it
+    has not yet been copied into the bundle. Partial export can leave both an
+    audit-preserved diagnostic and a root copy, while consumers legitimately
+    prefer either one; checking only one header can therefore disagree with
+    crash completeness and adjudicate a replay that never ran.
+    """
+    directory = Path(artifact_dir)
+    scan_dirs = crash_evidence_dirs(directory)
+    return (
+        find_testcase(
+            scan_dirs, sanitizer_files=sanitizer_diagnostics(directory),
+        ) is not None
+        or find_harness_source(scan_dirs) is not None
+        or crash_harness_binary(directory) is not None
+    )
+
+
 def find_reproducer_artifact(scan_dirs: Iterable[Path]) -> Optional[Path]:
     """Return a saved input or explicitly named self-contained reproducer.
 

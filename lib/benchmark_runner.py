@@ -369,14 +369,25 @@ def _evidence_scope(
 
 
 # Why a direct-condition crash lost its promotion. Every reason here is a
-# statement about the crash. A replay that never ran is not one of them: it
-# says the harness failed, and demoting on it silently disqualified real
-# crashes for months when one placeholder argument stopped the runner before
-# it produced any output. Those keep the crash and warn instead.
+# statement about the crash: the replay ran, and what it saw disagrees with
+# the report. A replay that never ran is not one of them: it says the harness
+# failed, and demoting on it silently disqualified real crashes for months
+# when one placeholder argument stopped the runner before it produced any
+# output. Those keep the crash and warn instead.
 _REPLAY_DEMOTION_REASONS = {
     "clean": "sanitizer evidence did not reproduce through the configured target invocation",
     "mismatch": "configured-target replay crashed on a different fault than the one reported",
-    "no-contract": "sanitizer evidence has no executable configured-target replay contract",
+}
+
+
+# Replay outcomes that establish nothing about the crash. `no-contract` sat in
+# the table above and destroyed reproducing direct-condition crashes in bulk:
+# the resolver reports it for a build that is gone, a harness nobody compiled
+# and a resolver that failed outright, none of which the crash chose. A
+# demotion is permanent, so it may not rest on a resolver's blind spot.
+_REPLAY_NON_VERDICTS = {
+    "unmeasured": "the replay produced no measurement; see .audit/reverify.log",
+    "no-contract": "no runnable replay contract resolved for the bundle",
 }
 
 
@@ -399,12 +410,13 @@ def triage_cell_crashes(
     held: set[Path] = set()
     pre_demoted = 0
     if require_replay:
-        # Old versions demoted a runner failure as if it disproved the crash.
-        # Reconsider only that exact historical disposition. Other deliberate
-        # demotions must not loop back, while newly routed sanitizer findings
-        # must cross the same replay gate as native crash bundles.
+        # Old versions demoted a replay that established nothing as if it had
+        # disproved the crash. Reconsider exactly those historical dispositions
+        # and no others: deliberate demotions must not loop back, while newly
+        # routed sanitizer findings must cross the same replay gate as native
+        # crash bundles.
         triage.route_finding_diagnostics(
-            results, reconsider_unmeasured_replay=True,
+            results, reconsider_unverifiable_replay=True,
         )
         candidates = sorted((results / "crashes").glob("CRASH-*"))
         with concurrent.futures.ThreadPoolExecutor(
@@ -435,17 +447,25 @@ def triage_cell_crashes(
                 continue
             if status == "reproduced":
                 continue
-            if status == "unmeasured":
+            if status in _REPLAY_NON_VERDICTS:
                 # The replay never ran, so it says nothing about this crash —
                 # not that it is real, and not that it is not. Keep the
                 # artifact, withhold the verdict, and make the harness failure
                 # loud. It counts as unadjudicated, so a broken replay can
                 # neither destroy a crash nor inflate the condition.
+                if (
+                    status == "no-contract"
+                    and not crash_artifacts.carries_replay_evidence(crash_dir)
+                ):
+                    # Nothing resolved because the bundle carries nothing to
+                    # run. That is the completeness gate's call, not this
+                    # one's: leave it in place and let the gate hold it.
+                    continue
                 held.add(crash_dir)
                 log(
                     f"WARN: model-direct replay could not measure "
-                    f"{crash_dir.name} - left unadjudicated under crashes/ "
-                    f"(see {crash_dir.name}/.audit/reverify.log)"
+                    f"{crash_dir.name} ({_REPLAY_NON_VERDICTS[status]}) - "
+                    f"left unadjudicated under crashes/"
                 )
                 continue
             triage.demote_to_finding(
@@ -473,10 +493,11 @@ def _verify_model_direct_crash(
 ) -> str:
     """Return bypass/reproduced/clean/mismatch/unmeasured/no-contract.
 
-    All but `unmeasured` are verdicts about the crash — `no-contract` included,
-    because a bundle carrying nothing runnable is an artifact deficiency.
-    `unmeasured` alone says the replay did not happen, and the caller then
-    keeps the artifact and withholds the verdict.
+    Only `clean` and `mismatch` are verdicts about the crash: the replay ran
+    and disagreed with the report. `unmeasured` and `no-contract` both say the
+    replay never established anything — the second reads the same for a bundle
+    carrying nothing as for a build that is gone or a harness nobody compiled —
+    so the caller keeps those artifacts and withholds the verdict.
     """
     controls = {str(value).strip().lower() for value in attacker_controls}
     if triage._direct_probe_trigger_bypass(crash_dir, target, attacker_controls):
@@ -1242,11 +1263,11 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
 
     Returns `reproduced` / `not-reproduced` (the replay ran and a rate is now
     on the artifact), `mismatch` (it ran and crashed, but on another fault),
-    `unmeasured` (nothing ran to completion), or `no-contract` (the bundle
-    carries nothing runnable). Only `unmeasured` is a harness fault rather
-    than a statement about the crash, and callers must not read it as a
-    verdict — collapsing every outcome into one false return let a broken
-    replay silently disqualify real crashes.
+    `unmeasured` (nothing ran to completion), or `no-contract` (the resolver
+    could not produce a runnable contract). Neither of the last two establishes
+    anything about the crash, and callers must not read them as verdicts —
+    collapsing every outcome into one false return let a broken replay silently
+    disqualify real crashes.
     """
     resolved = _resolve_reverify_fields(crash_dir, target_root, target_slug)
     if resolved is None:

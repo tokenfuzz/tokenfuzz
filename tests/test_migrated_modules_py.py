@@ -857,15 +857,16 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         )
     check(
         replay_counts["promoted"] == 0
-        and replay_counts["demoted"] == 1
-        and (unreplayable_results / "findings" / "FIND-1" / "sanitizer.txt").is_file(),
-        "unreplayable model-direct sanitizer evidence is preserved as a finding",
+        and replay_counts["demoted"] == 0
+        and replay_counts["unreplayed"] == 1
+        and (unreplayable / "sanitizer.txt").is_file()
+        and not (unreplayable_results / "findings").exists(),
+        "a resolver that finds no contract leaves a saved reproducer a crash",
     )
     def _replay_outcome(status, name):
         outcome_results = root / name
         shutil.copytree(
-            unreplayable_results / "findings" / "FIND-1",
-            outcome_results / "crashes" / "CRASH-1",
+            unreplayable, outcome_results / "crashes" / "CRASH-1",
         )
         adjudicated = {}
 

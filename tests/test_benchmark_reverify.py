@@ -404,7 +404,99 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertIn("CRASH_RATE: 5/5", (normalized / "sanitizer.txt").read_text())
         self.assertIn("CRASH_RATE: 5/5", (ordered / "sanitizer.txt").read_text())
 
-    def test_direct_triage_reconsiders_only_unmeasured_legacy_demotions(self) -> None:
+    def direct_triage(self, crash: Path, status: str) -> tuple[dict, set[Path]]:
+        """Run the direct-condition gate with one replay outcome forced.
+
+        Returns the counts and the bundles the gate withheld from adjudication,
+        so a test can tell "kept and unjudged" from "kept and judged".
+        """
+        results = crash.parent.parent
+        target, slug = self.make_target(f"{results.name}-target")
+        captured: dict[str, set[Path]] = {}
+
+        def fake_triage(*args, **kwargs):
+            captured["held"] = set(kwargs.get("held") or ())
+            return {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0}
+
+        with mock.patch.object(
+            benchmark_runner, "_verify_model_direct_crash", return_value=status,
+        ), mock.patch.object(
+            benchmark_runner.triage, "triage_crash_dirs", fake_triage,
+        ):
+            counts = benchmark_runner.triage_cell_crashes(
+                results, target, slug, workers=1, require_replay=True,
+            )
+        return counts, captured["held"]
+
+    def test_an_unresolved_replay_contract_never_demotes_a_reproducer(self) -> None:
+        # export-repro migrates the compiled harness into .audit/, and the
+        # resolver used to read every exported bundle as carrying nothing
+        # runnable. Demotion is permanent, so it may not rest on that.
+        crash = self.make_crash("no-contract-with-evidence")
+        counts, held = self.direct_triage(crash, "no-contract")
+        self.assertEqual(counts["demoted"], 0)
+        self.assertTrue(crash.is_dir())
+        self.assertFalse((crash.parent.parent / "findings").exists())
+        self.assertEqual(held, {crash})
+        self.assertEqual(counts["unreplayed"], 1)
+
+    def test_a_bundle_carrying_no_reproducer_is_left_to_the_completeness_gate(
+        self,
+    ) -> None:
+        # Nothing to replay because there is nothing in the bundle. That is the
+        # completeness gate's call — it holds before it rejects — so this gate
+        # must neither demote it nor withhold it from that gate.
+        crash = self.make_crash("no-contract-bare")
+        (crash / "poc.bin").unlink()
+        counts, held = self.direct_triage(crash, "no-contract")
+        self.assertEqual(counts["demoted"], 0)
+        self.assertTrue(crash.is_dir())
+        self.assertEqual(held, set())
+
+    def test_a_header_only_testcase_keeps_an_unresolved_replay_unjudged(
+        self,
+    ) -> None:
+        # Testcase discovery must agree with the downstream completeness gate,
+        # which follows the exact path captured in ASAN_RUN_HEADER. Otherwise
+        # this gate calls the bundle empty and ordinary triage can confirm it
+        # even though configured-target replay never ran.
+        crash = self.make_crash("no-contract-header-testcase")
+        (crash / "poc.bin").unlink()
+        testcase = self.root / "captured-testcase.bin"
+        testcase.write_bytes(b"input")
+        sanitizer = crash / "sanitizer.txt"
+        sanitizer.write_text(
+            f"ASAN_RUN_HEADER: sanitizer=asan testcase={testcase} "
+            "binary=/missing/bin runs=1\n" + DIAGNOSTIC,
+            encoding="utf-8",
+        )
+        # A partial export can leave a second diagnostic in .audit/. Replay
+        # discovery prefers that copy while completeness prefers the root
+        # sanitizer.txt, so the evidence predicate must inspect both.
+        audit = crash / ".audit"
+        audit.mkdir()
+        (audit / "sanitizer.txt").write_text(DIAGNOSTIC, encoding="utf-8")
+
+        counts, held = self.direct_triage(crash, "no-contract")
+
+        self.assertEqual(counts["demoted"], 0)
+        self.assertEqual(counts["unreplayed"], 1)
+        self.assertEqual(held, {crash})
+
+    def test_a_replay_that_ran_and_disagreed_still_demotes(self) -> None:
+        crash = self.make_crash("clean-replay")
+        (crash / "report.md").write_text("# Bounds issue\n", encoding="utf-8")
+        counts, held = self.direct_triage(crash, "clean")
+        self.assertEqual(counts["demoted"], 1)
+        self.assertFalse(crash.is_dir())
+        self.assertEqual(held, set())
+        demoted = crash.parent.parent / "findings" / "FIND-0001"
+        self.assertIn(
+            "did not reproduce through the configured target invocation",
+            (demoted / "report.md").read_text(encoding="utf-8"),
+        )
+
+    def test_direct_triage_reconsiders_only_unverifiable_legacy_demotions(self) -> None:
         target, slug = self.make_target("reconsider-target")
         results = self.root / "reconsider-results"
         finding = results / "findings" / "FIND-0001"
