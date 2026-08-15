@@ -149,7 +149,11 @@ class FindingCrashRoutingTests(unittest.TestCase):
             ),
             1,
         )
-        self.assertTrue((self.results / "crashes" / "CRASH-011").is_dir())
+        routed = self.results / "crashes" / "CRASH-011"
+        self.assertTrue(routed.is_dir())
+        disposition = (routed / "report.md").read_text(encoding="utf-8")
+        self.assertIn("saved reproducer", disposition)
+        self.assertNotIn("runnable reproducer", disposition)
 
     def test_rejected_historical_replay_demotion_is_reconsidered_too(self) -> None:
         directory = self.results / "findings-rejected" / "FIND-008"
@@ -209,10 +213,6 @@ class FindingCrashRoutingTests(unittest.TestCase):
         self.assertTrue(directory.is_dir())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HeldBundleReceiptTests(unittest.TestCase):
     """A crash waiting on evidence must report as pending, not as legacy data."""
 
@@ -270,3 +270,73 @@ class HeldBundleReceiptTests(unittest.TestCase):
         receipt = validation_receipt.read_current(self.crash)
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt["state"], "pending")
+
+
+class PublicationDetailTests(unittest.TestCase):
+    """A receipt's recorded reason must be the reason it was decided for."""
+
+    def test_a_scope_review_decision_is_not_reported_as_the_reach_verdict(self) -> None:
+        # The reach verdict reads the report's self-declared trigger; the
+        # source review outranks it. Recording the reach reason under the
+        # review's decision published receipts contradicting themselves —
+        # "trigger within attacker_controls=bytes" stamped on not-reportable —
+        # which reads as a broken gate rather than a reviewer's call.
+        self.assertEqual(
+            "source review placed the trigger outside attacker_controls=bytes",
+            triage._publication_detail(
+                "not-reportable", "promote",
+                "trigger within attacker_controls=bytes",
+                {"trigger_controls_fit": "outside"}, ["bytes"],
+            ),
+        )
+        self.assertEqual(
+            "real defect that crosses no security boundary",
+            triage._publication_detail(
+                "not-reportable", "promote",
+                "trigger within attacker_controls=bytes",
+                {"rejection_kind": "no-added-boundary"}, ["bytes"],
+            ),
+        )
+
+    def test_every_override_explains_the_branch_that_decided(self) -> None:
+        detail = "trigger requires call-sequence outside attacker_controls=bytes"
+        self.assertEqual(
+            detail,
+            triage._publication_detail(
+                "not-reportable", "out-of-model", detail, {}, ["bytes"],
+            ),
+        )
+        self.assertEqual(
+            "source review placed the trigger within attacker_controls=bytes",
+            triage._publication_detail(
+                "reportable", "out-of-model", detail,
+                {"trigger_controls_fit": "within"}, ["bytes"],
+            ),
+        )
+        self.assertEqual(
+            "confirmed probe placed the trigger within attacker_controls=bytes",
+            triage._publication_detail(
+                "reportable", "out-of-model", detail,
+                {"trigger_controls_fit": "outside"}, ["bytes"],
+                direct_trigger_proof=True,
+            ),
+        )
+        contract_detail = "caller contract is missing"
+        self.assertEqual(
+            contract_detail,
+            triage._publication_detail(
+                "not-reportable", "contract-flag", contract_detail,
+                {"trigger_controls_fit": "outside"}, ["bytes"],
+            ),
+        )
+        self.assertEqual(
+            triage._UNSETTLED_REVIEW_DETAIL,
+            triage._publication_detail(
+                "pending", "promote", "trigger within attacker_controls=bytes",
+                {"trigger_controls_fit": "outside"}, ["bytes"],
+            ),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

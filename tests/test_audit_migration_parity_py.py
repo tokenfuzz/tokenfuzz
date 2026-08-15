@@ -141,8 +141,9 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     )
     secondary_duplicate = audit_runner.progress(runtime)
     check(
-        not audit_runner.newly_introduced_roots(novel, secondary_duplicate),
-        "progress finds a cluster stamp in a secondary report file",
+        audit_runner.newly_introduced_roots(novel, secondary_duplicate)
+        == {"finding:FIND-004"},
+        "progress does not resurrect a stale cluster stamp from a secondary report file",
     )
     trigger_pending = findings / "FIND-005"
     trigger_pending.mkdir()

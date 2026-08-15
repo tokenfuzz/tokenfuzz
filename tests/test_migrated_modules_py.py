@@ -349,6 +349,55 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(not sanitizer.RAW_FRAME.search("    #4 0x180b37dfc in start (in dyld) + 6988\n"),
           "a resolved frame naming its module is not mistaken for a raw one")
 
+    # The loop resolves only module+offset frames and passes the rest through
+    # with their original numbers. Numbering the resolved ones from a counter
+    # that never saw the others renumbered a stack's last frame to `#0`, so a
+    # repaired report carried two `#0` frames and lost its real order.
+    loop = clusterfuzz_symbolizer.SymbolizationLoop()
+    loop.symbolize_address = lambda addr, binary, offset, arch: [
+        "app_start start.c:7"]
+    mixed = (
+        "    #0 0x10a in app_update_error report.c:190\n"
+        "    #1 0x10a in app_raise_error report.c:718\n"
+        "    #2 0x2f0 in app_main main.c:100\n"
+        "    #3 0x18e0 in app_start+0x1b4c (/usr/lib/dyld:arm64+0x1fdfc)\n"
+    )
+    equal("    #3 app_start start.c:7",
+          loop.process_stacktrace(mixed).splitlines()[3],
+          "a resolved frame keeps its own number instead of restarting at #0")
+
+    # One raw instruction can expand into multiple inline names. The following
+    # frame must move with that expansion or the repaired report carries two
+    # frames with the same number. Already-symbolized and unresolved raw
+    # followers both take the accumulated offset; a new #0 starts a new stack.
+    loop = clusterfuzz_symbolizer.SymbolizationLoop()
+    loop.symbolize_address = lambda addr, binary, offset, arch: [
+        "app_inner child.c:7", "app_outer parent.c:19"]
+    expanded = (
+        "    #3 0x18e0 in app_outer+0x1b4c (/tmp/app:arm64+0x1fdfc)\n"
+        "    #4: 0x2f0 in app_main main.c:100\n"
+        "    #5 0x3000  (/tmp/missing:arm64+0x20)\n"
+        "    #0 0x10a in worker thread.c:12\n"
+    )
+    with mock.patch.object(
+        loop, "symbolize_address",
+        side_effect=[
+            ["app_inner child.c:7", "app_outer parent.c:19"],
+            None,
+        ],
+    ):
+        numbered = loop.process_stacktrace(expanded).splitlines()
+    equal("    #3 app_inner child.c:7", numbered[0],
+          "an inline expansion begins at the source frame number")
+    equal("    #4 app_outer parent.c:19", numbered[1],
+          "an inline expansion extends from the source frame number")
+    equal("    #5: 0x2f0 in app_main main.c:100", numbered[2],
+          "an already-symbolized follower moves past the inline expansion")
+    equal("    #6 0x3000  (/tmp/missing:arm64+0x20)", numbered[3],
+          "an unresolved raw follower moves past the inline expansion")
+    equal("    #0 0x10a in worker thread.c:12", numbered[4],
+          "a second stack resets accumulated inline numbering")
+
     # A demangled C++ name carries spaces and parentheses. Constraining the
     # symbol text recognized only plain C identifiers, which is why a libxml2
     # validation passed while a C++ target stayed unrepaired and unwarned.

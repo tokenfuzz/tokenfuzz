@@ -667,6 +667,47 @@ def _git_rev(path: Path, short: bool = False) -> str:
     return result.stdout.strip() if result.returncode == 0 else "no-vcs"
 
 
+_HARNESS_SOURCE_PATHS = ("AGENTS.md", "bin", "lib", ".agents")
+
+
+def _harness_revision(root: Path = SCRIPT_ROOT) -> str:
+    """Content identity of tracked harness source, or "" when unavailable.
+
+    The whole tree is the wrong unit: targets and tests can change without
+    changing the code that measures a cell. Untracked files are excluded too,
+    since a run creates caches under ``lib/``. Hash the bytes, not porcelain
+    status: once a file is dirty its status line stays constant across further
+    edits, which would otherwise make mid-run changes invisible.
+    """
+    listed = subprocess.run(
+        [
+            "git", "-c", f"safe.directory={root}", "-C", str(root),
+            "ls-files", "-z", "--", *_HARNESS_SOURCE_PATHS,
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    paths = sorted(path for path in listed.stdout.split(b"\0") if path)
+    if listed.returncode or not paths:
+        return ""
+    digest = hashlib.sha256()
+    for raw_path in paths:
+        path = root / raw_path.decode("utf-8", "surrogateescape")
+        try:
+            if path.is_symlink():
+                mode = b"link"
+                content = os.readlink(path).encode("utf-8", "surrogateescape")
+            else:
+                stat_result = path.stat()
+                mode = b"exec" if stat_result.st_mode & 0o111 else b"file"
+                content = path.read_bytes()
+        except FileNotFoundError:
+            mode, content = b"missing", b""
+        except OSError:
+            return ""
+        digest.update(raw_path + b"\0" + mode + b"\0" + content + b"\0")
+    return digest.hexdigest()
+
+
 def _is_shallow_checkout(path: Path) -> bool:
     result = subprocess.run(
         ["git", "-c", f"safe.directory={path}", "-C", str(path), "rev-parse", "--is-shallow-repository"],
@@ -701,6 +742,13 @@ def write_cell(
         drift = json.loads((path.parent / "source-drift.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         pass
+    harness_drift: dict = {}
+    try:
+        harness_drift = json.loads(
+            (path.parent / "harness-drift.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        pass
     payload = {
         "condition": condition, "replicate": replicate, "experiment": experiment,
         "results_dir": str(results_dir), "wall_seconds": wall, "status": status,
@@ -717,6 +765,8 @@ def write_cell(
         payload["requested_agents"] = requested_agents
     if drift:
         payload["source_drift"] = drift
+    if harness_drift:
+        payload["harness_drift"] = harness_drift
     if build_identity is None:
         try:
             previous = json.loads(path.read_text(encoding="utf-8"))
@@ -1241,6 +1291,16 @@ def _resolve_reverify_fields(
     return fields, replay_args
 
 
+def _replay_transcript(attempted: list[tuple[str, str]]) -> str:
+    """Label and join every invocation a replay tried."""
+    if len(attempted) == 1:
+        return attempted[0][1]
+    return "\n".join(
+        f"=== replay invocation: {label} ===\n{text}"
+        for label, text in attempted
+    )
+
+
 def _write_reverify_log(crash_dir: Path, measured: str) -> None:
     """Keep an unmeasurable replay's output for diagnosis; never fatal."""
     try:
@@ -1384,6 +1444,9 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         [testcase or os.devnull] if mode == "harness" else arguments,
         skip=mode == "harness" and not testcase,
     )
+    attempted: list[tuple[str, str]] = [
+        ("with the saved testcase" if testcase else "with no argument", measured),
+    ]
     if mode == "harness" and testcase and status != "reproduced":
         # The invocation is not recorded anywhere, and the recipe has changed:
         # drivers written to the older one are run with no arguments and can
@@ -1392,6 +1455,7 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         # invocation before concluding anything. Paid only when the documented
         # one already failed.
         legacy = attempt([os.devnull], skip=True)
+        attempted.append(("with no argument", legacy[3]))
         # Both invocations are plausible for an unversioned harness, so a
         # reproduction from either settles it, and neither one's clean result
         # can settle it while the other did not run to completion.
@@ -1404,8 +1468,10 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         ):
             status, crashes, runs, measured = legacy
     if status in {"unmeasured", "mismatch"}:
-        # Keep the output so the outcome is diagnosable without re-running.
-        _write_reverify_log(crash_dir, measured)
+        # Keep every invocation, not just the one the verdict came from: a
+        # fallback that died in the loader reads as "nothing ran" and hides
+        # that the documented invocation measured a rate.
+        _write_reverify_log(crash_dir, _replay_transcript(attempted))
         return status
     rate = f"{crashes}/{runs}"
     note = (
@@ -1430,13 +1496,18 @@ def _source_location(location: str) -> tuple[str, int | None]:
     return location.replace("\\", "/"), None
 
 
-def _fault_site(text: str) -> tuple[str, str, int | None] | None:
-    """The normalized function, path, and line of the reported fault."""
-    frame = stack_frames.first_interesting_frame(text)
-    if frame is None:
-        return None
-    path, line = _source_location(frame.location)
-    return frame.state_function, path, line
+def _fault_sites(text: str) -> list[tuple[str, str, int | None]]:
+    """Every name the reported faulting instruction carries.
+
+    One site per inlined name (see `stack_frames.leading_inline_group`), so a
+    replay symbolized differently from the original still matches on the name
+    both reports do show.
+    """
+    sites = []
+    for frame in stack_frames.leading_inline_group(text):
+        path, line = _source_location(frame.location)
+        sites.append((frame.state_function, path, line))
+    return sites
 
 
 def _same_source_path(left: str, right: str) -> bool:
@@ -1450,26 +1521,12 @@ def _same_source_path(left: str, right: str) -> bool:
     )
 
 
-def _same_fault(
-    key: tuple[str, str],
-    site: tuple[str, str, int | None] | None,
-    text: str,
+def _same_site(
+    site: tuple[str, str, int | None], measured: tuple[str, str, int | None],
 ) -> bool:
-    """Whether `text` reports the fault `key` and `site` describe.
-
-    Sanitizer family and primitive, plus the faulting site when both sides name
-    one: two unrelated heap-buffer-overflows in one binary share a primitive,
-    and counting either as the other's reproduction confirms the wrong bug at
-    the wrong rate. Where a side has no parseable frame the primitive stands
-    alone rather than rejecting a real reproduction.
-    """
-    if crash_artifacts.sanitizer_fault_key(text) != key:
-        return False
-    measured_site = _fault_site(text)
-    if site is None or measured_site is None:
-        return True
+    """Whether two frames name the same faulting source site."""
     function, path, line = site
-    measured_function, measured_path, measured_line = measured_site
+    measured_function, measured_path, measured_line = measured
     if function != measured_function:
         return False
     if line is None or measured_line is None:
@@ -1479,6 +1536,34 @@ def _same_fault(
         # symbolize must read as the same crash rather than a different one.
         return True
     return line == measured_line and _same_source_path(path, measured_path)
+
+
+def _same_fault(
+    key: tuple[str, str],
+    sites: list[tuple[str, str, int | None]],
+    text: str,
+) -> bool:
+    """Whether `text` reports the fault `key` and `sites` describe.
+
+    Sanitizer family and primitive, plus the faulting site when both sides name
+    one: two unrelated heap-buffer-overflows in one binary share a primitive,
+    and counting either as the other's reproduction confirms the wrong bug at
+    the wrong rate. Where a side has no parseable frame the primitive stands
+    alone rather than rejecting a real reproduction.
+
+    The sites are the inlined names of one instruction, so any name in common
+    is that instruction. This widens nothing else: two frames that are not the
+    same inline expansion still have to agree on function, line, and path.
+    """
+    if crash_artifacts.sanitizer_fault_key(text) != key:
+        return False
+    measured_sites = _fault_sites(text)
+    if not sites or not measured_sites:
+        return True
+    return any(
+        _same_site(site, measured)
+        for site in sites for measured in measured_sites
+    )
 
 
 def _runs_reproducing(original: str, measured: str) -> int:
@@ -1496,10 +1581,10 @@ def _runs_reproducing(original: str, measured: str) -> int:
     key = crash_artifacts.sanitizer_fault_key(original)
     if key is None:
         return 0
-    site = _fault_site(original)
+    sites = _fault_sites(original)
     transcript = measured.split("\n=== SUMMARY ===", 1)[0]
     runs = _REPLAY_RUN_SPLIT_RE.split(transcript)[1:] or [measured]
-    return sum(1 for run in runs if _same_fault(key, site, run))
+    return sum(1 for run in runs if _same_fault(key, sites, run))
 
 
 def _measured_crash_rate(path: Path) -> tuple[int, int] | None:
@@ -2417,11 +2502,14 @@ def _resolve_run_agent_security(args: argparse.Namespace, previous: dict) -> str
     return ""
 
 
-def _source_pin_mismatch(previous: dict, source: str) -> str:
+def _source_pin_mismatch(
+    previous: dict, source: str, *, field: str = "source_signature",
+    subject: str = "target source",
+) -> str:
     """Why a resume cannot continue at this tracked source state."""
-    recorded_source = str(previous.get("source_signature") or "")
+    recorded_source = str(previous.get(field) or "")
     if recorded_source and source and recorded_source != source:
-        return "the target source differs from the state this run pinned"
+        return f"the {subject} differs from the state this run pinned"
     return ""
 
 
@@ -2530,6 +2618,9 @@ def _settings_mismatch(previous: dict, args: argparse.Namespace, model: str) -> 
         ("budget_wall", args.budget_wall),
         ("harness_agents", args.agents),
         ("target_sha", target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target)),
+        # Older records predate harness_revision, but already carried this
+        # revision. Keep that schema transition from mixing harness commits.
+        ("tokenfuzz_sha", _git_rev(SCRIPT_ROOT)),
     )
     for name, current in fields:
         recorded = previous.get(name)
@@ -2583,6 +2674,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     build_suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
     run_identity: dict = {}
     run_source = ""
+    harness_revision = ""
     config_snapshot: Path | None = None
     run_config: target_config.Config | None = None
     # A run that already recorded a generation is being resumed, so from here on
@@ -2635,6 +2727,14 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         if drifted:
             print(f"FATAL: {_resume_refusal(drifted, run_id)}", file=sys.stderr)
             return 1
+        harness_revision = _harness_revision()
+        drifted = _source_pin_mismatch(
+            previous, harness_revision,
+            field="harness_revision", subject="harness source",
+        )
+        if drifted:
+            print(f"FATAL: {_resume_refusal(drifted, run_id)}", file=sys.stderr)
+            return 1
         conflict = _source_pin_conflict(target_root, args.target, run_source)
         if conflict:
             print(f"FATAL: {conflict}", file=sys.stderr)
@@ -2678,8 +2778,17 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 target_root, args.target, run_config,
             )
             run_source = str(previous.get("source_signature") or "") or run_source
+            # The harness tree is pinned the way the target tree is. A run
+            # whose own code changes underneath it measures two harnesses and
+            # reports one: the long-lived process keeps the modules it imported
+            # at startup while every subprocess picks the edited file off disk,
+            # so a cell's audit and its finalization can disagree.
+            harness_revision = (
+                str(previous.get("harness_revision") or "") or _harness_revision()
+            )
             run_data["build_identity"] = run_identity
             run_data["source_signature"] = run_source
+            run_data["harness_revision"] = harness_revision
             if config_snapshot is not None:
                 run_data["target_config_sha256"] = _config_digest(
                     config_snapshot,
@@ -2940,6 +3049,29 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     summary = {"exists": False}
                     _write_json(cell_dir / "metrics.json", summary)
                     status = "failed"
+                # One harness check, at the last boundary: finalizers read
+                # harness files too, and the comparison is against the run's
+                # pin, so this sees anything an earlier check would have.
+                # Same disposition as target drift — the artifacts are real,
+                # the comparison is not, because this cell ran code its peers
+                # did not.
+                observed = "" if args.dry_run else _harness_revision()
+                if harness_revision and observed and observed != harness_revision:
+                    log(
+                        f"WARN: Cell {name}: harness source changed during the "
+                        f"cell ({harness_revision[:12]} -> {observed[:12]}); "
+                        f"artifacts kept, cell excluded from the comparison"
+                    )
+                    _write_json(cell_dir / "harness-drift.json", {
+                        "observed_at": datetime.now(timezone.utc).isoformat(),
+                        "pinned": harness_revision,
+                        "observed": observed,
+                    })
+                    marker = cell_dir / ".run-quality"
+                    if not marker.exists():
+                        marker.write_text("source_drift\n", encoding="utf-8")
+                    if status == "done":
+                        status = "incomplete"
                 write_cell(
                     cell_json, condition, replicate, experiment, results, wall,
                     status, args.agents, paused=paused, started_at=started_at,

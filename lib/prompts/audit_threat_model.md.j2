@@ -1,0 +1,27 @@
+{# The effective threat model, rendered into the model-direct baseline
+   (lib/benchmark_model_direct_render.py) when target.toml loads. Config
+   supplies the same bytes default triage uses; without a loaded config the
+   section is omitted because an invented model is worse than none.
+
+   The harness session prompt states this contract already
+   (lib/prompts/safety_framing.md.j2). Without it the baseline searched
+   against a rule it could not see and spent its budget on triggers no
+   attacker supplies. The middle sentence mirrors the reviewer's own
+   component test (lib/prompts/validate_trigger_provenance.md.j2) so both
+   ends read one vocabulary; the last is the harness's recall-safe rule:
+   aim, but never pre-demote. #}
+## Threat model
+
+This target uses `attacker_controls = {{ attacker_controls }}`. A security
+issue whose trigger those controls fully determine is in-model; one that also
+needs something outside them is kept as a real defect but earns no security
+credit.
+
+An extra component is narrow — a post-parse call order, a lifetime or teardown
+order, timing, concurrency, environment, or filesystem state that the
+application chooses. Its fixed, contract-obeying setup is not one: creating or
+reusing a context, selecting a supported mode, and calling the documented entry
+point are things it does whatever the input says.
+
+Aim at faults the listed controls reach, but never pre-filter: report what
+reproduces and name the extra component. Triage makes that comparison once.

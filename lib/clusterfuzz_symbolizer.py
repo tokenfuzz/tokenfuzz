@@ -75,6 +75,7 @@ symbolizers = {}
 # frame unparsed. Backtracking anchors it on the trailing `+0xoffset`.
 STACK_TRACE_LINE_REGEX = re.compile(
     r'^( *#([0-9]+) *)(0x[0-9a-f]+) *(?:in +.*? +)?\((.*)\+(0x[0-9a-f]+)\)')
+FRAME_NUMBER_REGEX = re.compile(r'^(\s*#)([0-9]+)((?::)?\s+.*)$')
 
 # An answer that starts with an address is the tool saying it resolved nothing:
 # atos echoes the address alone, or with the module it did open
@@ -501,21 +502,27 @@ class SymbolizationLoop:
 
   def process_stacktrace(self, unsymbolized_crash_stacktrace):
     """Symbolizes a crash stacktrace."""
-    self.frame_no = 0
     symbolized_crash_stacktrace = ''
     unsymbolized_crash_stacktrace_lines = \
       unsymbolized_crash_stacktrace.splitlines()
 
+    frame_offset = 0
     for line in unsymbolized_crash_stacktrace_lines:
       self.current_line = line.rstrip()
+      numbered = FRAME_NUMBER_REGEX.match(self.current_line)
+      if numbered and int(numbered.group(2)) == 0:
+        # Sanitizer output may carry more than one stack. Each begins its own
+        # numbering, so inline expansion in the prior stack must not shift it.
+        frame_offset = 0
       frameno_str, addr, binary, offset, arch = self._line_parser(line)
       if not binary or not offset:
+        if numbered and frame_offset:
+          self.current_line = '%s%d%s' % (
+              numbered.group(1), int(numbered.group(2)) + frame_offset,
+              numbered.group(3))
         symbolized_crash_stacktrace += '%s\n' % self.current_line
         continue
 
-      if frameno_str == '0':
-        # Assume that frame #0 is the first frame of a new stack trace.
-        self.frame_no = 0
       symbolized_line = self.symbolize_address(addr, binary, offset, arch)
 
       # DIVERGENCE: a frame the tool resolved nothing for comes back empty
@@ -526,12 +533,25 @@ class SymbolizationLoop:
           frame for frame in (symbolized_line or []) if frame and frame.strip()
       ]
       if not symbolized_line:
+        if numbered and frame_offset:
+          self.current_line = '%s%d%s' % (
+              numbered.group(1), int(numbered.group(2)) + frame_offset,
+              numbered.group(3))
         symbolized_crash_stacktrace += '%s\n' % self.current_line
       else:
-        for symbolized_frame in symbolized_line:
+        # DIVERGENCE: upstream renumbers the stack from a counter because it
+        # resolves every frame. The divergence above passes unresolved frames
+        # through with their original numbers, so that counter advances only
+        # on answered frames and renumbers them against neighbours it never
+        # counted — a lone module+offset frame under an already-symbolized
+        # stack came out `#0`. Start from the source number, shifted only by
+        # inline names inserted above it; this frame's own expansion then
+        # extends from there.
+        base = int(frameno_str) + frame_offset
+        for index, symbolized_frame in enumerate(symbolized_line):
           symbolized_crash_stacktrace += '%s\n' % (
-              '    #' + str(self.frame_no) + ' ' + symbolized_frame.rstrip())
-          self.frame_no += 1
+              '    #' + str(base + index) + ' ' + symbolized_frame.rstrip())
+        frame_offset += len(symbolized_line) - 1
 
     self._close_pipes()
 

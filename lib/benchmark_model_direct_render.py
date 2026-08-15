@@ -289,6 +289,21 @@ def _expand_runner_token(value: str, cfg, san: str, testcase: str,
     return out
 
 
+def _threat_model_block(cfg) -> str:
+    """The effective threat-model section, or "" when no config loaded."""
+    from prompt_render import render_template  # type: ignore
+
+    controls = ", ".join(getattr(cfg, "attacker_controls", None) or [])
+    if not controls:
+        return ""
+    # Carry its own surrounding blank lines so the template reads correctly
+    # either way: the section spacing goes with the section, not the seam.
+    block = render_template(
+        "audit_threat_model.md.j2", {"attacker_controls": controls},
+    ).strip()
+    return f"\n{block}\n"
+
+
 def _runner_bin_for_prompt(cfg) -> str:
     raw = cfg.runner_bin
     if not raw:
@@ -524,6 +539,13 @@ def render(
         # enforces, so it does not drift into filing caller-misuse
         # NULL-derefs the gate rejects.
         "bug_contract": render_template("audit_bug_contract.md.j2", {}),
+        # The effective threat model, which decides whether triage scores an
+        # artifact as security or keeps it as a defect. The harness session
+        # prompt carries this contract already; without it here the baseline
+        # searches against a rule it cannot see. Config loading supplies the
+        # same bytes default triage uses; empty only when target.toml did not
+        # load, because inventing a model then would be worse than none.
+        "threat_model": _threat_model_block(cfg),
         # Shared report-narrative contract, the same partial the harness
         # session prompt renders. Report readability must not be a
         # condition difference either.

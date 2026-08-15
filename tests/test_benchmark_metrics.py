@@ -487,6 +487,30 @@ class BenchmarkMetricsTests(unittest.TestCase):
                     metrics["artifact_links"]["duplicate_groups"], [],
                 )
 
+    def test_a_blank_canonical_cluster_does_not_resurrect_a_stale_secondary_stamp(self) -> None:
+        # REPORT.md/report.md is the artifact's current report. If more than
+        # one recognized report form exists, a stale secondary stamp must not
+        # override the canonical report and merge unrelated artifacts.
+        results = self.root / "canonical-cluster-results"
+        findings = results / "findings"
+        for name in ("FIND-001", "FIND-002"):
+            directory = findings / name
+            directory.mkdir(parents=True)
+            (directory / "report.md").write_text(
+                f"# {name}\n\nCluster: (set by bin/cluster-crashes)\n",
+                encoding="utf-8",
+            )
+            (directory / "README.md").write_text(
+                "# Old report\n\nCluster: FCL-stale\n", encoding="utf-8",
+            )
+            self.finalize_fixture_finding(directory)
+
+        metrics = benchmark.harvest(results)
+
+        self.assertEqual(metrics["confirmed_findings"], 2)
+        self.assertEqual(metrics["finding_clusters"], 2)
+        self.assertEqual(metrics["artifact_links"]["duplicate_groups"], [])
+
     def test_metric_report_reads_are_bounded(self) -> None:
         report = self.root / "oversized-report.md"
         report.write_bytes(b"a" * (benchmark._MAX_SCAN_BYTES + 4096))

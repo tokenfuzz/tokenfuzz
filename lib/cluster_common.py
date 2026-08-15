@@ -134,7 +134,13 @@ def cluster_label(report_text: str) -> str:
 
 
 def artifact_cluster_id(directory: Path) -> str:
-    """Read one artifact's deterministic cluster id without modifying it."""
+    """Read one artifact's deterministic cluster id without modifying it.
+
+    The first readable report is canonical even when its stamp is blank. An
+    exported REPORT.md supersedes audit-side report.md/README.md; consulting a
+    stale secondary file after finding an unfilled canonical row can resurrect
+    an obsolete cluster and merge unrelated artifacts.
+    """
     for report in artifact_report_paths(directory):
         try:
             with report.open(encoding="utf-8", errors="replace") as stream:
@@ -142,6 +148,7 @@ def artifact_cluster_id(directory: Path) -> str:
                     cluster = cluster_label(line)
                     if cluster:
                         return cluster
+            return ""
         except OSError:
             continue
     return ""

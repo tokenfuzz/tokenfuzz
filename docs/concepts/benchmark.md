@@ -459,8 +459,12 @@ A run pins one build generation:
 Two things end up excluded from the headline comparison instead of silently
 averaged in. Their artifacts are always kept:
 
-- `source_drift` — the target's tracked source differs from the run pin when
-  the cell ends.
+- `source_drift` — source the cell depended on differs from the run pin when the
+  cell ends. Either the target's tracked source, or the harness's own
+  (`AGENTS.md`, `bin/`, `lib/`, `.agents/`): a run that edits itself mid-flight
+  measures the modules its process imported at startup and the files its
+  subprocesses read afterwards, and reports them as one. The cell records which
+  in `harness_drift`, and a resume onto changed harness source is refused.
 - `build_drift` — the build changed since the run pinned it, which only a build
   command run outside the harness can cause.
 

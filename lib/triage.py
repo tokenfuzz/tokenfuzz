@@ -717,7 +717,7 @@ def route_finding_diagnostics(
         if directory.parent.name == "findings-rejected":
             directory = _restore_rejected_artifact(
                 directory, findings, kind="finding",
-                detail="requeued after unmeasured crash replay was repaired",
+                detail="requeued after an unverifiable crash replay was reconsidered",
             )
             report = _report(directory)
             if report is None:
@@ -727,7 +727,7 @@ def route_finding_diagnostics(
             stream.write(
                 "\n## Triage disposition\n\n"
                 "Routed from `findings/` to `crashes/`: a dedicated sanitizer "
-                "artifact and runnable reproducer establish a crash candidate.\n"
+                "artifact and saved reproducer establish a crash candidate.\n"
             )
         crash_id = (
             f"CRASH-{directory.name.removeprefix('FIND-')}"
@@ -1392,6 +1392,48 @@ def _final_publication_state(
     if any(vote is not None for vote in trigger_votes):
         return "pending"
     return "not-reportable" if reach_verdict == "out-of-model" else "reportable"
+
+
+def _publication_detail(
+    state: str,
+    reach_verdict: str,
+    reach_detail: str,
+    review_facts: dict[str, str] | None,
+    attacker_controls: list[str] | None = None,
+    *,
+    direct_trigger_proof: bool = False,
+) -> str:
+    """The reason a receipt records, matching the decision it records.
+
+    `reach_detail` compares the report's self-declared `Trigger source`, which
+    `_final_publication_state` lets the source review outrank. Recording the
+    reach reason under a decision the review made leaves the receipt
+    contradicting itself — "trigger within attacker_controls=bytes" stamped on
+    a `not-reportable` artifact — and sends whoever reads it afterwards
+    looking for the bug in the wrong gate.
+    """
+    if state == "pending":
+        return _UNSETTLED_REVIEW_DETAIL
+    facts = review_facts or {}
+    controls = ",".join(attacker_controls or [])
+    # Match _final_publication_state's precedence. A lower-priority review fact
+    # must not explain a decision made by the contract or machine-proof branch.
+    if reach_verdict == "contract-flag":
+        return reach_detail
+    if facts.get("rejection_kind") == "no-added-boundary":
+        return "real defect that crosses no security boundary"
+    if direct_trigger_proof:
+        return (
+            "confirmed probe placed the trigger within "
+            f"attacker_controls={controls}"
+        )
+    fit = facts.get("trigger_controls_fit")
+    if fit in {"within", "outside"}:
+        return (
+            f"source review placed the trigger {fit} "
+            f"attacker_controls={controls}"
+        )
+    return reach_detail
 
 
 def _set_contract_concern(report: Path, reason: str) -> None:
@@ -2400,7 +2442,10 @@ def triage_one_crash(
     )
     validation_receipt.write(
         crash_dir, kind="crash", state=state,
-        detail=_UNSETTLED_REVIEW_DETAIL if state == "pending" else detail,
+        detail=_publication_detail(
+            state, verdict, detail, review_facts, attacker_controls,
+            direct_trigger_proof=direct_trigger_proof,
+        ),
         attacker_controls=attacker_controls, review_facts=review_facts,
     )
     if state == "pending":
@@ -3124,13 +3169,17 @@ def _finalize_accepted_finding(
     trigger_vote = _cached_trigger_vote(
         report, finding_dir / ".trigger-gate.json",
     )
+    direct_trigger_proof = _trigger_bypass_confirmed(finding_dir)
     state = _final_publication_state(
         reach_verdict, {trigger_vote}, review_facts,
-        direct_trigger_proof=_trigger_bypass_confirmed(finding_dir),
+        direct_trigger_proof=direct_trigger_proof,
     )
     validation_receipt.write(
         finding_dir, kind="finding", state=state,
-        detail=_UNSETTLED_REVIEW_DETAIL if state == "pending" else reach_detail,
+        detail=_publication_detail(
+            state, reach_verdict, reach_detail, review_facts, controls,
+            direct_trigger_proof=direct_trigger_proof,
+        ),
         attacker_controls=controls,
         review_facts=review_facts,
     )

@@ -500,6 +500,54 @@ ok(
     "first_sanitizer_diagnostic does not splice separate UBSan faults",
 )
 
+# One instruction carries every name inlined into it; which of them a report
+# shows depends on the symbolizer that ran, so consumers comparing two reports
+# need the whole group rather than frame #0.
+_inlined = (
+    "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+    "    #0 0x10a in app_update_error src/report.c:190\n"
+    "    #1 0x10a in app_raise_error src/report.c:718\n"
+    "    #2 0x2f0 in app_report src/report.c:782\n"
+)
+ok(
+    [f.state_function for f in stack_frames.leading_inline_group(_inlined)]
+    == ["app_update_error", "app_raise_error"],
+    "leading_inline_group returns the names sharing the faulting address",
+)
+_long_inlined = (
+    "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+    "    #0 0x10a in app_inner_a src/report.c:10\n"
+    "    #1 0x10a in app_inner_b src/report.c:20\n"
+    "    #2 0x10a in app_inner_c src/report.c:30\n"
+    "    #3 0x10a in app_outer src/report.c:40\n"
+    "    #4 0x2f0 in app_report src/report.c:782\n"
+)
+ok(
+    len(stack_frames.leading_inline_group(_long_inlined)) == 4,
+    "leading_inline_group is not truncated by the crash-signature frame cap",
+)
+_recursive = (
+    "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+    "    #0 0x10a in app_walk src/walk.c:12\n"
+    "    #1 0x2f0 in app_step src/walk.c:40\n"
+    "    #2 0x10a in app_walk src/walk.c:12\n"
+)
+ok(
+    len(stack_frames.leading_inline_group(_recursive)) == 1,
+    "leading_inline_group stops at the first different address",
+)
+# A scrubbed placeholder is the same token on every frame, so grouping on it
+# would fuse an unrelated caller into the faulting instruction.
+_scrubbed = (
+    "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+    "    #0 <addr> in app_update_error src/report.c:190\n"
+    "    #1 <addr> in app_report src/report.c:782\n"
+)
+ok(
+    len(stack_frames.leading_inline_group(_scrubbed)) == 1,
+    "leading_inline_group does not group on a scrubbed <addr> placeholder",
+)
+
 if FAILED:
     print(f"\033[0;31m{FAILED} failed, {PASSED} passed\033[0m")
     sys.exit(1)

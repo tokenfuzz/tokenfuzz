@@ -52,6 +52,9 @@ class BenchmarkReportTests(unittest.TestCase):
             'target = "sample"\n[sanitizer]\nenabled = []\n', encoding="utf-8"
         )
         body = benchmark_model_direct_render.render(str(managed), "/abs/out", str(ROOT))
+        self.assertIn(
+            "This target uses `attacker_controls = bytes`", body,
+        )
         for required in (
             "CRASH-<n>", "FIND-<n>", "sanitizer-instrumented", "Writing scope",
             "absolute paths only", "Do not delegate work to subagents", "Primary objective",
@@ -102,6 +105,31 @@ class BenchmarkReportTests(unittest.TestCase):
         self.assertIn("## Report narrative", body)
         self.assertEqual(body.count("## Report narrative"), 1)
         self.assertIn("**Impact**", body)
+
+        scoped = self.root / "scoped"
+        scoped.mkdir()
+        (scoped / "target.toml").write_text(
+            'target = "sample"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[threat_model]\n'
+            'attacker_controls = ["bytes", "call-sequence"]\n',
+            encoding="utf-8",
+        )
+        scoped_body = benchmark_model_direct_render.render(
+            str(scoped), "/abs/out", str(ROOT),
+        )
+        self.assertIn(
+            "This target uses `attacker_controls = bytes, call-sequence`",
+            scoped_body,
+        )
+        self.assertIn("never pre-filter", scoped_body)
+
+        unconfigured = self.root / "unconfigured"
+        unconfigured.mkdir()
+        unconfigured_body = benchmark_model_direct_render.render(
+            str(unconfigured), "/abs/out", str(ROOT),
+        )
+        self.assertNotIn("## Threat model", unconfigured_body)
 
         literal = prompt_render.render_template(
             ROOT / "lib" / "prompts" / "benchmark_model_direct.md.j2",

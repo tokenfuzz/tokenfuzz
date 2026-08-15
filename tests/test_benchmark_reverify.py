@@ -847,6 +847,67 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertEqual(self.reproducing(original, [unsymbolized] * 3), 3)
         self.assertEqual(self.reproducing(unsymbolized, [original] * 3), 3)
 
+    def test_an_inlined_fault_matches_whichever_name_a_symbolizer_shows(self) -> None:
+        # One instruction carries every name inlined into it, and which of them
+        # a report shows belongs to the symbolizer, not to the fault: the
+        # in-process one expands the chain, an offline pass over a -g1 binary
+        # prints only the outermost. A crash captured under one and replayed
+        # under the other read as two different bugs, which cost a crash that
+        # reproduced 5/5 its promotion.
+        expanded = (
+            "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+            "    #0 0x10a in app_update_error src/report.c:190\n"
+            "    #1 0x10a in app_raise_error src/report.c:718\n"
+            "    #2 0x2f0 in app_report src/report.c:782\n"
+        )
+        collapsed = (
+            "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+            "    #0 0x10a in app_raise_error src/report.c:718\n"
+            "    #1 0x2f0 in app_report src/report.c:782\n"
+        )
+        self.assertEqual(self.reproducing(expanded, [collapsed] * 5), 5)
+        self.assertEqual(self.reproducing(collapsed, [expanded] * 5), 5)
+        long_expansion = (
+            "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+            "    #0 0x10a in app_inner_a src/report.c:10\n"
+            "    #1 0x10a in app_inner_b src/report.c:20\n"
+            "    #2 0x10a in app_inner_c src/report.c:30\n"
+            "    #3 0x10a in app_outer src/report.c:40\n"
+            "    #4 0x2f0 in app_report src/report.c:782\n"
+        )
+        outer_only = (
+            "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+            "    #0 0x10a in app_outer src/report.c:40\n"
+            "    #1 0x2f0 in app_report src/report.c:782\n"
+        )
+        self.assertEqual(
+            self.reproducing(long_expansion, [outer_only] * 5), 5,
+            "fault identity does not truncate a compiler's inline chain",
+        )
+        # The group is the names of ONE instruction, so it widens nothing else:
+        # a frame below the inline expansion is still another fault.
+        deeper = (
+            "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+            "    #0 0x2f0 in app_report src/report.c:782\n"
+        )
+        self.assertEqual(self.reproducing(expanded, [deeper] * 5), 0)
+        # A recursive function repeats its address further down the stack, and
+        # only the contiguous leading run is one instruction's expansion.
+        recursive = (
+            "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+            "    #0 0x10a in app_walk src/walk.c:12\n"
+            "    #1 0x2f0 in app_step src/walk.c:40\n"
+            "    #2 0x10a in app_walk src/walk.c:12\n"
+        )
+        stepped = (
+            "==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+            "    #0 0x2f0 in app_step src/walk.c:40\n"
+        )
+        self.assertEqual(
+            self.reproducing(recursive, [stepped] * 5), 0,
+            "a repeated address deeper in the stack is not an inline expansion",
+        )
+
     def test_an_uncharacterised_fault_measures_nothing(self) -> None:
         # A fragment whose report headline never reached disk cannot be reduced
         # to a fault to compare. Counting whatever the replay crashed with as
@@ -1582,6 +1643,13 @@ class ReverifyDrivesTheRealRunnerTests(unittest.TestCase):
             "CRASH_RATE:",
             (crash / "sanitizer.txt").read_text(encoding="utf-8"),
         )
+        # The kept log is the only account of why, and the verdict came from
+        # the fallback. Keeping just that one reads as "nothing ran at all" and
+        # hides what the documented invocation measured — which sent a reader
+        # hunting a testcase-resolution bug that did not exist.
+        log = (crash / ".audit" / "reverify.log").read_text(encoding="utf-8")
+        self.assertIn("with the saved testcase", log)
+        self.assertIn("with no argument", log)
 
 
 if __name__ == "__main__":

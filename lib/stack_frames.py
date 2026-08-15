@@ -30,7 +30,7 @@ from clusterfuzz_stacktrace import (
 )
 
 
-_ASAN_FRAME_RE = re.compile(r"^\s*#(?P<index>\d+):?\s+(?:0x[0-9a-fA-F]+|[xX][0-9a-fA-F]+|<addr>)\s+(?:in\s+)?(?P<body>.+?)\s*$")
+_ASAN_FRAME_RE = re.compile(r"^\s*#(?P<index>\d+):?\s+(?P<addr>0x[0-9a-fA-F]+|[xX][0-9a-fA-F]+|<addr>)\s+(?:in\s+)?(?P<body>.+?)\s*$")
 _LOC_RE = re.compile(r"(?P<loc>\S+:\d+(?::\d+)?)$")
 _PATH_RE = re.compile(r"(?P<loc>\S+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|m|mm|rs|go|java|js|ts))$")
 _MODULE_RE = re.compile(r"(?P<func>.*?)\s+(?P<loc>\([^)]*(?:\+0x[0-9a-fA-F]+)?\))$")
@@ -134,6 +134,10 @@ class StackFrame:
     function: str
     location: str
     raw: str
+    #: Instruction address as printed, or "" when the report carries none (a
+    #: scrubbed `<addr>` placeholder, or a format with no address at all).
+    #: Comparable only within one report — it moves with ASLR between runs.
+    address: str = ""
 
     @property
     def state_function(self) -> str:
@@ -184,11 +188,15 @@ def parse_asan_frame(line: str) -> StackFrame | None:
     function, location = parse_frame_body(match.group("body"))
     if not function:
         return None
+    address = match.group("addr")
     return StackFrame(
         index=int(match.group("index")),
         function=function,
         location=location,
         raw=line.strip(),
+        # A scrubbed placeholder is not an address: every frame carries the
+        # same one, so grouping on it would fuse unrelated frames.
+        address="" if address == "<addr>" else address,
     )
 
 
@@ -298,6 +306,40 @@ def interesting_frames(text: str, want: int = 5) -> list[StackFrame]:
 def first_interesting_frame(text: str) -> StackFrame | None:
     frames = interesting_frames(text, want=1)
     return frames[0] if frames else None
+
+
+def leading_inline_group(text: str) -> list[StackFrame]:
+    """The top interesting frame plus the inline expansion sharing its address.
+
+    One instruction has as many names as the compiler inlined into it, and
+    which of them a report shows is a property of the symbolizer, not of the
+    fault: ASan's in-process symbolizer expands the chain into a frame per
+    name, while an offline `atos` pass over a `-g1` binary prints only the
+    outermost. So the same crash reads as `xmlVUpdateError` under one and
+    `xmlVRaiseError` under the other. Comparing frame `#0` across two reports
+    therefore calls one crash two bugs; compare the groups instead, which
+    intersect exactly when both name the same instruction.
+    """
+    group: list[StackFrame] = []
+    address = ""
+    for frame in iter_asan_frames(text):
+        if is_ignored_frame(frame):
+            continue
+        if not group:
+            group.append(frame)
+            address = frame.address
+            if not address:
+                break
+            continue
+        # Inline expansion is contiguous. Stopping at the first different
+        # address keeps a recursive function's later frames, which repeat the
+        # address further down the stack, out of the group. Do not reuse
+        # interesting_frames() here: its crash-signature cap is deliberately
+        # small, while an inline chain has no such three-name guarantee.
+        if frame.address != address:
+            break
+        group.append(frame)
+    return group
 
 
 def crash_signature(text: str, want: int = MAX_CRASH_STATE_FRAMES) -> list[str]:
