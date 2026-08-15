@@ -928,23 +928,8 @@ def confirmed_finding_cluster_count(findings_dir: Path, names: list[str]) -> int
     clusters: set[str] = set()
     for name in names:
         directory = findings_dir / name
-        report = next(
-            (path for path in (directory / "report.md", directory / "REPORT.md")
-             if path.is_file()),
-            None,
-        )
-        cluster = ""
-        if report is not None:
-            try:
-                text = report.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                text = ""
-            match = re.search(
-                r"^(?:Cluster\s*:\s*|\|\s*Cluster\s*\|\s*)([^|\n]+)",
-                text, re.IGNORECASE | re.MULTILINE,
-            )
-            cluster = match.group(1).strip() if match else ""
-        clusters.add(cluster if cluster and cluster not in {"—", "-"} else name)
+        cluster = cluster_common.artifact_cluster_id(directory)
+        clusters.add(cluster or name)
     return len(clusters)
 
 

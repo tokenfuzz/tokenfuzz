@@ -453,6 +453,40 @@ class BenchmarkMetricsTests(unittest.TestCase):
             },
         ])
 
+    def test_an_unstamped_cluster_row_does_not_group_unrelated_crashes(self) -> None:
+        # export-repro stamps every bundle's Cluster row with a placeholder
+        # until bin/cluster-crashes computes a real id. Read as a value, that
+        # placeholder is one cluster key every exported bundle shares.
+        rows = {
+            "table": (
+                "| Field | Value |\n| --- | --- |\n"
+                "| Cluster | (set by bin/cluster-crashes) |\n"
+            ),
+            "bare": "Cluster: (set by bin/cluster-crashes)\n",
+        }
+        for form, row in rows.items():
+            with self.subTest(form=form):
+                results = self.root / f"unstamped-{form}-results"
+                crashes = results / "crashes"
+                for name in ("CRASH-001", "CRASH-002"):
+                    directory = crashes / name
+                    directory.mkdir(parents=True)
+                    (directory / "sanitizer.txt").write_text(
+                        ASAN, encoding="utf-8",
+                    )
+                    (directory / "REPORT.md").write_text(
+                        f"# {name}\n\n{row}", encoding="utf-8",
+                    )
+                    self.finalize_fixture_crash(directory)
+
+                metrics = benchmark.harvest(results)
+
+                self.assertEqual(metrics["confirmed_crashes"], 2)
+                self.assertEqual(metrics["crash_clusters"], 2)
+                self.assertEqual(
+                    metrics["artifact_links"]["duplicate_groups"], [],
+                )
+
     def test_metric_report_reads_are_bounded(self) -> None:
         report = self.root / "oversized-report.md"
         report.write_bytes(b"a" * (benchmark._MAX_SCAN_BYTES + 4096))

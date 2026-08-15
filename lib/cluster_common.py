@@ -22,7 +22,7 @@ from typing import Callable, Iterable
 import report_identity
 
 _HSPACE_RE = re.compile(r"[ \t]+")
-_CLUSTER_BARE_RE = re.compile(r"^Cluster:\s*([^\s|]+)", re.IGNORECASE)
+_CLUSTER_BARE_RE = re.compile(r"^Cluster:\s*(.*?)\s*$", re.IGNORECASE)
 _CLUSTER_TABLE_RE = re.compile(
     r"^\|\s*Cluster\s*\|\s*([^|]+?)\s*\|", re.IGNORECASE
 )
@@ -115,13 +115,21 @@ def artifact_report_path(directory: Path) -> Path | None:
 
 
 def cluster_label(report_text: str) -> str:
-    """Read the deterministic cluster stamp from report text."""
+    """Read the deterministic cluster stamp from report text.
+
+    An unfilled stamp is not a label. Ask the shared report vocabulary rather
+    than carrying a local list of blanks, which knew the dashes bin/severity
+    writes but not the placeholder bin/export-repro writes — so every exported
+    bundle awaiting its first clustering pass answered with the same key.
+    """
     for line in report_text.splitlines():
         match = _CLUSTER_BARE_RE.match(line) or _CLUSTER_TABLE_RE.match(line)
         if match:
             value = match.group(1).strip()
-            if value not in {"", "—", "-", "?"}:
-                return value
+            if not report_identity.field_value_is_placeholder("Cluster", value):
+                # The stamp is the first token; parenthetical member summaries
+                # differ per report and are descriptive, not identity.
+                return value.split(maxsplit=1)[0]
     return ""
 
 

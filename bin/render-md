@@ -1536,8 +1536,12 @@ _CLASS_BULLET_LABEL_RE = re.compile(
 
 # Cluster placeholder the harness writes before bin/cluster-crashes
 # computes a real ID. Rendered as a muted dash in the HTML Fields
-# table — the literal text reads as broken to a triager.
-_CLUSTER_PLACEHOLDER_RE = re.compile(r"^\(set by bin/cluster-crashes\)\s*$")
+# table — the literal text reads as broken to a triager. Built from the
+# shared stamp so this renderer and the clusterer cannot disagree about
+# which text is a placeholder.
+_CLUSTER_PLACEHOLDER_RE = re.compile(
+    rf"^{re.escape(report_identity.CLUSTER_STAMP_PLACEHOLDER)}\s*$"
+)
 
 
 # Headings render-md understands (`#`, `##`, `###`). Used to find the end of a

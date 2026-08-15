@@ -13,16 +13,24 @@ REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "READ
 PLACEHOLDER_FIELD_VALUES = frozenset(
     {"", "-", "—", "?", "tbd", "unknown / not assessed"}
 )
+#: Stamped into a bundle's Cluster row before bin/cluster-crashes computes a
+#: real id. It is a stamp, not a value: a reader that takes it for one gets a
+#: cluster key every unclustered artifact shares, which merges unrelated bugs
+#: into one duplicate group and collapses distinct artifact roots into a
+#: single progress bucket.
+CLUSTER_STAMP_PLACEHOLDER = "(set by bin/cluster-crashes)"
 
 
 def field_value_is_placeholder(field: str, value: str) -> bool:
     """Whether a structured report value still needs a substantive value."""
     normalized = value.strip().casefold()
+    label = field.strip().casefold()
     return (
         normalized in PLACEHOLDER_FIELD_VALUES
+        or (normalized == "unspecified" and label != "caller contract")
         or (
-            normalized == "unspecified"
-            and field.strip().casefold() != "caller contract"
+            label == "cluster"
+            and normalized == CLUSTER_STAMP_PLACEHOLDER.casefold()
         )
     )
 

@@ -3171,7 +3171,9 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     if parameter_control_value:
         parts.append(emit_field("Parameter control", parameter_control_value))
     parts.append(emit_field("Trusted caller actions", trusted_actions_value))
-    parts.append(emit_field("Cluster", "(set by bin/cluster-crashes)"))
+    parts.append(
+        emit_field("Cluster", report_identity.CLUSTER_STAMP_PLACEHOLDER)
+    )
     if dedup_frames:
         parts.append(emit_field("Dedup frames", dedup_frames))
     parts.append(emit_field("Reproduction rate", confidence_value))
