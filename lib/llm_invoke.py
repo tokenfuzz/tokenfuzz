@@ -831,15 +831,15 @@ def agent_flags(
             # stays blocked, and `deny` still outranks the rule.
             #
             # The built-in file tools are deliberately NOT allowed here. The
-            # sandbox arbitrates Bash; Write/Edit go through the permission
+            # sandbox arbitrates Bash; Write/Edit answer to the permission
             # system alone, so a bare allow is an allow-all-file-access grant
-            # that reaches any path on the host — measured, not assumed: with
+            # reaching any path on the host — measured, not assumed: with
             # `allow: [Write, Edit]` a session created and overwrote files
-            # under $HOME with no --add-dir covering them, and path-scoping the
-            # rule did not contain it either. Agents reach files through Bash,
-            # where the kernel is the boundary. Reads are not confined in
-            # either path, so nothing secret may live in a session's
-            # environment.
+            # under $HOME that no --add-dir covered. Nothing here needs them:
+            # agents reach files through Bash, where the kernel is the
+            # boundary, so the question of which narrower rule would have been
+            # safe never arises. Reads are unconfined either way, so nothing
+            # secret may live in a session's environment.
             settings = {
                 "permissions": {
                     "allow": ["Bash"],
