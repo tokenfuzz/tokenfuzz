@@ -818,8 +818,33 @@ def agent_flags(
             # from blocking on a prompt; a tool it cannot sandbox is denied.
             # allowLocalBinding keeps loopback probes (client/server harnesses
             # in network targets) working while egress stays blocked.
+            #
+            # Bash, and only Bash, is allowed. dontAsk denies whatever the
+            # rules leave undecided, and a `;`-chained or multi-line command
+            # lands there: `bin/peek f:1-5` ran while
+            # `bin/peek f:1-5; echo; bin/peek f:7-9` was denied, taking 9% of
+            # agent Bash calls with it — the harness's own peek/rg-safe/state/
+            # probe invocations — while the unchained command it split on was
+            # permitted anyway. Allowing Bash moves that decision to the
+            # sandbox, which confines it: a write or delete outside the cwd and
+            # the --add-dir grants fails EPERM whatever an agent runs, egress
+            # stays blocked, and `deny` still outranks the rule.
+            #
+            # The built-in file tools are deliberately NOT allowed here. The
+            # sandbox arbitrates Bash; Write/Edit go through the permission
+            # system alone, so a bare allow is an allow-all-file-access grant
+            # that reaches any path on the host — measured, not assumed: with
+            # `allow: [Write, Edit]` a session created and overwrote files
+            # under $HOME with no --add-dir covering them, and path-scoping the
+            # rule did not contain it either. Agents reach files through Bash,
+            # where the kernel is the boundary. Reads are not confined in
+            # either path, so nothing secret may live in a session's
+            # environment.
             settings = {
-                "permissions": {"deny": ["WebFetch", "WebSearch"]},
+                "permissions": {
+                    "allow": ["Bash"],
+                    "deny": ["WebFetch", "WebSearch"],
+                },
                 "sandbox": {
                     "enabled": True,
                     "autoAllowBashIfSandboxed": True,

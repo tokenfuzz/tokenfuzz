@@ -320,8 +320,13 @@ Don't re-file already-rejected crash classes.
 Do not file caller-misuse or harness-artifact crashes in `crashes/` (item 3 above
 is the exact list of what those are). API-hardening crashes — an in-domain typed
 value the docs do not forbid, reproduced through a public boundary — DO belong in
-`crashes/`; they are the dominant bug class in mature C/C++ libraries, not a
-contract violation. For a borderline caller-misuse / harness-artifact case, keep
+`crashes/`; they are a large bug class in mature C/C++ libraries, not a
+contract violation. Belonging in `crashes/` is a filing rule, not a prediction
+of credit: a trigger outside the target's `attacker_controls` earns none, so
+file such a crash as a by-product and do not spend a session re-reaching it —
+a `NOT-REPORTABLE` row in `crashes/CRASH-CLUSTERS.md` is a mechanism already
+credited nothing. A neighbouring code path is judged on its own trigger, not
+the neighbour's. For a borderline caller-misuse / harness-artifact case, keep
 iterating toward a legitimate input boundary or mark the hypothesis DISCARDED.
 
 Every crash report must include these exact fields:

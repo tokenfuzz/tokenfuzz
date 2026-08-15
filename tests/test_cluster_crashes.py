@@ -411,6 +411,40 @@ The parser writes past `{object_name}`.
         )
         self.assertNotIn("PENDING", row)
 
+    def test_uncredited_crash_row_names_its_state(self) -> None:
+        """The index agents read before filing must not call a zero OK.
+
+        A crash whose trigger falls outside the threat model stays on disk and
+        earns no security credit, but rendered `OK` it read as a productive
+        seam — so agents kept mining mechanisms the scorer had written off.
+        """
+        crash = self.make_crash(
+            "CRASH-N1-1", "heap-buffer-overflow", "uncredited_fn",
+            "The capacity field is reused across two parse modes.",
+        )
+        (crash / "validation.json").write_text(
+            json.dumps({"kind": "crash", "state": "not-reportable"}),
+            encoding="utf-8",
+        )
+        credited = self.make_crash(
+            "CRASH-N2-1", "heap-use-after-free", "credited_fn",
+            "The node is freed before the dependent read.",
+        )
+        (credited / "validation.json").write_text(
+            json.dumps({"kind": "crash", "state": "reportable"}), encoding="utf-8",
+        )
+        self.assertEqual(self.run_cluster().returncode, 0)
+        rows = {
+            crash_id: next(
+                line for line in
+                (self.results / "crashes" / "CRASH-CLUSTERS.md").read_text().splitlines()
+                if crash_id in line
+            )
+            for crash_id in ("CRASH-N1-1", "CRASH-N2-1")
+        }
+        self.assertIn("NOT-REPORTABLE", rows["CRASH-N1-1"])
+        self.assertNotIn("NOT-REPORTABLE", rows["CRASH-N2-1"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

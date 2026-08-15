@@ -119,8 +119,11 @@ The distinction is "did the caller break a contract the docs state, OR
 did the implementation fail to validate an in-domain typed value the
 docs are silent about?" The first is caller misuse (`{{ results_dir }}/findings/`
 at most, often nothing); the second is an API-hardening bug and belongs in
-`{{ results_dir }}/crashes/`. **API-hardening bugs are the dominant bug class in
-mature C/C++ libraries — do not gate them out.**
+`{{ results_dir }}/crashes/`. **API-hardening bugs are a large bug class in
+mature C/C++ libraries — do not gate them out of `crashes/`.** Belonging in
+`crashes/` is a filing rule, not a prediction of credit: an API-hardening bug
+still earns security credit only when the trigger stays inside this target's
+`attacker_controls`.
 
 If you are unsure whether a value is in-domain: it is. A negative
 `regmatch_t.rm_so` is an `int`; the type signature says all `int`s are
@@ -202,6 +205,17 @@ regardless of its trigger source and let triage make that call. Do the
 trigger-source-vs-`attacker_controls` math once, in triage — never pre-demote
 a `call-sequence`/`env`/`race` crash at discovery time because the target is
 bytes-only.
+
+Filing what you already found is cheap; *hunting* a trigger the attacker
+cannot supply is not. A crash whose trigger needs something outside this
+target's `attacker_controls` earns no security credit however many ways you
+reach the same mechanism, so it is a by-product to file, never a seam to
+mine. Before committing a session to one, check `crashes/CRASH-CLUSTERS.md`:
+a `NOT-REPORTABLE` row is a mechanism the review credited nothing, so another
+route to it earns nothing either. A neighbouring code path is a separate
+question — its reachability is its own, and one can be externally-reachable
+next to a crash that is not — so judge each on its own trigger rather than
+inheriting the neighbour's verdict.
 
 If the crash needs a NON-DEFAULT mode, module, codec, filter, or option that
 the application or operator selects — not one the input bytes choose — write

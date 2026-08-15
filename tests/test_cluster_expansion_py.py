@@ -113,6 +113,7 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     runtime = SimpleNamespace(
         results=results, target_root=target, num_agents=2, root=ROOT,
         target_slug="sampleproj", repo_type="git", index=root / "index.log",
+        config=SimpleNamespace(attacker_controls=["bytes"]),
     )
     (results / "crashes" / "CRASH-CLUSTERS.md").write_text(
         "[CRASH-010-2](CRASH-010-2/REPORT.md)\n", encoding="utf-8"
@@ -145,5 +146,40 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     check((fresh / ".cluster_expanded").is_file(), "successful expansion is marked exactly once")
     check((empty / ".cluster_expanded").is_file(), "empty rows are a completed expansion")
     check(not (retry / ".cluster_expanded").exists(), "unavailable decisions remain retryable")
+
+    # An out-of-model seed still expands: expansion proposes source
+    # neighbours, and a neighbour reachable from bytes can sit beside a crash
+    # that is not. Skipping the seed would lose that lead for good. The seed's
+    # scope constrains the leads instead, through attacker_controls.
+    uncredited = crash_with_frame(results, target, "CRASH-040-1")
+    (uncredited / "validation.json").write_text(
+        json.dumps({"kind": "crash", "state": "not-reportable"}), encoding="utf-8",
+    )
+    runtime.config = SimpleNamespace(attacker_controls=["bytes"])
+    runtime.cluster_expansion_attempted = set()
+    with mock.patch.object(triage, "cluster_expansion_decision", side_effect=expansion) as scoped:
+        audit_runner.expand_new_crash_clusters(runtime)
+    considered = [call.args[0] for call in scoped.call_args_list]
+    check(uncredited in considered, "an out-of-model crash is still expanded")
+    check(
+        all(call.kwargs.get("attacker_controls") == ["bytes"]
+            for call in scoped.call_args_list),
+        "every expansion is scoped by the declared attacker_controls",
+    )
+
+    captured: dict[str, object] = {}
+
+    def scoped_decide(_name, _keys, prompt, timeout, **kwargs):
+        captured["prompt"] = prompt
+        return {"rows": []}
+
+    with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=scoped_decide):
+        triage.cluster_expansion_decision(
+            crash, target, attacker_controls=["bytes", "call-sequence"],
+        )
+    check(
+        "bytes,call-sequence" in str(captured.get("prompt")),
+        "the expansion prompt carries the declared controls",
+    )
 
 print("\ncluster expansion tests passed")

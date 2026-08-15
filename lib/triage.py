@@ -1243,12 +1243,19 @@ def _cluster_source_path(location: str, target_root: Path) -> tuple[Path, int] |
 
 
 def cluster_expansion_decision(
-    crash_dir: Path, target_root: Path, *, deadline: float | None = None,
+    crash_dir: Path, target_root: Path, *,
+    attacker_controls: list[str] | None = None,
+    deadline: float | None = None,
 ) -> list[dict] | None:
     """Return up to three source-grounded sibling leads for one new crash.
 
     ``None`` means retryable/unavailable; an empty list is a completed decision
     that found no strong siblings and may be marked final by the caller.
+
+    `attacker_controls` scopes the leads. A seed crash is expanded whatever its
+    own publication state, because a neighbour's reachability is not the
+    seed's; asking for siblings the declared model can reach is what keeps an
+    out-of-model seed from breeding a generation of out-of-model variants.
     """
     sanitizer = _sanitizer_file(crash_dir)
     if sanitizer is None:
@@ -1277,12 +1284,22 @@ def cluster_expansion_decision(
         source_parts.append(f">>> {relative}:{line}\n" + "\n".join(lines[start:end]))
         if len(source_parts) >= 3:
             break
+    controls = ",".join(attacker_controls or [])
+    scope_block = (
+        f"\nName only siblings an attacker could reach supplying `{controls}`.\n"
+        f"{crash_dir.name}'s own trigger does not bind you — a neighbour's\n"
+        "reachability is its own, and a sibling beside an out-of-scope crash may\n"
+        f"still be reachable — but one needing something outside `{controls}`\n"
+        "earns no security credit however it turns out, so it is not worth a\n"
+        "session. Drop it and return fewer rows.\n"
+    ) if controls else ""
     prompt = render_template(
         "triage_cluster_expand.md.j2",
         {
             "id": crash_dir.name,
             "frames": "\n".join(frame.raw for frame in frames),
             "source_block": "\n\n".join(source_parts) or "(source unavailable)",
+            "scope_block": scope_block,
         },
     )
     configured = llm_decide.decision_timeout("cluster_expand")

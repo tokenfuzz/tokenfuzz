@@ -60,6 +60,7 @@ import stack_frames  # noqa: E402
 import symbol_names  # noqa: E402
 import clusterfuzz_stacktrace as cf_stack  # noqa: E402
 import finding_signature  # noqa: E402
+import validation_receipt  # noqa: E402
 from cluster_common import (  # noqa: E402
     exact_child_file,
     promotion_pending_reasons,
@@ -68,6 +69,9 @@ from cluster_common import (  # noqa: E402
     run_under_aggregate_lock,
     texts_differ_beyond_padding,
 )
+
+# Final states that keep a bundle on disk without security credit.
+_UNCREDITED_STATES = frozenset({"not-reportable"})
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -550,6 +554,12 @@ def _signature(crash_dir: Path) -> dict:
     missing = promotion_pending_reasons(crash_dir)
     if missing:
         status = f"PENDING (missing: {','.join(missing)})"
+    elif validation_receipt.claims_state(crash_dir, _UNCREDITED_STATES):
+        # The index agents read before filing said OK about crashes the scorer
+        # had already written off, so a whole seam looked productive while it
+        # earned nothing. Name the state instead: same bundle, same evidence,
+        # no security credit.
+        status = "NOT-REPORTABLE (no security credit)"
 
     return {
         "id": crash_dir.name,

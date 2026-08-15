@@ -139,6 +139,16 @@ ok(claude_settings["sandbox"]["network"]["allowLocalBinding"] is True,
    "claude keeps loopback harnesses runnable while egress stays blocked")
 ok(claude_settings["permissions"]["deny"] == ["WebFetch", "WebSearch"],
    "claude denies web tools, the one rule a permission mode still enforces")
+# Without this, dontAsk denies whatever the rules leave undecided. A
+# `;`-chained command lands there, so read-only harness tools were denied
+# while the same tool ran unchained. The sandbox keys above are the boundary.
+ok(claude_settings["permissions"]["allow"] == ["Bash"],
+   "claude allows Bash alone so dontAsk cannot deny what the sandbox permits")
+# The sandbox arbitrates Bash; Write/Edit answer to the permission system
+# alone, so allowing them bare would grant file access anywhere on the host.
+for tool in ("Read", "Write", "Edit", "Glob", "Grep"):
+    ok(tool not in claude_settings["permissions"]["allow"],
+       f"claude never blanket-allows {tool}: no sandbox confines that tool")
 ok("--max-turns" in f, "claude has --max-turns")
 ok("80" in f, "claude default max-turns 80")
 ok("claude-opus-5" in f, "claude default model wired")

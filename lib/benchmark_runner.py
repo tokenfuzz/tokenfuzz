@@ -708,6 +708,24 @@ def _harness_revision(root: Path = SCRIPT_ROOT) -> str:
     return digest.hexdigest()
 
 
+def _harness_drift(pinned: str, *, dry_run: bool = False) -> dict:
+    """The run's harness pin against the tree now, or {} when they agree.
+
+    Both the pre-cell refusal and the post-cell exclusion ask this one
+    question, and they must answer it identically: a cell that starts on a
+    drifted tree can only end excluded, so asking before the budget is spent
+    is the same test moved earlier, not a new policy.
+    """
+    observed = "" if dry_run else _harness_revision()
+    if not pinned or not observed or observed == pinned:
+        return {}
+    return {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "pinned": pinned,
+        "observed": observed,
+    }
+
+
 def _is_shallow_checkout(path: Path) -> bool:
     result = subprocess.run(
         ["git", "-c", f"safe.directory={path}", "-C", str(path), "rev-parse", "--is-shallow-repository"],
@@ -2836,6 +2854,34 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 experiment = f"bench-{run_id}-{condition}-r{replicate}"
                 log(f"Cell {name} starting: condition={condition} replicate={replicate} agents={1 if condition == 'model-direct' else args.agents or 'default'} model={model or '?'} experiment={experiment}")
                 predicted = cell_dir if condition == "model-direct" else cell_dir / "repo-root" / "output" / f"{args.target}-{experiment}" / args.backend / "results"
+                # The same pin the post-cell check applies, asked before the
+                # budget is spent. A cell whose harness already differs from
+                # the run's pin can only end excluded, and the post-cell check
+                # alone let a 5h cell start seconds after its predecessor had
+                # recorded the drift. Refusing here costs the cell; not
+                # refusing costs the cell and the wall.
+                pre_drift = _harness_drift(
+                    harness_revision, dry_run=args.dry_run,
+                )
+                if pre_drift:
+                    log(
+                        f"WARN: Cell {name}: not started — harness source "
+                        f"differs from the run pin "
+                        f"({pre_drift['pinned'][:12]} -> "
+                        f"{pre_drift['observed'][:12]}); "
+                        f"re-run `bin/benchmark` to measure the current tree"
+                    )
+                    cell_dir.mkdir(parents=True, exist_ok=True)
+                    _write_json(cell_dir / "harness-drift.json", pre_drift)
+                    (cell_dir / ".run-quality").write_text(
+                        "source_drift\n", encoding="utf-8"
+                    )
+                    write_cell(
+                        cell_json, condition, replicate, experiment, Path(), 0,
+                        "incomplete", args.agents, build_identity=run_identity,
+                    )
+                    failed += 1
+                    continue
                 drift = build_preflight.pinned_build_problems(
                     target_root, run_identity, run_config,
                 )
@@ -3049,24 +3095,22 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     summary = {"exists": False}
                     _write_json(cell_dir / "metrics.json", summary)
                     status = "failed"
-                # One harness check, at the last boundary: finalizers read
-                # harness files too, and the comparison is against the run's
-                # pin, so this sees anything an earlier check would have.
-                # Same disposition as target drift — the artifacts are real,
-                # the comparison is not, because this cell ran code its peers
-                # did not.
-                observed = "" if args.dry_run else _harness_revision()
-                if harness_revision and observed and observed != harness_revision:
+                # The closing harness check: finalizers read harness files too,
+                # so this catches a tree edited after the pre-cell check let
+                # the cell start. Same disposition as target drift — the
+                # artifacts are real, the comparison is not, because this cell
+                # ran code its peers did not.
+                post_drift = _harness_drift(
+                    harness_revision, dry_run=args.dry_run,
+                )
+                if post_drift:
                     log(
                         f"WARN: Cell {name}: harness source changed during the "
-                        f"cell ({harness_revision[:12]} -> {observed[:12]}); "
+                        f"cell ({post_drift['pinned'][:12]} -> "
+                        f"{post_drift['observed'][:12]}); "
                         f"artifacts kept, cell excluded from the comparison"
                     )
-                    _write_json(cell_dir / "harness-drift.json", {
-                        "observed_at": datetime.now(timezone.utc).isoformat(),
-                        "pinned": harness_revision,
-                        "observed": observed,
-                    })
+                    _write_json(cell_dir / "harness-drift.json", post_drift)
                     marker = cell_dir / ".run-quality"
                     if not marker.exists():
                         marker.write_text("source_drift\n", encoding="utf-8")

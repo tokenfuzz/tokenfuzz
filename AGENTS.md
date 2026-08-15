@@ -157,7 +157,12 @@ a defect that crosses no security boundary: not a security report, no security
 yield, and no numeric CVSS score. Do not
 pre-demote such a crash to `findings/` or discard it: file the reproducer and
 let triage make that call. (Only source-disproved misuse and
-the auto-quarantine classes below are kept out of `crashes/`.)
+the auto-quarantine classes below are kept out of `crashes/`.) Filing one is
+cheap; re-reaching it is not — a `NOT-REPORTABLE` row in
+`crashes/CRASH-CLUSTERS.md` is a mechanism already reviewed and credited
+nothing, so another route to the same mechanism earns nothing either. A
+neighbouring code path is a separate question: reachability is per-trigger,
+and one can be externally-reachable beside a crash that is not.
 
 **Auto-quarantined by harness:** null deref (`0x0+` SEGV, "null-deref"), OOM,
 ABRT without sanitizer error, MOZ_CRASH/RustMozCrash/panic, timeout-only,

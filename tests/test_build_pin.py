@@ -353,6 +353,33 @@ class DriftAccountingTests(unittest.TestCase):
         (self.cell / ".run-quality").write_text("banana\n")
         self.assertEqual("clean", self._write("done")["run_quality"])
 
+    def test_a_drifted_harness_is_detected_before_a_cell_starts(self) -> None:
+        """The pre-cell and post-cell checks must give the same answer.
+
+        Checking only after a cell finished let the next cell launch seconds
+        after its predecessor had already recorded the drift, spending a full
+        wall-clock budget on a cell that could only end excluded.
+        """
+        with mock.patch.object(
+            benchmark_runner, "_harness_revision", return_value="1" * 64,
+        ):
+            drift = benchmark_runner._harness_drift("0" * 64)
+            agreed = benchmark_runner._harness_drift("1" * 64)
+            dry = benchmark_runner._harness_drift("0" * 64, dry_run=True)
+        self.assertEqual("0" * 64, drift["pinned"])
+        self.assertEqual("1" * 64, drift["observed"])
+        self.assertTrue(drift["observed_at"])
+        self.assertEqual({}, agreed, "an unchanged tree is not drift")
+        self.assertEqual({}, dry, "a dry run has no tree to compare")
+
+        with mock.patch.object(
+            benchmark_runner, "_harness_revision", return_value="",
+        ):
+            # git unavailable answers nothing; refusing cells on it would
+            # ground the run rather than protect the comparison.
+            self.assertEqual({}, benchmark_runner._harness_drift("0" * 64))
+        self.assertEqual({}, benchmark_runner._harness_drift(""))
+
     def test_a_rebuilt_tree_stops_the_next_cell(self) -> None:
         target = self.tmp / "target"
         _native_target(target)

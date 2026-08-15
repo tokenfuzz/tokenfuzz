@@ -1391,7 +1391,16 @@ def _migrate_cluster_backlog(runtime: Runtime) -> None:
 def expand_new_crash_clusters(
     runtime: Runtime, *, deadline: float | None = None,
 ) -> dict[str, int]:
-    """Expand each newly accepted crash once and queue its concrete siblings."""
+    """Expand each newly accepted crash once and queue its concrete siblings.
+
+    Every crash on disk is expanded, including one the review placed outside
+    the threat model. Expansion proposes source neighbours — peer handlers,
+    callers, same-file siblings — and a neighbour's reachability is its own:
+    an out-of-model seed can sit beside a byte-reachable sibling, so skipping
+    the seed would lose that lead permanently. What the seed's scope changes is
+    the constraint on the leads, not whether to look; `attacker_controls` goes
+    into the decision so the siblings it names are ones the model can reach.
+    """
     _migrate_cluster_backlog(runtime)
     candidates = [
         crash for crash in sorted((runtime.results / "crashes").glob("CRASH-*"))
@@ -1422,6 +1431,7 @@ def expand_new_crash_clusters(
                 triage.cluster_expansion_decision,
                 crash,
                 runtime.target_root,
+                attacker_controls=runtime.config.attacker_controls,
                 deadline=deadline,
             ): crash
             for crash in crashes
