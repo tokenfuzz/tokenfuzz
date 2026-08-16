@@ -275,6 +275,31 @@ def validate_launch(
         created = [path.name for path in Path(directory).iterdir() if path != testcase]
         if created:
             return False, f"derived invocation created output: {created[0]}"
+        # The check below concludes "it read the testcase" from the program
+        # answering differently with and without one. That inference only holds
+        # if the program answers the same way when nothing changed, so establish
+        # that first, on the same input. A throughput benchmark is the case that
+        # reached selection for real — it differs on every run, so it passed as
+        # a reader on noise alone, and it was picked because it was the one
+        # candidate whose help documented a file option.
+        try:
+            repeated, repeated_output = runner_preflight.capture_probe(
+                [str(binary), *expand(testcase)], 10, directory, 65536, env,
+            )
+        except OSError as exc:
+            return False, str(exc)
+        if repeated.returncode == 124:
+            return False, "derived invocation timed out after 10 seconds"
+        if runner_preflight.probe_signature(
+            completed, completed_output, testcase
+        ) != runner_preflight.probe_signature(
+            repeated, repeated_output, testcase
+        ):
+            return False, (
+                "derived invocation did not behave the same way twice on one "
+                "input, so nothing can be concluded from how it behaves without"
+                " one"
+            )
         try:
             absent, absent_output = runner_preflight.capture_probe(
                 [str(binary), *expand(missing)], 10, directory, 65536, env,

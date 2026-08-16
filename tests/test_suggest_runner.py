@@ -254,6 +254,36 @@ class SuggestRunnerTests(unittest.TestCase):
         self.assertIn("did not depend on testcase", result.stderr)
         self.assertNotIn("[runner]", self.toml.read_text())
 
+    def test_a_runner_must_answer_the_same_way_twice(self) -> None:
+        """The precondition for reading anything into present-vs-missing.
+
+        Concluding "it read the testcase" from a program behaving differently
+        with and without one assumes it behaves the same way when nothing
+        changed. A throughput benchmark does not, so it passed as a reader on
+        noise alone — and it was selected for real, because it was the one
+        candidate in a project of network examples whose help documented a
+        file option. Disqualified by measurement, not by its name.
+        """
+        self.binary.write_text(
+            f"#!{sys.executable}\n"
+            "import sys, time\n"
+            "if '-h' in sys.argv or '--help' in sys.argv:\n"
+            " print('usage: sampleproj -hash_input FILE   data to hash' * 4)\n"
+            " raise SystemExit(0)\n"
+            "open(sys.argv[-1], 'rb').read()\n"
+            "print('throughput %.6f MiB/s' % time.time())\n",
+            encoding="utf-8",
+        )
+        result = self.run_command({
+            "binary": "c1",
+            "args": ["-hash_input", "{TESTCASE}"],
+            "reasoning": "its help documents reading a file",
+        }, "--apply")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("same way twice", result.stderr)
+        self.assertIn("nothing can be concluded", result.stderr)
+        self.assertNotIn("[runner]", self.toml.read_text())
+
     def test_help_probe_cannot_write_into_the_callers_tree(self) -> None:
         self.binary.write_text(
             f"#!{sys.executable}\n"
