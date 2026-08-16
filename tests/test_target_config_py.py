@@ -1508,6 +1508,108 @@ ms_root.mkdir()
 assert_eq(["mcli"], tc.declared_cli_names(ms_root, "meson"),
           "declared_cli_names: meson reads executable() name")
 
+# A computed program name is a hole in the extraction, and the caller has to be
+# told: a project that names one target through a variable had every executable
+# it ships beside that one silently excluded from consideration.
+cm_var = DCN_DIR / "cmake-computed-name"
+cm_var.mkdir()
+(cm_var / "CMakeLists.txt").write_text(
+    "add_executable(visible v.c)\n"
+    'set(TOOL_NAME hidden)\n'
+    'add_executable("${TOOL_NAME}" h.c)\n',
+    encoding="utf-8")
+names, complete = tc.declared_cli_extraction(cm_var, "cmake")
+assert_eq(["visible"], names,
+          "declared_cli_extraction: cmake still reads the literal name")
+assert_eq(False, complete,
+          "declared_cli_extraction: cmake reports an unread computed name")
+assert_eq(["visible"], tc.declared_cli_names(cm_var, "cmake"),
+          "declared_cli_names: the list-only view is unchanged")
+
+# The same hole one character further along: a name that *starts* literal but
+# is computed after. Reading the prefix invents a target no build produced and
+# stops the site being counted as one the extractor could not read.
+cm_partial = DCN_DIR / "cmake-half-computed-name"
+cm_partial.mkdir()
+(cm_partial / "CMakeLists.txt").write_text(
+    "add_executable(tool_${ARCH} source.c)\nadd_executable(helper helper.c)\n",
+    encoding="utf-8")
+names, complete = tc.declared_cli_extraction(cm_partial, "cmake")
+assert_eq(["helper"], names,
+          "declared_cli_extraction: cmake does not invent a name from a prefix")
+assert_eq(False, complete,
+          "declared_cli_extraction: cmake reports a half-computed name unread")
+
+ms_partial = DCN_DIR / "meson-half-computed-name"
+ms_partial.mkdir()
+(ms_partial / "meson.build").write_text(
+    "project('p', 'c')\nexecutable('tool_' + suffix, 's.c')\n"
+    "executable('helper', 'h.c')\n", encoding="utf-8")
+names, complete = tc.declared_cli_extraction(ms_partial, "meson")
+assert_eq(["helper"], names,
+          "declared_cli_extraction: meson does not invent a name from a prefix")
+assert_eq(False, complete,
+          "declared_cli_extraction: meson reports a half-computed name unread")
+
+# A quoted literal is still a literal, and a commented-out declaration is not
+# a declaration. Treating either as unread widened the candidate scan for
+# nothing.
+cm_quoted = DCN_DIR / "cmake-quoted-literal"
+cm_quoted.mkdir()
+(cm_quoted / "CMakeLists.txt").write_text(
+    'add_executable("tool" source.c)\n', encoding="utf-8")
+assert_eq((["tool"], True), tc.declared_cli_extraction(cm_quoted, "cmake"),
+          "declared_cli_extraction: cmake reads a quoted literal name")
+
+cm_comment = DCN_DIR / "cmake-commented-out"
+cm_comment.mkdir()
+(cm_comment / "CMakeLists.txt").write_text(
+    "# add_executable(${OLD_TOOL} old.c)\nadd_executable(real real.c)\n",
+    encoding="utf-8")
+assert_eq((["real"], True), tc.declared_cli_extraction(cm_comment, "cmake"),
+          "declared_cli_extraction: a commented-out cmake declaration is none")
+
+ms_comment = DCN_DIR / "meson-commented-out"
+ms_comment.mkdir()
+(ms_comment / "meson.build").write_text(
+    "project('p', 'c')\n# executable(old_name, 'old.c')\n"
+    "executable('real', 'real.c')\n", encoding="utf-8")
+assert_eq((["real"], True), tc.declared_cli_extraction(ms_comment, "meson"),
+          "declared_cli_extraction: a commented-out meson declaration is none")
+
+# A `#` inside a quoted name is not a comment.
+cm_hash = DCN_DIR / "cmake-hash-in-string"
+cm_hash.mkdir()
+(cm_hash / "CMakeLists.txt").write_text(
+    'add_executable(real real.c)\nset(X "a # b")\n', encoding="utf-8")
+assert_eq((["real"], True), tc.declared_cli_extraction(cm_hash, "cmake"),
+          "declared_cli_extraction: a quoted # does not start a comment")
+
+ms_var = DCN_DIR / "meson-computed-name"
+ms_var.mkdir()
+(ms_var / "meson.build").write_text(
+    "project('p', 'c')\n"
+    "executable('mcli', 'm.c')\n"
+    "executable(tool_name, 't.c')\n",
+    encoding="utf-8")
+assert_eq(False, tc.declared_cli_extraction(ms_var, "meson")[1],
+          "declared_cli_extraction: meson reports an unread computed name")
+
+am_var = DCN_DIR / "autotools-computed-name"
+(am_var / "src").mkdir(parents=True)
+(am_var / "configure.ac").write_text("AC_INIT([proj],[1])\n", encoding="utf-8")
+(am_var / "src" / "Makefile.am").write_text(
+    "bin_PROGRAMS = mytool $(EXTRA_TOOLS)\n", encoding="utf-8")
+assert_eq(False, tc.declared_cli_extraction(am_var, "autotools")[1],
+          "declared_cli_extraction: autotools reports an unread computed name")
+
+# A manifest read in full stays authoritative — this is what keeps a project's
+# own tool from being averaged in with the test drivers beside it.
+assert_eq(True, tc.declared_cli_extraction(cm_noinst, "cmake")[1],
+          "declared_cli_extraction: a fully literal manifest reads complete")
+assert_eq(True, tc.declared_cli_extraction(am_root, "autotools")[1],
+          "declared_cli_extraction: autotools literal PROGRAMS read complete")
+
 # Unknown / language-ecosystem build systems yield nothing (free scan handles them).
 assert_eq([], tc.declared_cli_names(am_root, "cargo"),
           "declared_cli_names: non-native build system returns []")

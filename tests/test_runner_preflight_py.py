@@ -365,5 +365,166 @@ class RunnerPreflightTests(unittest.TestCase):
         checked.assert_called_once()
 
 
+class TestcaseDependenceTests(unittest.TestCase):
+    """Does the configured program actually read the input it is handed?
+
+    A binary that never opens its testcase makes every CLI replay report
+    CLEAN, so a crash that reproduces by hand is recorded as gone. The check
+    must only ever speak from a positive signal: it warns operators, and one
+    that cries wolf on a correct runner is worse than silence.
+    """
+
+    def script(self, body: str) -> Path:
+        # A distinct file per call: two programs sharing one path means the
+        # second body silently answers for the first.
+        self.written = getattr(self, "written", 0) + 1
+        path = Path(self.tmp) / f"prog{self.written}"
+        path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+        path.chmod(0o755)
+        return path
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="dependence-")
+
+    def test_a_program_ignoring_its_argument_is_named(self) -> None:
+        blind = self.script('echo "fixed banner"')
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_INVARIANT,
+            runner_preflight.testcase_verdict(blind, ["{TESTCASE}"]),
+        )
+
+    def test_a_program_reading_its_argument_is_left_alone(self) -> None:
+        reader = self.script('cat "$1" 2>&1 || echo "cannot open $1"')
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_DEPENDS,
+            runner_preflight.testcase_verdict(reader, ["{TESTCASE}"]),
+        )
+
+    def test_a_program_that_never_ran_is_undetermined(self) -> None:
+        """The failure mode that made this condemn every target at once.
+
+        The probe runs in a scratch directory, so a relative program never
+        execs — and two launches that both died in the loader agree perfectly,
+        which reads as "ignored its input" for a runner that was never asked.
+        """
+        reader = self.script('cat "$1" 2>&1 || echo "cannot open $1"')
+        self.assertEqual(
+            runner_preflight.TESTCASE_UNKNOWN,
+            runner_preflight.testcase_verdict(Path("prog"), ["{TESTCASE}"]),
+            "a relative program that cannot exec proves nothing",
+        )
+        self.assertEqual(
+            runner_preflight.TESTCASE_UNKNOWN,
+            runner_preflight.testcase_verdict(
+                Path(self.tmp) / "absent", ["{TESTCASE}"],
+            ),
+            "a program that is not there proves nothing",
+        )
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_INVARIANT,
+            runner_preflight.testcase_verdict(reader.resolve(), ["ignored"]),
+            "the same program is judged once it is actually run",
+        )
+
+    def test_a_program_that_disagrees_with_itself_is_undetermined(self) -> None:
+        """The failure that would have selected a benchmark as the runner.
+
+        A benchmark prints different timings every run, so it differs from the
+        missing-input launch for reasons that have nothing to do with reading
+        it. Without establishing repeatability first, that difference reads as
+        proof the input was consumed — and a selector acting on it points the
+        audit at a program that never parses anything.
+        """
+        noisy = self.script('date +%s%N; echo "$RANDOM"')
+        self.assertEqual(
+            runner_preflight.TESTCASE_UNKNOWN,
+            runner_preflight.testcase_verdict(noisy, ["{TESTCASE}"]),
+        )
+        self.assertNotEqual(
+            runner_preflight.OBSERVABLY_INVARIANT,
+            runner_preflight.testcase_verdict(noisy, ["{TESTCASE}"]),
+            "an unrepeatable program is never accused of ignoring its input",
+        )
+
+    def test_the_verdict_separates_proof_from_ignorance(self) -> None:
+        """Both callers need a positive answer, and opposite ones.
+
+        A warning may only fire on proof the input was ignored; a runner may
+        only be selected on proof it was read. Anything else must be neither.
+        """
+        reader = self.script('cat "$1" 2>&1 || echo "cannot open $1"')
+        blind = self.script('echo "fixed banner"')
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_DEPENDS,
+            runner_preflight.testcase_verdict(reader, ["{TESTCASE}"]),
+        )
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_INVARIANT,
+            runner_preflight.testcase_verdict(blind, ["{TESTCASE}"]),
+        )
+        self.assertEqual(
+            runner_preflight.TESTCASE_UNKNOWN,
+            runner_preflight.testcase_verdict(
+                Path(self.tmp) / "absent", ["{TESTCASE}"],
+            ),
+        )
+
+    def test_a_program_writing_to_the_testcase_path_is_undetermined(self) -> None:
+        # It was handed a path and created it. Whatever it is doing with the
+        # argument, it is not consuming it as input, and a rate measured
+        # through it would describe the harness's own file.
+        writer = self.script('echo produced > "$1"')
+        self.assertEqual(
+            runner_preflight.TESTCASE_UNKNOWN,
+            runner_preflight.testcase_verdict(writer, ["{TESTCASE}"]),
+        )
+
+    def test_the_probe_does_not_claim_the_file_was_read(self) -> None:
+        """Both answers are about observable behaviour, not consumption.
+
+        Exit status and output are all a portable probe sees. A program that
+        only stat()s the path varies with it while never opening it, and one
+        that reads the file whole while printing nothing does not vary at all.
+        Naming these `reads`/`ignores` invited a caller to rewrite a config
+        from them; they are evidence, and the names now say so.
+        """
+        stat_only = self.script(
+            'if [ -e "$1" ]; then echo present; else echo absent; fi'
+        )
+        silent_reader = self.script('cat "$1" >/dev/null 2>&1; exit 0')
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_DEPENDS,
+            runner_preflight.testcase_verdict(stat_only, ["{TESTCASE}"]),
+            "existence sensitivity is not proof the file was opened",
+        )
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_INVARIANT,
+            runner_preflight.testcase_verdict(silent_reader, ["{TESTCASE}"]),
+            "a silent reader is invariant, so this may not condemn a runner",
+        )
+
+    def test_configured_arguments_decide_the_verdict(self) -> None:
+        """A bare positional is not every target's invocation.
+
+        Judging `<bin> <testcase>` when the config says `-e pattern
+        {TESTCASE}` condemns a correctly configured runner for being asked the
+        wrong question.
+        """
+        picky = self.script(
+            'if [ "$1" != "--read" ]; then echo "usage"; exit 2; fi\n'
+            'cat "$2" 2>&1 || echo "cannot open $2"'
+        )
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_INVARIANT,
+            runner_preflight.testcase_verdict(picky, ["{TESTCASE}"]),
+        )
+        self.assertEqual(
+            runner_preflight.OBSERVABLY_DEPENDS,
+            runner_preflight.testcase_verdict(
+                picky, ["--read", "{TESTCASE}"],
+            ),
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

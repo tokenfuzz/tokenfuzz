@@ -1008,6 +1008,29 @@ _CMAKE_INSTALL_KEYWORDS = frozenset({
 })
 
 
+def _without_comments(text: str) -> str:
+    """Manifest text with `#` comments stripped, quotes respected.
+
+    CMake and Meson both comment to end of line with `#`. A commented-out
+    declaration is not one, and counting it made extraction look partial and
+    needlessly widened the candidate scan.
+    """
+    out: list[str] = []
+    for line in text.splitlines():
+        quote = ""
+        for index, character in enumerate(line):
+            if quote:
+                if character == quote:
+                    quote = ""
+            elif character in "'\"":
+                quote = character
+            elif character == "#":
+                line = line[:index]
+                break
+        out.append(line)
+    return "\n".join(out)
+
+
 def _manifest_texts(target_root: Path, filename: str, max_depth: int = 3) -> list[str]:
     """Return the text of every `filename` within `max_depth` of target_root.
 
@@ -1069,13 +1092,18 @@ def _cmake_installed_executables(texts: Iterable[str]) -> list[str]:
     # build emits. A phantom name from `add_executable(Ns::x ALIAS x)` would
     # otherwise collide with a same-named library in install(TARGETS ...),
     # yielding a non-empty result that suppresses the fallback below.
+    # The name must be the *whole* first argument. Without the trailing
+    # boundary, `add_executable(tool_${ARCH} ...)` yields a phantom `tool_`
+    # target that exists in no build, and the declaration stops being counted
+    # as one this extractor could not read.
     add_exec_re = re.compile(
-        r"add_executable\s*\(\s*([A-Za-z0-9_.:-]+)(?:\s+([A-Za-z_]+))?",
+        r"add_executable\s*\(\s*(?P<q>[\"']?)([A-Za-z0-9_.:-]+)(?P=q)(?=[\s)])"
+        r"(?:\s+([A-Za-z_]+))?",
         re.IGNORECASE)
     for text in text_list:
         for m in add_exec_re.finditer(text):
-            name = m.group(1)
-            if "::" in name or (m.group(2) or "").upper() in ("ALIAS", "IMPORTED"):
+            name = m.group(2)
+            if "::" in name or (m.group(3) or "").upper() in ("ALIAS", "IMPORTED"):
                 continue
             exec_names.add(name)
     if not exec_names:
@@ -1095,8 +1123,12 @@ def _cmake_installed_executables(texts: Iterable[str]) -> list[str]:
 
 def _meson_executables(texts: Iterable[str]) -> list[str]:
     """First (name) argument of every `executable(...)` call in meson.build."""
+    # Anchored to the end of the argument for the same reason as CMake above:
+    # `executable('tool_' + suffix, ...)` must not read as a target named
+    # `tool_`.
     exe_re = re.compile(
-        r"\bexecutable\s*\(\s*(?:'([^']+)'|\"([^\"]+)\")", re.IGNORECASE)
+        r"\bexecutable\s*\(\s*(?:'([^']*)'|\"([^\"]*)\")\s*[,)]",
+        re.IGNORECASE)
     out: list[str] = []
     for text in texts:
         for m in exe_re.finditer(text):
@@ -1104,7 +1136,37 @@ def _meson_executables(texts: Iterable[str]) -> list[str]:
     return out
 
 
-def declared_cli_names(target_root: str | os.PathLike, build_system: str) -> list[str]:
+# A declaration site whose program name is not a literal. Every build system
+# lets a project compute the name — `add_executable("${TEST_CJSON}" ...)`,
+# `executable(name_var, ...)`, `bin_PROGRAMS = $(TOOLS)` — and none of the
+# extractors above can see through that without interpreting the build
+# language. They do not try. What they must not do is stay silent about it:
+# a name they cannot read is a program they cannot rule in or out, and the
+# caller needs to know its list has a hole rather than treating a partial
+# read as the whole truth.
+# A declaration site whose program name is not a plain literal *in full*.
+# Testing only how the argument begins misses the common half-computed form
+# (`tool_${ARCH}`, `'tool_' + suffix`), which is the same hole one character
+# further along: the extractor reads a prefix, the site is not counted as
+# unread, and the real program stays hidden.
+_UNRESOLVED_DECLARATION = {
+    "cmake": re.compile(
+        r"add_executable\s*\(\s*(?![\"']?[A-Za-z0-9_.:-]+[\"']?[\s)])",
+        re.IGNORECASE),
+    "meson": re.compile(
+        r"\bexecutable\s*\(\s*(?!(?:'[^']*'|\"[^\"]*\")\s*[,)])",
+        re.IGNORECASE),
+    "autotools": re.compile(r"^\s*bin_PROGRAMS\s*[+:]?=.*[$@]", re.MULTILINE),
+}
+_MANIFEST_FILES = {
+    "cmake": "CMakeLists.txt", "meson": "meson.build",
+    "autotools": "Makefile.am",
+}
+
+
+def declared_cli_names(
+    target_root: str | os.PathLike, build_system: str,
+) -> list[str]:
     """User-facing CLI program names the target's own build manifests declare.
 
     Derived at runtime from the live target tree — never a hardcoded
@@ -1114,17 +1176,37 @@ def declared_cli_names(target_root: str | os.PathLike, build_system: str) -> lis
     instrumented executables; the free executable scan remains the fallback
     when this yields nothing (unknown build system, generated names, ...).
     """
+    return declared_cli_extraction(target_root, build_system)[0]
+
+
+def declared_cli_extraction(
+    target_root: str | os.PathLike, build_system: str,
+) -> tuple[list[str], bool]:
+    """`(names, complete)` — the declared CLI names, and whether that is all.
+
+    `complete` is False when the manifests declare an executable under a
+    computed name. Callers must not treat the names as exhaustive then: a
+    project that names one target through a variable would otherwise have every
+    other executable it ships silently excluded from consideration.
+    """
     root = Path(target_root)
     if build_system == "autotools":
         raw = _autotools_installed_programs(_manifest_texts(root, "Makefile.am"))
     elif build_system == "cmake":
-        raw = _cmake_installed_executables(_manifest_texts(root, "CMakeLists.txt"))
+        raw = _cmake_installed_executables(
+            _without_comments(text)
+            for text in _manifest_texts(root, "CMakeLists.txt")
+        )
     elif build_system == "meson":
-        raw = _meson_executables(_manifest_texts(root, "meson.build"))
+        raw = _meson_executables(
+            _without_comments(text)
+            for text in _manifest_texts(root, "meson.build")
+        )
     else:
         raw = []
     names: list[str] = []
     seen: set[str] = set()
+    complete = True
     for tok in raw:
         # Strip autotools $(EXEEXT) adornment and surrounding quotes.
         tok = tok.replace("$(EXEEXT)", "").strip().strip("'\"")
@@ -1133,10 +1215,24 @@ def declared_cli_names(target_root: str | os.PathLike, build_system: str) -> lis
         # Reject unresolved build-system variable references and anything
         # that is not a plain program name.
         if not re.fullmatch(r"[A-Za-z0-9._-]+", tok):
+            complete = False
             continue
         seen.add(tok)
         names.append(tok)
-    return names
+    # A computed name never reaches the loop above: the extractors match a
+    # literal, so the whole declaration is skipped rather than yielding a
+    # token to reject. Count the sites they could not read.
+    pattern = _UNRESOLVED_DECLARATION.get(build_system)
+    if pattern is not None:
+        manifest = _MANIFEST_FILES[build_system]
+        if any(
+            # `$(EXEEXT)` is an adornment on a name already read, not a name
+            # withheld, and the token loop above strips it for the same reason.
+            pattern.search(_without_comments(text).replace("$(EXEEXT)", ""))
+            for text in _manifest_texts(root, manifest)
+        ):
+            complete = False
+    return names, complete
 
 # ─── Threat-model seed lookup ───────────────────────────────────────────────
 #
@@ -1354,7 +1450,12 @@ def _cli_candidates(san_dir: Path, root: Path, build_system: str,
 
     The manifest pass is kept exclusive because the free scan cannot tell
     a project's own tool from the test drivers and benchmarks beside it —
-    only the manifests carry that distinction."""
+    only the manifests carry that distinction. It is exclusive only when the
+    manifests were read in full: a project that computes one target's name
+    hides every executable the extractor could not reach, and suppressing the
+    scan on that partial read left the rest of the build invisible to
+    bin/suggest-runner, which is what decides whether a program reads
+    attacker-supplied input. Resolved names still rank first."""
     if not san_dir.is_dir():
         return []
     found: list[str] = []
@@ -1365,12 +1466,13 @@ def _cli_candidates(san_dir: Path, root: Path, build_system: str,
             found.append(rel)
         return len(found) >= limit
 
-    for cand_name in declared_cli_names(root, build_system):
+    declared, complete = declared_cli_extraction(root, build_system)
+    for cand_name in declared:
         for m in _find_under(san_dir, name=cand_name):
             if (os.access(m, os.X_OK) and not _is_aux_build_path(m, san_dir)
                     and _binary_uses_sanitizer(m, sanitizer) and take(m)):
                 return found
-    if found:
+    if found and complete:
         return found
     # Filter to plausible CLI executables BEFORE capping the nm probes:
     # CMakeFiles/ alone can hold dozens of files, so capping first would

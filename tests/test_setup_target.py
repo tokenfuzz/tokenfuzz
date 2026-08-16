@@ -527,7 +527,13 @@ class SetupTargetTests(unittest.TestCase):
         )
         self.assertNotIn("ABI mismatch", refreshed.stdout)
 
-    def build_recipe(self, target: Path, sanitizer: str = "asan", executable: bool = True) -> Path:
+    def build_recipe(
+        self, target: Path, sanitizer: str = "asan", executable: bool = True,
+        body: str = "exit 0",
+    ) -> Path:
+        """A recipe that emits one stub program. `body` is its shell body, so a
+        test can build a program that reacts to its argument rather than the
+        default one that ignores it."""
         suffix = "" if sanitizer == "asan" else f"-{sanitizer}"
         recipe = target / ".audit" / f"build{suffix}.sh"
         recipe.parent.mkdir(parents=True, exist_ok=True)
@@ -536,7 +542,7 @@ class SetupTargetTests(unittest.TestCase):
             "import pathlib, sys\n"
             "build = pathlib.Path(sys.argv[2])\nbuild.mkdir(parents=True, exist_ok=True)\n"
             f"binary = build / {target.name!r}\n"
-            "binary.write_text('#!/bin/sh\\nexit 0\\n')\nbinary.chmod(0o755)\n"
+            f"binary.write_text('#!/bin/sh\\n' + {body!r} + '\\n')\nbinary.chmod(0o755)\n"
             f"(build / 'lib{target.name}.a').write_bytes(b'archive')\n",
             encoding="utf-8",
         )
@@ -624,6 +630,75 @@ class SetupTargetTests(unittest.TestCase):
         self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
         self.assertNotIn("materializing asan build", repeated.stdout)
         self.assertTrue(sentinel.is_file())
+
+    def test_an_invariant_runner_is_reported_and_never_rewritten(self) -> None:
+        """The diagnostic runs on the final config and only ever reports.
+
+        Placed inside the build verifier it could not reach an externally
+        configured binary, could not see a runner this same pass had just
+        selected, and its escalation branch was unreachable because
+        materialization only runs under --build. It also must not rewrite:
+        the probe sees exit status and output, so a parser that reads quietly
+        looks the same as one that never opened the file.
+        """
+        target = self.make_build_target("blindrunner")
+        self.build_recipe(target)
+        blind = target / "build-asan" / "blindrunner"
+        blind.parent.mkdir(parents=True, exist_ok=True)
+        blind.write_text("#!/bin/sh\necho fixed banner\n", encoding="utf-8")
+        blind.chmod(0o755)
+        config = self.config("blindrunner")
+        config.parent.mkdir(parents=True)
+        original = (
+            'target = "blindrunner"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/blindrunner"\n# REVIEWED_CONFIG\n'
+        )
+        config.write_text(original, encoding="utf-8")
+
+        process = self.setup(
+            "blindrunner", "--build", environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        output = process.stdout + process.stderr
+        self.assertIn("same exit status and output", output)
+        self.assertIn(
+            "bin/suggest-runner blindrunner --apply --force", output,
+            "the remediation named must be one that actually reselects",
+        )
+        self.assertNotIn(
+            "so crashes cannot be confirmed", output,
+            "an observation may not be restated as a categorical claim",
+        )
+        self.assertEqual(
+            original, config.read_text(encoding="utf-8"),
+            "the diagnostic must never rewrite configuration",
+        )
+
+    def test_a_runner_that_varies_with_its_input_is_not_reported(self) -> None:
+        target = self.make_build_target("readingrunner")
+        # The recipe emits the program, so the behaviour under test belongs
+        # there: one that opens its argument and reports whether it could
+        # varies with the testcase, which is what must not be reported.
+        self.build_recipe(
+            target, body='cat "$1" 2>&1 || echo "cannot open $1"',
+        )
+        config = self.config("readingrunner")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "readingrunner"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/readingrunner"\n',
+            encoding="utf-8",
+        )
+
+        process = self.setup(
+            "readingrunner", "--build", environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertNotIn(
+            "same exit status and output", process.stdout + process.stderr,
+        )
 
     def test_force_build_preserves_reviewed_config_and_recipe(self) -> None:
         target = self.make_build_target("reviewedbuild")

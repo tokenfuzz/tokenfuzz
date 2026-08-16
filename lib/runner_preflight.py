@@ -74,6 +74,102 @@ def capture_probe(
             return completed, output.read(max_bytes)
 
 
+def probe_signature(
+    result: subprocess.CompletedProcess, output: bytes, path: Path,
+) -> tuple[int, str]:
+    """One launch's observable behaviour, with the testcase path folded out.
+
+    Two launches that differ only in which path they were handed produce equal
+    signatures when nothing the program does observably depends on it — which
+    is weaker than never looking: a program that reads the file and prints
+    nothing compares equal too. Folding both the full path and the bare name
+    keeps a program that merely echoes its argument from looking like one that
+    used it.
+    """
+    rendered = output.decode("utf-8", errors="replace")
+    normalized = rendered.replace(str(path), "{TESTCASE}")
+    return result.returncode, normalized.replace(path.name, "{TESTCASE}")
+
+
+# What a black-box launch comparison can and cannot establish. Neither answer
+# proves the program read the file: one that only stat()s the path varies with
+# its existence, and one that reads it whole and prints nothing does not. These
+# name the observation, so no caller can mistake it for proof of consumption.
+OBSERVABLY_DEPENDS = "depends"
+OBSERVABLY_INVARIANT = "invariant"
+TESTCASE_UNKNOWN = "unknown"
+
+
+def testcase_verdict(
+    binary: Path, args: list[str], env: dict[str, str] | None = None,
+    *, seconds: int = 10,
+) -> str:
+    """Whether this launch's observable behaviour varies with its testcase.
+
+    A binary that never opens its input makes every CLI replay report CLEAN,
+    so a crash that reproduces by hand is recorded as gone. This is the cheap
+    portable check for that, and its limits are the reason it only ever
+    reports: exit status and output are all it sees, so a program that merely
+    stat()s the path counts as depending on it, and one that reads the file
+    whole while printing nothing counts as invariant. `OBSERVABLY_INVARIANT`
+    is therefore evidence worth acting on, never proof of an input-blind
+    runner, and no caller may rewrite configuration from it alone.
+
+    Three launches: the same input twice, then a path that is not there. The
+    repeat is what makes the third comparison mean anything — a benchmark
+    prints different timings every run, so it differs from the missing-input
+    launch for reasons that have nothing to do with reading it, and without
+    the repeat that reads as dependence on the input.
+    """
+    # The probe runs in a scratch cwd, so a relative program never execs and
+    # every launch fails identically — which reads as perfect agreement and
+    # would condemn every correct runner. Resolve before comparing anything.
+    binary = Path(binary).resolve()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        return TESTCASE_UNKNOWN
+    with tempfile.TemporaryDirectory(prefix="testcase-dependence-") as directory:
+        present = Path(directory) / "input.bin"
+        absent = Path(directory) / "missing-input.bin"
+        present.write_bytes(b"tokenfuzz invocation probe\n")
+
+        def expand(path: Path) -> list[str]:
+            return [
+                value.replace("{TESTCASE}", str(path)).replace(
+                    "{NULL_DEVICE}", os.devnull
+                )
+                for value in args
+            ]
+
+        signatures = []
+        for path in (present, present, absent):
+            try:
+                completed, output = capture_probe(
+                    [str(binary), *expand(path)], seconds, directory,
+                    65536, env,
+                )
+            except (OSError, subprocess.SubprocessError):
+                return TESTCASE_UNKNOWN
+            # 124 timed out; 126/127 never reached the program. A launch that
+            # did not run says nothing about what the program reads, and two
+            # of them agree trivially — the shape that made an early version
+            # of this check condemn every target at once.
+            if completed.returncode in (124, 126, 127):
+                return TESTCASE_UNKNOWN
+            if startup_failure_reason(completed.returncode, output):
+                return TESTCASE_UNKNOWN
+            signatures.append(probe_signature(completed, output, path))
+        if signatures[0] != signatures[1]:
+            return TESTCASE_UNKNOWN
+        if any(path.exists() for path in (absent,)):
+            # The program wrote to the path it was told to read. Whatever it
+            # is doing with its argument, it is not consuming it as input.
+            return TESTCASE_UNKNOWN
+        return (
+            OBSERVABLY_INVARIANT if signatures[0] == signatures[2]
+            else OBSERVABLY_DEPENDS
+        )
+
+
 def startup_failure_reason(
     returncode: int, output: bytes | str | None,
 ) -> str:

@@ -19,6 +19,7 @@ import build_materialize
 import build_lease
 import languages
 import runner_preflight
+import sanitizer
 import target_config
 import target_profile
 
@@ -573,6 +574,66 @@ class Setup:
                 f"startup:\n{failure}"
             )
 
+    def report_invariant_runners(self) -> None:
+        """Say when a configured runner's behaviour never varies with its input.
+
+        Such a binary can make `bin/run-<san> generic` report CLEAN whatever it
+        is given, so a crash that reproduces by hand is recorded as gone. The
+        probe that would have caught it only ever ran on *candidate* programs
+        at seed time, never on the value already in the file.
+
+        Diagnostic only, and deliberately so. Neither answer is proof: exit
+        status and output are all a portable probe sees, so a program that only
+        stat()s the path varies with it while never opening it, and a parser
+        that reads its input silently does not vary at all while still
+        crashing on a crafted testcase. Choosing a replacement is a semantic
+        judgement about which program is the project's input boundary rather
+        than a test driver, a benchmark or an internal tool, and neither this
+        probe nor the free executable scan can make it.
+
+        It runs here, after the builds and the runner bootstrap, so it reads
+        the configuration the audit will actually use — including a binary
+        outside the build tree, and one this same pass just selected.
+        """
+        if not self.toml.is_file():
+            return
+        config = target_config.Config(
+            slug=self.name, target_root=str(self.target_root),
+        )
+        try:
+            target_config.load_toml_into(config, self.toml)
+        except (OSError, ValueError):
+            return
+        if str(config.is_browser).lower() in {"1", "true"}:
+            return
+        for name in config.sanitizers_enabled or ["asan"]:
+            if sanitizer.generic_skips_testcase(name, os.environ):
+                continue
+            configured = config.sanitizer_bin(name)
+            if not configured or "FILL_ME" in configured:
+                continue
+            binary = Path(config.resolve_path(configured))
+            # bin/probe applies the argv template to a sanitizer binary only
+            # when no separate runner owns the invocation. Probing any other
+            # argv would judge a command the harness never runs.
+            args = (
+                list(config.runner_args)
+                if config.runner_args and not config.runner_bin
+                else ["{TESTCASE}"]
+            )
+            if runner_preflight.testcase_verdict(
+                binary, args, runner_preflight.runner_environment(config, name),
+            ) != runner_preflight.OBSERVABLY_INVARIANT:
+                continue
+            log(
+                f"WARN: {name}_bin {binary.name} produced the same exit status "
+                f"and output for a present and a missing testcase. That does "
+                f"not prove it ignores its input — a parser may read quietly — "
+                f"but a runner that truly ignores it reports CLEAN whatever "
+                f"the input, so confirm it consumes testcase contents. To "
+                f"reselect: bin/suggest-runner {self.name} --apply --force"
+            )
+
     def sanitizer_build_artifact_present(
         self,
         config: target_config.Config,
@@ -901,6 +962,7 @@ class Setup:
         self.language_build(config)
         self.sanitizer_builds(config)
         self.runner_bootstrap()
+        self.report_invariant_runners()
         print(f"\nNext steps:\n  1. Review output/{self.name}/target.toml.\n  2. Smoke-test with: bin/audit --target {self.requested_name} --backend <claude|codex|gemini|grok|oss> 1")
         return 0
 
