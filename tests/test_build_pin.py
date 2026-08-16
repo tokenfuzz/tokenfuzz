@@ -329,56 +329,20 @@ class DriftAccountingTests(unittest.TestCase):
         self.assertEqual("source_drift", cell["run_quality"])
         self.assertEqual(["parser.c"], cell["source_drift"]["paths"])
 
-    def test_harness_drift_is_recorded_beside_target_drift(self) -> None:
-        # The harness tree had no pin at all, so a run whose own code changed
-        # mid-flight published its cells as a clean comparison. It is not one:
-        # the long-lived process keeps the modules it imported at startup while
-        # its subprocesses read the edited files, so one cell can be audited by
-        # one revision and finalized by another.
-        (self.cell / ".run-quality").write_text("source_drift\n")
-        benchmark_runner._write_json(
-            self.cell / "harness-drift.json",
-            {
-                "observed_at": "2026-08-14T17:09:00+00:00",
-                "pinned": "0" * 64,
-                "observed": "1" * 64,
-            },
-        )
+    def test_editing_the_harness_mid_run_does_not_exclude_a_cell(self) -> None:
+        """Only the target's source and the build pin a cell's comparability.
+
+        Pinning the harness tree too excluded whole runs for ordinary
+        development on the checkout — a commit, a stash, even reverting to a
+        clean tree — and published those cells as measured zeros.
+        """
         cell = self._write("done")
-        self.assertEqual("source_drift", cell["run_quality"])
-        self.assertEqual("0" * 64, cell["harness_drift"]["pinned"])
-        self.assertNotIn("source_drift", cell)
+        self.assertEqual("clean", cell["run_quality"])
+        self.assertNotIn("harness_drift", cell)
 
     def test_unknown_quality_markers_are_still_ignored(self) -> None:
         (self.cell / ".run-quality").write_text("banana\n")
         self.assertEqual("clean", self._write("done")["run_quality"])
-
-    def test_a_drifted_harness_is_detected_before_a_cell_starts(self) -> None:
-        """The pre-cell and post-cell checks must give the same answer.
-
-        Checking only after a cell finished let the next cell launch seconds
-        after its predecessor had already recorded the drift, spending a full
-        wall-clock budget on a cell that could only end excluded.
-        """
-        with mock.patch.object(
-            benchmark_runner, "_harness_revision", return_value="1" * 64,
-        ):
-            drift = benchmark_runner._harness_drift("0" * 64)
-            agreed = benchmark_runner._harness_drift("1" * 64)
-            dry = benchmark_runner._harness_drift("0" * 64, dry_run=True)
-        self.assertEqual("0" * 64, drift["pinned"])
-        self.assertEqual("1" * 64, drift["observed"])
-        self.assertTrue(drift["observed_at"])
-        self.assertEqual({}, agreed, "an unchanged tree is not drift")
-        self.assertEqual({}, dry, "a dry run has no tree to compare")
-
-        with mock.patch.object(
-            benchmark_runner, "_harness_revision", return_value="",
-        ):
-            # git unavailable answers nothing; refusing cells on it would
-            # ground the run rather than protect the comparison.
-            self.assertEqual({}, benchmark_runner._harness_drift("0" * 64))
-        self.assertEqual({}, benchmark_runner._harness_drift(""))
 
     def test_a_rebuilt_tree_stops_the_next_cell(self) -> None:
         target = self.tmp / "target"
@@ -486,38 +450,16 @@ class ResumeAndSuffixTests(unittest.TestCase):
             "", benchmark_runner._source_pin_mismatch(previous, "s0"),
         )
 
-    def test_harness_revision_tracks_only_harness_bytes(self) -> None:
-        # `output/` and `targets/` carry tracked fixture config that a second
-        # backend's run legitimately rewrites. Untracked caches under lib are
-        # run by-products too. Neither may invalidate this run, while every
-        # edit to an already-dirty tracked harness file still must.
-        with tempfile.TemporaryDirectory(prefix="harness-revision-") as temp:
-            root = Path(temp)
-            (root / "lib").mkdir()
-            (root / "targets" / "sample").mkdir(parents=True)
-            (root / "lib" / "runner.py").write_text("revision = 1\n")
-            fixture = root / "targets" / "sample" / "target.toml"
-            fixture.write_text('target = "sample"\n')
-            _git_commit_all(root)
+    def test_a_recorded_harness_revision_no_longer_refuses(self) -> None:
+        """A run pinned before this was removed stays resumable.
 
-            baseline = benchmark_runner._harness_revision(root)
-            self.assertTrue(baseline)
-            fixture.write_text('target = "changed-by-peer"\n')
-            (root / "lib" / "cache.pyc").write_bytes(b"untracked")
-            self.assertEqual(baseline, benchmark_runner._harness_revision(root))
-
-            source = root / "lib" / "runner.py"
-            source.write_text("revision = 2\n")
-            first_edit = benchmark_runner._harness_revision(root)
-            source.write_text("revision = 3\n")
-            self.assertNotEqual(first_edit, benchmark_runner._harness_revision(root))
-
-    def test_recorded_harness_source_mismatch_refuses(self) -> None:
-        self.assertIn(
-            "harness source differs",
+        The harness pin is gone, so a `harness_revision` left in an older
+        run.json is inert rather than a reason to refuse the resume.
+        """
+        self.assertEqual(
+            "",
             benchmark_runner._source_pin_mismatch(
-                {"harness_revision": "h0"}, "h1",
-                field="harness_revision", subject="harness source",
+                {"source_signature": "s0", "harness_revision": "h0"}, "s0",
             ),
         )
 
