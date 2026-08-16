@@ -41,7 +41,9 @@ Extraction paths:
                event contract. `estimated` is false.
   recovered  — a terminal-less Claude stream is summed by stable message id.
                Cache buckets are measured; incomplete fresh-input/output
-               buckets make the whole row `estimated: true`.
+               buckets make the whole row `estimated: true`. A terminal-less
+               Codex stream is read from the rollout the session wrote while
+               running, which is measured and stays `estimated: false`.
   estimated  — when a backend reports no usage and a prompt file is supplied,
                tokens are estimated from character counts and the row is
                flagged `estimated: true`. Codex/Claude logs without usable
@@ -451,6 +453,96 @@ def _claude_per_request_usage(raw: str) -> tuple[dict, bool] | None:
     return totals, True
 
 
+def _codex_rollout_usage(raw: str) -> dict | None:
+    """Usage for every Codex thread in this transcript, from their rollouts.
+
+    `turn.completed` is the stream's only usage report, and the harness stops
+    half of a run's Codex sessions before it: both the turn soft cap and the
+    wall deadline end a session mid-turn, and a model-direct cell always ends
+    that way, so a whole audit priced as free. Codex writes a rollout per
+    thread as it runs, and its last `token_count` matched a finished session's
+    `turn.completed` usage field for field — measured, not estimated. It also
+    covers threads the stream never reported, which is why it is preferred
+    over the terminal events rather than used only as their fallback.
+
+    All or nothing per transcript: partial coverage cannot be added to stream
+    totals without double-counting the threads that appear in both, and a
+    rollout that was read but not used is the only surviving record of that
+    thread's spend. So unless every thread resolves, nothing is consumed and
+    nothing is deleted.
+
+    The residual is one in-flight request: counters land per completed
+    request, so a kill mid-request loses that request alone — under a percent
+    of a long session, against the whole session this recovers.
+    """
+    ids = []
+    for line in raw.splitlines():
+        if '"thread.started"' not in line:
+            continue
+        try:
+            event = json.loads(line.strip())
+        except ValueError:
+            continue
+        tid = event.get("thread_id") if isinstance(event, dict) else None
+        if isinstance(tid, str) and tid and tid not in ids:
+            ids.append(tid)
+    if not ids:
+        return None
+
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    resolved: dict[str, tuple[dict, list[Path]]] = {}
+    for tid in ids:
+        # Matched on the thread id this transcript reported, so a run never
+        # reads or removes another session's rollout.
+        paths = sorted(home.glob(f"sessions/**/rollout-*-{tid}.jsonl"))
+        for path in paths:
+            usage = _rollout_last_token_count(path)
+            if usage is not None:
+                resolved[tid] = (usage, paths)
+                break
+    if len(resolved) != len(ids):
+        return None
+
+    totals = dict.fromkeys(
+        ("input", "cached_input", "cache_creation", "cache_creation_1h", "output"), 0
+    )
+    for usage, paths in resolved.values():
+        totals["input"] += _first_int(usage, _INPUT_KEYS)
+        totals["cached_input"] += _cached_input_int(usage)
+        totals["cache_creation"] += _cache_write_int(usage)
+        totals["output"] += _first_int(usage, _OUTPUT_KEYS)
+        for path in paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    return totals
+
+
+def _rollout_last_token_count(path: Path) -> dict | None:
+    """The cumulative counters the rollout's last `token_count` carried."""
+    last = None
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if "token_count" not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                payload = event.get("payload") if isinstance(event, dict) else None
+                if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                    continue
+                info = payload.get("info")
+                usage = info.get("total_token_usage") if isinstance(info, dict) else None
+                if isinstance(usage, dict) and any(usage.values()):
+                    last = usage
+    except OSError:
+        return None
+    return last
+
+
 def extract_usage_from_text(
     raw: str,
     prompt_text: str = "",
@@ -461,6 +553,17 @@ def extract_usage_from_text(
     """Return a usage row from an already-read raw transcript."""
 
     reported_cost = 0.0
+
+    # Codex: the rollout covers every thread, including any the stream never
+    # reported, so it outranks the terminal events below. Codex streams carry
+    # no cost field, so returning here forfeits nothing.
+    if backend == "codex":
+        rollout = _codex_rollout_usage(raw)
+        if rollout is not None:
+            return {
+                "tokens": rollout, "probe": {}, "estimated": False,
+                "backend": backend,
+            }
 
     def with_reported_cost(row: dict) -> dict:
         if reported_cost > 0:
@@ -556,9 +659,11 @@ def extract_usage_from_text(
 
     # Fallback path B: no terminal event carried usage (agent killed before
     # emitting one, or a backend that only streams per-turn usage). The
-    # LAST non-zero usage object wins — a floor, not a proven total. A
-    # usage object that is all-zero is not real telemetry, so it does not
-    # displace an earlier real one.
+    # LAST non-zero usage object wins — one turn's counters standing in for
+    # the session, so the row is flagged estimated: the counters are real but
+    # the coverage is a floor, and reporting it as measured would publish an
+    # arbitrarily large undercount as an exact total. A usage object that is
+    # all-zero is not real telemetry, so it does not displace an earlier one.
     measured: dict | None = None
     for line in raw.splitlines():
         line = line.strip()
@@ -581,7 +686,7 @@ def extract_usage_from_text(
                 measured = candidate
     if measured is not None:
         return with_reported_cost({
-            "tokens": measured, "probe": {}, "estimated": False,
+            "tokens": measured, "probe": {}, "estimated": True,
             "backend": backend,
         })
 

@@ -878,9 +878,17 @@ def agent_flags(
         return flags
 
     if backend == "codex":
+        # Not --ephemeral: the stream reports usage only in `turn.completed`,
+        # which a session stopped at the turn cap or the wall deadline never
+        # emits, so the longest sessions in a run priced as free. Dropping it
+        # writes a rollout that carries those counters, and llm_usage deletes
+        # each one as it reads it. That trade is deliberate: between
+        # extraction and deletion, a full transcript of the audit sits in
+        # CODEX_HOME, and a killed harness leaves it there. Prompt history
+        # stays off, which --ephemeral did not control.
         flags = [
             "--json",
-            "--ephemeral",
+            "-c", 'history.persistence="none"',
             *_CODEX_PLUGIN_OFF_FLAGS,
             *_CODEX_PROJECT_ROOT_FLAGS,
             "--skip-git-repo-check",
@@ -1458,8 +1466,10 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         return flags
 
     if backend == "codex":
+        # Same rollout contract as an agent session above: a decision the
+        # timeout stops mid-turn would otherwise report no usage at all.
         flags = [
-            "--json", "--ephemeral",
+            "--json", "-c", 'history.persistence="none"',
             *_CODEX_PLUGIN_OFF_FLAGS, *_CODEX_PROJECT_ROOT_FLAGS,
             "--skip-git-repo-check", "--sandbox", "read-only",
         ]

@@ -1702,9 +1702,12 @@ def harvest_tokens(
             _int(tok.get("prompt_estimate"))
             or _int(tok.get("prompt_estimate_build"))
         )
-        if row.get("usage_complete") is False:
-            token_sources.add("unknown")
-        elif row.get("estimated") is True:
+        # Classify on whether the row CONTRIBUTED usage, not on how its
+        # invocation exited. `usage_complete` is false for every nonzero exit,
+        # including a timed-out session that still reported full counters and
+        # a backend-reported cost — that spend is in the total, so calling the
+        # total incomplete because of it marks a cell that is missing nothing.
+        if row.get("estimated") is True:
             token_sources.add("estimated")
         elif any((raw_input, cache_read, cache_creation, output, prompt_estimate)):
             token_sources.add("measured")
@@ -4342,15 +4345,23 @@ def _fmt_tokens(value: object) -> str:
     return f"{n / 1_000_000:.1f}M"
 
 
-def _fmt_bound(rendered: str, source: object) -> str:
-    """Mark known telemetry as a floor when some sessions are absent."""
-    if source == "unknown" and rendered != "—":
-        return f"≥{rendered}"
-    return rendered
+def _fmt_approx(rendered: str, source: object) -> str:
+    """One marker, one meaning: `~` says the figure is not exact.
+
+    A session that reported no usage omits its whole spend, so the total does
+    read low rather than merely imprecise — but a second prefix does not buy
+    that. It rendered as `≥~$46`, two warnings on one number, and reused `≥`
+    against the unjudged artifact remainder it already means elsewhere in the
+    report. The direction lives in the Source column, which names `unknown`
+    beside the figure, and in the legend.
+    """
+    if source != "unknown" or rendered in ("—", "") or rendered[0] == "~":
+        return rendered
+    return f"~{rendered}"
 
 
-def _fmt_token_bound(value: object, source: object) -> str:
-    return _fmt_bound(_fmt_tokens(value), source)
+def _fmt_token_approx(value: object, source: object) -> str:
+    return _fmt_approx(_fmt_tokens(value), source)
 
 
 def _fmt_input_cell(agg: dict) -> str:
@@ -4364,11 +4375,11 @@ def _fmt_input_cell(agg: dict) -> str:
     """
     measured = int(agg.get("input_tokens_total") or 0)
     if measured > 0:
-        return _fmt_token_bound(measured, agg.get("token_source"))
+        return _fmt_token_approx(measured, agg.get("token_source"))
     estimate = int(agg.get("prompt_estimate_tokens_total") or 0)
     if estimate > 0:
         return f"~{_fmt_tokens(estimate)}"
-    return _fmt_token_bound(measured, agg.get("token_source"))
+    return _fmt_token_approx(measured, agg.get("token_source"))
 
 
 def _fmt_output_cell(agg: dict) -> str:
@@ -4381,20 +4392,20 @@ def _fmt_output_cell(agg: dict) -> str:
     """
     measured = int(agg.get("output_tokens_total") or 0)
     if measured > 0:
-        return _fmt_token_bound(measured, agg.get("token_source"))
+        return _fmt_token_approx(measured, agg.get("token_source"))
     if int(agg.get("prompt_estimate_tokens_total") or 0) > 0:
         return "—"
-    return _fmt_token_bound(measured, agg.get("token_source"))
+    return _fmt_token_approx(measured, agg.get("token_source"))
 
 
-def _fmt_cost_bound(
+def _fmt_cost_approx(
     value: object, source: object, *, estimated: bool = False,
 ) -> str:
-    return _fmt_bound(_fmt_usd(value, estimated=estimated), source)
+    return _fmt_approx(_fmt_usd(value, estimated=estimated), source)
 
 
 def _fmt_cost_cell(agg: dict) -> str:
-    return _fmt_cost_bound(
+    return _fmt_cost_approx(
         agg.get("cost_usd_total"),
         agg.get("token_source"),
         estimated=bool(agg.get("cost_estimated"))
@@ -4414,7 +4425,7 @@ def _fmt_cost_compact_cell(agg: dict) -> str:
         bool(agg.get("cost_estimated"))
         or str(agg.get("token_source") or "") == "estimated"
     ) else ""
-    return _fmt_bound(f"{prefix}${amount:,}", agg.get("token_source"))
+    return _fmt_approx(f"{prefix}${amount:,}", agg.get("token_source"))
 
 
 def _fmt_hours(seconds: object) -> str:
@@ -4921,16 +4932,16 @@ def render_section(report: dict) -> str:
                         exp=exp_cell,
                         wall=_fmt_hours(row.get("wall_seconds")),
                         source=source,
-                        inp=_fmt_token_bound(row.get("input_tokens"), source),
-                        create=_fmt_token_bound(
+                        inp=_fmt_token_approx(row.get("input_tokens"), source),
+                        create=_fmt_token_approx(
                             row.get("cache_creation_tokens"), source,
                         ),
-                        cached=_fmt_token_bound(
+                        cached=_fmt_token_approx(
                             row.get("cached_input_tokens"), source,
                         ),
-                        out=_fmt_token_bound(row.get("output_tokens"), source),
+                        out=_fmt_token_approx(row.get("output_tokens"), source),
                         prompt=_fmt_tokens(row.get("prompt_estimate_tokens")),
-                        cost=_fmt_cost_bound(
+                        cost=_fmt_cost_approx(
                             row.get("cost_usd"),
                             source,
                             estimated=bool(
@@ -4954,14 +4965,14 @@ def render_section(report: dict) -> str:
                         sum(r.get("wall_seconds", 0) or 0 for r in rows)
                     ),
                     source=agg_source,
-                    inp=_fmt_token_bound(agg.get("input_tokens_total"), agg_source),
-                    create=_fmt_token_bound(
+                    inp=_fmt_token_approx(agg.get("input_tokens_total"), agg_source),
+                    create=_fmt_token_approx(
                         agg.get("cache_creation_tokens_total"), agg_source,
                     ),
-                    cached=_fmt_token_bound(
+                    cached=_fmt_token_approx(
                         agg.get("cached_input_tokens_total"), agg_source,
                     ),
-                    out=_fmt_token_bound(agg.get("output_tokens_total"), agg_source),
+                    out=_fmt_token_approx(agg.get("output_tokens_total"), agg_source),
                     prompt=_fmt_tokens(agg.get("prompt_estimate_tokens_total")),
                     cost=_fmt_cost_cell(agg),
                 )
@@ -4988,8 +4999,10 @@ def render_section(report: dict) -> str:
         lines.append(
             "> - **Cost** — USD-equivalent token cost at public provider "
             "rates: fresh input + cache writes + cache reads + output. "
-            "A `~` marks character-count estimates or reconstructed "
-            "per-request long-context tiers. "
+            "A `~` marks a figure that is not exact: character counts, a "
+            "reconstructed per-request long-context tier, one turn's counters "
+            "standing in for a session, or a session that reported no usage "
+            "at all — read **Source** to tell which. "
             "This is token cost, not separately metered provider tools, "
             "explicit cache storage, or non-standard service tiers. "
             "Codex rows use OpenAI API-equivalent dollars, including "
@@ -5009,11 +5022,11 @@ def render_section(report: dict) -> str:
         )
         lines.append(
             "> - **Source** — where the numbers came from: `measured` "
-            "(backend telemetry), `estimated` (character counts), "
-            "`unknown` (at least one session had no usage signal), "
-            "`mixed` across cells. With `unknown`, displayed token and cost "
-            "totals include only sessions with telemetry and carry `≥` as "
-            "lower bounds."
+            "(backend telemetry), `estimated` (character counts or a "
+            "partial-coverage floor), `unknown` (a session reported no usage "
+            "at all, so the total is missing its whole spend and reads low), "
+            "`mixed` across cells. A nonzero exit that still reported "
+            "counters is `measured` — that spend is in the total."
         )
         lines.append("")
 

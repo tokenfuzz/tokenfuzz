@@ -154,12 +154,31 @@ Backends report differently. A normally completed Claude, Codex, or Google
 Gemini CLI session emits terminal counts. Gemini's native turn-limit result
 also retains those counts. If Claude is stopped before its terminal event, the
 harness recovers exact cache buckets from its per-request events but marks the
-row `estimated: true` because fresh input and output remain lower bounds. A
-terminated Codex session with no usage stays unknown. Antigravity and Grok rows
-without native usage are estimated from prompt and transcript size.
-When a cell's source is `unknown`, its displayed token and cost totals include
-only sessions with telemetry and carry `≥` as lower bounds, not complete
-totals.
+row `estimated: true` because fresh input and output remain lower bounds.
+Codex reports usage only in `turn.completed`, which a session stopped at the
+turn cap or the wall deadline never emits. The harness therefore runs Codex
+without `--ephemeral` and reads the session rollout instead; its last
+`token_count` is measured, and it covers every thread rather than only the
+ones that finished. Where a backend leaves only one turn's counters standing
+in for a session, that row is flagged estimated — the counters are real, the
+coverage is a floor. Antigravity and Grok rows without native usage are
+estimated from prompt and transcript size.
+
+Each rollout is deleted as it is read, but this is not the same as
+`--ephemeral`, which suppressed the file outright:
+
+- between the session ending and extraction, a full transcript of the audit —
+  prompts, messages, tool activity — sits under `CODEX_HOME`;
+- a harness killed in that window, or an unreadable rollout, leaves the file
+  in place. Treat `CODEX_HOME/sessions` as audit-sensitive, and sweep it after
+  an aborted run.
+
+A cell's source is `unknown` only when a session reported no usage at all —
+not when a session exited nonzero after reporting it. An `unknown` total is
+missing that session's whole spend and reads low. Token and cost figures
+carry at most one marker, `~`, meaning "not exact"; the `Source` column beside
+them says which reason applies. `≥` is reserved for the unjudged remainder on
+finding and crash counts, so the two never appear on one number.
 
 One-shot harness decisions use the same ledger. Claude, Codex, native Gemini,
 and OpenCode keep their structured usage transport, then separate the

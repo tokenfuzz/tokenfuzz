@@ -1046,7 +1046,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIsNone(benchmark.reset_ledger(ledger, hard=True))
         self.assertFalse(ledger.exists())
 
-    def test_unknown_token_source_renders_known_totals_as_lower_bounds(self) -> None:
+    def test_unknown_token_source_marks_totals_with_one_marker(self) -> None:
         bench = self.root / "bench-unknown-tokens"
         self.write_json(bench / "run.json", {
             "runid": "run1", "target": "sample", "backend": "codex",
@@ -1059,8 +1059,34 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
         section = benchmark.render_section(benchmark.aggregate(bench))
         self.assertIn("| unknown |", section)
-        self.assertGreaterEqual(section.count("≥111"), 2)
-        self.assertIn("carry `≥` as lower bounds", section)
+        self.assertGreaterEqual(section.count("~111"), 2)
+        # Token and cost figures carry at most one marker. `≥` keeps its one
+        # meaning in this report — the unjudged artifact remainder — and must
+        # never reach a token or cost number.
+        self.assertNotIn("≥111", section)
+        self.assertNotIn("≥~", section)
+        self.assertNotIn("~~", section)
+        self.assertIn("reads low", section)
+
+    def test_estimated_cost_keeps_one_marker_when_a_session_is_also_missing(self) -> None:
+        bench = self.root / "bench-estimated-and-unknown"
+        self.write_json(bench / "run.json", {
+            "runid": "run1", "target": "sample", "backend": "codex",
+            "conditions": ["harness"], "replicates": 1,
+        })
+        cell = self.make_cell(bench, "harness-r1", "harness", 1, 1)
+        metrics = json.loads((cell / "metrics.json").read_text())
+        metrics["tokens"]["token_source"] = "unknown"
+        metrics["tokens"]["cost_estimated"] = True
+        metrics["tokens"]["cost_usd"] = "12.5"
+        self.write_json(cell / "metrics.json", metrics)
+
+        section = benchmark.render_section(benchmark.aggregate(bench))
+        rows = [ln for ln in section.splitlines() if ln.startswith("|")]
+        self.assertTrue(any("$12.5" in ln for ln in rows), rows)
+        for row in rows:
+            self.assertNotIn("~~", row)
+            self.assertNotIn("≥", row, "no floor mark on a token or cost figure")
 
     def test_pool_and_split_preserve_condition_membership_and_rejections(self) -> None:
         bench = self.root / "pool-bench"

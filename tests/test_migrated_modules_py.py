@@ -181,14 +181,17 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "mixed", usage_me["token_source"],
         "measured+estimated stays 'mixed', distinct from a missing session",
     )
-    incomplete_decision = root / "incomplete-decision-usage.jsonl"
-    incomplete_decision.write_text(
+    # A nonzero exit sets usage_complete=false even when the backend reported
+    # its full counters and cost first. That spend IS in the total, so the
+    # cell is measured — marking it unknown flagged cells missing nothing.
+    nonzero_exit = root / "nonzero-exit-usage.jsonl"
+    nonzero_exit.write_text(
         '{"backend":"claude","usage_complete":false,'
         '"tokens":{"input":10,"output":2}}\n', encoding="utf-8",
     )
     equal(
-        "unknown", __import__("benchmark").harvest_tokens(incomplete_decision)["token_source"],
-        "partial decision telemetry keeps the cell total explicitly unknown",
+        "measured", __import__("benchmark").harvest_tokens(nonzero_exit)["token_source"],
+        "a nonzero exit that still reported usage keeps the cell measured",
     )
     check(
         not llm_usage.usage_is_complete(

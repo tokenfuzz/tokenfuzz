@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -245,6 +247,133 @@ class UsageExtractionTests(unittest.TestCase):
         self.assertEqual(row["tokens"]["cached_input"], 1_000)
         self.assertGreater(row["tokens"]["output"], 2_000)
         self.assertTrue(row["estimated"])
+
+    def rollout(self, home: Path, tid: str, *totals: dict) -> Path:
+        path = home / "sessions" / "2026" / "08" / "16" / f"rollout-2026-08-16T01-02-03-{tid}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(
+            json.dumps({"type": "event_msg", "payload": {
+                "type": "token_count", "info": {"total_token_usage": total},
+            }}) + "\n" for total in totals
+        ), encoding="utf-8")
+        return path
+
+    def test_interrupted_codex_session_recovers_usage_from_its_rollout(self) -> None:
+        # Codex reports usage only in `turn.completed`, which a session
+        # stopped at the turn cap or the wall deadline never emits. Scoring
+        # those zero priced a model-direct cell's entire audit as free.
+        raw = self.fixture("codex-capped.raw", [
+            {"type": "thread.started", "thread_id": "thread-a"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"type": "command_execution"}},
+        ])
+        home = self.root / "codex-home"
+        consumed = self.rollout(
+            home, "thread-a",
+            {"input_tokens": 10, "cached_input_tokens": 4, "output_tokens": 1},
+            {"input_tokens": 900, "cached_input_tokens": 700,
+             "cache_write_input_tokens": 50, "output_tokens": 42},
+        )
+        untouched = self.rollout(
+            home, "thread-b", {"input_tokens": 1, "output_tokens": 1},
+        )
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            row = llm_usage.extract_usage(str(raw), backend="codex")
+
+        # The last token_count is the thread's cumulative total, not a delta.
+        self.assertEqual(row["tokens"]["input"], 900)
+        self.assertEqual(row["tokens"]["cached_input"], 700)
+        self.assertEqual(row["tokens"]["cache_creation"], 50)
+        self.assertEqual(row["tokens"]["output"], 42)
+        self.assertFalse(row["estimated"], "rollout counters are measured")
+        self.assertFalse(consumed.exists(), "the rollout is deleted once read")
+        self.assertTrue(untouched.exists(), "another thread's rollout is left alone")
+
+    def test_codex_sums_every_thread_including_the_interrupted_one(self) -> None:
+        # One transcript, two threads: A finished and reported a terminal
+        # event, B was interrupted and exists only in its rollout. Preferring
+        # the terminal events dropped B's spend AND deleted the only record
+        # of it, so the rollout outranks them and every thread is summed.
+        raw = self.fixture("codex-mixed.raw", [
+            {"type": "thread.started", "thread_id": "thread-a"},
+            {"type": "turn.completed", "usage": {"input_tokens": 100}},
+            {"type": "thread.started", "thread_id": "thread-b"},
+            {"type": "item.completed", "item": {"type": "command_execution"}},
+        ])
+        home = self.root / "codex-home-mixed"
+        a = self.rollout(home, "thread-a", {"input_tokens": 100, "output_tokens": 5})
+        b = self.rollout(home, "thread-b", {"input_tokens": 200, "output_tokens": 7})
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            row = llm_usage.extract_usage(str(raw), backend="codex")
+
+        self.assertEqual(row["tokens"]["input"], 300)
+        self.assertEqual(row["tokens"]["output"], 12)
+        self.assertFalse(a.exists())
+        self.assertFalse(b.exists())
+
+    def test_partial_rollout_coverage_keeps_the_stream_and_destroys_nothing(self) -> None:
+        # Half the threads resolved cannot be added to stream totals without
+        # double-counting, and a rollout read but unused is the last record of
+        # that thread — so nothing is consumed and nothing is deleted.
+        raw = self.fixture("codex-partial.raw", [
+            {"type": "thread.started", "thread_id": "thread-a"},
+            {"type": "turn.completed", "usage": {"input_tokens": 100}},
+            {"type": "thread.started", "thread_id": "thread-missing"},
+        ])
+        home = self.root / "codex-home-partial"
+        kept = self.rollout(home, "thread-a", {"input_tokens": 100, "output_tokens": 5})
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            row = llm_usage.extract_usage(str(raw), backend="codex")
+
+        self.assertEqual(row["tokens"]["input"], 100)
+        self.assertTrue(kept.exists(), "an unused rollout is evidence, not litter")
+
+    def test_unreadable_rollout_is_not_silently_consumed(self) -> None:
+        raw = self.fixture("codex-bad-rollout.raw", [
+            {"type": "thread.started", "thread_id": "thread-x"},
+        ])
+        home = self.root / "codex-home-bad"
+        bad = self.rollout(home, "thread-x")   # no token_count events at all
+        bad.write_text("not json at all\n", encoding="utf-8")
+
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            row = llm_usage.extract_usage(str(raw), backend="codex")
+
+        self.assertEqual(sum(row["tokens"].values()), 0)
+        self.assertTrue(bad.exists(), "a rollout we could not read is left in place")
+
+    def test_missing_codex_rollout_leaves_the_session_unknown(self) -> None:
+        raw = self.fixture("codex-norollout.raw", [
+            {"type": "thread.started", "thread_id": "thread-d"},
+            {"type": "item.completed", "item": {"type": "command_execution"}},
+        ])
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.root / "absent")}):
+            row = llm_usage.extract_usage(str(raw), backend="codex")
+        self.assertEqual(row["tokens"]["input"], 0)
+        self.assertFalse(llm_usage.usage_is_complete(row, 0))
+
+    def test_nonterminal_counters_are_a_floor_not_a_measurement(self) -> None:
+        # One turn's counters standing in for a whole session can undercount
+        # by orders of magnitude; reporting that as measured publishes it as
+        # an exact total.
+        raw = self.fixture("gemini-partial.raw", [
+            {"type": "message", "usage": {"input_tokens": 10, "output_tokens": 1}},
+            {"type": "message", "usage": {"input_tokens": 20, "output_tokens": 3}},
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="gemini")
+        self.assertEqual(row["tokens"]["input"], 20)
+        self.assertTrue(row["estimated"], "partial coverage is not a measurement")
+
+    def test_codex_flags_persist_the_rollout_but_not_prompt_history(self) -> None:
+        import llm_invoke
+
+        for flags in (llm_invoke.agent_flags("codex", max_turns=0),
+                      llm_invoke.decide_flags("codex")):
+            self.assertNotIn("--ephemeral", flags, "the rollout is the usage source")
+            self.assertIn('history.persistence="none"', flags)
 
     def test_terminal_model_usage_still_wins_over_per_request_sum(self) -> None:
         raw = self.fixture("complete.raw", [
