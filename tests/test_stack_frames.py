@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import sys
 from pathlib import Path
 
@@ -546,6 +548,119 @@ _scrubbed = (
 ok(
     len(stack_frames.leading_inline_group(_scrubbed)) == 1,
     "leading_inline_group does not group on a scrubbed <addr> placeholder",
+)
+
+# ── memory-safety class vocabulary ───────────────────────────────────────
+# Every consumer kept its own alternation and all of them omitted
+# `stack-buffer-underflow`, so a crash that replayed 5/5 was scored a fault
+# mismatch and never reached a verdict. The grammar branches are what keep the
+# next class ASan emits from being invisible the same way.
+# Derived from the vocabulary itself, so a name can never be admitted without
+# a test proving it resolves. `<fn>-param-overlap` is the one constructed form
+# and is probed through real interceptor names.
+_LITERALS = [
+    _name for _name in stack_frames.MEMORY_SAFETY_CLASS_PATTERN.split("|")
+    if "[a-z]+" not in _name
+] + ["strcpy-param-overlap", "memcpy-param-overlap", "strcat-param-overlap"]
+ok(len(_LITERALS) >= 22, f"vocabulary is non-trivial ({len(_LITERALS)} names)")
+for _class in _LITERALS:
+    ok(
+        stack_frames.memory_safety_class(
+            f"==1==ERROR: AddressSanitizer: {_class} on address 0x602000000010"
+        ) == _class,
+        f"memory_safety_class recognizes {_class}",
+    )
+
+# Names no ASan runtime prints. Accepting a composed name buys no recall and
+# widens what untrusted target output can pass off as corruption.
+for _class in (
+    "heap-buffer-underflow", "global-buffer-underflow", "stack-use-after-free",
+    "dynamic-heap-buffer-overflow", "heap-use-after-scope",
+):
+    ok(
+        stack_frames.memory_safety_class(
+            f"==1==ERROR: AddressSanitizer: {_class} on address 0x1"
+        ) is None,
+        f"memory_safety_class does not invent {_class}",
+    )
+
+# A null dereference, a stack exhaustion and an allocator limit are separate
+# dispositions, not memory corruption: admitting them here would let the
+# replay gate treat a DoS as a corruption reproduction.
+for _class in ("SEGV", "stack-overflow", "allocation-size-too-big"):
+    ok(
+        stack_frames.memory_safety_class(
+            f"==1==ERROR: AddressSanitizer: {_class} on address 0x0"
+        ) is None,
+        f"memory_safety_class excludes {_class}",
+    )
+
+# Prose in a report may name a class it did not observe. Only the runtime's own
+# announcement counts, so a claim cannot mint a corruption class.
+# Only the runtime's own headline counts. A report that merely discusses a
+# class, or a mid-line mention, must not mint one: this gate admits crashes.
+for _prose in (
+    "we ruled out AddressSanitizer: heap-use-after-free entirely",
+    "The report says AddressSanitizer: stack-buffer-underflow was expected",
+    "AddressSanitizer:stack-buffer-underflow",
+    "No AddressSanitizer report; a heap-use-after-free was ruled out.",
+):
+    ok(
+        stack_frames.memory_safety_class(_prose) is None,
+        f"memory_safety_class rejects prose: {_prose[:44]}",
+    )
+
+# Both headline shapes the runtime actually prints still resolve.
+ok(
+    stack_frames.memory_safety_class(
+        "==31337==ERROR: AddressSanitizer: stack-buffer-underflow on address 0x1"
+    ) == "stack-buffer-underflow",
+    "memory_safety_class reads the ERROR headline",
+)
+ok(
+    stack_frames.memory_safety_class(
+        "SUMMARY: AddressSanitizer: stack-buffer-underflow valid.c:979 in app_fmt"
+    ) == "stack-buffer-underflow",
+    "memory_safety_class reads the SUMMARY headline",
+)
+
+# The vocabulary decides membership; three downstream consumers each answer a
+# different question about the same class. A cleanup that keeps the replay gate
+# working while breaking clustering, scoring or presentation must fail here.
+_UNDERFLOW = (
+    "==4242==ERROR: AddressSanitizer: stack-buffer-underflow on address 0x16d90a7df\n"
+    "READ of size 1 at 0x16d90a7df thread T0\n"
+    "    #0 0x10a in app_fmt src/valid.c:979\n"
+    "SUMMARY: AddressSanitizer: stack-buffer-underflow src/valid.c:979 in app_fmt\n"
+)
+def _load_bin(name: str):
+    """Load an extensionless bin/ script the way tests/test_severity.py does."""
+    loader = importlib.machinery.SourceFileLoader(
+        f"tokenfuzz_{name.replace('-', '_')}", str(ROOT / "bin" / name)
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    loader.exec_module(module)
+    return module
+
+
+ok(
+    _load_bin("cluster-crashes").PRIMITIVE_RE.search(_UNDERFLOW).group(1)
+    == "stack-buffer-underflow",
+    "cluster-crashes reads the underflow as its own primitive",
+)
+
+_primitive, _ = _load_bin("severity").detect_primitive(_UNDERFLOW, _UNDERFLOW)
+ok(
+    _primitive == "stack_read",
+    f"severity scores the underflow in the stack tier (got {_primitive})",
+)
+
+ok(
+    _load_bin("render-md")._PRIMITIVE_CATEGORY.get("stack-buffer-underflow")
+    == "bounds",
+    "render-md presents the underflow as a bounds bug",
 )
 
 if FAILED:

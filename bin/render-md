@@ -1610,10 +1610,17 @@ _DEDUP_FRAMES_LINE_RE = re.compile(
     re.MULTILINE,
 )
 _LOC_SUFFIX_RE = re.compile(r"^(?P<func>.+?)\s+(?P<loc>\S+:\d+(?::\d+)?)$")
+# Presentation categories, not the corruption-membership set in
+# stack_frames.MEMORY_SAFETY_CLASS_PATTERN: this map also carries
+# finding-side classes that no sanitizer emits, and several sanitizers
+# beyond ASan. It shares that set's rule on which ASan names exist.
 _PRIMITIVE_CATEGORY = {
     "heap-buffer-overflow": "bounds",
     "stack-buffer-overflow": "bounds",
+    # ASan prints an underflow name for the stack region only.
+    "stack-buffer-underflow": "bounds",
     "global-buffer-overflow": "bounds",
+    "dynamic-stack-buffer-overflow": "bounds",
     "heap-use-after-free":  "lifetime",
     "stack-use-after-return": "lifetime",
     "use-after-free":       "lifetime",

@@ -1379,12 +1379,18 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
             # failure).
             return "unmeasured", 0, runs, measured
         if crashes:
+            # Reproduction answers one question: did the same fault happen
+            # again? `_same_fault` already requires the sanitizer family, the
+            # primitive and the source site where one is available, so nothing
+            # else is needed to settle it. Whether that fault is admissible —
+            # a memory-safety class, an autodiscard class, in the threat model
+            # — is the crash gate's call, and asking it here made a
+            # reproduction that matched 5/5 report as a mismatch whenever the
+            # class was missing from an allowlist. It also routed an
+            # auto-rejected class into finding adjudication instead of the
+            # terminal crash rejection triage_one_crash already gives it.
             crashes = _runs_reproducing(original, measured)
-            if (
-                not crashes
-                or triage.autodiscard_reason(measured)
-                or not triage._has_memory_safety_signal(measured)
-            ):
+            if not crashes:
                 # The replay crashed, but not with the original's fault. That
                 # is evidence about the crash, not a failure to run it.
                 return "mismatch", 0, runs, measured

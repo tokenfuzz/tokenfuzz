@@ -84,6 +84,70 @@ def has_sanitizer_diagnostic(text: str) -> bool:
     return bool(SANITIZER_SIGNATURE_RE.search(text or ""))
 
 
+# Canonical ASan memory-corruption class vocabulary, and the single source of
+# truth for "which ASan class is memory corruption". Four consumers each kept
+# their own list — the replay gate in lib/triage.py, the clustering primitive
+# in bin/cluster-crashes, the severity tiers in bin/severity, and the category
+# map in bin/render-md — and `stack-buffer-underflow` was absent from all four,
+# so a crash reproducing 5/5 was scored as a fault mismatch and never reached a
+# verdict.
+#
+# These are exact strings, not a grammar. The runtime picks a fixed
+# description per bug kind, so the tempting shorthands compose names ASan never
+# prints — there is no `heap-buffer-underflow`, `global-buffer-underflow`,
+# `stack-use-after-free` or `dynamic-heap-*`, and inventing them only widens
+# what untrusted target output can pass off as a crash. `<fn>-param-overlap` is
+# the sole constructed form, built from one format string with the intercepted
+# function's name, so it stays a pattern.
+#
+# Verified against the shipped runtime, which is the authority on spelling:
+#   strings libclang_rt.asan_osx_dynamic.dylib
+# That check settles which names exist, not which ones belong here. Membership
+# is this harness's policy, and every consumer downstream — severity's region
+# and read/write tiers, the renderer's category, the crash gate's admission —
+# needs a deliberate answer for each name. So the set is exactly the one that
+# predates this vocabulary plus `stack-buffer-underflow`, which is the stack
+# overflow's mirror and already has all three. `stack-overflow` (exhaustion),
+# `SEGV` (null dereference), `allocation-size-too-big` (allocator limit) and
+# `initialization-order-fiasco` (an initialization-order diagnostic that no
+# severity tier or category covers) are deliberately absent. Adding one is a
+# policy change: give it a severity tier, a category and a test in the same
+# commit, or leave it out.
+MEMORY_SAFETY_CLASS_PATTERN = (
+    r"heap-buffer-overflow|stack-buffer-overflow|stack-buffer-underflow"
+    r"|global-buffer-overflow|dynamic-stack-buffer-overflow"
+    r"|heap-use-after-free|use-after-free|stack-use-after-return"
+    r"|stack-use-after-scope|use-after-poison"
+    r"|container-overflow|intra-object-overflow|alloc-dealloc-mismatch"
+    r"|double-free|bad-free|free-size-mismatch|new-delete-type-mismatch"
+    r"|negative-size-param|calloc-overflow|reallocarray-overflow"
+    r"|pvalloc-overflow|invalid-pointer-pair"
+    r"|[a-z]+-param-overlap"
+)
+
+# Only the runtime's own headline counts. Matching a bare `AddressSanitizer:`
+# anywhere let a report that merely discusses a class ("we ruled out
+# AddressSanitizer: heap-use-after-free") mint one, and this decides crash
+# admission and replay classification — bin/severity already anchors its own
+# read of the same text for exactly this reason.
+MEMORY_SAFETY_CLASS_RE = re.compile(
+    r"^[ \t]*(?:==\d+==)?(?:ERROR|SUMMARY):\s+AddressSanitizer:\s+"
+    r"(" + MEMORY_SAFETY_CLASS_PATTERN + r")\b",
+    re.MULTILINE,
+)
+
+
+def memory_safety_class(text: str) -> str | None:
+    """The ASan memory-corruption class *text* announces, or None.
+
+    Use this instead of re-spelling an alternation: a consumer with its own
+    list goes stale silently, and a class missing from one consumer but present
+    in another makes the same crash cluster, score and adjudicate differently.
+    """
+    found = MEMORY_SAFETY_CLASS_RE.search(text or "")
+    return found.group(1) if found else None
+
+
 _DIAGNOSTIC_CLOSE_RE = re.compile(
     r"^\s*(?:==\d+==)?SUMMARY:\s", re.IGNORECASE,
 )

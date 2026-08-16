@@ -52,14 +52,9 @@ _RUNTIME_DIAGNOSTIC = re.compile(
     r"|^PHP Fatal error:|^Fatal error:|^Uncaught \w+Error:",
     re.MULTILINE,
 )
-_MEMORY_SAFETY = re.compile(
-    r"AddressSanitizer: (?:heap-buffer-overflow|(?:heap-)?use-after-free|use-after-poison|container-overflow"
-    r"|dynamic-stack-buffer-overflow|stack-buffer-overflow|stack-use-after-return"
-    r"|stack-use-after-scope|global-buffer-overflow|alloc-dealloc-mismatch"
-    r"|intra-object-overflow|double-free|negative-size-param|bad-free|calloc-overflow"
-    r"|reallocarray-overflow|pvalloc-overflow|new-delete-type-mismatch"
-    r"|free-size-mismatch|invalid-pointer-pair|[a-z]+-param-overlap)"
-)
+# The ASan half is answered by the shared vocabulary in lib/stack_frames.py: a
+# private copy here went stale against the runtime and cost a reproducing crash
+# its verdict.
 _OTHER_MEMORY_SAFETY = re.compile(
     r"WARNING: ThreadSanitizer: (?:data race|heap-use-after-free)"
     r"|WARNING: MemorySanitizer: use-of-uninitialized-value"
@@ -171,7 +166,7 @@ def _runtime_only_diagnostic(text: str, findings_only: bool) -> bool:
 
 def autodiscard_reason(text: str) -> str:
     if (
-        _MEMORY_SAFETY.search(text)
+        stack_frames.memory_safety_class(text)
         or _OTHER_MEMORY_SAFETY.search(text)
         or _ubsan_class(text) == "security"
     ):
@@ -1746,7 +1741,7 @@ def _ubsan_class(text: str) -> str:
 
 def _has_memory_safety_signal(text: str) -> bool:
     return bool(
-        _MEMORY_SAFETY.search(text)
+        stack_frames.memory_safety_class(text)
         or _OTHER_MEMORY_SAFETY.search(text)
         or _ubsan_class(text) == "security"
     )

@@ -34,6 +34,16 @@ DIAGNOSTIC = (
 )
 
 
+# ASan's own name for an access before a stack object. It was absent from
+# every consumer's class list, so a replay that reproduced it 5/5 was scored a
+# fault mismatch and the crash never reached a verdict.
+UNDERFLOW = (
+    "==4242==ERROR: AddressSanitizer: stack-buffer-underflow on address 0x16d90a7df\n"
+    "READ of size 1 at 0x16d90a7df thread T0\n"
+    "SUMMARY: AddressSanitizer: stack-buffer-underflow valid.c:979 in app_fmt\n"
+)
+
+
 SANITIZER_DIAGNOSTICS = {
     "ubsan": (
         "src/parse.c:91:17: runtime error: index 12 out of bounds "
@@ -134,6 +144,20 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 "raise SystemExit(1)\n"
             ),
             "clean": "print('ran clean')\n",
+            "exhaustion-crash": (
+                "print('==4242==ERROR: AddressSanitizer: stack-overflow "
+                "on address 0x16ef7ffc0')\n"
+                "print('SUMMARY: AddressSanitizer: stack-overflow "
+                "valid.c:100 in app_walk')\n"
+                "raise SystemExit(1)\n"
+            ),
+            "underflow-crash": (
+                "print('==4242==ERROR: AddressSanitizer: stack-buffer-underflow "
+                "on address 0x16d90a7df')\n"
+                "print('SUMMARY: AddressSanitizer: stack-buffer-underflow "
+                "valid.c:979 in app_fmt')\n"
+                "raise SystemExit(1)\n"
+            ),
             "invalid": "print('usage: missing required option', file=sys.stderr)\nraise SystemExit(2)\n",
             "flag-crash": (
                 "if '--boom' in sys.argv[1:]:\n"
@@ -165,10 +189,12 @@ class BenchmarkReverifyTests(unittest.TestCase):
         executable.chmod(0o755)
         return target, slug
 
-    def make_crash(self, name: str, *, footer: str = "") -> Path:
+    def make_crash(
+        self, name: str, *, footer: str = "", diagnostic: str = DIAGNOSTIC,
+    ) -> Path:
         crash = self.root / name / "crashes" / "CRASH-0001"
         crash.mkdir(parents=True)
-        (crash / "sanitizer.txt").write_text(DIAGNOSTIC + footer, encoding="utf-8")
+        (crash / "sanitizer.txt").write_text(diagnostic + footer, encoding="utf-8")
         (crash / "poc.bin").write_bytes(b"sample-bytes\n")
         return crash
 
@@ -427,6 +453,50 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 results, target, slug, workers=1, require_replay=True,
             )
         return counts, captured["held"]
+
+    def test_a_reproducing_underflow_is_not_scored_a_fault_mismatch(self) -> None:
+        """The replay path, end to end, on the class that was missing.
+
+        The rate and the fault site both matched 5/5, but the transcript was
+        not recognised as memory-safety evidence, so `attempt` returned
+        `mismatch` and the crash published as an unjudged remainder instead of
+        a reproduction. Asserting the class helper alone would not have caught
+        that: the loss happened one layer up, where the rate and the class are
+        combined.
+        """
+        target, slug = self.make_target(
+            "underflow-target", "underflow-crash",
+        )
+        crash = self.make_crash("underflow", diagnostic=UNDERFLOW)
+        with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}):
+            measured = self.reverify(crash.parent.parent, target, slug)
+        self.assertEqual(measured, 1, "the replay must count as measured")
+        text = (crash / "sanitizer.txt").read_text()
+        self.assertIn("CRASH_RATE: 5/5", text)
+        self.assertIn("reproduced in 5/5 reverification runs", text)
+
+    def test_reproduction_is_measured_before_admission_is_decided(self) -> None:
+        """Replay answers "same fault again?", not "is this admissible?".
+
+        Folding the crash gate's own class policy into the reproduction check
+        made a replay that matched the original 5/5 report as a fault mismatch
+        whenever the class sat outside an allowlist, and sent an auto-rejected
+        class into finding adjudication instead of the terminal crash rejection
+        triage_one_crash already gives it. Stack exhaustion is such a class: it
+        reproduces here, and the rate says so.
+        """
+        target, slug = self.make_target(
+            "exhaustion-target", "exhaustion-crash",
+        )
+        exhaustion = (
+            "==4242==ERROR: AddressSanitizer: stack-overflow on address 0x16ef7ffc0\n"
+            "SUMMARY: AddressSanitizer: stack-overflow valid.c:100 in app_walk\n"
+        )
+        crash = self.make_crash("exhaustion", diagnostic=exhaustion)
+        with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}):
+            measured = self.reverify(crash.parent.parent, target, slug)
+        self.assertEqual(measured, 1, "a matching fault is a measurement")
+        self.assertIn("CRASH_RATE: 5/5", (crash / "sanitizer.txt").read_text())
 
     def test_an_unresolved_replay_contract_never_demotes_a_reproducer(self) -> None:
         # export-repro migrates the compiled harness into .audit/, and the

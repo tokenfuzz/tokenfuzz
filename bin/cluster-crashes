@@ -94,21 +94,18 @@ def _atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+# The memory-corruption classes come from the shared vocabulary in
+# lib/stack_frames.py so a class cannot cluster here and adjudicate elsewhere.
+# It already carries the libc copy-overlap family (strcpy/memcpy/strcat), whose
+# token ASan builds from one `%s-param-overlap` format string: the function
+# name is captured with it, so distinct copy functions cluster apart, matching
+# triage. BUS/SEGV are signals rather than corruption classes, so they are not
+# in that vocabulary and are added here — clustering labels them, and it is the
+# severity scorer that decides what they are worth.
 PRIMITIVE_RE = re.compile(
     r"AddressSanitizer:\s+("
-    r"heap-buffer-overflow|heap-use-after-free|use-after-free|"
-    r"stack-buffer-overflow|stack-use-after-(?:scope|return)|"
-    r"global-buffer-overflow|container-overflow|dynamic-stack-buffer-overflow|"
-    r"alloc-dealloc-mismatch|intra-object-overflow|double-free|"
-    r"negative-size-param|bad-free|new-delete-type-mismatch|"
-    # libc copy-overlap family (strcpy/memcpy/strcat-param-overlap). ASan builds
-    # every overlap token from one `%s-param-overlap` format string, so the
-    # function name is captured with it — distinct copy functions cluster apart,
-    # matching triage. Without this the token fell through to `unclassified`,
-    # mislabeling the cluster and merging overlaps with unrelated unclassified
-    # crashes via _same_cf_cluster's primitive similarity.
-    r"[a-z]+-param-overlap|"
-    r"BUS|SEGV"
+    + stack_frames.MEMORY_SAFETY_CLASS_PATTERN
+    + r"|BUS|SEGV"
     r")"
 )
 RW_RE = re.compile(r"\b(READ|WRITE) of size", re.IGNORECASE)

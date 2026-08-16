@@ -1080,7 +1080,17 @@ def _detect_primitive(report_text: str) -> tuple[str, str]:
             return "global_write", "global WRITE (copy-overlap)"
         return "heap_write", "heap WRITE (copy-overlap)"
 
-    if re.search(r"\bstack-buffer-overflow\b|\bstack-use-after-(?:scope|return)\b|"
+    # `stack-buffer-underflow` is an access before the object: the same
+    # corruption of the same region as the overflow, so it takes the same tier.
+    # The runtime prints no underflow name for the heap, global or dynamic-stack
+    # regions, so only this one gains the alternative.
+    # These branches deliberately keep their own spellings rather than consuming
+    # stack_frames.MEMORY_SAFETY_CLASS_PATTERN: that vocabulary answers
+    # membership ("is this corruption"), while these answer impact, and the
+    # region and the read/write tier they sort into is a scoring policy the
+    # membership set does not encode. What must not diverge is which names
+    # exist, so both are checked against the same runtime.
+    if re.search(r"\bstack-buffer-(?:over|under)flow\b|\bstack-use-after-(?:scope|return)\b|"
                  r"\bdynamic-stack-buffer-overflow\b", t):
         if rw == "write":
             return "stack_write", "stack WRITE" + (f" of {rw_size} byte(s)" if rw_size else "")
