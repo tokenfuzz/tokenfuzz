@@ -417,9 +417,17 @@ class Setup:
             log(f"Refreshing output/{self.name}/target.toml because it no longer parses as TOML")
         else:
             log(f"Regenerating output/{self.name}/target.toml (--force)")
+        # Carry the curated sections across even here. A full re-seed drops
+        # what it cannot re-derive and leaves restoring it to the LLM helpers
+        # below, which makes every reason they do not run — `--no-llm-config`,
+        # a disabled bootstrap, or simply every backend failing — a silent
+        # deletion of an operator's threat model and peer set. Preserving costs
+        # nothing when they do run: both are invoked with `--force` on this
+        # path and overwrite what they derive. `missing` and `invalid` reach
+        # the same call with nothing to carry, and preserving is a no-op there.
         target_config.seed_toml(
             self.target_root, self.toml, self.source,
-            browser_mode=self.args.browser,
+            preserve_curated=True, browser_mode=self.args.browser,
             target_slug=self.name,
         )
         self.seeded_full = True

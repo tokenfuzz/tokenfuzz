@@ -700,6 +700,41 @@ class SetupTargetTests(unittest.TestCase):
             "same exit status and output", process.stdout + process.stderr,
         )
 
+    def test_a_forced_reseed_keeps_what_it_cannot_rederive(self) -> None:
+        """Destroying unconditionally while restoring conditionally loses data.
+
+        A full re-seed dropped the curated threat model and peer set and left
+        replacing them to the LLM helpers, so every reason those do not run —
+        this flag, a disabled bootstrap, or simply every backend failing —
+        deleted an operator's work with nothing to recover it from. The
+        helpers overwrite these sections when they do run, so carrying them
+        across costs nothing and is the only behaviour safe when they do not.
+        """
+        self.make_build_target("curated")
+        config = self.config("curated")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "curated"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/curated"\n'
+            '[threat_model]\n'
+            'attacker_controls = ["bytes", "protocol-state"]\n'
+            '[s6_peers]\ndomain = "example stacks"\n'
+            'peers  = ["alpha", "beta"]\n',
+            encoding="utf-8",
+        )
+
+        process = self.setup(
+            "curated", "--force", "--no-llm-config",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        rewritten = config.read_text(encoding="utf-8")
+        self.assertIn('attacker_controls = ["bytes", "protocol-state"]', rewritten)
+        self.assertIn("[s6_peers]", rewritten)
+        self.assertIn('"alpha"', rewritten)
+        self.assertIn('"beta"', rewritten)
+
     def test_force_build_preserves_reviewed_config_and_recipe(self) -> None:
         target = self.make_build_target("reviewedbuild")
         recipe = self.build_recipe(target)

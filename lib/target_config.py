@@ -1913,6 +1913,16 @@ def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
     if "include" not in out and _has_headers(target_root / "src", recursive=False):
         out.append("src")
     out.append(f"{asan_dir_name}/include")
+    # The build root itself, for the same reason and with the same cost when
+    # it holds nothing: a configure step generates its answers as headers, and
+    # CMake and Meson write them where the build put the target rather than
+    # under an `include/` — `options.h`, `config.h`. Emitting only
+    # `<build>/include` left a target whose every public header includes the
+    # generated one unable to compile a harness at all, so the library route
+    # was as unusable as the CLI one, and nothing said why. Listed after the
+    # source locations, so a generated header resolves the way the project's
+    # own build resolves it.
+    out.append(asan_dir_name)
     return out
 
 
@@ -2827,10 +2837,12 @@ def seed_toml(
     the whole [s6_peers] block, and build-configuration policy — are carried
     over from the existing file
     instead of reset to the conservative default (attacker_controls) or dropped
-    (s6_peers, which a plain seed never emits). bin/setup-target uses this for a
-    placeholder refresh, so filling one unrelated FILL_ME never discards an
-    operator's hand- or LLM-curated threat model / peer set. A full re-seed
-    (--force, missing, or unparseable file) leaves it False and regenerates."""
+    (s6_peers, which a plain seed never emits). bin/setup-target sets it on
+    every path that rewrites the file, so neither filling one unrelated FILL_ME
+    nor a `--force` regeneration discards an operator's hand- or LLM-curated
+    threat model / peer set. The helpers that can re-derive those sections
+    overwrite them afterwards; dropping them first only decided what survives
+    when those helpers do not run."""
     root = Path(target_root)
     out = Path(out_path)
     slug = target_slug or root.name

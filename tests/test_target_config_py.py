@@ -577,6 +577,27 @@ with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": "-img42"}):
         suffixed_seed_cfg.resolve_path("build-asan/include"),
         "canonical include path resolves into the active suffixed tree",
     )
+# A configure step writes its answers as headers into the build root, not
+# under an `include/`. Seeding only `<build>/include` left a target whose
+# public headers include the generated one unable to compile a harness at all.
+inc_root = TEST_TMPDIR / "generated-header-root"
+(inc_root / "src").mkdir(parents=True)
+(inc_root / "CMakeLists.txt").write_text("add_executable(t t.c)\n", encoding="utf-8")
+(inc_root / "src" / "api.h").write_text("#include <proj/options.h>\n", encoding="utf-8")
+(inc_root / "build-asan" / "proj").mkdir(parents=True)
+(inc_root / "build-asan" / "proj" / "options.h").write_text("#define X 1\n", encoding="utf-8")
+inc_out = TEST_TMPDIR / "generated-header-root.toml"
+tc.seed_toml(inc_root, inc_out, "")
+inc_cfg = tc.Config(target_root=str(inc_root))
+tc.load_toml_into(inc_cfg, inc_out)
+assert_eq(True, "build-asan" in inc_cfg.includes,
+          "seed_toml puts the build root on the harness include path")
+assert_eq(True, inc_cfg.includes.index("build-asan/include")
+          < inc_cfg.includes.index("build-asan"),
+          "the build root is searched after its include/ subdirectory")
+assert_eq(True, inc_cfg.includes.index("src") < inc_cfg.includes.index("build-asan"),
+          "generated headers resolve after the project's own source locations")
+
 assert_not_in("build-asan-img42", suffixed_seed_out.read_text(encoding="utf-8"),
               "seed_toml never writes a physical suffixed build path")
 
