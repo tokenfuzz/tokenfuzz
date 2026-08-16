@@ -31,10 +31,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from collections import Counter, defaultdict, deque
 from pathlib import Path
+
+# Appended, never prepended: this interpreter belongs to trailmark, and putting
+# the harness lib/ ahead of site-packages would let a module name in there
+# shadow a real dependency. native_symbols is stdlib-only by contract so it
+# imports under whichever interpreter bin/rank-work picked.
+sys.path.append(str(Path(__file__).resolve().parent.parent / "lib"))
+from native_symbols import defined_symbols  # noqa: E402
 
 # tree-sitter 0.26.0 segfaults in trailmark's C parser from the second file of
 # any directory parse onward. Released trailmark pins `tree-sitter~=0.25.0`, so
@@ -82,59 +88,6 @@ def _require_trailmark():
     except Exception:
         tm_version = "unknown"
     return QueryEngine, supported_languages, f"trailmark={tm_version} tree-sitter={ts_version}"
-
-
-# ── sanitizer artifact symbols ──────────────────────────────────────
-
-def _normalise_symbols(names: set[str]) -> set[str]:
-    """Strip the Mach-O underscore, then drop toolchain-generated names.
-
-    The prefix is removed only when the artifact as a whole carries it.
-    Stripping per-name instead would corrupt the names that genuinely start
-    with one (`_pcre2_...`) and — because both spellings would then be kept —
-    would double the denominator the coverage ratio divides by. Filtering
-    runs after normalising: on Mach-O the toolchain's own symbols arrive as
-    `_asan.module_ctor`, and a prefix test against the raw spelling lets every
-    one of them through.
-    """
-    prefixed = sum(1 for name in names if name.startswith("_"))
-    if prefixed * 2 > len(names):
-        names = {name[1:] if name.startswith("_") else name for name in names}
-    return {
-        name for name in names
-        if name and not name.startswith(("__", "asan.", "ltmp", "GCC_except", "OUTLINED"))
-    }
-
-
-def defined_symbols(artifact: Path, *, exported_only: bool = False) -> set[str]:
-    """Names `nm` reports as defined in a built artifact."""
-    if not artifact.is_file():
-        return set()
-    base = ["nm"] + (["-g"] if exported_only else [])
-    output = ""
-    for selector in ("--defined-only", "-U"):
-        proc = subprocess.run(
-            [*base, selector, str(artifact)],
-            capture_output=True, text=True, check=False,
-        )
-        if proc.returncode == 0:
-            output = proc.stdout
-            break
-    names: set[str] = set()
-    for line in output.splitlines():
-        fields = line.split()
-        # "<addr> <type> <name>", or "<type> <name>" for undefined-address
-        # symbols in an archive member.
-        if len(fields) < 2:
-            continue
-        kind, name = fields[-2], fields[-1]
-        # Text symbols only. Everything this set is compared against is a
-        # function, so counting data and bss symbols would silently deflate
-        # the coverage ratio with entries no parser could ever have matched.
-        if len(kind) != 1 or kind not in "TtWw":
-            continue
-        names.add(name)
-    return _normalise_symbols(names)
 
 
 # ── graph shaping ───────────────────────────────────────────────────

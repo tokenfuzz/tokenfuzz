@@ -12,6 +12,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import callgraph  # noqa: E402
+import native_symbols  # noqa: E402
 import target_config  # noqa: E402
 
 
@@ -619,15 +621,29 @@ class SymbolTableTests(unittest.TestCase):
         self.sidecar = _sidecar()
 
     def test_macho_underscore_is_stripped_once_for_the_whole_artifact(self) -> None:
-        names = self.sidecar._normalise_symbols({"_app_parse", "_app_open", "_asan.module_ctor"})
+        names = native_symbols.normalise({"_app_parse", "_app_open", "_asan.module_ctor"})
         self.assertEqual(names, {"app_parse", "app_open"})
 
     def test_elf_names_are_left_alone(self) -> None:
-        names = self.sidecar._normalise_symbols({"app_parse", "app_open", "_pcre2_internal"})
+        names = native_symbols.normalise({"app_parse", "app_open", "_pcre2_internal"})
         self.assertEqual(names, {"app_parse", "app_open", "_pcre2_internal"})
 
     def test_missing_artifact_yields_no_symbols(self) -> None:
         self.assertEqual(self.sidecar.defined_symbols(Path("/nonexistent/libapp.so")), set())
+
+    def test_the_sidecar_reads_the_shared_symbol_module(self) -> None:
+        """One reader for one question, shared with lib/fuzz_harness."""
+        self.assertIs(self.sidecar.defined_symbols, native_symbols.defined_symbols)
+
+    def test_the_shared_symbol_module_stays_stdlib_only(self) -> None:
+        """bin/callgraph runs under trailmark's interpreter, which is
+        guaranteed to have trailmark and nothing else. A third-party import
+        here would break the sidecar on an interpreter the harness never
+        chose."""
+        source = (ROOT / "lib" / "native_symbols.py").read_text(encoding="utf-8")
+        imported = set(re.findall(r"^(?:import|from)\s+([\w.]+)", source, re.M))
+        self.assertTrue(imported <= set(sys.stdlib_module_names) | {"__future__"},
+                        f"non-stdlib imports: {imported}")
 
 
 class EntryBoundaryTests(unittest.TestCase):
