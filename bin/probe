@@ -96,7 +96,7 @@ _LOADER_STRING_RE = re.compile(
 _EMPTY_STRING_RE = re.compile(r'^(?:u8|[uUL])?""$')
 HELP = """Usage:
   bin/probe [--confirm | --sanitizer-runs N] [--dry-run] [--mode auto|browser|js|generic] \\
-            [--hypothesis-id HYPOTHESIS-ID] \\
+            [--hypothesis-id HYPOTHESIS-ID] [--harness NAME] \\
             [--want REGEX] testcase [-- harness-args...]
 
 Required testcase headers:
@@ -111,6 +111,8 @@ Optional testcase headers:
 
 For opaque byte inputs that cannot carry comments, pass --hypothesis-id;
 TARGET and CARD-ID are derived from that hypothesis in structured state.
+--harness supplies the HARNESS header the same way, for a fuzz artifact
+replayed against the harness that produced it.
 
 PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner overrides target.toml.
 --confirm runs five times; --sanitizer-runs runs an explicit positive count;
@@ -127,6 +129,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--want", default="")
     parser.add_argument("--hypothesis-id", default="")
+    # An opaque byte input cannot carry a header, so the two fields a testcase
+    # would otherwise declare in one arrive as flags instead. Same resolution
+    # rules apply either way: the name stays relative to the testcase's own
+    # directory.
+    parser.add_argument("--harness", default="")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("testcase", nargs="?")
     parser.add_argument("args", nargs=argparse.REMAINDER)
@@ -616,6 +623,8 @@ class Probe:
         self.header = parse_header(self.testcase)
         if self.args.hypothesis_id:
             self.header["hypothesis"] = self.args.hypothesis_id
+        if self.args.harness:
+            self.header["harness"] = self.args.harness
         hypothesis_row = self._hypothesis_from_state(self.header["hypothesis"])
         if hypothesis_row:
             self.header["target"] = self.header["target"] or str(hypothesis_row.get("file", ""))

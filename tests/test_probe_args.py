@@ -132,5 +132,27 @@ class ProbeArgumentTests(unittest.TestCase):
             self.assertEqual(instance._actual_sanitizer_runs(), 4)
 
 
+class OpaqueInputHeaderTests(unittest.TestCase):
+    """An opaque byte input cannot carry a header, so both of the fields a
+    testcase would declare in one arrive as flags instead."""
+
+    def test_both_opaque_input_flags_are_accepted(self) -> None:
+        args = probe.parse_args(
+            ["--hypothesis-id", "H-7", "--harness", "fuzz_api.c", "input.bin"])
+        self.assertEqual(args.hypothesis_id, "H-7")
+        self.assertEqual(args.harness, "fuzz_api.c")
+
+    def test_they_default_empty_so_a_headered_testcase_is_unaffected(self) -> None:
+        args = probe.parse_args(["testcase.html"])
+        self.assertEqual(args.hypothesis_id, "")
+        self.assertEqual(args.harness, "")
+
+    def test_the_flag_supplies_the_harness_a_binary_input_cannot_declare(self) -> None:
+        # A fuzz artifact is exact bytes: prepending a `HARNESS:` comment would
+        # change the input that reproduces the crash.
+        self.assertIn("HARNESS", probe.HEADER_RE["harness"].pattern)
+        self.assertIn("--harness", probe.HELP)
+
+
 if __name__ == "__main__":
     unittest.main()
