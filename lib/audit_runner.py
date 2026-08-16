@@ -48,9 +48,7 @@ import workqueue
 from timeout import run_timeout
 
 
-# S4 is reserved for future use. Keep the numeric gap: historical reports and
-# resumable state already persist the meanings of S5-S8.
-STRATEGIES = ("S1", "S2", "S3", "S5", "S6", "S7", "S8")
+STRATEGIES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
 STRATEGY_DRY_THRESHOLD = 3
 STRATEGY_S1_DRY_THRESHOLD = 8
 STRATEGY_FORCE_EXTRA = 5

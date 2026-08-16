@@ -1,0 +1,581 @@
+#!/usr/bin/env python3
+"""Boundary-directed fuzzing: what to fuzz, how to build it, how to run it.
+
+The S4 strategy's tool. Six verbs, the first five in the order an agent uses
+them:
+
+  inventory   what fuzz harnesses this target already has, and what each
+              one is structurally unable to reach
+  candidates  every exported API run through the admission gate, so a new
+              harness is written only where untrusted input reaches a
+              published API that nothing already drives
+  template    a harness skeleton for one admitted symbol, built to be
+              compiled two ways — as a libFuzzer target and as a standalone
+              driver bin/probe can replay one artifact against
+  build       compile a harness out of tree, against the shared sanitizer
+              build read-only
+  run         spend a budget across the built harnesses, moving off any that
+              stops paying
+  doctor      prove the shared build is unaffected by any of the above
+
+Nothing here writes to the target checkout or to build-<san>/. That is not
+tidiness: build freshness is derived from the checkout's VCS state including
+untracked files, so a harness left in the tree stales the shared build for
+every other backend reading it and makes their source pins disagree. See
+`bin/fuzz doctor` for the check that proves a campaign kept that promise.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import build_lease  # noqa: E402
+import callgraph  # noqa: E402
+import fuzz_campaign  # noqa: E402
+import fuzz_harness  # noqa: E402
+import native_symbols  # noqa: E402
+import sanitizer as sanitizer_lib  # noqa: E402
+import target_config  # noqa: E402
+
+TOOL = "fuzz"
+
+
+def say(message: str) -> None:
+    print(f"[{TOOL}] {message}", file=sys.stderr)
+
+
+# ── configuration ───────────────────────────────────────────────────
+
+def load_config(start: str) -> target_config.Config:
+    """The session's target config, from an explicit path, the environment,
+    or by walking up from where the agent happens to be standing."""
+    for candidate in (start, os.environ.get("RESULTS_DIR", ""), os.getcwd()):
+        if not candidate:
+            continue
+        try:
+            return target_config.load(candidate)
+        except (FileNotFoundError, ValueError):
+            continue
+    raise SystemExit(
+        f"[{TOOL}] no output/<slug>/<backend>/results/.session-env above "
+        f"{start or os.getcwd()}; run bin/audit --target <slug> first"
+    )
+
+
+def chosen_sanitizer(config: target_config.Config, requested: str) -> str:
+    """The sanitizer to build and fuzz under, or exit saying there is none.
+
+    A findings-only target (`[sanitizer] enabled = []`) has no native build to
+    link; answering "asan" anyway turns an unsupported configuration into one
+    that fails later at the compiler with a confusing error.
+    """
+    if requested:
+        return requested
+    for name in config.sanitizers_enabled:
+        if name in fuzz_harness.COMPILE_SANITIZERS:
+            return name
+    raise SystemExit(
+        f"[{TOOL}] {config.slug or 'this target'} enables no native sanitizer "
+        f"([sanitizer] enabled = {config.sanitizers_enabled or '[]'}), so there "
+        f"is nothing for a fuzz harness to link against. S4 does not apply here; "
+        f"use S7 for hand-written adversarial inputs."
+    )
+
+
+def exported_symbols(config: target_config.Config, sanitizer: str) -> "set[str]":
+    """What the target's build publishes, from the artifact it publishes it in.
+
+    Reads the same library a harness will link — `coverage_library`'s choice,
+    not the plain path — so the gate and the build never disagree about what
+    is exported. They can: a target whose only coverage-instrumented tree is
+    the sibling would otherwise have every candidate rejected as "not
+    exported" while `bin/fuzz build` happily linked it.
+
+    The library is the API surface; the executable is a fallback for a target
+    that ships only a CLI. An empty answer is reported rather than silently
+    turning the gate into a pass-through.
+    """
+    candidates_paths = [fuzz_harness.coverage_library(config, sanitizer).path]
+    raw = config.sanitizer_bin(sanitizer)
+    candidates_paths.append(config.resolve_path(raw) if raw else "")
+    for resolved in candidates_paths:
+        if resolved and Path(resolved).is_file():
+            found = native_symbols.defined_symbols(Path(resolved), exported_only=True)
+            if found:
+                return found
+    return set()
+
+
+def hold_shared_build(config: target_config.Config,
+                      sanitizer: str) -> fuzz_harness.LibraryChoice:
+    """Keep the build we are about to link from being replaced under us.
+
+    Shared, never exclusive: a campaign is a *reader* of the build tree. Two
+    backends fuzzing the same pinned build both take this lease and neither
+    blocks the other; a rebuild is what the lease keeps out, because a tree
+    swapped mid-campaign would make every recorded edge count refer to a
+    binary that no longer exists. The lease is taken on whichever tree the
+    library actually came from, so a campaign on the sibling coverage build
+    never contends with the runners holding the plain one.
+    """
+    choice = fuzz_harness.coverage_library(config, sanitizer)
+    name = choice.tree or sanitizer_lib.build_dir(sanitizer, config.target_root).name
+    tree = Path(config.target_root) / name
+    if tree.is_dir():
+        build_lease.hold_shared(tree.parent, tree.name, logger=say)
+    return choice
+
+
+def discovered(config: target_config.Config,
+               exported: "set[str]") -> "list[fuzz_harness.ExistingHarness]":
+    """Harnesses that already drive this target's API — the project's own,
+    and the ones this session wrote.
+
+    Without the second half, `candidates` keeps offering a symbol the agent
+    already built a harness for, and the next iteration writes a duplicate.
+    """
+    return (fuzz_harness.discover(config.target_root, exported)
+            + fuzz_harness.discover(
+                fuzz_harness.source_dir(config.results_dir), exported))
+
+
+def entry_routes(results_dir: Path) -> "dict[str, str]":
+    """symbol -> the route a declared entry takes to it, when one is known.
+
+    Ranking only. lib/callgraph states the rule: a syntactic graph cannot see
+    indirect dispatch, so the *absence* of a route is not evidence that
+    nothing reaches the symbol, and it must never keep a candidate out. A
+    route that is present is real information about how an attacker gets
+    there, so it lifts a candidate up the list.
+    """
+    graph = callgraph.load(results_dir) or {}
+    routes: "dict[str, str]" = {}
+    for detail in (graph.get("files") or {}).values():
+        for entry in (detail.get("paths") or []):
+            path = entry.get("path") or []
+            if len(path) < 2:
+                continue
+            symbol = str(entry.get("function", "")).rsplit(":", 1)[-1]
+            routes.setdefault(symbol, f"entry route: {' -> '.join(path)}")
+    return routes
+
+
+# ── inventory ───────────────────────────────────────────────────────
+
+def cmd_inventory(args) -> int:
+    config = load_config(args.results_dir)
+    sanitizer = chosen_sanitizer(config, args.sanitizer)
+    exported = exported_symbols(config, sanitizer)
+    existing = discovered(config, exported)
+    payload = {
+        "target": config.slug, "sanitizer": sanitizer,
+        "exported_symbols": len(exported),
+        "harnesses": [harness.as_dict() for harness in existing],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    if not existing:
+        print(f"No fuzz harness found in {config.target_root}.")
+        print("Every admitted candidate needs one written; see `bin/fuzz candidates`.")
+        return 0
+    driven = {symbol for harness in existing for symbol in harness.drives}
+    print(f"{len(existing)} harness(es) in {config.slug}; they drive "
+          f"{len(driven)} of {len(exported)} exported symbols.\n")
+    for harness in existing:
+        print(f"  {harness.path}  [{harness.kind}]")
+        if harness.drives:
+            print(f"    drives: {', '.join(harness.drives[:12])}"
+                  f"{' …' if len(harness.drives) > 12 else ''}")
+        for gap, cost in harness.gaps:
+            print(f"    gap {gap}: {cost}")
+        print()
+    return 0
+
+
+# ── candidates ──────────────────────────────────────────────────────
+
+def cmd_candidates(args) -> int:
+    config = load_config(args.results_dir)
+    sanitizer = chosen_sanitizer(config, args.sanitizer)
+    exported = exported_symbols(config, sanitizer)
+    if not exported:
+        say(f"no exported symbols readable from the {sanitizer} build; "
+            f"candidate generation needs a built native library or binary "
+            f"(target.toml {sanitizer}_lib / {sanitizer}_bin)")
+        return 3
+    declarations = fuzz_harness.declaration_index(
+        config.target_root,
+        [config.resolve_path(path) for path in config.includes],
+    )
+    existing = discovered(config, exported)
+    routes = entry_routes(Path(config.results_dir))
+    found = fuzz_harness.candidates(
+        config, exported, existing, declarations, routes)
+    admitted = [c for c in found if c.admitted]
+    if args.json:
+        print(json.dumps({
+            "target": config.slug, "sanitizer": sanitizer,
+            "attacker_controls": config.attacker_controls,
+            "admitted": [c.as_dict() for c in admitted],
+            "rejected": [c.as_dict() for c in found if not c.admitted][:args.limit],
+        }, indent=2))
+        return 0
+    print(f"{len(admitted)} admitted of {len(found)} declared exported symbols "
+          f"in {config.slug} (attacker_controls: "
+          f"{', '.join(config.attacker_controls) or 'none'})\n")
+    for candidate in admitted[:args.limit]:
+        print(f"  {candidate.symbol}")
+        print(f"    {candidate.declaration}")
+        print(f"    reachable by: {', '.join(candidate.controls)} "
+              f"via {', '.join(candidate.shapes)}")
+        if candidate.route:
+            print(f"    {candidate.route}")
+        print()
+    if not admitted:
+        print("Nothing was admitted. The most common reasons, in order:\n")
+        for candidate in found[:args.limit]:
+            print(f"  {candidate.symbol}: {candidate.blockers[0]}")
+    return 0
+
+
+# ── template ────────────────────────────────────────────────────────
+
+TEMPLATE = '''// TARGET: {target}
+// HYPOTHESIS-ID: {hypothesis}
+// CATEGORY: bounds
+//
+// Boundary-directed fuzz target for {symbol}.
+//   declaration: {declaration}
+//   admitted:    {controls} reach it via {shapes}
+//
+// Compiled two ways on purpose:
+//   bin/fuzz build  ->  -fsanitize=fuzzer,<san> -DFUZZ_CAMPAIGN_BUILD=1
+//   bin/probe       ->  -fsanitize=<san>        (the main() below)
+// The second is what replays an artifact this target finds through the
+// normal crash pipeline, so a fuzz crash is confirmed, deduplicated, and
+// gated exactly like a hand-written one. Keep both entry points working.
+
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* TODO: include the public header that declares {symbol}. */
+
+/* Split one mutator input into decisions and payload. A harness that spends
+   the whole buffer on a single call can only ever find input-parsing bugs;
+   drawing a few integers first lets the same input drive a call *sequence*,
+   which is what reaches lifetime and state defects. */
+typedef struct {{ const uint8_t *p; size_t n; }} fz_stream;
+
+static uint8_t fz_u8(fz_stream *s) {{
+  if (s->n == 0) return 0;
+  s->n--;
+  return *s->p++;
+}}
+
+static uint32_t fz_u32(fz_stream *s) {{
+  uint32_t v = 0;
+  for (int i = 0; i < 4; i++) v = (v << 8) | fz_u8(s);
+  return v;
+}}
+
+/* Hand the rest of the buffer to the API under test. */
+static size_t fz_rest(fz_stream *s, const uint8_t **out) {{
+  *out = s->p;
+  size_t n = s->n;
+  s->p += n;
+  s->n = 0;
+  return n;
+}}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
+  fz_stream s = {{data, size}};
+
+  /* TODO, in this order:
+     1. draw configuration from fz_u8/fz_u32 so options are fuzzed too —
+        a harness with a fixed config cannot find a config-dependent bug;
+     2. construct whatever handle {symbol} needs;
+     3. call {symbol} with fz_rest(&s, &buf) as its payload;
+     4. optionally loop 2-3 more calls driven by fz_u8(&s), so a call
+        sequence is reachable;
+     5. free everything. An allocation the harness never releases is
+        reported as a leak in the harness, not a defect in the target. */
+
+  (void)fz_u32;
+  (void)fz_rest;
+  return 0;
+}}
+
+#ifndef FUZZ_CAMPAIGN_BUILD
+/* Standalone driver. -fsanitize=fuzzer supplies its own main, so this one is
+   compiled only for the replay build. */
+int main(int argc, char **argv) {{
+  for (int i = 1; i < argc; i++) {{
+    FILE *f = fopen(argv[i], "rb");
+    if (!f) {{ perror(argv[i]); return 1; }}
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    if (len < 0) {{ fclose(f); return 1; }}
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = (uint8_t *)malloc((size_t)len ? (size_t)len : 1);
+    if (!buf) {{ fclose(f); return 1; }}
+    size_t got = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    LLVMFuzzerTestOneInput(buf, got);
+    free(buf);
+  }}
+  return 0;
+}}
+#endif
+'''
+
+
+def cmd_template(args) -> int:
+    config = load_config(args.results_dir)
+    sanitizer = chosen_sanitizer(config, args.sanitizer)
+    exported = exported_symbols(config, sanitizer)
+    declarations = fuzz_harness.declaration_index(
+        config.target_root,
+        [config.resolve_path(path) for path in config.includes],
+    )
+    existing = discovered(config, exported)
+    covered = {s: h.path for h in existing for s in h.drives}
+    verdict = fuzz_harness.gate(
+        args.symbol, declarations.get(args.symbol, ""), exported,
+        config.attacker_controls, covered.get(args.symbol, ""),
+    )
+    if not verdict.admitted and not args.force:
+        say(f"{args.symbol} is not admitted:")
+        for blocker in verdict.blockers:
+            say(f"  - {blocker}")
+        say("Pass --force only if you can name why the gate is wrong here.")
+        return 3
+    destination = Path(args.output) if args.output else (
+        fuzz_harness.source_dir(config.results_dir) / f"fuzz_{args.symbol}.c")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fuzz_harness.reject_in_tree_source(destination, config.target_root)
+    if destination.exists() and not args.force:
+        say(f"refusing to overwrite {destination}; pass --force to replace it")
+        return 1
+    destination.write_text(TEMPLATE.format(
+        target=args.target or f"{args.symbol}",
+        hypothesis=args.hypothesis_id or "H-TODO",
+        symbol=args.symbol,
+        declaration=verdict.declaration or "(no public declaration found)",
+        controls=", ".join(verdict.controls) or "(forced)",
+        shapes=", ".join(verdict.shapes) or "(none)",
+    ), encoding="utf-8")
+    print(destination)
+    return 0
+
+
+# ── build ───────────────────────────────────────────────────────────
+
+def cmd_build(args) -> int:
+    config = load_config(args.results_dir)
+    sanitizer = chosen_sanitizer(config, args.sanitizer)
+    hold_shared_build(config, sanitizer)
+    failures = 0
+    for raw in args.sources or sorted(
+            fuzz_harness.source_dir(config.results_dir).glob("*.c*")):
+        source = Path(raw).resolve()
+        if not source.is_file():
+            say(f"no such harness source: {source}")
+            failures += 1
+            continue
+        try:
+            result = fuzz_harness.build(source, config, sanitizer)
+        except (fuzz_harness.InTreeSource, fuzz_harness.UnfaithfulHarness) as exc:
+            say(str(exc))
+            failures += 1
+            continue
+        if result.error:
+            say(f"{source.name}: {result.error}")
+            failures += 1
+            continue
+        say(f"{source.name}: {'built' if result.rebuilt else 'cached'} "
+            f"{result.binary} against {result.tree} "
+            f"({'guided' if result.guided else 'BLIND'})")
+        if result.remedy:
+            say(result.remedy)
+        print(result.binary)
+    return 1 if failures else 0
+
+
+# ── run ─────────────────────────────────────────────────────────────
+
+
+
+def cmd_run(args) -> int:
+    config = load_config(args.results_dir)
+    sanitizer = chosen_sanitizer(config, args.sanitizer)
+    hold_shared_build(config, sanitizer)
+    before = target_config.vcs_source_signature(
+        Path(config.target_root), include_untracked=True)
+    campaign = fuzz_campaign.Campaign(
+        config, agent=args.agent, slice_seconds=args.slice_seconds,
+        sanitizer=sanitizer, log=lambda message: print(message, file=sys.stderr),
+    )
+    built = fuzz_harness.built_harnesses(config.results_dir, sanitizer)
+    for name, record in built.items():
+        campaign.add(name, record["binary"], record.get("source", ""),
+                     record.get("hypothesis_id", ""))
+    if not built:
+        say(f"no {sanitizer} harness built under "
+            f"{fuzz_harness.binary_dir(config.results_dir)}; "
+            f"run `bin/fuzz build` first")
+        return 3
+    with fuzz_campaign.exclusive(config.results_dir, logger=say) as held:
+        if not held:
+            # Not queued behind: the point of S4 is to spend one campaign's
+            # wall per iteration, and waiting would spend two.
+            return 0
+        summary = campaign.run(args.budget_seconds)
+    after = target_config.vcs_source_signature(
+        Path(config.target_root), include_untracked=True)
+    if before and after and before != after:
+        # Loud, not fatal: the campaign is over and its evidence is real, but
+        # the shared build is now stale for every other backend on this
+        # checkout and somebody has to find out what landed there.
+        say("WARN: the target checkout's source signature changed during this "
+            "campaign. Something wrote into the tree, which stales the shared "
+            "build for every other backend. Find it with "
+            f"`git -C {config.target_root} status --short`.")
+    summary["source_signature_stable"] = not (before and after and before != after)
+    if args.json:
+        print(json.dumps(summary, indent=2))
+    else:
+        print(f"{summary['slices']} slices, {summary['artifacts']} artifacts, "
+              f"{len(summary['filed'])} filed by bin/probe")
+        for name, reason in summary["quarantined"].items():
+            print(f"  quarantined {name}: {reason}")
+    return 0
+
+
+# ── status ──────────────────────────────────────────────────────────
+
+def cmd_status(args) -> int:
+    config = load_config(args.results_dir)
+    states = fuzz_campaign.load_states(config.results_dir)
+    if args.json:
+        print(json.dumps({n: s.as_dict() for n, s in states.items()}, indent=2))
+        return 0
+    if not states:
+        print("No campaign has run in this session yet.")
+        return 0
+    for name, state in sorted(states.items()):
+        status = state.quarantine or "active"
+        print(f"  {name}: {status} — {state.slices} slices, "
+              f"{state.artifacts} artifacts, {state.seconds:.0f}s")
+        print(f"    coverage: {fuzz_campaign.coverage_note(state)}")
+        print(f"    next: {fuzz_campaign.recommendation(state)}")
+        if state.quarantine_detail:
+            print(f"    why: {state.quarantine_detail}")
+    return 0
+
+
+# ── doctor ──────────────────────────────────────────────────────────
+
+def cmd_doctor(args) -> int:
+    """Prove the isolation contract holds right now, in this checkout.
+
+    Answers one question an operator running two backends against one
+    checkout actually has: is anything about fuzzing making the shared build
+    look stale to the other backend?
+    """
+    config = load_config(args.results_dir)
+    sanitizer = chosen_sanitizer(config, args.sanitizer)
+    choice = fuzz_harness.coverage_library(config, sanitizer)
+    tree = Path(config.target_root) / (
+        choice.tree or sanitizer_lib.build_dir(sanitizer, config.target_root).name)
+    problems: "list[str]" = []
+    root = Path(config.target_root)
+    # An upstream harness the project ships is tracked and therefore already
+    # part of the signature every backend agreed on. One nobody committed is
+    # a change to that signature, which is the failure this command exists to
+    # catch. A tree with no readable VCS answers neither, so it says nothing.
+    tracked = target_config.vcs_tracked_files(root)
+    if tracked is not None:
+        for harness in fuzz_harness.discover(config.target_root):
+            if harness.path not in tracked:
+                problems.append(
+                    f"untracked harness in the checkout: {harness.path} — it "
+                    f"changes the source signature the shared build is measured "
+                    f"against, so every other backend on this checkout sees the "
+                    f"build as stale")
+    fuzz_dir = fuzz_harness.fuzz_root(config.results_dir)
+    print(f"target root:    {config.target_root}")
+    print(f"linked build:   {tree}{'' if tree.is_dir() else '  (absent)'}")
+    print(f"library:        {choice.path or '(none)'}")
+    print(f"feedback:       {'guided (SanitizerCoverage present)' if choice.instrumented else 'BLIND — no SanitizerCoverage'}")
+    print(f"campaign root:  {fuzz_dir}")
+    print(f"build lease:    {build_lease.lease_path(tree.parent, tree.name)}")
+    print(f"writer pending: {build_lease.writer_pending(tree.parent, tree.name)}")
+    print(f"other readers:  {build_lease.consumers_active(tree.parent, tree.name)}")
+    if choice.remedy:
+        print()
+        print(choice.remedy)
+    if not str(fuzz_dir).startswith(str(root)):
+        print("isolation:      OK — every campaign artifact is outside the checkout")
+    else:
+        problems.append(
+            f"RESULTS_DIR is inside the target checkout ({fuzz_dir}); every "
+            f"corpus file would read as a source edit")
+    for problem in problems:
+        say(f"PROBLEM: {problem}")
+    return 1 if problems else 0
+
+
+def main(argv: "list[str]") -> int:
+    parser = argparse.ArgumentParser(
+        prog="bin/fuzz", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--results-dir", default="")
+    parser.add_argument("--sanitizer", default="")
+    parser.add_argument("--json", action="store_true")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("inventory", help="existing harnesses and their gaps")
+
+    candidates = sub.add_parser("candidates", help="APIs that earn a fuzz target")
+    candidates.add_argument("--limit", type=int, default=25)
+
+    template = sub.add_parser("template", help="skeleton harness for one symbol")
+    template.add_argument("symbol")
+    template.add_argument("--output", default="")
+    template.add_argument("--target", default="")
+    template.add_argument("--hypothesis-id", default="")
+    template.add_argument("--force", action="store_true")
+
+    build = sub.add_parser("build", help="compile harnesses out of tree")
+    build.add_argument("sources", nargs="*")
+
+    run = sub.add_parser("run", help="spend a budget across built harnesses")
+    run.add_argument("--budget-seconds", type=int,
+                     default=fuzz_campaign.DEFAULT_BUDGET_SECONDS)
+    run.add_argument("--slice-seconds", type=int,
+                     default=fuzz_campaign.DEFAULT_SLICE_SECONDS)
+    run.add_argument("--agent", type=int, default=int(os.environ.get("AGENT_NUM", "1")))
+
+    sub.add_parser("status", help="what each harness has done so far")
+    sub.add_parser("doctor", help="prove the shared build is unaffected")
+
+    args = parser.parse_args(argv)
+    return {
+        "inventory": cmd_inventory, "candidates": cmd_candidates,
+        "template": cmd_template, "build": cmd_build, "run": cmd_run,
+        "status": cmd_status, "doctor": cmd_doctor,
+    }[args.command](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

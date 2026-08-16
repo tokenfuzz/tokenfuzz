@@ -1358,8 +1358,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "environment-blocked work advances strategy rotation",
     )
 
-    # S4 is reserved, so stale state is replaced before an agent is launched.
-    (strategy_results / "state" / "strategy-1").write_text("S4\n", encoding="utf-8")
+    # A resumed run can carry an assignment no longer in the registry — a
+    # retired identifier, or a truncated write. Initialization replaces
+    # anything it does not recognise with a strategy the queue can feed.
+    (strategy_results / "state" / "strategy-1").write_text("S9\n", encoding="utf-8")
     audit_runner.initialize_agent_strategies(
         SimpleNamespace(
             root=ROOT, target_root=generic_target, target_slug="demo",
@@ -1369,8 +1371,24 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     equal(
         "S7", (strategy_results / "state" / "strategy-1").read_text().strip(),
-        "a stale S4 assignment is replaced by a strategy that owns cards",
+        "an unrecognised assignment is replaced by a strategy that owns cards",
     )
+    # A recognised one is left alone, even when the queue holds no card for it
+    # yet: rank-work mints S4 companions as it ranks, and reassigning here
+    # would undo an operator's --strategy pin on every iteration.
+    (strategy_results / "state" / "strategy-1").write_text("S4\n", encoding="utf-8")
+    audit_runner.initialize_agent_strategies(
+        SimpleNamespace(
+            root=ROOT, target_root=generic_target, target_slug="demo",
+            results=strategy_results, repo_type="none", num_agents=1,
+            fixed_strategy="",
+        )
+    )
+    equal(
+        "S4", (strategy_results / "state" / "strategy-1").read_text().strip(),
+        "a recognised assignment survives initialization",
+    )
+    (strategy_results / "state" / "strategy-1").write_text("S7\n", encoding="utf-8")
     (strategy_results / "work-cards.jsonl").write_text(
         json.dumps({"id": "WORK-only", "strategy": "S3", "status": "unclaimed"}) + "\n",
         encoding="utf-8",
@@ -1385,8 +1403,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             rotation_runtime, rotation_context, {1: idle_progress}, set(),
         )
     equal(
-        "S5", (strategy_results / "state" / "strategy-1").read_text().strip(),
-        "rotation with no alternative queue skips the reserved S4 identifier",
+        "S4", (strategy_results / "state" / "strategy-1").read_text().strip(),
+        "rotation with no alternative queue advances in canonical order",
     )
     (strategy_results / "work-cards.jsonl").write_text(
         "".join(json.dumps(card) + "\n" for card in strategy_cards), encoding="utf-8"

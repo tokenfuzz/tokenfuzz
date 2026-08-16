@@ -39,6 +39,7 @@ from typing import Optional
 SCRIPT_DIR = Path(__file__).absolute().parent
 SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+import strategies  # noqa: E402
 
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
 import cluster_common  # noqa: E402
@@ -2065,7 +2066,6 @@ def read_bare_field(path: Optional[Path], label: str) -> str:
     return usable(read_field_from_fields_table(path, label))
 
 
-_STRATEGY_TOKEN_RE = re.compile(r"\b(S[1-3]|S[5-8]|REF)\b", re.IGNORECASE)
 _SURFACE_FIELD_RE = re.compile(
     r"^(network|library-api|file-format|cli|dev-tool|maint-tool|internal|unknown)"
     r"\b(?:\s*—\s*(.*))?$",
@@ -2090,18 +2090,7 @@ def normalize_strategy(value: str) -> str:
     back to the input value when no recognised token is present, and returns
     empty for empty input. The strategy index lives in
     .agents/references/strategies/README.md."""
-    if not value:
-        return ""
-    s = value.strip()
-    if not s:
-        return ""
-    if re.search(r"\bS4\b", s, re.IGNORECASE):
-        return ""
-    m = _STRATEGY_TOKEN_RE.search(s)
-    if not m:
-        return s
-    token = m.group(1).upper()
-    return token
+    return strategies.normalize(value)
 
 
 def read_severity_from(path: Optional[Path]) -> str:

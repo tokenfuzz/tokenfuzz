@@ -86,7 +86,7 @@ carries the full ruleset and the rationale for each rule.
 
 Each agent is a small autonomous worker:
 
-- it has a role (`reproduce` or `analysis`) and an active strategy (S1, S2, S3, S5, S6, S7, or S8; S4 is reserved);
+- it has a role (`reproduce` or `analysis`) and an active strategy (S1 through S8);
 - it reads source through capped wrappers so prompts stay small;
 - it writes one testcase at a time and runs it immediately;
 - it keeps a compact state snippet so a context compaction doesn't

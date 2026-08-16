@@ -36,5 +36,6 @@ that baseline.
 | [Backends and ensembling](backends.md) | Run a single backend, cycle multiple hosted backends, or compare them. |
 | [Non-C/C++ targets](multi-language.md) | Configure language runners, findings-only targets, or non-ASan sanitizers such as Go `race`. |
 | [Browser targets](browser-targets.md) | Audit Firefox, Chromium, or a JS/Wasm runtime. |
+| [Boundary-directed fuzzing](directed-fuzzing.md) | Give agents coverage-guided fuzzing on the APIs untrusted input actually reaches, without disturbing a shared build. |
 | [Triage results](triage-results.md) | Decide which crashes and findings to promote, reject, or refine. |
 | [Reproduce a crash](reproduce-a-crash.md) | Re-run an exported TokenFuzz crash bundle against a clean upstream checkout. |

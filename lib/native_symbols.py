@@ -21,6 +21,20 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+# One `nm` per artifact per process. A single `bin/fuzz` invocation asks the
+# same question from the coverage probe, the export listing, each build, and
+# the campaign's startup — five subprocesses over the same megabytes. Keyed on
+# identity, not just path, so a rebuilt artifact is re-read.
+_CACHE: "dict[tuple, set[str]]" = {}
+
+
+def _identity(artifact: Path, kind: str) -> "tuple | None":
+    try:
+        stat = artifact.stat()
+    except OSError:
+        return None
+    return (str(artifact), kind, stat.st_size, stat.st_mtime_ns)
+
 # Toolchain-generated names that are never audited code. `__` covers the
 # reserved C identifier space (compiler builtins, libc internals) that no
 # target's own public API may use; the rest are emitted by the sanitizer
@@ -60,8 +74,12 @@ def defined_symbols(artifact: Path, *, exported_only: bool = False) -> "set[str]
     on a Linux CI image and a macOS developer machine without asking which
     one it is.
     """
-    if not Path(artifact).is_file():
+    artifact = Path(artifact)
+    if not artifact.is_file():
         return set()
+    key = _identity(artifact, f"defined:{exported_only}")
+    if key is not None and key in _CACHE:
+        return _CACHE[key]
     base = ["nm"] + (["-g"] if exported_only else [])
     output = ""
     for selector in ("--defined-only", "-U"):
@@ -83,7 +101,10 @@ def defined_symbols(artifact: Path, *, exported_only: bool = False) -> "set[str]
         if len(kind) != 1 or kind not in _TEXT_KINDS:
             continue
         names.add(name)
-    return normalise(names)
+    result = normalise(names)
+    if key is not None:
+        _CACHE[key] = result
+    return result
 
 
 def undefined_symbols(artifact: Path) -> "set[str]":
@@ -95,16 +116,23 @@ def undefined_symbols(artifact: Path) -> "set[str]":
     does this build require" is the only way to tell an instrumented library
     from a plain one without rebuilding it.
     """
-    if not Path(artifact).is_file():
+    artifact = Path(artifact)
+    if not artifact.is_file():
         return set()
+    key = _identity(artifact, "undefined")
+    if key is not None and key in _CACHE:
+        return _CACHE[key]
     for selector in ("--undefined-only", "-u"):
         proc = subprocess.run(
             ["nm", selector, str(artifact)],
             capture_output=True, text=True, check=False,
         )
         if proc.returncode == 0:
-            return {
+            result = {
                 fields[-1] for fields in
                 (line.split() for line in proc.stdout.splitlines()) if fields
             }
+            if key is not None:
+                _CACHE[key] = result
+            return result
     return set()

@@ -13,7 +13,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import callgraph
 from llm_decide import decision_timeout
-from workqueue import add_common_args, annotate_card_buildability, apply_latest_claim_status, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
+import target_config
+from workqueue import add_common_args, campaign_supported, annotate_card_buildability, apply_latest_claim_status, campaign_card, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
+
+
+def _target_config_for(ctx):
+    """The target's config, or None when it cannot be read.
+
+    Only used to decide whether a fuzz campaign is possible at all; an
+    unreadable config means "cannot tell", so no card is minted.
+    """
+    toml = target_config.find_target_toml(ctx.results_dir)
+    if toml is None:
+        return None
+    config = target_config.Config()
+    config.target_root = str(ctx.target_root)
+    try:
+        target_config.load_toml_into(config, toml)
+    except (OSError, ValueError):
+        return None
+    return config
 
 
 def main(argv: list[str]) -> int:
@@ -63,6 +82,12 @@ def main(argv: list[str]) -> int:
         and c.get("id") not in merged_ids
     ]
     cards = cards + annotate_card_buildability(ctx, s6_cards)
+    # The single S4 campaign card, appended like the S6 merge above and for
+    # the same reason: it is not ranked source, so it must not consume a
+    # window slot, and without it S4 owns no card and is never assignable.
+    if not any(c.get("kind") == "s4-campaign" for c in cards) \
+            and campaign_supported(_target_config_for(ctx)):
+        cards = cards + [campaign_card(ctx)]
     cards = apply_latest_claim_status(ctx, cards)
     write_cards(out, cards)
     if not args.quiet:

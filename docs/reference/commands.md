@@ -95,7 +95,7 @@ Common flags:
 | Flag | Meaning |
 | --- | --- |
 | `--model <name>` | Override the backend's configured model. Required for `oss`. |
-| `--strategy S1|S2|S3|S5|S6|S7|S8` | Pin one investigation strategy and suspend rotation. S4 is reserved. |
+| `--strategy S1|S2|S3|S4|S5|S6|S7|S8` | Pin one investigation strategy and suspend rotation. |
 | `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer's initial session is still running. |
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
 | `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. `sandboxed` is the default and refuses backends whose sandbox cannot host an audit; the bypass mode requires an asserted outer sandbox. |
@@ -199,6 +199,31 @@ bin/probe-history --results-dir "$RESULTS" --hypothesis-id H1
 | `bin/scratch-status` | Show testcase/output pairs and unrun testcases in one scratch directory. |
 | `bin/scratch-search` | Search prior scratch, corpus, and crash artifacts without scanning raw logs. |
 | `bin/probe-history` | Read prior verdicts from structured run state. |
+
+### Boundary-directed fuzzing (S4)
+
+```bash
+bin/fuzz inventory                    # harnesses the target already has
+bin/fuzz candidates                   # APIs that earn one, ranked
+bin/fuzz template <symbol>            # skeleton under $RESULTS/fuzz/src/
+bin/fuzz build                        # compile out of tree
+bin/fuzz run --budget-seconds 300     # bounded campaign
+bin/fuzz status
+bin/fuzz doctor                       # prove the shared build is unaffected
+```
+
+| Command | Purpose |
+| --- | --- |
+| `bin/fuzz inventory` | List existing fuzz harnesses (libFuzzer, cargo-fuzz, Go, Atheris, Jazzer), what each drives, and its structural gaps. |
+| `bin/fuzz candidates` | Run every exported symbol through the admission gate; report the reason each rejection failed. |
+| `bin/fuzz template` | Write a dual-entry harness skeleton for one admitted symbol. |
+| `bin/fuzz build` | Compile a harness out of tree; refuses in-tree sources and unfaithful harnesses. |
+| `bin/fuzz run` | Spend a budget across harnesses, quarantine those that stop paying, replay artifacts through `bin/probe`. |
+| `bin/fuzz status` | What each harness did and why it stopped. |
+| `bin/fuzz doctor` | Report the linked build, coverage feedback, lease state, and isolation. |
+
+See [Boundary-directed fuzzing](../guides/directed-fuzzing.md) for the workflow
+and the build-isolation rules.
 
 Coverage diagnostics for supported browser and JS builds:
 

@@ -532,6 +532,41 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(len(bucketed), len(set(reason for reason, _ in bucketed)))
         self.assertLessEqual(workqueue.BOUNDARY_REASONS, reasons)
 
+    def test_no_file_feature_mints_a_fuzz_campaign_card(self) -> None:
+        """A campaign covers a target, not a file.
+
+        Per-file S4 cards meant several agents could each start the same
+        global campaign over one shared corpus and state file. S4 owns no
+        reason for that reason; its single card comes from `campaign_card`.
+        """
+        for _strategy, tags in workqueue._STRATEGY_BUCKETS:
+            self.assertNotIn("S4", _strategy)
+        every_reason = [reason for _p, _pts, reason in workqueue.CODE_PATTERNS]
+        primary = workqueue.strategy_for(every_reason)
+        self.assertNotEqual(primary, "S4")
+        self.assertNotIn(
+            "S4", workqueue.complementary_strategies(every_reason, primary))
+
+    def test_the_campaign_card_never_consumes_a_ranked_window_slot(self) -> None:
+        """It is not ranked source. bin/rank-work appends it beside the S6
+        peer merge, so a bounded window still buys `limit` files of real
+        ranking rather than `limit - 1`."""
+        cards = workqueue.rank_target(self.ctx, 3)
+        self.assertLessEqual(len(cards), 3)
+        self.assertNotIn("s4-campaign", {c.get("kind") for c in cards})
+
+    def test_one_campaign_card_exists_per_target_and_is_stable(self) -> None:
+        card = workqueue.campaign_card(self.ctx)
+        again = workqueue.campaign_card(self.ctx)
+        self.assertEqual(card["id"], again["id"])
+        self.assertEqual(card["strategy"], "S4")
+        self.assertEqual(card["kind"], "s4-campaign")
+        # A unique surface, so it can never collide with a ranked file card
+        # and get deduplicated away.
+        self.assertNotEqual(
+            workqueue.work_surface(card),
+            workqueue.work_surface({"file": "a.c", "strategy": "S4"}))
+
     def test_s3_evidence_accepts_rule_and_outbound_decision_traces(self) -> None:
         matcher, threshold = workqueue.STRATEGY_KEYWORDS["S3"]
         self.assertEqual(threshold, 2)
@@ -1300,12 +1335,12 @@ class WorkQueueTests(unittest.TestCase):
         """A rejected label must not cost the hypothesis row.
 
         The agent types `--strategy` itself, and writes 'S7', 's7', and
-        'S7-fuzz-improvement' alike.  The row couples a claim, its probe
+        'S7-adversarial-input' alike.  The row couples a claim, its probe
         runs, and the rotation's evidence count, so refusing an
         off-vocabulary label loses far more than it protects; the report
         path normalizes the label later.
         """
-        for label in ("S7", "s7", "S7-fuzz-improvement", "REF"):
+        for label in ("S7", "s7", "S7-adversarial-input", "REF"):
             with self.subTest(label=label):
                 done = self.run_command([
                     sys.executable, str(ROOT / "bin" / "state"),
@@ -1323,7 +1358,7 @@ class WorkQueueTests(unittest.TestCase):
             row.get("strategy")
             for row in workqueue.read_jsonl(self.results / "state" / "hypotheses.jsonl")
         }
-        self.assertEqual({"S7", "s7", "S7-fuzz-improvement", "REF"}, recorded)
+        self.assertEqual({"S7", "s7", "S7-adversarial-input", "REF"}, recorded)
 
     def test_every_fired_strategy_gets_a_card_on_a_multi_signal_file(self) -> None:
         """A strategy with no card can never be assigned to an agent.

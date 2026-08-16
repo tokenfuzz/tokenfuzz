@@ -124,6 +124,7 @@ nav:
       - Backends, models, and ensemble: guides/backends.md
       - Language runners: guides/multi-language.md
       - Browser targets: guides/browser-targets.md
+      - Boundary-directed fuzzing: guides/directed-fuzzing.md
       - Review and triage: guides/triage-results.md
       - Maintainer crash reproduction: guides/reproduce-a-crash.md
   - Concepts:

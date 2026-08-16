@@ -46,6 +46,7 @@ from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+import strategies  # noqa: E402
 
 import report_identity  # noqa: E402
 import stack_frames  # noqa: E402
@@ -1008,13 +1009,15 @@ _STRATEGY_NAMES = {
     "S1":  "Prior-fix + regression variant",
     "S2":  "Invariant negation",
     "S3":  "Spec-vs-impl + fast-paths",
+    "S4":  "Boundary-directed fuzzing",
     "S5":  "Lifetime & state violation",
     "S6":  "Cross-project variant mining",
-    "S7":  "Adversarial input & fuzz engineering",
+    "S7":  "Adversarial input",
     "S8":  "Property-based oracles",
     "REF": "Pattern reference",
 }
-_STRATEGY_CELL_RE = re.compile(r"^\s*(S[1-3]|S[5-8]|REF)\s*$")
+_STRATEGY_CELL_RE = re.compile(
+    r"^\s*(" + "|".join(strategies.ATTRIBUTABLE) + r")\s*$")
 
 # Advisory field is a yes/no flag — `yes` means the bundle ships a
 # `## Fix Direction` narrative *without* a surgical patch.diff (the fix

@@ -1,16 +1,22 @@
-# Strategy S7: Adversarial Input & Fuzz Engineering
+# Strategy S7: Adversarial Input Engineering
 
-**Two complementary approaches:** (A) Write targeted adversarial inputs that stress
-parsers/decoders at boundary conditions — delivered through the normal ASan pipeline,
-no fuzzer needed. (B) Improve existing fuzz harnesses and generate smart seeds for
-offline fuzzing.
+Write targeted adversarial inputs that stress parsers and decoders at boundary
+conditions, delivered through the normal sanitizer pipeline. No fuzzer, and no
+fuzz harness: reasoning backwards from parser code to the input that reaches a
+specific error path is what an LLM does better than mutation, and it needs
+nothing built.
 
-**Part A is the primary approach.** LLM agents reason about what inputs break parsers;
-brute-force mutation is better left to long-running fuzzer jobs.
+**Fuzzing belongs to S4.** If this surface deserves a fuzz target — an
+untrusted-input entry point on a published API with no harness driving it —
+that is a boundary-directed fuzzing card, not a detour here. See
+`S4-directed-fuzzing.md`. Do not build harnesses, generate corpora, or run a
+fuzzer under S7.
 
-**Review gate:** after 6 targeted inputs plus 3 fuzz seeds with 0 crashes and no HIT/NEEDS_TESTCASE lead, rotate strategy. Do not stop while a seed reaches the intended parser/decoder path.
+**Review gate:** after 6 targeted inputs with 0 crashes and no
+HIT/NEEDS_TESTCASE lead, rotate strategy. Do not stop while an input is
+reaching closer to the intended parser/decoder path.
 
-## Part A: Adversarial Parser/Decoder Inputs (PRIMARY)
+## Adversarial Parser/Decoder Inputs
 
 Unlike S3 (spec-vs-impl) which compares spec text to implementation, this approach
 needs no spec. Feed adversarial inputs to parsers and decoders, targeting structural
@@ -116,48 +122,17 @@ Inputs to construct:
 
 ### Delivery
 
-All Part A testcases go through the normal pipeline:
+Every testcase goes through the normal pipeline:
 ```bash
 bin/probe "${RESULTS_DIR}/scratch-N/testcase.html"       # TARGET / HYPOTHESIS-ID from header
 ```
 
-No fuzzer binary needed. No XPCOM init overhead. Same budget as any other testcase.
+No fuzzer binary needed. No XPCOM init overhead. Same budget as any other
+testcase. When a surface resists hand-written inputs because it is guarded by a
+format or checksum a reasoned guess cannot satisfy, that is the signal to file
+an S4 card for it rather than to keep guessing here.
 
-## Part B: Fuzz Harness + Seed Engineering (SECONDARY)
-
-Generate smart seeds and harness improvements for offline fuzzing. Useful when you
-encounter a subsystem with existing fuzz targets, but **don't spend more than 20%
-of session time here** — seed generation is the deliverable, not fuzzer runtime.
-
-### Smart seed generation
-
-1. Read the fuzz harness source to understand input format requirements
-2. Read the target parser code to identify unreached branches
-3. Construct minimal seeds that pass header/magic validation and exercise specific branches
-4. Write seeds to `${RESULTS_DIR}/scratch-N/fuzz-seeds/<TargetName>/` for offline use
-
-**Do NOT run the fuzzer yourself** for browser-integrated targets (XPCOM init = ~5s/exec,
-impractical for short sessions). For JS-only targets (`fuzz-tests` binary), short runs
-(60s) are acceptable since init is fast.
-
-When you do run one, pass `-artifact_prefix=${RESULTS_DIR}/scratch-N/`. libFuzzer
-otherwise saves `crash-<sha1>` into the directory it was launched from, which leaves
-the artifact in the source tree where it belongs to no run.
-
-### Harness gaps to document
-
-When reading a fuzz harness, note gaps in `${RESULTS_DIR}/scratch-N/fuzz-harness-notes.md`:
-
-| Gap | Impact | Example |
-|-----|--------|---------|
-| Missing API calls | Unreached code | Decoder tests Decode but not Seek/Reset |
-| No multi-step sequences | State confusion unreachable | init→op→op→cleanup not tested |
-| Fixed config | Config-dependent bugs missed | Optimizations always on/off |
-| MOZ_RELEASE_ASSERT barriers | Fuzzer killed on mutation | Can't mutate past header validation |
-
-These notes are valuable for the human to act on — they identify structural fuzz coverage gaps.
-
-### Existing test mutation
+## Existing test mutation
 
 Mutate the project's own test suite to violate preconditions:
 

@@ -8,17 +8,17 @@ Read only the strategy file you need, not all of them.
 - **Two-phase search:** Filename-only sweep first (`rg -l`), then inspect only the 2-3 most promising files with `rg -n` or `sed -n`.
 - **Scope every search:** Always scope with a directory path or `--glob`. Never search from `.` or scan `output/`.
 
-## Strategy Priority (7 active strategies + 1 reserved ID + 1 pattern reference)
+## Strategy Priority (8 active strategies + 1 pattern reference)
 
 | Priority | Strategy | File | When |
 |----------|----------|------|------|
 | **1st** | **S1: Prior-fix + regression variant** | `S1-prior-fix-review.md` | Always first. 3/7 historical findings. Mines own fixes AND refactors. |
 | **2nd** | **S2: Invariant negation** | `S2-assert-negation.md` | Mechanical: asserts, algorithm assumptions, multi-precondition gates. |
 | **3rd** | **S3: Rule-vs-implementation** | `S3-spec-vs-impl.md` | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
-| — | **S4: Reserved** | — | Unused and not assignable. |
+| **4th** | **S4: Boundary-directed fuzzing** | `S4-directed-fuzzing.md` | The only strategy that runs a fuzzer. Admitted APIs only: published, untrusted-reachable, undriven. |
 | **5th** | **S5: Lifetime & state violation** | `S5-reentrancy.md` | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
 | **6th** | **S6: Cross-project variant mining** | `S6-cross-project.md` | Mine peer projects' fixes for bug classes in target. |
-| **7th** | **S7: Adversarial input & fuzz engineering** | `S7-fuzz-improvement.md` | Targeted parser/decoder boundary inputs + smart seed generation. |
+| **7th** | **S7: Adversarial input** | `S7-adversarial-input.md` | Targeted parser/decoder boundary inputs, by hand. Fuzzing is S4. |
 | **8th** | **S8: Property-based oracles** | `S8-property-based.md` | Sanitizer-free oracles: idempotence, injectivity, numerical domain, format compliance, inverse operations. |
 | Ref | **REF: Pattern search library** | `REF-pattern-search.md` | Not a strategy — grep patterns for use alongside any strategy. |
 
@@ -54,6 +54,8 @@ reachability → lower priority unless you can name a concrete input path past i
 | R6 | JIT fast-path type-mismatch via MaybeOptimize* | S3 (fast-path) |
 | R8 | Sentinel collision: -1/0xFFFF/MAX matches valid data | REF (pattern ref) |
 | R9 | Multi-precondition gate → fuzzer-unreachable code | S2 |
+| R24 | Published API takes caller-controlled bytes and no harness drives it | S4 (admission gate) |
+| R25 | Existing harness gated by a magic/size check the mutator cannot pass | S4 (harness gap) |
 | R10 | Algorithm invariant violation at edge cases | S2 |
 | R11 | Spec says "MUST reject" but code continues | S3 |
 | R15 | Assert-only bounds check → bounds issue in release | S2 |

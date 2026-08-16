@@ -38,7 +38,7 @@ tells the agent not to re-read those ranges after compaction.
 
 ## Strategies
 
-**Strategy (S1, S2, S3, S5, S6, S7, or S8).** A named recipe an agent follows: how to
+**Strategy (S1 through S8).** A named recipe an agent follows: how to
 pick a hypothesis, find an input, mutate it, and decide what the
 result means. See
 [Strategy model](../concepts/strategy-model.md).

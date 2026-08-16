@@ -350,7 +350,7 @@ _INPUT_CONSUMPTION_RE = re.compile(
 # Each row is (compiled_regex, points, reason). `code_feature_reasons`
 # adds `points` (saturating) to a file's rank score and records
 # `reason`; `strategy_for` / `complementary_strategies` map the reason
-# set to an active audit strategy (S1, S2, S3, S5, S6, S7, or S8).
+# set to an active audit strategy; see lib/strategies.ACTIVE.
 #
 # Discipline (docs/development.md): these run against EVERY target's source, so
 # every row must be target-agnostic — it matches a *family* (verb stems,
@@ -721,7 +721,15 @@ BOUNDARY_REASONS: frozenset[str] = S3_SECURITY_REASONS | {"remote-peer endpoint"
 # S7 adversarial-input and S5 lifetime/state are sanitizer-checked so
 # they lead; S2/S3 are code-grounded; S8 is the no-sanitizer oracle.
 # S1 (prior-fix) and S6 (cross-artifact) are not seedable from one file's
-# code features. S4 is reserved and has no runtime behavior.
+# code features.
+#
+# S4 (boundary-directed fuzzing) deliberately owns no reason here. It is not
+# a per-file method: one fuzz campaign covers a target's whole admitted
+# surface at once, so a card per ranked file would mean several agents each
+# starting the same global campaign over one shared corpus and state file.
+# It gets exactly one card per target from `campaign_card`, the same shape
+# patch cards (always S1) and peer-fix cards (always S6) already use. That
+# also keeps this table's one-reason-one-strategy property intact.
 #
 # The boundary rows (access control, identity/origin, credential
 # verification, query/template construction, outbound requests, path
@@ -1841,6 +1849,59 @@ def rank_target(ctx: Context, limit: int, patch_cards: Path | None = None) -> li
     return dedupe_work_cards(
         select_strategy_window(cards, main_limit) + selected_floor
     )
+
+
+def campaign_supported(config) -> bool:
+    """Whether this target can host a fuzz campaign at all.
+
+    Two hard requirements, both from the target's own config: a native
+    sanitizer libFuzzer can build against, and a library to link. A
+    findings-only target (`[sanitizer] enabled = []`) has neither, and a
+    target configured with only a CLI binary cannot be linked by the
+    out-of-tree build — minting the card anyway hands an agent work whose
+    first step fails.
+    """
+    if config is None:
+        return False
+    native = [name for name in getattr(config, "sanitizers_enabled", [])
+              if name in {"asan", "ubsan", "msan", "tsan"}]
+    if not native:
+        return False
+    return any(config.sanitizer_lib(name) for name in native)
+
+
+def campaign_card(ctx: Context) -> dict:
+    """The single S4 card for a target.
+
+    A fuzz campaign is a target-level activity, not a per-file one: it covers
+    every admitted API at once and holds one corpus and one state file. Minting
+    one card is what keeps two agents from starting the same campaign over the
+    same corpus, and what bounds S4 to one campaign's wall per iteration.
+
+    Deliberately unscored and unranked — it is not competing with the ranked
+    window, it is a standing invitation that the admission gate then accepts or
+    refuses on evidence.
+    """
+    digest = hashlib.sha1(f"{ctx.target_slug}:s4-campaign".encode()).hexdigest()[:12]
+    return {
+        "id": f"FUZZ-{digest}",
+        "kind": "s4-campaign",
+        "strategy": "S4",
+        "status": "unclaimed",
+        "target_slug": ctx.target_slug,
+        "file": "",
+        "function": "",
+        "subsystem": "(target)",
+        "mode": "auto",
+        "score": 1,
+        "buildability": "built",
+        "created_at": now_iso(),
+        "reason": (
+            "boundary-directed fuzzing campaign for the whole target; "
+            "run `bin/fuzz candidates` to see which published APIs untrusted "
+            "input reaches and no harness drives"
+        ),
+    }
 
 
 def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
@@ -4448,15 +4509,35 @@ STRATEGY_KEYWORDS: dict[str, tuple[re.Pattern[str], int]] = {
         ),
         1,
     ),
-    # S7 — adversarial / fuzz-improvement.
+    # S7 — adversarial input, written by hand. Anything naming a fuzzer, a
+    # harness, or a corpus belongs to S4 now; leaving those spellings here
+    # would let a fuzzing note complete an S7 rotation the agent never did.
     "S7": (
         re.compile(
             r"\b(?:truncat|malformed|adversarial|crafted"
             r"|short[\s_-]?input|over[\s_-]?long"
             r"|encoding|surrogate|bom"
             r"|null[\s_-]?byte"
-            r"|partial[\s_-]?read"
-            r"|fuzz[\s_-]?seed|corpus[\s_-]?gap)",
+            r"|partial[\s_-]?read)",
+            re.IGNORECASE,
+        ),
+        2,
+    ),
+    # S4 — boundary-directed fuzzing. Evidence is the agent naming the
+    # campaign machinery: a harness, a corpus, a coverage or execution
+    # measurement, or one of the health verdicts a slice ends in. Threshold 2
+    # because one campaign produces all of these at once, and a single note
+    # saying "ran the fuzzer" is not work.
+    "S4": (
+        re.compile(
+            r"\b(?:fuzz(?:er|ing)?[\s_-]?(?:target|harness|campaign|blocker|seed)"
+            r"|libfuzzer|LLVMFuzzerTestOneInput|cargo[\s_-]?fuzz|atheris|jazzer"
+            r"|corpus(?:[\s_-]?(?:gap|seed|merge|minimi))?"
+            r"|coverage[\s_-]?(?:feedback|edge|guided|instrument)"
+            r"|new[\s_-]?edges|exec(?:utions)?/s|execs?[\s_-]?per[\s_-]?second"
+            r"|sanitizer[\s_-]?coverage|artifact_prefix"
+            r"|(?:startup[\s_-]?crash|noise[\s_-]?flood|blocked[\s_-]?on[\s_-]?crash"
+            r"|saturated[\s_-]?harness))",
             re.IGNORECASE,
         ),
         2,

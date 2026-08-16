@@ -85,17 +85,17 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 
 ---
 
-## STRATEGY PRIORITY (7 active strategies + 1 reserved ID + 1 pattern reference)
+## STRATEGY PRIORITY (8 active strategies + 1 pattern reference)
 
 | Priority | Strategy | When |
 |----------|----------|------|
 | **1st (fallback default)** | **S1: Prior-fix + regression variant** | Default ONLY when the queue has no higher-signal card assigned. The harness queue may rank another card above every S1 patch card — follow the assigned strategy when one is given. Mines own fixes AND refactors for unfixed analogues. |
 | **2nd** | **S2: Invariant negation** | Mechanical: break asserts, algorithm assumptions, multi-precondition gates. |
 | **3rd** | **S3: Rule-vs-implementation** | LLM-native: trace a stated security, specification, or fast/slow-path rule to the exact code that must enforce it. Security-boundary cards start with access, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions. |
-| — | **S4: Reserved** | Unused and not assignable. |
+| **4th** | **S4: Boundary-directed fuzzing** | The only strategy that runs a fuzzer. `bin/fuzz candidates` admits a published API that untrusted input reaches and no harness drives; improve or write one faithful harness, then spend ONE bounded campaign. Artifacts replay through `bin/probe`. |
 | **5th** | **S5: Lifetime & state violation** | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
 | **6th** | **S6: Cross-project variant mining** | Mine peer projects' fixes for bug classes in target. |
-| **7th** | **S7: Adversarial input & fuzz engineering** | Targeted parser/decoder boundary inputs + smart seed generation. |
+| **7th** | **S7: Adversarial input** | Targeted parser/decoder boundary inputs, written by hand. No harnesses, no corpora, no fuzzer — those are S4. |
 | **8th** | **S8: Property-based oracles** | Sanitizer-free oracles for silent corruption: idempotence, injectivity, numerical domain, format compliance, inverse operations. |
 | Ref | **REF: Pattern search library** | Grep patterns for use alongside any strategy. |
 
@@ -130,7 +130,7 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
    one-run probe does NOT auto-file — confirm first.) Do NOT hunt the crashes/
    tree for it and do NOT open a second dir — re-confirming the same testcase
    reuses the existing bundle. Go to the printed path and ENRICH `report.md`
-   — write the narrative sections named in the "Report narrative" block of your session prompt (Summary, Root Cause, Data Flow, Impact, Fix Direction), keeping Data Flow bullets in the `step: func (path/to/file.c:NN) — desc` shape so the post-render pass can inline source snippets. Point at the fix with exactly one pointer (best-effort, never blocks filing): for a surgical 1–3 line fix, save a sibling `patch.diff` whenever it passes the non-mutating `git -C "$TARGET_ROOT" apply --check` (never modify the target source to validate — for hg targets just save the `hg diff`); do NOT write a `## Patch` section in `report.md` — `bin/enrich-report` is the single writer of that section. Otherwise — the fix is non-surgical, or you couldn't capture a clean diff — add a `## Fix Direction` heading on its own line instead. The report must also carry the standard bare-label fields `Boundary:` / `Caller controls:` / `Trusted caller actions:` / `Caller contract:` / `Trigger source:` / `Strategy:` (see `.agents/references/session-rules.md`). `Strategy: S<N>` records which of S1, S2, S3, S5, S6, S7, S8, or REF produced this report — the cluster tables and ROI surface use it to attribute bugs to the strategy that found them.
+   — write the narrative sections named in the "Report narrative" block of your session prompt (Summary, Root Cause, Data Flow, Impact, Fix Direction), keeping Data Flow bullets in the `step: func (path/to/file.c:NN) — desc` shape so the post-render pass can inline source snippets. Point at the fix with exactly one pointer (best-effort, never blocks filing): for a surgical 1–3 line fix, save a sibling `patch.diff` whenever it passes the non-mutating `git -C "$TARGET_ROOT" apply --check` (never modify the target source to validate — for hg targets just save the `hg diff`); do NOT write a `## Patch` section in `report.md` — `bin/enrich-report` is the single writer of that section. Otherwise — the fix is non-surgical, or you couldn't capture a clean diff — add a `## Fix Direction` heading on its own line instead. The report must also carry the standard bare-label fields `Boundary:` / `Caller controls:` / `Trusted caller actions:` / `Caller contract:` / `Trigger source:` / `Strategy:` (see `.agents/references/session-rules.md`). `Strategy: S<N>` records which of S1, S2, S3, S4, S5, S6, S7, S8, or REF produced this report — the cluster tables and ROI surface use it to attribute bugs to the strategy that found them.
 ```
 
 **Techniques:** allocator shaping, GC/CC timing, object replacement, multi-trigger, `ASAN_OPTIONS=quarantine_size_mb=1`. Full templates: `.agents/references/reproducer-templates.md`.
@@ -188,7 +188,7 @@ Required:
 - A report file at the FIND root — `report.md` or `description.md` (markdown). `report.html` is generated automatically by the harness; you do not need to write it. Other artifacts (testcase, sanitizer output, `affected-files.txt`) are welcome but optional.
 - Keep FIND/CRASH bundles self-contained: save evidence as regular files, never symlinks. For an impractically large input, save a compact generator instead.
 - The report must name a concrete location (file:function:line, endpoint, config key, etc.), state the security issue class, and give a rationale a reviewer can act on (impact, caller control, what is wrong).
-- Include the standard bare-label fields the crash gate expects, including `Strategy: S<N>` (S1, S2, S3, S5, S6, S7, S8, or REF) so FINDING-CLUSTERS attributes the finding to the strategy that produced it. S4 is reserved and must not be used.
+- Include the standard bare-label fields the crash gate expects, including `Strategy: S<N>` (S1, S2, S3, S4, S5, S6, S7, S8, or REF) so FINDING-CLUSTERS attributes the finding to the strategy that produced it.
 
 **Do NOT create FINDs for:** vague suspicions with no nameable location, "code looks suspicious" without saying why, provably unreachable code, OR pure correctness / data-integrity / robustness / spec-deviation bugs that don't cross a security boundary. "Empty input decodes to wrong bytes", "roundtrip drops whitespace", "format differs from spec" are upstream quality bugs, not security findings — record them with `bin/state add-note` and move on, don't file under `findings/`. The harness gate moves rejected FINDs to `findings-rejected/`; saving the cycles by not filing them in the first place is faster.
 

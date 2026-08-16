@@ -641,9 +641,16 @@ class SymbolTableTests(unittest.TestCase):
         here would break the sidecar on an interpreter the harness never
         chose."""
         source = (ROOT / "lib" / "native_symbols.py").read_text(encoding="utf-8")
-        imported = set(re.findall(r"^(?:import|from)\s+([\w.]+)", source, re.M))
-        self.assertTrue(imported <= set(sys.stdlib_module_names) | {"__future__"},
-                        f"non-stdlib imports: {imported}")
+        imported = {
+            name.split(".")[0]
+            for name in re.findall(r"^(?:import|from)\s+([\w.]+)", source, re.M)
+        }
+        # Named rather than checked against sys.stdlib_module_names, which is
+        # 3.10+: the harness still supports the 3.9 a stock macOS ships, and a
+        # test that cannot run there does not guard anything there.
+        allowed = {"__future__", "subprocess", "pathlib", "os", "sys", "re"}
+        self.assertTrue(imported <= allowed,
+                        f"non-stdlib or unvetted imports: {imported - allowed}")
 
 
 class EntryBoundaryTests(unittest.TestCase):

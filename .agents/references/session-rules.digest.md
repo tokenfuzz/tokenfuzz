@@ -105,7 +105,7 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 ## bin/state cheat sheet (use instead of `--help`)
 
 ```
-resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1|S2|S3|S5|S6|S7|S8]
+resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1|S2|S3|S4|S5|S6|S7|S8]
 next-card     --agent N [--mode MODE] [--peek]
 show-card     CARD_ID [--mode MODE]                     # compact JSON
 list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
@@ -176,7 +176,7 @@ Caller controls:
 Trusted caller actions:
 Caller contract: obeyed|violated|unspecified
 Trigger source: bytes|call-sequence|timing|race|protocol-state|env|fs-state|both
-Strategy: S1|S2|S3|S5|S6|S7|S8|REF
+Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
 ```
 
 `Strategy` is the investigation strategy actually in use when the
