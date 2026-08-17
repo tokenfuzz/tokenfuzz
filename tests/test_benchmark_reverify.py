@@ -1286,6 +1286,64 @@ class BenchmarkReverifyTests(unittest.TestCase):
         )
         self.assertEqual(fields["BIN"], str(snapshot_binary))
 
+    def test_a_named_reproducer_that_defines_main_is_not_cli_input(self) -> None:
+        """`repro.c` matches the testcase prefixes and still defines main().
+
+        Resolving it as CLI input replays the wrong program: the target reads a
+        source file it never crashed on, and a CLI whose ordinary exit status is
+        nonzero then reports a failed execution, which the caller records as an
+        unmeasured replay and leaves a real crash unadjudicated. A configured
+        harness library is what says the bundle's sources are drivers to compile.
+        """
+        target, slug = self.make_target(
+            "api-harness-bundle", library="build-asan/libtarget.a",
+        )
+        crash = self.make_crash("api-harness-bundle-cell")
+        (crash / "poc.bin").unlink()
+        (crash / "repro.c").write_text(
+            "#include <stdio.h>\nint main(void) { return 0; }\n", encoding="utf-8",
+        )
+        self.assertIsNone(
+            benchmark_runner._resolve_reverify_fields(crash, target, slug),
+        )
+
+    def test_a_source_consuming_target_still_replays_its_source_input(self) -> None:
+        """The same file is genuinely the input when nothing links a harness.
+
+        A target that parses source has no `asan_lib` for a driver to link
+        against, so `repro.c` is what its CLI consumes — and a recorded
+        `testcase=` is ground truth either way.
+        """
+        for name, library, footer in (
+            ("source-parser", "", ""),
+            (
+                "recorded-input",
+                "build-asan/libtarget.a",
+                "ASAN_RUN_HEADER: sanitizer=asan testcase={path}\n",
+            ),
+        ):
+            with self.subTest(name):
+                target, slug = self.make_target(name, library=library)
+                crash = self.make_crash(f"{name}-cell")
+                (crash / "poc.bin").unlink()
+                source = crash / "repro.c"
+                source.write_text(
+                    "#include <stdio.h>\nint main(void) { return 0; }\n",
+                    encoding="utf-8",
+                )
+                if footer:
+                    with (crash / "sanitizer.txt").open("a", encoding="utf-8") as out:
+                        out.write(footer.format(path=source))
+                resolved = benchmark_runner._resolve_reverify_fields(
+                    crash, target, slug,
+                )
+                self.assertIsNotNone(resolved)
+                fields, _ = resolved
+                self.assertEqual(fields["MODE"], "cli")
+                self.assertEqual(
+                    Path(fields["TESTCASE"]).resolve(), source.resolve(),
+                )
+
     def test_config_discovery_stops_at_the_benchmark_contract(self) -> None:
         target, slug = self.make_target("bounded-config")
         results = self.root / "loose" / "results"

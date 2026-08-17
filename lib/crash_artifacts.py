@@ -635,6 +635,21 @@ def crash_harness_binary(crash_dir: Path) -> Optional[Path]:
 
 def find_testcase(scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] = (),
                   min_bytes: int = 1) -> Optional[Path]:
+    return find_testcase_with_provenance(
+        scan_dirs, sanitizer_files=sanitizer_files, min_bytes=min_bytes,
+    )[0]
+
+
+def find_testcase_with_provenance(
+    scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] = (),
+    min_bytes: int = 1,
+) -> tuple[Optional[Path], bool]:
+    """`find_testcase`, plus whether a sanitizer header named that exact file.
+
+    Every other pass here picks by name, and a name is a guess: a caller that
+    has to know whether the input was *recorded* — rather than inferred from a
+    `repro.`/`input.` prefix — cannot recover that from the path alone.
+    """
     dirs = [Path(d) for d in scan_dirs if Path(d).is_dir()]
 
     # Prefer audit-preserved originals before following ASAN_RUN_HEADER.
@@ -646,7 +661,7 @@ def find_testcase(scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] 
     for d in audit_dirs:
         for p in _visible_files(d):
             if is_testcase_candidate(p, min_bytes=min_bytes):
-                return p
+                return p, False
 
     header_hit = testcase_from_sanitizer_header(
         sanitizer_files,
@@ -654,12 +669,12 @@ def find_testcase(scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] 
         min_bytes=min_bytes,
     )
     if header_hit is not None:
-        return header_hit
+        return header_hit, True
 
     for d in dirs:
         for p in _visible_files(d):
             if is_testcase_candidate(p, min_bytes=min_bytes):
-                return p
+                return p, False
 
     # Last resort before the caller reports "no testcase" (which TTL-rejects an
     # otherwise-complete crash): accept any non-artifact, non-binary,
@@ -668,8 +683,20 @@ def find_testcase(scan_dirs: Iterable[Path], *, sanitizer_files: Iterable[Path] 
     for d in (*audit_dirs, *dirs):
         for p in _visible_files(d):
             if is_testcase_candidate(p, min_bytes=min_bytes, relaxed=True):
-                return p
-    return None
+                return p, False
+    return None, False
+
+
+def source_defines_main(path: Path) -> bool:
+    """Whether `path` is a C/C++ source that defines main().
+
+    Public form of the harness-body test. `is_testcase_candidate` lets a
+    testcase-*named* source (`repro.c`, `input.c`) stay an input, which is right
+    for a target that parses source — and wrong for a library target, where the
+    same file is an API driver that has to be compiled, not fed to a CLI.
+    Callers that can tell those two targets apart need the body test on its own.
+    """
+    return _looks_like_harness_source(Path(path))
 
 
 def carries_replay_evidence(artifact_dir: Path) -> bool:

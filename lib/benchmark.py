@@ -6194,7 +6194,7 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
     sanitizer = _ca.infer_sanitizer_from_text(text)
 
     harness = _ca.crash_harness_binary(crash_dir)
-    testcase = _ca.find_testcase(
+    testcase, testcase_from_header = _ca.find_testcase_with_provenance(
         scan_dirs,
         sanitizer_files=[diagnostic] if diagnostic else [],
     )
@@ -6239,6 +6239,31 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
         if not binary_relative and not runner_selected and config.asan_bin:
             binary_relative = config.asan_bin
         library_relative = config.sanitizer_lib(sanitizer)
+
+    if (
+        harness_source is None
+        and testcase is not None
+        and not testcase_from_header
+        and library_relative
+        and _ca.source_defines_main(testcase)
+    ):
+        # A main()-bearing source picked by name alone, in a bundle for a target
+        # that links C harnesses, is an API driver — `repro.c` matches the
+        # testcase prefixes as readily as `input.c`. Replaying it as CLI input
+        # measures the wrong program: the runner reports whatever the target
+        # does with a source file it never crashed on, and a target whose normal
+        # exit status is nonzero then reads as a failed execution. The header
+        # exemption keeps a recorded input authoritative, and requiring a
+        # configured harness library keeps a source-parsing target's `input.c`
+        # replaying through its CLI, where it really is the input.
+        #
+        # Not a proof: a target can both link harnesses and parse source, and
+        # there this holds a measurable CLI reproducer unadjudicated. That is
+        # the conservative side — the alternative measured the wrong program and
+        # demoted on the result — but the durable answer is for the filing and
+        # export paths to record which role the file has, not a further reading
+        # of its name and body here.
+        harness_source, testcase = testcase, None
 
     target_binary = runner_binary or _resolve_build_path(
         target_root, binary_relative,
