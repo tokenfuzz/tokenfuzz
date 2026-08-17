@@ -887,6 +887,74 @@ assert_eq("build-asan/group/platform/release/libdeep.a",
           tc.detect_sanitizer_build_artifacts(deep_root, "asan")[1],
           "artifact detection reaches target-defined nested output")
 
+# Depth ranks above alphabetical order. The scan walks depth-first in name
+# order, so a subdirectory sorting before the product's own archive took the
+# slot, and a helper archive built for the CLI was configured as the library
+# instead — leaving every harness linked against symbols no public header
+# declares. Depth is the build's own statement about what it publishes.
+product_root = TEST_TMPDIR / "shallow-product-wins"
+(product_root / "build-asan" / "tools").mkdir(parents=True)
+(product_root / "build-asan" / "tools" / "libhelper.a").write_bytes(b"!<arch>\n")
+(product_root / "build-asan" / "libsampleproj.a").write_bytes(b"!<arch>\n")
+(product_root / "build-asan" / "libsampleproj_extra.a").write_bytes(b"!<arch>\n")
+assert_eq("build-asan/libsampleproj.a",
+          tc.detect_sanitizer_build_artifacts(product_root, "asan")[1],
+          "_detect_sanitizer_lib: a top-level product outranks a nested helper")
+
+# Public headers live by convention, and the conventions are few: include/, the
+# root, src/, lib/. A tree that matches none of them still needs a path that
+# resolves `<component>/header.h`, which is the root.
+def _include_case(name: str, headers: "list[str]") -> "list[str]":
+    root = TEST_TMPDIR / f"includes-{name}"
+    (root / "build-asan").mkdir(parents=True)
+    for relative in headers:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("int f(void);\n", encoding="utf-8")
+    return tc._detect_include_dirs(root, "build-asan")
+
+assert_in("lib", _include_case("lib-layout", ["lib/sampleproj.h"]),
+          "_detect_include_dirs: a lib/ layout is a public-header location")
+assert_in(".", _include_case("component-layout", ["component/api.h"]),
+          "_detect_include_dirs: an unrecognised layout still resolves from the root")
+assert_eq(False, "." in _include_case("include-layout", ["include/pub.h"]),
+          "_detect_include_dirs: a named layout does not also pull in the root")
+
+# `refresh_detected_build_fields` keeps a configured value that is a usable
+# artifact, so a library no header describes survived every rerun. The repair
+# path writes past that rule — only where the caller has measured that the
+# replacement is better, which is why the write is a separate, dumb edit.
+repair_root = TEST_TMPDIR / "harness-input-repair"
+(repair_root / "build-asan" / "tools").mkdir(parents=True)
+(repair_root / "build-asan" / "tools" / "libhelper.a").write_bytes(b"!<arch>\n")
+(repair_root / "build-asan" / "libproduct.a").write_bytes(b"!<arch>\n")
+(repair_root / "lib").mkdir()
+(repair_root / "lib" / "product.h").write_text("int f(void);\n", encoding="utf-8")
+repair_toml = repair_root / "target.toml"
+repair_toml.write_text(
+    'build_system  = "cmake"\n'
+    'asan_lib      = "build-asan/tools/libhelper.a"\n'
+    'includes      = ["build-asan"]\n',
+    encoding="utf-8",
+)
+detected_lib, detected_includes = tc.detected_harness_inputs(repair_root, "asan")
+assert_eq("build-asan/libproduct.a", detected_lib,
+          "detected_harness_inputs: reports the product, not the kept helper")
+assert_in("lib", detected_includes,
+          "detected_harness_inputs: reports the header location")
+assert_eq(False, tc.refresh_detected_build_fields(repair_root, repair_toml),
+          "refresh_detected_build_fields: still keeps the usable-but-wrong value")
+assert_eq(True, tc.write_harness_inputs(
+              repair_toml, "asan", detected_lib, detected_includes),
+          "write_harness_inputs: reports the correction")
+repaired = repair_toml.read_text(encoding="utf-8")
+assert_in('asan_lib      = "build-asan/libproduct.a"', repaired,
+          "write_harness_inputs: corrects the library")
+assert_in('"lib"', repaired, "write_harness_inputs: corrects the includes")
+assert_eq(False, tc.write_harness_inputs(
+              repair_toml, "asan", detected_lib, detected_includes),
+          "write_harness_inputs: reports no change when already correct")
+
 # A generated CMake interface export is positive evidence that a successful
 # build is header-only, while any imported compiled location keeps the normal
 # artifact requirement in force.

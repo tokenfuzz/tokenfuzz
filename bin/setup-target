@@ -17,6 +17,7 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import build_materialize
 import build_lease
+import fuzz_harness
 import languages
 import runner_preflight
 import sanitizer
@@ -954,6 +955,72 @@ class Setup:
             if completed.returncode:
                 log("bootstrap: alternate build configurations could not be prepared; primary build is unaffected")
 
+    def repair_harness_inputs(self) -> None:
+        """Correct a library and include set that cannot see each other.
+
+        The CLI route is proved by launching the program, and a binary that
+        cannot start is re-detected and replaced. The library route was proved
+        by `is_file()`, which a helper archive beside the product passes just as
+        well, and `includes` was never re-checked at all — so a pair that
+        declares nothing survived every rerun. Downstream that reads as "this
+        target has no API", which is also what a target with no API looks like.
+
+        The same shape as the CLI repair, with the same guard: measure, and
+        adopt a replacement only where the measurement proves it is better. A
+        pair that already works is never touched, and a replacement that would
+        not work is reported instead of written — a CLI-first target is audited
+        perfectly well without a harness route.
+        """
+        for sanitizer_name in self.harness_input_sanitizers():
+            config = target_config.Config(target_root=str(self.target_root))
+            target_config.load_toml_into(config, self.toml)
+            exported, declared = self.declared_exports(config, sanitizer_name)
+            if not exported or declared:
+                continue
+            library, includes = target_config.detected_harness_inputs(
+                self.target_root, sanitizer_name,
+            )
+            candidate = target_config.Config(target_root=str(self.target_root))
+            target_config.load_toml_into(candidate, self.toml)
+            if library:
+                setattr(candidate, f"{sanitizer_name}_lib", library)
+            candidate.includes = list(includes)
+            _, repaired = self.declared_exports(candidate, sanitizer_name)
+            if repaired and target_config.write_harness_inputs(
+                self.toml, sanitizer_name, library, includes,
+            ):
+                log(
+                    f"config repair: {sanitizer_name}_lib/includes declared "
+                    f"none of the library's {exported} exported symbol(s); "
+                    f"re-detected as {library} + {includes}, which declares "
+                    f"{repaired}"
+                )
+                continue
+            log(
+                f"WARN: {sanitizer_name}_lib exports {exported} symbol(s) that "
+                f"`includes` does not declare, and re-detection found no better "
+                f"pair; a C harness cannot be written against this target. "
+                f"Check that {sanitizer_name}_lib names the library the build "
+                f"publishes rather than a helper archive beside it, and that "
+                f"`includes` reaches its public headers"
+            )
+
+    def harness_input_sanitizers(self) -> "list[str]":
+        config = target_config.Config(target_root=str(self.target_root))
+        target_config.load_toml_into(config, self.toml)
+        return [
+            name for name in config.sanitizers_enabled
+            if name in {"asan", "ubsan", "msan", "tsan"}
+            and config.sanitizer_lib(name)
+        ]
+
+    @staticmethod
+    def declared_exports(config, sanitizer_name: str) -> "tuple[int, int]":
+        try:
+            return fuzz_harness.declared_exports(config, sanitizer_name)
+        except (OSError, ValueError):
+            return 0, 0
+
     def execute(self) -> int:
         self.prepare_source()
         self.seed_profile_build_recipe()
@@ -971,6 +1038,7 @@ class Setup:
         self.sanitizer_builds(config)
         self.runner_bootstrap()
         self.report_invariant_runners()
+        self.repair_harness_inputs()
         print(f"\nNext steps:\n  1. Review output/{self.name}/target.toml.\n  2. Smoke-test with: bin/audit --target {self.requested_name} --backend <claude|codex|gemini|grok|oss> 1")
         return 0
 

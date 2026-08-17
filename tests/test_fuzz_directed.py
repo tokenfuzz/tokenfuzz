@@ -21,10 +21,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -157,6 +159,70 @@ class DeclarationReadingTests(unittest.TestCase):
             "#define API_CHECK(cond) do { if (!(cond)) return -1; } while (0)\n"
             "int api_parse(const char *b, size_t n);\n")
         self.assertEqual(sorted(index), ["api_parse"])
+
+
+class HarnessInputAgreementTests(unittest.TestCase):
+    """Whether the configured library and includes describe the same thing.
+
+    `setup-target` proves the CLI route by launching the program, but proved the
+    library route with `is_file()` — which a helper archive beside the product
+    passes just as well. Both shipped configurations that read downstream as
+    "this target declares nothing", which is what a target with no API to fuzz
+    looks like too. This is the measurement that separates them.
+    """
+
+    def config(self, library: str, includes: "list[str]") -> "tuple[object, Path]":
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / "build-asan").mkdir(parents=True)
+        (root / "api").mkdir()
+        (root / "api" / "pub.h").write_text(
+            "int app_parse(const char *data, unsigned long len);\n", encoding="utf-8",
+        )
+        configuration = target_config.Config(
+            slug="demo", target_root=str(root),
+            asan_lib=library, includes=includes,
+            sanitizers_enabled=["asan"],
+        )
+        return configuration, root
+
+    def test_a_library_no_configured_header_describes_is_reported(self) -> None:
+        configuration, root = self.config("build-asan/libhelper.a", ["api"])
+        (root / "build-asan" / "libhelper.a").write_bytes(b"!<arch>\n")
+        with mock.patch.object(
+            fuzz_harness.native_symbols, "defined_symbols",
+            return_value={"helper_internal_thing"},
+        ):
+            self.assertEqual(
+                fuzz_harness.declared_exports(configuration, "asan"), (1, 0),
+            )
+
+    def test_a_matching_pair_reports_the_overlap(self) -> None:
+        configuration, root = self.config("build-asan/libdemo.a", ["api"])
+        (root / "build-asan" / "libdemo.a").write_bytes(b"!<arch>\n")
+        with mock.patch.object(
+            fuzz_harness.native_symbols, "defined_symbols",
+            return_value={"app_parse", "app_private"},
+        ):
+            self.assertEqual(
+                fuzz_harness.declared_exports(configuration, "asan"), (2, 1),
+            )
+
+    def test_includes_that_resolve_to_no_header_are_reported(self) -> None:
+        # The shipped shape: `includes` names the build directory, which exists
+        # and holds no header. An include list that resolves to nothing at all
+        # falls back to scanning the tree and quietly works, so only a list that
+        # resolves to a real but header-less directory reaches the gate empty —
+        # which is why this went unnoticed on the two targets that had it.
+        configuration, root = self.config("build-asan/libdemo.a", ["build-asan"])
+        (root / "build-asan" / "libdemo.a").write_bytes(b"!<arch>\n")
+        with mock.patch.object(
+            fuzz_harness.native_symbols, "defined_symbols",
+            return_value={"app_parse"},
+        ):
+            self.assertEqual(
+                fuzz_harness.declared_exports(configuration, "asan"), (1, 0),
+            )
 
 
 class SymbolFamilyTests(unittest.TestCase):

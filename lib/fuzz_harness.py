@@ -852,6 +852,30 @@ class LibraryChoice:
     remedy: str = ""
 
 
+def declared_exports(config, sanitizer: str) -> "tuple[int, int]":
+    """(symbols the library exports, how many the configured includes declare).
+
+    The pair the admission gate starts from, and the one measurement that tells
+    a misconfigured harness route apart from a target that simply has no API to
+    fuzz. Zero declared against a non-empty export list means `<san>_lib` and
+    `includes` are pointing at different things: a library whose headers are not
+    on the path, or a helper archive that no public header describes. Both
+    shipped, and both read downstream as "this target declares nothing" rather
+    than "this configuration is wrong".
+    """
+    library = coverage_library(config, sanitizer).path
+    if not library or not Path(library).is_file():
+        return 0, 0
+    exported = native_symbols.defined_symbols(Path(library), exported_only=True)
+    if not exported:
+        return 0, 0
+    index = declaration_index(
+        config.target_root,
+        [config.resolve_path(path) for path in config.includes],
+    )
+    return len(exported), sum(1 for symbol in exported if symbol in index)
+
+
 def coverage_library(config, sanitizer: str) -> LibraryChoice:
     """The library a campaign should link, preferring a coverage build.
 

@@ -1428,6 +1428,13 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
         return ""
     archives = [a for a in _find_under(san_dir, name=None)
                 if a.suffix == ".a" and not _is_aux_build_path(a, san_dir)]
+    # Shallowest first. `_find_under` walks alphabetically depth-first, so a
+    # subdirectory whose name sorts before the product's own archive took the
+    # slot, and a helper archive built for the CLI became the library every
+    # harness links against. Depth is the build's own statement about which
+    # artifact is the product; a stable sort keeps the existing order within
+    # one level.
+    archives.sort(key=lambda archive: len(archive.relative_to(san_dir).parts))
     for a in archives[:3]:
         if "posix" in a.name:
             continue
@@ -1870,6 +1877,59 @@ def refresh_detected_build_fields(
     return changed
 
 
+def detected_harness_inputs(
+    target_root: Path, sanitizer: str,
+) -> "tuple[str, list[str]]":
+    """What detection would choose today for the C-harness build inputs."""
+    _bin, library = detect_sanitizer_build_artifacts(target_root, sanitizer)
+    # The canonical alias, matching what the seeder persists: a container
+    # suffix belongs to the running image, not to the recorded config.
+    return library, _detect_include_dirs(
+        target_root, build_dir_name(sanitizer, suffix=""),
+    )
+
+
+def write_harness_inputs(
+    toml_path: Path, sanitizer: str, library: str, includes: "list[str]",
+) -> bool:
+    """Overwrite `<san>_lib` and `includes`, past the keep-what-is-usable rule.
+
+    `refresh_detected_build_fields` preserves a configured value that is still a
+    usable artifact, because an operator or a suggest-* helper may have chosen
+    it and detection is the weaker signal. That policy is right until the pair
+    stops working: a library no configured header describes passes every test
+    the refresh applies and still cannot be linked against, and `includes` is
+    not refreshed at all. Callers must prove the replacement is better first —
+    this only performs the edit.
+    """
+    try:
+        lines = Path(toml_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    field = f"{sanitizer}_lib"
+    library_line = _build_field_line(field, library)
+    includes_line = "includes      = [" + ", ".join(
+        toml_basic_string(entry) for entry in includes
+    ) + "]"
+    changed = False
+    for pattern, replacement in (
+        (rf"^\s*#?\s*{field}\b\s*=", library_line if library else ""),
+        (r"^\s*#?\s*includes\b\s*=", includes_line),
+    ):
+        if not replacement:
+            continue
+        matcher = re.compile(pattern)
+        for index, line in enumerate(lines):
+            if matcher.match(line):
+                if lines[index] != replacement:
+                    lines[index] = replacement
+                    changed = True
+                break
+    if changed:
+        Path(toml_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
+
+
 _HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx", ".H")
 
 
@@ -1912,6 +1972,17 @@ def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
     # `include/`.
     if "include" not in out and _has_headers(target_root / "src", recursive=False):
         out.append("src")
+    # `lib/` on the same terms as `src/`. A project publishing from there and
+    # holding nothing at the root resolved no header at all, which left its
+    # whole library route unusable.
+    if "include" not in out and _has_headers(target_root / "lib", recursive=False):
+        out.append("lib")
+    if not out:
+        # No conventional header directory, which is what a project that
+        # publishes `<component>/header.h` and includes it from its own root
+        # looks like. The root is the only path that resolves those, and
+        # reaching it needs no further layout guess.
+        out.append(".")
     out.append(f"{asan_dir_name}/include")
     # The build root itself, for the same reason and with the same cost when
     # it holds nothing: a configure step generates its answers as headers, and
