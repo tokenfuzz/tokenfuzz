@@ -442,6 +442,28 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check("/t/definitely-not-here.dylib" in kept and "0x30" in kept,
           "a frame nothing could resolve survives the pass intact", repr(kept))
 
+    # Teardown ran straight into the symbolizer's own failure: addr2line exits
+    # on a binary that is not there, so the buffered flush inside close()
+    # raised BrokenPipeError and threw away a stacktrace the loop had already
+    # symbolized. Only Linux picks addr2line, so the fixture is the dead pipe
+    # itself rather than a platform the developer may not be on.
+    dead = subprocess.Popen(
+        [sys.executable, "-c", "raise SystemExit(1)"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    )
+    dead.wait()
+    dead.stdin.write(b"unflushed" * 8192)
+    saved_pipes = clusterfuzz_symbolizer.pipes
+    clusterfuzz_symbolizer.pipes = [dead]
+    try:
+        clusterfuzz_symbolizer.SymbolizationLoop()._close_pipes()
+        closed_cleanly = True
+    except OSError:
+        closed_cleanly = False
+    finally:
+        clusterfuzz_symbolizer.pipes = saved_pipes
+    check(closed_cleanly, "a symbolizer that already exited cannot fail teardown")
+
     # Silence is what let a whole run ship address-only stacks while reporting
     # itself clean, so a report that keeps raw frames must say so.
     stubborn = root / "stubborn-symbols.txt"

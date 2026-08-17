@@ -493,8 +493,15 @@ class SymbolizationLoop:
   def _close_pipes(self):
     """Closes any open pipes."""
     for pipe in pipes:
-      pipe.stdin.close()
-      pipe.stdout.close()
+      # A symbolizer that already exited — addr2line handed a binary that is
+      # not there — leaves a broken pipe, and the flush inside close() raises
+      # it. Teardown must not discard a stacktrace the loop already
+      # symbolized; the unresolved frames it kept are the answer.
+      for stream in (pipe.stdin, pipe.stdout):
+        try:
+          stream.close()
+        except OSError:
+          pass
       try:
         pipe.kill()
       except ProcessLookupError:
