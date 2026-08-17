@@ -1,5 +1,138 @@
 # Changelog
 
+## 1.5.0 - 2026-08-17
+
+- **S4 is now boundary-directed fuzzing, and it actually runs.** S4 was a
+  reserved identifier no generator could feed and S7 carried a seed-and-harness
+  half its playbook told agents not to run, so nothing fuzzed. `bin/fuzz`
+  admits an API only when the build publishes it, the declared threat model
+  reaches its parameters, and no harness already drives it; it lints out the
+  three harness shapes that forge state or reach past public headers, runs
+  bounded slices with health quarantine, and replays every artifact through
+  `bin/probe` with its hypothesis, sanitizer, and build compiler attached.
+  Progress counts features as well as edges, because value profiling reports
+  through `ft` alone and a campaign watching `cov` would quarantine the harness
+  it had just switched on; coverage totals are reported, never divided, since
+  the instrumented total spans every loaded module.
+
+  Minting the card was not enough to run it. Strategies are assigned by
+  descending card supply, and S4 owns one target-level campaign card by
+  construction — one corpus, one lock, one campaign per iteration — so a lane
+  holding a whole iteration of work sorted behind every lane holding a list of
+  files, and came last on all four benchmark targets. Supply is breadth and the
+  campaign's is depth, so it is no longer ranked at all: it is reserved on the
+  highest-numbered reproduce worker, and ranked lanes compact over the agents
+  that remain. `bin/probe --harness` names the harness an opaque fuzz artifact
+  came from, which its bytes cannot carry, and harnesses build out of tree so a
+  campaign cannot stale the shared build for a peer backend.
+
+- **Security yield now requires a trigger inside the threat model.** Every kept
+  artifact counted as security yield even when its trigger fell outside the
+  model, so out-of-scope defects earned Medium+ severity. Only `reportable`
+  counts; the other lane is `not-reportable`, never "Low" — a CVSS Low is a
+  real report with small impact and the two must not share a word. Scope no
+  longer comes from the report's own `Trigger source`, which the finder writes
+  and which is wrong in both directions: judging on it punished the work that
+  builds reproducers. The trigger reviewer reads source and cites verified
+  anchors, so it answers the scope question itself, and `not-reportable` may
+  only assert what a review established — an `Uncertain` verdict or two
+  disagreeing reviewers stay `pending` and are counted in the unadjudicated
+  remainder that marks a benchmark count a floor. A decided out-of-model call
+  from an anchor-verified `Uncertain` vote is now kept rather than dropped,
+  since that direction can only withhold, never publish.
+
+- **A backend that refuses the request halts the run instead of publishing a
+  clean cell.** A revoked OAuth token matched none of the capacity or transient
+  patterns, so every dead session read as an ordinary dry iteration: the run
+  stopped early and the cell published as clean and done, which a same-run-id
+  resume then skipped as a valid measurement. A refusal — a turned-down
+  credential, or a model the installed CLI cannot serve — is its own class that
+  marks the cell unavailable and never pauses or retries, so no wall is
+  subtracted for capacity that was never coming back. It is read from a
+  backend's own error field as well as its CLI error lines, and threaded rather
+  than collapsed, so `rate_limit` keeps meaning retryable.
+
+- **Crashes stop being unmade between capture and replay.** Four layers each
+  kept their own ASan class list and all four omitted `stack-buffer-underflow`,
+  so a crash that replayed 5/5 against its own fault scored a mismatch and
+  published as an unjudged remainder; the vocabulary now lives in one place, as
+  the exact names the runtime prints. Replay answers one question — did the same
+  fault happen again — and no longer consults the crash gate's admission policy,
+  so a future omission cannot unmake a reproduction. Fault identity matches the
+  leading inline group, because a crash captured with the in-process symbolizer
+  keeps an inlined name the offline pass does not. A bundle whose harness had
+  migrated into `.audit/` matched the leftover `.dSYM/` directory and exec'd it;
+  resolution now requires a regular file. `no-contract` no longer demotes: it is
+  reported for a build that is gone as readily as for a real answer, and on one
+  ffmpeg set it had moved 17 reproducing crashes into `findings/` permanently.
+  A `main()`-bearing API driver picked by name alone resolves as the uncompiled
+  harness it is, rather than being fed to the target as CLI input.
+
+- **Clusters group again.** A real cluster stamp carries a per-report member
+  summary naming the *other* members, so every member produced a different key
+  and nothing ever grouped — 22 pooled crashes read as 22 clusters where there
+  are 14. Both row forms are now read as their stamp, and the placeholder
+  `bin/cluster-crashes` writes before an id exists has one definition shared by
+  the writer, the renderer and the clusterer.
+
+- **Benchmark cells keep evidence that was never in doubt.** Cells were excluded
+  whenever tracked bytes under `AGENTS.md`, `bin/`, `lib/` or `.agents/`
+  differed from a run-start pin, and ordinary development on the checkout
+  tripped it — a libxml2 run lost both 5h cells to a pin taken on a dirty tree.
+  That pin is gone; the target source and build pins, which do decide what a
+  cell measured, are unchanged. An empty `FIND-*` shell no longer counts as
+  unowned evidence, and a direct backend that exits nonzero after hours of
+  productive work is retained behind an `(Nt)` marker and its shorter actual
+  wall. Batched review inherited the single-item prompt's text but not its
+  answer contract, so every positive review stalled unresolved on the in-run
+  gate and the post-cell drain alike; the shared contract moved above the split
+  and schema parity is asserted so the two cannot diverge again.
+
+- **Sandboxed Claude gets its Bash back.** Launches ran with no allow rules, so
+  whatever the rules left undecided was denied — `;`-chained and multi-line
+  commands, about 9% of harness Bash calls, including `bin/peek`, `bin/state`
+  and `bin/probe`. Bash is now allowed, since the sandbox is what arbitrates it:
+  writes stay inside the `--add-dir` grants, egress stays blocked, and `deny`
+  still wins. Only Bash — nothing here grants the file tools.
+
+- **`setup-target` seeds a config the audit can actually use.** A `--force`
+  re-seed dropped the curated threat model and peer set and left replacing them
+  to LLM helpers that do not always run, so an operator's `attacker_controls`
+  and peers could vanish with nothing to recover them from; they now carry
+  across. Generated headers land in the build root rather than under `include/`,
+  which was the only build entry for one target and left it unable to compile a
+  harness at all. A computed program name is no longer treated as a complete
+  manifest read — cjson resolved 2 of its 21 executables that way — and the
+  binary already in the config is probed after the builds, against the route the
+  audit will use, reporting rather than repairing because neither answer is
+  proof. Runner selection repeats a launch on one input before comparing
+  anything, after a throughput benchmark passed as a reader on timing noise
+  alone and moved one audit's surface from a TLS client to hashing bytes.
+  Library and include detection ranks depth over name order and stays advisory,
+  reporting a stronger detected pair for review rather than overwriting operator
+  provenance.
+
+- **Sessions stopped before their terminal event are priced.** A backend that
+  reports usage only in a terminal event reported none when the turn cap or the
+  wall deadline stopped the session first, so a run's longest sessions —
+  including every model-direct cell, which always ends at its deadline — priced
+  as zero. Spend is recovered from the backend's own session record, and a cell
+  is classified on whether a row reported usage rather than on how it exited.
+
+- **The test suite stops paying a process where a call would do.** It is
+  process-startup bound: every `bin/` entry point costs 120–260ms of interpreter
+  and import, and the same chains run in an audit. `lib/timeout.py` paced its
+  reap poll and its `ps` sampler on one 0.5s tick, billing every sanitizer run
+  half a second of sleep after its command had already exited; the reverify
+  resolver re-entered `lib/benchmark` as a subprocess per crash to call a
+  function already in memory; and pool rebuild asked each cluster tool twice,
+  once for JSON and once for reports, clustering the same tree twice. On an idle
+  machine the four slowest suites go 146s to 99s, with crash reverification
+  halving. Only a whole-suite run may write the scheduler's timing artifact — a
+  filtered run left it holding a few rows and the next full run packed badly.
+  Symbolizer teardown no longer discards a stacktrace it had already symbolized
+  when `addr2line` exits on a binary that is not there.
+
 ## 1.4.1 - 2026-08-10
 
 - **A work card carries the source call graph instead of asking for a grep.**
