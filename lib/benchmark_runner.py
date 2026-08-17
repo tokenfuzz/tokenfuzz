@@ -1274,24 +1274,29 @@ def _run_tool(name: str, *args: str, env: dict | None = None, stdout=None) -> in
 def _resolve_reverify_fields(
     crash_dir: Path, target_root: Path, target_slug: str,
 ) -> tuple[dict[str, str], list[str]] | None:
-    command = [
-        sys.executable, str(SCRIPT_ROOT / "lib" / "benchmark.py"),
-        "resolve-reverify", str(crash_dir), str(target_root), target_slug,
-    ]
     config_path = _benchmark_target_config_path(
         crash_dir.parent.parent, target_root, target_slug,
     )
-    if config_path is not None:
-        command.extend(["--target-toml", str(config_path)])
-    resolved = subprocess.run(
-        command,
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
-    )
-    if resolved.returncode:
+    try:
+        resolved = metrics.resolve_reverify_lines(
+            crash_dir, target_root, target_slug,
+            str(config_path) if config_path is not None else "",
+        )
+    except Exception as exc:
+        # The resolver used to run as a subprocess, where any fault became a
+        # nonzero exit that unresolved this crash alone. Keep that containment
+        # now that it runs in-process on a pool shared with every other crash:
+        # one malformed bundle must not abort the whole reverification. The
+        # caller still reports it — `no-contract`, with the reason on disk.
+        _write_reverify_log(
+            crash_dir, f"replay contract could not be resolved: {exc}\n",
+        )
+        return None
+    if resolved is None:
         return None
     fields: dict[str, str] = {}
     replay_args: list[str] = []
-    for line in resolved.stdout.splitlines():
+    for line in "\n".join(resolved).splitlines():
         key, separator, value = line.partition("=")
         if not separator:
             continue
@@ -2063,14 +2068,17 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
     ):
         if not (pool / kind).is_dir():
             continue
-        with (bench_dir / output_name).open("w", encoding="utf-8") as output:
-            if _run_tool(tool, str(pool), "--json", env=environment, stdout=output):
-                clustering_succeeded = False
-                output.seek(0)
-                output.truncate()
-                output.write('{"clusters":[]}\n')
-        if _run_tool(tool, str(pool), env=environment):
+        # One run answers both: the tool writes the JSON and updates the
+        # reports from a single clustering pass. Asking separately clustered
+        # the pool twice per kind, and clustering is the expensive half.
+        # The file check is part of the verdict, not a nicety — the tool has
+        # layout modes that answer without writing one, and a missing index
+        # must read as a failed clustering rather than as no clusters.
+        json_path = bench_dir / output_name
+        if _run_tool(tool, str(pool), "--json-out", str(json_path), env=environment) \
+                or not json_path.is_file():
             clustering_succeeded = False
+            json_path.write_text('{"clusters":[]}\n', encoding="utf-8")
     # Cluster the rejected side the same way, so "unique kept" and "unique cut"
     # count comparably — a raw reject tally against a deduplicated accept tally
     # measures two different things. The tool's root detection already accepts a

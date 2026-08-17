@@ -671,6 +671,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Don't write FINDING-CLUSTERS.md, report.md, or .dup-of markers")
     ap.add_argument("--json", action="store_true",
                     help="Emit cluster JSON to stdout")
+    ap.add_argument("--json-out", type=Path, default=None,
+                    help="Write cluster JSON to PATH and still update reports")
     args = ap.parse_args(argv)
 
     rd = args.results_dir.resolve()
@@ -705,12 +707,17 @@ def main(argv: list[str] | None = None) -> int:
 
     clusters = cluster_findings(findings_root, target_root=target_root)
 
-    if args.json:
+    if args.json or args.json_out is not None:
         emitted = [{k: v for k, v in c.items() if k != "_full"} for c in clusters]
-        json.dump({"findings_root": str(findings_root), "clusters": emitted},
-                  sys.stdout, indent=2, sort_keys=True)
-        sys.stdout.write("\n")
-        return 0
+        payload = json.dumps({"findings_root": str(findings_root), "clusters": emitted},
+                             indent=2, sort_keys=True) + "\n"
+        # See bin/cluster-crashes: one run answers both, instead of clustering
+        # the same tree twice for the JSON and then for the reports.
+        if args.json_out is not None:
+            _atomic_write_text(args.json_out, payload)
+        if args.json:
+            sys.stdout.write(payload)
+            return 0
 
     md = _format_clusters_md(clusters, findings_root, link_prefix=link_prefix)
     if args.dry_run:

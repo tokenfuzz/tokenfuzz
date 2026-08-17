@@ -988,6 +988,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="Path containing crashes/CRASH-*/ subdirs (or the crashes/ dir itself)")
     ap.add_argument("--dry-run", action="store_true", help="Don't write files; print plan")
     ap.add_argument("--json", action="store_true", help="Emit cluster JSON to stdout")
+    ap.add_argument("--json-out", type=Path, default=None,
+                    help="Write cluster JSON to PATH and still update reports")
     args = ap.parse_args(argv)
 
     # Three layouts we accept:
@@ -1012,13 +1014,20 @@ def main(argv: list[str] | None = None) -> int:
 
     clusters = cluster_crashes(crashes_root)
 
-    if args.json:
+    if args.json or args.json_out is not None:
         # Strip internal _full member objects before emitting.
         emitted = [{k: v for k, v in c.items() if k != "_full"} for c in clusters]
-        json.dump({"crashes_root": str(crashes_root), "clusters": emitted},
-                  sys.stdout, indent=2, sort_keys=True)
-        sys.stdout.write("\n")
-        return 0
+        payload = json.dumps({"crashes_root": str(crashes_root), "clusters": emitted},
+                             indent=2, sort_keys=True) + "\n"
+        # --json-out keeps the report pass in the same run. Asking for the JSON
+        # and the reports as two invocations clustered the identical tree twice
+        # — the JSON pass writes nothing, so the second read saw the same input
+        # — and paid a second interpreter for it.
+        if args.json_out is not None:
+            _atomic_write_text(args.json_out, payload)
+        if args.json:
+            sys.stdout.write(payload)
+            return 0
 
     md = _format_clusters_md(clusters, crashes_root)
     if args.dry_run:

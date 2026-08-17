@@ -137,8 +137,20 @@ that reads correctly but was never checked.
      or any unreleased bug detail.
    - Use neutral placeholders (`child_free child.c:91`, `app_parse`,
      `sampleproj`), consistent within a file. The same rule applies to docs.
+5. **Suite time is spawn count.** Every `bin/` entry point costs 120–260ms of
+   interpreter and import, so count spawns before optimising anything else,
+   and fix the harness rather than thinning the test — the same chain runs in
+   an audit. Never spawn a Python entry point from Python that could import
+   it: give a printing callee a form that *returns* its answer and leave the
+   CLI a thin printer (a threaded caller cannot capture stdout). Ask a tool
+   once, not once per output format. Pace a wait by what it waits for — a
+   poll that also drives a sampler bills every fast call a full interval. And
+   dropping a process boundary drops its containment: restore that, loudly.
 
 Tests live in `tests/`; shared fixtures and assertions in `tests/helpers.sh`.
+Time a suite change on an idle machine — a stale or parallel run makes wall
+clock meaningless — and let only a whole-suite run write the scheduler's
+`output/test-timings.tsv`.
 
 ## Coding discipline
 

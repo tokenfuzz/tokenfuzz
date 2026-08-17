@@ -37,6 +37,7 @@ import target_config
 import triage
 import verdict
 import vocab_rules
+import timeout
 from timeout import run_timeout
 
 passed = failed = 0
@@ -516,6 +517,21 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         except OSError:
             pass
     check(bg_dead, "normal-exit wrapper reaps a leaked background descendant")
+
+    # An RSS cap must not cost a short command a whole sampling interval. The
+    # reap poll and the `ps` sample once shared one tick, so every sanitizer
+    # run — the harness's hottest path — slept half a second after its command
+    # had already exited. Measured against an uncapped run of the same command
+    # so the assertion is about the cap's overhead, not about host speed.
+    quick = [sys.executable, "-c", "pass"]
+    uncapped = _time.perf_counter()
+    run_timeout(quick, 10, capture_output=True)
+    uncapped = _time.perf_counter() - uncapped
+    capped = _time.perf_counter()
+    run_timeout(quick, 10, rss_mb=4096, capture_output=True)
+    capped = _time.perf_counter() - capped
+    check(capped - uncapped < timeout.RSS_SAMPLE_SECONDS / 2,
+          "an RSS cap does not bill a short command a sampling interval")
 
     with mock.patch.dict(os.environ, {"LLM_DECIDE_MOCK_THREAT_MODEL_SUGGEST": '{"attacker_controls":["bytes"],"reasoning":"fixture"}'}, clear=False):
         equal(

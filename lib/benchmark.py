@@ -6177,11 +6177,22 @@ def _resolve_build_path(target_root: Path, relative: str) -> str:
     return str(target_root / normalized)
 
 
-def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
+def resolve_reverify_lines(
+    crash_dir: Path, target_root: Path, target_slug: str = "",
+    target_toml: str = "",
+) -> "list[str] | None":
+    """The replay contract for one pooled crash, as `KEY=value` records.
+
+    Records are newline-joined to form the output, so one may carry several
+    lines. Returns None when nothing resolves at all (the CLI's exit 1).
+    Callers inside the harness use this directly: the reverify pool runs
+    crashes on a thread pool, so the contract cannot be a print the caller
+    captures, and re-entering this module as a subprocess per crash paid a
+    fresh interpreter and a full re-import for a lookup already in memory.
+    """
     if _ca is None:
-        return 1
-    crash_dir = Path(args.crash_dir)
-    target_root = Path(args.target_root)
+        return None
+    lines: list[str] = []
     scan_dirs = _ca.crash_evidence_dirs(crash_dir)
 
     diagnostic = _ca.find_primary_sanitizer(scan_dirs)
@@ -6205,17 +6216,17 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
     # binary nothing else in the harness would have chosen.
     config = None
     config_path = (
-        Path(args.target_toml)
-        if args.target_toml
+        Path(target_toml)
+        if target_toml
         else target_root / "target.toml"
     )
-    if not args.target_toml and args.target_slug:
-        split_config = SCRIPT_ROOT / "output" / args.target_slug / "target.toml"
+    if not target_toml and target_slug:
+        split_config = SCRIPT_ROOT / "output" / target_slug / "target.toml"
         if split_config.is_file():
             config_path = split_config
     if _tc is not None and config_path.is_file():
         config = _tc.Config(
-            slug=args.target_slug,
+            slug=target_slug,
             target_root=str(target_root),
             results_dir=str(crash_dir.parent.parent),
         )
@@ -6291,21 +6302,21 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
         # replay does too: a driver that reads argv keeps reproducing after
         # its bundle is renamed or pooled, which a path baked into the source
         # at discovery time does not survive.
-        print(
+        lines.append(
             f"SAN={sanitizer}\nMODE=harness\nBIN={harness}\n"
             f"LIBDIR={library_dir}\nTESTCASE={testcase or ''}"
         )
-        return 0
+        return lines
     if harness_source is not None:
-        print("MODE=none\nREASON=source-harness-uncompiled")
-        return 0
+        lines.append("MODE=none\nREASON=source-harness-uncompiled")
+        return lines
     if (
         testcase is not None
         and target_binary
         and os.path.exists(target_binary)
         and os.access(target_binary, os.X_OK)
     ):
-        print(
+        lines.append(
             f"SAN={sanitizer}\nMODE=cli\nBIN={target_binary}\nTESTCASE={testcase}"
         )
         replay_args = _ca.find_repro_args(
@@ -6329,12 +6340,24 @@ def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
                     entry, config, sanitizer, testcase=str(testcase),
                 )
                 if "=" in value:
-                    print(f"ENV_{index}={value}")
+                    lines.append(f"ENV_{index}={value}")
         for replay_arg in replay_args:
             value = str(testcase) if replay_arg == _ca.TESTCASE_TOKEN else replay_arg
-            print(f"ARG={value}")
-        return 0
-    print("MODE=none")
+            lines.append(f"ARG={value}")
+        return lines
+    lines.append("MODE=none")
+    return lines
+
+
+def _cmd_resolve_reverify(args: argparse.Namespace) -> int:
+    lines = resolve_reverify_lines(
+        Path(args.crash_dir), Path(args.target_root),
+        args.target_slug, args.target_toml,
+    )
+    if lines is None:
+        return 1
+    if lines:
+        print("\n".join(lines))
     return 0
 
 

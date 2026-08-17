@@ -24,6 +24,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Mapping, Sequence
 
+# RSS-watch pacing. A sample costs a `ps` spawn and stays on the coarse
+# interval it has always had; a reap poll costs a waitpid, so it runs often
+# enough that a short command is not billed for a sampling interval.
+RSS_SAMPLE_SECONDS = 0.5
+REAP_POLL_SECONDS = 0.02
+
 
 def run_timeout(
     command: Sequence[str],
@@ -259,11 +265,19 @@ def main():
         # check the process-tree resident memory between waitpid sweeps. The
         # wall-clock timeout is enforced here too (not via SIGALRM) so both
         # ceilings share one loop and one kill path. A fast allocator can
-        # overshoot the cap by up to one tick before the kill lands; the tick
-        # is short and the cap is set well under host RAM, so the host is
-        # protected either way.
+        # overshoot the cap by up to one sample before the kill lands; the
+        # interval is short and the cap is set well under host RAM, so the
+        # host is protected either way.
+        #
+        # Reaping and sampling are paced separately. Sampling costs a `ps`
+        # spawn, so it keeps its interval; reaping costs a waitpid, so it
+        # polls fast enough that a command finishing in milliseconds is not
+        # held for a whole sampling interval. Pacing both at once billed every
+        # sanitizer run half a second of pure sleep, on the hottest path in
+        # the harness.
         limit_kb = rss_mb * 1024
         deadline = time.time() + secs
+        next_sample = 0.0
         while True:
             try:
                 w, status = os.waitpid(pid, os.WNOHANG)
@@ -272,25 +286,28 @@ def main():
                 break
             if w == pid:
                 break
-            if time.time() >= deadline:
+            now = time.time()
+            if now >= deadline:
                 escalate_and_exit(124)
-            rss_kb = _tree_rss_kb(pid)
-            if rss_kb > limit_kb:
-                used_mb = rss_kb // 1024
-                # Marker is matched by triage (is_autodiscard_crash_output)
-                # and bin/severity detect_primitive — the OOM /
-                # host-protection class, so the kill is recorded, never
-                # promoted to a memory-safety bug.
-                print(
-                    "tokenfuzz: probe rss limit exceeded "
-                    "(%dMb > %dMb) -- host-protection kill" % (used_mb, rss_mb),
-                    file=sys.stderr,
-                    flush=True,
-                )
-                kill_group(signal.SIGKILL)
-                reap_blocking()
-                os._exit(137)
-            time.sleep(0.5)
+            if now >= next_sample:
+                next_sample = now + RSS_SAMPLE_SECONDS
+                rss_kb = _tree_rss_kb(pid)
+                if rss_kb > limit_kb:
+                    used_mb = rss_kb // 1024
+                    # Marker is matched by triage (is_autodiscard_crash_output)
+                    # and bin/severity detect_primitive — the OOM /
+                    # host-protection class, so the kill is recorded, never
+                    # promoted to a memory-safety bug.
+                    print(
+                        "tokenfuzz: probe rss limit exceeded "
+                        "(%dMb > %dMb) -- host-protection kill" % (used_mb, rss_mb),
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    kill_group(signal.SIGKILL)
+                    reap_blocking()
+                    os._exit(137)
+            time.sleep(REAP_POLL_SECONDS)
     else:
         signal.alarm(secs)
         _, status = os.waitpid(pid, 0)

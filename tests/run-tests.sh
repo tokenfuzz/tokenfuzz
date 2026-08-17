@@ -50,6 +50,7 @@ CATEGORY_FILTER=""
 SUITE_TIMEOUT=900
 LIST_ONLY=0
 PATTERNS=()
+FULL_RUN=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -342,6 +343,7 @@ collect_tests() {
   local -a seen=()
   if [ "${#PATTERNS[@]}" -eq 0 ]; then
     PATTERNS=(test_*.sh test_*.py)
+    [ -z "$CATEGORY_FILTER" ] && FULL_RUN=1
   fi
   for pattern in "${PATTERNS[@]}"; do
     for tf in "$TESTS_DIR"/$pattern; do
@@ -506,6 +508,11 @@ run_tests_parallel() {
 
 write_timing_artifact() {
   [ "${#TIMING_ROWS[@]}" -gt 0 ] || return 0
+  # Only a whole-suite run may publish weights. A filtered run measures a few
+  # suites on an idle machine and would leave the artifact holding just those
+  # rows, so the next full run had nothing to schedule with and packed badly —
+  # one `run-tests.sh test_foo.py` silently slowed everyone's next full run.
+  [ "${FULL_RUN:-0}" -eq 1 ] || return 0
   local timing_file
   timing_file="${TEST_TIMINGS_FILE:-$SCRIPT_ROOT/output/test-timings.tsv}"
   mkdir -p "$(dirname "$timing_file")" 2>/dev/null || return 0
