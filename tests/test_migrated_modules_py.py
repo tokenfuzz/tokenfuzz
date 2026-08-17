@@ -1276,6 +1276,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     strategy_runtime = SimpleNamespace(
         root=ROOT, target_root=generic_target, target_slug="demo",
         results=strategy_results, repo_type="none", num_agents=3, fixed_strategy="",
+        agent_roles=(),
     )
     audit_runner.initialize_agent_strategies(strategy_runtime)
     equal(
@@ -1308,7 +1309,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     audit_runner.initialize_agent_strategies(SimpleNamespace(
         root=ROOT, target_root=generic_target, target_slug="demo",
         results=equal_results, repo_type="none", num_agents=3,
-        fixed_strategy="",
+        fixed_strategy="", agent_roles=(),
     ))
     equal(
         ["S7", "S5", "S2"],
@@ -1317,6 +1318,87 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             for agent in range(1, 4)
         ],
         "an equal-share queue opens on expected yield, not on strategy number",
+    )
+
+    # A campaign lane holds one card by construction — one corpus, one lock,
+    # one campaign per iteration — so ranking lanes by card supply buries it
+    # behind every lane holding a list of files. Measured on four targets it
+    # sorted last of all of them, and no bounded run ever drew it, which left
+    # the only strategy that runs a fuzzer permanently unassigned.
+    campaign_results = root / "campaign-results"
+    (campaign_results / "state").mkdir(parents=True)
+    (campaign_results / "work-cards.jsonl").write_text(
+        "".join(
+            json.dumps({
+                "id": f"WORK-{strategy}-{index}",
+                "strategy": strategy,
+                "status": "unclaimed",
+            }) + "\n"
+            for strategy in ("S2", "S3", "S5", "S7", "S8")
+            for index in range(4)
+        )
+        + json.dumps({
+            "id": "FUZZ-abc123", "kind": "s4-campaign", "strategy": "S4",
+            "status": "unclaimed",
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    campaign_only = json.dumps({
+        "id": "FUZZ-narrow", "kind": "s4-campaign", "strategy": "S4",
+        "status": "unclaimed",
+    }) + "\n"
+    narrow_results = root / "campaign-narrow-results"
+    (narrow_results / "state").mkdir(parents=True)
+    (narrow_results / "work-cards.jsonl").write_text(campaign_only, encoding="utf-8")
+    mixed_results = root / "campaign-mixed-results"
+    (mixed_results / "state").mkdir(parents=True)
+    (mixed_results / "work-cards.jsonl").write_text(
+        "".join(
+            json.dumps({"id": f"WORK-S7-{i}", "strategy": "S7", "status": "unclaimed"}) + "\n"
+            for i in range(3)
+        ) + campaign_only,
+        encoding="utf-8",
+    )
+
+    def campaign_strategies(agents: int, results: Path = campaign_results) -> list[str]:
+        for agent in range(1, agents + 1):
+            (results / "state" / f"strategy-{agent}").unlink(missing_ok=True)
+        audit_runner.initialize_agent_strategies(SimpleNamespace(
+            root=ROOT, target_root=generic_target, target_slug="demo",
+            results=results, repo_type="none", num_agents=agents,
+            fixed_strategy="", agent_roles=(),
+        ))
+        return [
+            (results / "state" / f"strategy-{agent}").read_text().strip()
+            for agent in range(1, agents + 1)
+        ]
+
+    # The campaign is execution work — build a harness, run a slice, replay what
+    # it finds — so it goes to a reproduce worker. Taking the last slot instead
+    # handed it the default layout's only analysis agent, whose contract is to
+    # read and hand off, so nothing would have run the fuzzer there either.
+    equal(
+        ["S7", "S4", "S5"], campaign_strategies(3),
+        "the campaign takes a reproduce slot, leaving the analysis lane intact",
+    )
+    # Its own lock allows one campaign at a time, so one slot is the whole ask.
+    equal(
+        ["S7", "S5", "S4", "S2"], campaign_strategies(4),
+        "the campaign takes one slot, not a share that grows with the fleet",
+    )
+    # A lone agent spent on the campaign would leave the ranked queue untouched.
+    equal(["S7"], campaign_strategies(1), "a single agent is not spent on the campaign")
+    # A narrow queue used to put the campaign in the ranked positions as well as
+    # the reserved one, so two agents opened on it and the one that lost the
+    # exclusive lock exited having done nothing.
+    equal(
+        ["S4", "S1"], campaign_strategies(2, narrow_results),
+        "a queue holding only the campaign still spends one agent on it",
+    )
+    equal(
+        ["S7", "S4", "S7"], campaign_strategies(3, mixed_results),
+        "a campaign never doubles up by also filling a ranked slot",
     )
 
     rotation_runtime = SimpleNamespace(
@@ -1366,7 +1448,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         SimpleNamespace(
             root=ROOT, target_root=generic_target, target_slug="demo",
             results=strategy_results, repo_type="none", num_agents=1,
-            fixed_strategy="",
+            fixed_strategy="", agent_roles=(),
         )
     )
     equal(
@@ -1381,7 +1463,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         SimpleNamespace(
             root=ROOT, target_root=generic_target, target_slug="demo",
             results=strategy_results, repo_type="none", num_agents=1,
-            fixed_strategy="",
+            fixed_strategy="", agent_roles=(),
         )
     )
     equal(

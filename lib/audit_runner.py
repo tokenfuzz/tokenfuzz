@@ -811,6 +811,11 @@ def _eligible_strategy_counts(runtime: Runtime) -> dict[str, int]:
     return counts
 
 
+#: The one strategy whose queue supply is a fixed-size campaign rather than a
+#: list of candidate sites, so card count cannot rank it against the others.
+_CAMPAIGN_STRATEGY = "S4"
+
+
 def initialize_agent_strategies(runtime: Runtime) -> None:
     if runtime.fixed_strategy:
         return
@@ -820,14 +825,49 @@ def initialize_agent_strategies(runtime: Runtime) -> None:
     # queue gives every strategy a comparable share, and canonical numbering
     # would then hand the opening portfolio to the lowest-numbered methods
     # rather than the most productive ones.
+    #
+    # The campaign lane is the exception, because supply there measures breadth
+    # and its supply is depth: one card by construction — one corpus, one lock,
+    # one campaign per iteration — so a lane holding a whole iteration of work
+    # sorted behind every lane holding a list of files, on every target
+    # measured, and no bounded run ever reached it. It is never ranked. It is
+    # reserved below, or it is absent.
     ranked = sorted(
-        (strategy for strategy in STRATEGIES[1:] if counts[strategy]),
+        (
+            strategy for strategy in STRATEGIES[1:]
+            if counts[strategy] and strategy != _CAMPAIGN_STRATEGY
+        ),
         key=lambda strategy: (
             -counts[strategy],
             workqueue.expected_yield_rank(strategy),
             STRATEGIES.index(strategy),
         ),
     ) or ["S1"]
+    # One slot, and a reproduce one. Its own exclusive lock allows a single
+    # campaign at a time, so a second agent on it exits having done nothing;
+    # and the campaign is execution — build a harness, run a bounded slice,
+    # replay what it finds — which is the reproduce contract, not the analysis
+    # worker's read-and-hand-off. Taking the highest-numbered reproduce slot
+    # leaves the default layout's sole analysis lane intact.
+    reproduce = [
+        agent for agent in range(1, runtime.num_agents + 1)
+        if prompt.agent_role(agent, runtime.num_agents, runtime.agent_roles)
+        == "reproduce"
+    ]
+    reserved_agent = (
+        reproduce[-1]
+        if counts.get(_CAMPAIGN_STRATEGY) and runtime.num_agents > 1 and reproduce
+        else 0
+    )
+    # Ranked lanes fill the remaining agents in order, so reserving one slot
+    # shortens the opening portfolio by one rather than displacing a lane.
+    position = {
+        agent: index
+        for index, agent in enumerate(
+            agent for agent in range(1, runtime.num_agents + 1)
+            if agent != reserved_agent
+        )
+    }
     state = runtime.results / "state"
     state.mkdir(parents=True, exist_ok=True)
     for agent in range(1, runtime.num_agents + 1):
@@ -837,7 +877,11 @@ def initialize_agent_strategies(runtime: Runtime) -> None:
         except OSError:
             current = ""
         if current not in STRATEGIES:
-            path.write_text(ranked[(agent - 1) % len(ranked)] + "\n", encoding="utf-8")
+            selected = (
+                _CAMPAIGN_STRATEGY if agent == reserved_agent
+                else ranked[position[agent] % len(ranked)]
+            )
+            path.write_text(selected + "\n", encoding="utf-8")
 
 
 def _strategy_streak_path(runtime: Runtime, agent: int) -> Path:

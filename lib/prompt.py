@@ -56,6 +56,20 @@ def strategy_brief(strategy: str, reference_dir: Path) -> str:
 DEFAULT_TURN_SOFT_CAP = 128
 
 
+def agent_role(
+    agent: int, num_agents: int, agent_roles: "tuple[str, ...]" = (),
+) -> str:
+    """Which role an agent runs under: the operator's list, or the default.
+
+    Module-level so a caller that must reason about roles — which agent runs
+    execution-heavy work — can ask without building a whole PromptContext, and
+    cannot drift from the answer the prompt itself gives that agent.
+    """
+    if 1 <= agent <= len(agent_roles):
+        return agent_roles[agent - 1]
+    return "analysis" if num_agents > 1 and agent == num_agents else "reproduce"
+
+
 @dataclass
 class PromptContext:
     results_dir: Path
@@ -89,9 +103,7 @@ class PromptContext:
         return "browser" if agent <= self.browser_agents else "shell"
 
     def role(self, agent: int) -> str:
-        if 1 <= agent <= len(self.agent_roles):
-            return self.agent_roles[agent - 1]
-        return "analysis" if self.num_agents > 1 and agent == self.num_agents else "reproduce"
+        return agent_role(agent, self.num_agents, self.agent_roles)
 
     def strategy(self, agent: int) -> str:
         path = self.results_dir / "state" / f"strategy-{agent}"
