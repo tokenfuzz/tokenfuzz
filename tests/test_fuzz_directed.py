@@ -164,11 +164,10 @@ class DeclarationReadingTests(unittest.TestCase):
 class HarnessInputAgreementTests(unittest.TestCase):
     """Whether the configured library and includes describe the same thing.
 
-    `setup-target` proves the CLI route by launching the program, but proved the
-    library route with `is_file()` — which a helper archive beside the product
-    passes just as well. Both shipped configurations that read downstream as
-    "this target declares nothing", which is what a target with no API to fuzz
-    looks like too. This is the measurement that separates them.
+    `setup-target` proves the CLI route by launching the program, but historically
+    proved the library route with `is_file()` — which a helper archive beside the
+    product passes just as well. Symbol/header overlap makes that ambiguity
+    visible without treating the heuristic as authority to replace the config.
     """
 
     def config(self, library: str, includes: "list[str]") -> "tuple[object, Path]":
@@ -222,6 +221,34 @@ class HarnessInputAgreementTests(unittest.TestCase):
         ):
             self.assertEqual(
                 fuzz_harness.declared_exports(configuration, "asan"), (1, 0),
+            )
+
+    def test_a_width_suffixed_export_matches_its_public_declaration(self) -> None:
+        configuration, root = self.config("build-asan/libdemo.a", ["api"])
+        (root / "build-asan" / "libdemo.a").write_bytes(b"!<arch>\n")
+        with mock.patch.object(
+            fuzz_harness.native_symbols, "defined_symbols",
+            return_value={"app_parse_8"},
+        ):
+            self.assertEqual(
+                fuzz_harness.declared_exports(configuration, "asan"), (1, 1),
+            )
+
+    def test_a_cpp_export_matches_its_source_level_declaration(self) -> None:
+        configuration, root = self.config("build-asan/libdemo.a", ["api"])
+        (root / "build-asan" / "libdemo.a").write_bytes(b"!<arch>\n")
+        with (
+            mock.patch.object(
+                fuzz_harness.native_symbols, "defined_symbols",
+                return_value={"_Z9app_parsePKcm"},
+            ),
+            mock.patch.object(
+                fuzz_harness.symbol_names, "demangle_text",
+                return_value="app_parse(char const*, unsigned long)\n",
+            ),
+        ):
+            self.assertEqual(
+                fuzz_harness.declared_exports(configuration, "asan"), (1, 1),
             )
 
 

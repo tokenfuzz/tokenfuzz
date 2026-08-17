@@ -887,11 +887,9 @@ assert_eq("build-asan/group/platform/release/libdeep.a",
           tc.detect_sanitizer_build_artifacts(deep_root, "asan")[1],
           "artifact detection reaches target-defined nested output")
 
-# Depth ranks above alphabetical order. The scan walks depth-first in name
-# order, so a subdirectory sorting before the product's own archive took the
-# slot, and a helper archive built for the CLI was configured as the library
-# instead — leaving every harness linked against symbols no public header
-# declares. Depth is the build's own statement about what it publishes.
+# Depth ranks above alphabetical order for generated defaults. The scan walks
+# depth-first in name order, so a subdirectory sorting before a root aggregate
+# took the slot. This remains a heuristic: a usable configured value is kept.
 product_root = TEST_TMPDIR / "shallow-product-wins"
 (product_root / "build-asan" / "tools").mkdir(parents=True)
 (product_root / "build-asan" / "tools" / "libhelper.a").write_bytes(b"!<arch>\n")
@@ -921,9 +919,8 @@ assert_eq(False, "." in _include_case("include-layout", ["include/pub.h"]),
           "_detect_include_dirs: a named layout does not also pull in the root")
 
 # `refresh_detected_build_fields` keeps a configured value that is a usable
-# artifact, so a library no header describes survived every rerun. The repair
-# path writes past that rule — only where the caller has measured that the
-# replacement is better, which is why the write is a separate, dumb edit.
+# artifact. Re-detection can diagnose a library/header mismatch, but remains a
+# weaker signal than an operator choice and must not write past that rule.
 repair_root = TEST_TMPDIR / "harness-input-repair"
 (repair_root / "build-asan" / "tools").mkdir(parents=True)
 (repair_root / "build-asan" / "tools" / "libhelper.a").write_bytes(b"!<arch>\n")
@@ -944,16 +941,9 @@ assert_in("lib", detected_includes,
           "detected_harness_inputs: reports the header location")
 assert_eq(False, tc.refresh_detected_build_fields(repair_root, repair_toml),
           "refresh_detected_build_fields: still keeps the usable-but-wrong value")
-assert_eq(True, tc.write_harness_inputs(
-              repair_toml, "asan", detected_lib, detected_includes),
-          "write_harness_inputs: reports the correction")
-repaired = repair_toml.read_text(encoding="utf-8")
-assert_in('asan_lib      = "build-asan/libproduct.a"', repaired,
-          "write_harness_inputs: corrects the library")
-assert_in('"lib"', repaired, "write_harness_inputs: corrects the includes")
-assert_eq(False, tc.write_harness_inputs(
-              repair_toml, "asan", detected_lib, detected_includes),
-          "write_harness_inputs: reports no change when already correct")
+assert_in('asan_lib      = "build-asan/tools/libhelper.a"',
+          repair_toml.read_text(encoding="utf-8"),
+          "re-detection never overwrites a usable configured library")
 
 # A generated CMake interface export is positive evidence that a successful
 # build is header-only, while any imported compiled location keeps the normal

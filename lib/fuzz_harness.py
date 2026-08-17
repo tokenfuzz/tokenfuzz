@@ -45,6 +45,7 @@ from pathlib import Path
 import audit_scope
 import native_symbols
 import sanitizer
+import symbol_names
 import workqueue
 
 # ── Layout under RESULTS_DIR ────────────────────────────────────────
@@ -855,13 +856,12 @@ class LibraryChoice:
 def declared_exports(config, sanitizer: str) -> "tuple[int, int]":
     """(symbols the library exports, how many the configured includes declare).
 
-    The pair the admission gate starts from, and the one measurement that tells
-    a misconfigured harness route apart from a target that simply has no API to
-    fuzz. Zero declared against a non-empty export list means `<san>_lib` and
-    `includes` are pointing at different things: a library whose headers are not
-    on the path, or a helper archive that no public header describes. Both
-    shipped, and both read downstream as "this target declares nothing" rather
-    than "this configuration is wrong".
+    The pair the admission gate starts from, and a diagnostic for a harness
+    route that exposes no callable API. Zero declared against a non-empty export
+    list can mean `<san>_lib` and `includes` point at different things, but it can
+    also describe a real internal/helper library with no public C API. Callers
+    may report or rank this signal; it is not proof that a different artifact is
+    the product.
     """
     library = coverage_library(config, sanitizer).path
     if not library or not Path(library).is_file():
@@ -873,7 +873,43 @@ def declared_exports(config, sanitizer: str) -> "tuple[int, int]":
         config.target_root,
         [config.resolve_path(path) for path in config.includes],
     )
-    return len(exported), sum(1 for symbol in exported if symbol in index)
+    declared = {symbol for symbol in exported if symbol in index}
+
+    # Public names are not always spelled literally in the symbol table. The
+    # candidate gate already resolves width/version suffixes such as PCRE2's
+    # `pcre2_compile_8`; agreement must use the same rule or a working target
+    # is reported as misconfigured. ELF symbol versions are another binary-only
+    # suffix and are safe to remove after `@`.
+    aliases = suffix_aliases(exported)
+    declared.update(
+        exported_symbol for source_name, exported_symbol in aliases.items()
+        if source_name in index
+    )
+    declared.update(
+        symbol for symbol in exported
+        if symbol.split("@", 1)[0] in index
+    )
+
+    mangled = sorted(
+        symbol for symbol in exported - declared
+        if symbol.startswith(("_Z", "?"))
+    )
+    if mangled:
+        # C++ headers carry source identifiers while nm carries ABI-mangled
+        # names. Demangle in one bounded subprocess, then compare only the
+        # final identifier before the parameter list (`ns::Type::parse` ->
+        # `parse`). If no demangler is installed, the names remain unchanged;
+        # setup merely reports the inconclusive mismatch and never rewrites the
+        # operator's configuration from it.
+        rendered = symbol_names.demangle_text("\n".join(mangled) + "\n")
+        demangled = rendered.splitlines()
+        if len(demangled) == len(mangled):
+            for symbol, display in zip(mangled, demangled):
+                prefix = display.split("(", 1)[0]
+                match = re.search(r"([A-Za-z_]\w*)\s*$", prefix)
+                if match and match.group(1) in index:
+                    declared.add(symbol)
+    return len(exported), len(declared)
 
 
 def coverage_library(config, sanitizer: str) -> LibraryChoice:

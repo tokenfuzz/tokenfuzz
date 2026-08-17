@@ -1429,11 +1429,11 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     archives = [a for a in _find_under(san_dir, name=None)
                 if a.suffix == ".a" and not _is_aux_build_path(a, san_dir)]
     # Shallowest first. `_find_under` walks alphabetically depth-first, so a
-    # subdirectory whose name sorts before the product's own archive took the
-    # slot, and a helper archive built for the CLI became the library every
-    # harness links against. Depth is the build's own statement about which
-    # artifact is the product; a stable sort keeps the existing order within
-    # one level.
+    # nested helper whose directory sorts first otherwise beats the aggregate
+    # archive many build systems place at their output root. This remains a
+    # generated default, not proof of product identity; refresh keeps any
+    # usable operator-selected library. A stable sort preserves the existing
+    # deterministic order within one level.
     archives.sort(key=lambda archive: len(archive.relative_to(san_dir).parts))
     for a in archives[:3]:
         if "posix" in a.name:
@@ -1889,47 +1889,6 @@ def detected_harness_inputs(
     )
 
 
-def write_harness_inputs(
-    toml_path: Path, sanitizer: str, library: str, includes: "list[str]",
-) -> bool:
-    """Overwrite `<san>_lib` and `includes`, past the keep-what-is-usable rule.
-
-    `refresh_detected_build_fields` preserves a configured value that is still a
-    usable artifact, because an operator or a suggest-* helper may have chosen
-    it and detection is the weaker signal. That policy is right until the pair
-    stops working: a library no configured header describes passes every test
-    the refresh applies and still cannot be linked against, and `includes` is
-    not refreshed at all. Callers must prove the replacement is better first —
-    this only performs the edit.
-    """
-    try:
-        lines = Path(toml_path).read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    field = f"{sanitizer}_lib"
-    library_line = _build_field_line(field, library)
-    includes_line = "includes      = [" + ", ".join(
-        toml_basic_string(entry) for entry in includes
-    ) + "]"
-    changed = False
-    for pattern, replacement in (
-        (rf"^\s*#?\s*{field}\b\s*=", library_line if library else ""),
-        (r"^\s*#?\s*includes\b\s*=", includes_line),
-    ):
-        if not replacement:
-            continue
-        matcher = re.compile(pattern)
-        for index, line in enumerate(lines):
-            if matcher.match(line):
-                if lines[index] != replacement:
-                    lines[index] = replacement
-                    changed = True
-                break
-    if changed:
-        Path(toml_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return changed
-
-
 _HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx", ".H")
 
 
@@ -1940,6 +1899,8 @@ def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
       - `include/` populated with headers (curl, libxml2, openssl, ...)
       - headers at source root (cJSON, sqlite, lua, libpng, ...)
       - `src/` carrying public headers (some autotools projects)
+      - `lib/` carrying public headers
+      - component header directories reached from the source root
     The `build-asan/include` entry is always emitted because CMake/Meson
     routinely generate config headers there; if the dir doesn't exist at
     repro time the -I just does nothing. `asan_dir_name` is only that

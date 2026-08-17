@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -19,6 +21,16 @@ COMMAND = ROOT / "bin" / "setup-target"
 sys.path.insert(0, str(ROOT / "lib"))
 import build_materialize
 import target_config
+
+
+def _load_setup_target():
+    loader = importlib.machinery.SourceFileLoader(
+        "setup_target_test_module", str(COMMAND),
+    )
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 # Holds a shared build lease on a tree, the way a live audit does, until the
 # stop file appears.
@@ -96,6 +108,49 @@ class SetupTargetTests(unittest.TestCase):
 
     def config(self, slug: str) -> Path:
         return self.harness / "output" / slug / "target.toml"
+
+    def test_a_detected_harness_input_mismatch_never_overwrites_config(self) -> None:
+        setup_target = _load_setup_target()
+        target = self.temp / "mismatch-target"
+        target.mkdir()
+        config = self.temp / "mismatch-target.toml"
+        config.write_text(
+            'target = "demo"\nasan_lib = "build-asan/curated/libdemo.a"\n'
+            'includes = ["curated/include"]\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        setup = setup_target.Setup.__new__(setup_target.Setup)
+        setup.target_root = target
+        setup.toml = config
+        before = config.read_bytes()
+        with (
+            mock.patch.object(
+                setup, "declared_exports", side_effect=[(3, 0), (5, 2)],
+            ),
+            mock.patch.object(
+                setup_target.target_config, "detected_harness_inputs",
+                return_value=("build-asan/libother.a", ["include"]),
+            ),
+        ):
+            setup.report_harness_input_mismatch()
+        self.assertEqual(before, config.read_bytes())
+
+    def test_browser_setup_does_not_invent_a_c_harness_contract(self) -> None:
+        setup_target = _load_setup_target()
+        target = self.temp / "browser-target"
+        target.mkdir()
+        config = self.temp / "browser-target.toml"
+        config.write_text(
+            'target = "browser"\nis_browser = "1"\n'
+            'asan_lib = "build-asan/libinternal.a"\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        setup = setup_target.Setup.__new__(setup_target.Setup)
+        setup.target_root = target
+        setup.toml = config
+        self.assertEqual([], setup.harness_input_sanitizers())
 
     def test_clone_preservation_refresh_force_and_updates(self) -> None:
         process = self.setup("demo", str(self.remote))
