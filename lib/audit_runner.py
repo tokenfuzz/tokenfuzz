@@ -2061,7 +2061,7 @@ def _refill_outcome(result: AgentResult) -> str:
 # Provider states the outer loop recovers from, so the pool must stop feeding
 # them. The synthetic "internal" issue is a local harness fault, not provider
 # health, and halting every slot on one would discard the others' work.
-_PROVIDER_HALT_ISSUES = ("capacity_limited", "transient")
+_PROVIDER_HALT_ISSUES = ("capacity_limited", "transient", "backend_rejected")
 
 
 def _session_did_work(result: AgentResult) -> bool:
@@ -2287,12 +2287,16 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
         if current.roots & novel_roots
     }
     diagnostic = after.env_blocked > before.env_blocked
+    rejected = any(result.provider_issue == "backend_rejected" for result in results)
     capacity_limited = any(result.provider_issue == "capacity_limited" for result in results)
     transient = any(result.provider_issue == "transient" for result in results)
-    if capacity_limited or transient:
+    if rejected or capacity_limited or transient:
         if productive:
             state.dry_streak = 0
-        issue = "capacity" if capacity_limited else "transient"
+        issue = (
+            "rejected" if rejected
+            else "capacity" if capacity_limited else "transient"
+        )
         index_log(runtime, f"Iteration {state.iteration} interrupted by {issue} provider failure")
         return issue, results
     if productive:
@@ -2375,6 +2379,14 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
                 break
             if _productive_wall_exhausted(state):
                 break
+            if status == "rejected":
+                # No recovery: the provider refused the request itself, so a
+                # pause buys nothing and would be subtracted from the wall as
+                # if the provider had withheld capacity it was going to return.
+                (runtime.logs / ".backend-unavailable").touch()
+                (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                index_log(runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
+                return 2
             if status == "capacity":
                 can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
                 if not can_retry or not _recover_capacity(state, results):
@@ -2427,7 +2439,15 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
                 total_iterations += status not in ("budget",)
                 if status != "budget" and _productive_wall_exhausted(state):
                     continue
-                if status == "capacity":
+                if status == "rejected":
+                    # Terminal for this backend, whatever the ensemble's peers
+                    # are doing: nothing it could wait for will change the answer.
+                    state.stopped = True
+                    failures += 1
+                    (state.runtime.logs / ".backend-unavailable").touch()
+                    (state.runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                    index_log(state.runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
+                elif status == "capacity":
                     has_alternative = any(
                         other is not state and not other.stopped for other in states
                     )

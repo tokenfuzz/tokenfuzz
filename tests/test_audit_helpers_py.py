@@ -601,18 +601,28 @@ provider_cases = [
         "provider-issue: claude 529 overload is transient",
     ),
     (
-        # Non-429 4xx (auth/config/input) is NOT a provider retry/quota signal.
-        # It must fall through so normal failure handling exposes the real cause
-        # (bad key, forbidden, not found, payload too large) — never a backoff.
+        # Non-429 4xx (config/input) is NOT a provider retry/quota signal, and a
+        # per-request failure is not the run's health: these must fall through so
+        # normal failure handling exposes the real cause — never a backoff.
         [
             {"type": "error", "error": {"code": 400, "message": "Bad Request"}},
-            {"type": "error", "error": {"code": 401, "message": "Unauthorized"}},
             {"type": "error", "error": {"code": 403, "message": "Forbidden"}},
             {"type": "turn.failed", "error": {"message": "Server returned 404"}},
             {"type": "error", "error": {"code": 413, "message": "Payload Too Large"}},
         ],
         "none",
         "provider-issue: non-429 4xx is not transient or capacity",
+    ),
+    (
+        # 401 used to sit in the row above, on the premise that falling through
+        # let normal failure handling expose it. It did not: a revoked token
+        # killed every session in a benchmark cell, each one read as an ordinary
+        # dry session, and the cell published as a clean, complete measurement.
+        # It is a provider state — just not a retryable one, so it gets its own
+        # class rather than a backoff.
+        [{"type": "error", "error": {"code": 401, "message": "Unauthorized"}}],
+        "backend_rejected",
+        "provider-issue: a refused credential is a provider state, not silence",
     ),
 ]
 

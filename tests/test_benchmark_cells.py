@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import benchmark_runner
 import build_preflight
+import llm_decide
 import llm_invoke
 
 
@@ -598,6 +599,90 @@ class InterruptedCellRecoveryTests(unittest.TestCase):
             benchmark_runner._audit_accounting(results),
             (9, 17),
         )
+
+
+class FinalizationDrainTests(unittest.TestCase):
+    """How the post-audit drain reacts to a backend that stopped answering."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="benchmark-drain-")
+        self.work = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+
+    def test_a_refused_provider_stops_the_drain_without_pausing(self) -> None:
+        """A refusal is not a throttle, so there is nothing to wait out.
+
+        Both states open the same marker file to stop the fan-out, and a refusal
+        written as an unknown reset read as a quota pause: the drain slept out
+        its budget — up to six hours by default — on a backend that had already
+        said no, and billed the cell for it.
+        """
+        marker = self.work / "limit"
+        marker.write_text("unknown\n", encoding="utf-8")
+        self.assertFalse(benchmark_runner._find_gate_refused(marker))
+        self.assertEqual(benchmark_runner._find_gate_reset(marker), 0)
+
+        marker.write_text(f"{llm_decide.REFUSED_MARKER}\n", encoding="utf-8")
+        self.assertTrue(benchmark_runner._find_gate_refused(marker))
+
+        # The two markers come from the one writer, so the reader cannot drift
+        # from it: a refusal must never be recorded as a waitable reset.
+        with mock.patch.dict(os.environ, {"LLM_DECIDE_LIMIT_FILE": str(marker)}):
+            marker.write_text("", encoding="utf-8")
+            llm_decide.record_provider_limit(
+                '{"type":"result","is_error":true,"api_error_status":401}',
+            )
+            # Still stops the fan-out — the two differ only in whether waiting
+            # can help, not in whether to keep calling a refused backend.
+            self.assertTrue(llm_decide.provider_limit_open())
+        self.assertTrue(benchmark_runner._find_gate_refused(marker))
+
+        with mock.patch.dict(os.environ, {"LLM_DECIDE_LIMIT_FILE": str(marker)}):
+            marker.write_text("", encoding="utf-8")
+            llm_decide.record_provider_limit(
+                '{"type":"result","is_error":true,"api_error_status":429}',
+            )
+        self.assertFalse(benchmark_runner._find_gate_refused(marker))
+
+    def test_a_refused_drain_calls_the_gate_once_and_never_sleeps(self) -> None:
+        """The whole drain stops, not just its pause loop.
+
+        Breaking the inner loop alone left the completion loop to clear the
+        marker and call a refused backend again, so "halts and never retries"
+        was still false — each further pass buys another refusal.
+        """
+        results = self.work / "cell" / "results"
+        (results / "findings").mkdir(parents=True)
+        calls: list[int] = []
+
+        def refuse(*_args, **kwargs):
+            # What a refused validator does: record the refusal through the
+            # same marker the real gate writes, and leave the id pending.
+            calls.append(1)
+            llm_decide.record_provider_limit(
+                '{"type":"result","is_error":true,"api_error_status":401}',
+            )
+            return {"accepted": 0, "rejected": 0, "pending": 3}
+
+        with mock.patch.object(benchmark_runner.triage, "validate_find_gate", refuse), \
+                mock.patch.object(benchmark_runner.time, "sleep") as slept, \
+                mock.patch.object(
+                    benchmark_runner, "benchmark_target_config",
+                    return_value=SimpleNamespace(
+                        attacker_controls=["bytes"],
+                        attacker_controls_csv=lambda: "bytes",
+                    ),
+                ), \
+                mock.patch.object(
+                    benchmark_runner, "_evidence_scope", return_value=("rev", "digest"),
+                ):
+            counts = benchmark_runner.drain_find_gate(
+                results, "claude", "model", self.work / "target", "demo",
+            )
+        self.assertEqual(len(calls), 1, "a refused backend is asked exactly once")
+        slept.assert_not_called()
+        self.assertEqual(counts.get("pending"), 3)
+        self.assertNotIn("paused_seconds", counts)
 
 
 if __name__ == "__main__":

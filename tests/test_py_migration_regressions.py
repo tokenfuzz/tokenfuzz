@@ -1330,6 +1330,75 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "benchmark honors a quota marker even when the raw transcript is absent",
     )
 
+    # A provider that refuses the request itself is neither a quota nor a blip:
+    # waiting cannot clear it, so it is classified apart from both. Left as
+    # "none" it produced a cell whose backend was dead for its whole terminal
+    # phase and which still published as a clean, complete measurement.
+    refusals = {
+        "revoked credential on a CLI error line":
+            "2026-08-17T03:19:06.614814Z ERROR codex_models::manager: failed to "
+            "refresh: unexpected status 401 Unauthorized: Encountered "
+            "invalidated oauth token for user, auth error code: token_revoked",
+        "model the installed client cannot serve":
+            '{"type":"error","message":"{\\"status\\":400,\\"error\\":{\\"type\\":'
+            '\\"invalid_request_error\\",\\"message\\":\\"The model requires a '
+            'newer version of the CLI.\\"}}"}',
+    }
+    for name, line in refusals.items():
+        check(
+            audit_helpers._provider_issue_from_lines([line]) == "backend_rejected",
+            f"provider refusal is classified: {name}",
+        )
+    # Scoped the same way every other provider signal is: an audited program's
+    # own output names these codes and terms without the backend having failed.
+    quiet = {
+        "audited source quoting a status": "  if (status == 401) return TOKEN_REVOKED;",
+        "tool output that begins like an error":
+            "error: no match for pattern 401 Unauthorized in app.c",
+        "assistant prose": '{"type":"assistant","message":"a 401 Unauthorized means the token expired"}',
+        "an ordinary bad request": '{"type":"error","message":"{\\"status\\":400,'
+            '\\"error\\":{\\"type\\":\\"invalid_request_error\\",\\"message\\":'
+            '\\"prompt is too long\\"}}"}',
+    }
+    for name, line in quiet.items():
+        check(
+            audit_helpers._provider_issue_from_lines([line]) == "none",
+            f"provider refusal is not read from: {name}",
+        )
+    # The classes stay distinguishable: a refusal must not eat a real quota or
+    # overload, which do clear and are worth pausing for.
+    check(
+        audit_helpers._provider_issue_from_lines(
+            ['{"type":"error","message":"status 429 Too Many Requests"}'],
+        ) == "capacity_limited",
+        "a quota limit is still capacity_limited",
+    )
+    check(
+        audit_helpers._provider_issue_from_lines(
+            ['{"type":"error","message":"status 503 UNAVAILABLE"}'],
+        ) == "transient",
+        "an overload is still transient",
+    )
+    # A refused cell is excluded rather than published: without the marker the
+    # cell records as done and a same-run-id resume then skips it as measured.
+    refused_cell = root / "refused-cell"
+    refused_cell.mkdir()
+    (refused_cell / "audit.log").write_text(
+        list(refusals.values())[0] + "\n", encoding="utf-8",
+    )
+    check(
+        benchmark_runner._provider_issue(refused_cell) == "backend_rejected",
+        "benchmark classifies a refused backend from the cell's own logs",
+    )
+    check(
+        benchmark_runner._record_provider_quality(refused_cell, refused_cell, 0)
+        == "backend_rejected"
+        and (refused_cell / ".backend-unavailable").is_file()
+        and (refused_cell / ".run-quality").read_text(encoding="utf-8").strip()
+        == "provider_limited",
+        "a refused backend marks the cell unavailable rather than recovered",
+    )
+
     # quota_dominates reads only a bounded tail: a huge transcript whose 429
     # burst sits in the last lines is still detected, and a progress line in the
     # tail vetoes it — without re-reading the whole file each poll.

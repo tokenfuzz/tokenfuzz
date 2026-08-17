@@ -1124,8 +1124,14 @@ def llm_decide(
     return result
 
 
+#: Marker written for a provider that refused rather than throttled. Both stop a
+#: fan-out; only a throttle is worth waiting out, so the reader has to tell them
+#: apart and a bare epoch/`unknown` cannot say which this was.
+REFUSED_MARKER = "rejected"
+
+
 def record_provider_limit(*chunks: str) -> None:
-    """Record a provider usage-limit reset seen in a failed decide call.
+    """Record a provider limit or refusal seen in a failed decide call.
 
     A decision LLM call has no session log for the shared rate-limit detector to
     scan, so when the find-gate drain wants to pause and resume through an
@@ -1153,12 +1159,23 @@ def record_provider_limit(*chunks: str) -> None:
     try:
         lines = raw.splitlines()
         # Only a genuine account/session cap is worth pausing for; a transient
-        # 5xx blip is retried by the drain's next pass without a long wait.
-        if _provider_issue_from_lines(lines) != "capacity_limited":
+        # 5xx blip is retried by the drain's next pass without a long wait. A
+        # refusal stops the fan-out for the opposite reason: it will not clear,
+        # and every further call returns an unparseable error the gate then
+        # carries as an unjudged artifact.
+        issue = _provider_issue_from_lines(lines)
+        if issue not in ("capacity_limited", "backend_rejected"):
             return
-        reset = _latest_rejected_reset_at(lines)
+        # The two are recorded apart because the reader does different things
+        # with them: a cap is waited out, a refusal is not. Writing a refusal as
+        # an unknown reset made the drain sleep out its whole pause budget on a
+        # backend that was never coming back.
+        marker = (
+            REFUSED_MARKER if issue == "backend_rejected"
+            else (_latest_rejected_reset_at(lines) or "unknown")
+        )
         with open(target, "a", encoding="utf-8") as f:
-            f.write(f"{reset if reset else 'unknown'}\n")
+            f.write(f"{marker}\n")
     except Exception:
         return
 

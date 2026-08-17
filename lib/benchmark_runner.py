@@ -32,6 +32,7 @@ import build_lease
 import build_preflight
 import crash_artifacts
 import crash_bundle
+import llm_decide
 import llm_invoke
 import llm_usage
 import process_tree
@@ -130,6 +131,19 @@ def _find_gate_reset(path: Path) -> int | None:
     except OSError:
         return None
     return max(values) if values else 0
+
+
+def _find_gate_refused(path: Path) -> bool:
+    """Whether the gate stopped because the provider refused, not throttled.
+
+    A throttle is worth waiting out; a refusal is not, and waiting one out spends
+    the whole pause budget on a backend that will keep refusing. The marker file
+    carries the two apart because a bare epoch cannot say which happened.
+    """
+    try:
+        return llm_decide.REFUSED_MARKER in path.read_text().split()
+    except OSError:
+        return False
 
 
 def _stamp_finalization_start(results: Path) -> None:
@@ -235,6 +249,7 @@ def drain_find_gate(
     except ValueError:
         max_pauses, max_pause_total, pause_chunk = 12, 21600, 1800
     paused = 0
+    refused = False
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
     config = benchmark_target_config(results, target, target_slug)
     revision, config_digest = _evidence_scope(results, target, target_slug)
@@ -248,7 +263,7 @@ def drain_find_gate(
         os.environ["LLM_DECIDE_LIMIT_FILE"] = str(limit_file)
 
         def drain_once() -> dict[str, int]:
-            nonlocal paused
+            nonlocal paused, refused
             result = {"accepted": 0, "rejected": 0, "pending": 0}
             for attempt in range(max_pauses + 1):
                 # The first pass must still enumerate expired findings so the
@@ -266,6 +281,14 @@ def drain_find_gate(
                 if reset is None:
                     break
                 if reset == 0 and limit_file.stat().st_size == 0:
+                    break
+                if _find_gate_refused(limit_file):
+                    # Nothing to wait for, and nothing to come back to: the
+                    # outer completion loop reads this too, because clearing the
+                    # marker and calling again is how a refusal turns into a
+                    # second refused call instead of an unadjudicated remainder.
+                    refused = True
+                    log("Find-gate stopped: provider refused the request")
                     break
                 if attempt >= max_pauses or paused >= max_pause_total:
                     break
@@ -291,6 +314,8 @@ def drain_find_gate(
             # pass that converges, stalls, or runs past the ceiling ends the
             # drain instead of looping on a stuck id.
             for _ in range(_FIND_GATE_COMPLETION_PASSES):
+                if refused:
+                    break
                 if not counts.get("pending"):
                     break
                 if deadline is not None and time.monotonic() >= deadline:
@@ -973,7 +998,7 @@ def _provider_issue(cell_dir: Path) -> str:
     quota_marker = cell_dir / ".quota-exhausted"
     if quota_marker.is_file():
         return "capacity_limited"
-    saw_transient = False
+    saw_capacity = saw_transient = False
     candidates = [cell_dir / "backend.raw.log", cell_dir / "audit.log"]
     candidates.extend((cell_dir / "repo-root" / "output").glob("**/logs/.raw/session_*.log.raw"))
     candidates.extend((cell_dir / "repo-root" / "output").glob("**/logs/.raw/model-preflight-*.raw"))
@@ -984,9 +1009,15 @@ def _provider_issue(cell_dir: Path) -> str:
                 issue = audit_helpers._provider_issue_from_lines(stream)
         except OSError:
             continue
-        if issue == "capacity_limited":
+        # Scanned to the end rather than returning on the first hit: a refusal
+        # ranks above a capacity limit, and the log that carries it is not
+        # necessarily the first one read.
+        if issue == "backend_rejected":
             return issue
+        saw_capacity |= issue == "capacity_limited"
         saw_transient |= issue == "transient"
+    if saw_capacity:
+        return "capacity_limited"
     return "transient" if saw_transient else "none"
 
 
@@ -1001,6 +1032,15 @@ def _record_provider_quality(cell_dir: Path, results: Path, rc: int = 1) -> str:
         return "capacity_limited"
     issue = _provider_issue(cell_dir)
     if issue == "none":
+        return issue
+    if issue == "backend_rejected":
+        # Unconditional, unlike the capacity case below: a refused backend never
+        # served the cell's full budget and its gates never ran, so whatever
+        # artifacts landed are not a measurement of anything. Recording it as
+        # `provider_recovered` would publish the cell as a real result and, worse,
+        # let a same-run-id resume skip it as already done.
+        (cell_dir / ".backend-unavailable").touch()
+        (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
         return issue
     existing = ""
     try:
@@ -1094,7 +1134,10 @@ def run_model_direct(
         json.dumps(usage_event, separators=(",", ":")) + "\n", encoding="utf-8"
     )
     issue = _record_provider_quality(cell_dir, cell_dir, rc)
-    if issue == "capacity_limited" and (cell_dir / ".backend-unavailable").is_file():
+    if (
+        issue in ("capacity_limited", "backend_rejected")
+        and (cell_dir / ".backend-unavailable").is_file()
+    ):
         return 0
     if rc not in (0, 124) and _has_substantive_artifacts(cell_dir):
         # The scoreboard reports actual wall beside the granted wall, so an

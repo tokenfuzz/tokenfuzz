@@ -795,6 +795,43 @@ _PROVIDER_TRANSIENT_TEXT_RE = re.compile(
 _PROVIDER_USAGE_LIMIT_RE = re.compile(r'usage limit|session limit', re.IGNORECASE)
 _PROVIDER_RETRY_RE = re.compile(r'try again at|retry after|reset', re.IGNORECASE)
 
+# The provider refused, and will refuse the next identical request too. Unlike a
+# quota or an overload this never clears on its own, so it is classified apart
+# from both: retrying spends the pause budget on a backend that keeps refusing,
+# and a pause wrongly subtracted from a benchmark wall hands the cell extra
+# budget. Two shapes, because one run hit both — a revoked credential, and a
+# model the installed CLI cannot serve.
+_PROVIDER_CREDENTIAL_TEXT_RE = re.compile(
+    r'token[_ ]revoked|refresh_token_invalidated|invalidated oauth|'
+    r'invalid[_ -]?api[_ -]?key|authentication_error|\bUnauthorized\b|'
+    r'not authenticated|oauth token[^.\n]{0,40}(?:expired|revoked|invalid)|'
+    r'please (?:re-?)?(?:login|authenticate)',
+    re.IGNORECASE,
+)
+
+# A 400 the run cannot resend its way out of. Inclusion criterion: the provider
+# names the model or the client itself as the blocker, which neither waiting nor
+# resending changes. Deliberately narrow — an ordinary bad request (an oversized
+# prompt) stays a one-session failure rather than halting the whole run.
+_PROVIDER_UNSERVABLE_TEXT_RE = re.compile(
+    r'requires a newer version|upgrade to the latest|unknown model|'
+    r'model[^.\n]{0,40}(?:not found|not supported|unsupported|does not exist)',
+    re.IGNORECASE,
+)
+
+# A provider-CLI log line at error level, optionally behind a leading timestamp.
+# Codex writes credential failures to stderr in exactly this shape, outside any
+# JSON event, so the named-dialect rule below never sees them: it was written for
+# gemini/agy and treats every other CLI's plain lines as untrusted. Refusal
+# wording is credited on a line of this shape as a conjunction, the same two-part
+# shape the usage-limit notice uses, so an audited program's own output cannot
+# supply it alone. Deliberately the uppercase log level and not a looser `error:`
+# prefix: a grep or compiler line that quotes a status code reads as prose, and
+# structured backend errors already arrive through the error-event path.
+_PROVIDER_ERROR_LINE_RE = re.compile(
+    r'^\s*(?:\d{4}-\d{2}-\d{2}[T ]\S*\s+)?(?:ERROR|FATAL)\b',
+)
+
 # Provider-CLI dialect markers (gemini/agy). A bare plain-text provider error
 # (no JSON event) is trusted only when the log is one of these CLIs, so a stray
 # "UNAVAILABLE" / "quota will reset" in unrelated output is not a false hit.
@@ -807,23 +844,36 @@ _PROVIDER_DIALECT_RE = re.compile(
 
 
 def _status_class(match) -> str:
-    """Map a regex match's first populated 3-digit group to capacity/transient/''."""
+    """Map a regex match's first populated 3-digit group to the failure class.
+
+    Only 401 reads as a refusal on its own: the credential itself was turned
+    down. 403 is deliberately absent — an edge proxy returns it for reasons that
+    do clear — and 400 needs the wording check its caller applies.
+    """
     code = next((g for g in match.groups() if g), None)
     if code == "429":
         return "capacity"
+    if code == "401":
+        return "refused"
+    if code == "400":
+        return "bad-request"
     if code and code[0] == "5":
         return "transient"
     return ""
 
 
 def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
-    """Classify backend/provider failures as none, transient, or capacity_limited.
+    """Classify backend/provider failures as none, transient, capacity_limited,
+    or backend_rejected.
 
-    Capacity wins over transient when both appear. Detection is scoped so that
-    only genuine provider failures count: structured status codes and provider
+    A refusal wins over capacity, which wins over transient: it is the only one
+    of the three that cannot clear, so pausing or retrying for it spends budget
+    on a backend that will keep refusing. Detection is scoped so that only
+    genuine provider failures count: structured status codes and provider
     wording are credited inside a backend error event or on a provider-CLI plain
     line (gemini stderr), never in tool output or assistant prose. The account
-    usage-limit notice is the sole exception and needs a two-part match.
+    usage-limit notice and the refusal wording are the exceptions, and each
+    needs a two-part match.
     """
 
     # The Gemini watchdog observes the live retry stream and writes this marker
@@ -836,6 +886,7 @@ def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
     cap_plain = trans_plain = False  # seen on a non-JSON (provider-CLI) line
     dialect = False
     usage_limit_notice = False
+    refused = False
 
     for raw_line in lines:
         line = raw_line.strip()
@@ -856,12 +907,18 @@ def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
         if _PROVIDER_DIALECT_RE.search(line):
             dialect = True
 
-        # api_error_status is a dedicated field — trust it anywhere.
+        # api_error_status is a dedicated field — trust it anywhere. Claude
+        # reports every API failure through it, including on a `result` event
+        # that no error-shaped rule below matches, so a refusal has to be read
+        # here or that backend's credential failure is invisible.
         m = _PROVIDER_API_ERROR_RE.search(line)
         if m:
             cls = _status_class(m)
             cap = cap or cls == "capacity"
             trans = trans or cls == "transient"
+            refused = refused or cls == "refused"
+            if cls == "bad-request" and _PROVIDER_UNSERVABLE_TEXT_RE.search(line):
+                refused = True
 
         if is_error_event:
             m = _PROVIDER_STATUS_CODE_RE.search(line)
@@ -889,11 +946,42 @@ def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
             if _PROVIDER_USAGE_LIMIT_RE.search(line) and _PROVIDER_RETRY_RE.search(line):
                 usage_limit_notice = True
 
+        # A refusal, in a backend error event or on a line that is itself shaped
+        # like a CLI error. Never in assistant prose or tool output, where an
+        # audited program's own logs mention these terms.
+        if is_error_event or (is_plain and _PROVIDER_ERROR_LINE_RE.search(line)):
+            found = _PROVIDER_STATUS_CODE_RE.search(line)
+            status = _status_class(found) if found else ""
+            if status == "refused" or _PROVIDER_CREDENTIAL_TEXT_RE.search(line):
+                refused = True
+            # A 400 halts the run only when the provider named the model or the
+            # client as the blocker; on its own it is one malformed request.
+            if (
+                (status == "bad-request" or "invalid_request_error" in line)
+                and _PROVIDER_UNSERVABLE_TEXT_RE.search(line)
+            ):
+                refused = True
+
+    if refused:
+        return "backend_rejected"
     if cap or (dialect and cap_plain) or usage_limit_notice:
         return "capacity_limited"
     if trans or (dialect and trans_plain):
         return "transient"
     return "none"
+
+
+#: Provider failures a retry or a pause can clear. `backend_rejected` is
+#: deliberately absent: it is a provider state, but not one any caller should
+#: back off into — the `rate_limit` flag below means "retryable", and reporting a
+#: refusal there would send a caller to wait out something that never clears.
+RETRYABLE_PROVIDER_ISSUES = ("capacity_limited", "transient")
+
+#: Severity order when folding several logs into one answer. A refusal outranks
+#: a cap for the same reason it does inside one log: it cannot be waited out.
+_PROVIDER_ISSUE_RANK = {
+    "none": 0, "transient": 1, "capacity_limited": 2, "backend_rejected": 3,
+}
 
 
 def _raw_status_defaults() -> dict[str, int]:
@@ -916,7 +1004,7 @@ def _raw_status_from_lines(lines) -> dict[str, int]:
     gemini_result = False
     gemini_success = False
 
-    if _provider_issue_from_lines(raw_lines) != "none":
+    if _provider_issue_from_lines(raw_lines) in RETRYABLE_PROVIDER_ISSUES:
         status["rate_limit"] = 1
 
     for raw_line in raw_lines:
@@ -1250,10 +1338,12 @@ def _iteration_provider_status(raw_dir: str, timestamp: str) -> "tuple[bool, str
     Globs session_<timestamp>_*.log.raw — one wildcard that covers every agent
     and its -rN refills, and cannot silently miss a future role/mode — then, in a
     single pass per file, reuses the same classifier the per-file callers use:
-      * rejection gate == (_provider_issue_from_lines != "none"), the exact
+      * rejection gate == (_provider_issue_from_lines is retryable), the exact
         equivalence _raw_status_from_lines encodes, so this stays consistent with
-        log_has_rate_limit_rejection;
-      * issue is the max over files (capacity_limited > transient > none);
+        log_has_rate_limit_rejection. A refusal is reported through `issue`
+        alone: it is a provider state, but not one to back off into;
+      * issue is the max over files
+        (backend_rejected > capacity_limited > transient > none);
       * reset_at is the max epoch over rejected files.
     Returns (saw_rejection, issue, reset_at|None).
     """
@@ -1268,11 +1358,9 @@ def _iteration_provider_status(raw_dir: str, timestamp: str) -> "tuple[bool, str
         file_issue = _provider_issue_from_lines(text.splitlines())
         if file_issue == "none":
             continue
-        saw_rejection = True
-        if file_issue == "capacity_limited":
-            issue = "capacity_limited"
-        elif issue != "capacity_limited":
-            issue = "transient"
+        saw_rejection = saw_rejection or file_issue in RETRYABLE_PROVIDER_ISSUES
+        if _PROVIDER_ISSUE_RANK[file_issue] > _PROVIDER_ISSUE_RANK[issue]:
+            issue = file_issue
         candidate = _provider_reset_from_text(text)
         if candidate is not None and candidate > 0 and (reset_at is None or candidate > reset_at):
             reset_at = candidate
