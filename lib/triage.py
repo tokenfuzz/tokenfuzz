@@ -1960,7 +1960,7 @@ def _source_review_facts(
         facts = triage_validate.source_review_facts(payload.get("review_facts"))
         for key, value in facts.items():
             observed[key][value] = observed[key].get(value, 0) + 1
-    return {
+    settled = {
         key: next(iter(counts))
         for key, counts in observed.items()
         if (
@@ -1971,6 +1971,63 @@ def _source_review_facts(
             )
         )
     }
+    if "trigger_controls_fit" not in settled:
+        scope = _unsettled_scope_fact(report, vote_files)
+        if scope:
+            settled["trigger_controls_fit"] = scope
+    return settled
+
+
+def _unsettled_scope_fact(report: Path, vote_files: tuple[Path, ...]) -> str:
+    """Scope from reviewers that read the source and did not settle the defect.
+
+    The prompt asks an Uncertain reviewer for this one field ("Do not use
+    Uncertain to park a case you did establish — say so through the vote and
+    `trigger_controls_fit`"), and `stamp_trigger_vote` then drops it with the
+    rest of that vote's facts, so it is read back off the vote itself.
+
+    A fallback, never a peer: consulted only when no settled reviewer answered
+    the scope question, so it can neither contradict one nor turn agreement into
+    a split. Scope is the only field taken this way — `rejection_kind` demotes on
+    its own, and an unsettled reviewer must not carry that. It cannot publish
+    anything either: `_final_publication_state` routes an Uncertain vote to
+    `pending` before it reads `within`, so the one disposition this can add is
+    the `outside` one, which withholds credit rather than granting it.
+
+    Withholding credit is still terminal, though — `not-reportable` drops the
+    artifact out of the unjudged floor — so "cannot publish" is not the whole
+    safety argument. The citations are re-read against the source as it stands,
+    the way a settled vote's are, and anything unverifiable here contributes no
+    fact at all, leaving the artifact pending.
+    """
+    observed: set[str] = set()
+    for vote_file in vote_files:
+        if _cached_trigger_vote(report, vote_file) != "Uncertain":
+            continue
+        try:
+            payload = json.loads(vote_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        # Anchors are what make the reading verifiable, and the recorded bit
+        # only says they verified once. `not-reportable` is terminal — it drops
+        # the artifact out of the unjudged floor — so the citations are checked
+        # against the source as it stands now, exactly as a settled vote's are.
+        # A stale anchor contributes nothing and the artifact stays pending.
+        anchors = payload.get("anchors")
+        if payload.get("anchors_verified") is not True or not anchors:
+            continue
+        target_root_value = os.environ.get("TARGET_ROOT", "")
+        target_root = Path(target_root_value)
+        if not target_root_value or not target_root.is_dir():
+            continue
+        if triage_validate.verify_source_anchors(anchors, target_root) != anchors:
+            continue
+        fit = triage_validate.source_review_facts(payload).get(
+            "trigger_controls_fit"
+        )
+        if fit:
+            observed.add(fit)
+    return next(iter(observed)) if len(observed) == 1 else ""
 
 
 _TRIGGER_BATCH_SIZE = 4

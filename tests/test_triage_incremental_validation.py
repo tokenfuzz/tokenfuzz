@@ -2656,6 +2656,91 @@ Generated score text.
             "not-reportable",
         )
 
+    def test_an_unsettled_review_still_delivers_the_scope_it_did_settle(self) -> None:
+        """A reviewer can settle scope without settling the defect.
+
+        The prompt asks for `trigger_controls_fit` on an Uncertain vote, and
+        `_final_publication_state` already turns an `outside` answer into
+        `not-reportable`. What never happened was delivery: facts were collected
+        from settled votes only, so a decided out-of-model call was dropped and
+        the artifact published as an unjudged remainder instead.
+        """
+        vote_file = self.finding / ".trigger-gate.json"
+        vote = trigger_vote(self.report, self.root, "Uncertain")
+        vote["trigger_controls_fit"] = "outside"
+        vote_file.write_text(json.dumps(vote), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"TARGET_ROOT": str(self.root)}):
+            facts = triage._source_review_facts(self.report, (vote_file,))
+        self.assertEqual(facts, {"trigger_controls_fit": "outside"})
+        self.assertEqual(
+            triage._final_publication_state("promote", {"Uncertain"}, facts),
+            "not-reportable",
+        )
+
+    def test_a_stale_anchor_cannot_terminally_suppress_a_finding(self) -> None:
+        """`not-reportable` is terminal, so the citations are re-read.
+
+        A settled vote re-verifies its anchors against the live source before it
+        counts. Trusting the recorded `anchors_verified` bit alone let a review
+        of source that has since changed keep demoting the artifact out of the
+        unjudged floor — the other dangerous direction from publishing.
+        """
+        vote_file = self.finding / ".trigger-gate.json"
+        vote = trigger_vote(self.report, self.root, "Uncertain")
+        vote["trigger_controls_fit"] = "outside"
+        vote_file.write_text(json.dumps(vote), encoding="utf-8")
+        # The cited line changes; the recorded revision does not.
+        (self.root / "sample.c").write_text(
+            "int app_parse(void) { return 1; }\n", encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"TARGET_ROOT": str(self.root)}):
+            facts = triage._source_review_facts(self.report, (vote_file,))
+        self.assertEqual(facts, {})
+        self.assertEqual(
+            triage._final_publication_state("promote", {"Uncertain"}, facts),
+            "pending",
+        )
+
+    def test_an_unsettled_review_cannot_publish_or_outvote_a_settled_one(self) -> None:
+        """The scope fallback may withhold credit; it may never grant it.
+
+        `within` from a reviewer that did not settle must not become security
+        yield, an unverifiable reading must not count at all, and a reviewer that
+        did settle must not be outranked by one that did not.
+        """
+        vote_file = self.finding / ".trigger-gate.json"
+
+        def write(**overrides) -> None:
+            vote = trigger_vote(self.report, self.root, "Uncertain")
+            vote.update(overrides)
+            vote_file.write_text(json.dumps(vote), encoding="utf-8")
+
+        def facts(*votes: Path) -> dict:
+            with mock.patch.dict(os.environ, {"TARGET_ROOT": str(self.root)}):
+                return triage._source_review_facts(self.report, votes)
+
+        write(trigger_controls_fit="within")
+        self.assertEqual(
+            triage._final_publication_state(
+                "promote", {"Uncertain"}, facts(vote_file),
+            ),
+            "pending",
+        )
+
+        # A vote downgraded to Uncertain for citing nothing read nothing.
+        write(trigger_controls_fit="outside", anchors_verified=False)
+        self.assertEqual(facts(vote_file), {})
+
+        # A settled reviewer answered, so the fallback is never consulted.
+        write(trigger_controls_fit="outside")
+        settled = self.finding / ".trigger-gate-2.json"
+        settled_vote = trigger_vote(self.report, self.root, "Promote")
+        settled_vote["review_facts"] = {"trigger_controls_fit": "within"}
+        settled.write_text(json.dumps(settled_vote), encoding="utf-8")
+        self.assertEqual(
+            facts(vote_file, settled), {"trigger_controls_fit": "within"},
+        )
+
     def test_machine_trigger_proof_survives_an_unsettled_surface_review(self) -> None:
         """A 5/5 direct byte-path proof is not negated by a boundary review.
 
