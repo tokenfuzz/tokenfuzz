@@ -684,6 +684,23 @@ class FinalizationDrainTests(unittest.TestCase):
         self.assertEqual(counts.get("pending"), 3)
         self.assertNotIn("paused_seconds", counts)
 
+    def test_the_unadjudicated_warning_names_only_remedies_that_apply(self) -> None:
+        """It must not promise that re-running the gate finishes the count.
+
+        Operators followed the old wording, ran `--regenerate`, and watched the
+        number not move: a review that ran and could not settle is cached and
+        never re-asked.
+        """
+        warning = benchmark_runner._unadjudicated_warning("harness-r1", 3)
+        self.assertIn("harness-r1", warning)
+        self.assertIn("3 finding(s)", warning)
+        self.assertIn("--regenerate", warning)
+        self.assertIn("retries", warning)
+        self.assertNotIn("to finish the gate", warning)
+        # A pending id may have no receipt at all, so the receipt is offered as
+        # a place to look rather than asserted to exist.
+        self.assertIn("where one exists", warning)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

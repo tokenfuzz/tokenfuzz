@@ -1021,6 +1021,28 @@ def _provider_issue(cell_dir: Path) -> str:
     return "transient" if saw_transient else "none"
 
 
+def _unadjudicated_warning(name: str, unjudged: int) -> str:
+    """The un-adjudicated warning, without promising a remedy that may not apply.
+
+    Two different states reach this count, and only one is worth acting on: a
+    review with no usable recorded answer is retried on the next pass, while one
+    that ran and could not settle is cached and never re-asked, so
+    `--regenerate` re-derives it unchanged. The old wording sent an operator to
+    re-run the gate for both, and they watched the count not move.
+
+    Says "retries" rather than "finishes" because a retry is not a promise — a
+    batch can return nothing usable again — and hedges the receipt for the same
+    reason: an id no review has answered may have no current receipt at all.
+    """
+    return (
+        f"WARN: {name} has {unjudged} finding(s) un-adjudicated after drain; "
+        "they count as unconfirmed. `bin/benchmark --regenerate` retries the "
+        "ones whose review left no usable answer; a review that ran and could "
+        "not settle stays unjudged until new evidence settles it. Each "
+        "finding's validation.json says which, where one exists"
+    )
+
+
 def _has_artifacts(results: Path) -> bool:
     return any(path.is_dir() for root in (results / "crashes", results / "findings") if root.is_dir() for path in root.iterdir())
 
@@ -3009,17 +3031,12 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     )
                     # A drain that stops early leaves findings unjudged, and
                     # every one of them counts as unconfirmed — so the cell
-                    # reports a yield it never actually measured. The
-                    # regenerate path already says this; a live run is where an
+                    # reports a yield it never actually measured. Warned in the
+                    # same words as the regenerate path; a live run is where an
                     # operator can still act on it.
                     unjudged = summary.get("findings_unadjudicated", 0)
                     if args.validate_findings and unjudged:
-                        log(
-                            f"WARN: {name} has {unjudged} finding(s) still "
-                            "un-adjudicated after drain; they count as "
-                            "unconfirmed. Re-run `bin/benchmark --regenerate` "
-                            "to finish the gate"
-                        )
+                        log(_unadjudicated_warning(name, unjudged))
                     _write_json(cell_dir / "metrics.json", summary)
                 else:
                     summary = {"exists": False}
@@ -3155,7 +3172,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 _write_json(cell_dir / "metrics.json", summary)
                 remaining = summary.get("findings_unadjudicated", 0)
                 if args.validate_findings and remaining:
-                    log(f"WARN: {cell_dir.name} has {remaining} finding(s) still un-adjudicated after drain")
+                    log(_unadjudicated_warning(cell_dir.name, remaining))
                 # Recover old accounting-only incomplete cells and model-direct
                 # exits that left substantive cell evidence. Empty or unusable
                 # process failures stay failed. Residual artifacts remain
