@@ -309,11 +309,13 @@ assert_eq(2, len(indices), "gemini emits two --add-dir flags")
 ok(f[indices[0] + 1] == "/a", "first gemini add-dir = /a")
 ok(f[indices[1] + 1] == "/b", "second gemini add-dir = /b")
 
-# A benchmark cell reaches the target tree by symlink, and Claude Code matches
-# its sandbox write rules against the resolved path: granting only the facade
-# spelling left the target readable and unwritable, which took out the build
-# lease and with it every sanitizer entry point.
-print("\nclaude grants the resolved spelling of a symlinked directory")
+# A benchmark cell reaches the target tree by symlink, and every backend sandbox
+# matches its write rules against the resolved path: the facade spelling left
+# Claude's target readable and unwritable, and Codex refuses to start any
+# process while such a root is configured. Granting the resolved spelling alone
+# is the one answer both accept. The per-backend matrix is asserted against the
+# imported API below; this covers the CLI that renders it.
+print("\nagent-flags grants the resolved spelling of a symlinked directory")
 # Resolved up front: the platform temp root is itself a symlink on macOS, which
 # would make even the non-symlinked control case resolve to something else.
 _sandbox_tmp = Path(tempfile.mkdtemp(prefix="granted-dirs-")).resolve()
@@ -325,8 +327,7 @@ try:
     proc = run(["agent-flags", "claude", "--add-dirs", str(_facade)], check=True)
     f = flags(proc)
     granted = [f[i + 1] for i, x in enumerate(f) if x == "--add-dir"]
-    ok(str(_facade) in granted, "the facade spelling stays granted")
-    ok(str(_real.resolve()) in granted, "the resolved target tree is granted too")
+    assert_eq([str(_real)], granted, "only the resolved target tree is granted")
     # An ordinary directory must not be granted twice.
     proc = run(["agent-flags", "claude", "--add-dirs", str(_real)], check=True)
     f = flags(proc)
@@ -944,6 +945,44 @@ ok(agent_codex[agent_codex.index("--cd") + 1] == "/x",
    "codex --cd uses first add-dir entry")
 ok(agent_codex[agent_codex.index("--add-dir") + 1] == "/y",
    "codex --add-dir grants second add-dir entry")
+
+# A benchmark cell reaches its target tree through a symlinked facade entry, so
+# every grant a backend receives must already be resolved. Claude turns a
+# symlinked grant readable-but-unwritable; Codex refuses to create any process
+# at all while one is configured, which cost a whole harness row every command
+# it ran. Neither failure is visible in a settings dict, so assert the paths.
+with tempfile.TemporaryDirectory() as _raw_td:
+    facade_td = Path(os.path.realpath(_raw_td))
+    real_targets = facade_td / "checkout" / "targets"
+    (real_targets / "demo").mkdir(parents=True)
+    facade_root = facade_td / "cell" / "repo-root"
+    facade_root.mkdir(parents=True)
+    (facade_root / "targets").symlink_to(real_targets, target_is_directory=True)
+    symlinked = facade_root / "targets" / "demo"
+
+    ok(str(symlinked) != os.path.realpath(symlinked),
+       "fixture reproduces a benchmark cell's symlinked target grant")
+    ok(inv.granted_dirs(f"{symlinked},{os.path.realpath(symlinked)}")
+       == [os.path.realpath(symlinked)],
+       "granted_dirs collapses both spellings of one directory")
+
+    # Both positions matter: the first entry becomes the workspace root
+    # (codex --cd, grok --cwd) and the rest become explicit grants, and codex
+    # rejects a symlinked writable root in either position.
+    for sandboxable in ("claude", "codex", "gemini", "grok"):
+        for position, grants in (
+            ("as a grant", f"{facade_root},{symlinked}"),
+            ("as the workspace root", str(symlinked)),
+        ):
+            emitted = [
+                flag
+                for flag in inv.agent_flags(sandboxable, add_dirs=grants)
+                if flag.startswith(str(facade_td))
+            ]
+            unresolved = [f for f in emitted if f != os.path.realpath(f)]
+            ok(emitted and not unresolved,
+               f"agent_flags('{sandboxable}') resolves a symlinked dir {position}",
+               f"symlinked spelling reached the sandbox: {unresolved}")
 
 # max_turns is consumed by Claude and Grok; Codex and the Antigravity-CLI
 # Gemini backend do not take a --max-turns flag.

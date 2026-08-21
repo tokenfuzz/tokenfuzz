@@ -345,7 +345,10 @@ class BenchmarkReportTests(unittest.TestCase):
         )
         invoked = json.loads(args_line.removeprefix("FAKE_ARGS="))
         self.assertIn("features.plugins=false", invoked)
-        self.assertIn(f"FAKE_CD={cell}", raw)
+        # The launch directory is granted as a writable root, so it reaches
+        # the backend resolved — a symlinked spelling is the one spelling a
+        # sandbox cannot use, and Codex refuses to start a process on it.
+        self.assertIn(f"FAKE_CD={os.path.realpath(cell)}", raw)
         self.assertIn(str(target.resolve()), raw.split("FAKE_ADDS=", 1)[1])
 
     def test_find_gate_uses_benchmark_context(self) -> None:

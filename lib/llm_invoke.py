@@ -764,24 +764,29 @@ def agy_model_label(model: str, effort: str = "") -> str:
 
 
 def granted_dirs(add_dirs: str) -> list[str]:
-    """Each granted directory, plus its resolved path when that differs.
+    """Each granted directory as the path a sandbox actually enforces.
 
-    Claude Code matches its sandbox write rules against the resolved path, so a
-    directory reached by symlink comes out readable and silently unwritable.
-    That is exactly what a benchmark cell grants, because its facade reaches
-    the target tree through a symlink: the agent could then not open the
-    target's build lease, and every sanitizer entry point died before it ran.
-    Granting both spellings widens nothing — the resolved path is the one the
-    kernel was already checking.
+    Every sandbox here matches its write rules against the resolved path, so
+    the symlinked spelling of a grant is the one spelling that cannot work.
+    Claude made such a grant readable and silently unwritable, which left the
+    target's build lease unopenable. Codex is stricter still: it refuses to
+    create *any* process while a symlinked writable root is configured, so a
+    session lost every command it ran, `pwd` included.
+
+    A benchmark cell grants exactly that shape — its facade reaches the target
+    tree through a symlink — so both failures land on the harness row and on
+    no other. Resolving widens nothing: the resolved path is the one the
+    kernel was already checking, and it is the only spelling every backend
+    agrees on.
     """
     granted: list[str] = []
     for raw in (add_dirs or "").split(","):
         directory = raw.strip()
         if not directory:
             continue
-        for spelling in (directory, os.path.realpath(directory)):
-            if spelling not in granted:
-                granted.append(spelling)
+        resolved = os.path.realpath(directory)
+        if resolved not in granted:
+            granted.append(resolved)
     return granted
 
 
@@ -909,7 +914,7 @@ def agent_flags(
             flags += ["-c", f'model_reasoning_effort="{effort}"']
         if not allow_subagents:
             flags += ["-c", "features.multi_agent=false"]
-        dirs = [d.strip() for d in (add_dirs or "").split(",") if d.strip()]
+        dirs = granted_dirs(add_dirs)
         if dirs:
             flags += ["--cd", dirs[0]]
             for d in dirs[1:]:
@@ -952,10 +957,8 @@ def agent_flags(
             # cross-run memory.
             if not memory_enabled():
                 flags += ["--admin-policy", gemini_memory_policy_path()]
-            for d in (add_dirs or "").split(","):
-                d = d.strip()
-                if d:
-                    flags += ["--include-directories", d]
+            for d in granted_dirs(add_dirs):
+                flags += ["--include-directories", d]
             return flags
 
         # Antigravity CLI (agy): plain stdout in --print mode. Outside an
@@ -974,10 +977,8 @@ def agent_flags(
         agy_log = os.environ.get("AGY_LOG_FILE", "").strip()
         if agy_log:
             flags += ["--log-file", agy_log]
-        for d in (add_dirs or "").split(","):
-            d = d.strip()
-            if d:
-                flags += ["--add-dir", d]
+        for d in granted_dirs(add_dirs):
+            flags += ["--add-dir", d]
         return flags
 
     if backend == "grok":
@@ -997,7 +998,7 @@ def agent_flags(
             flags += ["--model", resolved_model]
         if effort:
             flags += ["--reasoning-effort", effort]
-        dirs = [d.strip() for d in (add_dirs or "").split(",") if d.strip()]
+        dirs = granted_dirs(add_dirs)
         if dirs:
             flags += ["--cwd", dirs[0]]
         return flags
@@ -1079,7 +1080,7 @@ def run_agent_prompt(
         allow_subagents=allow_subagents,
         agent_security=agent_security,
     )
-    first_dir = next((p.strip() for p in add_dirs.split(",") if p.strip()), "")
+    first_dir = next(iter(granted_dirs(add_dirs)), "")
     working_dir = Path(cwd or first_dir or Path.cwd())
     # Grok and Antigravity have no launch flag that disables parent project
     # discovery. Make the directory each CLI treats as its workspace a hard

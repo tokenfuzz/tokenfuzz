@@ -13,6 +13,11 @@ pipe into a redirect, mixed quoting, a multi-line script. The `;` chain is
 the specific shape that broke: `bin/peek f:1-5` ran while
 `bin/peek f:1-5; echo; bin/peek f:7-9` was denied.
 
+The second case covers the *launch* rather than the command: a grant that
+reaches its tree through a symlink, which is what every benchmark cell hands
+its agents. That one cost a five-hour harness row every command it ran, and a
+plain workspace cannot expose it — the symlink has to be in the fixture.
+
 Opt-in, because each backend costs a real provider call:
 
     TOKENFUZZ_LIVE_BACKENDS=claude python3 tests/test_backend_sandbox_conformance.py
@@ -69,6 +74,22 @@ tools; these must go through Bash. Report the exit code of each, then stop.
 {commands}
 """
 
+# The shape a benchmark cell launches: the workspace root is an ordinary
+# directory whose `targets` entry is a symlink to the real tree, and the grant
+# handed to the backend points *through* that symlink. Claude turned such a
+# grant readable-but-unwritable; Codex refused to create any process at all
+# while one was configured, so a five-hour harness row ran zero commands. A
+# write that lands in the real tree is the only proof both are fixed.
+FACADE_MARKER = "wrote.txt"
+FACADE_PROMPT = """You are a non-interactive conformance probe. Run this exact
+shell command with your Bash tool, in the current working directory, then
+report its exit code and stop. Do not use file-editing tools; it must go
+through Bash.
+
+printf conformance > targets/demo/{marker}
+"""
+
+
 # A launch that failed for one of these reasons says nothing about
 # permissions, so it skips. Anything else — an unparsable setting, a sandbox
 # that would not start, a flag the CLI rejects — is a launch regression this
@@ -124,7 +145,23 @@ class BackendSandboxConformanceTests(unittest.TestCase):
         for workspace in self._workspaces:
             shutil.rmtree(workspace, ignore_errors=True)
 
-    def _run(self, backend: str) -> Path | None:
+    def _workspace(self, backend: str, label: str) -> Path:
+        """A scratch root with no symlink of its own.
+
+        Resolved, because the platform temp root is itself a symlink on macOS:
+        leaving it unresolved would put a symlink component in every path here
+        and make the facade case prove nothing about the one link it builds.
+        """
+        workspace = Path(
+            tempfile.mkdtemp(prefix=f"conformance-{label}-{backend}-")
+        ).resolve()
+        self._workspaces.append(workspace)
+        return workspace
+
+    def _run(
+        self, backend: str, workspace: Path, launch_dir: Path,
+        add_dirs: str, prompt: str, max_turns: int,
+    ) -> Path | None:
         """The workspace a finished session left, or None on a provider outage.
 
         A session the provider refused answers nothing about permissions, so it
@@ -134,18 +171,15 @@ class BackendSandboxConformanceTests(unittest.TestCase):
         it exists to catch. The originally-guarded failure exits 0 and leaves
         the markers unwritten, so that one stays a failure either way.
         """
-        workspace = Path(tempfile.mkdtemp(prefix=f"conformance-{backend}-"))
-        self._workspaces.append(workspace)
         transcript = workspace / "transcript.log"
-        commands = "\n\n".join(shell for _, shell, _ in SHAPES)
         rc = llm_invoke.run_agent_prompt(
             backend,
-            PROMPT.format(commands=commands),
+            prompt,
             600,
             transcript,
-            max_turns=len(SHAPES) * 3,
-            add_dirs=str(workspace),
-            cwd=workspace,
+            max_turns=max_turns,
+            add_dirs=add_dirs,
+            cwd=launch_dir,
             allow_subagents=False,
             agent_security="sandboxed",
         )
@@ -165,13 +199,17 @@ class BackendSandboxConformanceTests(unittest.TestCase):
             f"suspect; transcript at {transcript}"
         )
 
-    def test_ordinary_command_shapes_are_not_blocked(self) -> None:
+    def _each_backend(self, run_case) -> None:
+        """Run `run_case(backend)` for every requested backend.
+
+        One backend being unavailable must not decide the verdict for the
+        others: a skip raised mid-loop would end the run and hide a backend
+        that had already answered. `run_case` returns False when the provider
+        refused the session, and asserts whatever its own case proves.
+        """
         backends = requested_backends()
         if not backends:
             self.skipTest("set TOKENFUZZ_LIVE_BACKENDS=claude,codex (or all)")
-        # One backend being unavailable must not decide the verdict for the
-        # others: a skip raised mid-loop would end the run and hide a backend
-        # that had already answered.
         unavailable: list[str] = []
         verified = 0
         for backend in backends:
@@ -179,31 +217,87 @@ class BackendSandboxConformanceTests(unittest.TestCase):
                 if not shutil.which(llm_invoke.backend_bin(backend)):
                     unavailable.append(f"{backend}: CLI not on PATH")
                     continue
-                workspace = self._run(backend)
-                if workspace is None:
-                    unavailable.append(f"{backend}: provider refused the session")
-                    continue
-                verified += 1
                 try:
-                    for name, shell, expected in SHAPES:
-                        marker = workspace / name
-                        self.assertTrue(
-                            marker.is_file(),
-                            f"{backend} never ran `{shell}` — a sandboxed "
-                            f"backend must not block an ordinary agent command",
-                        )
-                        self.assertEqual(
-                            expected, marker.read_text(encoding="utf-8").strip(),
-                            f"{backend} ran `{shell}` but its effect differs",
-                        )
+                    answered = run_case(backend)
                 except AssertionError:
                     self._keep = True
                     raise
+                if not answered:
+                    unavailable.append(f"{backend}: provider refused the session")
+                    continue
+                verified += 1
         if not verified:
             self.skipTest(
                 "no requested backend produced a session: "
                 + "; ".join(unavailable)
             )
+
+    def test_ordinary_command_shapes_are_not_blocked(self) -> None:
+        def case(backend: str) -> bool:
+            workspace = self._workspace(backend, "shapes")
+            commands = "\n\n".join(shell for _, shell, _ in SHAPES)
+            finished = self._run(
+                backend, workspace, workspace, str(workspace),
+                PROMPT.format(commands=commands), len(SHAPES) * 3,
+            )
+            if finished is None:
+                return False
+            for name, shell, expected in SHAPES:
+                marker = workspace / name
+                self.assertTrue(
+                    marker.is_file(),
+                    f"{backend} never ran `{shell}` — a sandboxed "
+                    f"backend must not block an ordinary agent command",
+                )
+                self.assertEqual(
+                    expected, marker.read_text(encoding="utf-8").strip(),
+                    f"{backend} ran `{shell}` but its effect differs",
+                )
+            return True
+
+        self._each_backend(case)
+
+    def test_symlinked_grant_is_writable(self) -> None:
+        """A grant reaching its tree through a symlink must still work.
+
+        This is a benchmark cell in miniature. It is a separate case from the
+        command shapes above because it fails for a different reason and at a
+        different layer: the shapes ask whether a *command* is permitted, this
+        asks whether the session can run commands at all, and a backend that
+        rejects the writable root answers no to every command equally.
+        """
+        def case(backend: str) -> bool:
+            workspace = self._workspace(backend, "facade")
+            targets = workspace / "checkout" / "targets"
+            (targets / "demo").mkdir(parents=True)
+            facade = workspace / "repo-root"
+            facade.mkdir()
+            (facade / "targets").symlink_to(targets, target_is_directory=True)
+            grant = facade / "targets" / "demo"
+            self.assertNotEqual(
+                str(grant), os.path.realpath(grant),
+                "fixture must reach its grant through a symlink",
+            )
+            finished = self._run(
+                backend, workspace, facade, f"{facade},{grant}",
+                FACADE_PROMPT.format(marker=FACADE_MARKER), 6,
+            )
+            if finished is None:
+                return False
+            landed = targets / "demo" / FACADE_MARKER
+            self.assertTrue(
+                landed.is_file(),
+                f"{backend} wrote nothing through a symlinked grant — every "
+                f"benchmark cell hands its agents exactly this shape",
+            )
+            self.assertEqual(
+                "conformance", landed.read_text(encoding="utf-8").strip(),
+                f"{backend} wrote through its symlinked grant but the "
+                f"content differs",
+            )
+            return True
+
+        self._each_backend(case)
 
 
 if __name__ == "__main__":
