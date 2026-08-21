@@ -1233,10 +1233,16 @@ def _detect_primitive(report_text: str) -> tuple[str, str]:
         return "null_deref", "null/SEGV"
     if re.search(r"\bbus\b", t) or "sigbus" in t:
         return "bus", "BUS"
-    if _unnegated_search(r"\b(info[- ]disclosure|information disclosure|internal representation|leak(?:ed|s)?)\b", t):
+    if _unnegated_search(r"\b(info[- ]disclosure|information disclosure)\b", t):
         return "info_leak", "information disclosure"
-    if _unnegated_search(r"\b(uninit|uninitialized|uninitialised)\b", t):
-        return "info_leak", "uninitialized read"
+    # Prose-only "uninitialized" / "leak" stays in the conservative small-read
+    # tier for the same reason as "type confusion" below: info_leak carries
+    # VC:H, and a narrative word is not evidence that anything reached an
+    # attacker. The class stays reserved for the MSan diagnostic matched
+    # above, an explicit disclosure claim, or a structured `Primitive:
+    # info_leak` field.
+    if _unnegated_search(r"\b(uninit|uninitialized|uninitialised|leak(?:ed|s)?)\b", t):
+        return "heap_read_small", "unconfirmed uninitialized read"
     # Prose-only "type confusion" stays in the conservative small-read tier:
     # the 34-point type_confusion class is reserved for sanitizer-grade
     # signals (Bad-cast / CFI / vptr, matched above) or a deliberate

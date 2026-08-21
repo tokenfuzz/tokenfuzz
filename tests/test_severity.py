@@ -313,6 +313,30 @@ class SeverityTests(unittest.TestCase):
             with self.subTest(expected=expected, text=text):
                 self.assertEqual(severity.detect_primitive(text)[0], expected)
 
+    def test_prose_keywords_do_not_mint_disclosure_impact(self) -> None:
+        # info_leak carries VC:H. A narrative word is not evidence that
+        # anything reached an attacker, so a prose-only claim lands in the
+        # conservative small-read tier, as prose-only "type confusion" does.
+        for text in (
+            "the parser performs an uninitialized read of the offset pair",
+            "the handler leaks the internal representation of the node",
+            "an uninitialised value decides the branch",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    severity.detect_primitive(text)[0], "heap_read_small",
+                )
+        # A diagnostic and an explicit disclosure claim still classify.
+        for text in (
+            "WARNING: MemorySanitizer: use-of-uninitialized-value",
+            "information disclosure of the key material",
+            "info-disclosure through the error path",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    severity.detect_primitive(text)[0], "info_leak",
+                )
+
     def test_authoritative_overlap_and_signal_precedence(self) -> None:
         cases = (
             ("==7==ERROR: AddressSanitizer: strcpy-param-overlap\nstack of thread T0", "stack_write"),
