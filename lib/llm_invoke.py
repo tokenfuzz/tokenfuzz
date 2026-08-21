@@ -1610,28 +1610,6 @@ def _opencode_assistant_texts(ev: dict) -> list[str]:
     return pieces
 
 
-def _json_has_tool_name(value, tool_name: str) -> bool:
-    wanted = tool_name.lower()
-    if isinstance(value, dict):
-        for key in ("tool", "name", "tool_name"):
-            item = value.get(key)
-            if isinstance(item, str) and item.lower() == wanted:
-                return True
-        return any(_json_has_tool_name(item, tool_name) for item in value.values())
-    if isinstance(value, list):
-        return any(_json_has_tool_name(item, tool_name) for item in value)
-    return False
-
-
-def raw_has_tool(raw_log_path: str, tool_name: str) -> bool:
-    if not os.path.isfile(raw_log_path):
-        raise FileNotFoundError(raw_log_path)
-    return any(
-        isinstance(ev, dict) and _json_has_tool_name(ev, tool_name)
-        for ev in _iter_json_lines(raw_log_path)
-    )
-
-
 def extract_text(backend: str, raw_log_path: str) -> str:
     """Pull the assistant's text from a raw transcript.
 
@@ -2156,13 +2134,6 @@ def _cmd_extract_text(args) -> int:
         return 1
 
 
-def _cmd_raw_has_tool(args) -> int:
-    try:
-        return 0 if raw_has_tool(args.raw_log, args.tool_name) else 1
-    except FileNotFoundError:
-        return 1
-
-
 def _cmd_transient_tail(args) -> int:
     return 0 if transient_tail(args.raw_log) else 1
 
@@ -2242,11 +2213,6 @@ def _build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("transient-tail")
     s.add_argument("raw_log")
     s.set_defaults(func=_cmd_transient_tail)
-
-    s = sub.add_parser("raw-has-tool")
-    s.add_argument("raw_log")
-    s.add_argument("tool_name")
-    s.set_defaults(func=_cmd_raw_has_tool)
 
     s = sub.add_parser("refusal-warning")
     s.add_argument("backend")

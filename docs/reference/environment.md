@@ -81,7 +81,7 @@ for a shared shell, or a backend binary outside `PATH`.
 | `GROK_MODEL_DEFAULT` | `config/models.toml` | Default Grok model. |
 | `CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN` / `GROK_BIN` / `OPENCODE_BIN` | the CLI's own name (`agy` for Gemini) | Backend executable outside `PATH`. |
 | `USE_GEMINI_CLI` | `0` | Use Google Gemini CLI instead of the default Antigravity CLI. |
-| `AUDIT_MODEL_PREFLIGHT` | `1` | Launch the selected model once through the real agent path before starting. Set `0` only for an intentionally offline or mock run. |
+| `AUDIT_MODEL_PREFLIGHT` | `1` | Before starting, launch the selected model once through the real agent path — same granted directories as an audit session — and require it to run a command that writes into the target tree. A backend that can reply but cannot act fails here rather than spending the run. Set `0` only for an intentionally offline or mock run. |
 
 Model precedence is `--model`, then the matching `*_MODEL_DEFAULT`, then
 `config/models.toml`. The `oss` backend has no default: always pass the exact

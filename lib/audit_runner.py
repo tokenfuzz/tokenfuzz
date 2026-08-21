@@ -11,6 +11,7 @@ import http.server
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -34,6 +35,7 @@ import llm_decide
 import llm_invoke
 import llm_usage
 import prompt
+import prompt_render
 import quality
 import runner_preflight
 import sanitizer_run
@@ -405,16 +407,31 @@ def validate_model(runtime: Runtime) -> None:
     if timeout_secs <= 0 or attempts <= 0:
         raise ValueError("model preflight timeout and attempts must be positive")
 
-    preflight_dir = runtime.logs / ".preflight"
-    preflight_dir.mkdir(parents=True, exist_ok=True)
     raw = runtime.raw / f"model-preflight-{runtime.backend}-{os.getpid()}-{time.time_ns()}.raw"
-    prompt_text = (runtime.root / "lib/prompts/model_preflight.md.j2").read_text(encoding="utf-8")
-    expected = "MODEL_PREFLIGHT_OK"
-    if runtime.backend == "oss":
-        token = f"OSS_TOOL_PREFLIGHT_OK_{os.getpid()}_{time.time_ns()}"
-        (preflight_dir / "oss-tool-sentinel.txt").write_text(token + "\n", encoding="utf-8")
-        prompt_text = (runtime.root / "lib/prompts/oss_tool_preflight.md.j2").read_text(encoding="utf-8")
-        expected = token
+    # The probe runs the launch contract the audit itself will use: the same
+    # granted directories, the same working directory, and a command that has
+    # to reach the target tree. Asking only for a reply answers "the provider
+    # is up", never "an agent can act here" — and a backend that could not
+    # create a single process passed that weaker probe, so a run spent its
+    # whole wall issuing nothing and published the silence as a clean zero.
+    # A write is what proves it: a grant can also arrive readable and silently
+    # unwritable, which no exit code reports. It lands in the target's .audit/
+    # — where the build lease the audit needs already lives, and which
+    # freshness prunes, so the probe cannot read as target drift.
+    stamp = f"{os.getpid()}_{time.time_ns()}"
+    token = f"AGENT_PREFLIGHT_OK_{stamp}"
+    sentinel = runtime.target_root / ".audit" / f"preflight-{stamp}"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    # Quoted here rather than in the template: a checkout path may legally
+    # contain a quote, and a prompt that renders its own quoting would hand the
+    # agent an unrunnable command and read the failure as a blocked sandbox.
+    prompt_text = prompt_render.render_template(
+        "agent_preflight.md.j2",
+        {
+            "token": token,
+            "command": f"printf %s {shlex.quote(token)} > {shlex.quote(str(sentinel))}",
+        },
+    )
 
     last_rc = 1
     agy_log = (
@@ -427,11 +444,15 @@ def validate_model(runtime: Runtime) -> None:
         os.environ["AGY_LOG_FILE"] = str(agy_log)
     try:
         for attempt in range(1, attempts + 1):
+            # Each attempt has to produce its own evidence: a sentinel left by
+            # an attempt that then failed would pass the next one, which need
+            # only exit zero without acting.
+            sentinel.unlink(missing_ok=True)
             last_rc = llm_invoke.run_agent_prompt(
                 runtime.backend, prompt_text, timeout_secs, raw,
-                model=runtime.model, max_turns=6 if runtime.backend == "oss" else 1,
-                add_dirs=str(preflight_dir if runtime.backend == "oss" else runtime.root),
-                cwd=preflight_dir if runtime.backend == "oss" else runtime.root,
+                model=runtime.model, max_turns=6,
+                add_dirs=f"{runtime.root},{runtime.target_root},{runtime.results}",
+                cwd=runtime.root,
                 agent_security=runtime.agent_security,
             )
             llm_usage.append_usage_event(
@@ -441,10 +462,9 @@ def validate_model(runtime: Runtime) -> None:
                 usage_complete=last_rc == 0,
             )
             try:
-                response = llm_invoke.extract_text(runtime.backend, str(raw)).strip()
-            except (OSError, ValueError):
-                response = ""
-            tool_ok = runtime.backend != "oss" or llm_invoke.raw_has_tool(str(raw), "read")
+                acted = sentinel.read_text(encoding="utf-8").strip() == token
+            except OSError:
+                acted = False
             unresolved_model = bool(
                 agy_log is not None and agy_log.is_file()
                 and "Failed to resolve model flag" in agy_log.read_text(encoding="utf-8", errors="replace")
@@ -452,12 +472,7 @@ def validate_model(runtime: Runtime) -> None:
             if unresolved_model:
                 last_rc = 45
                 break
-            response_ok = (
-                response == expected
-                if runtime.backend in {"gemini", "grok", "oss"}
-                else True
-            )
-            if last_rc == 0 and tool_ok and response_ok:
+            if last_rc == 0 and acted:
                 raw.unlink(missing_ok=True)
                 if agy_log is not None:
                     agy_log.unlink(missing_ok=True)
@@ -474,12 +489,13 @@ def validate_model(runtime: Runtime) -> None:
                 os.environ.pop("AGY_LOG_FILE", None)
             else:
                 os.environ["AGY_LOG_FILE"] = prior_agy_log
-        if runtime.backend == "oss":
-            (preflight_dir / "oss-tool-sentinel.txt").unlink(missing_ok=True)
+        sentinel.unlink(missing_ok=True)
 
     message = (
-        f"model preflight failed for backend={runtime.backend} model={runtime.model} "
-        f"after {attempts} attempt(s) (last exit={last_rc}); transcript: {raw}"
+        f"model preflight failed for backend={runtime.backend} "
+        f"model={runtime.model} after {attempts} attempt(s) (last exit="
+        f"{last_rc}): no command of its own reached {sentinel.parent}, so the "
+        f"audit would spend its wall unable to act; transcript: {raw}"
     )
     raise RuntimeError(message)
 
@@ -1002,6 +1018,10 @@ class AgentResult:
     # Cut off mid-investigation at the rollover target, so its state carries
     # in-flight work that the slot's next session is meant to continue.
     turn_capped: bool = False
+    # Tallied once when the session ends. `transcript_events == 0` means
+    # nothing parsed, which is not the same as a session that did nothing.
+    tool_calls: int = 0
+    transcript_events: int = 0
 
 
 def sanitizer_run_budget(
@@ -1050,6 +1070,21 @@ def _turn_cap() -> int:
     if not raw.isdigit():
         raise ValueError(f"TURN_SOFT_CAP must be a non-negative integer (got {raw!r})")
     return int(raw)
+
+
+def _tally_transcript(raw_path: Path) -> tuple[int, int]:
+    """(tool calls, parsed events) for one finished session's transcript.
+
+    Two numbers, not one: no tool call means the session did nothing, but no
+    parsed event at all means the transcript said nothing about it — and those
+    have to stay distinguishable, or an unreadable log would be filed as an
+    agent that could not act.
+    """
+    tools = events = 0
+    for event in audit_helpers._iter_json_events(str(raw_path)):
+        events += 1
+        tools += audit_helpers._event_tool_counts(event)[1]
+    return tools, events
 
 
 def _claude_stream_idle_retry_needed(raw_path: Path) -> bool:
@@ -1192,6 +1227,7 @@ def run_agent(
             pass
     usage_complete = llm_usage.usage_is_complete(usage, rc)
     turn_capped = llm_invoke.session_turn_capped(raw_path)
+    tools, events = _tally_transcript(raw_path)
     event = {
         "timestamp": datetime.now(timezone.utc).isoformat(), "iteration": iteration,
         "agent": agent, "role": role, "backend": runtime.backend, "model": runtime.model,
@@ -1199,6 +1235,7 @@ def run_agent(
         "usage_complete": usage_complete, "turn_capped": turn_capped,
         "turn_soft_cap": turn_cap,
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
+        "tool_calls": tools, "transcript_events": events,
         "raw_log": str(raw_path), "text_log": str(text_path), **usage,
     }
     workqueue.append_jsonl(runtime.index_jsonl, event)
@@ -1217,6 +1254,7 @@ def run_agent(
     )
     return AgentResult(
         agent, role, rc, raw_path, text_path, usage, issue, reset_at, turn_capped,
+        tools, events,
     )
 
 
@@ -2118,11 +2156,7 @@ def _session_did_work(result: AgentResult) -> bool:
     repeat the same no-op. Falls open when nothing parsed at all: an unreadable
     or unrecognised transcript must not silently disable a backend's refills.
     """
-    events = tools = 0
-    for event in audit_helpers._iter_json_events(str(result.raw)):
-        events += 1
-        tools += audit_helpers._event_tool_counts(event)[1]
-    return tools > 0 or events == 0
+    return result.tool_calls > 0 or result.transcript_events == 0
 
 
 def run_agent_pool(

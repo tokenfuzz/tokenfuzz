@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import stat
@@ -1209,19 +1210,50 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         root=ROOT, logs=root / "model-preflight-logs",
         raw=root / "model-preflight-logs" / ".raw",
         index=root / "model-preflight-logs" / "index.log",
+        target_root=root / "model-preflight-target",
+        results=root / "model-preflight-results",
         backend="gemini", model="fixture-model", agent_security="sandboxed",
     )
     model_runtime.raw.mkdir(parents=True)
+    model_runtime.target_root.mkdir()
+    model_runtime.results.mkdir()
+
+    preflight_grants: list[str] = []
+
+    def _preflight_command(prompt_text):
+        """The (token, sentinel) the probe told its agent to write."""
+        line = next(
+            row for row in prompt_text.splitlines() if row.startswith("printf ")
+        )
+        parts = shlex.split(line)
+        return parts[2], parts[4]
+
+    def _preflight_acts(_backend, prompt_text, *_args, **kwargs):
+        """Stand in for an agent that can actually run the command it was given."""
+        preflight_grants.append(kwargs.get("add_dirs", ""))
+        token, sentinel = _preflight_command(prompt_text)
+        Path(sentinel).write_text(token, encoding="utf-8")
+        return 0
+
     with mock.patch.dict(
         os.environ,
         {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"},
         clear=False,
-    ), mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0), \
-         mock.patch.object(audit_runner.llm_invoke, "extract_text", return_value="MODEL_PREFLIGHT_OK"):
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt", side_effect=_preflight_acts,
+    ):
         audit_runner.validate_model(model_runtime)
     check(
         "Model preflight passed" in model_runtime.index.read_text(encoding="utf-8"),
         "model preflight exercises the requested model through the agent launch path",
+    )
+    # The probe has to ask its question with the audit's own grants. Asking with
+    # a narrower set is how a target tree the agent could not write stayed
+    # invisible until the run had spent its wall.
+    check(
+        str(model_runtime.target_root) in preflight_grants[0]
+        and str(model_runtime.results) in preflight_grants[0],
+        "the preflight is granted the same directories the audit will use",
     )
     preflight_usage = json.loads(
         (model_runtime.logs / "index.jsonl").read_text(encoding="utf-8")
@@ -1236,29 +1268,99 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         os.environ,
         {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"},
         clear=False,
-    ), mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0), \
-         mock.patch.object(
-             audit_runner.llm_invoke, "extract_text",
-             side_effect=lambda _backend, _raw: (model_runtime.logs / ".preflight/oss-tool-sentinel.txt").read_text().strip(),
-         ), mock.patch.object(audit_runner.llm_invoke, "raw_has_tool", return_value=True):
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt", side_effect=_preflight_acts,
+    ):
         audit_runner.validate_model(model_runtime)
     check(
-        not (model_runtime.logs / ".preflight/oss-tool-sentinel.txt").exists(),
-        "OSS preflight requires a real read-tool result and removes its sentinel",
+        not list((model_runtime.target_root / ".audit").glob("preflight-*")),
+        "every backend answers one preflight, and it leaves no sentinel behind",
     )
     model_runtime.backend = "gemini"
     with mock.patch.dict(
         os.environ,
         {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"},
         clear=False,
-    ), mock.patch.object(audit_runner.llm_invoke, "run_agent_prompt", return_value=0), \
-         mock.patch.object(audit_runner.llm_invoke, "extract_text", return_value="wrong model response"):
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt", return_value=0,
+    ):
         try:
             audit_runner.validate_model(model_runtime)
-            rejected_bad_model = False
+            rejected_idle_agent = False
         except RuntimeError:
-            rejected_bad_model = True
-    check(rejected_bad_model, "model preflight rejects a nominal exit with the wrong response")
+            rejected_idle_agent = True
+    check(
+        rejected_idle_agent,
+        "model preflight rejects a nominal exit whose agent never ran a command",
+    )
+
+    # A sentinel has to be produced by the attempt that is judged on it. One
+    # left behind by an attempt that then failed would pass the next attempt,
+    # which need only exit zero without acting.
+    stale_attempts = []
+
+    def _acts_then_fails(_backend, prompt_text, *_args, **_kwargs):
+        stale_attempts.append(None)
+        if len(stale_attempts) == 1:
+            token, sentinel = _preflight_command(prompt_text)
+            Path(sentinel).write_text(token, encoding="utf-8")
+            return 1
+        return 0
+
+    with mock.patch.dict(
+        os.environ,
+        {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "2"},
+        clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt", side_effect=_acts_then_fails,
+    ), mock.patch.object(audit_runner.time, "sleep"):
+        try:
+            audit_runner.validate_model(model_runtime)
+            rejected_stale_sentinel = False
+        except RuntimeError:
+            rejected_stale_sentinel = True
+    check(
+        rejected_stale_sentinel,
+        "preflight never passes on a sentinel an earlier attempt left behind",
+    )
+
+    # The per-session tally is telemetry, not a verdict: it is how a run that
+    # could not act is diagnosed afterwards. A tool count cannot tell a blocked
+    # agent from one that read its state and concluded, and a session denied
+    # every command can still make read calls — so the two numbers have to stay
+    # distinguishable and stay evidence for a human.
+    tally = root / "tally"
+    tally.mkdir()
+
+    def _transcript(name, rows):
+        path = tally / name
+        path.write_text(
+            "\n".join(json.dumps(row) for row in rows), encoding="utf-8",
+        )
+        return path
+
+    equal(
+        (1, 1),
+        audit_runner._tally_transcript(_transcript("acted.jsonl", [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {}}]}},
+        ])),
+        "a session that used a tool is tallied as having acted",
+    )
+    equal(
+        (0, 1),
+        audit_runner._tally_transcript(_transcript("silent.jsonl", [
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "nothing to do"}]}},
+        ])),
+        "a parsed session with no tool call is tallied as idle",
+    )
+    plain = tally / "plain.log"
+    plain.write_text("assistant text, not JSON\n", encoding="utf-8")
+    equal(
+        (0, 0), audit_runner._tally_transcript(plain),
+        "a transcript that parsed nothing stays distinct from an idle session",
+    )
     config = target_config.Config(is_browser="1", build_system="mach")
     with mock.patch.dict(os.environ, {"BROWSER_AGENTS": "2", "SHELL_AGENTS": "2"}, clear=False):
         equal((4, 2, 2), audit_runner._agent_counts(config, 10), "audit honors configured browser and shell role counts")
@@ -1899,8 +2001,12 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         pool_runtime, pool_context, iteration=1, started_at=1.0,
     )
     def _pool_result(agent, rc=0, issue="none", turn_capped=False, raw=Path()):
+        # Tallied from the transcript exactly as a finished session is, so the
+        # refill decision is still driven by real transcript content.
+        tools, events = audit_runner._tally_transcript(raw)
         return audit_runner.AgentResult(
             agent, "reproduce", rc, raw, Path(), {}, issue, None, turn_capped,
+            tools, events,
         )
 
     def _transcript(name, tool_calls):

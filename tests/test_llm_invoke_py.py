@@ -444,15 +444,6 @@ with tempfile.TemporaryDirectory() as td:
     ok('"smoke":true' in proc.stdout, "oss text event content extracted")
     ok("qwen3.6-35b-a3b" in proc.stdout, "oss text event model preserved")
 
-    (p / "oss_tool_spaced.jsonl").write_text(
-        '{ "type": "tool_use", "part": { "type": "tool", '
-        '"tool": "read", "state": { "status": "completed" } } }\n'
-    )
-    proc = run(["raw-has-tool", str(p / "oss_tool_spaced.jsonl"), "read"])
-    assert_eq(0, proc.returncode, "raw-has-tool detects nested OpenCode read tool with spaced JSON")
-    proc = run(["raw-has-tool", str(p / "oss_tool_spaced.jsonl"), "bash"])
-    assert_eq(1, proc.returncode, "raw-has-tool rejects absent tool names")
-
     # gemini — Antigravity CLI emits plain text on stdout; the entire
     # transcript IS the assistant reply.
     (p / "gemini.txt").write_text(
