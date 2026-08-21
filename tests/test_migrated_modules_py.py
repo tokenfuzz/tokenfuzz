@@ -453,7 +453,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
     )
     dead.wait()
-    dead.stdin.write(b"unflushed" * 8192)
+    # The payload has to stay inside the write buffer, whose default size grew
+    # in 3.14: a larger one flushes on write, so the pipe breaks here instead
+    # of inside close() and the fixture never arms.
+    dead.stdin.write(b"unflushed")
     saved_pipes = clusterfuzz_symbolizer.pipes
     clusterfuzz_symbolizer.pipes = [dead]
     try:
