@@ -218,6 +218,12 @@ The fix is a **sibling** tree, never a replacement:
 targets/<slug>/build-asan+fuzz/     # same build, plus -fsanitize=fuzzer-no-link
 ```
 
+Build it with the compiler `bin/fuzz build` names, not the one the target
+normally uses: a sanitizer runtime is version-locked to the code it
+instrumented, and only one can own a process. When they differ, `bin/fuzz
+build` either refuses the link or relinks the harness without its own
+instrumentation and tells you what that costs.
+
 `bin/fuzz` picks it up automatically when it exists. A sibling is free of both
 hazards: `build-<san>+fuzz` matches the sanitizer-build pattern that is pruned
 from the source walk, so it cannot stale anything, and the build lease keys on

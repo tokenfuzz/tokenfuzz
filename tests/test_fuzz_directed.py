@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -109,6 +110,31 @@ class AdmissionGateTests(unittest.TestCase):
             fuzz_harness.SHAPE_BUFFER,
             fuzz_harness.input_shapes(
                 "xmlDoc *xmlReadDoc(const char *encoding, int options);"))
+
+
+    def test_an_element_count_is_not_a_byte_length(self) -> None:
+        # A pointer to a wider element measured by an adjacent integer counts
+        # elements, not bytes: a harness handed the mutator's length would be
+        # claiming an array it never allocated, so every crash it reached
+        # would be its own miscount.
+        # The whole shape set, because a counted array that merely stops
+        # being a buffer would fall through to the handle rule and be admitted
+        # under a call-sequence threat model instead.
+        for counted in ("int vl_set_levels(const double *levels, int count);",
+                        "int vl_set_flags(const unsigned *flags, int count);"):
+            self.assertEqual(fuzz_harness.input_shapes(counted), set(), counted)
+        # Every spelling of a byte stays a buffer, including the one that
+        # shares a keyword with the rejected types.
+        for measured in ("int vl_write(const unsigned char *data, int count);",
+                         "int vl_put(const char *data, size_t len);"):
+            self.assertIn(fuzz_harness.SHAPE_BUFFER,
+                          fuzz_harness.input_shapes(measured), measured)
+
+    def test_an_array_of_pointers_is_not_a_single_buffer(self) -> None:
+        # The qualifier between the stars is what hid this shape: fuzzing it
+        # means fabricating pointers out of mutator bytes.
+        declaration = "int vl_set_names(const char *const *names, int count);"
+        self.assertEqual(fuzz_harness.input_shapes(declaration), set())
 
 
 class DeclarationReadingTests(unittest.TestCase):
@@ -955,6 +981,177 @@ class BudgetTests(unittest.TestCase):
             # slice, so exactly one runs and no second one overruns.
             summary = campaign.run(budget_seconds=1)
         self.assertLessEqual(summary["slices"], 1)
+
+
+class CallerOwnedObjectTests(unittest.TestCase):
+    """The harness's own redzones are what report a caller-owned overrun.
+
+    A unit test on the link flags cannot catch this: a harness linked without
+    its sanitizer still builds, still runs, still fuzzes, and only stops
+    reporting a target that writes past a buffer *the harness* owns. That
+    regression shipped once and read as a working campaign, so the property is
+    pinned to a real compile rather than to the flag list.
+    """
+
+    HEADER = ("#ifndef VS_H\n#define VS_H\n#include <stddef.h>\n"
+              "void vs_fill(char *out, size_t n);\n#endif\n")
+    LIBRARY = ("#include \"vs.h\"\n"
+               "void vs_fill(char *out, size_t n) {\n"
+               "  for (size_t i = 0; i <= n; i++) out[i] = 'A';  /* one past */\n"
+               "}\n")
+    HARNESS = ("#include <stdint.h>\n#include <stddef.h>\n#include \"vs.h\"\n"
+               "int LLVMFuzzerTestOneInput(const uint8_t *d, size_t s) {\n"
+               "  (void)d; (void)s;\n"
+               "  char owned[16];\n"
+               "  vs_fill(owned, sizeof owned);\n"
+               "  return 0;\n}\n")
+
+    def test_a_target_overrunning_a_caller_owned_buffer_is_reported(self) -> None:
+        compiler = shutil.which(fuzz_harness.fuzzing_compiler())
+        if not compiler:
+            self.skipTest("no clang shipping libFuzzer on this machine")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            target, results = root / "target", root / "results"
+            (results / "fuzz" / "src").mkdir(parents=True)
+            target.mkdir()
+            (target / "vs.h").write_text(self.HEADER, encoding="utf-8")
+            (target / "vs.c").write_text(self.LIBRARY, encoding="utf-8")
+            source = results / "fuzz" / "src" / "fuzz_vs_fill.c"
+            source.write_text(self.HARNESS, encoding="utf-8")
+            suffix = ".dylib" if sys.platform == "darwin" else ".so"
+            library = target / f"libvs{suffix}"
+            # The same compiler the harness will use, so the link keeps its
+            # sanitizer and this measures the policy, not a toolchain gap.
+            built = subprocess.run(
+                [compiler, "-fsanitize=address", "-g", "-O0", "-shared",
+                 "-fPIC", "-I", str(target)]
+                + (["-install_name", str(library)] if suffix == ".dylib" else [])
+                + ["-o", str(library), str(target / "vs.c")],
+                capture_output=True, text=True)
+            if built.returncode:
+                self.skipTest("cannot build an instrumented library: "
+                              + built.stderr[-200:])
+            config = config_for(target, ["bytes"])
+            config.results_dir = str(results)
+            config.includes = [str(target)]
+            config.asan_lib = library.name
+            result = fuzz_harness.build(source, config, "asan")
+            self.assertTrue(result.binary, result.error)
+            manifest = json.loads(
+                fuzz_harness.manifest_path(result.binary).read_text())
+            self.assertTrue(manifest["sanitized"], result.remedy)
+            probe = root / "input"
+            probe.write_bytes(b"x")
+            ran = subprocess.run([result.binary, str(probe)],
+                                 capture_output=True, text=True)
+            self.assertIn("stack-buffer-overflow", ran.stdout + ran.stderr)
+
+
+class RuntimeLinkageTests(unittest.TestCase):
+    """The harness keeps its own instrumentation unless it cannot start."""
+
+    def command_for(self, sanitize: bool) -> "list[str]":
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            source = root / "fuzz_api.c"
+            source.write_bytes(b"int LLVMFuzzerTestOneInput(void){return 0;}")
+            return fuzz_harness.build_command(
+                source, root / "out", "asan", config_for(root, ["bytes"]),
+                str(root / "libtarget.dylib"), [], sanitize)
+
+    def test_the_harness_is_sanitized_by_default(self) -> None:
+        # Redzones around the harness's own stack and globals are what report
+        # a target overrunning a buffer its caller owns.
+        self.assertIn("-fsanitize=fuzzer,address", self.command_for(True))
+
+    def test_the_fallback_drops_the_sanitizer_and_nothing_else(self) -> None:
+        command = self.command_for(False)
+        self.assertIn("-fsanitize=fuzzer", command)
+        self.assertNotIn("-fsanitize=fuzzer,address", command)
+
+    def test_only_a_duplicate_runtime_earns_the_fallback(self) -> None:
+        self.assertTrue(fuzz_harness.duplicate_runtime(
+            "==1==ERROR: Interceptors are not working. This may be because "
+            "AddressSanitizer is loaded too late"))
+        self.assertTrue(fuzz_harness.duplicate_runtime(
+            "==1==ERROR: ASan runtime does not come first in initial library "
+            "list"))
+        self.assertFalse(fuzz_harness.duplicate_runtime(
+            "dyld: Library not loaded: @rpath/libtarget.dylib"))
+
+
+class DeadSliceDiagnosisTests(unittest.TestCase):
+    """A slice that never ran must report what it saw, not a guess."""
+
+    def verdict(self, log_text: str) -> str:
+        parsed = fuzz_campaign.parse_log(log_text)
+        result = fuzz_campaign.SliceResult(
+            harness="h", seconds=0.1, returncode=127, **parsed)
+        return fuzz_campaign.classify(
+            result, fuzz_campaign.HarnessState(name="h", binary="/gone"), 0)[1]
+
+    def test_the_opening_line_is_the_diagnosis(self) -> None:
+        # A binary rebuilt out from under the campaign, or a library that will
+        # not load, says so before libFuzzer prints anything.
+        detail = self.verdict("exec: [Errno 2] No such file or directory\n")
+        self.assertIn("No such file or directory", detail)
+
+    def test_a_libfuzzer_banner_is_not_mistaken_for_an_error(self) -> None:
+        detail = self.verdict("INFO: Seed: 1\nINFO: Running with entropic\n")
+        self.assertIn("check the build log", detail)
+
+
+class ToolchainMismatchTests(unittest.TestCase):
+    """A version-locked runtime must name its repair, not a missing symbol."""
+
+    LINK_ERROR = (
+        "Undefined symbols for architecture arm64:\n"
+        '  "___asan_version_mismatch_check_apple_clang_2100", referenced from:\n'
+        "      _asan.module_ctor in libtarget.a(target.o)\n"
+    )
+
+    def test_a_version_locked_runtime_names_the_toolchain_to_rebuild_with(self) -> None:
+        repair = fuzz_harness.toolchain_mismatch(self.LINK_ERROR)
+        self.assertIn(fuzz_harness.fuzzing_compiler(), repair)
+        self.assertIn(fuzz_harness.COVERAGE_TREE_SUFFIX, repair)
+
+    def test_the_recipe_covers_c_and_cxx(self) -> None:
+        # A C++ target ignores CC and CFLAGS and would come back unchanged.
+        recipe = fuzz_harness.rebuild_recipe()
+        for variable in ("CC=", "CXX=", "CFLAGS/CXXFLAGS"):
+            self.assertIn(variable, recipe)
+
+    def test_an_ordinary_compile_error_is_left_alone(self) -> None:
+        self.assertEqual(fuzz_harness.toolchain_mismatch(
+            "fuzz_api.c:12:3: error: use of undeclared identifier 'foo'"), "")
+
+
+class StartupProbeTests(unittest.TestCase):
+    """A harness that cannot start is a build error, not a wasted slice."""
+
+    def probe(self, script: str) -> str:
+        with tempfile.TemporaryDirectory() as raw:
+            binary = Path(raw) / "harness"
+            binary.write_text(script, encoding="utf-8")
+            binary.chmod(0o755)
+            return fuzz_harness.startup_failure(binary, "", "asan")
+
+    def test_a_binary_that_cannot_start_reports_what_it_printed(self) -> None:
+        failure = self.probe(
+            "#!/bin/sh\necho 'Interceptors are not working' >&2\nexit 134\n")
+        self.assertIn("Interceptors are not working", failure)
+
+    def test_a_failure_after_the_banner_is_still_a_failure(self) -> None:
+        # `-help=1` executes no input, so nothing the target does can make the
+        # status non-zero: a binary that prints and then dies is broken, and
+        # accepting it would hand the campaign a slice to waste.
+        failure = self.probe(
+            "#!/bin/sh\necho 'INFO: Seed: 1'\necho 'boom' >&2\nexit 134\n")
+        self.assertIn("boom", failure)
+
+    def test_a_binary_that_prints_its_flags_and_exits_has_started(self) -> None:
+        self.assertEqual(self.probe("#!/bin/sh\necho 'Usage:'\n"), "")
 
 
 if __name__ == "__main__":

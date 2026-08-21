@@ -47,6 +47,7 @@ import native_symbols
 import sanitizer
 import symbol_names
 import workqueue
+from timeout import run_timeout
 
 # ── Layout under RESULTS_DIR ────────────────────────────────────────
 #
@@ -373,6 +374,17 @@ _PATH_NAME = re.compile(
 _LENGTH_NAME = re.compile(
     r"\b(?:size|sz|len|length|count|cnt|num|n|nbytes|nbyte|bytes|cb|"
     r"\w+_(?:size|len|length|count))\w*\s*$", re.I)
+# A pointer to something wider than a byte, measured by an adjacent integer,
+# carries an *element count* rather than a byte length: the mutator's bytes
+# cannot supply it, so a harness admitted here reaches the target only by
+# claiming its array holds more elements than it allocated, and every crash
+# that follows is the harness miscounting. Named builtins only — an unknown
+# typedef stays admitted, for the reason `_buffer_pair` gives below — and any
+# spelling of `char` is the byte buffer this must not touch.
+_BYTE_ELEMENT = re.compile(r"\bchar\b")
+_WIDE_ELEMENT = re.compile(
+    r"\b(?:short|int|long|float|double|unsigned|"
+    r"u?int(?:16|32|64|128)_t|size_t|ssize_t|ptrdiff_t)\b")
 _PAYLOAD_NAME = re.compile(
     r"\b(?:data|buf|buffer|bytes|input|in|content|payload|chunk|blob|msg|"
     r"message|str|s|p|ptr|mem|memory|\w*_(?:data|buf|buffer|bytes))\s*$", re.I)
@@ -428,14 +440,37 @@ def split_parameters(params: str) -> "list[str]":
     return [p for p in out if p and p not in {"void", "..."}]
 
 
+# Qualifiers sit *between* the stars of an array of pointers
+# (`const char *const *strings`), so counting stars without stripping them
+# first reads that shape as a single pointer — and a harness admitted on it
+# could only fabricate an array of pointers out of mutator bytes, which is the
+# forged-state shape this gate exists to refuse.
+_QUALIFIER = re.compile(r"\b(?:const|volatile|restrict|__restrict\w*)\b")
+
+
 def _is_single_pointer(param: str) -> bool:
     """A pointer to one thing: not a double pointer, not a function pointer."""
-    return ("*" in param and "**" not in param.replace(" ", "")
-            and not re.search(r"\*\s*\)\s*\(", param))
+    bare = _QUALIFIER.sub(" ", param)
+    return ("*" in bare and "**" not in bare.replace(" ", "")
+            and not re.search(r"\*\s*\)\s*\(", bare))
 
 
 def _is_integer(param: str) -> bool:
     return bool(re.fullmatch(rf"(?:const\s+)?{_INT_TYPE}\s*\w*", param.strip()))
+
+
+def counted_array(pointer: str, length: str) -> bool:
+    """Whether two adjacent parameters are an array and its element count.
+
+    The element type is what precedes the star, read from the last open paren
+    because a macro-wrapped declaration puts its own return type in front of
+    the first parameter (`PUBLIC(obj *) f(const double *v`).
+    """
+    if not _is_single_pointer(pointer) or not _is_integer(length):
+        return False
+    element = pointer.rsplit("(", 1)[-1].split("*", 1)[0]
+    return bool(not _BYTE_ELEMENT.search(element)
+                and _WIDE_ELEMENT.search(element))
 
 
 def _buffer_pair(pointer: str, length: str) -> bool:
@@ -456,6 +491,8 @@ def _buffer_pair(pointer: str, length: str) -> bool:
         return False
     if _PATH_NAME.search(pointer):
         return False
+    if counted_array(pointer, length):
+        return False
     if _LENGTH_NAME.search(length) or _PAYLOAD_NAME.search(pointer):
         return True
     # Unnamed on both sides: `int f(const void *, size_t)`.
@@ -469,11 +506,16 @@ def input_shapes(declaration: str) -> "set[str]":
         return set()
     params = split_parameters(match.group("params"))
     shapes: "set[str]" = set()
-    payloads: "set[int]" = set()
+    # Parameters a pair has already accounted for. A counted array joins them
+    # without adding a shape: it is not a buffer the mutator can fill, and it
+    # is not the opaque handle the fallback below would otherwise call it.
+    spoken_for: "set[int]" = set()
     for index, param in enumerate(params[:-1]):
         if _buffer_pair(param, params[index + 1]):
             shapes.add(SHAPE_BUFFER)
-            payloads.add(index)
+            spoken_for.add(index)
+        elif counted_array(param, params[index + 1]):
+            spoken_for.add(index)
     for index, param in enumerate(params):
         # `char *` only. A `void *` or `uint8_t *` is a byte buffer, and
         # calling it a string would admit every raw-memory API on a target
@@ -482,7 +524,7 @@ def input_shapes(declaration: str) -> "set[str]":
             re.search(r"\bchar\s*(?:const\s*)?\*", param)
             and not re.search(r"\b(?:unsigned|signed|u_)\s*char", param)
             and _is_single_pointer(param))
-        if text_pointer and index not in payloads:
+        if text_pointer and index not in spoken_for:
             shapes.add(SHAPE_PATH if _PATH_NAME.search(param) else SHAPE_STRING)
         if _STREAM_TYPE.search(param) or re.fullmatch(
                 r"(?:const\s+)?int\s+fd\w*", param.strip()):
@@ -490,7 +532,7 @@ def input_shapes(declaration: str) -> "set[str]":
         # A pointer to something that is neither text nor a payload nor a
         # stream is the state object a call sequence mutates.
         if (_is_single_pointer(param) and not text_pointer
-                and index not in payloads and not _STREAM_TYPE.search(param)):
+                and index not in spoken_for and not _STREAM_TYPE.search(param)):
             shapes.add(SHAPE_HANDLE)
     return shapes
 
@@ -938,8 +980,10 @@ def coverage_library(config, sanitizer: str) -> LibraryChoice:
         f"{Path(plain).name} carries no SanitizerCoverage, so libFuzzer will "
         f"run blind — it cannot tell that an input reached new code. Build a "
         f"sibling tree with coverage on and this is picked up automatically:\n"
-        f"    CFLAGS/CXXFLAGS += -fsanitize=fuzzer-no-link\n"
-        f"    build into {Path(config.target_root) / sibling_tree}/\n"
+        + rebuild_recipe(Path(config.target_root) / sibling_tree)
+        + f"That toolchain and not the target's usual one: a sanitizer "
+        f"runtime is version-locked to the code it instrumented, and only it "
+        f"can share a process with the harness's.\n"
         f"The sibling never replaces {tree}/: it is pruned from the source "
         f"walk that decides build freshness and it takes its own build lease, "
         f"so no other backend's run is disturbed by building or using it."
@@ -959,7 +1003,20 @@ COMPILE_SANITIZERS = {
 _CXX_SUFFIXES = {".cc", ".cpp", ".cxx", ".c++", ".mm"}
 
 
-def compiler_for(source: Path) -> str:
+def rebuild_recipe(destination: "str | os.PathLike" = "") -> str:
+    """The one way to rebuild a target's library for fuzzing.
+
+    Both compilers and both flag variables, because a C++ target ignores CC
+    and CFLAGS entirely and would come back with the same mismatch.
+    """
+    return (
+        f"    CC={fuzzing_compiler()} CXX={fuzzing_compiler(cxx=True)}\n"
+        f"    CFLAGS/CXXFLAGS += -fsanitize=fuzzer-no-link\n"
+        + (f"    build into {destination}/\n" if destination else "")
+    )
+
+
+def fuzzing_compiler(cxx: bool = False) -> str:
     """A clang that ships libFuzzer, not merely the first clang on PATH.
 
     On macOS the Command Line Tools clang has no ``libclang_rt.fuzzer``, so
@@ -968,8 +1025,12 @@ def compiler_for(source: Path) -> str:
     lives on each platform; asking it here turns that failure into a working
     build wherever one is installed.
     """
-    name = "clang++" if source.suffix.lower() in _CXX_SUFFIXES else "clang"
-    return sanitizer.llvm_tool(name)
+    return sanitizer.llvm_tool("clang++" if cxx else "clang")
+
+
+def compiler_for(source: Path) -> str:
+    """The fuzzing compiler for one harness source, C or C++."""
+    return fuzzing_compiler(source.suffix.lower() in _CXX_SUFFIXES)
 
 
 # ── Contract faithfulness ───────────────────────────────────────────
@@ -1067,13 +1128,19 @@ def reject_in_tree_source(source: Path, target_root: "str | os.PathLike") -> Non
 
 
 def build_command(source: Path, binary: Path, san: str, config,
-                  library: str, flags: "list[str]") -> "list[str]":
+                  library: str, flags: "list[str]",
+                  sanitize: bool = True) -> "list[str]":
     """The one compile invocation, so tests can read it without running it.
 
     ``-fsanitize=fuzzer`` supplies libFuzzer's ``main``; the target's own
     instrumentation comes from the library built earlier, which is linked, not
     rebuilt. ``-O1`` rather than probe's ``-O0``: a fuzzer's throughput is the
     product, and the harness is the only unit compiled here.
+
+    The sanitizer is on by default and belongs there: it is what puts redzones
+    around the *harness's* own stack and global objects, so a target that
+    overruns a buffer its caller owns is reported rather than missed. ``build``
+    drops it only after proving the link cannot start.
     """
     sanitizer_flag = COMPILE_SANITIZERS.get(san)
     if not sanitizer_flag:
@@ -1087,7 +1154,8 @@ def build_command(source: Path, binary: Path, san: str, config,
     if library and Path(library).parent != Path("."):
         library_args.append(f"-Wl,-rpath,{Path(library).parent}")
     return [
-        compiler, f"-fsanitize=fuzzer,{sanitizer_flag}",
+        compiler, f"-fsanitize=fuzzer,{sanitizer_flag}" if sanitize else
+        "-fsanitize=fuzzer",
         # The harness carries a standalone `main` for bin/probe to replay one
         # artifact against. libFuzzer supplies its own, so this define is what
         # compiles ours out of the campaign build — and its absence is what
@@ -1116,7 +1184,7 @@ def build_identity(source: Path, san: str, config, library: str,
     except OSError:
         stat = None
     parts = (
-        "schema=1",
+        "schema=2",
         f"source={hashlib.sha1(source.read_bytes()).hexdigest()}",
         f"compiler={shutil.which(compiler) or compiler}",
         f"sanitizer={san}",
@@ -1129,6 +1197,48 @@ def build_identity(source: Path, san: str, config, library: str,
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:12]
 
 
+STARTUP_PROBE_SECONDS = 30
+
+# Two sanitizer runtimes in one process: whichever loses the race says so and
+# aborts. Both spellings mean the same thing — the runtime linked here cannot
+# own the process, because the library already brought its own.
+_DUPLICATE_RUNTIME = re.compile(
+    r"Interceptors are not working|runtime does not come first")
+
+
+def duplicate_runtime(output: str) -> bool:
+    """Whether a startup failure is two sanitizer runtimes in one process."""
+    return bool(_DUPLICATE_RUNTIME.search(output))
+
+
+def startup_failure(binary: Path, library: str, san: str) -> str:
+    """What a harness printed when it cannot start, or "" when it can.
+
+    ``-help=1`` makes libFuzzer print its flags and exit 0. The process still
+    loads every library and initialises the sanitizer runtime — which is where
+    a link that cannot run fails — but executes no input, so a non-zero status
+    here is never a crash the campaign should have filed instead. A binary
+    that dies this way would otherwise cost a slice and report as `dead`, a
+    verdict naming the symptom while the cause sits in a log nobody reads.
+    """
+    environment = dict(os.environ)
+    if library:
+        environment[sanitizer.LIBRARY_PATH_ENV] = str(Path(library).parent)
+    try:
+        completed = run_timeout(
+            [str(binary), "-help=1"], STARTUP_PROBE_SECONDS,
+            kill=True, rss_mb=0, cwd=str(binary.parent),
+            capture_output=True, text=True,
+            env=sanitizer.prepare_runtime_env(san, environment),
+        )
+    except OSError as error:
+        return str(error)
+    if completed.returncode == 0:
+        return ""
+    output = ((completed.stdout or "") + (completed.stderr or "")).strip()
+    return output or f"exited {completed.returncode} with no output"
+
+
 @dataclass
 class BuildResult:
     binary: str
@@ -1139,6 +1249,28 @@ class BuildResult:
     tree: str = ""
     guided: bool = False
     remedy: str = ""
+
+
+# The sanitizer runtime is version-locked to the toolchain that instrumented
+# the code, and the lock is a symbol: `__asan_version_mismatch_check_<tag>`,
+# undefined at link when a library instrumented by one clang is linked by
+# another. Broad and stable — every LLVM-derived toolchain spells the check
+# this way — and it is the whole diagnosis, so the repair can be named instead
+# of leaving an undefined symbol nobody reads.
+_VERSION_LOCK = re.compile(r"__asan_version_mismatch_check\w*")
+
+
+def toolchain_mismatch(output: str) -> str:
+    """The repair for a link that failed on a version-locked runtime, or ""."""
+    if not _VERSION_LOCK.search(output):
+        return ""
+    return (
+        f"\nThe library was instrumented by a different toolchain than the one "
+        f"linking this harness, and a sanitizer runtime is version-locked to "
+        f"its own. Rebuild the library into the `build-<san>"
+        f"{COVERAGE_TREE_SUFFIX}` sibling, which never replaces the shared "
+        f"build, with that toolchain:\n" + rebuild_recipe()
+    )
 
 
 def build(source: Path, config, san: str = "asan",
@@ -1177,21 +1309,62 @@ def build(source: Path, config, san: str = "asan",
     }
     if os.access(binary, os.X_OK):
         return BuildResult(str(binary), False, **context)
-    command = build_command(source, binary, san, config, library, flags)
-    completed = subprocess.run(command, capture_output=True, check=False)
-    output = (completed.stdout + completed.stderr).decode(errors="replace")
-    log.write_text(
-        " ".join(shlex.quote(part) for part in command) + "\n\n" + output,
-        encoding="utf-8",
-    )
-    if completed.returncode or not os.access(binary, os.X_OK):
+    def compile_once(sanitize: bool) -> "tuple[list[str], int, str]":
+        command = build_command(
+            source, binary, san, config, library, flags, sanitize)
+        done = subprocess.run(command, capture_output=True, check=False)
+        text = (done.stdout + done.stderr).decode(errors="replace")
+        log.write_text(
+            " ".join(shlex.quote(part) for part in command) + "\n\n" + text,
+            encoding="utf-8",
+        )
+        return command, done.returncode, text
+
+    def refuse(reason: str) -> BuildResult:
         binary.unlink(missing_ok=True)
         manifest_path(binary).unlink(missing_ok=True)
-        return BuildResult("", False, log=str(log), error=(
-            f"harness build failed (rc={completed.returncode}); full log: {log}\n"
-            + output[-4000:]
-        ), **context)
-    write_manifest(binary, source, san, choice, digest)
+        return BuildResult("", False, log=str(log), error=reason, **context)
+
+    command, returncode, output = compile_once(sanitize=True)
+    if returncode or not os.access(binary, os.X_OK):
+        return refuse(
+            f"harness build failed (rc={returncode}); full log: {log}\n"
+            + output[-4000:] + toolchain_mismatch(output))
+    failure = startup_failure(binary, library, san)
+    sanitized = True
+    if failure and duplicate_runtime(failure):
+        # The library brought its own runtime and will not share the process
+        # with a second one. Linking the harness without the sanitizer leaves
+        # one runtime, and the target — the code under audit — stays fully
+        # instrumented. What is lost is the harness's own redzones, so a
+        # target that overruns a buffer *its caller* owns goes unreported;
+        # that is a real loss, and `context["remedy"]` says so rather than
+        # letting a quieter campaign pass for an equal one.
+        command, returncode, output = compile_once(sanitize=False)
+        if returncode or not os.access(binary, os.X_OK):
+            return refuse(
+                f"harness build failed (rc={returncode}); full log: {log}\n"
+                + output[-4000:] + toolchain_mismatch(output))
+        sanitized = False
+        failure = startup_failure(binary, library, san)
+        if not failure:
+            context["remedy"] = "\n".join(filter(None, (
+                context["remedy"],
+                f"{Path(library).name} loads its own {san} runtime, so the "
+                f"harness had to be linked without one: the target stays "
+                f"instrumented, but nothing guards the harness's own stack "
+                f"and global objects, and a target that overruns a buffer its "
+                f"caller owns will not be reported. Build the library with "
+                f"the compiler that links the harnesses to get both:\n"
+                + rebuild_recipe(
+                    Path(config.target_root) / (
+                        f"build-{san}{COVERAGE_TREE_SUFFIX}")))))
+    if failure:
+        return refuse(
+            f"harness compiled but cannot start, so a campaign would spend a "
+            f"slice on it and report `dead`; full log: {log}\n"
+            + failure[-4000:])
+    write_manifest(binary, source, san, choice, digest, sanitized)
     return BuildResult(str(binary), True, log=str(log), **context)
 
 
@@ -1211,7 +1384,8 @@ def manifest_path(binary: "str | os.PathLike") -> Path:
 
 
 def write_manifest(binary: Path, source: Path, san: str,
-                   choice: "LibraryChoice", digest: str) -> None:
+                   choice: "LibraryChoice", digest: str,
+                   sanitized: bool = True) -> None:
     hypothesis = ""
     try:
         head = source.read_text(errors="replace")[:4096]
@@ -1234,6 +1408,7 @@ def write_manifest(binary: Path, source: Path, san: str,
         "library": choice.path,
         "tree": choice.tree,
         "guided": choice.instrumented,
+        "sanitized": sanitized,
         "hypothesis_id": hypothesis,
         "binary": str(binary),
     }, indent=2, sort_keys=True), encoding="utf-8")

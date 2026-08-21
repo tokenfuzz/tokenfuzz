@@ -128,13 +128,39 @@ that an input reached new code, and every coverage number stays flat.
 Do not rebuild the shared tree to fix that. Build a **sibling**:
 
 ```bash
-# However this target normally builds, with coverage added and a different
-# output directory. For a cmake target:
+# However this target normally builds, with coverage added, a different output
+# directory, and the compiler that links the harnesses. For a cmake target:
 cmake -S targets/<slug>/src -B targets/<slug>/src/build-asan+fuzz \
+  -DCMAKE_C_COMPILER=/path/to/llvm/bin/clang \
+  -DCMAKE_CXX_COMPILER=/path/to/llvm/bin/clang++ \
   -DCMAKE_C_FLAGS="-fsanitize=address,fuzzer-no-link -g -O1" \
   -DCMAKE_CXX_FLAGS="-fsanitize=address,fuzzer-no-link -g -O1"
 cmake --build targets/<slug>/src/build-asan+fuzz
 ```
+
+Use that compiler and not the target's usual one — `bin/fuzz build` prints its
+exact path when it needs it. A sanitizer runtime is version-locked to the code
+it instrumented, and only one runtime can own a process, so a library built by
+a different toolchain either fails the harness link outright or forces the
+harness to give up its own instrumentation. libFuzzer ships only with a full
+LLVM, so on a machine whose targets are built by the platform compiler the two
+differ by default.
+
+## When the toolchains differ anyway
+
+`bin/fuzz build` links every harness with the sanitizer, then runs the binary
+once with `-help=1` — enough to load the libraries and start the runtime, and
+not enough to execute an input. A binary that cannot start is a build error
+carrying the runtime's own message, rather than a campaign slice reported as
+`dead`.
+
+One failure has a fallback: when the library brings its own runtime and refuses
+to share the process ("Interceptors are not working"), the harness is relinked
+without the sanitizer, which leaves one runtime and a target that is still
+fully instrumented. What it loses is the redzones around the *harness's* own
+stack and globals, so a target overrunning a buffer its caller owns goes
+unreported. `bin/fuzz build` says so and prints the rebuild recipe above; the
+binary's manifest records `sanitized: false`.
 
 `bin/fuzz` finds `build-<san>+fuzz` automatically and links against it. A
 sibling is safe for the same two reasons the plain tree is not: the

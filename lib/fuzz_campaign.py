@@ -172,6 +172,9 @@ class SliceResult:
     leak: bool = False
     counters: int = 0
     log: str = ""
+    # What the process printed before libFuzzer got going. Empty for a healthy
+    # slice; for a broken one it is the whole diagnosis.
+    opening: str = ""
 
 
 # How much of a slice log to read back and keep. Everything `parse_log` needs
@@ -209,6 +212,24 @@ def read_log(path: Path) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+# libFuzzer's own first lines. Anything printed before one of these came from
+# the loader, the sanitizer runtime, or the exec that never happened — which
+# is what a harness that produced no executions needs reported.
+_LIBFUZZER_BANNER = ("INFO: Running with", "INFO: Seed:", "Dictionary:")
+
+
+def _opening_line(text: str) -> str:
+    """The first line the process printed that libFuzzer did not."""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(_LIBFUZZER_BANNER):
+            return ""
+        return line[:200]
+    return ""
+
+
 def parse_log(text: str) -> dict:
     """Measurements from one libFuzzer run's output.
 
@@ -240,6 +261,7 @@ def parse_log(text: str) -> dict:
         "oom": bool(_OOM.search(text)),
         "timeout": bool(_TIMEOUT.search(text)),
         "leak": bool(_LEAK.search(text)),
+        "opening": _opening_line(text),
     }
 
 
@@ -391,10 +413,16 @@ def classify(result: SliceResult, state: HarnessState,
             "its verdict before editing anything"
         )
     if result.executions <= DEAD_EXEC_FLOOR and not result.inited:
+        # The opening line is the cause when there is one: a binary that was
+        # rebuilt out from under the campaign, a library that will not load, a
+        # sanitizer runtime refusing to start. Reporting the generic sentence
+        # over it sends the reader to the build log for an answer that was
+        # already printed.
         return VERDICT_DEAD, (
             f"ran {result.executions} executions and never reached INITED "
-            f"(rc={result.returncode}); the binary is not fuzzing — check the "
-            f"build log and that the linked library loads"
+            f"(rc={result.returncode}); the binary is not fuzzing"
+            + (f" — it printed: {result.opening}" if result.opening else
+               " — check the build log and that the linked library loads")
         )
     kinds = [name for name, hit in
              (("out-of-memory", result.oom), ("timeout", result.timeout),
