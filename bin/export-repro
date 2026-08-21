@@ -1576,6 +1576,18 @@ _BARE_LABEL_RES = (
     re.compile(r"^Line:\s+\S+\s*$"),
     re.compile(r"^(?:Bug\s+)?[Cc]lass:\s+[\w()\- ]{1,40}\s*$"),
 )
+# A run-local artifact id, dropped rather than re-emitted — the one exception
+# to the rule above, and narrow on purpose. `FIND-011-...` is minted by the
+# audit that filed it and names a sibling the bundle does not carry, so the
+# maintainer who receives it cannot resolve it; nothing is lost by dropping an
+# id that resolves nowhere. Evidence keeps its line even when the bundle
+# restates it elsewhere — a `Reproducer:` naming the .audit/ input and its
+# generator, a `Verdict:` recording how reproduction was confirmed — because
+# the value there is the author's wording, not the label.
+_RUN_LOCAL_ID_RES = (
+    re.compile(r"^Related\s+finding:\s+\S", re.IGNORECASE),
+)
+_STRIPPED_LABEL_RES = _BARE_LABEL_RES + _RUN_LOCAL_ID_RES
 _AUTO_SEVERITY_RE = re.compile(r"^-?\s*\*\*Severity\*\*\s*:")
 # Kept metadata lines (strip leaves these in the body); skipped, not treated as
 # narrative, when deciding whether the narrative already has a heading.
@@ -1731,7 +1743,7 @@ def strip_audit_sections(text: str) -> str:
             continue
         if _FULL_ORIGINAL_RE.match(line_no_nl):
             continue
-        if any(p.match(line_no_nl) for p in _BARE_LABEL_RES):
+        if any(p.match(line_no_nl) for p in _STRIPPED_LABEL_RES):
             continue
         if _AUTO_SEVERITY_RE.match(line_no_nl):
             continue
@@ -1788,7 +1800,7 @@ def _is_structured_line(stripped: str) -> bool:
     the auto-Severity bullet, or the `Full original output:` pointer."""
     if stripped.startswith("|"):
         return True
-    if any(p.match(stripped) for p in _BARE_LABEL_RES):
+    if any(p.match(stripped) for p in _STRIPPED_LABEL_RES):
         return True
     if _AUTO_SEVERITY_RE.match(stripped) or _FULL_ORIGINAL_RE.match(stripped):
         return True

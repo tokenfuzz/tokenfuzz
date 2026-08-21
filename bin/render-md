@@ -1402,35 +1402,77 @@ def _label_rows(lines: list[str], known: set[str]) -> list[tuple[str, str]]:
 
     A field line is only recognizable from the run it sits in: report authors
     extend the harness's metadata block with labels of their own, and prose
-    uses colons too. So a run of consecutive `Label: value` lines is the
-    report's metadata when at least one of its labels is `known` — a row of
-    the report's own grid, or a harness contract field — and then every label
-    in that run is a field. A run without one is prose (a Data Flow step
-    list, a labelled classification block) and stays where the author put
-    it."""
+    uses colons too. A run is metadata when either one label is `known`, or it
+    sits in the preamble of a report that already has a Fields grid. The grid
+    makes that leading `Label: value` shape unambiguous without requiring a
+    vocabulary that will go stale against author-defined labels. Once report
+    narrative starts, an unseeded run is prose (for example Data Flow steps)
+    and stays where the author put it — including a run narrative interrupts,
+    which is a wrapped sentence that happens to open `Word: `, not a block."""
     rows: list[tuple[str, str]] = []
     run: list[tuple[str, str]] = []
     seeded = False
+    preamble_run = False
+    in_report_preamble = _has_fields_table(lines)
+    seen_h1 = False
+    in_enrich = False
     fenced = False
 
     def close() -> None:
-        nonlocal run, seeded
-        if seeded:
+        nonlocal run, seeded, preamble_run
+        if seeded or preamble_run:
             rows.extend(run)
-        run, seeded = [], False
+        run, seeded, preamble_run = [], False, False
 
     for line in lines:
-        if line.strip().startswith("```"):
-            fenced = not fenced
+        stripped = line.strip()
+        if _ENRICH_OPEN_RE.match(stripped):
+            in_enrich = True
             close()
             continue
+        if _ENRICH_CLOSE_RE.match(stripped):
+            in_enrich = False
+            close()
+            continue
+        if in_enrich:
+            close()
+            continue
+        if stripped.startswith("```"):
+            fenced = not fenced
+            in_report_preamble = False
+            close()
+            continue
+        if not fenced and stripped.startswith("#"):
+            # A report's own `## Fields` heading sits above its metadata on
+            # the finding layout, so it alone leaves the preamble open. Every
+            # other heading is where the narrative starts — the title H1
+            # excepted, since that is the report announcing itself.
+            leaf = stripped.lstrip("#").strip().casefold()
+            if stripped.startswith("# "):
+                if seen_h1 and leaf != "fields":
+                    in_report_preamble = False
+                seen_h1 = True
+            elif leaf != "fields":
+                in_report_preamble = False
         match = None if fenced else _FIELD_LABEL_RE.match(line)
         if match is None:
+            # A malformed/legacy report may put unheaded prose before its
+            # Fields grid. That prose starts the narrative just as surely as a
+            # heading; only harness enrichment, comments and table markup may
+            # precede metadata without ending the preamble. Prose also
+            # disqualifies the run it just interrupted: a metadata block ends
+            # at a blank line or a block boundary, so a run that runs into a
+            # sentence was that sentence's first line all along, and promoting
+            # it would tear the paragraph in half.
+            if (not fenced and stripped
+                    and not stripped.startswith(("<!--", "|", "#"))):
+                in_report_preamble = preamble_run = False
             close()
             continue
         key = match.group("key").strip()
         run.append((key, match.group("val").strip()))
         seeded = seeded or key.casefold() in known
+        preamble_run = preamble_run or in_report_preamble
     close()
     return rows
 
@@ -1909,9 +1951,10 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
     omitted_labels = _omitted_grid_labels(hero, hero_html)
     # Fields the body carries as bare labels, and the labels it must stop
     # repeating once the grid answers them. The rows fold into the report's
-    # own grid, or become that grid when it has none — `_label_rows` only
-    # yields a run seeded by a known field, so an index or a crosstab never
-    # grows a Fields table out of a stray label line.
+    # own grid, or become that grid when it has none — the synthesized grid is
+    # built only from runs a known field seeded, because `_label_rows` treats
+    # position as evidence only inside a report that already has a grid, so an
+    # index or a crosstab never grows a Fields table out of a stray label.
     field_rows, hidden_labels = _report_fields(lines, omitted_labels)
     synthesized_grid = (
         "" if _has_fields_table(lines) else _synthesized_fields_grid(field_rows)

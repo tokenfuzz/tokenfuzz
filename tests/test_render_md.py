@@ -36,9 +36,17 @@ class RenderMarkdownTests(unittest.TestCase):
         )
 
     def html(self, path: Path) -> str:
-        process = self.render(path, arguments=("--html-sibling",))
+        return self.html_all(path)[0]
+
+    def html_all(self, *paths: Path) -> list[str]:
+        """Render every document in one bin/render-md run — a spawn each is
+        the suite's dominant cost, and these documents share nothing."""
+        process = self.render(*paths, arguments=("--html-sibling",))
         self.assertEqual(process.returncode, 0, process.stderr)
-        return path.with_suffix(".html").read_text(encoding="utf-8")
+        return [
+            path.with_suffix(".html").read_text(encoding="utf-8")
+            for path in paths
+        ]
 
     def test_table_padding_check_mode_and_idempotency(self) -> None:
         document = self.markdown(
@@ -298,6 +306,144 @@ Disclosed content: cross-principal
         # where the author put it — a Data Flow step list is not metadata.
         self.assertNotIn("step 1", grid)
         self.assertIn("app_parse (app.c:12)", rest)
+
+    def test_separated_preamble_metadata_joins_the_fields_grid(self) -> None:
+        # Legacy and author-written reports can carry metadata in separate
+        # runs before Summary, with no harness-owned label to identify any one
+        # run as metadata. Their position in a report carrying a Fields grid
+        # is the structure that distinguishes them from labelled narrative
+        # later in the report. Publication policy is intentionally upstream of
+        # this renderer; its job is to place every surviving field correctly.
+        report = self.markdown(
+            "preamble-fields",
+            """# CRASH-1
+
+<!-- enrich:tldr -->
+**Reviewer TL;DR**
+
+- **Bug** — a caller-controlled length reaches a fixed buffer.
+<!-- /enrich:tldr -->
+
+Location: `src/sample.c:sample_parse:12`
+Diagnostic: bounds (heap-buffer-overflow WRITE, 4 bytes)
+Related finding: `FIND-2`
+
+Reviewer note: confirm the public parser boundary
+
+Reproducer: `sample.bin`
+Verdict: CRASH 5/5 runs
+
+## Summary
+
+Caller-supplied bytes reach the sample parser.
+
+## Fields
+
+| Field | Value |
+|:------|:------|
+| Primitive | heap-buffer-overflow |
+| Reproduction rate | 5/5 |
+
+## Data Flow
+
+step 1: sample_parse (src/sample.c:12) - reads the record
+step 2: sample_finish (src/sample.c:40) - returns the result
+""",
+        )
+        # A finding lays its grid out ABOVE the metadata, so the report's own
+        # `## Fields` heading is the one heading that leaves the preamble open.
+        finding = self.markdown(
+            "grid-above-metadata",
+            "# FIND-1\n\n## Fields\n\n| Field | Value |\n|:------|:------|\n"
+            "| Primitive | heap-buffer-overflow |\n\n"
+            "Location: `src/sample.c:sample_parse:12`\n"
+            "Issue class: memory-safety\n\n## Summary\n\nProse.\n",
+        )
+        ordinary = self.markdown(
+            "ordinary-labels",
+            "# Release notes\n\nOwner: sample team\nStatus: draft\n",
+        )
+        unheaded = self.markdown(
+            "unheaded-narrative",
+            "# CRASH-2\n\nNarrative starts without a Summary heading.\n\n"
+            "Owner: sample team\n\n## Fields\n\n| Field | Value |\n"
+            "|:------|:------|\n| Primitive | heap-buffer-overflow |\n",
+        )
+        # Each of these ends the preamble on its own: a heading render-md draws
+        # no differently from prose, a code block, and a wrapped sentence whose
+        # first line happens to read as a label.
+        boundaries = self.markdown(
+            "narrative-boundaries",
+            "# CRASH-3\n\n#### Analysis\n\nDeep heading: still narrative\n\n"
+            "```c\nint x;\n```\n\nAfter fence: still narrative\n\n"
+            "Note: a sentence that opens like a label and wraps\n"
+            "onto a second line of the same paragraph.\n\n"
+            "## Fields\n\n| Field | Value |\n|:------|:------|\n"
+            "| Primitive | heap-buffer-overflow |\n",
+        )
+        pages = self.html_all(report, finding, ordinary, unheaded, boundaries)
+        page = pages[0].split("<body>")[1]
+        grid, rest = page.split('class="fields-table"')[1].split("</table>", 1)
+
+        for field, value in (
+            ("Location", "src/sample.c:sample_parse:12"),
+            ("Diagnostic", "heap-buffer-overflow WRITE"),
+            ("Related finding", "FIND-2"),
+            ("Reviewer note", "public parser boundary"),
+            ("Reproducer", "sample.bin"),
+            ("Verdict", "CRASH 5/5 runs"),
+        ):
+            self.assertIn(field, grid, field)
+            self.assertIn(value, grid, field)
+            self.assertNotIn(value, rest, field)
+        self.assertNotIn(
+            "report-definition", page.split('class="fields-table"', 1)[0]
+        )
+        # Unknown author fields retain their relative source order; no field
+        # name needs to join the renderer's recognition vocabulary.
+        ordered = (
+            "Diagnostic", "Related finding", "Reviewer note", "Reproducer",
+            "Verdict",
+        )
+        self.assertEqual(
+            sorted(ordered, key=grid.index), list(ordered),
+            "author fields retain document order",
+        )
+
+        # Labelled narrative begins after Summary and stays narrative.
+        self.assertNotIn("step 1", grid)
+        self.assertIn("sample_parse (src/sample.c:12)", rest)
+
+        finding_grid = pages[1].split('class="fields-table"')[1].split("</table>")[0]
+        for field in ("Location", "Issue class"):
+            self.assertIn(field, finding_grid, field)
+
+        self.assertNotIn(
+            'class="fields-table"', pages[2],
+            "an ordinary document cannot grow a report grid from label prose",
+        )
+
+        unheaded_page = pages[3].split("<body>")[1]
+        unheaded_before, unheaded_table = unheaded_page.split(
+            'class="fields-table"', 1
+        )
+        unheaded_grid = unheaded_table.split("</table>", 1)[0]
+        self.assertNotIn("Owner", unheaded_grid)
+        self.assertIn("sample team", unheaded_before)
+
+        boundary_page = pages[4].split("<body>")[1]
+        boundary_before, boundary_table = boundary_page.split(
+            'class="fields-table"', 1
+        )
+        boundary_grid = boundary_table.split("</table>", 1)[0]
+        for label in ("Deep heading", "After fence", "Note"):
+            self.assertNotIn(label, boundary_grid, label)
+        # The wrapped sentence stays one paragraph rather than losing its
+        # first line to a grid row.
+        self.assertIn(
+            "Note: a sentence that opens like a label and wraps onto a second "
+            "line of the same paragraph.", boundary_before,
+        )
 
     def test_a_field_is_hidden_only_where_something_else_shows_it(self) -> None:
         # Suppressing a bare label before its replacement renders is how a
