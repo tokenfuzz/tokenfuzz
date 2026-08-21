@@ -110,6 +110,27 @@ _GENERATED_LINE_RE = re.compile(
 )
 
 
+def code_fence_mask(lines: list[str]) -> list[bool]:
+    """Per-line flag: True while inside a fenced code block, fences included.
+
+    Identity keeps fenced content byte-sensitive, so a `Cluster:` stamp that
+    lands inside a fence stops being strippable bookkeeping and becomes part
+    of the report's content. Writers that anchor on a heading share this so
+    they cannot mistake a repro block's `# comment` for the report title.
+    """
+    mask: list[bool] = []
+    fence: str | None = None
+    for line in lines:
+        match = _CODE_FENCE_RE.match(line)
+        mask.append(fence is not None or bool(match))
+        if match:
+            if fence is None:
+                fence = match.group(1)[0]
+            elif match.group(1)[0] == fence:
+                fence = None
+    return mask
+
+
 def _table_columns(rows: list[list[str]]) -> int:
     """Columns a table carries content in, ignoring padding-only cells.
 

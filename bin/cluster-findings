@@ -46,6 +46,7 @@ import strategies  # noqa: E402
 
 import finding_signature  # noqa: E402
 import finding_dedup  # noqa: E402
+import report_identity  # noqa: E402
 from cluster_common import (  # noqa: E402
     exact_child_file,
     render_member_report_siblings,
@@ -212,13 +213,41 @@ def _signature(find_dir: Path, target_root: str) -> dict:
     return sig
 
 
+def _title_index(lines: list[str]) -> int | None:
+    """Index of the report's H1, ignoring any `# ` inside a code fence.
+
+    A repro block's shell comment is not a title. Anchoring on one put the
+    Cluster stamp inside the fence, where identity is byte-sensitive, so the
+    stamp stopped being strippable bookkeeping and moved the report's
+    content hash out from under its severity and validation receipts.
+    """
+    fenced = report_identity.code_fence_mask(lines)
+    return next(
+        (
+            index for index, line in enumerate(lines)
+            if not fenced[index] and line.strip().startswith("# ")
+        ),
+        None,
+    )
+
+
+def _unfenced_index(lines: list[str], pattern: re.Pattern) -> int | None:
+    """Index of the first line matching `pattern` outside any code fence."""
+    fenced = report_identity.code_fence_mask(lines)
+    return next(
+        (
+            index for index, line in enumerate(lines)
+            if not fenced[index] and pattern.match(line)
+        ),
+        None,
+    )
+
+
 def _report_title(text: str) -> str:
     """First H1 of the report, used as a lexical signal for clustering."""
-    for line in (text or "").splitlines():
-        s = line.strip()
-        if s.startswith("# "):
-            return s.lstrip("#").strip()
-    return ""
+    lines = (text or "").splitlines()
+    index = _title_index(lines)
+    return lines[index].strip().lstrip("#").strip() if index is not None else ""
 
 
 def _component_cluster_id(canonical_sig: dict, display_key: str = "id") -> str:
@@ -363,7 +392,7 @@ def _move_leading_metadata_after_title(text: str) -> str:
     if not any(line.startswith("Cluster:") or line.startswith("Dedup key:") for line in leading):
         return text
     rest = lines[rest_start:]
-    title_idx = next((i for i, line in enumerate(rest) if line.startswith("# ")), None)
+    title_idx = _title_index(rest)
     if title_idx is None:
         return text
     metadata = [line for line in leading if line.strip()]
@@ -385,36 +414,44 @@ def _set_cluster_line(report_text: str, cluster_id: str, members: list[str],
     else:
         cell = f"{cluster_id} (singleton)"
 
-    text = report_text
-    if _CLUSTER_LINE_RE.search(text):
-        text = _CLUSTER_LINE_RE.sub(lambda mm: f"{mm.group(1)}{cell}", text, count=1)
+    # Bare-label stamps are placed line-wise so a fenced lookalike is neither
+    # read as an existing stamp nor written over.
+    lines = report_text.splitlines()
+    cluster_idx = _unfenced_index(lines, _CLUSTER_LINE_RE)
+    if cluster_idx is not None:
+        lines[cluster_idx] = (
+            f"{_CLUSTER_LINE_RE.match(lines[cluster_idx]).group(1)}{cell}"
+        )
     else:
         # Keep the report title as the first visible line. Index generation
         # and human reviewers both prefer the issue title over dedup metadata.
-        m = re.search(r"^# .*$", text, re.MULTILINE)
-        if m:
-            text = text[: m.end()] + f"\n\nCluster: {cell}" + text[m.end():]
+        title_idx = _title_index(lines)
+        if title_idx is None:
+            lines.insert(0, f"Cluster: {cell}")
+            cluster_idx = 0
         else:
-            text = f"Cluster: {cell}\n" + text
+            lines[title_idx + 1:title_idx + 1] = ["", f"Cluster: {cell}"]
+            cluster_idx = title_idx + 2
 
+    if key_text:
+        dk_line = f"Dedup key: [{kind}] {key_text}"
+        dk_idx = _unfenced_index(lines, _DEDUP_KEY_LINE_RE)
+        if dk_idx is None:
+            # Insert directly after the Cluster: bare-label line.
+            lines.insert(cluster_idx + 1, dk_line)
+        else:
+            lines[dk_idx] = dk_line
+
+    text = "\n".join(lines) + ("\n" if report_text.endswith("\n") else "")
+    # The Fields grid is never fenced, so its rows stay whole-text edits.
     if _CLUSTER_TABLE_ROW_RE.search(text):
         text = _CLUSTER_TABLE_ROW_RE.sub(
             lambda mm: f"{mm.group(1)} {cell} |", text, count=1,
         )
-
-    if key_text:
-        dk_line = f"Dedup key: [{kind}] {key_text}"
-        if _DEDUP_KEY_LINE_RE.search(text):
-            text = _DEDUP_KEY_LINE_RE.sub(dk_line, text, count=1)
-        else:
-            # Insert directly after the Cluster: bare-label line.
-            m = re.search(r"^Cluster:.*$", text, re.MULTILINE)
-            if m:
-                text = text[: m.end()] + f"\n{dk_line}" + text[m.end():]
-        if _DEDUP_KEY_TABLE_ROW_RE.search(text):
-            text = _DEDUP_KEY_TABLE_ROW_RE.sub(
-                lambda mm: f"{mm.group(1)} [{kind}] {key_text} |", text, count=1,
-            )
+    if key_text and _DEDUP_KEY_TABLE_ROW_RE.search(text):
+        text = _DEDUP_KEY_TABLE_ROW_RE.sub(
+            lambda mm: f"{mm.group(1)} [{kind}] {key_text} |", text, count=1,
+        )
     return _move_leading_metadata_after_title(text)
 
 

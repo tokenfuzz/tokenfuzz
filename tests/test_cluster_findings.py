@@ -17,6 +17,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMAND = ROOT / "bin" / "cluster-findings"
+sys.path.insert(0, str(ROOT / "lib"))
+
+import report_identity  # noqa: E402
 
 
 class ClusterFindingsTests(unittest.TestCase):
@@ -223,6 +226,40 @@ class ClusterFindingsTests(unittest.TestCase):
         self.assertIn("Needs review", markdown)
         self.assertIn("NEEDS REVIEW", markdown)
         self.assertIn("sev-Needs-review", html)
+
+    def test_stamp_stays_out_of_a_code_fence(self) -> None:
+        """Stamping must not move the report's content identity.
+
+        A report with no H1 whose only `# ` line is a shell comment inside a
+        repro fence anchored the stamp inside that fence, where identity is
+        byte-sensitive. The severity receipt written just before clustering
+        then read as stale and the pool refused to publish.
+        """
+        report = self.make_find(
+            "FIND-FENCED",
+            "## Fields\n\n| Field | Value |\n|:------|:------|\n"
+            "| Class | memory-safety |\n\n## Summary\n\n"
+            "Location: `src/demo.c:app_parse:91`\n\n## Reproduction\n\n"
+            "```\nbuild-asan/app -i poc.bin\n"
+            "# exit 1, no output after the header\n```\n",
+            "memory-safety",
+        )
+        before = report_identity.content_sha1(report)
+
+        process = self.run_cluster()
+        self.assertEqual(process.returncode, 0, process.stderr)
+
+        lines = report.read_text().splitlines()
+        self.assertTrue(lines[0].startswith("Cluster: FCL-"), lines[:3])
+        fenced = report_identity.code_fence_mask(lines)
+        stamped = [
+            index for index, line in enumerate(lines)
+            if line.startswith(("Cluster:", "Dedup key:"))
+        ]
+        self.assertTrue(stamped)
+        self.assertFalse([index for index in stamped if fenced[index]], lines)
+        self.assertIn("# exit 1, no output after the header", lines)
+        self.assertEqual(report_identity.content_sha1(report), before)
 
 
 if __name__ == "__main__":

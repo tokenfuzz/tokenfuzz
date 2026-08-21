@@ -511,9 +511,13 @@ def _title_slug(report_text: str, want_words: int = 6) -> str:
     Distinct enough to give each unique finding its own cluster, but matches
     on near-duplicate titles ("XSS in foo" vs "XSS in foo handler").
     """
-    for line in (report_text or "").splitlines():
+    lines = (report_text or "").splitlines()
+    fenced = report_identity.code_fence_mask(lines)
+    for index, line in enumerate(lines):
         line = line.strip()
-        if line.startswith("# "):
+        # A repro block's `# comment` is not a title, and letting one become
+        # the dedup tail clusters findings on shell output.
+        if line.startswith("# ") and not fenced[index]:
             t = line.lstrip("#").strip().lower()
             t = _TITLE_SLUG_RE.sub("-", t).strip("-")
             words = [w for w in t.split("-") if w][:want_words]
