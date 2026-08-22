@@ -174,6 +174,19 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 "print('SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free')\n"
                 "raise SystemExit(1)\n"
             ),
+            # A target whose syntax glues the input onto a prefix, so the
+            # replay token can only appear inside a larger argument.
+            "prefixed-crash": (
+                "import os\n"
+                "argv = sys.argv[1:]\n"
+                "value = argv[argv.index('-i') + 1] if '-i' in argv else ''\n"
+                "prefix, _, path = value.partition(':')\n"
+                "if prefix == 'pfx' and path and os.path.exists(path):\n"
+                "    print('==4242==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000000010')\n"
+                "    print('SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in child_free')\n"
+                "    raise SystemExit(1)\n"
+                "print('ran clean')\n"
+            ),
             "ordered-crash": (
                 "if len(sys.argv) == 5 and sys.argv[1] == '--input' "
                 "and sys.argv[3:] == ['--sink', '/dev/null']:\n"
@@ -453,6 +466,22 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 results, target, slug, workers=1, require_replay=True,
             )
         return counts, captured["held"]
+
+    def test_a_token_embedded_in_an_argument_still_names_the_testcase(self) -> None:
+        """A replay token glued to a prefix, as protocol syntax requires.
+
+        The contract substituted only an argument that was exactly the token,
+        so `pfx:{TESTCASE}` reached the target literally: every run failed to
+        open a file by that name and a crash that reproduces 5/5 was recorded
+        as unmeasurable.
+        """
+        target, slug = self.make_target("prefixed-target", "prefixed-crash")
+        crash = self.make_crash("prefixed")
+        (crash / "repro.cmd").write_text("-i pfx:{TESTCASE}\n", encoding="utf-8")
+
+        with mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}):
+            self.assertEqual(1, self.reverify(crash.parent.parent, target, slug))
+        self.assertIn("CRASH_RATE: 5/5", (crash / "sanitizer.txt").read_text())
 
     def test_a_reproducing_underflow_is_not_scored_a_fault_mismatch(self) -> None:
         """The replay path, end to end, on the class that was missing.
@@ -827,6 +856,42 @@ class BenchmarkReverifyTests(unittest.TestCase):
         stack_overflow = (
             "==4242==ERROR: AddressSanitizer: stack-overflow on address 0x1\n"
         )
+        ubsan_divzero = (
+            "src/parse.c:91:17: runtime error: division by zero\n"
+        )
+        tsan_lock_order = (
+            "WARNING: ThreadSanitizer: lock-order-inversion "
+            "(potential deadlock) (pid=4242)\n"
+        )
+        msan_segv = (
+            "==4242==ERROR: MemorySanitizer: SEGV on unknown address 0x0\n"
+        )
+        ubsan_segv = (
+            "==4242==ERROR: UndefinedBehaviorSanitizer: SEGV on unknown "
+            "address 0x000012345000\n"
+        )
+        tsan_segv = (
+            "==4242==ERROR: ThreadSanitizer: SEGV on unknown address 0x0\n"
+        )
+        # A target's own line can say "runtime error:"; only the sanitizer's
+        # carries the source location it fired at.
+        app_noise = "app: runtime error: caller-supplied status text\n"
+        self.assertIsNone(
+            benchmark_runner.crash_artifacts.sanitizer_fault_key(app_noise)
+        )
+        # UBSan writes the same generic kind on every check's SUMMARY line, so
+        # it identifies no fault and must not stand in for one.
+        self.assertIsNone(
+            benchmark_runner.crash_artifacts.sanitizer_fault_key(
+                "SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior a.c:9:1\n"
+            )
+        )
+        # The operands a report carries vary per run; the check it names does
+        # not, so the same fault stays one fault across replays.
+        self.assertEqual(
+            benchmark_runner.crash_artifacts.sanitizer_fault_key(ubsan_divzero),
+            ("ubsan", "division by zero"),
+        )
         # Without a parseable frame the primitive is all the evidence
         # available; another sanitizer's and another primitive are not equal.
         cases = {
@@ -841,6 +906,36 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 ["WARNING: ThreadSanitizer: heap-use-after-free\n"],
                 0,
             ),
+            # UBSan, TSan and MSan each named their checks from a fixed list,
+            # so a report outside it reduced to no fault at all and every
+            # replay of it — however faithful — counted zero reproductions.
+            "UBSan class off the old list": (ubsan_divzero, [ubsan_divzero], 1),
+            "other UBSan class off the old list": (
+                ubsan_divzero,
+                ["src/parse.c:91:17: runtime error: signed integer overflow: "
+                 "2147483647 + 1 cannot be represented in type 'int'\n"],
+                0,
+            ),
+            "TSan class off the old list": (tsan_lock_order, [tsan_lock_order], 1),
+            "other TSan class off the old list": (
+                tsan_lock_order,
+                ["WARNING: ThreadSanitizer: thread leak (pid=4242)\n"],
+                0,
+            ),
+            "MSan class off the old list": (msan_segv, [msan_segv], 1),
+            # Read unanchored, a line of target output stood in as the fault
+            # and keyed two unrelated crashes alike.
+            "target output ahead of the real diagnostic": (
+                app_noise + ubsan_divzero,
+                [app_noise
+                 + "src/parse.c:91:17: runtime error: signed integer "
+                   "overflow: 1 + 1 cannot be represented in type 'int'\n"],
+                0,
+            ),
+            # A fatal signal is not a check, so it has no `runtime error:`
+            # line and neither sanitizer's check parser sees it.
+            "UBSan fatal signal": (ubsan_segv, [ubsan_segv], 1),
+            "TSan fatal signal": (tsan_segv, [tsan_segv], 1),
             "double-free reported twice over": (
                 "ERROR: AddressSanitizer: attempting double-free on 0x1\n",
                 ["SUMMARY: AddressSanitizer: double-free child.c:91\n"],

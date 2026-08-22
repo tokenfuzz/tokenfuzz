@@ -113,6 +113,14 @@ MAX_RECORDED_SANITIZER_OPTIONS_BYTES = 64 * 1024
 # A sanitizer report's own opening line, optionally carrying the runtime's
 # process-id prefix.
 _HEADLINE = r"^(?:==\d+==)?\s*(?:ERROR|WARNING|SUMMARY): "
+# UBSan prefixes every check it reports with the source location it fired at.
+# A bare "runtime error:" is also how Go opens a panic and how a target can
+# label its own output, so the location is what separates the sanitizer's
+# report from the program's. Inference and the fault key share this one form:
+# reading an unanchored "runtime error:" let a line of target output stand in
+# as the fault, and two unrelated crashes then keyed alike and counted as each
+# other's reproduction.
+_UBSAN_RUNTIME_ERROR = r"^[^\s].*?:\d+:\d+:\s*runtime error:"
 # Raw-diagnostic fallback for output with no runner header. Each pattern is a
 # sanitizer's own report line, not a mention of its name: a target that prints
 # "runtime error:" or names MemorySanitizer in its own output must not reclassify
@@ -127,34 +135,87 @@ _RAW_DIAGNOSTIC_PATTERNS = (
         r"|^ASAN_RUN_HEADER:", re.MULTILINE,
     )),
     ("race", re.compile(r"^WARNING: DATA RACE$", re.MULTILINE)),
-    # UBSan prefixes every diagnostic with the source location it fired at. A
-    # bare "runtime error:" is also how Go opens a panic, so the location is
-    # what separates the sanitizer's report from a target's own output.
     ("ubsan", re.compile(
         _HEADLINE + r"UndefinedBehaviorSanitizer:|UndefinedBehaviorSanitizer:DEADLYSIGNAL"
-        r"|^[^\s].*:\d+:\d+: runtime error:", re.MULTILINE,
+        r"|" + _UBSAN_RUNTIME_ERROR, re.MULTILINE,
     )),
 )
 _ASAN_FAULT_RE = re.compile(
     r"(?:ERROR|SUMMARY):\s+(?:AddressSanitizer|HWAddressSanitizer):\s+"
     r"([A-Za-z0-9_-]+)"
 )
-_UBSAN_FAULT_PATTERNS = (
-    ("incorrect-function-type", re.compile(
-        r"through pointer to incorrect function type", re.IGNORECASE
-    )),
-    ("out-of-bounds", re.compile(r"out of bounds for type", re.IGNORECASE)),
-    ("insufficient-space", re.compile(
-        r"with insufficient space for an object of type", re.IGNORECASE
-    )),
-    ("nonpositive-vla", re.compile(
-        r"variable length array bound evaluates to non-positive value",
-        re.IGNORECASE,
-    )),
-    ("invalid-object-type", re.compile(
-        r"does not point to an object of type", re.IGNORECASE
-    )),
+_MSAN_FAULT_RE = re.compile(
+    r"(?:ERROR|SUMMARY|WARNING):\s+MemorySanitizer:\s+([A-Za-z0-9_-]+)"
 )
+# UBSan names its check in the fixed prose of the `runtime error:` line; the
+# rest of that line is run-specific (indices, addresses, type names), so the
+# prose with those removed is a stable identity. This replaced a list of five
+# message shapes that had rotted: division by zero, signed integer overflow,
+# null dereference, misaligned access and every other check absent from it
+# reduced to no fault at all, and a replay that reproduced 5/5 could not be
+# told from one that never ran.
+_UBSAN_RUNTIME_ERROR_RE = re.compile(
+    _UBSAN_RUNTIME_ERROR + r"\s*(.+)$", re.MULTILINE
+)
+_UBSAN_RUN_SPECIFIC_RE = re.compile(
+    r"'[^']*'"                              # quoted type names
+    r"|0x[0-9a-fA-F]+"                      # addresses
+    r"|\b\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\b"  # numeric literals
+)
+
+
+# TSan states its kind as the leading prose of the report line; a parenthetical
+# aside, the location and the thread ids follow it. Reading that prose covers
+# every check the tool has, where naming two of them left lock-order-inversion,
+# thread leak and mutex misuse with no fault to compare.
+_TSAN_REPORT_RE = re.compile(r"(?:WARNING|SUMMARY):\s+ThreadSanitizer:\s*(.+)")
+_TSAN_PARENTHETICAL_RE = re.compile(r"\([^)]*\)")
+_TSAN_KIND_WORD_RE = re.compile(r"[A-Za-z][A-Za-z-]*")
+
+
+# A fatal signal is not a check, so it carries no `runtime error:` line and
+# neither sanitizer's normal parser sees it. It is stated on the runtime's own
+# ERROR line; SUMMARY is left out because UBSan writes the same generic
+# `undefined-behavior` there for every check, which would key two unrelated
+# faults alike.
+_FATAL_ERROR_LINE = r"^(?:==\d+==)?\s*ERROR:\s+%s:\s+([A-Za-z0-9_-]+)"
+_UBSAN_FATAL_RE = re.compile(
+    _FATAL_ERROR_LINE % "UndefinedBehaviorSanitizer", re.MULTILINE
+)
+_TSAN_FATAL_RE = re.compile(_FATAL_ERROR_LINE % "ThreadSanitizer", re.MULTILINE)
+
+
+def _fatal_signal_kind(pattern: "re.Pattern[str]", text: str) -> Optional[str]:
+    """The signal a sanitizer died on, when no check of its own reported it."""
+    match = pattern.search(text)
+    return match.group(1).lower() if match else None
+
+
+def _tsan_fault_kind(text: str) -> Optional[str]:
+    """The race or misuse TSan reported, without its location or operands."""
+    match = _TSAN_REPORT_RE.search(text)
+    if match is None:
+        return None
+    words: list[str] = []
+    for token in _TSAN_PARENTHETICAL_RE.sub(" ", match.group(1)).split():
+        # Prose only: the location and ids that follow carry a separator or a
+        # digit, and the first such token ends the kind.
+        if not _TSAN_KIND_WORD_RE.fullmatch(token):
+            break
+        words.append(token.lower())
+    return "-".join(words) or None
+
+
+def _ubsan_fault_kind(text: str) -> Optional[str]:
+    """The check UBSan reported, stripped of the values that vary per run."""
+    match = _UBSAN_RUNTIME_ERROR_RE.search(text)
+    if match is None:
+        return None
+    # The clause before the first `:` or `,` is the check; what follows is the
+    # operands it failed on ("... overflow: 2147483647 + 1 cannot be ...").
+    description = re.split(r"[:,]", match.group(1), maxsplit=1)[0]
+    prose = _UBSAN_RUN_SPECIFIC_RE.sub(" ", description)
+    return " ".join(prose.split()).lower() or None
 
 
 def sanitizer_run_header_fields(text: str) -> dict[str, str]:
@@ -243,22 +304,16 @@ def sanitizer_fault_key(text: str) -> tuple[str, str] | None:
                 kind = "bad-free"
         return sanitizer, kind
     if sanitizer == "ubsan":
-        for name, pattern in _UBSAN_FAULT_PATTERNS:
-            if pattern.search(text):
-                return sanitizer, name
-        return None
+        kind = _ubsan_fault_kind(text) or _fatal_signal_kind(_UBSAN_FATAL_RE, text)
+        return (sanitizer, kind) if kind else None
     if sanitizer == "msan":
-        if re.search(r"MemorySanitizer:\s+use-of-uninitialized-value", text):
-            return sanitizer, "use-of-uninitialized-value"
-        return None
+        # Read the reported kind rather than naming one: MSan's own SEGV had
+        # no fault key, so a crash under it could never be measured.
+        kinds = _MSAN_FAULT_RE.findall(text)
+        return (sanitizer, kinds[-1].lower()) if kinds else None
     if sanitizer == "tsan":
-        match = re.search(
-            r"(?:WARNING|SUMMARY):\s+ThreadSanitizer:\s+"
-            r"(data race|heap-use-after-free)\b",
-            text,
-            re.IGNORECASE,
-        )
-        return (sanitizer, match.group(1).lower().replace(" ", "-")) if match else None
+        kind = _tsan_fault_kind(text) or _fatal_signal_kind(_TSAN_FATAL_RE, text)
+        return (sanitizer, kind) if kind else None
     if sanitizer == "race" and re.search(r"^WARNING: DATA RACE$", text, re.MULTILINE):
         return sanitizer, "data-race"
     return None

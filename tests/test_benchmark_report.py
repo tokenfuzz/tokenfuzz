@@ -246,6 +246,10 @@ class BenchmarkReportTests(unittest.TestCase):
             "both first-class ways to find bugs",
             "File a CRASH only when a real sanitizer trace reproduces",
             "--input /abs/out/crashes/CRASH-N/input --sink " + os.devnull,
+            # The bundle contract has to name the compiled driver: the replay
+            # gate reruns that binary, and a source-only bundle left every
+            # API-level crash in the direct condition unadjudicated.
+            "`/abs/out/crashes/CRASH-<n>/harness`",
         ):
             self.assertIn(required, native_body)
         # The discouragement that suppressed the crash lane is gone from every

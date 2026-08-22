@@ -301,7 +301,11 @@ For every CRASH:
      (capture stderr — that's where AddressSanitizer writes).
   5. If you wrote a driver, save it as
      `{{ output_dir }}/crashes/CRASH-<n>/harness.c` -- one driver per
-     crash, so each can be rebuilt and reproduced on its own.
+     crash, so each can be rebuilt and reproduced on its own -- and leave
+     the compiled driver beside it as
+     `{{ output_dir }}/crashes/CRASH-<n>/harness`. The gate reruns that
+     compiled driver; a directory holding only source is left
+     unadjudicated, however well the driver reproduces.
   6. Write `{{ output_dir }}/crashes/CRASH-<n>/report.md`. Use the same
      `## Fields` table and the same "Report narrative" sections required for
      findings.

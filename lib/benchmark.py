@@ -6364,7 +6364,12 @@ def resolve_reverify_lines(
                 if "=" in value:
                     lines.append(f"ENV_{index}={value}")
         for replay_arg in replay_args:
-            value = str(testcase) if replay_arg == _ca.TESTCASE_TOKEN else replay_arg
+            # The token can sit inside an argument a target's syntax glues
+            # together (`scheme:{TESTCASE}`). Comparing for the bare token
+            # left those literal, so the replay opened a file named
+            # `{TESTCASE}`, failed to execute, and reported no measurement
+            # for a crash that reproduces.
+            value = replay_arg.replace(_ca.TESTCASE_TOKEN, str(testcase))
             lines.append(f"ARG={value}")
         return lines
     lines.append("MODE=none")
