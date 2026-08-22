@@ -510,7 +510,7 @@ provider_cases = [
     ),
     (
         [
-            {"type": "init", "model": "gemini-3.6-flash"},
+            {"type": "init", "model": "gemini-3.7-flash"},
             "Attempt 1 failed with status 429. RESOURCE_EXHAUSTED You exceeded your current quota.",
         ],
         "capacity_limited",

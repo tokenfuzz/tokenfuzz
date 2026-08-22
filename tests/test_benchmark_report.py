@@ -340,7 +340,7 @@ class BenchmarkReportTests(unittest.TestCase):
     def test_default_model_and_end_to_end_cell_metadata(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GEMINI_MODEL_DEFAULT", None)
-            self.assertEqual(llm_invoke.default_model("gemini"), "gemini-3.6-flash")
+            self.assertEqual(llm_invoke.default_model("gemini"), "gemini-3.7-flash")
         with mock.patch.dict(os.environ, {"GEMINI_MODEL_DEFAULT": "custom-model"}):
             self.assertEqual(llm_invoke.default_model("gemini"), "custom-model")
 

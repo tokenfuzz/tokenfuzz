@@ -162,10 +162,13 @@ def inherited_agent_security(backend: str = "") -> str:
     """Security profile selected by the parent audit or benchmark process.
 
     With no parent choice, the backend's own default applies. OpenCode has no
-    native OS sandbox, so agent_security_problem refuses it under `sandboxed`
-    and an unqualified default failed every oss launch, container or not. The
-    outer boundary is not the weaker answer here: external-bypass is still
-    refused unless IS_SANDBOX=1 asserts that boundary exists.
+    native OS sandbox, so `sandboxed` refuses it outright; defaulting oss to
+    that profile means `--backend oss` cannot start anywhere, and the only way
+    through is to type the bypass flag by hand — which asserts nothing extra,
+    since the flag is not evidence of a boundary either. Default it to the
+    profile it can actually run under and let warn_agent_security say what is
+    unconfined, rather than gating the default on IS_SANDBOX and turning a
+    missing assertion back into a refusal.
     """
     default = "external-bypass" if backend == "oss" else DEFAULT_AGENT_SECURITY
     return (os.environ.get(AGENT_SECURITY_ENV) or default).strip()
@@ -184,17 +187,18 @@ def resolve_agent_security(
 def agent_security_problem(backend: str, agent_security: str) -> str:
     """Why this backend cannot launch a tool-using agent under this profile.
 
+    Only capability facts refuse here: a CLI sandbox that provably cannot host
+    an audit is not something an operator can waive by insisting. Whether an
+    outer boundary actually exists is the operator's to assert, and IS_SANDBOX
+    is their assertion, not a measurement — so its absence is advice rather
+    than a refusal. See agent_security_warning.
+
     Read-only decide calls do not consult this: they carry no execution
     boundary to assert.
     """
     if agent_security not in AGENT_SECURITY_MODES:
         return f"unknown agent security mode: {agent_security}"
     if agent_security == "external-bypass":
-        if not external_sandbox_active():
-            return (
-                "--agent-security external-bypass requires an externally "
-                "hardened sandbox that sets IS_SANDBOX=1"
-            )
         return ""
     if backend == "oss":
         return (
@@ -226,6 +230,38 @@ def agent_security_problem(backend: str, agent_security: str) -> str:
             "hardened sandbox and select --agent-security external-bypass"
         )
     return ""
+
+
+_UNASSERTED_BYPASS_WARNED = False
+
+
+def agent_security_warning(agent_security: str) -> str:
+    """Advice for a bypass whose outer boundary nothing has asserted."""
+    if agent_security != "external-bypass" or external_sandbox_active():
+        return ""
+    return (
+        "--agent-security external-bypass is running without IS_SANDBOX=1. "
+        "No CLI sandbox confines the agent and nothing has asserted that a "
+        "container or VM does, so agents run target build scripts and "
+        "harness-authored testcases with this account's filesystem, "
+        "credentials, and network."
+    )
+
+
+def warn_agent_security(agent_security: str) -> str:
+    """Emit that advice once per process, and return what it said.
+
+    Once, not per launch: an audit starts hundreds of agents, and a warning
+    repeated into every log is one nobody reads. The entry points call this at
+    startup so it heads the run, and run_agent_prompt calls it too so a caller
+    reaching the library directly cannot end up with no notice at all.
+    """
+    global _UNASSERTED_BYPASS_WARNED
+    warning = agent_security_warning(agent_security)
+    if warning and not _UNASSERTED_BYPASS_WARNED:
+        _UNASSERTED_BYPASS_WARNED = True
+        print(f"WARN: {warning}", file=sys.stderr)
+    return warning
 
 
 def gemini_default_bin() -> str:
@@ -751,6 +787,11 @@ def local_model_available(model: str) -> bool:
 # slug to the exact label here; bin/audit's model preflight parses agy's log
 # for the unresolved-flag signature as the hard backstop.
 _AGY_SLUG_TO_LABEL = {
+    "gemini-3.7-flash": {
+        "high": "Gemini 3.7 Flash (High)",
+        "medium": "Gemini 3.7 Flash (Medium)",
+        "low": "Gemini 3.7 Flash (Low)",
+    },
     "gemini-3.6-flash": {
         "high": "Gemini 3.6 Flash (High)",
         "medium": "Gemini 3.6 Flash (Medium)",
@@ -1091,6 +1132,7 @@ def run_agent_prompt(
     problem = agent_security_problem(backend, agent_security)
     if problem:
         raise ValueError(problem)
+    warn_agent_security(agent_security)
     binary = backend_bin(backend)
     requested_cap = max(0, int(turn_cap)) if turn_cap is not None else None
     native_session_cap = (

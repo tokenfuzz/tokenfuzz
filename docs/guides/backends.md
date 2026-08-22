@@ -15,10 +15,8 @@ bin/audit --target <target> --backend <backend> [--model <model>]
 bin/audit --target <target> --backend all
 ```
 
-Agent launches default to `--agent-security sandboxed`, except `oss`, which
-defaults to `external-bypass` because OpenCode has no native OS sandbox. That
-mode is still refused unless an outer sandbox asserts `IS_SANDBOX=1`. See
-[Agent security modes](#agent-security-modes).
+Each launch runs under an execution boundary chosen by
+`--agent-security`; see [Agent security modes](#agent-security-modes).
 
 | Backend | CLI | Model behavior |
 | --- | --- | --- |
@@ -68,14 +66,23 @@ the CLI; do not put keys in `target.toml` or reports.
 
 ## Agent security modes
 
-Every agent launch runs under one of two modes. Hosted backends default to
-`sandboxed`; `oss` defaults to `external-bypass`. The latter is always refused
-unless the environment asserts `IS_SANDBOX=1`.
+Every agent launch runs under one of two modes. A backend defaults to the
+strongest one it can actually run under: `sandboxed` everywhere except `oss`,
+because OpenCode's permissions are an approval policy rather than an OS
+sandbox — it ships no sandbox to run inside, so `sandboxed` refuses it and
+`external-bypass` is its only usable mode.
+
+`IS_SANDBOX=1` is how an outer container or VM announces itself. It is an
+assertion, not something TokenFuzz can measure, so its absence prints one
+warning naming what is left unconfined rather than refusing the run — the
+boundary is yours to administer and yours to skip. What is refused is a
+capability fact instead: a CLI whose own sandbox provably cannot host an
+audit, which no flag can grant it.
 
 | Mode | What enforces the boundary | When to use it |
 | --- | --- | --- |
 | `sandboxed` (hosted default) | The backend CLI's own OS sandbox — Seatbelt on macOS, Landlock/seccomp or bubblewrap on Linux. Approval prompts are turned off, because a headless run cannot answer one and an approval the model can request is not a boundary. | Normal runs on a machine you also use for other things. |
-| `external-bypass` (`oss` default) | Nothing in the CLI. You are asserting that an outer container or VM enforces filesystem, process, credential, and egress policy. | Inside a container or VM you administer, and for the backends `sandboxed` refuses. |
+| `external-bypass` (`oss` default inside an asserted outer sandbox) | Nothing in the CLI. You are asserting that an outer container or VM enforces filesystem, process, credential, and egress policy. | Inside a container or VM you administer, and for the backends `sandboxed` refuses. |
 
 A third, classifier-reviewed `auto` mode is deliberately absent: it would add
 provider calls, latency, and variable decisions to the audit and benchmark
@@ -235,9 +242,9 @@ bin/audit --target <target> --backend oss \
 ```
 
 TokenFuzz passes the `opencode/` model reference through to the installed CLI,
-which retains OpenCode's normal credential and provider handling. Because
-OpenCode has no native OS sandbox, `oss` selects `external-bypass` automatically
-and the command runs only inside an environment that asserts `IS_SANDBOX=1`.
+which retains OpenCode's normal credential and provider handling. No security
+flag is needed; see [Agent security modes](#agent-security-modes) for the
+boundary `oss` runs under and why.
 
 ### Local OpenAI-compatible models
 

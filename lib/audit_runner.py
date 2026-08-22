@@ -115,8 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--agent-security", choices=llm_invoke.AGENT_SECURITY_MODES, default=None,
         help=(
-            "backend execution boundary (default: external-bypass for oss, "
-            "which has no native OS sandbox; sandboxed otherwise)"
+            "backend execution boundary. sandboxed runs the backend inside its own OS sandbox; external-bypass drops that for an outer container or VM you administer, and warns once when nothing asserts IS_SANDBOX=1. Defaults to external-bypass for oss, which OpenCode is the only backend to need: its permissions are an approval policy, not an OS sandbox, so it cannot run sandboxed at all. Every other backend defaults to sandboxed."
         ),
     )
     parser.add_argument(
@@ -2600,6 +2599,7 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         return 1
+    llm_invoke.warn_agent_security(args.agent_security)
     if requested == "all":
         if args.model:
             print("FATAL: --model requires a single backend", file=sys.stderr)

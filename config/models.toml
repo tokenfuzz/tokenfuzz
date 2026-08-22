@@ -1,7 +1,9 @@
 # Default model per backend — the single source of truth; change a value here
 # to switch a backend's model. Override per-run with --model / $MODEL or
 # per-backend via *_MODEL_DEFAULT env vars. "oss" has no default — pass --model
-# so the local OpenCode provider can match the served model name explicitly.
+# with either an OpenCode catalog id (for example "opencode/x-preview-f-free",
+# listed by `opencode models opencode --refresh`) or the exact model name a
+# local OpenAI-compatible server serves.
 # Keep provider/CLI model identifiers (they key the benchmark pricing table).
 # For gemini on agy the slug is mapped to an `agy models` label in
 # lib/llm_invoke.py:agy_model_label.
@@ -9,8 +11,8 @@
 [models]
 claude = "claude-opus-5"
 codex  = "gpt-5.6-sol"
-gemini = "gemini-3.6-flash"
-grok   = "grok-4.5"
+gemini = "gemini-3.7-flash"
+grok   = "grok-4.6"
 oss    = ""
 
 # Backend-native reasoning controls. The gemini backend uses `agy` by default

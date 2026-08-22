@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import errno
 import io
+import inspect
 import json
 import shutil
 import subprocess
@@ -488,11 +489,15 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("claude", "claude-opus-4-8", {"input": 1000, "cached_input": 2000, "cache_creation": 400, "output": 3000}, "0.083500"),
             ("grok", "grok-build-0.1", {"input": 3000, "cached_input": 2000, "output": 3000}, "0.007400"),
             ("codex", "gpt-5.5", {"input": 5000000, "cached_input": 4800000, "output": 1000, "prompt_estimate_build": 16000}, "3.430000"),
-            ("codex", "gpt-5.6-sol", {"input": 5000000, "cached_input": 4800000, "output": 1000, "prompt_estimate_build": 16000}, "3.430000"),
+            ("codex", "gpt-5.6-sol", {"input": 5000000, "cached_input": 4800000, "output": 1000, "prompt_estimate_build": 16000}, "2.740000"),
         )
         for backend, model, tokens, expected in cases:
             with self.subTest(backend=backend, model=model):
-                index.write_text(json.dumps({"backend": backend, "model": model, "tokens": tokens}) + "\n")
+                index.write_text(json.dumps({
+                    "backend": backend, "model": model,
+                    "timestamp": "2026-08-22T00:00:00+00:00",
+                    "tokens": tokens,
+                }) + "\n")
                 self.assertEqual(benchmark.harvest_tokens(index)["cost_usd"], expected)
 
         index.write_text(json.dumps({
@@ -700,10 +705,10 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
     def test_current_model_families_use_their_exact_price_tiers(self) -> None:
         cases = (
-            ("codex", "gpt-5.6", "5", "0.50", "30"),
-            ("codex", "gpt-5.6-sol", "5", "0.50", "30"),
-            ("codex", "gpt-5.6-terra", "2.50", "0.25", "15"),
-            ("codex", "gpt-5.6-luna", "1", "0.10", "6"),
+            ("codex", "gpt-5.6", "4", "0.40", "20"),
+            ("codex", "gpt-5.6-sol", "4", "0.40", "20"),
+            ("codex", "gpt-5.6-terra", "2", "0.20", "12"),
+            ("codex", "gpt-5.6-luna", "0.20", "0.02", "1.20"),
             ("codex", "gpt-5.5-2026-04-23", "5", "0.50", "30"),
             ("codex", "gpt-5.5-pro", "30", "0", "180"),
             ("codex", "gpt-5.4", "2.50", "0.25", "15"),
@@ -744,7 +749,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("claude", "claude-haiku-4-5-20251001", "1", "0.10", "5"),
             ("claude", "claude-3-5-haiku-20241022", "0.80", "0.08", "4"),
             ("claude", "claude-3-haiku-20240307", "0.25", "0.03", "1.25"),
-            ("gemini", "gemini-3.6-flash", "1.50", "0.15", "7.50"),
+            ("gemini", "gemini-3.7-flash", "0.75", "0.075", "3.75"),
+            ("gemini", "gemini-3.6-flash", "0.75", "0.075", "3.75"),
             ("gemini", "gemini-3.5-flash", "1.50", "0.15", "9"),
             ("gemini", "gemini-3.5-flash-lite", "0.30", "0.03", "2.50"),
             ("gemini", "gemini-3.1-pro-preview", "2", "0.20", "12"),
@@ -756,15 +762,14 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("gemini", "gemini-2.0-flash", "0.10", "0.025", "0.40"),
             ("gemini", "gemini-2.0-flash-lite", "0.075", "0", "0.30"),
             ("grok", "grok-build-0.1", "1", "0.20", "2"),
+            ("grok", "grok-4.6", "2", "0.50", "6"),
             ("grok", "grok-4.5", "2", "0.30", "6"),
             ("grok", "grok-4.3", "1.25", "0.20", "2.50"),
             ("grok", "grok-4.20-0309-reasoning", "1.25", "0.20", "2.50"),
         )
         for backend, model, input_rate, cache_rate, output_rate in cases:
             with self.subTest(backend=backend, model=model):
-                rates = benchmark._pricing_rates(
-                    backend, model, priced_at="2026-07-12",
-                )
+                rates = benchmark._pricing_rates(backend, model)
                 self.assertIsNotNone(rates)
                 if rates.get("tiered"):
                     self.assertEqual(str(rates["input_low"]), input_rate)
@@ -782,19 +787,42 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5-6"))
         self.assertIsNone(benchmark._pricing_rates("claude", "claude-haiku-5"))
         self.assertIsNone(benchmark._pricing_rates("claude", "claude-opus-6"))
-        sonnet_standard = benchmark._pricing_rates(
-            "claude", "claude-sonnet-5", priced_at="2026-09-01",
+        # Sonnet 5 is the standing argument against pricing an announcement:
+        # its 2026-09-01 increase to $3/$15 was cancelled and the launch price
+        # became standard. No row keys on a date, so nothing in the table can
+        # restate a finished run's spend on a day a change was merely
+        # scheduled for.
+        self.assertNotIn(
+            "priced_at",
+            inspect.signature(benchmark._pricing_rates).parameters,
         )
-        self.assertEqual(str(sonnet_standard["input"]), "3")
-        self.assertEqual(str(sonnet_standard["cache_write"]), "3.75")
-        self.assertEqual(str(sonnet_standard["cache_write_1h"]), "6")
-        self.assertEqual(str(sonnet_standard["cache_read"]), "0.30")
-        self.assertEqual(str(sonnet_standard["output"]), "15")
+        self.assertNotIn(
+            "priced_at",
+            inspect.signature(benchmark._cost_decimal).parameters,
+        )
+        sonnet = benchmark._pricing_rates("claude", "claude-sonnet-5")
+        self.assertEqual(str(sonnet["input"]), "2")
+        self.assertEqual(str(sonnet["cache_write"]), "2.50")
+        self.assertEqual(str(sonnet["cache_write_1h"]), "4")
+        self.assertEqual(str(sonnet["cache_read"]), "0.20")
+        self.assertEqual(str(sonnet["output"]), "10")
+        # Both Flash generations sit on the same promotion at the same rate,
+        # and each still names its own generation in the cost source.
+        for model in ("gemini-3.7-flash", "gemini-3.6-flash"):
+            flash = benchmark._pricing_rates("gemini", model)
+            self.assertEqual(str(flash["input"]), "0.75")
+            self.assertEqual(str(flash["cache_read"]), "0.075")
+            self.assertEqual(str(flash["output"]), "3.75")
+            self.assertEqual(
+                flash["source"],
+                f"gemini-api-{model.removeprefix('gemini-').removesuffix('-flash')}"
+                "-flash-standard",
+            )
 
         long_context = (
-            ("gpt-5.6-sol", "10", "1", "12.50", "45"),
-            ("gpt-5.6-terra", "5", "0.50", "6.25", "22.50"),
-            ("gpt-5.6-luna", "2", "0.20", "2.50", "9"),
+            ("gpt-5.6-sol", "8", "0.80", "10", "30"),
+            ("gpt-5.6-terra", "4", "0.40", "5", "18"),
+            ("gpt-5.6-luna", "0.40", "0.04", "0.50", "1.80"),
             ("gpt-5.5", "10", "1", None, "45"),
             ("gpt-5.5-pro", "60", "0", None, "270"),
         )
@@ -821,9 +849,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         )
         for model, write_5m, write_1h in claude_cache:
             with self.subTest(model=model, tier="cache-write"):
-                rates = benchmark._pricing_rates(
-                    "claude", model, priced_at="2026-07-12",
-                )
+                rates = benchmark._pricing_rates("claude", model)
                 self.assertEqual(str(rates["cache_write"]), write_5m)
                 self.assertEqual(str(rates["cache_write_1h"]), write_1h)
 
@@ -838,10 +864,13 @@ class BenchmarkMetricsTests(unittest.TestCase):
             output_tokens=1_000_000,
             prompt_tokens_for_tier=200_000,
         )
-        self.assertEqual(benchmark._decimal_text(cost), "18.000000")
+        self.assertEqual(benchmark._decimal_text(cost), "14.400000")
         self.assertEqual(source, "openai-api-gpt-5.6-terra-standard")
 
-        claude_long, _ = benchmark._cost_decimal(
+        # Claude splits cache writes by TTL: 1.25x base for 5m, 2x for 1h.
+        # A prompt far past 200k does not change the rate — no Sonnet carries a
+        # long-context premium any more.
+        claude_cache_ttl, _ = benchmark._cost_decimal(
             "claude", "claude-sonnet-4-5",
             input_tokens=1_000_000,
             cached_input_tokens=1_000_000,
@@ -850,7 +879,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             output_tokens=1_000_000,
             prompt_tokens_for_tier=1_400_000,
         )
-        self.assertEqual(benchmark._decimal_text(claude_long), "30.600000")
+        self.assertEqual(benchmark._decimal_text(claude_cache_ttl), "19.050000")
 
         gemini_long, _ = benchmark._cost_decimal(
             "gemini", "gemini-2.5-pro",

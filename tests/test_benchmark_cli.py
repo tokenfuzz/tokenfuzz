@@ -115,6 +115,18 @@ class BenchmarkCliTests(unittest.TestCase):
             )
         self.assertEqual(args.agent_security, "external-bypass")
 
+    def test_a_host_side_opencode_run_starts_under_its_only_usable_profile(self) -> None:
+        # OpenCode has no native OS sandbox, so gating its default on
+        # IS_SANDBOX leaves `--backend oss` unable to start anywhere: the
+        # sandboxed fallback refuses it outright. Warn about the boundary
+        # instead of turning a missing assertion into a refusal.
+        args = self._regen_args(backend="oss", regenerate=False)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                "", benchmark_runner._resolve_run_agent_security(args, {}),
+            )
+        self.assertEqual(args.agent_security, "external-bypass")
+
     def test_a_new_run_keeps_the_operator_choice_for_the_settings_check(self) -> None:
         args = self._regen_args(regenerate=False)
         with mock.patch.dict(os.environ, {}, clear=True):

@@ -42,7 +42,7 @@ import sys
 import tempfile
 import urllib.parse
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import audit_helpers
@@ -1028,21 +1028,8 @@ def _model_id_is(model: str, *model_ids: str) -> bool:
     return False
 
 
-def _pricing_day(value: object = None) -> date:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if value:
-        try:
-            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).date()
-        except ValueError:
-            pass
-    return datetime.now(timezone.utc).date()
-
-
 def _pricing_rates(
-    backend: str, model: str = "", *, priced_at: object = None,
+    backend: str, model: str = "",
 ) -> dict | None:
     """Public USD-equivalent token rates per 1M tokens.
 
@@ -1051,6 +1038,15 @@ def _pricing_rates(
     for cross-backend benchmark dollars. The benchmark CLIs make interactive
     standard-tier requests, so batch, flex, priority, fast-mode, and regional
     multipliers do not apply here.
+
+    Every row is the rate in force, and none of them key on a date. An
+    announced future change is not a rate: vendors routinely extend a
+    promotion or drop an increase — Anthropic cancelled Sonnet 5's scheduled
+    one outright — so encoding the announcement means the table restates a
+    completed run's spend on a day nothing actually happened. When a price
+    really changes, change the row. A backend that reports its own cost is
+    believed ahead of this table either way; what this provides is one
+    denominator applied uniformly to every condition in a comparison.
     """
     b = (backend or "").strip().lower()
     m = (model or "").strip().lower()
@@ -1067,20 +1063,17 @@ def _pricing_rates(
                 "output": _money("50"),
                 "source": "claude-api-fable-5",
             }
-        # Introductory first-party API pricing is effective through
-        # 2026-08-31; the published rate becomes $3/$15 on 2026-09-01.
+        # Announced as introductory pricing through 2026-08-31, then made the
+        # standard price: Anthropic cancelled the scheduled $3/$15 increase,
+        # so this is flat and no longer keys on the pricing day.
         if _model_id_is(m, "claude-sonnet-5"):
-            introductory = _pricing_day(priced_at) <= date(2026, 8, 31)
             return {
-                "input": _money("2" if introductory else "3"),
-                "cache_write": _money("2.50" if introductory else "3.75"),
-                "cache_write_1h": _money("4" if introductory else "6"),
-                "cache_read": _money("0.20" if introductory else "0.30"),
-                "output": _money("10" if introductory else "15"),
-                "source": (
-                    "claude-api-sonnet-5-introductory"
-                    if introductory else "claude-api-sonnet-5-standard"
-                ),
+                "input": _money("2"),
+                "cache_write": _money("2.50"),
+                "cache_write_1h": _money("4"),
+                "cache_read": _money("0.20"),
+                "output": _money("10"),
+                "source": "claude-api-sonnet-5-standard",
             }
         if _model_id_is(
             m,
@@ -1108,26 +1101,16 @@ def _pricing_rates(
                 "output": _money("75"),
                 "source": "claude-api-opus-3/4/4.1",
             }
-        if _model_id_is(m, "claude-sonnet-4-5", "claude-sonnet-4"):
-            return {
-                "tiered": True,
-                "threshold": 200_000,
-                "input_low": _money("3"),
-                "input_high": _money("6"),
-                "cache_write_low": _money("3.75"),
-                "cache_write_high": _money("7.50"),
-                "cache_write_1h_low": _money("6"),
-                "cache_write_1h_high": _money("12"),
-                "cache_read_low": _money("0.30"),
-                "cache_read_high": _money("0.60"),
-                "output_low": _money("15"),
-                "output_high": _money("22.50"),
-                "source": "claude-api-sonnet-4/4.5-standard",
-            }
+        # Sonnet 4 and 4.5 carried a >200k premium only under the retired 1M
+        # context beta. Their context window is 200k again, so a real request
+        # can no longer reach the threshold: every firing of that tier came
+        # from the per-request estimate overshooting, which doubled the input
+        # rate and marked the cell estimated. One flat rate, like every other
+        # Sonnet.
         if _model_id_is(
             m,
-            "claude-sonnet-4-6", "claude-3-7-sonnet",
-            "claude-3-5-sonnet", "claude-3-sonnet",
+            "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4",
+            "claude-3-7-sonnet", "claude-3-5-sonnet", "claude-3-sonnet",
         ):
             return {
                 "input": _money("3"),
@@ -1168,46 +1151,54 @@ def _pricing_rates(
     if b in {"codex", "oss"}:
         # GPT-5.6 renamed the former flagship/mini/nano tiers to
         # Sol/Terra/Luna. The unsuffixed alias routes to Sol.
+        #
+        # A rate keys on the pricing day only where the vendor publishes the
+        # date, as Gemini Flash does below. Guessing one is worse than not
+        # dating at all: a made-up boundary silently restates a completed run's
+        # spend on the day it passes, and it reads as sourced. OpenAI says only
+        # that Sol's promotional pricing runs "at least through November 21,
+        # 2026" — a floor with no start, and no post-promotion rate published —
+        # so there is nothing here to encode but the price in force.
         if _model_id_is(m, "gpt-5.6-luna"):
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "input_low": _money("1"),
-                "input_high": _money("2"),
-                "cache_write_low": _money("1.25"),
-                "cache_write_high": _money("2.50"),
-                "cache_read_low": _money("0.10"),
-                "cache_read_high": _money("0.20"),
-                "output_low": _money("6"),
-                "output_high": _money("9"),
+                "input_low": _money("0.20"),
+                "input_high": _money("0.40"),
+                "cache_write_low": _money("0.25"),
+                "cache_write_high": _money("0.50"),
+                "cache_read_low": _money("0.02"),
+                "cache_read_high": _money("0.04"),
+                "output_low": _money("1.20"),
+                "output_high": _money("1.80"),
                 "source": "openai-api-gpt-5.6-luna-standard",
             }
         if _model_id_is(m, "gpt-5.6-terra"):
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "input_low": _money("2.50"),
-                "input_high": _money("5"),
-                "cache_write_low": _money("3.125"),
-                "cache_write_high": _money("6.25"),
-                "cache_read_low": _money("0.25"),
-                "cache_read_high": _money("0.50"),
-                "output_low": _money("15"),
-                "output_high": _money("22.50"),
+                "input_low": _money("2"),
+                "input_high": _money("4"),
+                "cache_write_low": _money("2.50"),
+                "cache_write_high": _money("5"),
+                "cache_read_low": _money("0.20"),
+                "cache_read_high": _money("0.40"),
+                "output_low": _money("12"),
+                "output_high": _money("18"),
                 "source": "openai-api-gpt-5.6-terra-standard",
             }
         if _model_id_is(m, "gpt-5.6", "gpt-5.6-sol"):
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "input_low": _money("5"),
-                "input_high": _money("10"),
-                "cache_write_low": _money("6.25"),
-                "cache_write_high": _money("12.50"),
-                "cache_read_low": _money("0.50"),
-                "cache_read_high": _money("1"),
-                "output_low": _money("30"),
-                "output_high": _money("45"),
+                "input_low": _money("4"),
+                "input_high": _money("8"),
+                "cache_write_low": _money("5"),
+                "cache_write_high": _money("10"),
+                "cache_read_low": _money("0.40"),
+                "cache_read_high": _money("0.80"),
+                "output_low": _money("20"),
+                "output_high": _money("30"),
                 "source": "openai-api-gpt-5.6-sol-standard",
             }
         if _model_id_is(m, "gpt-5.5-pro"):
@@ -1322,12 +1313,17 @@ def _pricing_rates(
             return rates
 
     if b == "gemini":
-        if _model_id_is(m, "gemini-3.6-flash"):
+        # Both Flash generations are on the same promotion, which Google says
+        # runs through 2026-12-31.
+        if _model_id_is(m, "gemini-3.7-flash", "gemini-3.6-flash"):
+            generation = (
+                "3.7" if _model_id_is(m, "gemini-3.7-flash") else "3.6"
+            )
             return {
-                "input": _money("1.50"),
-                "cache_read": _money("0.15"),
-                "output": _money("7.50"),
-                "source": "gemini-api-3.6-flash-standard",
+                "input": _money("0.75"),
+                "cache_read": _money("0.075"),
+                "output": _money("3.75"),
+                "source": f"gemini-api-{generation}-flash-standard",
             }
         if _model_id_is(m, "gemini-3.5-flash"):
             return {
@@ -1436,6 +1432,19 @@ def _pricing_rates(
                 "output_high": _money("4"),
                 "source": "xai-code-api-grok-build-0.1",
             }
+        if _model_id_is(m, "grok-4.6"):
+            return {
+                "tiered": True,
+                "threshold": 200_000,
+                "threshold_inclusive": True,
+                "input_low": _money("2"),
+                "input_high": _money("4"),
+                "cache_read_low": _money("0.50"),
+                "cache_read_high": _money("1"),
+                "output_low": _money("6"),
+                "output_high": _money("12"),
+                "source": "xai-chat-api-grok-4.6",
+            }
         if _model_id_is(m, "grok-4.5"):
             return {
                 "tiered": True,
@@ -1481,9 +1490,8 @@ def _cost_decimal(
     cache_creation_tokens: int = 0,
     cache_creation_1h_tokens: int = 0,
     prompt_tokens_for_tier: int | None = None,
-    priced_at: object = None,
 ) -> tuple[Decimal | None, str]:
-    rates = _pricing_rates(backend, model, priced_at=priced_at)
+    rates = _pricing_rates(backend, model)
     if not rates:
         return None, "unknown"
 
@@ -1510,10 +1518,9 @@ def _cost_decimal(
             "cache_write_high" if high else "cache_write_low",
             input_rate,
         )
-        write_1h_rate = rates.get(
-            "cache_write_1h_high" if high else "cache_write_1h_low",
-            write_rate,
-        )
+        # A separately priced one-hour cache write is Anthropic-only, and no
+        # Claude model is tiered, so the tiered branch has one write rate.
+        write_1h_rate = write_rate
         fresh_input = max(Decimal("0"), inp - cache_create)
         cost = (
             fresh_input * input_rate
@@ -1775,7 +1782,6 @@ def harvest_tokens(
                 cache_creation_tokens=cache_creation,
                 cache_creation_1h_tokens=cache_creation_1h,
                 prompt_tokens_for_tier=tier_basis,
-                priced_at=row.get("timestamp"),
             )
         if event_cost is not None:
             totals["cost_usd"] = _decimal_text(
@@ -1784,7 +1790,7 @@ def harvest_tokens(
             if source:
                 cost_sources.add(source)
         if used_rate_card and event_cost is not None:
-            rates = _pricing_rates(backend, model, priced_at=row.get("timestamp"))
+            rates = _pricing_rates(backend, model)
             # The threshold is per provider request, while CLI telemetry is an
             # invocation aggregate. The selected tier is the best available
             # reconstruction, not a backend-reported invoice amount.
