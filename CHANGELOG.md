@@ -1,15 +1,15 @@
 # Changelog
 
-## 1.5.0 - 2026-08-17
+## 1.5.0 - 2026-08-21
 
 - **S4 is now boundary-directed fuzzing, and it actually runs.** S4 was a
-  reserved identifier no generator could feed and S7 carried a seed-and-harness
-  half its playbook told agents not to run, so nothing fuzzed. `bin/fuzz`
+  reserved identifier no generator could feed, and S7 carried a seed-and-harness
+  half its own playbook told agents not to run, so nothing fuzzed. `bin/fuzz`
   admits an API only when the build publishes it, the declared threat model
   reaches its parameters, and no harness already drives it; it lints out the
   three harness shapes that forge state or reach past public headers, runs
   bounded slices with health quarantine, and replays every artifact through
-  `bin/probe` with its hypothesis, sanitizer, and build compiler attached.
+  `bin/probe` with its hypothesis, sanitizer and build compiler attached.
   Progress counts features as well as edges, because value profiling reports
   through `ft` alone and a campaign watching `cov` would quarantine the harness
   it had just switched on; coverage totals are reported, never divided, since
@@ -19,12 +19,22 @@
   descending card supply, and S4 owns one target-level campaign card by
   construction — one corpus, one lock, one campaign per iteration — so a lane
   holding a whole iteration of work sorted behind every lane holding a list of
-  files, and came last on all four benchmark targets. Supply is breadth and the
+  files, and came last on all four benchmark targets. Supply is breadth and a
   campaign's is depth, so it is no longer ranked at all: it is reserved on the
   highest-numbered reproduce worker, and ranked lanes compact over the agents
   that remain. `bin/probe --harness` names the harness an opaque fuzz artifact
   came from, which its bytes cannot carry, and harnesses build out of tree so a
   campaign cannot stale the shared build for a peer backend.
+
+  A harness linked `-fsanitize=fuzzer,address` against a library that already
+  loads its own runtime got two runtimes in one process and aborted before the
+  first input — 6 of 12 native targets, every campaign dead at slice 1. The
+  link stays sanitized, because those redzones are what report a target
+  overrunning a buffer its *caller* owns: `bin/fuzz build` proves the binary
+  starts before a campaign spends anything, and only a duplicate-runtime abort
+  earns a relink without the sanitizer, with a remedy naming what that costs
+  and how to undo it. Anything else that cannot start is a build error carrying
+  the runtime's own message, not a slice reported as `dead`.
 
 - **Security yield now requires a trigger inside the threat model.** Every kept
   artifact counted as security yield even when its trigger fell outside the
@@ -38,27 +48,55 @@
   only assert what a review established — an `Uncertain` verdict or two
   disagreeing reviewers stay `pending` and are counted in the unadjudicated
   remainder that marks a benchmark count a floor. A decided out-of-model call
-  from an anchor-verified `Uncertain` vote is now kept rather than dropped,
-  since that direction can only withhold, never publish.
+  from an anchor-verified `Uncertain` vote is kept rather than dropped, since
+  that direction can only withhold, never publish; its citations are re-read
+  against current source first, because `not-reportable` is terminal.
 
-- **A backend that refuses the request halts the run instead of publishing a
-  clean cell.** A revoked OAuth token matched none of the capacity or transient
-  patterns, so every dead session read as an ordinary dry iteration: the run
-  stopped early and the cell published as clean and done, which a same-run-id
-  resume then skipped as a valid measurement. A refusal — a turned-down
-  credential, or a model the installed CLI cannot serve — is its own class that
-  marks the cell unavailable and never pauses or retries, so no wall is
-  subtracted for capacity that was never coming back. It is read from a
-  backend's own error field as well as its CLI error lines, and threaded rather
-  than collapsed, so `rate_limit` keeps meaning retryable.
+  Impact stops being minted by vocabulary in the same move. A bare
+  "uninitialized", "leak" or "internal representation" in report prose returned
+  the `info_leak` row, whose VC:H granted High confidentiality with no evidence
+  anything reached an attacker; prose alone now lands in the conservative
+  small-read tier, while the MSan diagnostic, an explicit disclosure claim and
+  a structured `Primitive` field still classify. One real finding whose
+  observed effect was a hang drops from Medium 4.8 to Low 1.1.
+
+- **A run that cannot act stops instead of publishing a clean zero.** Codex
+  0.149 refuses to create any process while a writable root contains a symlink
+  component, so a benchmark cell's facade target grant killed every command in
+  110 of 127 agent sessions — that harness row scored 0 crashes where Claude
+  found 5 on the same target and build, and the wall was spent publishing
+  silence. Granted directories are now resolved once, for every backend, since
+  granting both spellings fails just as hard.
+
+  The startup probe should have caught it and could not: it asked the model to
+  reply, under a narrower set of directories than the audit uses, so a backend
+  unable to create a single process passed. It now runs under the audit's own
+  grants and must write through them, into the target `.audit/` where the build
+  lease already lives, which also catches a grant that arrives readable but
+  silently unwritable. One probe for every backend; each attempt clears its
+  sentinel first, so an attempt that wrote and then failed cannot pass the next
+  one on evidence it did not produce. Sessions also record a tool tally in
+  `index.jsonl` — telemetry, not a verdict, since a count cannot separate a
+  blocked agent from one that read its state and concluded.
+
+  A backend that refuses the request is now its own class. A revoked OAuth
+  token matched none of the capacity or transient patterns, so every dead
+  session read as an ordinary dry iteration: the run stopped early and the cell
+  published as clean and done, which a same-run-id resume then skipped as a
+  valid measurement. A refusal — a turned-down credential, or a model the
+  installed CLI cannot serve — marks the cell unavailable and never pauses or
+  retries, so no wall is subtracted for capacity that was never coming back. It
+  is read from a backend's own error field as well as its CLI error lines, and
+  threaded rather than collapsed, so `rate_limit` keeps meaning retryable.
 
 - **Crashes stop being unmade between capture and replay.** Four layers each
   kept their own ASan class list and all four omitted `stack-buffer-underflow`,
   so a crash that replayed 5/5 against its own fault scored a mismatch and
   published as an unjudged remainder; the vocabulary now lives in one place, as
-  the exact names the runtime prints. Replay answers one question — did the same
-  fault happen again — and no longer consults the crash gate's admission policy,
-  so a future omission cannot unmake a reproduction. Fault identity matches the
+  the exact names the runtime prints, anchored to the runtime's own
+  ERROR/SUMMARY headline. Replay answers one question — did the same fault
+  happen again — and no longer consults the crash gate's admission policy, so a
+  future omission cannot unmake a reproduction. Fault identity matches the
   leading inline group, because a crash captured with the in-process symbolizer
   keeps an inlined name the offline pass does not. A bundle whose harness had
   migrated into `.audit/` matched the leftover `.dSYM/` directory and exec'd it;
@@ -73,7 +111,14 @@
   and nothing ever grouped — 22 pooled crashes read as 22 clusters where there
   are 14. Both row forms are now read as their stamp, and the placeholder
   `bin/cluster-crashes` writes before an id exists has one definition shared by
-  the writer, the renderer and the clusterer.
+  the writer, the renderer and the clusterer. The stamp also anchored on the
+  first `^# ` anywhere in a report, so an untitled finding took it inside a
+  repro fence where identity is byte-sensitive: a severity receipt written
+  moments earlier read as stale and the pre-swap pool audit refused to publish
+  the whole run. Report metadata split by blank lines above `Summary` is
+  recognised by position rather than by label, so author-defined fields render
+  in the report's Fields grid instead of falling through to the generic
+  renderer.
 
 - **Benchmark cells keep evidence that was never in doubt.** Cells were excluded
   whenever tracked bytes under `AGENTS.md`, `bin/`, `lib/` or `.agents/`
@@ -86,14 +131,22 @@
   wall. Batched review inherited the single-item prompt's text but not its
   answer contract, so every positive review stalled unresolved on the in-run
   gate and the post-cell drain alike; the shared contract moved above the split
-  and schema parity is asserted so the two cannot diverge again.
+  and schema parity is asserted so the two cannot diverge again. Crash replay
+  ranked the extensionless name the direct contract mandates below any sibling
+  beside it, reporting clean on a derived file, and a run stopped inside
+  unbounded finalization now checkpoints its wall instead of needing a fresh
+  audit to be scored. The unadjudicated warning stops promising a
+  `--regenerate` that cannot move a review which ran and could not settle.
 
 - **Sandboxed Claude gets its Bash back.** Launches ran with no allow rules, so
   whatever the rules left undecided was denied — `;`-chained and multi-line
   commands, about 9% of harness Bash calls, including `bin/peek`, `bin/state`
   and `bin/probe`. Bash is now allowed, since the sandbox is what arbitrates it:
   writes stay inside the `--add-dir` grants, egress stays blocked, and `deny`
-  still wins. Only Bash — nothing here grants the file tools.
+  still wins. Only Bash — nothing here grants the file tools. Out-of-model
+  crashes stop being steered at: the index names that state and the filing rules
+  say it, while expansion still runs on such a seed and now carries
+  `attacker_controls` so the neighbours it proposes are ones the model reaches.
 
 - **`setup-target` seeds a config the audit can actually use.** A `--force`
   re-seed dropped the curated threat model and peer set and left replacing them
@@ -130,8 +183,18 @@
   machine the four slowest suites go 146s to 99s, with crash reverification
   halving. Only a whole-suite run may write the scheduler's timing artifact — a
   filtered run left it holding a few rows and the next full run packed badly.
-  Symbolizer teardown no longer discards a stacktrace it had already symbolized
-  when `addr2line` exits on a binary that is not there.
+
+- **macOS and container runs stop failing on their environment.** Process-tree
+  inspection shelled out to a `ps` mode macOS denies unprivileged callers, and a
+  captured command still inherited a live caller pipe, so an argument-driven
+  decision backend could wait out its whole timeout; there is now a Darwin
+  `sysctl` fallback and every no-input launch gets `DEVNULL`. Contributed in
+  [#2](https://github.com/tokenfuzz/tokenfuzz/pull/2) — thanks to
+  [@Dor1s](https://github.com/Dor1s). Symbolizer teardown no longer discards a
+  stacktrace it had already symbolized when `addr2line` exits on a binary that
+  is not there, and two fixtures stop depending on the host — an unwritable
+  lease fixture that root could still open, and a broken-pipe payload larger
+  than the default write buffer on everything but Python 3.14.
 
 ## 1.4.1 - 2026-08-10
 
@@ -225,6 +288,46 @@
   validation receipt is rebound as the representation-only transform it is,
   rather than going stale and refusing to publish a pool whose reports never
   changed meaning.
+
+- **A model-direct cell shows whether it worked the sanitizer, and its
+  teardown stops destroying it.** An ffmpeg cell scored 0 crashes beside the
+  harness's 6 and nothing on disk could say whether it had ever run the
+  target: model-direct writes no `state/runs.jsonl`, and the usage-ledger
+  fallback it fell through to was only ever written by the dry-run fixture, so
+  every such row reported zero. The sanitizer runtimes named in the cell's own
+  transcript are now counted — 227 on that row — and published as
+  `sanitizer_command_requests`, beside the exact counters and never inside
+  them. It is inexact in both directions and documents which: a command that
+  only writes a script naming the option matches, while `./runfuzz.sh` names
+  none and may run the target thousands of times. What it answers is whether
+  the crash lane was worked at all, which a bare zero could not.
+
+  Two costs fell on that lane alone. A sandbox denies a sanitizer runtime the
+  process spawn its own symbolizer needs, so the baseline read
+  `module+offset` where the harness read source lines through `bin/run-asan`,
+  and an address-only trace cannot be told apart from one raised inside the
+  agent's own driver. The prompt turns in-process symbolization off where it
+  owns the environment and names `bin/symbolize`, the same offline pass, in
+  one block reaching the native, harness-driver and `[runner]` paths alike.
+
+  And the reap missed exactly what it existed for: macOS will not disclose a
+  platform binary's environment, so a leaked `/bin/sh` supervisor was
+  invisible while the driver it respawned was not. The sweep killed the
+  driver, the supervisor replaced it, and scratch reclaim then deleted the
+  binaries of campaigns still running, which spent the next ten minutes
+  logging a missing driver over their own results. Process group and parent
+  links are readable and inherited alike, so ownership widens over both to a
+  fixed point — never onto the runner's own group. The sweep repeats until
+  the marker clears, a probe that cannot see this process refuses to report a
+  clean reap, and a marker that will not clear marks the cell noncomparable
+  and stops the run: measuring the next cell against work the last one is
+  still doing measures the contention.
+
+  The direct prompt also caps concurrent executions at half the CPUs the
+  process may actually use, container quota included. Left unbounded, the
+  baseline drove a benchmark machine to a load average of 108, at which point
+  its own `timeout`-based oracles began reporting load as hits it then spent
+  real budget disproving.
 
 - **Model-direct crashes are measured, not assumed.** Harness replay of a
   model-direct cell could not run end to end: the runner ignored the skip
