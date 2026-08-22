@@ -91,6 +91,85 @@ def _san_options(script_root: str, san: str, mode: str = "full") -> str:
     return rows.get(mode) or rows.get("full") or ""
 
 
+def _usable_cpus() -> int:
+    """CPUs this process may actually run on, honouring a container quota.
+
+    `os.cpu_count()` reports the machine, not the allocation: inside a
+    container with a fractional CPU quota it can overstate by an order of
+    magnitude, and a ceiling derived from it would license the overload it
+    exists to prevent.
+    """
+    count = 0
+    getter = getattr(os, "process_cpu_count", None)  # 3.13+
+    if getter is not None:
+        count = getter() or 0
+    if not count and hasattr(os, "sched_getaffinity"):
+        try:
+            count = len(os.sched_getaffinity(0))
+        except OSError:
+            count = 0
+    count = count or os.cpu_count() or 1
+    for quota_path, period_path in (
+        ("/sys/fs/cgroup/cpu.max", None),  # cgroup v2: "<quota|max> <period>"
+        ("/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
+         "/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+    ):
+        try:
+            raw = Path(quota_path).read_text().split()
+            quota = raw[0]
+            period = raw[1] if period_path is None else Path(period_path).read_text().strip()
+            if quota in ("max", "-1"):
+                continue
+            allowed = int(quota) // int(period)
+            if allowed >= 1:
+                count = min(count, allowed)
+        except (OSError, ValueError, IndexError, ZeroDivisionError):
+            continue
+    return max(1, count)
+
+
+def _symbolize_available(script_root: str) -> bool:
+    sys.path.insert(0, str(Path(script_root) / "lib"))
+    import sanitizer  # noqa: PLC0415 - script_root is only known at call time
+
+    return bool(sanitizer.symbolize_available())
+
+
+def _symbolize_hint(script_root: str, present: bool) -> str:
+    """One instruction for every way this prompt can reach a sanitizer.
+
+    A sandboxed backend is denied the process spawn a sanitizer runtime needs
+    to symbolize its own report, so the direct condition read address-only
+    stacks while the harness — routing every run through bin/run-asan — read
+    source lines. That is a difference in how evidence renders, not in what
+    either condition can find, and it taxes only the crash lane: an
+    unsymbolized trace cannot be told apart from one raised inside the agent's
+    own driver.
+
+    It belongs here rather than inside a single invocation block. The three
+    ways a target advertises a sanitizer — a native binary, a one-off harness
+    driver, and a `[runner]` command — are rendered by different builders and
+    only one of them is chosen, so an instruction threaded through one builder
+    reaches only the targets that happen to take that branch. The advice holds
+    for all of them, because it keys on the symptom.
+    """
+    if not present or not _symbolize_available(script_root):
+        return ""
+    return (
+        "## Sanitizer frames arrive without source lines\n"
+        "\nThis sandbox denies a sanitizer runtime the process spawn its own\n"
+        "symbolizer needs. Where the options above say `symbolize=0` that is\n"
+        "already accounted for; where they do not, a runtime that cannot\n"
+        "symbolize itself falls back to `module+offset` anyway. Either way,\n"
+        "resolve any report whose frames carry no `file:line` before you read\n"
+        "or file it:\n\n"
+        f"    {Path(script_root) / 'bin' / 'symbolize'} <path-to-sanitizer.txt>\n\n"
+        "It rewrites the report in place and exits non-zero if a frame stays\n"
+        "raw. An address-only trace cannot be told apart from one raised\n"
+        "inside your own driver, so do not judge a candidate on one.\n"
+    )
+
+
 def _env_assignment(name: str, options: str) -> str:
     # Keep rendered snippets shell-valid even when a fixture script_root lacks
     # lib/sanitizer_options.conf. `ASAN_OPTIONS=` is a valid empty assignment;
@@ -526,6 +605,11 @@ def render(
 
     profile = _SAN_PROFILE.get(san or "", _SAN_PROFILE["asan"])
     options = _san_options(script_root, san) if san else ""
+    # Only the invocations this prompt writes the env line for can be told to
+    # skip in-process symbolization; a [runner] command owns its own
+    # environment. The hint below covers every path either way.
+    if options and _symbolize_available(script_root):
+        options = f"{options}:symbolize=0"
     present = bin_path is not None or lib_path is not None
 
     ctx = {
@@ -562,10 +646,20 @@ def render(
         "harness_build_recipe": _build_recipe(
             san, lib_path, include_dirs, link_libs, output_dir,
             options, profile),
+        "symbolize_hint": _symbolize_hint(
+            script_root,
+            present or bool(race_runner_hint) or bool(sanitizer_runner_hint),
+        ),
         # Single source of truth (lib/audit_scope.py) — the harness
         # work-card pool uses the same set, so both audit modes scope
         # findings the same way. See the .j2 "Audit scope" section.
         "non_audit_dirs": non_audit_dirs_for_prompt(),
+        # Sized from the CPUs this process may use, not from the machine:
+        # the harness bounds its own concurrency by worker count, and a
+        # baseline with no ceiling drove a benchmark host to a load average
+        # of 108, at which point its own timeout-based oracles reported load
+        # as findings. Never below 1, and never above half of what is there.
+        "parallel_ceiling": max(1, _usable_cpus() // 2),
         "budget_line": _budget_line(wall_seconds),
     }
     return render_template("benchmark_model_direct.md.j2", ctx)

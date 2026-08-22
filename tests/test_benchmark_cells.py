@@ -21,6 +21,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import benchmark
 import benchmark_runner
 import build_preflight
 import llm_decide
@@ -517,6 +518,37 @@ raise SystemExit(23)
         self.assertFalse((scratch_cell / "scratch").exists())
         for relative in ("scratch-1", "crashes/CRASH-1", "findings/FIND-1"):
             self.assertTrue((scratch_cell / relative).is_dir())
+
+    def test_scratch_survives_a_cell_whose_processes_never_died(self) -> None:
+        """Reclaiming under a live campaign corrupts it instead of ending it.
+
+        A real cell left fuzz loops running past its reap; the reclaim then
+        deleted their drivers mid-run and every one of them spent the next
+        minutes logging a missing binary over its own results.
+        """
+        cell = self.work / "unreaped-cell"
+        junk = cell / "scratch" / "corpus" / "seed.bin"
+        junk.parent.mkdir(parents=True)
+        junk.touch()
+        (cell / ".processes-unreaped").write_text("marker still live\n")
+        benchmark_runner.cleanup_model_direct_scratch(cell)
+        self.assertTrue(junk.is_file())
+
+    def test_an_unreaped_cell_is_noncomparable_and_outranks_other_reasons(self) -> None:
+        """Its wall did not contain its work, so it cannot be scored against one.
+
+        Whatever else was wrong with the cell, work that outlived the clock
+        also spends CPU against whatever runs next — which is why the runner
+        stops instead of starting another cell.
+        """
+        cell = self.work / "quality-cell"
+        cell.mkdir(parents=True)
+        (cell / ".run-quality").write_text("provider_recovered\n")
+        (cell / ".backend-terminated").touch()
+        self.assertEqual(benchmark.cell_run_quality(cell, "done"), "backend_terminated")
+        (cell / ".processes-unreaped").write_text("still live\n")
+        self.assertEqual(benchmark.cell_run_quality(cell, "done"), "processes_unreaped")
+        self.assertIn("processes_unreaped", benchmark.NONCOMPARABLE_RUN_QUALITIES)
 
 
 class InterruptedCellRecoveryTests(unittest.TestCase):

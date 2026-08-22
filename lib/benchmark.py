@@ -45,6 +45,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+import audit_helpers
 import cluster_common
 import crash_artifacts
 import crash_bundle
@@ -73,15 +74,23 @@ FINDING_CONFIRMATION_VERSION = "quality-trigger-v1"
 CELL_RUN_QUALITIES = frozenset({
     "clean", "incomplete", "provider_recovered", "provider_limited",
     "source_drift", "build_drift", "unowned_artifacts", "backend_terminated",
+    "processes_unreaped",
 })
 NONCOMPARABLE_RUN_QUALITIES = frozenset({
-    "provider_limited", "source_drift", "build_drift",
+    # A cell whose own work is still running was never bounded by its wall:
+    # it kept spending CPU after the clock stopped, and it spends it against
+    # whatever runs next.
+    "provider_limited", "source_drift", "build_drift", "processes_unreaped",
 })
 
 
 def cell_run_quality(cell_dir: Path, status: str) -> str:
     """Resolve persistent cell-quality evidence with stable precedence."""
     quality = "clean"
+    if (cell_dir / ".processes-unreaped").is_file():
+        # Outranks every other reason: whatever else was wrong with the cell,
+        # its wall did not contain its work.
+        return "processes_unreaped"
     try:
         candidate = (cell_dir / ".run-quality").read_text(
             encoding="utf-8",
@@ -1638,6 +1647,8 @@ def harvest_tokens(
         "cache_creation_tokens": 0,
         "cache_creation_1h_tokens": 0,
         "output_tokens": 0,
+        # Sanitizer execution is counted in metrics["execution"] and copied
+        # onto the audit tokens row; the cost ledger never carried it.
         "asan_invocations": 0,
         # prompt_estimate is the only input-token signal from backends whose
         # CLI omits usage (Antigravity and Grok Build), so the harness
@@ -1781,10 +1792,6 @@ def harvest_tokens(
                 rates is not None and rates.get("tiered")
             ):
                 totals["cost_estimated"] = True
-        probe = row.get("probe") or {}
-        if not isinstance(probe, dict):
-            probe = {}
-        totals["asan_invocations"] += _int(probe.get("asan_invocations"))
         if row.get("estimated") is True or estimated_pricing:
             totals["estimated"] = True
     if cost_sources:
@@ -1822,16 +1829,24 @@ def _find_index_jsonl(results_dir: Path) -> Path:
 def harvest_execution(
     results_dir: Path,
     *,
-    usage_reported_invocations: int = 0,
+    raw_log: Path | None = None,
     crash_floor: int = 0,
 ) -> dict:
     """Read passive execution telemetry without influencing audit behavior.
 
     ``bin/probe`` records one row per sanctioned probe in ``state/runs.jsonl``
-    and preserves the requested sanitizer repetition count.  Older and
-    model-direct cells may only have the usage-ledger counter or a confirmed
-    crash, so retain those as explicitly named fallback signals.  The signals
-    can describe the same work; take their maximum instead of double-counting.
+    and preserves the requested sanitizer repetition count.  A confirmed crash
+    floors it, because a crash is proof of at least one run.  Both are exact
+    and stay exact.
+
+    ``sanitizer_command_requests`` is a separate, inexact signal and is never
+    merged into them.  A model-direct cell drives the sanitizer build by hand
+    and writes no probe state, so the exact counters are legitimately zero for
+    it — but zero also used to be the answer for a cell that fuzzed for four
+    hours, and the two are not the same claim.  The request count separates
+    them without pretending to be an execution total; see
+    ``audit_helpers.count_sanitizer_command_requests`` for both directions it
+    is wrong in.
     """
     path = results_dir / "state" / "runs.jsonl"
     probe_records = 0
@@ -1861,15 +1876,16 @@ def harvest_execution(
             by_sanitizer[sanitizer] = by_sanitizer.get(sanitizer, 0) + runs
             by_verdict[verdict] = by_verdict.get(verdict, 0) + runs
 
-    usage_reported_invocations = _as_nonnegative_int(usage_reported_invocations)
+    # Read only when there is no probe state to read: a harness cell's agents
+    # export the same options through bin/probe, so the two describe the same
+    # work and reporting both would invite adding them.
+    command_requests = 0
+    if not probe_records and raw_log is not None and raw_log.is_file():
+        command_requests = audit_helpers.count_sanitizer_command_requests(raw_log)
     crash_floor = _as_nonnegative_int(crash_floor)
-    sanitizer_invocations = max(
-        structured_invocations, usage_reported_invocations, crash_floor
-    )
+    sanitizer_invocations = max(structured_invocations, crash_floor)
     if probe_records:
         source = "state/runs.jsonl"
-    elif usage_reported_invocations:
-        source = "logs/index.jsonl"
     elif crash_floor:
         source = "crash-floor"
     else:
@@ -1878,7 +1894,8 @@ def harvest_execution(
         "probe_records": probe_records,
         "sanitizer_invocations": sanitizer_invocations,
         "structured_sanitizer_invocations": structured_invocations,
-        "usage_reported_invocations": usage_reported_invocations,
+        # Inexact and separately named on purpose — see the docstring.
+        "sanitizer_command_requests": command_requests,
         "crash_floor": crash_floor,
         "by_sanitizer": dict(sorted(by_sanitizer.items())),
         "by_verdict": dict(sorted(by_verdict.items())),
@@ -2760,7 +2777,7 @@ def harvest(
     )
     metrics["execution"] = harvest_execution(
         results_dir,
-        usage_reported_invocations=metrics["tokens"].get("asan_invocations", 0),
+        raw_log=results_dir / "backend.raw.log",
         crash_floor=crash_count,
     )
     # Compatibility for existing metric consumers.  New code should use the
@@ -6109,6 +6126,11 @@ def _cmd_cell_metrics_summary(args: argparse.Namespace) -> int:
     probes = _as_int(tokens.get("asan_invocations"))
     if probes:
         parts.append(f"probes={probes}")
+    # Never folded into probes: it counts requests naming a sanitizer runtime,
+    # not runs. Shown so a hand-driven cell reads as worked rather than idle.
+    requests = _as_int(metrics.get("execution", {}).get("sanitizer_command_requests"))
+    if requests and not probes:
+        parts.append(f"sanitizer_cmds={requests}")
     token_keys = ("input_tokens", "cached_input_tokens", "cache_creation_tokens", "output_tokens", "prompt_estimate_tokens")
     if any(_as_int(tokens.get(key)) for key in token_keys):
         parts.append(

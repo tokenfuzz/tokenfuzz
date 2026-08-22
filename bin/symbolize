@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Resolve `module+offset` frames in a saved sanitizer report, in place.
+
+`bin/run-asan` and its siblings already do this for every testcase they run.
+This is the same pass for a report produced outside them — a sandboxed backend
+that drove the instrumented binary by hand, or an operator replaying one — so
+address-only evidence does not have to be read as addresses.
+
+Usage:
+  bin/symbolize <sanitizer.txt> [more.txt ...]
+
+Exits non-zero when any report still holds an unresolved frame afterwards; the
+reason is on stderr and the report keeps whatever it had.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "lib"))
+
+import sanitizer
+
+
+def main(argv: list[str]) -> int:
+    reports = [Path(value) for value in argv[1:]]
+    if not reports:
+        print("usage: bin/symbolize <sanitizer.txt> [more.txt ...]", file=sys.stderr)
+        return 2
+    resolved = True
+    for report in reports:
+        if not report.is_file():
+            print(f"[symbolize] no such report: {report}", file=sys.stderr)
+            resolved = False
+            continue
+        # symbolize_file already says on stderr why a report kept raw frames.
+        resolved &= sanitizer.symbolize_file(report)
+    return 0 if resolved else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

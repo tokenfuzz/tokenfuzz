@@ -45,6 +45,69 @@ class BenchmarkReportTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value) + "\n", encoding="utf-8")
 
+    def test_direct_prompt_makes_its_own_sanitizer_output_readable(self) -> None:
+        """The baseline must not be handed evidence it cannot read.
+
+        A sandboxed backend is denied the process spawn a sanitizer runtime
+        needs to symbolize itself, so a real run's every trace arrived as
+        `module+offset` while the harness — routing each run through
+        bin/run-asan — read source lines. That taxed only the crash lane: an
+        address-only trace cannot be told apart from one raised inside the
+        agent's own driver.
+        """
+        target = self.root / "sanitized"
+        (target / "build-asan").mkdir(parents=True)
+        binary = target / "build-asan" / "app"
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        binary.chmod(0o755)
+        (target / "target.toml").write_text(
+            'target = "sample"\nasan_bin = "build-asan/app"\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        body = benchmark_model_direct_render.render(str(target), "/abs/out", str(ROOT))
+        self.assertIn("ASAN_OPTIONS=", body)
+        self.assertIn(":symbolize=0", body)
+        self.assertIn(str(ROOT / "bin" / "symbolize"), body)
+        # Sized from the host so a baseline cannot thrash the machine it is
+        # being measured on; a real cell reached a load average of 108 and
+        # then had to disprove its own timeout-driven false hits.
+        self.assertIn("Keep the machine responsive", body)
+        self.assertRegex(body, r"Run at most `\d+` of your own")
+
+        # A [runner] target owns its own environment, so the prompt cannot put
+        # symbolize=0 in its command — but the advice is keyed on the symptom
+        # and has to reach it anyway. Threading the instruction through one
+        # invocation builder reached only the targets taking that branch.
+        for name, toml in (
+            ("swiftish",
+             'target = "b"\nbuild_system = "swift"\n[sanitizer]\nenabled = ["asan"]\n'
+             '[runner]\nbin = "/usr/bin/env"\nargs = ["swift", "{TESTCASE}"]\n'),
+            ("gorace",
+             'target = "c"\nbuild_system = "go"\n[sanitizer]\nenabled = ["race"]\n'
+             '[runner]\nbin = "/usr/bin/env"\nargs = ["go", "run", "{TESTCASE}"]\n'),
+        ):
+            runner_target = self.root / name
+            runner_target.mkdir(parents=True)
+            (runner_target / "target.toml").write_text(toml, encoding="utf-8")
+            runner_body = benchmark_model_direct_render.render(
+                str(runner_target), "/abs/out", str(ROOT),
+            )
+            self.assertIn(str(ROOT / "bin" / "symbolize"), runner_body, name)
+            self.assertIn("Sanitizer frames arrive without source lines",
+                          runner_body, name)
+
+        # A target with no sanitizer at all is told none of it.
+        plain = self.root / "findings-only"
+        plain.mkdir(parents=True)
+        (plain / "target.toml").write_text(
+            'target = "d"\n[sanitizer]\nenabled = []\n', encoding="utf-8",
+        )
+        plain_body = benchmark_model_direct_render.render(
+            str(plain), "/abs/out", str(ROOT),
+        )
+        self.assertNotIn("bin/symbolize", plain_body)
+
     def test_model_direct_prompt_for_managed_and_sanitized_targets(self) -> None:
         managed = self.root / "managed"
         managed.mkdir()

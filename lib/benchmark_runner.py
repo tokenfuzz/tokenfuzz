@@ -907,7 +907,6 @@ def dryrun_cell(cell_dir: Path, condition: str, replicate: int, backend: str) ->
             "backend": backend,
             "resolved_effort": llm_invoke.default_effort(backend),
             "tokens": {"input": 1000, "cached_input": 900, "output": replicate * 100},
-            "probe": {"asan_invocations": 3},
         }) + "\n",
         encoding="utf-8",
     )
@@ -988,6 +987,11 @@ def _target_artifact_guard(target: Path, cell_dir: Path):
 def cleanup_model_direct_scratch(cell_dir: Path) -> None:
     scratch = cell_dir / "scratch"
     if not scratch.is_dir():
+        return
+    if (cell_dir / ".processes-unreaped").is_file():
+        # Deleting a live campaign's binaries mid-run does not stop it: it
+        # makes it log a missing driver over its own results. Keep the tree.
+        log(f"Cell {cell_dir.name}: scratch/ kept — cell processes never reaped")
         return
     count = sum(1 for path in scratch.rglob("*") if path.is_file())
     shutil.rmtree(scratch, ignore_errors=True)
@@ -1079,7 +1083,7 @@ def _record_provider_quality(cell_dir: Path, results: Path, rc: int = 1) -> str:
     return issue
 
 
-def _reap_cell_processes(marker: str) -> None:
+def _reap_cell_processes(marker: str, cell_dir: Path) -> None:
     """Kill fuzzers a completed cell left behind.
 
     The cell command runs under a setsid'd timeout wrapper that reaps its own
@@ -1089,7 +1093,18 @@ def _reap_cell_processes(marker: str) -> None:
     regardless of session, parent, or command line, and can never touch a
     concurrent sibling cell or an unrelated process.
     """
-    reaped = process_tree.kill_marked(marker)
+    try:
+        reaped = process_tree.kill_marked(marker)
+    except process_tree.ProcessLeakError as leak:
+        # The cell's evidence is already on disk, so finish scoring it — but
+        # its wall did not contain its work, and whatever is still running
+        # spends CPU against every cell after it. Record the reason: that
+        # marks this cell noncomparable and stops the run before the next one
+        # is measured on a machine this one is still using.
+        log(f"WARN: Cell {cell_dir.name}: {leak}")
+        (cell_dir / ".processes-unreaped").write_text(f"{leak}\n", encoding="utf-8")
+        (cell_dir / ".run-quality").write_text("processes_unreaped\n", encoding="utf-8")
+        return
     if reaped:
         print(
             f"reaped {len(reaped)} leaked cell process(es): "
@@ -1138,7 +1153,7 @@ def run_model_direct(
                 os.environ.pop("LOGDIR", None)
             else:
                 os.environ["LOGDIR"] = previous_logdir
-            _reap_cell_processes(reap_marker)
+            _reap_cell_processes(reap_marker, cell_dir)
     usage = subprocess.run(
         [
             sys.executable, str(SCRIPT_ROOT / "lib" / "llm_usage.py"),
@@ -1253,7 +1268,7 @@ def run_harness(
                 # Reap escaped cell processes even if the launch raised
                 # (OSError, timeout-helper failure) — the leak this guards
                 # against is exactly what an abnormal exit leaves behind.
-                _reap_cell_processes(reap_marker)
+                _reap_cell_processes(reap_marker, cell_dir)
         result_dir.mkdir(parents=True, exist_ok=True)
     logs = result_dir.parent / "logs"
     for marker in (".run-quality", ".backend-unavailable"):
@@ -2806,9 +2821,12 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
 
     done = failed = 0
     provider_unavailable = False
+    processes_unreaped = ""
     require_trigger_confirmation = True
     if not args.regenerate:
         for condition in conditions:
+            if processes_unreaped:
+                break
             for replicate in range(1, args.replicates + 1):
                 name = f"{condition}-r{replicate}"
                 cell_dir = cells_dir / name
@@ -2825,6 +2843,13 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     log(f"Cell {name}: already done, skipping")
                     done += 1
                     continue
+                if processes_unreaped:
+                    # Measuring this cell now would measure contention with
+                    # the last cell's surviving work, so it is not started at
+                    # all. The run raises below.
+                    log(f"Cell {name}: not started — {processes_unreaped} is "
+                        "still running work this runner could not reap")
+                    break
                 if prior.get("status"):
                     # A same-run-id resume re-runs any replicate that did not
                     # finish clean — provider-limited (excluded from the totals)
@@ -3057,6 +3082,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 )
                 if condition == "model-direct":
                     cleanup_model_direct_scratch(cell_dir)
+                if (cell_dir / ".processes-unreaped").is_file():
+                    processes_unreaped = name
                 log(f"Cell {name} {metrics.metric_gate_summary(summary)}")
                 if status == "done":
                     done += 1
@@ -3081,6 +3108,18 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 update_live_result(bench_root, f"after {name}")
                 log(f"Cell {name}: metrics saved; pooled finalization deferred")
         log(f"Cells complete: {done} done, {failed} failed")
+        if processes_unreaped:
+            # Not a warning: a later cell measured while this one's campaigns
+            # are still running measures the contention, not the condition.
+            print(
+                f"FATAL: cell {processes_unreaped} left processes this runner "
+                f"could not reap. That cell is excluded as noncomparable, and "
+                f"the run stops rather than measure the next one against work "
+                f"the last is still doing. End them, then resume this run id "
+                f"for the cells it did not reach.",
+                file=sys.stderr,
+            )
+            return 1
     else:
         refreshed = 0
         for cell_dir in cells_dir.iterdir():

@@ -181,8 +181,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         logs = results / "logs"
         logs.mkdir()
         (logs / "index.jsonl").write_text(
-            '{"backend":"codex","tokens":{"input":1000,"cached_input":800,"output":50},"probe":{"asan_invocations":2}}\n'
-            '{"backend":"codex","tokens":{"input":500,"cached_input":400,"output":30},"probe":{"asan_invocations":1}}\n'
+            '{"backend":"codex","tokens":{"input":1000,"cached_input":800,"output":50}}\n'
+            '{"backend":"codex","tokens":{"input":500,"cached_input":400,"output":30}}\n'
         )
         (logs / "provider.refusals.log").write_text("WARN MODEL_REFUSAL one\nnoise\n")
 
@@ -202,7 +202,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["tokens"]["input_tokens"], 300)
         self.assertEqual(metrics["tokens"]["cached_input_tokens"], 1200)
         self.assertEqual(metrics["tokens"]["output_tokens"], 80)
-        self.assertEqual(metrics["tokens"]["asan_invocations"], 3)
+        # No probe state and no transcript: the one confirmed crash is the floor.
+        self.assertEqual(metrics["tokens"]["asan_invocations"], 1)
         self.assertEqual(
             metrics["validation_waterfall"]["crashes"]["candidates"], 4,
         )
@@ -331,11 +332,14 @@ class BenchmarkMetricsTests(unittest.TestCase):
         results.mkdir(parents=True)
         logs.mkdir()
         (logs / "index.jsonl").write_text(
-            '{"backend":"codex","tokens":{"input":4000,"cached_input":3800,"output":120},"probe":{"asan_invocations":5}}\n'
+            '{"backend":"codex","tokens":{"input":4000,"cached_input":3800,"output":120}}\n'
         )
         metrics = benchmark.harvest(results)
         self.assertEqual(metrics["tokens"]["input_tokens"], 200)
-        self.assertEqual(metrics["tokens"]["asan_invocations"], 5)
+        # Nothing executed and nothing crashed: the honest answer is zero, and
+        # the source says which signal that came from.
+        self.assertEqual(metrics["tokens"]["asan_invocations"], 0)
+        self.assertEqual(metrics["execution"]["source"], "none")
 
         state = results / "state"
         state.mkdir()
@@ -374,6 +378,96 @@ class BenchmarkMetricsTests(unittest.TestCase):
         direct_metrics = benchmark.harvest(direct)
         self.assertEqual(direct_metrics["tokens"]["asan_invocations"], 1)
         self.assertEqual(direct_metrics["execution"]["source"], "crash-floor")
+
+    def test_model_direct_execution_is_read_from_its_own_transcript(self) -> None:
+        """A hand-driven cell must not score as zero execution.
+
+        A model-direct cell runs the sanitizer build itself instead of through
+        bin/probe, so it writes no state/runs.jsonl. Every such row reported
+        zero sanitizer work, which read the same whether the cell never touched
+        the binary or fuzzed it for four hours.
+        """
+        direct = self.root / "direct-cell"
+        (direct / "crashes").mkdir(parents=True)
+        (direct / "findings").mkdir(parents=True)
+        (direct / "backend.raw.log").write_text(
+            # Claude assistant-message shape.
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "input": {
+                    "command": "ASAN_OPTIONS=detect_leaks=0 ./build-asan/app poc"}},
+            ]}}) + "\n"
+            # The result echoing that command back must not count twice.
+            + json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "content":
+                 "ASAN_OPTIONS=detect_leaks=0 ./build-asan/app poc\nclean"},
+            ]}}) + "\n"
+            # Codex shape, a different sanitizer runtime.
+            + json.dumps({"type": "command_execution",
+                          "command": "UBSAN_OPTIONS=halt_on_error=1 ./build-ubsan/app poc"}) + "\n"
+            # Reading source is not executing it.
+            + json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "rg ASAN_OPTIONS docs/"}},
+            ]}}) + "\n",
+            encoding="utf-8",
+        )
+        metrics = benchmark.harvest(direct)
+        self.assertEqual(metrics["execution"]["sanitizer_command_requests"], 2)
+        self.assertEqual(metrics["execution"]["probe_records"], 0)
+        # The request count is evidence the crash lane was worked. It is not
+        # an execution count in either direction — one matched loop can run
+        # the target thousands of times, and a command that only writes a
+        # script naming the option matches too — so it must never reach the
+        # exact counters or be rendered as probes.
+        self.assertEqual(metrics["execution"]["sanitizer_invocations"], 0)
+        self.assertEqual(metrics["tokens"]["asan_invocations"], 0)
+        self.assertEqual(metrics["execution"]["source"], "none")
+
+    def test_a_request_count_is_neither_a_floor_nor_a_ceiling(self) -> None:
+        """Pin both directions so nobody later reads it as an execution total."""
+        direct = self.root / "inexact"
+        direct.mkdir(parents=True)
+        (direct / "backend.raw.log").write_text(
+            # Over-counts: this writes a script, it does not run one.
+            json.dumps({"type": "command_execution", "command":
+                        "cat > run.sh <<'EOF'\nASAN_OPTIONS=detect_leaks=0 ./app\nEOF"}) + "\n"
+            # Under-counts: one request, thousands of executions, no option named.
+            + json.dumps({"type": "command_execution", "command": "./run.sh 6000"}) + "\n"
+            # A race runtime names its own option variable, not *SAN_OPTIONS.
+            + json.dumps({"type": "command_execution",
+                          "command": "GORACE=halt_on_error=1 ./racer poc"}) + "\n",
+            encoding="utf-8",
+        )
+        execution = benchmark.harvest(direct)["execution"]
+        self.assertEqual(execution["sanitizer_command_requests"], 2)
+        self.assertEqual(execution["sanitizer_invocations"], 0)
+
+    def test_structured_probe_state_outranks_the_transcript(self) -> None:
+        """A harness cell exports the same options through bin/probe.
+
+        Both signals describe the same runs, so adding them would bill the work
+        twice; structured state is the precise one and wins outright.
+        """
+        results = self.root / "harness-cell"
+        (results / "state").mkdir(parents=True)
+        (results / "state" / "runs.jsonl").write_text(
+            json.dumps({"id": "RUN-1", "verdict": "CRASH",
+                        "sanitizer": "asan", "sanitizer_runs": 3}) + "\n",
+            encoding="utf-8",
+        )
+        (results / "backend.raw.log").write_text(
+            "\n".join(
+                json.dumps({"type": "command_execution",
+                            "command": f"ASAN_OPTIONS=halt_on_error=1 ./app {n}"})
+                for n in range(9)
+            ) + "\n",
+            encoding="utf-8",
+        )
+        metrics = benchmark.harvest(results)
+        self.assertEqual(metrics["execution"]["probe_records"], 1)
+        self.assertEqual(metrics["execution"]["sanitizer_invocations"], 3)
+        self.assertEqual(metrics["execution"]["sanitizer_command_requests"], 0)
+        self.assertEqual(metrics["execution"]["source"], "state/runs.jsonl")
 
     def test_token_normalization_sources_and_pricing(self) -> None:
         index = self.root / "index.jsonl"

@@ -359,6 +359,110 @@ _WASTE_OBSERVABILITY_ONLY = {"update_topic"}
 _SHELL_TOOL_NAMES = {"Bash", "bash", "run_shell_command"}
 
 
+# A shell command that sets a sanitizer or race runtime's options is working a
+# sanitizer build. The vocabulary is industry-wide and stable across projects,
+# and it is what a model-direct prompt hands the agent. Both the regex and the
+# cheap line screen are built from this one list: the screen reads raw JSONL,
+# where an escape can sit against the name and defeat a word boundary, so it
+# must be the looser of the two and must never be written out by hand.
+_SANITIZER_OPTION_VARS = (
+    "ASAN_OPTIONS", "HWASAN_OPTIONS", "LSAN_OPTIONS", "MSAN_OPTIONS",
+    "TSAN_OPTIONS", "UBSAN_OPTIONS", "GORACE",
+)
+_SANITIZER_OPTIONS_RE = re.compile(
+    r"\b(?:%s)=" % "|".join(_SANITIZER_OPTION_VARS)
+)
+
+
+def _may_name_a_sanitizer(line: str) -> bool:
+    return any(f"{name}=" in line for name in _SANITIZER_OPTION_VARS)
+
+
+def _shell_command_text(ev) -> list[str]:
+    """Return the shell commands one raw-transcript event requested.
+
+    Mirrors the backend shapes `waste-telemetry` walks: Codex's
+    `command_execution`, Gemini/OpenCode `tool_use`, and Claude's assistant
+    message content. Requests are counted, not results, so one command is
+    counted once however its output is echoed back.
+    """
+    if ev.get("type") == "item.completed":
+        item = ev.get("item") or {}
+        if isinstance(item, dict) and item.get("type") == "command_execution":
+            return [_text_value(item.get("command"))]
+        return []
+
+    if ev.get("type") == "command_execution":
+        return [_text_value(ev.get("command"))]
+
+    if ev.get("type") == "tool_use":
+        opencode_tool = _opencode_tool_event(ev)
+        if opencode_tool is not None:
+            if opencode_tool["name"] not in _SHELL_TOOL_NAMES:
+                return []
+            params = opencode_tool["input"]
+            return [_text_value(params.get("command")) if isinstance(params, dict) else ""]
+        if (ev.get("tool_name") or ev.get("name") or "") not in _SHELL_TOOL_NAMES:
+            return []
+        params = ev.get("parameters") or ev.get("input") or {}
+        return [_text_value(params.get("command")) if isinstance(params, dict) else ""]
+
+    if ev.get("type") == "assistant" or "message" in ev:
+        commands = []
+        for item in _claude_content_items(ev):
+            if not isinstance(item, dict) or item.get("type") != "tool_use":
+                continue
+            if (item.get("name") or "") not in _SHELL_TOOL_NAMES:
+                continue
+            inp = item.get("input") or {}
+            commands.append(_text_value(inp.get("command")) if isinstance(inp, dict) else "")
+        return commands
+
+    return []
+
+
+def count_sanitizer_command_requests(path) -> int:
+    """Count agent shell requests that name a sanitizer runtime's options.
+
+    This is **not** an execution count and must never be reported as one. It
+    is wrong in both directions, by construction:
+
+    * it over-counts — a command that only *writes* a script containing the
+      option string is indistinguishable from one that runs it, and about a
+      fifth of the matches in one real transcript were heredocs and `cat >`
+      forms;
+    * it under-counts, and by far the larger factor — `./runfuzz.sh` names no
+      option and may execute the target thousands of times, one matched loop
+      is one request, and an in-process driver is one request per corpus.
+
+    What it does answer is the question the metrics could not: whether the
+    cell worked the sanitizer build at all. A model-direct cell writes no
+    `state/runs.jsonl`, so zero was the only number available whether it never
+    touched the binary or fuzzed it for four hours. Publish it under its own
+    name, beside the exact counts, never merged into them.
+    """
+    total = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line or not _may_name_a_sanitizer(line):
+                    continue
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                total += sum(
+                    1 for command in _shell_command_text(event)
+                    if _SANITIZER_OPTIONS_RE.search(command)
+                )
+    except OSError:
+        return 0
+    return total
+
+
 def _text_value(value):
     if value is None:
         return ""

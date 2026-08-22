@@ -118,8 +118,95 @@ def _pids_with_token(token: str) -> list[int]:
     argv-only snapshot identifies that boundary: without it, marker-looking
     text in an unrelated process's arguments is indistinguishable from an
     environment entry. Both expose only processes this uid may inspect, so the
-    search is same-uid by construction.
+    search is same-uid by construction. The result is then widened over process
+    groups and parent links, which recovers the processes those probes are not
+    permitted to read.
     """
+    return _widen_ownership(_pids_with_token_env(token))
+
+
+def _process_table() -> tuple[dict[int, int], dict[int, int]]:
+    """(parent, process-group) by pid, or empty when ps cannot be read."""
+    try:
+        output = subprocess.check_output(
+            ["ps", "-ax", "-o", "pid=,ppid=,pgid="], text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}, {}
+    parent: dict[int, int] = {}
+    group: dict[int, int] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 3 or not all(part.lstrip("-").isdigit() for part in parts):
+            continue
+        pid, ppid, pgid = (int(part) for part in parts)
+        parent[pid] = ppid
+        group[pid] = pgid
+    return parent, group
+
+
+def _widen_ownership(pids: list[int]) -> list[int]:
+    """Claim the processes the environment probe is not allowed to read.
+
+    The marker is inherited by every descendant, so reading it is normally
+    enough. It is not always readable: macOS refuses to disclose a platform
+    binary's arguments and environment to a non-root caller, so a leaked
+    `/bin/sh` supervisor is invisible while the driver it respawns is not. One
+    real cell reaped that driver five times over while the supervisor calmly
+    replaced it.
+
+    Two links the kernel does expose recover it, applied together to a fixed
+    point because each can reveal work the other then widens:
+
+    * process group — inherited exactly like the marker, unaffected by the
+      launcher exiting, and it outlives its own leader. This is what finds an
+      opaque supervisor with no visible relative above it.
+    * parent — finds an opaque child of a visible marked process, the case a
+      group cannot cover once something has called setsid.
+
+    Neither reaches a process that is opaque, reparented, *and* alone in a new
+    group. Nothing readable ties such a process to this run, which is why
+    kill_marked reports rather than assumes when the marker will not clear.
+    """
+    if not pids:
+        return pids
+    parent, group = _process_table()
+    if not parent:
+        return pids
+    members: dict[int, list[int]] = {}
+    children: dict[int, list[int]] = {}
+    for pid, pgid in group.items():
+        members.setdefault(pgid, []).append(pid)
+    for pid, ppid in parent.items():
+        children.setdefault(ppid, []).append(pid)
+
+    # Never widen onto ourselves. A directly marked ancestor is still reaped —
+    # that is the caller's declared ownership — but inferring one from a group
+    # or parent link would take down the caller mid-reap. Our own group is
+    # excluded wholesale: when a cell was never put in a session of its own,
+    # widening by group would sweep the runner in with it.
+    protected = {0, 1, os.getpid()}
+    walker = parent.get(os.getpid(), 0)
+    while walker > 1 and walker not in protected:
+        protected.add(walker)
+        walker = parent.get(walker, 0)
+    own_groups = {group.get(pid, 0) for pid in protected} | {0, 1}
+
+    claimed = {pid for pid in pids if pid not in protected}
+    while True:
+        widened = set(claimed)
+        for pid in claimed:
+            pgid = group.get(pid, 0)
+            if pgid not in own_groups:
+                widened.update(members.get(pgid, ()))
+            widened.update(children.get(pid, ()))
+        widened -= protected
+        if widened == claimed:
+            return sorted(claimed)
+        claimed = widened
+
+
+def _pids_with_token_env(token: str) -> list[int]:
     pids: list[int] = []
     if os.path.isdir("/proc"):
         raw = token.encode()
@@ -192,6 +279,43 @@ def _pids_with_token(token: str) -> list[int]:
     return pids
 
 
+# Enough rounds to outlast a supervisor that respawns one replacement per
+# kill, few enough that a genuinely unkillable tree is reported rather than
+# spun on. Each round costs one process-table scan plus `grace`.
+_REAP_ROUNDS = 5
+
+
+class ProcessLeakError(RuntimeError):
+    """A reap marker stayed live, or could not be observed at all."""
+
+
+# Snapshotted before anything in-process can mutate it, so _probe_blind asks
+# about a variable the kernel actually recorded for this pid.
+_EXEC_ENVIRON = dict(os.environ)
+
+
+def _probe_blind() -> bool:
+    """Whether the marker probe cannot observe process environments here.
+
+    Every probe path degrades to an empty list when the platform refuses it —
+    a sandbox that denies `sysctl`, a hardened `ps` that drops `-E`, a
+    container with no readable `/proc`. An empty result then means "nothing to
+    reap" and "cannot tell", which are opposite answers, and the caller
+    reported the second as the first. Ask the one question whose answer is
+    known: a probe that cannot find this very process cannot find anything.
+
+    The variable must come from the exec-time environment. What these probes
+    read is the copy the kernel took at exec, so a token assigned into
+    ``os.environ`` afterwards is invisible to them and every host would look
+    blind.
+    """
+    for name in ("PATH", "HOME", "TMPDIR"):
+        value = _EXEC_ENVIRON.get(name)
+        if value:
+            return os.getpid() not in _pids_with_token_env(f"{name}={value}")
+    return False
+
+
 def kill_marked(marker: str, grace: float = 1.0) -> list[int]:
     """TERM then KILL every process carrying ``marker`` in its environment.
 
@@ -203,23 +327,46 @@ def kill_marked(marker: str, grace: float = 1.0) -> list[int]:
     Refuses to act if this process itself carries the marker — that would mean
     reaping our own tree — so a caller that wrongly exported it into its own
     environment fails safe instead of killing the run.
+
+    Sweeps until the marker is clear. One pass only kills the processes alive
+    when it took its snapshot, so a restart loop whose child is killed spawns a
+    replacement the pass never sees: a model-direct cell reaped 31 processes
+    and still had campaigns writing files ten minutes later, into a scratch
+    tree the runner was deleting under them. Rounds are bounded, and a marker
+    that will not clear is raised rather than reported as reaped.
     """
     if not marker or os.environ.get(REAP_MARKER_VAR) == marker:
         return []
-    pids = sorted(
-        pid for pid in _pids_with_token(f"{REAP_MARKER_VAR}={marker}")
-        if pid != os.getpid()
-    )
-    if not pids:
-        return []
-    _kill(pids, signal.SIGTERM)
-    deadline = time.monotonic() + grace
-    while grace > 0 and time.monotonic() < deadline:
-        if not any(_alive(pid) for pid in pids):
-            break
-        time.sleep(0.05)
-    _kill([pid for pid in pids if _alive(pid)], signal.SIGKILL)
-    return pids
+    reaped: set[int] = set()
+    for _ in range(_REAP_ROUNDS):
+        pids = sorted(
+            pid for pid in _pids_with_token(f"{REAP_MARKER_VAR}={marker}")
+            if pid != os.getpid()
+        )
+        if not pids:
+            if not reaped and _probe_blind():
+                raise ProcessLeakError(
+                    "cannot read process environments on this host, so a "
+                    "leaked cell process is undetectable; reaping nothing is "
+                    "not evidence that nothing leaked"
+                )
+            return sorted(reaped)
+        reaped.update(pids)
+        _kill(pids, signal.SIGTERM)
+        deadline = time.monotonic() + grace
+        while grace > 0 and time.monotonic() < deadline:
+            if not any(_alive(pid) for pid in pids):
+                break
+            time.sleep(0.05)
+        _kill([pid for pid in pids if _alive(pid)], signal.SIGKILL)
+    if [pid for pid in _pids_with_token(f"{REAP_MARKER_VAR}={marker}")
+            if pid != os.getpid()]:
+        raise ProcessLeakError(
+            f"{len(reaped)} process(es) reaped over {_REAP_ROUNDS} rounds and "
+            f"the reap marker is still live; something is respawning faster "
+            f"than it can be killed"
+        )
+    return sorted(reaped)
 
 
 def main(argv: list[str]) -> int:

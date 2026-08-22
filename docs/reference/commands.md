@@ -191,6 +191,7 @@ TARGET_ROOT="targets/$TARGET" RESULTS_DIR="$RESULTS" \
 bin/scratch-status "$RESULTS/scratch-1"
 RESULTS_DIR="$RESULTS" bin/scratch-search <pattern>
 bin/probe-history --results-dir "$RESULTS" --hypothesis-id H1
+bin/symbolize "$RESULTS/crashes/CRASH-001/sanitizer.txt"
 ```
 
 | Command | Purpose |
@@ -199,6 +200,12 @@ bin/probe-history --results-dir "$RESULTS" --hypothesis-id H1
 | `bin/scratch-status` | Show testcase/output pairs and unrun testcases in one scratch directory. |
 | `bin/scratch-search` | Search prior scratch, corpus, and crash artifacts without scanning raw logs. |
 | `bin/probe-history` | Read prior verdicts from structured run state. |
+| `bin/symbolize` | Resolve `module+offset` frames in a report produced outside the runners. |
+
+The runners symbolize what they run. `bin/symbolize` is for a report that did
+not come from one — a sandboxed backend that drove the instrumented binary
+itself, where the sanitizer runtime is denied the process spawn its own
+symbolizer needs. It exits non-zero, and says why, when a frame stays raw.
 
 ### Boundary-directed fuzzing (S4)
 

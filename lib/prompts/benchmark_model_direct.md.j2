@@ -85,6 +85,15 @@ absolute path), and do not use `pgrep`, `ps`, a pipeline, or a script to feed
 matched PIDs to `kill`. A target name also appears in concurrent benchmark
 commands. Signal only an exact PID you saved, or let timeout cleanup own it.
 
+Keep the machine responsive. Run at most `{{ parallel_ceiling }}` of your own
+executions at a time across every background job together, and check with
+`uptime` before adding another. This is a measurement rule, not a budget:
+past that point the host thrashes, every `timeout`-based check starts firing
+on load rather than on the target, and the hits it reports are artifacts you
+will spend real time disproving. Any background job you start is yours to
+finish — read its results before the deadline, because a campaign still
+running when the session ends is a campaign that found nothing.
+
 ## Writing scope — absolute paths only
 
 Everything you produce — findings, crashes, and any intermediate files or
@@ -274,6 +283,7 @@ do not describe it as reachable from the input alone.
 
 {{ asan_invocation_hint }}
 {{ harness_build_recipe }}
+{{ symbolize_hint }}
 
 For every CRASH:
 

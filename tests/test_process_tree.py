@@ -240,6 +240,145 @@ ok(completed.returncode == 0 and completed.stdout.startswith("[]|"),
    f"rc={completed.returncode} out={completed.stdout.strip()!r} err={completed.stderr.strip()!r}")
 
 
+# ── opaque supervisor: env unreadable, parent link readable ──────────
+print("\nopaque supervisor")
+# macOS refuses to disclose a platform binary's environment to a non-root
+# caller, so a leaked `/bin/sh` supervisor is invisible to the environment
+# probe while the driver it respawns is not. One pass then killed the child
+# and left the supervisor to spawn another: the shape that outlived a real
+# benchmark cell and wrote over the scratch tree the runner was reclaiming.
+opaque = pt.new_marker()
+with tempfile.TemporaryDirectory() as tmp:
+    supervisor = Path(tmp) / "respawn.sh"
+    supervisor.write_text("while true; do sleep 60 & wait $!; done\n")
+    launcher = Path(tmp) / "launch.py"
+    launcher.write_text(
+        "import subprocess, sys, time\n"
+        "[subprocess.Popen(['/bin/sh', sys.argv[1]]) for _ in range(2)]\n"
+        "time.sleep(120)\n"
+    )
+    parent = subprocess.Popen(
+        [sys.executable, str(launcher), str(supervisor)],
+        env=_marked_env(opaque),
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    time.sleep(2.0)
+    token = f"{pt.REAP_MARKER_VAR}={opaque}"
+    env_only = pt._pids_with_token_env(token)
+    closed = pt._pids_with_token(token)
+    ok(len(closed) > len(env_only),
+       "parent closure recovers descendants the environment probe cannot read",
+       f"env_only={env_only} closed={closed}")
+    reaped = pt.kill_marked(opaque, grace=0.5)
+    time.sleep(0.5)
+    survivors = [pid for pid in pt._pids_with_token(token) if pid != os.getpid()]
+    ok(not survivors, "a respawning opaque supervisor is fully reaped",
+       f"reaped={reaped} survivors={survivors}")
+    _cleanup(parent)
+
+
+# ── orphaned opaque supervisor: no readable marked relative above it ─
+print("\norphaned opaque supervisor")
+# The shape the previous fix did not reach, and the one a real cell hit: the
+# launcher is gone, so the only marked process a probe can read is the driver
+# at the BOTTOM. Its supervisor is a platform binary reparented to PID 1 —
+# unreadable, with nothing marked above it — and it respawns the driver as
+# fast as the reap kills it. Only the process group still ties the two
+# together.
+orphaned = pt.new_marker()
+with tempfile.TemporaryDirectory() as tmp:
+    supervisor = Path(tmp) / "supervise.sh"
+    supervisor.write_text(
+        f"while true; do {sys.executable} -c 'import time; time.sleep(5)'; done\n"
+    )
+    subprocess.run(
+        ["/bin/sh", "-c", f"nohup /bin/sh {supervisor} >/dev/null 2>&1 & exit 0"],
+        env=_marked_env(orphaned), start_new_session=True, check=False,
+    )
+    time.sleep(2.5)
+
+    def _supervisor_pids() -> list[int]:
+        listing = subprocess.check_output(["ps", "-ax", "-o", "pid=,command="], text=True)
+        return [int(row.split()[0]) for row in listing.splitlines()
+                if str(supervisor) in row]
+
+    token = f"{pt.REAP_MARKER_VAR}={orphaned}"
+    readable = pt._pids_with_token_env(token)
+    widened = pt._pids_with_token(token)
+    running = _supervisor_pids()
+    ok(bool(running), "orphaned supervisor is running", f"pids={running}")
+    ok(all(pid not in readable for pid in running),
+       "the supervisor's environment is unreadable, as the failure requires",
+       f"readable={readable} supervisor={running}")
+    ok(all(pid in widened for pid in running),
+       "process-group widening claims a supervisor with no marked relative above it",
+       f"readable={readable} widened={widened} supervisor={running}")
+    try:
+        reaped = pt.kill_marked(orphaned, grace=0.5)
+        raised = ""
+    except pt.ProcessLeakError as leak:  # pragma: no cover - the bug this fixes
+        reaped, raised = [], str(leak)
+    time.sleep(1.0)
+    survivors = _supervisor_pids()
+    ok(not raised and not survivors,
+       "an orphaned opaque supervisor is reaped instead of respawning forever",
+       f"reaped={reaped} raised={raised!r} survivors={survivors}")
+    for pid in survivors:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+# ── safety: a cell left in our own group never widens onto the runner ─
+print("\nown-group safety")
+# A cell that was never put in a session of its own shares the runner's
+# process group. Widening by group would then sweep in the runner and every
+# unrelated sibling, so the claim must stay exactly what the marker proved.
+same_group = pt.new_marker()
+marked = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(60)"], env=_marked_env(same_group),
+)
+unmarked = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+time.sleep(1.0)
+claimed = pt._pids_with_token(f"{pt.REAP_MARKER_VAR}={same_group}")
+ok(claimed == [marked.pid],
+   "a marked process in our own group claims only itself",
+   f"claimed={claimed} marked={marked.pid} unmarked={unmarked.pid} self={os.getpid()}")
+_cleanup(marked, unmarked)
+
+
+# ── blind probe is reported, never read as "nothing leaked" ──────────
+print("\nblind probe")
+# Every probe path degrades to an empty list when the platform refuses it, and
+# "nothing to reap" then means the same as "cannot tell". Force the blind case
+# and require it to raise rather than return clean.
+blind_helper = (
+    "import sys;"
+    "sys.path.insert(0, sys.argv[1]);"
+    "import process_tree as pt;"
+    "pt._pids_with_token_env = lambda token: [];"
+    "pt._EXEC_ENVIRON = {'PATH': '/definitely/not/this/process'};"
+    "\ntry:\n"
+    "    pt.kill_marked('some-marker', grace=0.1)\n"
+    "    print('RETURNED')\n"
+    "except pt.ProcessLeakError:\n"
+    "    print('RAISED')\n"
+)
+completed = subprocess.run(
+    [sys.executable, "-c", blind_helper, str(ROOT / "lib")],
+    capture_output=True, text=True, check=False,
+)
+ok(completed.stdout.strip() == "RAISED",
+   "a probe that cannot see this process refuses to report a clean reap",
+   f"out={completed.stdout.strip()!r} err={completed.stderr.strip()[-200:]!r}")
+
+# A working probe with genuinely nothing marked still returns clean.
+ok(pt.kill_marked(pt.new_marker(), grace=0.1) == [],
+   "an unused marker on a working probe reaps nothing without raising")
+
+
 print()
 if FAILED:
     print(f"\033[0;31m{FAILED} failed, {PASSED} passed\033[0m")
