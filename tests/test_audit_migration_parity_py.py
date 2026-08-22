@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 import audit_helpers
 import audit_runner
 import benchmark
+import cluster_common
 import file_tools
 import llm_invoke
 import process_tree
@@ -61,6 +62,23 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         json.loads(run_config.read_text(encoding="utf-8"))["agent_security"]
         == "sandboxed",
         "audit run metadata records the selected agent security profile",
+    )
+
+    # On a case-insensitive filesystem a `directory / "REPORT.md"` probe
+    # answers for an on-disk `report.md` and hands back the case it was asked
+    # for. Every consumer must agree on the one spelling the directory has:
+    # triage feeds it to `render-md --html-sibling`, which names the sibling
+    # after it, and the cluster tools then link that pair by exact name.
+    report_dir = root / "exact-report-case"
+    report_dir.mkdir()
+    (report_dir / "report.md").write_text("finding\n", encoding="utf-8")
+    check(
+        {
+            report_identity.find_report(report_dir),
+            triage._report(report_dir),
+            cluster_common.artifact_report_paths(report_dir)[0],
+        } == {report_dir / "report.md"},
+        "report consumers agree on the report's exact on-disk case",
     )
 
     prompt_results = root / "prompt-results"

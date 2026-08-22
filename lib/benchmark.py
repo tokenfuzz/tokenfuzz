@@ -1927,7 +1927,7 @@ def harvest_artifact_links(
         ("crash", results_dir / "crashes", crash_names),
     ):
         for name in sorted(names):
-            report = cluster_common.artifact_report_path(parent / name)
+            report = report_identity.find_report(parent / name)
             text = _read_metric_report(report)
             cluster = cluster_common.cluster_label(text)
             records[name] = (kind, text)
@@ -2013,7 +2013,7 @@ def harvest_gate_states(results_dir: Path) -> list[dict]:
         for directory in sorted(parent.iterdir()):
             if not directory.is_dir() or not directory.name.startswith(prefix):
                 continue
-            report = cluster_common.artifact_report_path(directory)
+            report = report_identity.find_report(directory)
             report_text = _read_metric_report(report)
             receipt = validation_receipt.read_current(directory)
             if receipt is not None and receipt.get("kind") != kind:
@@ -2894,21 +2894,8 @@ def _short(text: str, limit: int = 220) -> str:
     return text[: max(0, limit - 1)].rstrip() + "…"
 
 
-def _exact_child_file(parent: Path, names: tuple[str, ...]) -> Path | None:
-    """Return an exact-case child match, even on case-insensitive filesystems."""
-    try:
-        children = {child.name: child for child in parent.iterdir()}
-    except OSError:
-        return None
-    for name in names:
-        child = children.get(name)
-        if child is not None and child.is_file():
-            return child
-    return None
-
-
 def _report_link_name(finding_dir: Path) -> str:
-    report = _exact_child_file(
+    report = report_identity.exact_child_file(
         finding_dir,
         ("report.md", "REPORT.md", "description.md", "analysis.md",
          "report.html", "REPORT.html", "description.html"),
@@ -2941,7 +2928,7 @@ def _first_crash_frame(text: str) -> str:
 
 
 def _crash_sanitizer_text(crash_dir: Path) -> str:
-    direct = _exact_child_file(
+    direct = report_identity.exact_child_file(
         crash_dir,
         ("sanitizer.txt",),
     )

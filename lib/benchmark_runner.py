@@ -594,7 +594,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--model", default="")
     result.add_argument(
         "--agent-security", choices=llm_invoke.AGENT_SECURITY_MODES, default=None,
-        help="backend execution boundary used by both conditions",
+        help=(
+            "backend execution boundary used by both conditions (default: "
+            "external-bypass for oss, which has no native OS sandbox; "
+            "sandboxed otherwise)"
+        ),
     )
     result.add_argument("--replicates", type=_positive, default=3)
     result.add_argument(
@@ -2534,7 +2538,9 @@ def _resolve_run_agent_security(args: argparse.Namespace, previous: dict) -> str
             )
         args.agent_security = recorded
     try:
-        args.agent_security = llm_invoke.resolve_agent_security(args.agent_security)
+        args.agent_security = llm_invoke.resolve_agent_security(
+            args.agent_security, args.backend,
+        )
     except ValueError as exc:
         return str(exc)
     problem = llm_invoke.agent_security_problem(args.backend, args.agent_security)

@@ -181,6 +181,14 @@ proc = run(["agent-flags", "oss", "--model", "qwen3:8b"], check=True)
 f = flags(proc)
 assert_eq("local/qwen3:8b", f[f.index("--model") + 1], "oss model uses shared local provider ref for colon-tagged models")
 
+proc = run(["agent-flags", "oss", "--model", "org/qwen3-8b"], check=True)
+f = flags(proc)
+assert_eq("local/org/qwen3-8b", f[f.index("--model") + 1], "oss keeps slash-bearing served model ids on the local provider")
+
+proc = run(["agent-flags", "oss", "--model", "opencode/x-preview-f-free"], check=True)
+f = flags(proc)
+assert_eq("opencode/x-preview-f-free", f[f.index("--model") + 1], "oss passes OpenCode built-in model refs through")
+
 proc = run(["local-base-url"], check=True)
 assert_eq("http://127.0.0.1:8000/v1", proc.stdout.strip(), "oss vLLM default base URL includes /v1")
 
@@ -207,6 +215,13 @@ ok(cfg["permission"]["external_directory"] == "deny",
    "oss sandboxed config denies external directories")
 ok(cfg["permission"]["webfetch"] == "deny",
    "oss sandboxed config denies web fetch tools")
+
+proc = run(["opencode-config", "--model", "opencode/x-preview-f-free"], check=True)
+cfg = json.loads(proc.stdout)
+ok("provider" not in cfg,
+   "oss built-in model config does not shadow OpenCode's provider")
+ok(cfg["permission"]["external_directory"] == "deny",
+   "oss built-in model decisions retain external-directory denies")
 
 proc = run(["agent-flags", "gemini"], check=True)
 f = flags(proc)
@@ -517,8 +532,8 @@ with mock.patch.dict(os.environ, {}, clear=True):
         refused = ""
     except ValueError as exc:
         refused = str(exc)
-    ok("native OS sandbox" in refused,
-       "an agent launch fails closed before it reaches the backend")
+    ok("IS_SANDBOX=1" in refused,
+       "an unflagged OpenCode launch requires its default outer sandbox")
     ok(inv.decide_flags("oss"),
        "a read-only decision carries no execution boundary and still runs")
     ok("child network" in inv.agent_security_problem("grok", "sandboxed"),
@@ -541,6 +556,16 @@ with mock.patch.dict(
 ):
     assert_eq("external-bypass", inv.inherited_agent_security(),
               "child agent launches inherit the parent orchestration profile")
+with mock.patch.dict(os.environ, {}, clear=True):
+    assert_eq("external-bypass", inv.resolve_agent_security(None, "oss"),
+              "OpenCode defaults to its required outer-sandbox profile")
+    assert_eq("sandboxed", inv.resolve_agent_security(None, "codex"),
+              "native-sandbox backends retain the sandboxed default")
+with mock.patch.dict(
+    os.environ, {inv.AGENT_SECURITY_ENV: "sandboxed"}, clear=True,
+):
+    assert_eq("sandboxed", inv.resolve_agent_security(None, "oss"),
+              "an inherited profile overrides the OpenCode default")
 import llm_decide as decide_mod  # noqa: E402
 
 with tempfile.TemporaryDirectory() as td:

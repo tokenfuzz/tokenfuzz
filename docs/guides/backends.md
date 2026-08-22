@@ -15,11 +15,10 @@ bin/audit --target <target> --backend <backend> [--model <model>]
 bin/audit --target <target> --backend all
 ```
 
-Agent launches default to `--agent-security sandboxed`, which runs the backend
-inside its own OS sandbox and refuses backends whose sandbox cannot host an
-audit. `--agent-security external-bypass` drops that boundary for an outer one
-you administer, and is refused unless the environment asserts `IS_SANDBOX=1`.
-See [Agent security modes](#agent-security-modes).
+Agent launches default to `--agent-security sandboxed`, except `oss`, which
+defaults to `external-bypass` because OpenCode has no native OS sandbox. That
+mode is still refused unless an outer sandbox asserts `IS_SANDBOX=1`. See
+[Agent security modes](#agent-security-modes).
 
 | Backend | CLI | Model behavior |
 | --- | --- | --- |
@@ -27,7 +26,7 @@ See [Agent security modes](#agent-security-modes).
 | `codex` | Codex CLI (`codex`) | Uses `config/models.toml` unless `--model` is passed. |
 | `gemini` | Antigravity CLI (`agy`) by default | A config model slug is mapped to an `agy models` label. Set `USE_GEMINI_CLI=1` to use Google Gemini CLI instead. |
 | `grok` | Grok Build (`grok`) | Uses `config/models.toml` unless `--model` is passed. |
-| `oss` | OpenCode (`opencode`) | `--model` is required and must match the exact id served by the local endpoint. |
+| `oss` | OpenCode (`opencode`) | `--model` is required. Use an `opencode/<id>` catalog entry or the exact id served by a local endpoint. |
 | `all` | Installed hosted CLIs | Cycles `claude → codex → gemini → grok`; excludes `oss`, and skips any backend the selected [security mode](#agent-security-modes) cannot launch. |
 
 Use an explicit `--backend` and `--model` in any reproduction or benchmark
@@ -69,14 +68,14 @@ the CLI; do not put keys in `target.toml` or reports.
 
 ## Agent security modes
 
-Every agent launch runs under one of two modes. `sandboxed` is the default and
-needs no flag; `external-bypass` must be asked for and is refused unless the
-environment asserts `IS_SANDBOX=1`.
+Every agent launch runs under one of two modes. Hosted backends default to
+`sandboxed`; `oss` defaults to `external-bypass`. The latter is always refused
+unless the environment asserts `IS_SANDBOX=1`.
 
 | Mode | What enforces the boundary | When to use it |
 | --- | --- | --- |
-| `sandboxed` (default) | The backend CLI's own OS sandbox — Seatbelt on macOS, Landlock/seccomp or bubblewrap on Linux. Approval prompts are turned off, because a headless run cannot answer one and an approval the model can request is not a boundary. | Normal runs on a machine you also use for other things. |
-| `external-bypass` | Nothing in the CLI. You are asserting that an outer container or VM enforces filesystem, process, credential, and egress policy. | Inside a container or VM you administer, and for the backends `sandboxed` refuses. |
+| `sandboxed` (hosted default) | The backend CLI's own OS sandbox — Seatbelt on macOS, Landlock/seccomp or bubblewrap on Linux. Approval prompts are turned off, because a headless run cannot answer one and an approval the model can request is not a boundary. | Normal runs on a machine you also use for other things. |
+| `external-bypass` (`oss` default) | Nothing in the CLI. You are asserting that an outer container or VM enforces filesystem, process, credential, and egress policy. | Inside a container or VM you administer, and for the backends `sandboxed` refuses. |
 
 A third, classifier-reviewed `auto` mode is deliberately absent: it would add
 provider calls, latency, and variable decisions to the audit and benchmark
@@ -221,7 +220,26 @@ output/<target>/CRASH-CLUSTERS.html
 Ensemble mode is rotation, not consensus voting. Each backend works its own
 state tree; the target-level summaries cluster results after the fact.
 
-## Local models through OpenCode
+## OpenCode provider and local models
+
+The `oss` backend can use a model from OpenCode's built-in provider. Refresh
+the catalog and verify the exact provider-qualified id directly before the
+audit:
+
+```bash
+opencode models opencode --refresh
+opencode run --pure --model opencode/<model-id> "Reply exactly: tokenfuzz-opencode-auth-ok"
+
+bin/audit --target <target> --backend oss \
+  --model opencode/<model-id> 1
+```
+
+TokenFuzz passes the `opencode/` model reference through to the installed CLI,
+which retains OpenCode's normal credential and provider handling. Because
+OpenCode has no native OS sandbox, `oss` selects `external-bypass` automatically
+and the command runs only inside an environment that asserts `IS_SANDBOX=1`.
+
+### Local OpenAI-compatible models
 
 The `oss` backend runs OpenCode against an OpenAI-compatible server. TokenFuzz
 defaults to `http://127.0.0.1:8000/v1` and verifies the requested model against
@@ -233,7 +251,7 @@ bin/audit --target <target> --backend oss --model <served-model-id> 1
 
 Install OpenCode, then choose a server:
 
-### vLLM path
+#### vLLM path
 
 vLLM is suited to GPU hosts and larger models:
 
@@ -253,7 +271,7 @@ export AUDIT_LOCAL_BASE_URL=http://127.0.0.1:9000/v1
 bin/audit --target <target> --backend oss --model audit-model 1
 ```
 
-### Ollama path
+#### Ollama path
 
 Ollama is convenient for a desktop or smaller local model:
 

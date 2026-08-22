@@ -107,6 +107,14 @@ class BenchmarkCliTests(unittest.TestCase):
             args.agent_security, benchmark_runner.llm_invoke.DEFAULT_AGENT_SECURITY,
         )
 
+    def test_a_new_opencode_run_defaults_to_the_outer_sandbox_profile(self) -> None:
+        args = self._regen_args(backend="oss", regenerate=False)
+        with mock.patch.dict(os.environ, {"IS_SANDBOX": "1"}, clear=True):
+            self.assertEqual(
+                "", benchmark_runner._resolve_run_agent_security(args, {}),
+            )
+        self.assertEqual(args.agent_security, "external-bypass")
+
     def test_a_new_run_keeps_the_operator_choice_for_the_settings_check(self) -> None:
         args = self._regen_args(regenerate=False)
         with mock.patch.dict(os.environ, {}, clear=True):

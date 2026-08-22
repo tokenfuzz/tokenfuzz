@@ -32,7 +32,7 @@ SCRIPT_ROOT = HERE.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import target_config  # noqa: E402
-from cluster_common import exact_child_file  # noqa: E402
+from report_identity import exact_child_file  # noqa: E402
 from report_enrich import (  # noqa: E402
     EnrichContext,
     SourceFileIndex,

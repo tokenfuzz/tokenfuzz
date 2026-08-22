@@ -42,7 +42,6 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import strategies  # noqa: E402
 
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
-import cluster_common  # noqa: E402
 import crash_bundle  # noqa: E402
 import report_identity  # noqa: E402
 import sanitizer as sanitizer_policy  # noqa: E402
@@ -3394,7 +3393,7 @@ def main(argv: list[str]) -> int:
     # it. Re-bundling from .audit/report.md alone silently discards fields
     # learned after the first export.
     field_report_md = (
-        cluster_common.exact_child_file(crash_dir, ("REPORT.md",))
+        report_identity.exact_child_file(crash_dir, ("REPORT.md",))
         or report_md
     )
 

@@ -71,6 +71,7 @@ class AuditContainerShellTests(unittest.TestCase):
             "# codex login status", '# claude -p "Reply exactly: tokenfuzz-claude-auth-ok"',
             '# agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"',
             '# grok -p "Reply exactly: tokenfuzz-grok-auth-ok"', "press Ctrl+C",
+            "# opencode auth login", "tokenfuzz-opencode-auth-ok",
             "IS_SANDBOX=1", "--agent-security external-bypass",
         ):
             with self.subTest(expected=expected):
@@ -85,6 +86,7 @@ class AuditContainerShellTests(unittest.TestCase):
         for expected in (
             "BASE_IMAGE=node:lts-bookworm", "@anthropic-ai/claude-code@latest",
             "@openai/codex@latest", "@google/gemini-cli@latest",
+            "opencode-ai@latest",
             "AGY_INSTALL_URL=https://antigravity.google/cli/install.sh",
             "GROK_INSTALL_URL=https://x.ai/cli/install.sh", f"-v {self.root}:/root/work",
             "-e GEMINI_CLI_TRUST_WORKSPACE=true", "-e IS_SANDBOX=1",

@@ -40,7 +40,6 @@ import severity_receipt  # noqa: E402
 import stack_frames  # noqa: E402
 import target_config as tc  # noqa: E402
 import validation_receipt  # noqa: E402
-from cluster_common import exact_child_file  # noqa: E402
 
 
 # ─── target.toml discovery ────────────────────────────────────────────────
@@ -2863,15 +2862,9 @@ def _run_batch(results_dir: Path) -> int:
 
 
 def _find_report_md_in_dir(report_dir: Path) -> Path | None:
-    # exact_child_file walks the real directory entries, so the returned
-    # Path carries the on-disk case. On case-insensitive filesystems
-    # (macOS APFS default, Docker Desktop bind mounts) both "report.md"
-    # and "REPORT.md" resolve to the same entry; a naive (report_dir /
-    # name).is_file() probe returns a Path with whatever case we asked
-    # for, and a later write_text through that Path can leave the
-    # visible entry under the wrong case — which then trips the
-    # exact-case bundle gate in lib/triage.py:_triage_has_exact_file.
-    return exact_child_file(report_dir, ("report.md", "REPORT.md"))
+    # Narrower than report_identity.find_report on purpose: severity rewrites
+    # the report in place and only the two markdown spellings are its to edit.
+    return report_identity.exact_child_file(report_dir, ("report.md", "REPORT.md"))
 
 
 def _resolve_report_arg(report_arg: Path) -> tuple[Path, Path] | None:

@@ -600,14 +600,13 @@ def read_llm_cache(find_dir: Path) -> dict:
 
 
 def _read_report(find_dir: Path) -> tuple[Optional[Path], str]:
-    for name in ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md"):
-        p = find_dir / name
-        if p.is_file():
-            try:
-                return p, p.read_text("utf-8", errors="replace")
-            except OSError:
-                continue
-    return None, ""
+    report = report_identity.find_report(find_dir)
+    if report is None:
+        return None, ""
+    try:
+        return report, report.read_text("utf-8", errors="replace")
+    except OSError:
+        return None, ""
 
 
 def main(argv: list[str]) -> int:

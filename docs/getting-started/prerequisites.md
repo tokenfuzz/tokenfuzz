@@ -151,7 +151,7 @@ Install and authenticate at least one supported CLI:
 | Codex | `codex` | Install and authenticate Codex CLI. |
 | Gemini | `agy` by default | Install Antigravity CLI and authenticate. Google Gemini CLI is available with `USE_GEMINI_CLI=1`. |
 | Grok | `grok` | Install Grok Build and configure its credentials. |
-| Local model | `opencode` | Serve an OpenAI-compatible model through vLLM, Ollama, or another compatible server; pass its exact model id with `--backend oss --model <id>`. |
+| OpenCode / local model | `opencode` | Pass an OpenCode catalog id as `--backend oss --model opencode/<id>`, or serve an OpenAI-compatible model through vLLM, Ollama, or another compatible server and pass its exact served id. |
 
 Verify the chosen CLI directly before asking TokenFuzz to launch it. Exact
 installation links, authentication checks, model selection, local vLLM/Ollama

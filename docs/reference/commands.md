@@ -98,7 +98,7 @@ Common flags:
 | `--strategy S1|S2|S3|S4|S5|S6|S7|S8` | Pin one investigation strategy and suspend rotation. |
 | `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer's initial session is still running. |
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
-| `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. `sandboxed` is the default and refuses backends whose sandbox cannot host an audit; the bypass mode requires an asserted outer sandbox. |
+| `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. The default is `external-bypass` for `oss` (OpenCode has no native OS sandbox) and `sandboxed` otherwise. Bypass requires an asserted outer sandbox. |
 | `--new-target <slug>` | Generate starter config and exit without starting an audit. |
 
 One audit at a time owns a result tree: a second run on the same target and

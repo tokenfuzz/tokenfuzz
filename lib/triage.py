@@ -88,10 +88,6 @@ _AUTO_REJECT = (
     (re.compile(r"(?:^|[][\s:>])Hit MOZ_CRASH\(|^Assertion failure:|###!!! ASSERTION:", re.MULTILINE), "intentional assertion crash"),
     (re.compile(r"^thread '[^']*'(?: \([^)]*\))? panicked at |\bRustMozCrash\b", re.MULTILINE), "runtime panic"),
 )
-# Report-file precedence is shared with the content-identity module so the gate
-# and its read-only consumers always hash the same file. _report keeps its
-# stricter non-empty requirement.
-_REPORT_NAMES = report_identity.REPORT_NAMES
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -131,11 +127,13 @@ def _deadline_expired(deadline: float | None) -> bool:
 
 
 def _report(directory: Path) -> Path | None:
-    for name in _REPORT_NAMES:
-        candidate = directory / name
-        if candidate.is_file() and candidate.stat().st_size:
-            return candidate
-    return None
+    """The shared report path, with triage's stricter non-empty requirement.
+
+    An empty file is a report an agent created and has not written yet; gating
+    on it would score a placeholder.
+    """
+    candidate = report_identity.find_report(directory)
+    return candidate if candidate is not None and candidate.stat().st_size else None
 
 
 def _sanitizer_file(directory: Path) -> Path | None:

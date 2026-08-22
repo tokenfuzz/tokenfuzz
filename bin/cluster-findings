@@ -48,7 +48,6 @@ import finding_signature  # noqa: E402
 import finding_dedup  # noqa: E402
 import report_identity  # noqa: E402
 from cluster_common import (  # noqa: E402
-    exact_child_file,
     render_member_report_siblings,
     render_md_sibling,
     run_under_aggregate_lock,
@@ -83,10 +82,7 @@ def _read_text(path: Path) -> str:
 
 
 def _find_report(find_dir: Path) -> Path | None:
-    return exact_child_file(
-        find_dir,
-        ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md"),
-    )
+    return report_identity.find_report(find_dir)
 
 
 def _read_llm_cache(find_dir: Path) -> dict:

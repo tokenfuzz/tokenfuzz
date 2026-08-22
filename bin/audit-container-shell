@@ -35,25 +35,30 @@ Options:
   --dry-run             Print commands without executing them
 
 The image includes Claude Code, Codex, Antigravity CLI (`agy`), Google Gemini
-CLI, and Grok Build. Host ~/.claude, ~/.codex, ~/.gemini, and ~/.grok are never
-mounted. `IS_SANDBOX=1` is set because the container is the sandbox boundary
-assertion required by `--agent-security external-bypass`; the profile must
-still be selected explicitly after reviewing the container's mounts and egress.
+CLI, Grok Build, and OpenCode. Host ~/.claude, ~/.codex, ~/.gemini, ~/.grok,
+and ~/.local/share/opencode are never mounted. `IS_SANDBOX=1` is set because
+the container is the sandbox boundary assertion required by `--agent-security
+external-bypass`. The `oss` backend selects that profile by default because
+OpenCode has no native OS sandbox.
 
 Authenticating the CLIs:
   # codex login
   # claude
   # agy
   # grok login
+  # opencode auth login
 Then confirm auth; if a command hangs, press Ctrl+C:
   # codex login status
   # claude -p "Reply exactly: tokenfuzz-claude-auth-ok"
   # agy -p "Reply exactly: tokenfuzz-gemini-auth-ok"
   # grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
+  # opencode run --pure --model opencode/<model-id> "Reply exactly: tokenfuzz-opencode-auth-ok"
 
 Run from /root/work:
   # Default: the CLI's own sandbox, which needs a runtime that permits it.
   ./bin/audit --backend <backend> --target <target-name> [--model <model>]
+  # OpenCode uses the container boundary automatically; no security flag needed.
+  ./bin/audit --backend oss --target <target-name> --model opencode/<model-id>
   # When the container blocks nested sandboxing, and it is your boundary:
   ./bin/audit --backend <backend> --target <target-name> --agent-security external-bypass
 '''
@@ -65,6 +70,7 @@ FROM ${BASE_IMAGE}
 ARG CLAUDE_NPM_SPEC=@anthropic-ai/claude-code@latest
 ARG CODEX_NPM_SPEC=@openai/codex@latest
 ARG GEMINI_CLI_NPM_SPEC=@google/gemini-cli@latest
+ARG OPENCODE_NPM_SPEC=opencode-ai@latest
 ARG AGY_INSTALL_URL=https://antigravity.google/cli/install.sh
 ARG GROK_INSTALL_URL=https://x.ai/cli/install.sh
 
@@ -81,7 +87,7 @@ RUN set -eux; \
       yum install -y nodejs npm curl ca-certificates; yum clean all; \
     else echo "No supported package manager found" >&2; exit 2; fi; \
   fi
-RUN npm install -g "${CLAUDE_NPM_SPEC}" "${CODEX_NPM_SPEC}" "${GEMINI_CLI_NPM_SPEC}" && npm cache clean --force
+RUN npm install -g "${CLAUDE_NPM_SPEC}" "${CODEX_NPM_SPEC}" "${GEMINI_CLI_NPM_SPEC}" "${OPENCODE_NPM_SPEC}" && npm cache clean --force
 RUN curl -fsSL "${AGY_INSTALL_URL}" | bash
 RUN curl -fsSL "${GROK_INSTALL_URL}" -o /tmp/grok-install.sh && bash /tmp/grok-install.sh && rm -f /tmp/grok-install.sh
 ENV PATH="/root/.grok/bin:${PATH}"
@@ -99,7 +105,7 @@ fi
 if [ -t 1 ]; then
   cat <<'BANNER'
 Audit container shell
-Log in with: codex login, claude, agy, or grok login.
+Log in with: codex login, claude, agy, grok login, or opencode auth login.
 Then run ./bin/audit --backend <backend> --target <target-name> [--model <model>]
 BANNER
 fi
@@ -282,6 +288,7 @@ def main() -> int:
                 "--build-arg", f"CLAUDE_NPM_SPEC={os.environ.get('CLAUDE_NPM_SPEC', '@anthropic-ai/claude-code@latest')}",
                 "--build-arg", f"CODEX_NPM_SPEC={os.environ.get('CODEX_NPM_SPEC', '@openai/codex@latest')}",
                 "--build-arg", f"GEMINI_CLI_NPM_SPEC={os.environ.get('GEMINI_CLI_NPM_SPEC', '@google/gemini-cli@latest')}",
+                "--build-arg", f"OPENCODE_NPM_SPEC={os.environ.get('OPENCODE_NPM_SPEC', 'opencode-ai@latest')}",
                 "--build-arg", f"AGY_INSTALL_URL={os.environ.get('AGY_INSTALL_URL', 'https://antigravity.google/cli/install.sh')}",
                 "--build-arg", f"GROK_INSTALL_URL={os.environ.get('GROK_INSTALL_URL', 'https://x.ai/cli/install.sh')}",
                 "-f", dockerfile, root_text,

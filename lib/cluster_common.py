@@ -86,32 +86,11 @@ def texts_differ_beyond_padding(old: str, new: str) -> bool:
     return _HSPACE_RE.sub(" ", old) != _HSPACE_RE.sub(" ", new)
 
 
-def exact_child_files(parent: Path, names: Iterable[str]) -> tuple[Path, ...]:
-    """Return exact-case file children in the requested priority order."""
-    try:
-        children = {child.name: child for child in parent.iterdir()}
-    except OSError:
-        return ()
-    return tuple(
-        child
-        for name in names
-        if (child := children.get(name)) is not None and child.is_file()
-    )
-
-
-def exact_child_file(parent: Path, names: Iterable[str]) -> Path | None:
-    """Return the first exact-case file child in the requested order."""
-    return next(iter(exact_child_files(parent, names)), None)
-
-
 def artifact_report_paths(directory: Path) -> tuple[Path, ...]:
     """Return recognized report files in their canonical priority order."""
-    return exact_child_files(directory, report_identity.REPORT_NAMES)
-
-
-def artifact_report_path(directory: Path) -> Path | None:
-    """Return the report file used for cluster identity, if present."""
-    return next(iter(artifact_report_paths(directory)), None)
+    return report_identity.exact_child_files(
+        directory, report_identity.REPORT_NAMES,
+    )
 
 
 def cluster_label(report_text: str) -> str:

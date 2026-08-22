@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import os
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 
@@ -360,11 +362,40 @@ def content_sha1(path: Path) -> str | None:
         return None
 
 
-def find_report(directory: Path) -> Path | None:
-    return next(
-        (directory / name for name in REPORT_NAMES if (directory / name).is_file()),
-        None,
+def exact_child_files(parent: Path, names: Iterable[str]) -> tuple[Path, ...]:
+    """Return exact-case file children in the requested priority order.
+
+    A case-insensitive filesystem — APFS, or a Docker Desktop bind mount over
+    one — answers `(directory / "REPORT.md").is_file()` for an on-disk
+    `report.md`, so probing by name hands back a path spelled a way the
+    directory does not contain. That spelling escapes: triage feeds it to
+    `render-md --html-sibling`, which derives the sibling's name from it, and
+    the consumers that link the pair look the name up exactly.
+
+    Reading the directory costs more than probing five names did; scandir over
+    iterdir keeps that at a few tens of microseconds per artifact for triage's
+    per-iteration passes, which call this for every crash and finding.
+    """
+    try:
+        with os.scandir(parent) as entries:
+            children = {entry.name: entry for entry in entries}
+    except OSError:
+        return ()
+    return tuple(
+        Path(entry.path)
+        for name in names
+        if (entry := children.get(name)) is not None and entry.is_file()
     )
+
+
+def exact_child_file(parent: Path, names: Iterable[str]) -> Path | None:
+    """Return the first exact-case file child in the requested order."""
+    return next(iter(exact_child_files(parent, names)), None)
+
+
+def find_report(directory: Path) -> Path | None:
+    """Return the artifact's report, spelled the way the directory spells it."""
+    return exact_child_file(directory, REPORT_NAMES)
 
 
 def quality_cache_matches_report(directory: Path, payload: dict) -> bool:

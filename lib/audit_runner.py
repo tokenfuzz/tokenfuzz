@@ -114,7 +114,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-memory", action="store_true")
     parser.add_argument(
         "--agent-security", choices=llm_invoke.AGENT_SECURITY_MODES, default=None,
-        help="backend execution boundary (default: sandboxed)",
+        help=(
+            "backend execution boundary (default: external-bypass for oss, "
+            "which has no native OS sandbox; sandboxed otherwise)"
+        ),
     )
     parser.add_argument(
         "--refill-workers", action=argparse.BooleanOptionalAction, default=True,
@@ -2591,7 +2594,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     requested = args.backend or os.environ.get("AUDIT_BACKEND", "all")
     try:
-        args.agent_security = llm_invoke.resolve_agent_security(args.agent_security)
+        args.agent_security = llm_invoke.resolve_agent_security(
+            args.agent_security, requested,
+        )
     except ValueError as exc:
         print(f"FATAL: {exc}", file=sys.stderr)
         return 1

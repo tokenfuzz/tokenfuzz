@@ -158,14 +158,24 @@ def external_sandbox_active() -> bool:
     return os.environ.get("IS_SANDBOX", "").strip() == "1"
 
 
-def inherited_agent_security() -> str:
-    """Security profile selected by the parent audit or benchmark process."""
-    return os.environ.get(AGENT_SECURITY_ENV, DEFAULT_AGENT_SECURITY).strip()
+def inherited_agent_security(backend: str = "") -> str:
+    """Security profile selected by the parent audit or benchmark process.
+
+    With no parent choice, the backend's own default applies. OpenCode has no
+    native OS sandbox, so agent_security_problem refuses it under `sandboxed`
+    and an unqualified default failed every oss launch, container or not. The
+    outer boundary is not the weaker answer here: external-bypass is still
+    refused unless IS_SANDBOX=1 asserts that boundary exists.
+    """
+    default = "external-bypass" if backend == "oss" else DEFAULT_AGENT_SECURITY
+    return (os.environ.get(AGENT_SECURITY_ENV) or default).strip()
 
 
-def resolve_agent_security(agent_security: str | None) -> str:
+def resolve_agent_security(
+    agent_security: str | None, backend: str = "",
+) -> str:
     """One resolution rule: an explicit choice, else the inherited profile."""
-    resolved = agent_security or inherited_agent_security()
+    resolved = (agent_security or inherited_agent_security(backend)).strip()
     if resolved not in AGENT_SECURITY_MODES:
         raise ValueError(f"unknown agent security mode: {resolved}")
     return resolved
@@ -189,8 +199,8 @@ def agent_security_problem(backend: str, agent_security: str) -> str:
     if backend == "oss":
         return (
             "the OpenCode backend has no native OS sandbox; run it inside an "
-            "externally hardened sandbox and select --agent-security "
-            "external-bypass"
+            "externally hardened sandbox (oss defaults to external-bypass "
+            "when no mode is specified)"
         )
     if backend == "grok":
         # workspace reads the whole host including credential paths (only
@@ -660,8 +670,17 @@ def resolve_model_name(backend: str, model: str = "") -> str:
     return model or default_model(backend)
 
 
+def _is_opencode_builtin_model(model: str) -> bool:
+    # Only OpenCode's own provider prefix bypasses the local adapter. Served
+    # vLLM model ids commonly contain a slash (for example org/model), so a
+    # generic provider/model test would silently reroute existing local runs.
+    return model.startswith("opencode/") and bool(model.removeprefix("opencode/"))
+
+
 def opencode_model_ref(model: str) -> str:
     resolved = (model or default_model("oss")).strip()
+    if _is_opencode_builtin_model(resolved):
+        return resolved
     return f"local/{resolved}" if resolved else "local"
 
 
@@ -669,10 +688,10 @@ def opencode_config(model: str, agent_security: str | None = None) -> dict:
     resolved = (model or default_model("oss")).strip()
     if not resolved:
         raise ValueError("oss model is required")
-    api_key = os.environ.get("AUDIT_LOCAL_API_KEY") or "EMPTY"
-    config = {
-        "$schema": "https://opencode.ai/config.json",
-        "provider": {
+    config = {"$schema": "https://opencode.ai/config.json"}
+    if not _is_opencode_builtin_model(resolved):
+        api_key = os.environ.get("AUDIT_LOCAL_API_KEY") or "EMPTY"
+        config["provider"] = {
             "local": {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Local OpenAI-compatible",
@@ -686,8 +705,12 @@ def opencode_config(model: str, agent_security: str | None = None) -> dict:
                     },
                 },
             },
-        },
-    }
+        }
+    # Deliberately resolved without the backend, so the oss agent default does
+    # not reach here: an agent launch always passes its already-resolved
+    # profile, and the only caller that passes none is the read-only decide
+    # path, which should keep these denies rather than inherit a boundary it
+    # never asserts.
     if resolve_agent_security(agent_security) == "sandboxed":
         # OpenCode permissions are an approval policy, not an OS sandbox, so
         # agent launches refuse this backend in sandboxed mode. These denies
@@ -807,7 +830,7 @@ def agent_flags(
     """
     resolved_model = resolve_model_name(backend, model)
     effort = default_effort(backend)
-    bypass = resolve_agent_security(agent_security) == "external-bypass"
+    bypass = resolve_agent_security(agent_security, backend) == "external-bypass"
 
     if backend == "claude":
         flags = [
@@ -1064,7 +1087,7 @@ def run_agent_prompt(
     agent_security: str | None = None,
 ) -> int:
     """Launch a tool-using backend and write its combined raw transcript."""
-    agent_security = resolve_agent_security(agent_security)
+    agent_security = resolve_agent_security(agent_security, backend)
     problem = agent_security_problem(backend, agent_security)
     if problem:
         raise ValueError(problem)

@@ -62,8 +62,8 @@ import symbol_names  # noqa: E402
 import clusterfuzz_stacktrace as cf_stack  # noqa: E402
 import finding_signature  # noqa: E402
 import validation_receipt  # noqa: E402
+from report_identity import exact_child_file  # noqa: E402
 from cluster_common import (  # noqa: E402
-    exact_child_file,
     promotion_pending_reasons,
     render_member_report_siblings,
     render_md_sibling,
