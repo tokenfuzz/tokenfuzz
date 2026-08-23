@@ -235,6 +235,110 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         "scheduler availability matches allowed-strategy claim semantics",
     )
 
+    # A lane whose cards are gone must not keep its agent: nothing else moves
+    # it, and post-iteration rotation never runs on an interrupted iteration.
+    starved_results = root / "starved-results"
+    (starved_results / "state").mkdir(parents=True)
+    (starved_results / "work-cards.jsonl").write_text(
+        "".join(
+            json.dumps({"id": f"C{index}", "status": "unclaimed", "strategy": "S3"}) + "\n"
+            for index in range(3)
+        ),
+        encoding="utf-8",
+    )
+    starved_runtime = SimpleNamespace(
+        root=ROOT, target_root=target, target_slug="sample",
+        results=starved_results, repo_type="none",
+        num_agents=2, fixed_strategy="", agent_roles="",
+    )
+    workqueue.init_state(audit_runner._queue_context(starved_runtime))
+    lane_one = starved_results / "state" / "strategy-1"
+    lane_one.write_text("S8\n", encoding="utf-8")
+    (starved_results / "state" / "strategy-2").write_text("S3\n", encoding="utf-8")
+    audit_runner.initialize_agent_strategies(starved_runtime)
+    check(
+        lane_one.read_text().strip() == "S3",
+        "an agent on a lane with no claimable cards is reassigned to one with cards",
+    )
+    check(
+        (starved_results / "state" / "strategy-2").read_text().strip() == "S3",
+        "an agent whose lane still has cards keeps it",
+    )
+
+    # A claimed card leaves the unclaimed count, so an agent that just took the
+    # last card in its lane must not be rotated off the work it is doing.
+    claimed_results = root / "claimed-results"
+    (claimed_results / "state").mkdir(parents=True)
+    (claimed_results / "work-cards.jsonl").write_text(
+        json.dumps({"id": "HELD", "status": "unclaimed", "strategy": "S8",
+                    "file": "src/a.c"}) + "\n"
+        + json.dumps({"id": "FREE", "status": "unclaimed", "strategy": "S1",
+                      "file": "src/b.c"}) + "\n",
+        encoding="utf-8",
+    )
+    claimed_runtime = SimpleNamespace(
+        root=ROOT, target_root=target, target_slug="sample",
+        results=claimed_results, repo_type="none",
+        num_agents=1, fixed_strategy="", agent_roles="",
+    )
+    claimed_ctx = audit_runner._queue_context(claimed_runtime)
+    workqueue.init_state(claimed_ctx)
+    workqueue.claim_next_card(claimed_ctx, agent="1", strategy="S8")
+    lane = claimed_results / "state" / "strategy-1"
+    lane.write_text("S8\n", encoding="utf-8")
+    audit_runner.initialize_agent_strategies(claimed_runtime)
+    check(
+        lane.read_text().strip() == "S8",
+        "an agent holding a live claim keeps its lane when the queue reads empty",
+    )
+
+    # A card is claimable under its primary strategy and under every angle in
+    # allowed_strategies, which is how select_strategy_window carries dropped
+    # companions. A claim taken through one of those is still this agent's work.
+    allowed_results = root / "allowed-results"
+    (allowed_results / "state").mkdir(parents=True)
+    (allowed_results / "work-cards.jsonl").write_text(
+        json.dumps({"id": "VIA", "status": "unclaimed", "strategy": "S7",
+                    "allowed_strategies": ["S8"], "file": "src/a.c"}) + "\n"
+        + json.dumps({"id": "OTHER", "status": "unclaimed", "strategy": "S1",
+                      "file": "src/b.c"}) + "\n",
+        encoding="utf-8",
+    )
+    allowed_runtime = SimpleNamespace(
+        root=ROOT, target_root=target, target_slug="sample",
+        results=allowed_results, repo_type="none",
+        num_agents=1, fixed_strategy="", agent_roles="",
+    )
+    allowed_ctx = audit_runner._queue_context(allowed_runtime)
+    workqueue.init_state(allowed_ctx)
+    workqueue.claim_next_card(allowed_ctx, agent="1", strategy="S8")
+    allowed_lane = allowed_results / "state" / "strategy-1"
+    allowed_lane.write_text("S8\n", encoding="utf-8")
+    audit_runner.initialize_agent_strategies(allowed_runtime)
+    check(
+        allowed_lane.read_text().strip() == "S8",
+        "a claim taken through allowed_strategies keeps that lane",
+    )
+    # And from an open hypothesis when the claim is not this agent's: the card
+    # was released and taken by a peer while this agent is still investigating
+    # it, so neither the unclaimed count nor its own claims mention the lane.
+    workqueue.claim_next_card(claimed_ctx, agent="2", strategy="S8")
+    (claimed_results / "state" / "hypotheses.jsonl").write_text(
+        json.dumps({"agent": "1", "card_id": "HELD", "status": "INVESTIGATING"}) + "\n",
+        encoding="utf-8",
+    )
+    check(
+        not audit_runner._eligible_strategy_counts(claimed_runtime).get("S8")
+        and "S8" in audit_runner._agent_live_strategies(claimed_runtime).get("1", set()),
+        "the lane reads empty in the queue and live only through the hypothesis",
+    )
+    lane.write_text("S8\n", encoding="utf-8")
+    audit_runner.initialize_agent_strategies(claimed_runtime)
+    check(
+        lane.read_text().strip() == "S8",
+        "an agent with an open hypothesis keeps its lane",
+    )
+
     stream_results = root / "stream-results"
     stream_logs = root / "stream-logs"
     stream_raw = stream_logs / ".raw"
@@ -278,6 +382,7 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         launch_count[0] == 2 and result.returncode == 0,
         "Claude stream-idle failure retries once through the real launch path",
     )
+
 
     with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "oss"}, clear=True):
         oss_tier = triage.llm_decide.decision_timeout("unmeasured")

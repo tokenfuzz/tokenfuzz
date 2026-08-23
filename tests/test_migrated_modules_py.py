@@ -1294,6 +1294,43 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "model preflight rejects a nominal exit whose agent never ran a command",
     )
 
+    # A provider that serves a different model refuses the request as surely as
+    # one that errors, and deterministically: without the provider markers a
+    # harness-only benchmark records an ordinary failed cell and re-runs it for
+    # every replicate and resume.
+    def _preflight_acts_as_other_model(_backend, prompt_text, *args, **kwargs):
+        token, sentinel = _preflight_command(prompt_text)
+        Path(sentinel).write_text(token, encoding="utf-8")
+        Path(args[1]).write_text(
+            json.dumps({"type": "result", "stats": {"models": {
+                "gemini-3.5-flash": {"total_tokens": 4096},
+            }}}) + "\n",
+            encoding="utf-8",
+        )
+        return 0
+
+    (model_runtime.logs / ".backend-unavailable").unlink(missing_ok=True)
+    (model_runtime.logs / ".run-quality").unlink(missing_ok=True)
+    model_runtime.model = "gemini-3.7-flash"
+    with mock.patch.dict(
+        os.environ, {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1"}, clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt",
+        side_effect=_preflight_acts_as_other_model,
+    ):
+        try:
+            audit_runner.validate_model(model_runtime)
+            refused_substitution = ""
+        except RuntimeError as exc:
+            refused_substitution = str(exc)
+    check(
+        "gemini-3.5-flash" in refused_substitution
+        and (model_runtime.logs / ".backend-unavailable").is_file()
+        and (model_runtime.logs / ".run-quality").read_text().strip()
+        == "provider_limited",
+        "a substituted model is refused and recorded as a provider rejection",
+    )
+
     # A sentinel has to be produced by the attempt that is judged on it. One
     # left behind by an attempt that then failed would pass the next attempt,
     # which need only exit zero without acting.
@@ -1598,10 +1635,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "S7", (strategy_results / "state" / "strategy-1").read_text().strip(),
         "an unrecognised assignment is replaced by a strategy that owns cards",
     )
-    # A recognised one is left alone, even when the queue holds no card for it
-    # yet: rank-work mints S4 companions as it ranks, and reassigning here
-    # would undo an operator's --strategy pin on every iteration.
-    (strategy_results / "state" / "strategy-1").write_text("S4\n", encoding="utf-8")
+    # A recognised assignment whose lane still has cards is left alone, so a
+    # working agent is never churned between iterations.
+    (strategy_results / "state" / "strategy-1").write_text("S7\n", encoding="utf-8")
     audit_runner.initialize_agent_strategies(
         SimpleNamespace(
             root=ROOT, target_root=generic_target, target_slug="demo",
@@ -1610,8 +1646,38 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         )
     )
     equal(
+        "S7", (strategy_results / "state" / "strategy-1").read_text().strip(),
+        "a recognised assignment with cards survives initialization",
+    )
+    # An operator's --strategy pin outranks supply: it is honoured even with an
+    # empty lane, which is what keeps a deliberate pin from being undone here.
+    (strategy_results / "state" / "strategy-1").write_text("S4\n", encoding="utf-8")
+    audit_runner.initialize_agent_strategies(
+        SimpleNamespace(
+            root=ROOT, target_root=generic_target, target_slug="demo",
+            results=strategy_results, repo_type="none", num_agents=1,
+            fixed_strategy="S4", agent_roles=(),
+        )
+    )
+    equal(
         "S4", (strategy_results / "state" / "strategy-1").read_text().strip(),
-        "a recognised assignment survives initialization",
+        "an operator strategy pin survives an empty lane",
+    )
+    # Unpinned, an empty lane is reassigned instead: this runs after the rank
+    # pass that mints companions, so a lane still empty here has nothing
+    # coming, and an agent left on it does no work at all. One benchmark cell
+    # held an agent on an empty lane for 88% of the run while 104 cards sat
+    # unclaimed in other lanes.
+    audit_runner.initialize_agent_strategies(
+        SimpleNamespace(
+            root=ROOT, target_root=generic_target, target_slug="demo",
+            results=strategy_results, repo_type="none", num_agents=1,
+            fixed_strategy="", agent_roles=(),
+        )
+    )
+    equal(
+        "S7", (strategy_results / "state" / "strategy-1").read_text().strip(),
+        "an unpinned agent is rotated off a lane with no claimable cards",
     )
     (strategy_results / "state" / "strategy-1").write_text("S7\n", encoding="utf-8")
     (strategy_results / "work-cards.jsonl").write_text(

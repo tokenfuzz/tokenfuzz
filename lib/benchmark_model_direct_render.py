@@ -9,7 +9,11 @@ directly.
 
 CLI:
     python3 lib/benchmark_model_direct_render.py \\
-        <target_path> <output_dir> [script_root]
+        <target_path> <output_dir> [script_root] [wall_seconds] [target_toml]
+
+Every argument render() takes is forwarded, so a CLI render matches what
+bin/benchmark produces; omitting wall_seconds renders a prompt with no
+deadline, which is not the prompt a cell runs.
 
 Prints the fully-rendered prompt to stdout. Empty output_dir / target_path
 fall through to render_template (the .md.j2 substitutes them in plain).
@@ -668,13 +672,26 @@ def render(
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         print("usage: benchmark_model_direct_render.py "
-              "<target_path> <output_dir> [script_root]", file=sys.stderr)
+              "<target_path> <output_dir> [script_root] [wall_seconds] "
+              "[target_toml]", file=sys.stderr)
         return 2
     target_path = argv[1]
     output_dir = argv[2]
     script_root = argv[3] if len(argv) > 3 else os.path.dirname(
         os.path.dirname(os.path.abspath(__file__)))
-    sys.stdout.write(render(target_path, output_dir, script_root))
+    # Forwarded, not defaulted away: without the wall the rendered prompt
+    # states no deadline, and the deadline is the pass's only stopping
+    # condition. bin/benchmark calls render() directly, so this is what a
+    # CLI render has to match to be the same prompt.
+    try:
+        wall_seconds = int(argv[4]) if len(argv) > 4 and argv[4] else 0
+    except ValueError:
+        print("wall_seconds must be an integer", file=sys.stderr)
+        return 2
+    target_toml = argv[5] if len(argv) > 5 else ""
+    sys.stdout.write(
+        render(target_path, output_dir, script_root, wall_seconds, target_toml)
+    )
     return 0
 
 

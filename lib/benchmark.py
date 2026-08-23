@@ -1014,20 +1014,9 @@ def _money(value: str) -> Decimal:
     return Decimal(value)
 
 
-def _model_id_is(model: str, *model_ids: str) -> bool:
-    """Match a model ID or its dated snapshot, without prefix collisions."""
-    leaf = model.rsplit("/", 1)[-1].strip().lower()
-    normalized = re.sub(r"\s+", "-", leaf)
-    for model_id in model_ids:
-        wanted = re.sub(r"\s+", "-", model_id.strip().lower())
-        if normalized == wanted:
-            return True
-        if re.fullmatch(
-            rf"{re.escape(wanted)}-(?:\d{{8}}|\d{{4}}-\d{{2}}-\d{{2}})",
-            normalized,
-        ):
-            return True
-    return False
+# Shared with the served-model gate, which must decide "is this the model we
+# asked for?" against the same rules the price table uses.
+_model_id_is = llm_usage.model_id_matches
 
 
 def _pricing_rates(

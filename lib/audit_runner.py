@@ -475,6 +475,29 @@ def validate_model(runtime: Runtime) -> None:
                 last_rc = 45
                 break
             if last_rc == 0 and acted:
+                # A CLI that quietly falls back to another model answers a
+                # wrong --model with a cheerful success, so no exit code
+                # reports it. Retrying cannot change which model is served,
+                # so this fails the run outright rather than costing an
+                # attempt: every row of a substituted run names a model that
+                # served nothing and prices its traffic at the wrong rate.
+                served = llm_usage.substituted_model(raw, runtime.model)
+                if served:
+                    # Recorded the way a refused backend is, not left as an
+                    # ordinary failed cell: substitution is deterministic, so a
+                    # benchmark that cannot tell the difference re-runs it for
+                    # every replicate and every resume. bin/benchmark copies
+                    # these markers out of the logs dir.
+                    (runtime.logs / ".backend-unavailable").touch()
+                    (runtime.logs / ".run-quality").write_text(
+                        "provider_limited\n", encoding="utf-8",
+                    )
+                    raise RuntimeError(
+                        f"model preflight refused for backend={runtime.backend}: "
+                        f"requested model={runtime.model} but the provider served "
+                        f"{served}. Results would name a model that never ran; "
+                        f"transcript: {raw}"
+                    )
                 raw.unlink(missing_ok=True)
                 if agy_log is not None:
                     agy_log.unlink(missing_ok=True)
@@ -834,6 +857,60 @@ def _eligible_strategy_counts(runtime: Runtime) -> dict[str, int]:
 _CAMPAIGN_STRATEGY = "S4"
 
 
+def _agent_live_strategies(runtime: Runtime) -> dict[str, set[str]]:
+    """Strategies each agent is already working, by live claim or open hypothesis.
+
+    A claimed card leaves the unclaimed count, so an agent that just took the
+    last card in its lane makes that lane look starved -- and reassigning it
+    then rotates the agent off the very work it is doing, mid-investigation.
+    What the agent holds is therefore consulted alongside what the queue still
+    offers.
+    """
+    ctx = _queue_context(runtime)
+    cards = {
+        str(card.get("id", "")): card
+        for card in workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
+    }
+    held: dict[str, set[str]] = {}
+
+    def _record(agent: object, *sources: object) -> None:
+        # A card is claimable under its primary strategy and under every angle
+        # in `allowed_strategies` -- select_strategy_window carries dropped
+        # companions there, so a claim through one of them is ordinary. Reading
+        # only the primary would leave an agent's own claimed card invisible in
+        # the lane it is actually working.
+        angles: set[str] = set()
+        for source in sources:
+            if isinstance(source, dict):
+                angles.add(str(source.get("strategy", "")))
+                allowed = source.get("allowed_strategies")
+                if isinstance(allowed, list):
+                    angles.update(str(value) for value in allowed)
+            elif source:
+                angles.add(str(source))
+        live = {angle.upper() for angle in angles} & set(STRATEGIES)
+        if live:
+            held.setdefault(str(agent or ""), set()).update(live)
+
+    ttl = workqueue.work_card_claim_ttl()
+    now = datetime.now(timezone.utc)
+    for card_id, claim in workqueue.latest_claims_by_card(ctx).items():
+        if workqueue.claim_blocks_card(claim, ttl, now):
+            _record(claim.get("agent", ""), cards.get(str(card_id)))
+    for row in workqueue.read_jsonl(
+        runtime.results / "state" / "hypotheses.jsonl"
+    ):
+        if workqueue.is_active_hypothesis_status(str(row.get("status", ""))):
+            # The hypothesis records the angle actually being investigated,
+            # which need not be the card's primary one.
+            _record(
+                row.get("agent", ""),
+                cards.get(str(row.get("card_id", ""))),
+                row.get("strategy", ""),
+            )
+    return held
+
+
 def initialize_agent_strategies(runtime: Runtime) -> None:
     if runtime.fixed_strategy:
         return
@@ -888,18 +965,34 @@ def initialize_agent_strategies(runtime: Runtime) -> None:
     }
     state = runtime.results / "state"
     state.mkdir(parents=True, exist_ok=True)
+    live = _agent_live_strategies(runtime)
     for agent in range(1, runtime.num_agents + 1):
         path = state / f"strategy-{agent}"
         try:
             current = path.read_text(encoding="utf-8").strip().upper()
         except OSError:
             current = ""
-        if current not in STRATEGIES:
+        # Re-assigned when the lane offers nothing and holds nothing, not only
+        # when the file is unreadable: an agent whose strategy has no claimable
+        # card and no work of its own cannot act, and nothing else moves it.
+        # Post-iteration rotation is the wrong place to catch that -- it never
+        # runs on a provider-interrupted iteration, and its evidence is
+        # productivity, which a starved agent cannot produce either way. An
+        # empty lane needs no streak to be conclusive, but it is only empty if
+        # the agent is not already working it: a card this agent claimed has
+        # left the unclaimed count, and rotating on that would pull the agent
+        # off its own live investigation. A starved campaign lane also clears
+        # `reserved_agent` above, so the agent lands on a ranked lane rather
+        # than back on the empty one.
+        if current not in STRATEGIES or not (
+            counts.get(current) or current in live.get(str(agent), ())
+        ):
             selected = (
                 _CAMPAIGN_STRATEGY if agent == reserved_agent
                 else ranked[position[agent] % len(ranked)]
             )
-            path.write_text(selected + "\n", encoding="utf-8")
+            if selected != current:
+                path.write_text(selected + "\n", encoding="utf-8")
 
 
 def _strategy_streak_path(runtime: Runtime, agent: int) -> Path:
@@ -2323,14 +2416,14 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     reset_llm_decision_counters(runtime)
     before = progress(runtime)
     cold = _cold(runtime)
-    refreshed = refresh_work_cards(runtime)
-    if refreshed:
-        initialize_agent_strategies(runtime)
+    refresh_work_cards(runtime)
     released = release_stale_card_claims(runtime)
     if released:
         index_log(runtime, f"queue: released {released} stale work-card claim(s)")
-    if expand_work_cards_if_exhausted(runtime):
-        initialize_agent_strategies(runtime)
+    expand_work_cards_if_exhausted(runtime)
+    # Once, after every step that can change card supply, and unconditionally:
+    # a lane starves between iterations without the queue itself changing.
+    initialize_agent_strategies(runtime)
     if _productive_wall_exhausted(state):
         return "budget", []
     assign_build_configs(runtime, context, state.iteration)

@@ -1000,7 +1000,23 @@ def cleanup_model_direct_scratch(cell_dir: Path) -> None:
     log(f"Cell {cell_dir.name}: reclaimed scratch/ ({count} file(s))")
 
 
-def _provider_issue(cell_dir: Path) -> str:
+def _provider_issue(cell_dir: Path, model: str = "") -> str:
+    # Checked before the quota marker, not after: a served-model mismatch is
+    # settled evidence about what this cell measured, while a capacity limit
+    # says only that it was cut short. A cell carrying both is a cell whose
+    # artifacts name a model that never ran, and reporting it as merely
+    # capacity-limited would let it be retried into the comparison.
+    #
+    # A provider that served a different model refused the request as surely as
+    # one that returned an error, and more expensively: the cell runs to
+    # completion and publishes a row priced at the requested model's rate.
+    # Retrying cannot change which model is served, so it ranks with
+    # backend_rejected. Only the model-direct transcript is read here -- a
+    # harness cell asks the same question in its own model preflight, off one
+    # small transcript, and re-reading every session log would cost more than
+    # the check is worth.
+    if model and llm_usage.substituted_model(cell_dir / "backend.raw.log", model):
+        return "backend_rejected"
     quota_marker = cell_dir / ".quota-exhausted"
     if quota_marker.is_file():
         return "capacity_limited"
@@ -1053,12 +1069,14 @@ def _has_artifacts(results: Path) -> bool:
     return any(path.is_dir() for root in (results / "crashes", results / "findings") if root.is_dir() for path in root.iterdir())
 
 
-def _record_provider_quality(cell_dir: Path, results: Path, rc: int = 1) -> str:
+def _record_provider_quality(
+    cell_dir: Path, results: Path, rc: int = 1, model: str = "",
+) -> str:
     """Persist provider quality, letting conclusive capacity evidence outrank rc."""
     if (cell_dir / ".backend-unavailable").is_file():
         (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
         return "capacity_limited"
-    issue = _provider_issue(cell_dir)
+    issue = _provider_issue(cell_dir, model)
     if issue == "none":
         return issue
     if issue == "backend_rejected":
@@ -1172,7 +1190,7 @@ def run_model_direct(
     (cell_dir / "logs" / "index.jsonl").write_text(
         json.dumps(usage_event, separators=(",", ":")) + "\n", encoding="utf-8"
     )
-    issue = _record_provider_quality(cell_dir, cell_dir, rc)
+    issue = _record_provider_quality(cell_dir, cell_dir, rc, model)
     if (
         issue in ("capacity_limited", "backend_rejected")
         and (cell_dir / ".backend-unavailable").is_file()
@@ -1279,7 +1297,7 @@ def run_harness(
             shutil.copy2(source, cell_dir / marker)
     # This also catches a provider-limited startup/preflight before the audit
     # runtime had a chance to create its own marker.
-    _record_provider_quality(cell_dir, result_dir, rc)
+    _record_provider_quality(cell_dir, result_dir, rc, model)
     return (0 if rc == 124 else rc), result_dir
 
 

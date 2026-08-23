@@ -84,6 +84,13 @@ Never kill by process name/argv: do not run `pkill`/`killall` (including by
 absolute path), and do not use `pgrep`, `ps`, a pipeline, or a script to feed
 matched PIDs to `kill`. A target name also appears in concurrent benchmark
 commands. Signal only an exact PID you saved, or let timeout cleanup own it.
+So save one, and save it where you can still read it next turn: a shell
+variable does not survive between commands, so print the PID and append it to a
+file under your own output path —
+`cmd & printf '%s\n' "$!" >> {{ output_dir }}/scratch/jobs.pids`. A job
+launched inside `( ... & )` leaves you no PID at all and no legal way to
+recover one, so its slot below is held until the deadline whether or not the
+job is still doing anything.
 
 Keep the machine responsive. Run at most `{{ parallel_ceiling }}` of your own
 executions at a time across every background job together, and check with

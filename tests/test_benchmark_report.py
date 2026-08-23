@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -73,6 +75,49 @@ class BenchmarkReportTests(unittest.TestCase):
         # being measured on; a real cell reached a load average of 108 and
         # then had to disprove its own timeout-driven false hits.
         self.assertIn("Keep the machine responsive", body)
+        # The kill rule bans ps/pgrep-driven PID discovery, so a job whose PID
+        # was never recorded can never be reclaimed and holds a slot to the
+        # deadline. One cell spent 52% of its wall idle that way. A shell
+        # variable does not survive between tool calls, so the guidance has to
+        # persist the PID, not just capture it.
+        self.assertIn('"$!"', body)
+        # A rendered absolute path under the cell's own output dir, not a bare
+        # shell variable: $SCRATCH is defined nowhere, so an unset expansion
+        # would write to /jobs.pids and break the prompt's own absolute-write
+        # rule.
+        self.assertIn("/abs/out/scratch/jobs.pids", body)
+        self.assertNotIn("$SCRATCH", body)
+        # The CLI entry point must forward the wall it is given: the deadline
+        # is the pass's only stopping condition, and main() used to drop it.
+        argv = [str(ROOT / "lib" / "benchmark_model_direct_render.py"),
+                str(target), "/abs/out", str(ROOT)]
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self.assertEqual(benchmark_model_direct_render.main(argv + ["18000"]), 0)
+        self.assertIn("5 hours of wall-clock time", captured.getvalue())
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self.assertEqual(benchmark_model_direct_render.main(argv), 0)
+        self.assertIn("no fixed time limit", captured.getvalue())
+        # The 5th argument reaches render() too, so a CLI render can pin the
+        # same config snapshot a cell runs against.
+        snapshot = target / "pinned.toml"
+        snapshot.write_text(
+            'target = "sample"\nasan_bin = "build-asan/app"\n'
+            'includes = ["include"]\n[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            self.assertEqual(
+                benchmark_model_direct_render.main(
+                    argv + ["18000", str(snapshot)]
+                ), 0,
+            )
+        self.assertIn("5 hours of wall-clock time", captured.getvalue())
+        self.assertEqual(
+            benchmark_model_direct_render.main(argv + ["not-a-number"]), 2
+        )
         self.assertRegex(body, r"Run at most `\d+` of your own")
 
         # A [runner] target owns its own environment, so the prompt cannot put

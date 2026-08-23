@@ -414,5 +414,127 @@ class UsageExtractionTests(unittest.TestCase):
         self.assertFalse(llm_usage.usage_is_complete({"tokens": []}, 0))
 
 
+class ServedModelTests(unittest.TestCase):
+    """A CLI that answers a wrong --model with a cheerful success."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="served-model-")
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write(self, name: str, rows: list) -> Path:
+        path = self.root / name
+        path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+        return path
+
+    def test_substitution_is_reported_with_the_model_that_actually_ran(self) -> None:
+        raw = self.write("gemini.raw", [{"type": "result", "stats": {
+            "models": {
+                "gemini-3.5-flash": {"total_tokens": 10_099_986},
+                "gemini-3-flash-preview": {"total_tokens": 69_625},
+            },
+        }}])
+        self.assertEqual(
+            llm_usage.served_models(raw),
+            {"gemini-3.5-flash": 10_099_986, "gemini-3-flash-preview": 69_625},
+        )
+        # The busiest served model, so the operator message names what ran.
+        self.assertEqual(
+            llm_usage.substituted_model(raw, "gemini-3.7-flash"),
+            "gemini-3.5-flash",
+        )
+
+    def test_the_requested_model_doing_the_work_is_not_substitution(self) -> None:
+        raw = self.write("ok.raw", [{"type": "result", "stats": {"models": {
+            "gemini-3.7-flash": {"total_tokens": 42},
+        }}}])
+        self.assertEqual(llm_usage.substituted_model(raw, "gemini-3.7-flash"), "")
+
+    def test_a_token_of_the_requested_model_does_not_excuse_the_rest(self) -> None:
+        # "Did the requested model appear at all?" waves through a row whose
+        # traffic is almost entirely another model's, priced at the requested
+        # model's rate.
+        raw = self.write("mixed.raw", [{"type": "result", "stats": {"models": {
+            "gemini-3.7-flash": {"total_tokens": 1},
+            "gemini-3.5-flash": {"total_tokens": 1_000_000},
+        }}}])
+        self.assertEqual(
+            llm_usage.substituted_model(raw, "gemini-3.7-flash"), "gemini-3.5-flash"
+        )
+
+    def test_a_small_helper_model_beside_the_requested_one_is_healthy(self) -> None:
+        # Claude Code bills a helper model in modelUsage next to the one it was
+        # asked for, and this harness prices those rows. Refusing every session
+        # that shows a second model would reject healthy runs.
+        raw = self.write("helper.raw", [{"modelUsage": {
+            "claude-opus-5": {"inputTokens": 900_000},
+            "claude-haiku-4-5": {"inputTokens": 500},
+        }}])
+        self.assertEqual(llm_usage.substituted_model(raw, "claude-opus-5"), "")
+
+    def test_a_dated_snapshot_of_the_requested_model_is_not_substitution(self) -> None:
+        raw = self.write("dated.raw", [
+            {"modelUsage": {"claude-opus-5-20260101": {"inputTokens": 10}}},
+        ])
+        self.assertEqual(llm_usage.substituted_model(raw, "claude-opus-5"), "")
+
+    def test_a_cli_reporting_no_served_model_falls_open(self) -> None:
+        # Absence of telemetry is not evidence of substitution; oss reports
+        # none, and refusing every oss run would be a worse failure.
+        raw = self.write("quiet.raw", [{"type": "step_finish", "tokens": {"input": 5}}])
+        self.assertEqual(llm_usage.served_models(raw), {})
+        self.assertEqual(llm_usage.substituted_model(raw, "opencode/x-free"), "")
+
+    def test_a_cache_ttl_decoration_is_the_same_model(self) -> None:
+        # Claude Code keys modelUsage by model plus billed cache TTL, so a
+        # 1h-cache session reports claude-opus-5[1m]. Reading that as a
+        # substitution would refuse every such run.
+        raw = self.write("ttl.raw", [
+            {"modelUsage": {"claude-opus-5[1m]": {"inputTokens": 2, "outputTokens": 9}}},
+        ])
+        self.assertEqual(llm_usage.substituted_model(raw, "claude-opus-5"), "")
+
+    def test_only_a_ttl_shaped_bracket_is_treated_as_decoration(self) -> None:
+        raw = self.write("bracket.raw", [
+            {"modelUsage": {"claude-opus-5[other]": {"inputTokens": 10}}},
+        ])
+        self.assertEqual(
+            llm_usage.substituted_model(raw, "claude-opus-5"), "claude-opus-5[other]"
+        )
+
+    def test_a_sibling_model_is_still_a_substitution(self) -> None:
+        # The decoration is stripped exactly, never as an arbitrary suffix:
+        # flash and flash-lite are different models at different prices.
+        raw = self.write("lite.raw", [{"type": "result", "stats": {"models": {
+            "gemini-3.5-flash-lite": {"total_tokens": 40},
+        }}}])
+        self.assertEqual(
+            llm_usage.substituted_model(raw, "gemini-3.5-flash"),
+            "gemini-3.5-flash-lite",
+        )
+
+    def test_a_models_object_in_tool_output_is_not_billing_telemetry(self) -> None:
+        # An agent that curls an API returning its own "models" object must not
+        # be read as the provider substituting a model and killing the run.
+        raw = self.write("toolout.raw", [{"type": "tool_use", "part": {"state": {
+            "output": json.dumps({"models": {"someone-elses-model": {"total_tokens": 999}}}),
+        }}}])
+        self.assertEqual(llm_usage.served_models(raw), {})
+        self.assertEqual(llm_usage.substituted_model(raw, "gemini-3.7-flash"), "")
+
+    def test_a_zero_token_model_entry_is_not_a_served_model(self) -> None:
+        raw = self.write("zero.raw", [{"type": "result", "stats": {"models": {
+            "gemini-3.7-flash": {"total_tokens": 0},
+            "gemini-3.5-flash": {"total_tokens": 900},
+        }}}])
+        self.assertEqual(
+            llm_usage.substituted_model(raw, "gemini-3.7-flash"), "gemini-3.5-flash"
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
