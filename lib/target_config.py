@@ -1314,6 +1314,15 @@ def _binary_uses_sanitizer(path: Path, sanitizer: str = "asan") -> bool:
     return marker in out.stdout
 
 
+def sanitizer_has_runtime_marker(sanitizer: str) -> bool:
+    """Whether a binary can be inspected for this sanitizer's instrumentation.
+
+    False means absence cannot be distinguished from an unknown family, so a
+    caller must not read a clean run under a substituted binary as evidence.
+    """
+    return sanitizer.lower() in _SANITIZER_RUNTIME_MARKER
+
+
 def sanitizer_binary_is_usable(
     target_root: "str | os.PathLike", sanitizer: str, path: "str | os.PathLike",
 ) -> bool:

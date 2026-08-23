@@ -2932,6 +2932,13 @@ _PRODUCTIVE_DECAY_AFTER_ITERS = 2
 # Keep this a strict subset of PERMANENT_TERMINAL_CARD_STATUSES.
 _PRODUCTIVE_TERMINAL_CARD_STATUSES = {"crash", "find"}
 
+# Which closures update_card_status makes carry evidence. Derived from the
+# declared terminal set rather than re-listing statuses: a status added to
+# PERMANENT_TERMINAL_CARD_STATUSES is gated by default, so it cannot hard-close
+# cards without evidence the way an unlisted spelling once did. `crash` keeps
+# its own verdict gate; `find` is exempt (see update_card_status).
+_EVIDENCE_GATED_CARD_STATUSES = PERMANENT_TERMINAL_CARD_STATUSES - {"crash", "find"}
+
 # A concrete productive card is retired once it has been re-concluded more
 # times than it has distinct hypotheses: the surplus conclusions are
 # re-discoveries of an already-recorded bug, not new ones. A margin of 1
@@ -4747,11 +4754,15 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
     before the wall budget, so the clean-close and crash conclusions must
     carry harness-written evidence:
 
-      * `discarded` requires ≥WORK_CARD_MIN_RUNS_BEFORE_DISCARD (default 3)
+      * every clean-close status in _EVIDENCE_GATED_CARD_STATUSES (today
+        `discarded` and `done`) requires ≥WORK_CARD_MIN_RUNS_BEFORE_DISCARD (default 3)
         CLEAN runs.jsonl rows referencing the card and a real hypothesis AND
         ≥WORK_CARD_MIN_HYPS_BEFORE_DISCARD (default 2) distinct hypothesis
         shapes among those runs: MISSED/NO_EXEC probes and unprobed rows cannot
-        retire a file/strategy surface.
+        retire a file/strategy surface. The set is derived from
+        PERMANENT_TERMINAL_CARD_STATUSES so a second spelling of "clean close"
+        cannot reach the queue ungated — `done` did, and retired cards that had
+        never been probed at all.
       * `crash` requires ≥1 runs.jsonl row with a CRASH verdict for the
         card and no unfinished crash report owned by the agent. An
         `update-card --status crash` with no such row is bounced
@@ -4778,13 +4789,13 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
     longer retires a whole (possibly very large) file.
     """
     init_state(ctx)
-    if status == "discarded":
+    if status in _EVIDENCE_GATED_CARD_STATUSES:
         min_runs, min_hyps = card_discard_requirements()
         runs, hyps = card_discard_evidence(ctx, card_id)
         ok = runs >= min_runs and hyps >= min_hyps
         if not ok:
             raise CardStatusUpdateError(
-                f"update-card refuses discard for {card_id}: "
+                f"update-card refuses {status} for {card_id}: "
                 f"clean_runs={runs} (need {min_runs}); "
                 f"probed_distinct_hypotheses={hyps} (need {min_hyps}). "
                 "Run bin/probe and add distinct hypotheses first."

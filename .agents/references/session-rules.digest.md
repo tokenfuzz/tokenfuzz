@@ -115,7 +115,7 @@ add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \
               --input-shape 'shape' --guard-gap 'gap' \
               --diagnostic bounds|lifetime|type|size|uninit|state --strategy S1
 update-hyp    --id H-... --status STATUS [--note NOTE]
-update-card   --card-id ID --status claimed|done|discarded|crash|find|blocked [--note NOTE]
+update-card   --card-id ID --status claimed|discarded|crash|find|blocked [--note NOTE]
 add-run       --agent N --hypothesis-id H-... --mode MODE --testcase TC \
               --asan-output ASAN --verdict VERDICT       # bin/probe sets these for you
 add-note      --agent N --hypothesis-id H-... --kind data-flow|guard|variants|decision|context --text '...'

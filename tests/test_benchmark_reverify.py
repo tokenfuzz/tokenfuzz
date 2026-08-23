@@ -839,6 +839,132 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 self.assertIsNotNone(resolved)
                 self.assertEqual(resolved[0]["SAN"], sanitizer)
 
+    def test_a_cli_replay_refuses_sanitizers_the_binary_cannot_observe(self) -> None:
+        """A non-ASan fault replayed against an ASan binary is not evidence.
+
+        The substituted binary carries none of the requested instrumentation,
+        so it can exit clean whatever the input does. That clean exit was reported as
+        `not-reproduced`, which _REVERIFY_MEASURED reads as a verdict and which
+        disqualifies a real crash. The harness branch already refuses this.
+        """
+        target, slug = self.make_target("sanitizer-uninstrumented")
+        for sanitizer in ("ubsan", "msan", "tsan"):
+            with self.subTest(sanitizer=sanitizer):
+                crash = self.make_crash(
+                    f"{sanitizer}-cli",
+                    diagnostic=SANITIZER_DIAGNOSTICS[sanitizer],
+                )
+                self.assertEqual(
+                    benchmark_runner.metrics.resolve_reverify_lines(
+                        crash, target, slug,
+                    ),
+                    ["MODE=none\nREASON=sanitizer-not-instrumented"],
+                )
+                self.assertIsNone(
+                    benchmark_runner._resolve_reverify_fields(
+                        crash, target, slug,
+                    )
+                )
+
+        # A target that configures its own UBSan binary still replays.
+        configured, configured_slug = self.make_target(
+            "ubsan-configured", sanitizer_binaries=("ubsan",),
+        )
+        resolved = benchmark_runner._resolve_reverify_fields(
+            self.make_crash("ubsan-ok", diagnostic=SANITIZER_DIAGNOSTICS["ubsan"]),
+            configured, configured_slug,
+        )
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved[0]["SAN"], "ubsan")
+
+        # ASan is the substitute, never the substituted: it is unaffected.
+        resolved = benchmark_runner._resolve_reverify_fields(
+            self.make_crash("asan-cli"), target, slug,
+        )
+        self.assertIsNotNone(resolved)
+        self.assertEqual(resolved[0]["SAN"], "asan")
+
+        # A Go race report likewise requires its configured -race runner. An
+        # ASan binary cannot observe it and carries no race marker to inspect.
+        race = self.make_crash("race-cli", diagnostic="WARNING: DATA RACE\n")
+        self.assertEqual(
+            benchmark_runner.metrics.resolve_reverify_lines(race, target, slug),
+            ["MODE=none\nREASON=sanitizer-not-instrumented"],
+        )
+
+    def test_configured_runner_args_reach_a_replay_without_a_runner_bin(self) -> None:
+        """`[runner] args` describe argv even when no `[runner] bin` is set.
+
+        A native CLI target names its binary with `asan_bin` and its argv with
+        `[runner] args`. Gating the argv on `runner_bin` dropped it, so the
+        replay passed the testcase bare; a target that takes its input behind a
+        flag then read it as an output path and never parsed it, leaving every
+        replay unmeasured.
+        """
+        target, slug = self.make_target("runner-args")
+        config = target / "target.toml"
+        config.write_text(
+            config.read_text(encoding="utf-8")
+            + '\n[runner]\nargs = ["-i", "{TESTCASE}", "-f", "null", "{NULL_DEVICE}"]\n',
+            encoding="utf-8",
+        )
+        resolved = benchmark_runner._resolve_reverify_fields(
+            self.make_crash("runner-args-crash"), target, slug,
+        )
+        self.assertIsNotNone(resolved)
+        fields, replay_args = resolved
+        self.assertEqual(fields["MODE"], "cli")
+        self.assertEqual(
+            replay_args, ["-i", fields["TESTCASE"], "-f", "null", os.devnull],
+        )
+
+    def test_a_separate_runners_args_do_not_replace_sanitizer_cli_argv(self) -> None:
+        """A configured sanitizer binary and runner are distinct carriers."""
+        target, slug = self.make_target("separate-runner")
+        runner = target / "sample-runner"
+        runner.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        runner.chmod(0o755)
+        config = target / "target.toml"
+        config.write_text(
+            config.read_text(encoding="utf-8")
+            + '\n[runner]\nbin = "sample-runner"\nargs = ["--script", "{TESTCASE}"]\n'
+            + 'env = ["RUNNER_ONLY=1"]\n',
+            encoding="utf-8",
+        )
+
+        resolved = benchmark_runner._resolve_reverify_fields(
+            self.make_crash("separate-runner-crash"), target, slug,
+        )
+        self.assertIsNotNone(resolved)
+        fields, replay_args = resolved
+        self.assertEqual(fields["BIN"], str(target / "build-asan" / "src" / "stub"))
+        self.assertEqual(replay_args, [])
+        # The runner's env belongs to the runner too, not to the sanitizer CLI.
+        self.assertEqual(
+            [value for key, value in fields.items() if key.startswith("ENV_")], [],
+        )
+
+    def test_browser_runner_args_do_not_become_sanitizer_cli_argv(self) -> None:
+        """Browser argv needs the browser carrier that creates its profile."""
+        target, slug = self.make_target("browser-runner-args")
+        config = target / "target.toml"
+        contents = config.read_text(encoding="utf-8").replace(
+            "[sanitizer]", 'is_browser = "1"\n[sanitizer]', 1,
+        )
+        config.write_text(
+            contents
+            + '\n[runner]\nargs = ["--profile", "{PROFILE}", "{TESTCASE}"]\n',
+            encoding="utf-8",
+        )
+
+        resolved = benchmark_runner._resolve_reverify_fields(
+            self.make_crash("browser-runner-args-crash"), target, slug,
+        )
+        self.assertIsNotNone(resolved)
+        fields, replay_args = resolved
+        self.assertEqual(fields["BIN"], str(target / "build-asan" / "src" / "stub"))
+        self.assertEqual(replay_args, [])
+
     def reproducing(self, original: str, runs: list[str]) -> int:
         return benchmark_runner._runs_reproducing(
             original, multi_run_transcript(runs),

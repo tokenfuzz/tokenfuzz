@@ -426,7 +426,7 @@ def main(argv: list[str]) -> int:
         if not args.card_id:
             print("[state] update-card requires --card-id", file=sys.stderr)
             return 2
-        allowed_card_status = {"claimed", "done", "discarded", "crash", "find", "blocked"}
+        allowed_card_status = {"claimed", "discarded", "crash", "find", "blocked"}
         requested_status = args.status.strip()
         normalized_status = requested_status.lower()
         terminal_status = requested_status.upper()
@@ -438,6 +438,10 @@ def main(argv: list[str]) -> int:
             args.status = "blocked"
         elif normalized_status.startswith("mode-incompatible"):
             args.status = "blocked"
+        elif normalized_status == "done":
+            # One spelling for "closed with nothing to report", so the close
+            # goes through the discard evidence bar instead of around it.
+            args.status = "discarded"
         elif normalized_status in allowed_card_status:
             args.status = normalized_status
         if args.status not in allowed_card_status:

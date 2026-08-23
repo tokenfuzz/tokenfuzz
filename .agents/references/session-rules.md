@@ -204,7 +204,7 @@ bin/state add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:f
                         --input-shape 'shape' --guard-gap 'gap' \
                         --diagnostic {bounds|lifetime|type|size|uninit|state} --strategy S1
 bin/state update-hyp    --id H-... --status STATUS [--note NOTE]
-bin/state update-card   --card-id PATCH-... --status {claimed|done|discarded|crash|find|blocked}
+bin/state update-card   --card-id PATCH-... --status {claimed|discarded|crash|find|blocked}
 bin/state add-run       --agent N --hypothesis-id H-... --mode MODE --testcase TC \
                         --asan-output ASAN --verdict VERDICT \
                         [--testcase-sha1 HEX] [--sanitizer-runs N]   # bin/probe sets these

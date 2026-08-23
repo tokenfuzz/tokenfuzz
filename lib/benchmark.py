@@ -6270,6 +6270,7 @@ def resolve_reverify_lines(
     library_relative = ""
     runner_binary = ""
     runner_selected = False
+    substituted_binary = False
     if config is not None:
         binary_relative = config.sanitizer_bin(sanitizer)
         if not binary_relative and config.runner_bin:
@@ -6281,6 +6282,7 @@ def resolve_reverify_lines(
                 runner_binary = ""
         if not binary_relative and not runner_selected and config.asan_bin:
             binary_relative = config.asan_bin
+            substituted_binary = True
         library_relative = config.sanitizer_lib(sanitizer)
 
     if (
@@ -6343,6 +6345,24 @@ def resolve_reverify_lines(
         lines.append("MODE=none\nREASON=source-harness-uncompiled")
         return lines
     if (
+        substituted_binary
+        and target_binary
+        and _tc is not None
+        and not (
+            _tc.sanitizer_has_runtime_marker(sanitizer)
+            and _tc.sanitizer_binary_is_usable(
+                target_root, sanitizer, target_binary,
+            )
+        )
+    ):
+        # The crash's sanitizer has no configured binary, so this would run a
+        # different instrument. A clean result there is not evidence, but
+        # `not-reproduced` is in _REVERIFY_MEASURED and disqualifies the crash.
+        # A substitution stands only where the binary is shown to carry that
+        # instrumentation; a family with no inspectable marker never qualifies.
+        lines.append("MODE=none\nREASON=sanitizer-not-instrumented")
+        return lines
+    if (
         testcase is not None
         and target_binary
         and os.path.exists(target_binary)
@@ -6356,7 +6376,19 @@ def resolve_reverify_lines(
             bin_names=[os.path.basename(target_binary)],
             testcase_name=os.path.basename(str(testcase)),
         )
-        if runner_binary and config is not None:
+        # Match bin/probe's carrier selection: a `[runner]` block belongs to
+        # runner_bin when one is configured, and describes a native sanitizer
+        # CLI only when no separate runner owns it. Handing a separate runner's
+        # argv or env to the sanitizer binary runs the wrong route, and a clean
+        # result there reads as `not-reproduced` against a real crash.
+        runner_block_applies = config is not None and (
+            runner_selected
+            or (
+                not config.runner_bin
+                and str(config.is_browser).lower() not in {"1", "true"}
+            )
+        )
+        if runner_block_applies:
             import sanitizer_run
             if not replay_args and config.runner_args:
                 replay_args = [

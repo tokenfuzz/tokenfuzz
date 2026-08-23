@@ -980,6 +980,44 @@ class WorkQueueTests(unittest.TestCase):
         self.add_run(index=4, hypothesis_id="H-2")
         self.assertEqual(workqueue.update_card_status(self.ctx, "WORK-A", "discarded")["status"], "discarded")
 
+    def test_every_permanent_terminal_close_carries_evidence(self) -> None:
+        """A second spelling of "clean close" must not bypass the discard bar.
+
+        `done` hard-closed a card exactly like `discarded` but was absent from
+        the gate's status list, so it retired cards that had never been probed.
+        """
+        self.assertEqual(
+            workqueue._EVIDENCE_GATED_CARD_STATUSES,
+            workqueue.PERMANENT_TERMINAL_CARD_STATUSES - {"crash", "find"},
+        )
+        self.assertIn("done", workqueue._EVIDENCE_GATED_CARD_STATUSES)
+        for status in sorted(workqueue._EVIDENCE_GATED_CARD_STATUSES):
+            with self.subTest(status=status):
+                self.write_cards([self.card("WORK-A", "src/app.c")])
+                with self.assertRaisesRegex(
+                    workqueue.CardStatusUpdateError, f"refuses {status}",
+                ):
+                    workqueue.update_card_status(self.ctx, "WORK-A", status, agent="1")
+
+    def test_state_cli_routes_done_through_the_discard_gate(self) -> None:
+        """`update-card --status done` is one spelling of `discarded`, gated."""
+        self.write_cards([self.card("WORK-A", "src/app.c")])
+        result = subprocess.run(
+            [
+                sys.executable, str(ROOT / "bin" / "state"),
+                "--script-root", str(ROOT),
+                "--target-path", str(self.target),
+                "--target-slug", "sample",
+                "--results-dir", str(self.results),
+                "update-card", "--card-id", "WORK-A",
+                "--status", "done", "--agent", "1",
+            ],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertNotIn("invalid status", result.stderr)
+        self.assertIn("refuses discarded for WORK-A", result.stderr)
+
     def test_card_discard_ignores_nonclean_runs_and_unprobed_hypotheses(self) -> None:
         self.write_cards([self.card("WORK-A", "src/app.c")])
         self.add_hypothesis()
