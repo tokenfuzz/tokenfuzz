@@ -552,17 +552,7 @@ def _finding_trigger_kept(finding_dir: Path) -> bool:
     """True iff current trigger evidence keeps the finding in scope."""
     if _read_json(finding_dir / ".trigger-gate-bypass.json").get("bypass") is True:
         return True
-    report = report_identity.find_report(finding_dir)
-    report_sha1s = (
-        report_identity.content_sha1_candidates(report) if report else frozenset()
-    )
-    if not report_sha1s:
-        return False
-    for name in (".trigger-gate.json", ".trigger-gate-2.json"):
-        payload = _read_json(finding_dir / name)
-        if _current_trigger_vote(payload, report_sha1s, finding_dir) == "Promote":
-            return True
-    return False
+    return _trigger_snapshot(finding_dir)[0] in {"bypass", "promote"}
 
 
 def _current_trigger_vote(
@@ -573,7 +563,10 @@ def _current_trigger_vote(
     vote = payload.get("vote")
     version = payload.get("decision_version")
     if (
-        version == triage_validate.TRIGGER_GATE_DECISION_VERSION
+        version in {
+            triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
+        }
         # Harvest is intentionally environment-free: it validates that the
         # current scoped schema recorded controls, while live triage is the
         # authority that compares them with target.toml and refreshes a stale
@@ -581,6 +574,15 @@ def _current_trigger_vote(
         and isinstance(payload.get("attacker_controls"), list)
         and vote in {"Promote", "Reject", "Uncertain"}
     ):
+        if version == triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION:
+            prior_paths = _trigger_resolution_sources(
+                report_sha1s, directory,
+            )
+            if not prior_paths:
+                return None
+            prior_sha256s = triage_validate.prior_review_sha256s(prior_paths)
+            if payload.get("prior_review_sha256s") != prior_sha256s:
+                return None
         if vote in {"Promote", "Reject"}:
             anchors = payload.get("anchors")
             if (
@@ -600,6 +602,21 @@ def _current_trigger_vote(
     ):
         return "Uncertain"
     return None
+
+
+def _trigger_resolution_sources(
+    report_sha1s: frozenset[str], directory: Path,
+) -> tuple[Path, ...]:
+    first = directory / ".trigger-gate.json"
+    first_vote = _current_trigger_vote(
+        _read_json(first), report_sha1s, directory,
+    )
+    second = directory / ".trigger-gate-2.json"
+    names = triage_validate.trigger_resolution_review_names(
+        first_vote,
+        _current_trigger_vote(_read_json(second), report_sha1s, directory),
+    )
+    return tuple(directory / name for name in names)
 
 
 def _finding_is_confirmed(
@@ -1966,6 +1983,14 @@ def _trigger_snapshot(directory: Path) -> tuple[str, set[str]]:
     report_sha1s = (
         report_identity.content_sha1_candidates(report) if report else frozenset()
     )
+    resolution_path = directory / ".trigger-gate-resolution.json"
+    resolution_payload = _read_json(resolution_path)
+    resolution_vote = _current_trigger_vote(
+        resolution_payload, report_sha1s, directory,
+    )
+    if resolution_vote is not None:
+        signals.add(resolution_vote)
+        observed = True
     for name in (".trigger-gate.json", ".trigger-gate-2.json"):
         payload = _read_json(directory / name)
         if payload.get("vote") not in {"Promote", "Reject", "Uncertain"}:
@@ -1974,7 +1999,8 @@ def _trigger_snapshot(directory: Path) -> tuple[str, set[str]]:
         vote = _current_trigger_vote(payload, report_sha1s, directory)
         if vote is None:
             continue
-        signals.add(vote)
+        if resolution_vote is None:
+            signals.add(vote)
     bypass = _read_json(directory / ".trigger-gate-bypass.json").get("bypass") is True
     if bypass:
         signals.add("Promote")

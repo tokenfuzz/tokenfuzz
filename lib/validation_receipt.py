@@ -34,6 +34,7 @@ _FIXED_EVIDENCE_NAMES = (
     ".llm-find-quality.json",
     ".trigger-gate.json",
     ".trigger-gate-2.json",
+    ".trigger-gate-resolution.json",
     ".trigger-gate-bypass.json",
 )
 

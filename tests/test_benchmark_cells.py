@@ -720,14 +720,16 @@ class FinalizationDrainTests(unittest.TestCase):
         """It must not promise that re-running the gate finishes the count.
 
         Operators followed the old wording, ran `--regenerate`, and watched the
-        number not move: a review that ran and could not settle is cached and
-        never re-asked.
+        number not move. The warning must distinguish retryable first-pass
+        uncertainty from a focused resolution that already remained uncertain.
         """
         warning = benchmark_runner._unadjudicated_warning("harness-r1", 3)
         self.assertIn("harness-r1", warning)
         self.assertIn("3 finding(s)", warning)
         self.assertIn("--regenerate", warning)
         self.assertIn("retries", warning)
+        self.assertIn("focused resolution", warning)
+        self.assertIn("unresolved final review", warning)
         self.assertNotIn("to finish the gate", warning)
         # A pending id may have no receipt at all, so the receipt is offered as
         # a place to look rather than asserted to exist.

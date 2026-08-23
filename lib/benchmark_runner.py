@@ -1046,11 +1046,10 @@ def _provider_issue(cell_dir: Path, model: str = "") -> str:
 def _unadjudicated_warning(name: str, unjudged: int) -> str:
     """The un-adjudicated warning, without promising a remedy that may not apply.
 
-    Two different states reach this count, and only one is worth acting on: a
-    review with no usable recorded answer is retried on the next pass, while one
-    that ran and could not settle is cached and never re-asked, so
-    `--regenerate` re-derives it unchanged. The old wording sent an operator to
-    re-run the gate for both, and they watched the count not move.
+    Two different states reach this count. A review with no usable recorded
+    answer is retried on the next pass. An inconclusive first review or split is
+    retried once with its prior evidence; only a focused resolution that still
+    cannot settle is cached until the evidence changes.
 
     Says "retries" rather than "finishes" because a retry is not a promise — a
     batch can return nothing usable again — and hedges the receipt for the same
@@ -1059,8 +1058,9 @@ def _unadjudicated_warning(name: str, unjudged: int) -> str:
     return (
         f"WARN: {name} has {unjudged} finding(s) un-adjudicated after drain; "
         "they count as unconfirmed. `bin/benchmark --regenerate` retries the "
-        "ones whose review left no usable answer; a review that ran and could "
-        "not settle stays unjudged until new evidence settles it. Each "
+        "ones whose review left no usable answer or needs focused resolution; "
+        "an unresolved final review stays unjudged until new evidence settles "
+        "it. Each "
         "finding's validation.json says which, where one exists"
     )
 

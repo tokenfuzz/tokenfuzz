@@ -159,9 +159,11 @@ engineering defect on disk without presenting it as a security bug, and it
 states something a review established — an admitted contract violation, or
 reviewers agreeing the trigger needs a control the threat model does not list.
 An `Uncertain` verdict and two reviewers who disagree establish neither, so
-they stay unsettled rather than being written off as out of scope: that
-remainder is the reason a count can carry the `≥` floor mark. Content-addressing
-reopens the review when the report, the evidence, or the prompt version changes.
+the gate gives their exact open question to one focused resolver rather than
+asking another blind review. If that resolver remains uncertain, the artifact
+stays unsettled rather than being written off as out of scope: that remainder is
+the reason a count can carry the `≥` floor mark. Content-addressing reopens the
+review when the report, the evidence, or the prompt version changes.
 Runtime signature details remain available in the linked crash and finding
 indexes rather than adding another count to the benchmark headline.
 

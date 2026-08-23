@@ -30,6 +30,12 @@ from prompt_render import render_template
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 
+_TRIGGER_PRIMARY_NAME = ".trigger-gate.json"
+_TRIGGER_SECOND_NAME = ".trigger-gate-2.json"
+_TRIGGER_RESOLUTION_NAME = ".trigger-gate-resolution.json"
+_TRIGGER_REVIEW_NAMES = (_TRIGGER_PRIMARY_NAME, _TRIGGER_SECOND_NAME)
+_TRIGGER_EVIDENCE_NAMES = (*_TRIGGER_REVIEW_NAMES, _TRIGGER_RESOLUTION_NAME)
+
 _DIAGNOSTIC = re.compile(
     r"ERROR: (?:AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)"
     r"|SUMMARY: (?:AddressSanitizer|HWAddressSanitizer|UndefinedBehaviorSanitizer)"
@@ -227,7 +233,7 @@ def _record_unreachable_route(directory: Path, results_dir: Path) -> None:
     never blocks a claim, so a different route to the same defect stays open.
     """
     row: dict | None = None
-    for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+    for name in _TRIGGER_EVIDENCE_NAMES:
         vote = _finding_cache(directory / name)
         summary = _unreachable_route_summary(vote.get("disproof", ""))
         anchors = vote.get("anchors") or []
@@ -479,9 +485,24 @@ def _restore_stale_trigger_rejections(
         ):
             continue
         report = _report(directory)
-        vote_files = (
-            directory / ".trigger-gate.json",
-            directory / ".trigger-gate-2.json",
+        vote_pairs = [
+            (
+                directory / _TRIGGER_PRIMARY_NAME,
+                directory / _TRIGGER_SECOND_NAME,
+            ),
+            (
+                directory / _TRIGGER_PRIMARY_NAME,
+                directory / _TRIGGER_RESOLUTION_NAME,
+            ),
+        ]
+        vote_files = next(
+            (
+                pair for pair in vote_pairs
+                if report is not None
+                and [_cached_trigger_vote(report, path) for path in pair]
+                == ["Reject", "Reject"]
+            ),
+            vote_pairs[0],
         )
         current_votes = (
             [_cached_trigger_vote(report, path) for path in vote_files]
@@ -936,8 +957,9 @@ def _materialize_reach_fields_preserving_positive_votes(
 ) -> bool:
     """Advance fail-open trigger evidence across one harness field annotation."""
     vote_files = (
-        report.parent / ".trigger-gate.json",
-        report.parent / ".trigger-gate-2.json",
+        report.parent / _TRIGGER_PRIMARY_NAME,
+        report.parent / _TRIGGER_SECOND_NAME,
+        report.parent / _TRIGGER_RESOLUTION_NAME,
     )
     prior_votes = {
         path: _cached_trigger_vote(report, path)
@@ -950,17 +972,32 @@ def _materialize_reach_fields_preserving_positive_votes(
     # votes captured immediately before this exact annotation. A Reject is
     # deliberately never carried across semantic content.
     current_sha1 = report_identity.content_sha1(report)
-    for path, vote in prior_votes.items():
-        if vote not in {"Promote", "Uncertain"}:
-            continue
+
+    def _carry(path: Path, extra: dict | None = None) -> None:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            continue
+            return
         if not isinstance(payload, dict):
-            continue
+            return
         payload["content_sha1"] = current_sha1
+        payload.update(extra or {})
         _write_atomic_json(path, payload)
+
+    resolution = report.parent / _TRIGGER_RESOLUTION_NAME
+    for path, vote in prior_votes.items():
+        if vote in {"Promote", "Uncertain"} and path != resolution:
+            _carry(path)
+    # Strictly after the reviews above: a resolution is bound to their exact
+    # bytes, which that loop just rewrote. Carrying only the report identity
+    # would leave it bound to the pre-annotation reviews and silently stale,
+    # buying a second resolver call for a question already answered.
+    if prior_votes.get(resolution) in {"Promote", "Uncertain"}:
+        _carry(resolution, {
+            "prior_review_sha256s": triage_validate.prior_review_sha256s(
+                _trigger_resolution_sources(report, report.parent)
+            ),
+        })
     return True
 
 
@@ -1366,9 +1403,10 @@ def _final_publication_state(
     `pending`: not security yield, and not a defect anyone showed is out of
     scope. The benchmark then carries it as the unjudged remainder that marks
     its counts a floor, where writing a negative would instead publish an
-    adjudication that never happened. Nothing re-asks a cached vote, so
-    `pending` costs no provider call, and content-addressing reopens the review
-    when the report, its evidence, or the prompt version changes.
+    adjudication that never happened. An inconclusive first review or split is
+    re-asked once with the prior evidence; a resolver that remains uncertain is
+    cached, and content-addressing reopens it when the report, prior reviews,
+    evidence, or prompt version changes.
 
     Scope comes from `trigger_controls_fit` — the reviewer's own threat-model
     comparison, read from source and supplied by `_source_review_facts` only
@@ -1890,7 +1928,19 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
     if vote not in {"Promote", "Reject", "Uncertain"}:
         return None
     version = payload.get("decision_version")
-    if version == triage_validate.TRIGGER_GATE_DECISION_VERSION:
+    if version in {
+        triage_validate.TRIGGER_GATE_DECISION_VERSION,
+        triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
+    }:
+        if version == triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION:
+            if vote_file.name != _TRIGGER_RESOLUTION_NAME:
+                return None
+            prior_paths = _trigger_resolution_sources(report, vote_file.parent)
+            if not prior_paths:
+                return None
+            prior_sha256s = triage_validate.prior_review_sha256s(prior_paths)
+            if payload.get("prior_review_sha256s") != prior_sha256s:
+                return None
         # A current verdict is only reusable under the threat model it was
         # produced for; a controls, revision, or config change forces review.
         if payload.get("attacker_controls") != triage_validate.trigger_attacker_controls():
@@ -1936,6 +1986,54 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
         # source-anchor schema is refreshed. Legacy Rejects remain ignored.
         return "Uncertain"
     return None
+
+
+def _trigger_resolution_sources(report: Path, directory: Path) -> tuple[Path, ...]:
+    """Return the cached reviews a focused resolver must adjudicate."""
+    first = directory / _TRIGGER_PRIMARY_NAME
+    first_vote = _cached_trigger_vote(report, first)
+    second = directory / _TRIGGER_SECOND_NAME
+    names = triage_validate.trigger_resolution_review_names(
+        first_vote, _cached_trigger_vote(report, second),
+    )
+    return tuple(directory / name for name in names)
+
+
+#: Facts that describe the artifact rather than answer the disputed question.
+#: A resolver is pointed at one open question and fills the rest of the schema
+#: in passing, so these stay with the reviewers when those agreed.
+_DESCRIPTIVE_REVIEW_FACTS = ("vulnerable_boundary_surface", "reproducer_carrier")
+
+
+def _trigger_publication_evidence(
+    report: Path, directory: Path,
+) -> tuple[set[str | None], dict[str, str]]:
+    """Return the votes and source facts that actually settled publication.
+
+    A resolution owns the verdict and the question it was asked -- scope and
+    rejection kind -- because it read the reviews it adjudicated. It does not
+    own what those reviews already agreed on: `vulnerable_boundary_surface`
+    overrides the Surface that severity scores, and on the split reviews
+    measured here the two reviewers agreed on it every time while disagreeing
+    only about scope. Letting one resolver's incidental answer replace a
+    two-reviewer consensus would move published severity on a field nobody
+    disputed, so consensus stands and the resolution fills the rest.
+    """
+    reviews = tuple(directory / name for name in _TRIGGER_REVIEW_NAMES)
+    resolution = directory / _TRIGGER_RESOLUTION_NAME
+    resolution_vote = _cached_trigger_vote(report, resolution)
+    if resolution_vote is None:
+        return (
+            {_cached_trigger_vote(report, path) for path in reviews},
+            _source_review_facts(report, reviews, rejection_quorum=2),
+        )
+    facts = _source_review_facts(report, (resolution,), rejection_quorum=2)
+    agreed = _source_review_facts(report, reviews, rejection_quorum=2)
+    facts.update({
+        key: agreed[key]
+        for key in _DESCRIPTIVE_REVIEW_FACTS if key in agreed
+    })
+    return {resolution_vote}, facts
 
 
 def _source_review_facts(
@@ -2054,6 +2152,7 @@ def _batch_finding_trigger_votes(
     vote_name: str = ".trigger-gate.json",
 ) -> set[Path]:
     """Populate one round of independent keyed trigger votes in batches."""
+    resolution = vote_name == _TRIGGER_RESOLUTION_NAME
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     target_root = Path(os.environ.get("TARGET_ROOT", ""))
     if not backend or not target_root.is_dir():
@@ -2095,7 +2194,21 @@ def _batch_finding_trigger_votes(
         manifest = raw_dir / f"trigger-batch-{os.getpid()}-{time.time_ns()}-{tag}.json"
         payload = {
             "items": [
-                {"id": directory.name, "finding": str(report), "output": str(vote_file)}
+                {
+                    "id": directory.name,
+                    "finding": str(report),
+                    "output": str(vote_file),
+                    **(
+                        {
+                            "prior_reviews": [
+                                str(path) for path in _trigger_resolution_sources(
+                                    report, directory,
+                                )
+                            ],
+                        }
+                        if resolution else {}
+                    ),
+                }
                 for directory, report, vote_file in batch
             ]
         }
@@ -2105,6 +2218,8 @@ def _batch_finding_trigger_votes(
             "--batch-manifest", str(manifest), "--target-path", str(target_root),
             "--backend", backend, "--gate", "trigger", "--timeout", str(timeout),
         ]
+        if resolution:
+            command.append("--resolve-trigger")
         if model:
             command += ["--model", model]
         if usage_index:
@@ -2179,6 +2294,7 @@ def _trigger_vote(
     target_root: Path, deadline: float | None = None,
     usage_index: str | os.PathLike[str] | None = None,
     target_root_is_product: bool = False,
+    *, resolve: bool = False,
 ) -> int:
     """Run the recall-safe trigger-provenance reviewer (`validate-finding --gate
     trigger`) over a report. Returns 1 = disproof-backed Reject, 0 = keep
@@ -2206,6 +2322,10 @@ def _trigger_vote(
         "--backend", backend, "--gate", "trigger", "--output", str(vote_file),
         "--timeout", str(timeout),
     ]
+    if resolve:
+        command.append("--resolve-trigger")
+        for prior in _trigger_resolution_sources(report, vote_file.parent):
+            command += ["--prior-review", str(prior)]
     if model:
         command += ["--model", model]
     if usage_index:
@@ -2270,24 +2390,38 @@ def _crash_trigger_gate(
         return False
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     model = os.environ.get("MODEL", "")
+    first = crash_dir / _TRIGGER_PRIMARY_NAME
     if _trigger_vote(
-        report, crash_dir / ".trigger-gate.json", backend, model,
+        report, first, backend, model,
         target_root, deadline, usage_index,
         target_root_is_product,
     ) != 1:
+        if _cached_trigger_vote(report, first) == "Uncertain":
+            _trigger_vote(
+                report, crash_dir / _TRIGGER_RESOLUTION_NAME, backend, model,
+                target_root, deadline, usage_index, target_root_is_product,
+                resolve=True,
+            )
         return False
+    second = crash_dir / _TRIGGER_SECOND_NAME
     if _trigger_vote(
-        report, crash_dir / ".trigger-gate-2.json", backend, model,
+        report, second, backend, model,
         target_root, deadline, usage_index,
         target_root_is_product,
     ) != 1:
+        if _cached_trigger_vote(report, second) in {"Promote", "Uncertain"}:
+            resolution = crash_dir / _TRIGGER_RESOLUTION_NAME
+            _trigger_vote(
+                report, resolution, backend, model, target_root, deadline,
+                usage_index, target_root_is_product, resolve=True,
+            )
+            if _cached_trigger_vote(report, resolution) == "Reject":
+                return _trigger_rejection_is_dispositive(
+                    report, (first, resolution),
+                )
         return False
     return _trigger_rejection_is_dispositive(
-        report,
-        (
-            crash_dir / ".trigger-gate.json",
-            crash_dir / ".trigger-gate-2.json",
-        ),
+        report, (first, second),
     )
 
 
@@ -2471,10 +2605,9 @@ def triage_one_crash(
             category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
         )
         return "rejected"
-    trigger_votes = {
-        _cached_trigger_vote(report, crash_dir / name)
-        for name in (".trigger-gate.json", ".trigger-gate-2.json")
-    }
+    trigger_votes, review_facts = _trigger_publication_evidence(
+        report, crash_dir,
+    )
     source_review_required = (
         os.environ.get("CRASH_TRIGGER_GATE", "1") != "0"
         and (
@@ -2495,14 +2628,6 @@ def triage_one_crash(
             attacker_controls=attacker_controls,
         )
         return "pending"
-    review_facts = _source_review_facts(
-        report,
-        (
-            crash_dir / ".trigger-gate.json",
-            crash_dir / ".trigger-gate-2.json",
-        ),
-        rejection_quorum=2,
-    )
     state = _final_publication_state(
         verdict, trigger_votes, review_facts,
         direct_trigger_proof=direct_trigger_proof,
@@ -2979,18 +3104,39 @@ def _finding_trigger_disposition(
                 target_root_is_product,
             )
         second_vote = _cached_trigger_vote(report, second)
-        if second_vote in {"Promote", "Uncertain"}:
-            return "accepted"
         if second_vote != "Reject":
-            return "pending"
+            if second_vote not in {"Promote", "Uncertain"}:
+                return "pending"
+            resolution = finding_dir / _TRIGGER_RESOLUTION_NAME
+            if backend and target_root.is_dir():
+                _trigger_vote(
+                    report, resolution, backend,
+                    os.environ.get("MODEL", ""), target_root, deadline,
+                    usage_index, target_root_is_product, resolve=True,
+                )
+            resolution_vote = _cached_trigger_vote(report, resolution)
+            if resolution_vote != "Reject":
+                return (
+                    "accepted"
+                    if resolution_vote in {"Promote", "Uncertain"}
+                    else "pending"
+                )
+            rejection_files = (
+                finding_dir / _TRIGGER_PRIMARY_NAME,
+                resolution,
+            )
+        else:
+            rejection_files = (
+                finding_dir / _TRIGGER_PRIMARY_NAME,
+                second,
+            )
         facts = _source_review_facts(
-            report, (finding_dir / ".trigger-gate.json", second),
-            rejection_quorum=2,
+            report, rejection_files, rejection_quorum=2,
         )
         if facts.get("rejection_kind") == "no-added-boundary":
             return "not-reportable"
         if _trigger_rejection_is_dispositive(
-            report, (finding_dir / ".trigger-gate.json", second),
+            report, rejection_files,
             allow_consequence=True,
         ):
             # Only when both reviewers named it; a split disproof keeps the
@@ -3003,10 +3149,19 @@ def _finding_trigger_disposition(
     if vote == "Promote":
         return "accepted"
     if vote == "Uncertain":
-        # A legacy positive or inconclusive current review cannot justify
-        # suppressing a quality-confirmed finding. Keep it on disk and let
-        # _final_publication_state record the doubt as unadjudicated.
-        return "accepted"
+        resolution = finding_dir / _TRIGGER_RESOLUTION_NAME
+        if backend and target_root.is_dir():
+            _trigger_vote(
+                report, resolution, backend,
+                os.environ.get("MODEL", ""), target_root, deadline,
+                usage_index, target_root_is_product, resolve=True,
+            )
+        return (
+            "accepted"
+            if _cached_trigger_vote(report, resolution)
+            in {"Promote", "Reject", "Uncertain"}
+            else "pending"
+        )
     return "pending"
 
 
@@ -3015,12 +3170,21 @@ def _cached_trigger_resolution(directory: Path, report: Path) -> bool:
     if _trigger_bypass_confirmed(directory):
         return True
     first = _cached_trigger_vote(report, directory / ".trigger-gate.json")
-    if first in {"Promote", "Uncertain"}:
+    if first == "Promote":
         return True
+    resolution = _cached_trigger_vote(
+        report, directory / _TRIGGER_RESOLUTION_NAME,
+    )
+    if first == "Uncertain":
+        return resolution in {"Promote", "Reject", "Uncertain"}
     if first == "Reject":
-        return _cached_trigger_vote(
+        second = _cached_trigger_vote(
             report, directory / ".trigger-gate-2.json",
-        ) in {"Promote", "Uncertain", "Reject"}
+        )
+        if second == "Reject":
+            return True
+        if second in {"Promote", "Uncertain"}:
+            return resolution in {"Promote", "Reject", "Uncertain"}
     return False
 
 
@@ -3078,7 +3242,7 @@ def _score_validated_report(
         )
     )
     trigger_payloads: dict[Path, dict] = {}
-    for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+    for name in _TRIGGER_EVIDENCE_NAMES:
         path = directory / name
         if _cached_trigger_vote(report, path) is None:
             continue
@@ -3115,11 +3279,23 @@ def _score_validated_report(
                 quality["report_sha1"] = current_sha1
                 _write_atomic_json(quality_path, quality)
                 caches_rebound = True
+        resolution_payload = trigger_payloads.pop(
+            directory / _TRIGGER_RESOLUTION_NAME, None,
+        )
         for path, payload in trigger_payloads.items():
             if payload.get("content_sha1") != current_sha1:
                 payload["content_sha1"] = current_sha1
                 _write_atomic_json(path, payload)
                 caches_rebound = True
+        if resolution_payload is not None:
+            resolution_path = directory / _TRIGGER_RESOLUTION_NAME
+            prior_paths = _trigger_resolution_sources(report, directory)
+            resolution_payload["content_sha1"] = current_sha1
+            resolution_payload["prior_review_sha256s"] = (
+                triage_validate.prior_review_sha256s(prior_paths)
+            )
+            _write_atomic_json(resolution_path, resolution_payload)
+            caches_rebound = True
         if caches_rebound and scored_receipt is not None:
             validation_receipt.rewrite_after_equivalent_transform(
                 directory, scored_receipt,
@@ -3198,12 +3374,14 @@ def _finalize_accepted_finding(
         return "pending"
     controls = triage_validate.trigger_attacker_controls()
     if disposition == "not-reportable":
+        resolution = finding_dir / _TRIGGER_RESOLUTION_NAME
+        vote_files = (
+            (finding_dir / _TRIGGER_PRIMARY_NAME, resolution)
+            if _cached_trigger_vote(report, resolution) == "Reject"
+            else tuple(finding_dir / name for name in _TRIGGER_REVIEW_NAMES)
+        )
         review_facts = _source_review_facts(
-            report,
-            (
-                finding_dir / ".trigger-gate.json",
-                finding_dir / ".trigger-gate-2.json",
-            ),
+            report, vote_files,
             rejection_quorum=2,
         )
         validation_receipt.write(
@@ -3225,20 +3403,12 @@ def _finalize_accepted_finding(
             attacker_controls=controls,
         )
         return "pending"
-    review_facts = _source_review_facts(
-        report,
-        (
-            finding_dir / ".trigger-gate.json",
-            finding_dir / ".trigger-gate-2.json",
-        ),
-        rejection_quorum=2,
-    )
-    trigger_vote = _cached_trigger_vote(
-        report, finding_dir / ".trigger-gate.json",
+    trigger_votes, review_facts = _trigger_publication_evidence(
+        report, finding_dir,
     )
     direct_trigger_proof = _trigger_bypass_confirmed(finding_dir)
     state = _final_publication_state(
-        reach_verdict, {trigger_vote}, review_facts,
+        reach_verdict, trigger_votes, review_facts,
         direct_trigger_proof=direct_trigger_proof,
     )
     validation_receipt.write(
@@ -3708,6 +3878,21 @@ def validate_find_gate(
                 )
                 if second_trigger_directories else set()
             )
+            resolution_directories = [
+                directory for directory in disposition_group
+                if (
+                    (report := _report(directory)) is not None
+                    and _trigger_resolution_sources(report, directory)
+                )
+            ]
+            resolution_attempted = (
+                _batch_finding_trigger_votes(
+                    resolution_directories, results, group_deadline,
+                    usage_index, target_root_is_product, workers,
+                    vote_name=_TRIGGER_RESOLUTION_NAME,
+                )
+                if resolution_directories else set()
+            )
             for directory in disposition_group:
                 report = _report(directory)
                 if (
@@ -3722,6 +3907,12 @@ def validate_find_gate(
                         directory in second_trigger_attempted
                         and _cached_trigger_vote(
                             report, directory / ".trigger-gate-2.json",
+                        ) is None
+                    )
+                    or (
+                        directory in resolution_attempted
+                        and _cached_trigger_vote(
+                            report, directory / _TRIGGER_RESOLUTION_NAME,
                         ) is None
                     )
                 ):

@@ -65,6 +65,16 @@ class ValidationReceiptTests(unittest.TestCase):
             validation_receipt.evidence_record(self.directory)["evidence_id"],
         )
 
+    def test_trigger_resolution_is_bound_as_publication_evidence(self) -> None:
+        resolution = self.directory / ".trigger-gate-resolution.json"
+        resolution.write_text('{"vote": "Promote"}', encoding="utf-8")
+        validation_receipt.write(
+            self.directory, kind="finding", state="reportable",
+        )
+        self.assertIsNotNone(validation_receipt.read_current(self.directory))
+        resolution.write_text('{"vote": "Rejects"}', encoding="utf-8")
+        self.assertIsNone(validation_receipt.read_current(self.directory))
+
     def test_large_evidence_memo_still_notices_a_rewrite(self) -> None:
         # Large reproducers are memoized so one pass digests them once across
         # the several consumers that rebuild the record. Restoring mtime after

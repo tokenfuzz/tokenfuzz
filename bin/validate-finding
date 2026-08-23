@@ -63,6 +63,10 @@ def parse_args(argv=None):
     parser.add_argument("--backend", required=True, choices=("claude", "codex", "gemini", "grok", "oss"))
     parser.add_argument("--model", default="")
     parser.add_argument("--tiebreak", action="store_true")
+    parser.add_argument("--resolve-trigger", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--prior-review", action="append", default=[],
+                        help=argparse.SUPPRESS)
     parser.add_argument("--gate", choices=("finding", "trigger"), default="finding")
     parser.add_argument("--target-root-is-product", action="store_true",
                         help=argparse.SUPPRESS)
@@ -113,9 +117,32 @@ def candidate(path: Path) -> dict:
     return candidate_snapshot(path)[0]
 
 
+def prior_review_snapshot(paths: list[Path]) -> list[dict]:
+    """Return only the prior reviewers' decision evidence for the resolver."""
+    reviews: list[dict] = []
+    for path in paths:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        reviews.append({
+            key: payload[key]
+            for key in (
+                "vote", "rationale", "trigger_path", "disproof",
+                "rejection_kind", "review_mode", "trigger_controls_fit",
+                "review_facts", "anchors",
+            )
+            if key in payload
+        })
+    return reviews
+
+
 def stamp_trigger_vote(
     args, vote: dict, content_sha1: str, target: Path | None = None,
     artifact_dir: Path | None = None, probe_evidence: object = None,
+    prior_review_paths: list[Path] | None = None,
 ) -> dict:
     """Content-address trigger verdicts; other validator modes stay unchanged."""
     if args.gate != "trigger":
@@ -138,10 +165,18 @@ def stamp_trigger_vote(
         else {}
     )
     stamped.update({
-        "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+        "decision_version": (
+            triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION
+            if args.resolve_trigger
+            else triage_validate.TRIGGER_GATE_DECISION_VERSION
+        ),
         "content_sha1": content_sha1,
         "attacker_controls": triage_validate.trigger_attacker_controls(),
     })
+    if args.resolve_trigger:
+        stamped["prior_review_sha256s"] = (
+            triage_validate.prior_review_sha256s(prior_review_paths or [])
+        )
     evidence = probe_evidence if isinstance(probe_evidence, dict) else None
     if evidence is None:
         evidence = crash_bundle.recorded_evidence_context(
@@ -211,6 +246,20 @@ def validator_cwd(finding: Path, target: Path) -> Path:
 
 def render_validator_prompt(args, facts: dict) -> str:
     skeptic = prompt_render.render_template("validate_tiebreak.md.j2", {}) if args.tiebreak else ""
+    resolving = args.gate == "trigger" and args.resolve_trigger
+    resolution = prompt_render.render_template(
+        "validate_trigger_resolution.md.j2", {},
+    ) if resolving else ""
+    reviewer_intro = (
+        "You are the focused resolution reviewer for a security finding at "
+        f"{args.target_path}. Treat both the finding and the supplied prior "
+        "reviews as claims to verify, not conclusions to rubber-stamp."
+        if resolving else
+        "You are an independent reviewer doing a second-opinion pass on a "
+        f"security finding for the project at {args.target_path}. You have NOT "
+        "seen this finding before. Treat the finding facts supplied near the "
+        "end as claims to verify, not as a conclusion to rubber-stamp."
+    )
     template = "validate_trigger_provenance.md.j2" if args.gate == "trigger" else "validate_finding.md.j2"
     product_boundary_block = ""
     if args.target_root_is_product:
@@ -227,6 +276,8 @@ def render_validator_prompt(args, facts: dict) -> str:
         "candidate_json": json.dumps(facts, sort_keys=True),
         "attacker_controls": os.environ.get("TARGET_ATTACKER_CONTROLS_CSV", "bytes"),
         "product_boundary_block": product_boundary_block,
+        "reviewer_intro": reviewer_intro,
+        "resolution_block": resolution,
         "skeptic_block": skeptic,
         "timeout_secs": str(args.timeout),
     })
@@ -340,6 +391,7 @@ def main(argv=None) -> int:
         outputs: dict[str, Path] = {}
         artifact_dirs: dict[str, Path] = {}
         probe_evidence: dict[str, object] = {}
+        prior_review_paths: dict[str, list[Path]] = {}
         content_hashes: dict[str, str] = {}
         findings: list[Path] = []
         for entry in entries:
@@ -351,11 +403,23 @@ def main(argv=None) -> int:
             if not item_id or item_id in outputs or not finding.is_file() or not output.parent.is_dir():
                 return 4
             facts, content_hash = candidate_snapshot(finding, semantic=True)
+            review_paths = [
+                Path(str(value))
+                for value in entry.get("prior_reviews", [])
+                if str(value)
+            ]
+            if args.resolve_trigger:
+                reviews = prior_review_snapshot(review_paths)
+                if not reviews:
+                    return 4
+                facts = dict(facts)
+                facts["prior_reviews"] = reviews
             items.append({"id": item_id, "facts": facts})
             outputs[item_id] = output
             artifact_dirs[item_id] = finding.parent
             content_hashes[item_id] = content_hash
             probe_evidence[item_id] = facts.get("probe_evidence")
+            prior_review_paths[item_id] = review_paths
             findings.append(finding)
         if not target.is_dir():
             return 4
@@ -385,6 +449,7 @@ def main(argv=None) -> int:
             vote = stamp_trigger_vote(
                 args, vote, content_hashes[item_id], target,
                 artifact_dirs[item_id], probe_evidence[item_id],
+                prior_review_paths[item_id],
             )
             output.write_text(json.dumps(vote, indent=2, sort_keys=True) + "\n")
             written += 1
@@ -426,6 +491,14 @@ def main(argv=None) -> int:
     facts, content_hash = candidate_snapshot(
         finding, semantic=args.gate == "trigger",
     )
+    review_paths = [Path(value) for value in args.prior_review]
+    if args.resolve_trigger:
+        reviews = prior_review_snapshot(review_paths)
+        if not reviews:
+            print("FATAL: trigger resolution requires prior reviews", file=sys.stderr)
+            return 4
+        facts = dict(facts)
+        facts["prior_reviews"] = reviews
     prompt = render_validator_prompt(args, facts)
     raw = destination.with_suffix(".raw.log")
     # A stable isolated cwd keeps the CLI's system context identical across
@@ -464,7 +537,7 @@ def main(argv=None) -> int:
         vote.update(vote="Uncertain", downgraded_from="Reject", downgrade_reason="empty disproof")
     vote = stamp_trigger_vote(
         args, vote, content_hash, target, finding.parent,
-        facts.get("probe_evidence"),
+        facts.get("probe_evidence"), review_paths,
     )
     destination.write_text(json.dumps(vote, indent=2, sort_keys=True) + "\n")
     return VOTES.get(vote.get("vote"), 3)

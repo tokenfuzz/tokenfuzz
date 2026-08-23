@@ -164,7 +164,8 @@ no numeric CVSS score, no security yield.
 Those checks are mechanical. On top of them, a reviewer reads the source and can
 still throw out a sanitizer-confirmed crash — but only on two independent
 rejections that each carry a concrete disproof. Silence or uncertainty keeps
-the crash.
+the crash. An inconclusive or split review receives the same focused resolution
+pass as a finding; one resolver Reject still cannot replace the two-Reject bar.
 
 **For findings, the gates are about substance:**
 
@@ -179,7 +180,9 @@ accept or reject. Two accepts promote it; two rejects move it to
 `findings-rejected/`. A promoted finding then receives source review of its
 trigger and exact claimed security consequence. It is quarantined only when
 two anchored reviewers agree on a concrete disproof; missing or ambiguous
-evidence fails open.
+evidence fails open. An inconclusive first review or a split receives one
+focused resolution pass carrying the prior evidence; genuine remaining
+uncertainty stays visible and unjudged.
 
 What happens to each artifact:
 

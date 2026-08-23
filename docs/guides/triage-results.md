@@ -56,7 +56,11 @@ needs two accepts to confirm, or two rejects to move a FIND to
 trigger and exact claimed security consequence. One Reject opens an independent
 second review; only two anchored Rejects agreeing that the trigger is
 unreachable or the consequence is source-disproved can quarantine it. Missing
-or ambiguous evidence fails open.
+or ambiguous evidence fails open. A first `Uncertain` vote, or a split between
+the two reviews, opens one focused resolution review that receives the prior
+rationales and checks their exact open question. If that review also cannot
+settle the claim, the finding remains unjudged rather than being guessed into a
+final lane.
 
 ## Common rejection reasons
 
@@ -117,8 +121,9 @@ candidate no review settled, without granting benchmark credit or severity;
 `rejected` preserves the evidence in the rejected tree. `not-reportable` states
 a fact a review established — an admitted contract violation, or reviewers
 agreeing the trigger needs something `attacker_controls` does not list. A
-review that returns `Uncertain`, or two reviewers who disagree, established
-neither, so those stay `pending` and are counted in the unadjudicated remainder
+focused resolver sees an `Uncertain` review or a review split before either can
+become an absorbing cached state. If it still cannot establish a final answer,
+the artifact stays `pending` and is counted in the unadjudicated remainder
 rather than written off. A `not-reportable` artifact remains visible as an
 engineering defect, but it is outside the security total and has no numeric
 security severity. The receipt is content-addressed, so stale review decisions

@@ -470,6 +470,38 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["execution"]["sanitizer_command_requests"], 0)
         self.assertEqual(metrics["execution"]["source"], "state/runs.jsonl")
 
+    def test_focused_trigger_resolution_replaces_the_raw_vote_conflict(self) -> None:
+        finding = self.root / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        report = finding / "report.md"
+        report.write_text("# Boundary issue\n", encoding="utf-8")
+        common = {
+            "content_sha1": report_identity.content_sha1(report),
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": ["bytes"],
+            "anchors": [{"path": "sample.c"}],
+            "anchors_verified": True,
+        }
+        first = finding / ".trigger-gate.json"
+        second = finding / ".trigger-gate-2.json"
+        first.write_text(json.dumps({**common, "vote": "Reject"}))
+        second.write_text(json.dumps({**common, "vote": "Promote"}))
+        self.assertEqual(benchmark._trigger_snapshot(finding)[0], "conflict")
+
+        (finding / ".trigger-gate-resolution.json").write_text(json.dumps({
+            **common,
+            "vote": "Promote",
+            "decision_version": (
+                triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION
+            ),
+            "prior_review_sha256s": triage_validate.prior_review_sha256s(
+                (first, second),
+            ),
+        }))
+        self.assertEqual(
+            benchmark._trigger_snapshot(finding), ("promote", {"Promote"}),
+        )
+
     def test_oss_input_is_disjoint_from_cache_reads(self) -> None:
         # OpenCode reports fresh input separately from cache reads, so a long
         # session's summed cache reads dwarf its summed input. Normalizing oss

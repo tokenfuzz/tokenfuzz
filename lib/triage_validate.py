@@ -9,11 +9,16 @@ import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
 TRIGGER_GATE_DECISION_VERSION = "trigger-v8-batch-controls-fit"
+# A resolver reads the cached reviews as evidence and answers their exact open
+# question. It has a separate identity so changing that policy never invalidates
+# the independent first-pass votes it is meant to adjudicate.
+TRIGGER_RESOLUTION_DECISION_VERSION = "trigger-resolution-v1"
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.
@@ -25,6 +30,28 @@ TRIGGER_GATE_ADVISORY_VERSIONS = {
     "trigger-v3-scoped-controls",
     "trigger-v4-source-anchors",
 }
+
+
+def trigger_resolution_review_names(
+    first_vote: str | None, second_vote: str | None,
+) -> tuple[str, ...]:
+    """Return the prior review files needed to resolve an unsettled gate."""
+    if first_vote == "Uncertain":
+        return (".trigger-gate.json",)
+    if first_vote == "Reject" and second_vote in {"Promote", "Uncertain"}:
+        return (".trigger-gate.json", ".trigger-gate-2.json")
+    return ()
+
+
+def prior_review_sha256s(paths: Iterable[Path]) -> list[str]:
+    """Bind a resolution vote to the exact reviews it adjudicated."""
+    values: list[str] = []
+    for path in paths:
+        try:
+            values.append(hashlib.sha256(path.read_bytes()).hexdigest())
+        except OSError:
+            continue
+    return values
 
 ANCHOR_KINDS = {"source", "contract", "build"}
 BOUNDARY_SURFACES = {

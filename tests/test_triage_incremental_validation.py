@@ -95,6 +95,20 @@ def trigger_vote(
     return payload
 
 
+def trigger_resolution_vote(
+    report: Path, target_root: Path, prior_reviews: list[Path],
+    vote: str = "Promote",
+) -> dict:
+    payload = trigger_vote(report, target_root, vote)
+    payload["decision_version"] = (
+        triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION
+    )
+    payload["prior_review_sha256s"] = triage_validate.prior_review_sha256s(
+        prior_reviews,
+    )
+    return payload
+
+
 def _write_batch_votes(command: list[str], only: set[str] | None = None) -> None:
     """Simulate the batched trigger validator: write a valid cached vote for each
     manifest item (optionally only a subset), so the caller sees those ids as
@@ -1262,6 +1276,66 @@ Generated score text.
         ):
             self.assertEqual(validator["main"](arguments), 2)
 
+    def test_trigger_resolution_prompt_carries_the_prior_open_question(self) -> None:
+        validator = runpy.run_path(str(ROOT / "bin" / "validate-finding"))
+        first = self.finding / ".trigger-gate.json"
+        prior = trigger_vote(self.report, self.root, "Uncertain")
+        prior["rationale"] = "The object replacement path was not settled."
+        first.write_text(json.dumps(prior), encoding="utf-8")
+        output = self.finding / ".trigger-gate-resolution.json"
+        manifest = self.root / "trigger-resolution.json"
+        manifest.write_text(json.dumps({
+            "items": [{
+                "id": self.finding.name,
+                "finding": str(self.report),
+                "output": str(output),
+                "prior_reviews": [str(first)],
+            }],
+        }), encoding="utf-8")
+        arguments = [
+            "--batch-manifest", str(manifest),
+            "--target-path", str(self.root),
+            "--backend", "codex", "--gate", "trigger",
+            "--resolve-trigger",
+        ]
+        prompts: list[str] = []
+
+        def invoke(_backend, prompt, _timeout, raw, **_kwargs):
+            prompts.append(prompt)
+            vote = trigger_vote(self.report, self.root, "Promote")
+            vote["id"] = self.finding.name
+            Path(raw).write_text(
+                json.dumps({
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": json.dumps({"items": [vote]}),
+                    },
+                }) + "\n",
+                encoding="utf-8",
+            )
+            return 0
+
+        with mock.patch.object(
+            validator["llm_invoke"], "run_agent_prompt", side_effect=invoke,
+        ), mock.patch.object(
+            validator["llm_usage"], "append_usage_event",
+        ):
+            self.assertEqual(validator["main"](arguments), 0)
+
+        self.assertIn("Resolve their exact disagreement", prompts[0])
+        self.assertIn("object replacement path was not settled", prompts[0])
+        self.assertNotIn("You have NOT seen this finding before", prompts[0])
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(
+            payload["decision_version"],
+            triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
+        )
+        self.assertEqual(
+            payload["prior_review_sha256s"],
+            [hashlib.sha256(first.read_bytes()).hexdigest()],
+        )
+
     def test_trigger_cache_requires_current_prompt_and_report(self) -> None:
         cache = self.finding / ".trigger-gate.json"
         cache.write_text(json.dumps(trigger_vote(self.report, self.root)))
@@ -1371,6 +1445,193 @@ Generated score text.
                 2,
             )
 
+    def test_unsettled_trigger_reviews_remain_retryable_for_resolution(self) -> None:
+        first = self.finding / ".trigger-gate.json"
+        second = self.finding / ".trigger-gate-2.json"
+
+        first.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Uncertain",
+        )), encoding="utf-8")
+        self.assertFalse(triage._cached_trigger_resolution(
+            self.finding, self.report,
+        ))
+
+        first.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Reject",
+        )), encoding="utf-8")
+        second.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Promote",
+        )), encoding="utf-8")
+        self.assertFalse(triage._cached_trigger_resolution(
+            self.finding, self.report,
+        ))
+
+    def test_focused_resolution_can_settle_a_review_conflict(self) -> None:
+        first = self.finding / ".trigger-gate.json"
+        second = self.finding / ".trigger-gate-2.json"
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        first.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Reject",
+        )), encoding="utf-8")
+        second.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Promote",
+        )), encoding="utf-8")
+        resolution.write_text(json.dumps(trigger_resolution_vote(
+            self.report, self.root, [first, second], "Promote",
+        )), encoding="utf-8")
+
+        with mock.patch.object(
+            triage, "evaluate_crash_verdict", return_value=("promote", "within"),
+        ), mock.patch.object(triage, "_run_tool", return_value=0):
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None, prepared=True,
+                ),
+                "accepted",
+            )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "reportable")
+
+    def test_a_resolver_does_not_overturn_an_agreed_boundary_surface(self) -> None:
+        # The reviewers split on scope but agreed the surface is file-format.
+        # A resolver is aimed at the disputed question and fills the rest of the
+        # schema in passing, yet vulnerable_boundary_surface overrides the
+        # Surface severity scores -- so consensus must survive it.
+        first = self.finding / ".trigger-gate.json"
+        second = self.finding / ".trigger-gate-2.json"
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        for path, vote, fit in (
+            (first, "Reject", "within"), (second, "Promote", "outside"),
+        ):
+            payload = trigger_vote(self.report, self.root, vote)
+            payload["review_facts"] = {
+                "vulnerable_boundary_surface": "file-format",
+                "trigger_controls_fit": fit,
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+        resolved = trigger_resolution_vote(
+            self.report, self.root, [first, second], "Promote",
+        )
+        resolved["review_facts"] = {
+            "vulnerable_boundary_surface": "network",
+            "trigger_controls_fit": "within",
+        }
+        resolution.write_text(json.dumps(resolved), encoding="utf-8")
+
+        votes, facts = triage._trigger_publication_evidence(
+            self.report, self.finding,
+        )
+        self.assertEqual(votes, {"Promote"})
+        # The resolver settles the question it was asked...
+        self.assertEqual(facts.get("trigger_controls_fit"), "within")
+        # ...and the reviewers keep the one they agreed on.
+        self.assertEqual(facts.get("vulnerable_boundary_surface"), "file-format")
+
+    def test_a_resolution_survives_a_harness_reach_field_annotation(self) -> None:
+        # The harness annotates reach fields onto the report, which changes its
+        # identity and rewrites the reviews the resolution is bound to. Carrying
+        # the reviews but not the resolution would drop a settled answer and buy
+        # a second resolver call for a question already resolved.
+        first = self.finding / ".trigger-gate.json"
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        first.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Uncertain",
+        )), encoding="utf-8")
+        resolution.write_text(json.dumps(trigger_resolution_vote(
+            self.report, self.root, [first], "Promote",
+        )), encoding="utf-8")
+        self.assertEqual(
+            triage._cached_trigger_vote(self.report, resolution), "Promote",
+        )
+
+        self.assertTrue(
+            triage._materialize_reach_fields_preserving_positive_votes(
+                self.report, {"boundary": "network"},
+            )
+        )
+        self.assertEqual(
+            triage._cached_trigger_vote(self.report, first), "Uncertain",
+        )
+        self.assertEqual(
+            triage._cached_trigger_vote(self.report, resolution), "Promote",
+        )
+        self.assertTrue(triage._cached_trigger_resolution(
+            self.finding, self.report,
+        ))
+
+    def test_focused_resolution_is_stale_when_a_prior_review_changes(self) -> None:
+        first = self.finding / ".trigger-gate.json"
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        first.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Uncertain",
+        )), encoding="utf-8")
+        resolution.write_text(json.dumps(trigger_resolution_vote(
+            self.report, self.root, [first], "Promote",
+        )), encoding="utf-8")
+        self.assertEqual(
+            triage._cached_trigger_vote(self.report, resolution), "Promote",
+        )
+
+        changed = json.loads(first.read_text(encoding="utf-8"))
+        changed["rationale"] = "A later review identified a different open fact."
+        first.write_text(json.dumps(changed), encoding="utf-8")
+        self.assertIsNone(
+            triage._cached_trigger_vote(self.report, resolution),
+        )
+
+    def test_resolution_reject_needs_and_can_join_a_prior_reject(self) -> None:
+        first = self.finding / ".trigger-gate.json"
+        second = self.finding / ".trigger-gate-2.json"
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        reject = trigger_vote(self.report, self.root, "Reject")
+        reject["review_facts"] = {"rejection_kind": "contract-invalid"}
+        first.write_text(json.dumps(reject), encoding="utf-8")
+        second.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Promote",
+        )), encoding="utf-8")
+        resolved = trigger_resolution_vote(
+            self.report, self.root, [first, second], "Reject",
+        )
+        resolved["review_facts"] = {"rejection_kind": "contract-invalid"}
+        resolution.write_text(json.dumps(resolved), encoding="utf-8")
+
+        with mock.patch.dict(
+            os.environ,
+            {"ACTIVE_BACKEND": "", "BACKEND": "", "TARGET_ROOT": str(self.root)},
+            clear=False,
+        ):
+            self.assertEqual(
+                triage._finding_trigger_disposition(
+                    self.finding, self.report, None,
+                ),
+                "rejected",
+            )
+
+    def test_one_resolution_reject_cannot_quarantine_after_uncertainty(self) -> None:
+        first = self.finding / ".trigger-gate.json"
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        first.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Uncertain",
+        )), encoding="utf-8")
+        resolution.write_text(json.dumps(trigger_resolution_vote(
+            self.report, self.root, [first], "Reject",
+        )), encoding="utf-8")
+
+        with mock.patch.object(
+            triage, "evaluate_crash_verdict", return_value=("promote", "within"),
+        ):
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None, prepared=True,
+                ),
+                "pending",
+            )
+        self.assertTrue(self.finding.is_dir())
+        self.assertEqual(
+            validation_receipt.read_current(self.finding)["state"], "pending",
+        )
+
     def test_find_gate_stabilizes_report_before_batched_trigger_vote(self) -> None:
         report_text = triage.read_report_bounded(self.report)
         (self.finding / ".llm-find-quality.json").write_text(json.dumps(
@@ -1479,6 +1740,70 @@ Generated score text.
             )
         self.assertEqual(
             rounds, [".trigger-gate.json", ".trigger-gate-2.json"],
+        )
+
+    def test_find_gate_batches_a_focused_resolution_after_uncertainty(self) -> None:
+        self.report.write_text(
+            self.report.read_text(encoding="utf-8")
+            + "\nSurface: library-api\n"
+            + "Boundary: public API\n"
+            + "Caller contract: obeyed\n"
+            + "Trigger source: bytes\n",
+            encoding="utf-8",
+        )
+        report_text = triage.read_report_bounded(self.report)
+        (self.finding / ".llm-find-quality.json").write_text(json.dumps(
+            triage._quality_payload(
+                report_text,
+                [
+                    quality_vote(self.finding.name)["items"][0],
+                    quality_vote(self.finding.name)["items"][0],
+                ],
+                2,
+                2,
+                report_identity.content_sha1(self.report),
+            )
+        ))
+        rounds: list[str] = []
+
+        def batch(
+            directories, *_args, vote_name=".trigger-gate.json", **_kwargs,
+        ):
+            rounds.append(vote_name)
+            for directory in directories:
+                report = directory / "report.md"
+                output = directory / vote_name
+                if vote_name == ".trigger-gate-resolution.json":
+                    first = directory / ".trigger-gate.json"
+                    payload = trigger_resolution_vote(
+                        report, self.root, [first], "Promote",
+                    )
+                else:
+                    payload = trigger_vote(report, self.root, "Uncertain")
+                output.write_text(json.dumps(payload), encoding="utf-8")
+            return set(directories)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage, "_batch_reach_field_decisions",
+            return_value=(set(), {}, set()),
+        ), mock.patch.object(
+            triage, "fill_reach_fields", return_value=False,
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", side_effect=batch,
+        ), mock.patch.object(
+            triage, "_run_tool", return_value=0,
+        ), mock.patch.object(
+            triage.subprocess, "run",
+            side_effect=AssertionError("individual trigger fallback"),
+        ):
+            self.assertEqual(
+                triage.validate_find_gate(self.root, workers=1),
+                {"accepted": 1, "rejected": 0, "pending": 0},
+            )
+        self.assertEqual(
+            rounds, [".trigger-gate.json", ".trigger-gate-resolution.json"],
         )
 
     def test_find_gate_finalizes_cached_work_before_unresolved_quality_batch(self) -> None:
@@ -2221,11 +2546,10 @@ Generated score text.
         )
 
     def test_disagreeing_trigger_review_leaves_the_finding_unsettled(self) -> None:
-        """One reviewer disproved it, the other promoted it: unevidenced.
+        """A split stays pending while its focused resolver has no answer.
 
-        The finding earns no security credit, but nothing established that it
-        is out of scope either, so it is carried as unadjudicated and the
-        evidence stays on disk for a later review to reopen.
+        The finding earns no security credit, but the cached split is no longer
+        considered complete provider work: a later bounded pass can resolve it.
         """
         first = trigger_vote(self.report, self.root, "Reject")
         first["review_facts"] = {
@@ -2267,9 +2591,8 @@ Generated score text.
         receipt = validation_receipt.read_current(self.finding)
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt["state"], "pending")
-        self.assertEqual(
-            receipt["evidence"]["review_facts"],
-            {"reproducer_carrier": "harness"},
+        self.assertFalse(
+            triage._cached_trigger_resolution(self.finding, self.report),
         )
 
     def test_legacy_trigger_rejection_is_requeued_for_current_review(self) -> None:
@@ -2462,7 +2785,6 @@ Generated score text.
             json.dumps(quality), encoding="utf-8",
         )
         payload = trigger_vote(self.report, self.root)
-        payload["decision_version"] = "trigger-v4-source-anchors"
         (self.finding / ".trigger-gate.json").write_text(
             json.dumps(payload), encoding="utf-8",
         )
