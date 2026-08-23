@@ -71,35 +71,40 @@ without one starving the other. A parser function with
 input-consumption verbs, casts, and asserts becomes an S7 card with
 S2 and S3 companions.
 
-Every fired angle gets a card, because dropping the lowest-priority
-ones starves that strategy across the whole queue rather than on one
-file: real parser files fire four or five rows at once, so the last
-row produced no card on any target, and a strategy that owns no cards
-can never be assigned to an agent.
+### Why every fired angle gets a card
 
-Scores mean different things per strategy — S8 scores once on presence
-while S7 multiplies per match — so ordering the bounded window by score
-alone orders it by whichever strategy scores highest, and the window
-arrives on a handful of dense files carrying every angle of each. The
-window is instead filled by rotating the strategies, each taking its
-highest-ranked card on a file the window does not already hold, inside
-one buildability tier at a time. Every strategy keeps a share and the
-slots buy distinct files.
+Dropping the lowest-priority angles would starve that strategy across the
+*whole queue*, not just on one file. Real parser files fire four or five rows
+at once, so the last row would produce no card on any target — and a strategy
+that owns no cards can never be assigned to an agent.
 
-The angles those companions carried are not lost. A selected card lists
-the strategies its dropped same-file siblings held, so an agent on any of
-them can claim that file — one card, every angle the file signalled. This
-matters because nothing recreates a dropped card later: the claim path
-reads only persisted cards, and the productive-agent relaxation lifts a
-subsystem restriction on cards that exist rather than minting new ones.
-Without the carried list a file would stay reachable under exactly one
-strategy for the whole run.
+### How the visible window is filled
 
-What does change is concurrency: two agents can no longer hold the same
-file under different strategies at the same time, because there is one
-card to claim rather than several.
+Scores are not comparable across strategies: S8 scores once on presence, while
+S7 multiplies per match. Ordering the bounded window by score alone would
+therefore order it by whichever strategy scores highest, and the window would
+arrive on a handful of dense files carrying every angle of each.
 
-Two other card sources sit on top of the ranked list:
+Instead the window is filled by **rotating the strategies**, each taking its
+highest-ranked card on a file the window does not already hold, one
+buildability tier at a time. Every strategy keeps a share, and the slots buy
+distinct files.
+
+The angles the dropped companions carried are not lost: a selected card lists
+the strategies its dropped same-file siblings held, so an agent on any of them
+can claim that file. One card, every angle the file signalled.
+
+That carried list matters because nothing recreates a dropped card later. The
+claim path reads only persisted cards, and the productive-agent relaxation
+(below) lifts a subsystem restriction on cards that already exist rather than
+minting new ones. Without the list, a file would stay reachable under exactly
+one strategy for the whole run.
+
+The one thing this costs is concurrency: two agents can no longer hold the same
+file under different strategies at once, because there is a single card to
+claim.
+
+### Two card sources on top of the ranked list
 
 - **Patch cards** (always S1) — one per recent fix commit, with the
   touched files, severity, and any testcase revisions recorded in

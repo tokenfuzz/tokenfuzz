@@ -197,27 +197,31 @@ What happens to each artifact:
   `findings-rejected/` — they are not deleted, so you can review the
   reasoning.
 
-When a reviewer rejects an artifact because its triggering state is not
-attacker-reachable, the disproof does not leave with the artifact: the
-anchored reason is appended to `state/unreachable-routes.jsonl` once the
-move lands, and a later work card on any file the disproof names renders
-it, newest first. Building a reproducer is the expensive half of an audit,
-and without this each session re-derives the same disproof on the same file
-— over half of all trigger rejections in a measured run landed on a file
-that had already produced one.
+### Rejections are kept as reusable knowledge
 
-The note lives exactly as long as the rejection does. A rejected artifact
-is the record of its own rejection, so when the gate requeues one whose
-verdict went stale the directory leaves `findings-rejected/` and its route
-row is retired before that path can be reused. Resumed runs reconcile stale
-trigger rejections before launching their first agents, so an obsolete note
-cannot survive for one cohort. This needs no tombstone and no second copy of
-the gate's validity rules to drift out of step. The note rules out a *route*,
-never the file: the card is still assigned, and reaching the same code
-through a different attacker-controlled path still counts.
+Building a reproducer is the expensive half of an audit, so a disproof is
+worth as much as a finding. When a reviewer rejects an artifact because its
+triggering state is not attacker-reachable, the anchored reason is appended to
+`state/unreachable-routes.jsonl`, and a later work card on any file that
+disproof names renders it, newest first. Without this, each session re-derives
+the same disproof on the same file — in one measured run, over half of all
+trigger rejections landed on a file that had already produced one.
 
-Severity annotation is best-effort post-processing. A failed scoring
-run does not remove an otherwise complete crash or finding.
+Two properties keep the note honest:
+
+- **It rules out a route, not a file.** The card is still assigned, and
+  reaching the same code through a different attacker-controlled path still
+  counts.
+- **It lives exactly as long as the rejection does.** A rejected artifact is
+  the record of its own rejection, so when the gate requeues one whose verdict
+  went stale, the directory leaves `findings-rejected/` and its route row is
+  retired before that path can be reused. Resumed runs reconcile stale trigger
+  rejections before launching their first agents, so an obsolete note cannot
+  survive even one cohort. No tombstone, and no second copy of the gate's
+  validity rules to drift out of step.
+
+Severity annotation is best-effort post-processing on top of all this. A failed
+scoring run does not remove an otherwise complete crash or finding.
 
 ## 7. Export to a maintainer bundle
 
@@ -232,6 +236,7 @@ input.<ext>        the testcase bytes
 harness.{c,cc,cpp,cxx} present iff the bug uses a C/C++ harness
 sanitizer.txt      full sanitizer output
 patch.diff         optional candidate fix
+validation.json    the publication decision, bound to this evidence
 severity.json      the published score, bound to the report it came from
 .audit/            original agent-authored files, kept for provenance
 ```

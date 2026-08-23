@@ -44,7 +44,7 @@ Opt into `race` or another sanitizer by editing
 | Rust | `RUSTFLAGS="-Z sanitizer=address"` (nightly) | `asan`; also `tsan` and `msan` on supported targets |
 | Go | `go build -race` | `race` |
 | Swift | `swift run -Xswiftc -sanitize={SWIFT_SANITIZER}` | `asan`, `ubsan`, `tsan` |
-| Java / JVM | JFR plus JNI ASan when auditing native bindings | none; use `crash_patterns` |
+| Java / JVM | None for JVM code; a JNI library can be built with ASan and driven separately | none for the JVM; rely on `crash_patterns` |
 | Python | `PYTHONMALLOC=malloc` plus CPython-ASan for C extensions | optional `asan` for native extensions |
 | Node / V8 | `--abort-on-uncaught-exception`; native modules can link ASan | optional `asan` for native add-ons |
 | Everything else | None; findings-only mode is the right choice | n/a |
@@ -96,9 +96,15 @@ The other ecosystems differ only in the `[runner]` fields:
 | Kotlin | `kotlin` | `kotlinc` | `["-script", "{TESTCASE}"]` | — |
 | Node | `npm` | `node` | `["{TESTCASE}"]` | — |
 | PHP | `composer` | `php` | `["{TESTCASE}"]` | — |
+| R | `rlang` | `Rscript` | `["{TESTCASE}"]` | — |
+| Perl | `perl` | `perl` | `["{TESTCASE}"]` | — |
 
-The same shape applies to `rlang` and `perl`; `bin/setup-target`
-writes a starter `[runner]` block for each.
+`bin/setup-target` writes the matching starter `[runner]` block for each. To
+print the registry's own answer for any build system:
+
+```bash
+python3 lib/languages.py runner-block <build_system> --pretty
+```
 
 !!! tip "There is a worked example for every language here"
     Rather than starting from the table, copy a config that is known to run.
@@ -160,13 +166,13 @@ directory does **not** have a sanitizer signal, it goes to
 
 ## Writing harnesses in non-C/C++ languages
 
-Use `// HARNESS:` (or `# HARNESS:` for languages whose comment
-delimiter is `#`). "Permissive" here means `bin/probe` ignores
-everything before the `HARNESS:` label as long as it contains no
-letters — so any comment syntax works: `//`, `#`, `;`, `--`,
-`<!-- … -->`, or `/* … */`. The same rule applies to the other
-header fields (`TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`, `MODE:`).
-The file extension picks the build/interpret path.
+Name the sidecar with a `HARNESS:` header comment. `bin/probe` parses these
+headers permissively: it ignores everything on the line before the label as
+long as that prefix contains no letters. Any comment syntax therefore works —
+`//`, `#`, `;`, `--`, `<!-- … -->`, `/* … */` — and the same rule applies to
+the other header fields (`TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`, `MODE:`).
+
+The file extension, not the header, picks the build-or-interpret path.
 
 For the authoritative table — one row per language, with its harness
 extensions and build systems — run:

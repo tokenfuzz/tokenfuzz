@@ -125,70 +125,95 @@ Treat a two-replicate, three-hour run as a layout and sanity check,
 not as a statistical claim. LLM runs are stochastic. For a result you would
 cite, use at least five replicates and more than one target.
 
+## How a result is counted
+
+A benchmark row is only worth reading if both conditions were scored by the
+same rule. This section is that rule. If you only want to run the thing, skip
+to [Where results land](#where-results-land).
+
+### The closing pass
+
 When a cell's timed investigation stops, it triages its crashes and finishes
-validating its findings before metrics are read. That closing pass is
-measurement, not extra finding time, and it is budgeted separately
-(`--finalize-wall`) so a crash-heavy cell cannot starve finding validation.
+validating its findings before metrics are read. That pass is *measurement*,
+not extra finding time: the artifact set is frozen when the audit wall ends, so
+the closing pass cannot buy a cell another finding. It gets its own budget
+(`--finalize-wall`), split so a crash-heavy cell cannot starve finding
+validation.
 
-The drain repeats while its unjudged remainder falls, because a review batch
-that returns no keyed output leaves its ids unadjudicated even on an unlimited
-budget. Cached receipts make each repeat pay only for what is still missing.
+The finding drain repeats while its unjudged remainder keeps falling, because a
+review batch that returns no keyed output leaves its ids unadjudicated even on
+an unlimited budget. Cached receipts make each repeat pay only for what is
+still missing.
 
-Anything still unadjudicated is handled conservatively rather than guessed at:
-an unvalidated finding does not enter the finding total, and a sanitizer-backed
-crash with unfinished validation remains a visible crash candidate rather than
-receiving final credit or an assumed severity. A cell that could not produce a
-usable measurement — provider limit, interruption before substantive evidence,
-failed post-processing — is marked incomplete and kept out of the medians, but
-any evidence it did produce is still reported as an observed count. A direct
-backend that terminates after substantive evidence is instead retained and
-counted, carrying its shorter actual wall and a replicate marker that says the
-count came from a shorter experiment. A cell that finished but still
-holds unjudged findings keeps its place and its evidence; its finding count
-carries the remainder, and a count whose remainder outnumbers its verdicts is
-marked `≥` — a lower bound on that condition, not a yield to compare.
-`bin/benchmark --regenerate` finishes the
+### What happens to anything unsettled
+
+Nothing is guessed at. An unvalidated finding does not enter the finding total.
+A sanitizer-backed crash with unfinished validation stays a visible crash
+candidate rather than receiving final credit or an assumed severity.
+
+A cell that finished but still holds unjudged findings keeps its place and its
+evidence; its finding count carries the remainder, and a count whose remainder
+outnumbers its verdicts is marked `≥` — read that as a lower bound on the
+condition, not a yield to compare. `bin/benchmark --regenerate` finishes the
 gate from cached receipts and removes the mark.
 
-The run report also shows one compact security-decision table. A settled review
-ends as **Report**, **Not reportable**, or **Rejected**; an artifact whose
-review never finished, or finished without settling the claim, stays under
-**Review unsettled** and receives no credit either way. Only Report enters
-security yield or receives numeric severity. Not reportable preserves a real
-engineering defect on disk without presenting it as a security bug, and it
-states something a review established — an admitted contract violation, or
-reviewers agreeing the trigger needs a control the threat model does not list.
-An `Uncertain` verdict and two reviewers who disagree establish neither, so
-the gate gives their exact open question to one focused resolver rather than
-asking another blind review. If that resolver remains uncertain, the artifact
-stays unsettled rather than being written off as out of scope: that remainder is
-the reason a count can carry the `≥` floor mark. Content-addressing reopens the
-review when the report, the evidence, or the prompt version changes.
-Runtime signature details remain available in the linked crash and finding
-indexes rather than adding another count to the benchmark headline.
+A cell that could not produce a usable measurement at all — provider limit,
+interruption before substantive evidence, failed post-processing — is marked
+incomplete and kept out of the medians, though any evidence it did produce is
+still reported as an observed count. A direct backend that terminates *after*
+substantive evidence is instead retained and counted, carrying its shorter
+actual wall and a replicate marker saying the count came from a shorter
+experiment.
+
+### The security-decision table
+
+Every run report carries one compact table of review outcomes:
+
+| Outcome | Meaning |
+| --- | --- |
+| **Report** | Settled: real security impact inside the declared attacker surface. The only outcome that enters security yield or receives a numeric severity. |
+| **Not reportable** | Settled: a real engineering defect that crosses no security boundary — an admitted contract violation, or reviewers agreeing the trigger needs a control the threat model does not list. Preserved on disk, never presented as a security bug. |
+| **Rejected** | Settled: the evidence did not hold up. Kept in the rejected tree with its reason. |
+| **Review unsettled** | The review never finished, or finished without settling the claim. No credit either way. |
+
+An `Uncertain` verdict and two reviewers who disagree both establish nothing,
+so the gate hands their exact open question to one focused resolver rather than
+asking for another blind review. If that resolver is still uncertain, the
+artifact stays unsettled rather than being written off as out of scope — and
+that remainder is what puts the `≥` floor mark on a count. Review decisions are
+content-addressed, so changing a report, its evidence, or the prompt version
+reopens the review. Runtime signature details stay in the linked crash and
+finding indexes rather than adding another number to the headline.
+
+### Scope is decided by reading source, not by the report
 
 The scope half of that decision — is the trigger inside `attacker_controls`? —
-is not taken from the report. A report's `Trigger source` is written by whoever
-found the bug, and it errs in both directions: a driver that exercises
-documented entry points reads as caller-driven even when attacker bytes decide
-the fault, and an unreproduced claim reads as byte-driven even when only a
-caller can reach it. Left uncorrected, that penalises the condition that builds
-reproducers and rewards the one that does not. The trigger-provenance reviewer
-reads the source and answers the question itself, and its answer decides when
-the two disagree.
+is deliberately not taken from the report. A report's `Trigger source` is
+written by whoever found the bug, and it errs in both directions: a driver that
+exercises documented entry points reads as caller-driven even when attacker
+bytes decide the fault, and an unreproduced claim reads as byte-driven even
+when only a caller can reach it. Left uncorrected, that penalises the condition
+that builds reproducers and rewards the one that does not. The
+trigger-provenance reviewer reads the source and answers the question itself,
+and its answer wins when the two disagree.
 
-Both conditions are held to the same evidence bar. The baseline's crashes are
-replayed through the target's normal invocation before they count, so a
-diagnostic that does not reproduce is not counted as a crash. A replay that
-never ran is a different thing and is not read as a verdict: the crash keeps
-its place under `crashes/`, takes no verdict, and is reported as an
-unadjudicated remainder, so broken replay infrastructure can neither destroy a
-real crash nor credit an unproven one. The failure is logged where the
-operator sees it. On either side, a
-crash that `bin/probe --confirm` reproduced 5/5 through the ordinary target
-binary, faulting in the target's own code on an attacker-controlled input,
-skips the trigger review it would otherwise get — the evidence already answers
-the question that review asks. Everything weaker takes the normal review.
+### Both conditions face the same bar
+
+The baseline's crashes are replayed through the target's normal invocation
+before they count, so a diagnostic that does not reproduce is not counted as a
+crash.
+
+A replay that never *ran* is a different thing, and is not read as a verdict:
+the crash keeps its place under `crashes/`, takes no verdict, and is reported
+as an unadjudicated remainder — so broken replay infrastructure can neither
+destroy a real crash nor credit an unproven one. The failure is logged where
+the operator sees it.
+
+On either side, a crash that `bin/probe --confirm` reproduced 5/5 through the
+ordinary target binary, faulting in the target's own code on an
+attacker-controlled input, skips the trigger review it would otherwise get: the
+evidence already answers the question that review asks. Everything weaker takes
+the normal review.
 
 ## Where results land
 

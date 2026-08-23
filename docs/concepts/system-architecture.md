@@ -141,8 +141,9 @@ Triage is the boundary between "an agent produced an artifact" and
   complete report fields, and they must not be
   a low-value class (OOM, assertion-only abort, stack overflow,
   plain null deref). A trigger source outside the declared attacker
-  surface does not reject a crash — it stays in `crashes/` with a
-  contract concern and a severity downgrade.
+  surface does not reject a crash — it stays in `crashes/`, marked
+  `not-reportable`: a real engineering defect, but outside the security
+  total and carrying no numeric CVSS score.
 - **Findings** need substance — a concrete location, an explicit
   issue class, and a rationale a reviewer can act on. A sanitizer
   reproducer is *not* required.
@@ -168,7 +169,7 @@ output/<target>/<backend>/results/
   crashes/                     accepted reproducible crashes
   crashes-rejected/            rejected with reasons (skipped next session)
   findings/                    concrete security issues (with or without repro)
-  findings-rejected/           findings the substance gate rejected (quorum)
+  findings-rejected/           findings triage rejected at quorum
   corpus/                      saved seeds with metadata
   state/                       claims, hypotheses, notes, runs, events
   work-cards.jsonl             the ranked queue
@@ -177,7 +178,10 @@ output/<target>/<backend>/results/
   .session-env                 probe discovery file for this result tree
 ```
 
-Cross-backend rollups live at:
+Each of the four result trees carries its own generated HTML index —
+`CRASH-CLUSTERS.html`, `FINDING-CLUSTERS.html`, `REJECTED-CRASHES.html`,
+`REJECTED-FINDINGS.html`. Cross-backend rollups exist for the two accepted
+trees only:
 
 - `output/<target>/CRASH-CLUSTERS.html`
 - `output/<target>/FINDING-CLUSTERS.html`

@@ -19,6 +19,7 @@ Open the generated HTML pages first:
 $RESULTS/crashes/CRASH-CLUSTERS.html
 $RESULTS/findings/FINDING-CLUSTERS.html
 $RESULTS/crashes-rejected/REJECTED-CRASHES.html
+$RESULTS/findings-rejected/REJECTED-FINDINGS.html
 $RESULTS/crashes/CRASH-*/REPORT.html   # report.html before export-repro runs
 $RESULTS/findings/FIND-*/report.html
 ```
@@ -86,7 +87,7 @@ The paths an operator inspects after a run:
 | `crashes/` | Crash candidates, including final and pending artifacts. |
 | `crashes-rejected/` | Rejected crash artifacts and `REJECTED-CRASHES.html` / `REJECTED-CRASHES.md`. |
 | `findings/` | Security finding candidates — any class, with or without a reproducer. See note below. |
-| `findings-rejected/` | FIND directories rejected by the LLM substance gate at quorum. |
+| `findings-rejected/` | FIND directories triage rejected at quorum — substance gate, unreachable trigger, or source-disproved consequence — plus `REJECTED-FINDINGS.html` / `REJECTED-FINDINGS.md` listing them with reasons. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
 | `scratch-N/` | Active testcase work for agent `N`. |
 | `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, `SESSION_STARTED`, and `TARGET_CONFIG_SHA256` values read by `bin/probe`. |
@@ -290,7 +291,9 @@ output/<target>/<backend>/logs/
 ```
 
 In the per-session filenames, `<TS>` is the launch timestamp, `<launch>`
-is `cold-start` or `deep_investigation`, and `<n>` is the agent number.
+is `cold-start` or `deep_investigation`, and `<n>` is the agent number. Other
+files may appear alongside these — decision caches and similar bookkeeping;
+the listing above is what is worth opening, not an exhaustive inventory.
 
 Logs are useful for:
 
@@ -303,6 +306,7 @@ For normal audit progress, prefer the generated HTML:
 - `crashes/CRASH-CLUSTERS.html`;
 - `findings/FINDING-CLUSTERS.html`;
 - `crashes-rejected/REJECTED-CRASHES.html`;
+- `findings-rejected/REJECTED-FINDINGS.html`;
 - per-result `REPORT.html` / `report.html`.
 
 For debugging a run, start with `logs/README.md`, then `index.log`.

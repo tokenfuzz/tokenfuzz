@@ -84,15 +84,18 @@ Crash B: state [decode_body, read_record, run]
 ### Output
 
 `bin/cluster-crashes` writes `CRASH-CLUSTERS.md` (one row per cluster, sorted
-by max-member severity then size) and stamps a `Cluster:` line into each
-member `REPORT.md`. Each row names a **Canonical** member — the
-highest-severity crash in the cluster (the CVSS score breaks ties within a
-severity band, then lowest id) — and the
-**Members** column lists every crash sharing the signature, ordered by
-severity descending with the canonical in **bold**. This mirrors
-`bin/cluster-findings`, so both pages pick and present the canonical the same
-way. The `CL-<hash>` cluster id stays anchored on the bucket's crash state, so
-it is stable regardless of which member is most severe.
+by max-member severity then size) and stamps a `Cluster:` line into each member
+`REPORT.md`. Each row names a **Canonical** member — the highest-severity crash
+in the cluster, with the CVSS score breaking ties inside a severity band and
+the lowest id breaking those — and the **Members** column lists every crash
+sharing the signature, ordered by severity descending with the canonical in
+**bold**. This mirrors `bin/cluster-findings`, so both pages pick and present
+the canonical the same way.
+
+The cluster id is `CL-` plus eight hex digits of a hash of the bucket's
+(primitive, crash state) key — for example `CL-4b21c7de`. It is anchored on the
+signature, not on membership, so it survives reruns and does not change when a
+more severe member joins.
 
 ---
 
@@ -208,6 +211,16 @@ sorted by max-member severity then size), stamps a `Cluster:` line into
 each member report, and drops a `.dup-of` marker in every non-canonical
 member pointing at the canonical FIND. The canonical is picked by
 evidence rank first, then severity, then lexicographic id (see above).
+
+Finding cluster ids are `FCL-` plus eight hex digits of a hash of the key —
+`FCL-8c19a032` — mirroring the crash side's `CL-`. The stamped line names the
+siblings and the member's role, so a report says on its own face whether it is
+the one to read:
+
+```text
+Cluster: FCL-8c19a032 (2 reports: FIND-007) (canonical)
+Dedup key: [loc] src/policy.c:142
+```
 
 Every merge is deterministic: a multi-member cluster was auto-merged on an
 identical `(class, file, line)` site or normalized crash state, and a

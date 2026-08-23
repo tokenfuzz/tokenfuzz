@@ -45,6 +45,15 @@ language and compared fairly. Most also carry deliberate **false-positive
 traps**: code that looks dangerous to a quick scan but is safe. A run that
 promotes a trap is a precision failure, and the answer key says so.
 
+!!! note "Not every planted bug can crash"
+    The scorer grades crashes, because a sanitizer artifact is the only
+    attribution it can trust. A planted bug that no sanitizer can catch — a path
+    traversal, a command injection — is marked `findings_only: true` in the
+    manifest and stays out of the crash-recall denominator. On the two sanitizer
+    samples where this matters, `samples/sample-go` counts 1 of its 6 planted
+    bugs toward crash recall and `samples/sample-rust` counts 2 of its 5. The
+    rest are there to exercise the finding path.
+
 ## Run one
 
 **Findings-only samples** need nothing but their interpreter. The

@@ -10,9 +10,9 @@ Most TokenFuzz failures fall into a small number of categories:
 This page is organised by symptom. Find the heading closest to what
 you see, and start there.
 
-For normal audit progress, the index files under `crashes/`,
-`findings/`, and `crashes-rejected/` are the right first stop. Raw
-logs are usually only useful when a backend CLI or wrapper itself
+For normal audit progress, the generated index pages under `crashes/`,
+`findings/`, `crashes-rejected/`, and `findings-rejected/` are the right first
+stop. Raw logs are usually only useful when a backend CLI or wrapper itself
 failed.
 
 ## Preflight fails
@@ -163,7 +163,9 @@ Then open the FIND directory and read the marker file:
 - `.needs-content` — the FIND directory has no `report.md` or
   `description.md`. Write one.
 - `.pending-drop` — a substance-gate pass ended with Reject votes below
-  quorum. Reaching quorum moves the directory to `findings-rejected/`.
+  quorum. Reaching quorum moves the directory to `findings-rejected/`, where
+  `REJECTED-FINDINGS.html` records the reason. Nothing is deleted, so a reject
+  you disagree with can be read and recovered.
 
 Add the missing concrete location, security impact, and
 reviewer-actionable rationale, then rerun triage. If a human has

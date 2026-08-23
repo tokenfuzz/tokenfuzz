@@ -28,6 +28,9 @@ that baseline.
   runtime-race diagnostics, or accepted security-boundary violations
   that can be clustered and exported.
 
+Rejected results are kept, not deleted, in `findings-rejected/` and
+`crashes-rejected/` — each with its own HTML index naming the reason.
+
 ## All guide pages
 
 | Page | Use it when |

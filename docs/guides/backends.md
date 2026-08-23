@@ -305,6 +305,7 @@ For one backend, start with:
 output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
 output/<target>/<backend>/results/crashes/CRASH-CLUSTERS.html
 output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
+output/<target>/<backend>/results/findings-rejected/REJECTED-FINDINGS.html
 output/<target>/<backend>/logs/index.log
 ```
 

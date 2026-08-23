@@ -85,7 +85,7 @@ under `#ifndef FUZZ_CAMPAIGN_BUILD` to make that replay possible — keep it.
 
 ## Build isolation, and why it matters across backends
 
-**Nothing S4 does writes to the target checkout or to `build-<san>/.**
+**Nothing S4 does writes to the target checkout or to `build-<san>/`.**
 
 That is a hard requirement, not a style preference, and it is what lets a
 claude run and a codex run audit the same checkout at once:

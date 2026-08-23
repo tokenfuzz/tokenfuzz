@@ -150,46 +150,45 @@ you need:
 - **`tokens.output` against testcases written.** Lots of output and few
   testcases is the "model wrote an essay" smell.
 
-Backends report differently. A normally completed Claude, Codex, or Google
-Gemini CLI session emits terminal counts. Gemini's native turn-limit result
-also retains those counts. If Claude is stopped before its terminal event, the
-harness recovers exact cache buckets from its per-request events but marks the
-row `estimated: true` because fresh input and output remain lower bounds.
-Codex reports usage only in `turn.completed`, which a session stopped at the
-turn cap or the wall deadline never emits. The harness therefore runs Codex
-without `--ephemeral` and reads the session rollout instead; its last
-`token_count` is measured, and it covers every thread rather than only the
-ones that finished. Where a backend leaves only one turn's counters standing
-in for a session, that row is flagged estimated — the counters are real, the
-coverage is a floor. Antigravity and Grok rows without native usage are
-estimated from prompt and transcript size.
+The row also records `turn_soft_cap` and `turn_capped`, so cost comparisons can
+separate natural completions from sessions rolled over to fresh context.
 
-Each rollout is deleted as it is read, but this is not the same as
-`--ephemeral`, which suppressed the file outright:
+For ensembling, compare these numbers across backends. A backend that produces
+the same evidence with half the cached input tokens is a meaningful operational
+signal — regardless of model prose quality.
 
-- between the session ending and extraction, a full transcript of the audit —
-  prompts, messages, tool activity — sits under `CODEX_HOME`;
-- a harness killed in that window, or an unreadable rollout, leaves the file
-  in place. Treat `CODEX_HOME/sessions` as audit-sensitive, and sweep it after
-  an aborted run.
+### Why some numbers are marked estimated
 
-A cell's source is `unknown` only when a session reported no usage at all —
-not when a session exited nonzero after reporting it. An `unknown` total is
-missing that session's whole spend and reads low. Token and cost figures
-carry at most one marker, `~`, meaning "not exact"; the `Source` column beside
-them says which reason applies. `≥` is reserved for the unjudged remainder on
-finding and crash counts, so the two never appear on one number.
+Backends report usage differently, and the harness never presents an estimate
+as a measurement:
+
+| Backend | What it reports |
+| --- | --- |
+| Claude | Terminal counts on a normal finish. Stopped early, exact cache buckets are recovered from its per-request events, but the row is marked `estimated: true` because fresh input and output are then lower bounds. |
+| Codex | Usage only in `turn.completed`, which a session stopped at the turn cap or the wall deadline never emits. The harness therefore runs Codex without `--ephemeral` and reads the session rollout instead — its last `token_count` is measured, and covers every thread rather than only the ones that finished. |
+| Google Gemini CLI | Terminal counts on a normal finish; its native turn-limit result retains them. |
+| Antigravity, Grok | No native usage in the current transports. Rows are estimated from prompt and transcript size. |
+
+Where a backend leaves only one turn's counters standing in for a session, that
+row is flagged estimated: the counters are real, the coverage is a floor.
+
+A cell's source is `unknown` only when a session reported no usage at all — not
+when a session exited nonzero after reporting it. An `unknown` total is missing
+that session's whole spend and reads low. Token and cost figures carry at most
+one marker, `~`, meaning "not exact"; the `Source` column beside them says
+which reason applies. `≥` is reserved for the unjudged remainder on finding and
+crash counts, so the two never appear on one number.
 
 One-shot harness decisions use the same ledger. Claude, Codex, native Gemini,
 and OpenCode keep their structured usage transport, then separate the
 assistant's answer before parsing the verdict. Antigravity and Grok decisions
-remain explicitly estimated because their current transports do not provide
-reliable native counts.
+remain explicitly estimated.
 
-The row also records `turn_soft_cap` and `turn_capped`, so cost comparisons can
-separate natural completions from sessions rolled over to fresh context.
-
-For ensembling, compare these numbers across backends. A backend
-that produces the same evidence with half the cached input tokens
-is a meaningful operational signal — regardless of model prose
-quality.
+!!! warning "Codex session rollouts are audit-sensitive"
+    Reading the rollout is not the same as the `--ephemeral` flag, which
+    suppressed the file outright. Between a session ending and the harness
+    extracting it, a full transcript of the audit — prompts, messages, tool
+    activity — sits under `CODEX_HOME`. Each rollout is deleted as it is read,
+    but a harness killed in that window, or an unreadable rollout, leaves the
+    file in place. Treat `CODEX_HOME/sessions` as audit-sensitive, and sweep it
+    after an aborted run.

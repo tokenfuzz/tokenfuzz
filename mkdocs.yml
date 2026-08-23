@@ -121,12 +121,12 @@ nav:
   - Guides:
       - guides/index.md
       - Configure a target: guides/configure-target.md
-      - Backends, models, and ensemble: guides/backends.md
-      - Language runners: guides/multi-language.md
+      - Backends and ensembling: guides/backends.md
+      - Non-C/C++ targets: guides/multi-language.md
       - Browser targets: guides/browser-targets.md
       - Boundary-directed fuzzing: guides/directed-fuzzing.md
-      - Review and triage: guides/triage-results.md
-      - Maintainer crash reproduction: guides/reproduce-a-crash.md
+      - Triage results: guides/triage-results.md
+      - Reproduce a crash: guides/reproduce-a-crash.md
   - Concepts:
       - concepts/index.md
       - Audit lifecycle: concepts/audit-lifecycle.md
@@ -134,7 +134,7 @@ nav:
       - Strategy model: concepts/strategy-model.md
       - Cost model: concepts/cost-model.md
       - Deduplication: concepts/deduplication.md
-      - Benchmarking and evaluation: concepts/benchmark.md
+      - Benchmarking: concepts/benchmark.md
   - Reference:
       - reference/index.md
       - Commands: reference/commands.md

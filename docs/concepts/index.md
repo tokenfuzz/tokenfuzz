@@ -4,6 +4,10 @@ Design and architecture pages. Read these when you want to understand
 *why* the harness is shaped the way it is, or when you are about to
 extend it.
 
+If you are reading them in order, [Audit lifecycle](audit-lifecycle.md) is the
+one that makes the rest make sense — every other page here expands on one step
+of it.
+
 | Page | What it covers |
 | --- | --- |
 | [Audit lifecycle](audit-lifecycle.md) | A run from setup to a maintainer bundle, in one place, with a diagram. |

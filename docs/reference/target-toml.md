@@ -243,8 +243,8 @@ targets that want to plug in a custom driver script.
 | Key | Meaning |
 | --- | --- |
 | `bin` | Interpreter or driver program (`python3`, `node`, `cargo`, `ruby`, an absolute path to a wrapper script, …). A bare name is resolved on `PATH` first, then as a path relative to `targets/<target>/` — which is how a config points at a binary the target's own build produced. |
-| `args` | Literal argument list. `{TESTCASE}` is substituted with the testcase path; browser runs also expand `{PROFILE}` to a fresh temporary profile. `{TARGET_ROOT}`, `{RESULTS_DIR}`, `{TARGET_SLUG}`, `{SANITIZER}`, and `{SWIFT_SANITIZER}` are also substituted at run time. |
-| `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). The same runner tokens as `args` are substituted at run time. |
+| `args` | Literal argument list, with the runner tokens below substituted at run time. |
+| `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). The same tokens are substituted. |
 | `crash_patterns` | Additional regex strings the triager treats as crash signals beyond its built-in language-agnostic markers. Use sparingly. |
 
 Before model preflight or benchmark cells start, `bin/audit` and
@@ -256,7 +256,20 @@ findings-only target with no runner audits in code-review mode (testcase
 execution is disabled, and probes report that); only a *configured* runner
 that is unusable is a fatal startup error.
 
-`{TESTCASE}` substitution rules:
+### Runner tokens
+
+| Token | Expands to |
+| --- | --- |
+| `{TESTCASE}` | Path to the testcase being run. |
+| `{TARGET_ROOT}` | `targets/<target>/`. |
+| `{RESULTS_DIR}` | This session's `results/` directory. |
+| `{TARGET_SLUG}` | The target slug. |
+| `{SANITIZER}` | The selected sanitizer slug (`asan`, `ubsan`, …). |
+| `{SWIFT_SANITIZER}` | The Swift spelling of that slug — `address`, `undefined`, or `thread`. Any other sanitizer is a hard error, not a silent empty value. |
+| `{NULL_DEVICE}` | The platform's null device (`/dev/null`). |
+| `{PROFILE}` | A fresh temporary browser profile. Valid only in browser execution; elsewhere it is an error. |
+
+`{TESTCASE}` has one extra rule:
 
 - When `{TESTCASE}` appears in `args`, it is replaced in place
   and the runner does *not* also append the testcase path.

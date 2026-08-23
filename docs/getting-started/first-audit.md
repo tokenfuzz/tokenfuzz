@@ -85,6 +85,7 @@ Then check the generated review pages:
 | `$RESULTS/findings/FINDING-CLUSTERS.html` | Concrete security findings, including reports without a reproducer. |
 | `$RESULTS/crashes/CRASH-CLUSTERS.html` | Confirmed crash clusters and maintainer bundles. |
 | `$RESULTS/crashes-rejected/REJECTED-CRASHES.html` | Rejected crash candidates with reasons. |
+| `$RESULTS/findings-rejected/REJECTED-FINDINGS.html` | Rejected findings with reasons. |
 | `output/$TARGET/FINDING-CLUSTERS.html` | Cross-backend finding summary. |
 | `output/$TARGET/CRASH-CLUSTERS.html` | Cross-backend crash summary. |
 
@@ -96,8 +97,8 @@ an uneventful iteration from a failed one, inspect in this order:
    hypotheses.
 3. `$RESULTS/state/runs.jsonl` for recorded probe executions, if the file
    exists.
-4. The rejected-crash page for candidates that reached triage but did not meet
-   the crash bar.
+4. The two rejected pages, for candidates that reached triage but did not meet
+   the bar.
 
 Use the trimmed session log named by `index.log` only when the structured views
 do not explain the run. Raw backend transcripts under `$LOGS/.raw/` are the

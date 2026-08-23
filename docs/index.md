@@ -27,13 +27,13 @@ The harness supplies the parts a long audit needs beyond a prompt:
 - **Comparable evaluation.** A built-in benchmark runs TokenFuzz and a direct
   vulnerability prompt under matched target, model, and wall-clock budgets,
   then compares validated, deduplicated evidence instead of prose volume.
-- **Supported backends.** Claude Code, Codex CLI, Gemini via Antigravity or Google
-  Gemini CLI, Grok Build, and local models via OpenCode; `--backend all` rotates hosted backends.
 
-Hosted and local model backends use the same audit contract. Bounded source
-reads, prompt reuse, execution budgets, and resumable state keep long runs
-operationally manageable. Final security judgment remains with the operator and
-the upstream maintainer.
+It drives Claude Code, Codex CLI, Gemini through Antigravity or the Google
+Gemini CLI, Grok Build, and local models through OpenCode; `--backend all`
+rotates the hosted ones across iterations. Hosted and local model backends use
+the same audit contract. Bounded source reads, prompt reuse, execution budgets,
+and resumable state keep long runs operationally manageable. Final security
+judgment remains with the operator and the upstream maintainer.
 
 ## Quick start
 
@@ -102,6 +102,7 @@ Start review with these generated pages:
 | `results/findings/FINDING-CLUSTERS.html` | Concrete security findings, grouped by exact evidence signature. |
 | `results/crashes/CRASH-CLUSTERS.html` | Confirmed sanitizer or race diagnostics and their reproduction bundles. |
 | `results/crashes-rejected/REJECTED-CRASHES.html` | Crash candidates rejected with an explanation. |
+| `results/findings-rejected/REJECTED-FINDINGS.html` | Findings triage rejected, with the reason. |
 
 The backend-specific `results/` prefix is
 `output/<target>/<backend>/results/`. Cross-backend finding and crash summaries
@@ -123,6 +124,27 @@ Read [Artifact layout](reference/artifacts.md) for every generated path and
 
 See [Audit lifecycle](concepts/audit-lifecycle.md) for the detailed flow and
 [System architecture](concepts/system-architecture.md) for component boundaries.
+
+## What TokenFuzz does not do
+
+Worth knowing before you plan around it:
+
+- **It does not replace fuzzing, code review, or maintainer judgment.** It is
+  another way to spend an audit budget, and the
+  [benchmark](concepts/benchmark.md) exists so you can check whether it is
+  earning that budget on your targets.
+- **It does not publish anything.** No advisory pipeline, no automatic upstream
+  filing. Disclosure stays yours, through the upstream project's process.
+- **Its severity scores are advisory.** They are real CVSS v4.0 vectors,
+  computed offline from the report's own fields — but two metrics are
+  worst-case defaults the harness cannot know, and only you know what the asset
+  is worth. Read the generated `## Severity rationale` before citing a number.
+- **A finding is a claim until a human checks it.** The gates are built to keep
+  unverified model prose out of `findings/`, and the reviewers fail *open* by
+  design: an artifact nobody could disprove is kept, not confirmed. A crash
+  reproduces; a finding is an argument.
+- **Clusters are a review aid, not a root-cause proof.** One defect can split
+  across sinks, and two defects can share one.
 
 ## Choose what to read next
 

@@ -10,22 +10,32 @@ A reproducible crash is the strongest kind of prioritisation evidence
 there is. A non-crashing issue, or a security issue without a
 sanitizer reproducer, belongs in `findings/` with a clear report.
 
-## The three kinds of result
+## The four result lanes
 
-| Type | Directory | Use when |
+| Lane | Directory | An artifact lands here when |
 | --- | --- | --- |
-| Crash | `crashes/CRASH-NNN-N/` | A testcase produces sanitizer evidence or an accepted security-boundary violation. |
-| Finding | `findings/FIND-NNN/` | Any concrete security issue — see below. |
+| Crash | `crashes/CRASH-NNN-N/` | A testcase produces sanitizer evidence, or an accepted security-boundary violation. |
+| Finding | `findings/FIND-NNN/` | It is any concrete security issue — see below. |
 | Rejected crash | `crashes-rejected/` | A crash candidate is low value, out of scope, or incomplete. |
+| Rejected finding | `findings-rejected/` | A FIND lost at quorum — the substance gate, an unreachable trigger, or a source-disproved consequence. |
 
 `findings/` accepts any concrete security class — memory safety,
 logic, auth, injection, info disclosure, crypto, race, boundary
 violation, and so on. A sanitizer reproducer is *not* required.
 
-`crashes-rejected/` is still part of the workflow — it stops the
-harness from refiling the same low-value crash. Findings have a
-separate substance gate that drops one of two markers in the FIND
-directory while the report waits for content or a second review:
+Nothing is deleted. Both rejected trees keep the full artifact and a
+generated index naming the reason, which is what stops the harness
+refiling the same low-value result next session and lets you audit a
+bad rejection:
+
+```text
+<RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.html
+<RESULTS_DIR>/findings-rejected/REJECTED-FINDINGS.html
+```
+
+Between "filed" and "rejected" sits a third state. Findings have a
+substance gate that drops one of two markers in the FIND directory
+while the report waits for content or a second review:
 
 - `.needs-content` — the FIND directory has no `report.md` or
   `description.md` yet.
@@ -41,26 +51,25 @@ marker appears in `findings/FINDING-CLUSTERS.html`.
 
 ## How the gates decide
 
-**Crashes** are classified deterministically — sanitizer class,
-artifact completeness, harness-rooted stacks, caller-contract fields,
-and the configured threat model decide the normal disposition. On top
-of that, an independent source-reading *trigger reviewer* can reject a
-sanitizer-confirmed crash, but only after two disproof-backed Reject
-votes; missing or inconclusive reviewer output fails open and keeps the
-crash. Editing a report's substance forces a fresh review; generated
-severity, patch, and cluster annotations do not.
+Both artifact types pass a mechanical stage and then a source-reading stage.
+The two stages differ because the evidence differs.
 
-**Findings** use a parallel two-vote mechanism: the substance gate
-needs two accepts to confirm, or two rejects to move a FIND to
-`findings-rejected/`. An accepted finding then receives source review of its
-trigger and exact claimed security consequence. One Reject opens an independent
-second review; only two anchored Rejects agreeing that the trigger is
-unreachable or the consequence is source-disproved can quarantine it. Missing
-or ambiguous evidence fails open. A first `Uncertain` vote, or a split between
-the two reviews, opens one focused resolution review that receives the prior
-rationales and checks their exact open question. If that review also cannot
-settle the claim, the finding remains unjudged rather than being guessed into a
-final lane.
+| | Crashes | Findings |
+| --- | --- | --- |
+| **Mechanical stage** | Sanitizer class, artifact completeness, harness-rooted stacks, caller-contract fields, and the configured threat model decide the normal disposition. Deterministic. | A substance gate: two independent readers, each with none of the filing agent's context, vote accept or reject. Two accepts confirm; two rejects move the FIND to `findings-rejected/`. |
+| **Source-reading stage** | A *trigger reviewer* reads the code and can throw out a sanitizer-confirmed crash — but only on two Reject votes that each carry a concrete disproof. | The same review, applied to the finding's trigger *and* its exact claimed consequence. One Reject opens an independent second review; two anchored Rejects can quarantine. |
+
+Three rules apply to the source-reading stage on both sides:
+
+- **It fails open.** Missing, ambiguous, or inconclusive reviewer output keeps
+  the artifact. Silence is never a rejection.
+- **Deadlock gets one resolver, not another coin flip.** A first `Uncertain`
+  vote, or a split between two reviews, opens one focused resolution review
+  that receives the prior rationales and answers their exact open question. If
+  that review also cannot settle the claim, the artifact stays unjudged rather
+  than being guessed into a lane.
+- **The receipt is content-addressed.** Editing a report's substance forces a
+  fresh review; generated severity, patch, and cluster annotations do not.
 
 ## Common rejection reasons
 
@@ -93,11 +102,9 @@ disagree, the reviewer decides. An admitted caller-contract violation or
 `harness-only` parameter control is the report's own words, so no reviewer
 opinion promotes it.
 
-Before filing a similar crash, check:
-
-```text
-<RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.html
-```
+Before filing a similar crash, check
+`<RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.html` — this run has already
+answered some of these questions.
 
 ### The finding Status column
 
@@ -115,20 +122,21 @@ the `Status` column:
 `.pending-drop` — a review pass that ended below reject quorum — is an
 internal marker and does not appear in this column.
 
-Open `validation.json` when a report's publication status is unclear.
-`reportable` and `not-reportable` are final decisions; `pending` preserves a
-candidate no review settled, without granting benchmark credit or severity;
-`rejected` preserves the evidence in the rejected tree. `not-reportable` states
-a fact a review established — an admitted contract violation, or reviewers
-agreeing the trigger needs something `attacker_controls` does not list. A
-focused resolver sees an `Uncertain` review or a review split before either can
-become an absorbing cached state. If it still cannot establish a final answer,
-the artifact stays `pending` and is counted in the unadjudicated remainder
-rather than written off. A `not-reportable` artifact remains visible as an
-engineering defect, but it is outside the security total and has no numeric
-security severity. The receipt is content-addressed, so stale review decisions
-do not survive changes to their report, evidence, configuration, or target
-identity.
+### Publication state
+
+When a report's status is unclear, open its `validation.json`. One of four
+states is recorded there:
+
+| State | Final? | What it means |
+| --- | --- | --- |
+| `reportable` | yes | Real security impact inside the declared attacker surface. The only state that receives a numeric CVSS score and counts toward security yield. |
+| `not-reportable` | yes | A review established a real engineering defect that crosses no security boundary — an admitted contract violation, or reviewers agreeing the trigger needs something `attacker_controls` does not list. Stays visible on disk, unscored, outside the security total. |
+| `pending` | no | No review settled the claim. Neither credited nor written off; counted in the unadjudicated remainder. |
+| `rejected` | yes | The evidence did not hold up. Preserved in the rejected tree with its reason. |
+
+The receipt binds the state to the report, its saved evidence, the target
+revision and config, and the threat model — so a stale decision cannot survive
+a change to any of them.
 
 ## What a strong crash looks like
 
@@ -231,7 +239,7 @@ illustration.)
 | Caller controls       | Document contents and length. |
 | Parameter control     | direct |
 | Trusted caller actions| none |
-| Cluster               | C1 |
+| Cluster               | CL-4b21c7de (singleton) |
 | Dedup frames          | app_next_char → app_parse_char_ref → app_parse_reference |
 | Reproduction rate     | 5/5 |
 | Strategy              | S7 |
@@ -269,35 +277,47 @@ Full original output: `sanitizer.txt`.
 Run `./reproduce.sh /path/to/clean/sampleproj`.
 ````
 
-Notes on the fields:
+Three rows in that table are written by the harness, not the agent:
 
-- `Cluster` is filled in by `bin/cluster-crashes` after triage; agents
-  leave it blank or use the generated marker.
-- `Advisory: yes` is added (above `Surface`) when no `patch.diff` is
-  attached and the fix is described in prose instead — either a
-  non-surgical (ABI/API-impacting) change or simply no clean diff
-  captured. See the `Fix Direction` section in the agent's narrative.
-- `Dedup frames` is the top-3 ClusterFuzz-style frame chain used for
-  duplicate detection.
-- The auto-Severity bullet (`- **Severity**: …`) is rewritten by
-  `bin/severity` on every triage pass; hand-edits there are lost.
-- Severity is a **CVSS v4.0 score**, computed offline by the vendored FIRST
-  reference scorer — no house metric. The label says which metric groups were
-  populated: `CVSS-BT` (base + threat) normally, `CVSS-BTE` once a verified
-  Environmental prerequisite applies, such as an alternate-build requirement.
-- The vector is derived mechanically from the report's own fields:
-  attack vector and user interaction from the surface, the impact metrics from
-  the primitive class, exploit maturity from the reproducer evidence, and the
-  Environmental metrics from caller control, contract concerns, and whether the
-  code ships. Two deliberate worst-case defaults: privileges required is `PR:N`,
-  because the harness has no authentication signal, and the requirement metrics
-  (`CR/IR/AR`) stay Not Defined, because only a deployer knows what the asset is
-  worth.
-- The generated `## Severity rationale` section shows the full vector and the
-  reasoning line by line. **Check those lines against your real deployment
-  before filing an advisory** — each one is a claim you can disagree with.
-- Cluster size is not part of the score. It is reported separately, as a
-  verification fact and a triage-priority signal.
+- `Cluster` is filled in by `bin/cluster-crashes` after triage; agents leave it
+  blank or use the generated marker.
+- `Dedup frames` is the top-3 ClusterFuzz-style frame chain used for duplicate
+  detection.
+- `Advisory: yes` is added above `Surface` when no `patch.diff` is attached and
+  the fix is described in prose instead — either a non-surgical (ABI- or
+  API-impacting) change, or simply no clean diff captured. The `Fix Direction`
+  section in the narrative carries the reasoning.
+
+### How severity is computed
+
+Severity is a **CVSS v4.0 score**, computed offline by the vendored FIRST
+reference scorer. There is no house metric, and no model opinion in the number.
+
+The vector is derived mechanically from the report's own fields: attack vector
+and user interaction from the surface, the impact metrics from the primitive
+class, exploit maturity from the reproducer evidence, and the Environmental
+metrics from caller control, contract concerns, and whether the code ships. The
+label says which metric groups were populated — `CVSS-BT` (base + threat)
+normally, `CVSS-BTE` once a verified Environmental prerequisite applies, such
+as an alternate-build requirement.
+
+Two defaults are deliberately worst-case, because the harness cannot know
+better:
+
+- privileges required stays `PR:N`, since the harness has no authentication
+  signal;
+- the requirement metrics (`CR`/`IR`/`AR`) stay Not Defined, since only a
+  deployer knows what the asset is worth.
+
+That is why the generated `## Severity rationale` section spells out the full
+vector and the reasoning line by line. **Read those lines against your real
+deployment before filing an advisory** — each one is a claim you are entitled
+to disagree with.
+
+Two mechanical notes: the auto-Severity bullet (`- **Severity**: …`) is
+rewritten by `bin/severity` on every triage pass, so hand-edits there are lost;
+and cluster size is not part of the score — it is reported separately, as a
+verification fact and a triage-priority signal.
 
 ## Finding requirements
 
@@ -334,7 +354,7 @@ A typical non-crashing FIND `report.md` looks like:
 | Surface        | library-api                                            |
 | Location       | src/policy.c:check_acl:142                             |
 | Caller control | request bytes                                          |
-| Cluster        | F3                                                     |
+| Cluster        | FCL-8c19a032 (singleton)                               |
 
 Class: authorization bypass
 Surface: library-api
@@ -387,10 +407,11 @@ findings without a reproducer are kept.
 
 When a substance-gate pass ends with Reject votes below quorum, the
 directory stays put with `.pending-drop`. A later accept clears that
-marker. If reject quorum is reached, the directory moves to `findings-rejected/`
-so QA can audit false rejects and recover anything worth keeping. Add
-`.reviewed` or `.keep` when a human has confirmed the report is
-intentionally terse.
+marker. If reject quorum is reached, the directory moves to
+`findings-rejected/` and is listed with its reason in
+`findings-rejected/REJECTED-FINDINGS.html` — so you can audit a false reject
+and recover anything worth keeping. Add `.reviewed` or `.keep` when a human
+has confirmed the report is intentionally terse.
 
 ## Exported crash bundle
 
@@ -405,6 +426,7 @@ CRASH-001-1/
   harness.{c,cc,cpp,cxx} # when applicable
   sanitizer.txt
   patch.diff             # optional: candidate fix that passes `git apply --check`
+  validation.json        # the publication decision, bound to this evidence
   severity.json          # the published score, bound to the report it came from
   .audit/
 ```
@@ -457,16 +479,17 @@ independent entries.
 crashes/
   CRASH-CLUSTERS.md
   CRASH-CLUSTERS.html
-  CRASH-001-1/REPORT.md          ← Cluster: C1
+  CRASH-001-1/REPORT.md          ← Cluster: CL-7e2d10ab (2 reports: CRASH-001-2)
   CRASH-001-1/REPORT.html
-  CRASH-001-2/REPORT.md          ← Cluster: C1, .dup-of -> CRASH-001-1
-  CRASH-002-1/REPORT.md          ← Cluster: C2
+  CRASH-001-2/REPORT.md          ← same cluster + .dup-of -> CRASH-001-1
+  CRASH-002-1/REPORT.md          ← Cluster: CL-9a03f118 (singleton)
 findings/
   FINDING-CLUSTERS.md
   FINDING-CLUSTERS.html
-  FIND-001/report.md             ← Cluster: F1, Dedup key: [loc] src/policy.c:142
+  FIND-001/report.md             ← Cluster: FCL-8c19a032 (2 reports: FIND-007) (canonical)
+                                   Dedup key: [loc] src/policy.c:142
   FIND-001/report.html
-  FIND-007/report.md             ← Cluster: F1, .dup-of -> FIND-001
+  FIND-007/report.md             ← same cluster + .dup-of -> FIND-001
 ```
 
 How the cluster files and markers work:
@@ -474,10 +497,13 @@ How the cluster files and markers work:
 - `CRASH-CLUSTERS.html` and `FINDING-CLUSTERS.html` are the browser
   review pages — one row per cluster, with severity, member count, and
   the canonical member. The `.md` siblings are generated source files.
-- Each report has a `Cluster: <ID>` line. For FINDs, `Dedup key: [loc]
-  <file>:<line>` records a deterministic source-site key. A siteless finding
-  receives a `[title]` display key but is not merged on title alone. Findings
-  can also merge when they contain the same normalized crash stack. See
+- Each report carries a `Cluster:` line naming its cluster and its siblings.
+  The id is a hash of the cluster's signature — `CL-<8 hex>` for crashes,
+  `FCL-<8 hex>` for findings — so it stays the same across reruns and does not
+  renumber when a new cluster appears. FINDs also get a `Dedup key: [loc]
+  <file>:<line>` line recording the source site the key was built from. A
+  siteless finding gets a `[title]` display key but is never merged on title
+  alone; findings can also merge on an identical normalized crash stack. See
   [Deduplication](../concepts/deduplication.md) for the exact rules.
 - Non-canonical members carry a `.dup-of` file naming the canonical
   member. They are **not** deleted — a duplicate may still carry a

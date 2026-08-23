@@ -34,6 +34,7 @@ Useful flags:
 | `--pull` | Update an existing VCS checkout to the latest upstream source without re-passing its repo URL. Tracked local edits leave the checkout untouched; untracked build trees, `.audit/` overlays, and run leftovers do not block the update. |
 | `--no-update` | Do not pull or fetch an existing VCS checkout. |
 | `--force` | Without `--build`, regenerate generated config, including suggested threat-model and peer sections. With `--build`, preserve reviewed config and recipes but rematerialize their build output from a clean tree. |
+| `--no-alternates` | Build only the canonical sanitizer trees, skipping the cached alternate ASan configurations described below. |
 | `--no-llm-config` | Skip best-effort model suggestions for the threat model and S6 peers. |
 
 The suggestion steps can also be rerun independently:
@@ -100,10 +101,13 @@ Common flags:
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
 | `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. Each backend defaults to the strongest mode it can run under; see [Agent security modes](../guides/backends.md#agent-security-modes). |
 | `--new-target <slug>` | Generate starter config and exit without starting an audit. |
+| `--allow-concurrent` | Skip the one-instance lock below. Two runs then append to one state tree; use it only when you know why you want that. |
 
 One audit at a time owns a result tree: a second run on the same target and
 backend exits with `another bin/audit instance is writing to …`. A lock left by
-a killed run is reclaimed automatically — there is nothing to clean up.
+a killed run is reclaimed automatically — there is nothing to clean up. To run
+several backends at once, give each its own `--backend`; they already write
+separate trees.
 
 Omitting `--backend`, or using `--backend all`, cycles installed hosted
 backends in `claude → codex → gemini → grok` order, skipping any the selected
@@ -147,6 +151,9 @@ testcase, and records the verdict in `state/runs.jsonl`.
 - Use `--dry-run` to inspect mode, sanitizer, output path, and resolved command
   without executing target code.
 - Use `--mode browser|js|generic` only when automatic mode detection is wrong.
+- Use `--hypothesis-id H1` for an opaque binary input that cannot carry a
+  comment header, and `--want <symbol-regex>` to name the code a coverage-gated
+  browser or JS probe must reach.
 - Compiled C/C++ harnesses that set `LD_PRELOAD` or
   `DYLD_INSERT_LIBRARIES` and then launch a process are refused before
   compilation. Injected process state is not a testcase-derived public
@@ -275,11 +282,13 @@ output/<target>/CRASH-CLUSTERS.html
 output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
 output/<target>/<backend>/results/crashes/CRASH-CLUSTERS.html
 output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
+output/<target>/<backend>/results/findings-rejected/REJECTED-FINDINGS.html
 ```
 
-Target-level pages combine all backends. Backend-level pages show one result
-tree. Follow a cluster to `report.html` or `REPORT.html`; edit only the Markdown
-source.
+Target-level pages combine all backends; backend-level pages show one result
+tree. The two rejected indexes are per-backend only — there is no cross-backend
+rollup of rejections. Follow a cluster to `report.html` or `REPORT.html`, and
+edit only the Markdown source.
 
 Normal triage performs export, severity, validation, and clustering
 automatically. These commands are for deliberate regeneration after a manual

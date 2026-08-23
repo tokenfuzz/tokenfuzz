@@ -73,8 +73,13 @@ env            = [
   "PYTHONDEVMODE=1",
   "PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src:{TARGET_ROOT}/lib",
 ]
-crash_patterns = []    # builtin Python tracebacks are already recognised
+crash_patterns = []    # optional: triage already knows Python tracebacks
 ```
+
+`bin/setup-target` seeds a starter `crash_patterns` list from the language
+registry; an empty list is equally valid, because triage recognises the
+common runtime markers on its own. Add entries only for a banner specific to
+your project.
 
 The harness runs `python3 <testcase>` against the interpreter on
 `PATH`. Runtime tracebacks land under `findings/` rather than

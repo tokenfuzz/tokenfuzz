@@ -39,15 +39,22 @@ CRASH-001-1/
 ├── harness.{c,cc,cpp,cxx} # present iff the bug uses a C/C++ harness
 ├── sanitizer.txt      # full sanitizer output captured during discovery
 ├── patch.diff         # optional: candidate fix, verified to apply cleanly
+├── validation.json    # the publication decision, bound to this evidence
 ├── severity.json      # the published score, bound to the report it came from
 └── .audit/            # audit-side originals, kept for provenance
 ```
+
+`validation.json` and `severity.json` are the audit's own record of *why* this
+was filed and how it was scored. Neither is needed to reproduce; both are there
+so a disputed report can be traced back to the decision that published it.
 
 `REPORT.md` is what to read first. For an even easier read, open
 `REPORT.html` in a browser — same content with the field table
 aligned, severity badge, and external links resolved.
 
-The report names:
+It opens with a **Reviewer TL;DR** — two lines giving the bug and its trigger —
+then the severity badge, a `## Summary` paragraph, and a `## Fields` table of
+the structured claims triage parsed. Between them they name:
 
 - the affected `file:function:line`;
 - the issue class (bounds / lifetime / type / size / uninit / state);

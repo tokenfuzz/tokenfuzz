@@ -34,6 +34,11 @@ bin/setup-target firefox --build
 bin/setup-target chromium --browser --build
 ```
 
+Chromium and Chrome need a `depot_tools` checkout and register a nested source
+slug; see
+[Chromium and Chrome checkouts](../getting-started/add-a-target.md#chromium-and-chrome-checkouts)
+before the first setup.
+
 The generated recipe is stored under `targets/<target>/.audit/`, uses a clean
 release-mode sanitizer object directory, and is reused by audit preflight when
 the source moves. `mach` and GN are native adapters; neither adapter branches
@@ -62,8 +67,11 @@ particular, a GN checkout that uses an external dependency client must be
 synced before setup; TokenFuzz does not replace project-specific source
 bootstrap tooling.
 
-Coverage mode, when available, checks `XUL` on macOS or `libxul.so`
-on Linux.
+Coverage gating (`bin/hits`) currently speaks only the Firefox command line
+and looks for `dist/Nightly.app/Contents/MacOS/XUL` on macOS or
+`dist/bin/libxul.so` on Linux — override with `COV_XUL`. Other browser targets
+run without the coverage pre-check; every probe spends a sanitizer run
+directly.
 
 ## Attacker surface
 
