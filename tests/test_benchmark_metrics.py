@@ -470,6 +470,24 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(metrics["execution"]["sanitizer_command_requests"], 0)
         self.assertEqual(metrics["execution"]["source"], "state/runs.jsonl")
 
+    def test_oss_input_is_disjoint_from_cache_reads(self) -> None:
+        # OpenCode reports fresh input separately from cache reads, so a long
+        # session's summed cache reads dwarf its summed input. Normalizing oss
+        # as cumulative subtracted the one from the other and floored the whole
+        # session at zero, which published a measured cell as near-free.
+        index = self.root / "index.jsonl"
+        index.write_text(json.dumps({
+            "backend": "oss",
+            "tokens": {
+                "input": 2657971, "cached_input": 65454784, "output": 127967,
+            },
+        }) + "\n")
+        totals = benchmark.harvest_tokens(index)
+        self.assertEqual(totals["input_tokens"], 2657971)
+        self.assertEqual(totals["cached_input_tokens"], 65454784)
+        self.assertEqual(totals["output_tokens"], 127967)
+        self.assertEqual(totals["token_source"], "measured")
+
     def test_token_normalization_sources_and_pricing(self) -> None:
         index = self.root / "index.jsonl"
         rows = [

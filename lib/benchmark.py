@@ -991,19 +991,21 @@ def confirmed_finding_class_count(findings_dir: Path, names: list[str]) -> int:
 
 
 # Backends whose `input` token field already includes the cached prefix
-# (cached + fresh). Codex reports a running total; local OpenCode/oss
-# transcripts can follow the same cumulative shape when usage is present;
-# gemini-cli's `result.stats.input_tokens` is likewise cumulative (it
+# (cached + fresh). Codex reports a running total; gemini-cli's
+# `result.stats.input_tokens` is likewise cumulative (it
 # also emits a separate fresh-only `input`, but the priority order in
 # _INPUT_KEYS picks `input_tokens` first, so the same subtract-cached
 # normalization applies). The xAI Responses API uses the same total-input
 # convention if Grok Build exposes usage in a future CLI release. Claude
-# reports fresh input only and stays out
+# and OpenCode/oss report fresh input only and stay out
 # of this list. harvest_tokens subtracts the cached part for these so
 # the per-turn delta is comparable across backends. Backend names are
 # industry vocabulary, not target-specific, so this list is
 # harness-shared by design.
-_INPUT_INCLUDES_CACHED = ("codex", "oss", "gemini", "grok")
+# OpenCode is out by arithmetic: its per-request `tokens.total` equals
+# input + output + reasoning + cache.read + cache.write, so `input` is
+# disjoint from the cache buckets and subtracting floored oss cells at zero.
+_INPUT_INCLUDES_CACHED = ("codex", "gemini", "grok")
 
 _MILLION = Decimal("1000000")
 
