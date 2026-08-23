@@ -345,6 +345,37 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         # its peers never read, so no later recovery may make it comparable.
         "status": "failed", "run_quality": "source_drift",
     }), encoding="utf-8")
+    # A finished cell whose shared target tree was rebuilt after it ran. Its
+    # crash verdicts were settled at cell end under the build it pinned; the
+    # overwritten generation is generally no longer available, so lowering
+    # status here can permanently zero a real run.
+    stale_build_dir = cells_dir / "harness-r7"
+    stale_results = stale_build_dir / "results"
+    stale_crash = stale_results / "crashes" / "CRASH-001-1"
+    stale_crash.mkdir(parents=True)
+    (stale_crash / "sanitizer.txt").write_text(_ASAN, encoding="utf-8")
+    (stale_crash / "REPORT.md").write_text(_GOOD_REPORT, encoding="utf-8")
+    validation_receipt.write(
+        stale_crash, kind="crash", state="reportable",
+        attacker_controls=["bytes"],
+    )
+    pinned_binary = fake_script_root / "targets" / "sampleproj" / "build-asan" / "stub"
+    pinned_binary.parent.mkdir(parents=True, exist_ok=True)
+    pinned_binary.write_bytes(b"rebuilt after the run\n")
+    pinned_binary.chmod(0o755)
+    (stale_build_dir / "cell.json").write_text(json.dumps({
+        "condition": "harness", "replicate": 7, "experiment": "stale-build",
+        "results_dir": str(stale_results), "wall_seconds": 1,
+        "status": "done", "run_quality": "clean",
+        "build_identity": {
+            "version": 2,
+            "stamps": {"asan": "0" * 64},
+            "artifacts": {"asan-bin": {
+                "path": "build-asan/stub", "size": 1, "sha256": "0" * 64,
+            }},
+        },
+    }), encoding="utf-8")
+
     regenerate_args = SimpleNamespace(**{**vars(budget_args), "regenerate": True})
     regenerate_age_pending = []
     def _regenerate_crash_triage(*args, **kwargs):
@@ -407,12 +438,43 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "regenerate triages without consuming pending-artifact lifetime",
         repr(regenerate_age_pending),
     )
+    stale_build = json.loads((stale_build_dir / "cell.json").read_text())
+    stale_metrics = json.loads((stale_build_dir / "metrics.json").read_text())
+    regenerated_harness = next(
+        condition for condition in benchmark.aggregate(
+            bench_dir, include_pool=False,
+        )["conditions"]
+        if condition["condition"] == "harness"
+    )
+    check(
+        stale_build["status"] == "done"
+        and stale_build["run_quality"] == "clean"
+        and stale_build["build_finalization_error"]
+        and stale_metrics["confirmed_crashes"] == 1
+        and regenerated_harness["crash_total"] == 5,
+        "a rebuilt target tree costs regeneration its replay, not the cell",
+        repr((
+            stale_build, stale_metrics.get("confirmed_crashes"),
+            regenerated_harness.get("crash_total"),
+        )),
+    )
     recovered["status"] = "incomplete"
     recovered["run_quality"] = "incomplete"
     (cells_dir / "harness-r1" / "cell.json").write_text(
         json.dumps(recovered), encoding="utf-8"
     )
+    replay_build_status = benchmark_runner._replay_build_status
+
+    def _restored_stale_build(cell, *args, **kwargs):
+        if cell.get("experiment") == "stale-build":
+            return True, ""
+        return replay_build_status(cell, *args, **kwargs)
+
     with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
+         mock.patch.object(
+             benchmark_runner, "_replay_build_status",
+             side_effect=_restored_stale_build,
+         ), \
          mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=RuntimeError("triage failed")), \
          mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
          mock.patch.object(benchmark_runner, "update_result", return_value=empty_report), \
@@ -429,6 +491,12 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         finalizer_failed["status"] == "incomplete",
         "regenerate does not recover a cell when a finalizer actually fails",
         repr(finalizer_failed),
+    )
+    stale_build = json.loads((stale_build_dir / "cell.json").read_text())
+    check(
+        "build_finalization_error" not in stale_build,
+        "regenerate clears a stale replay-build error once the pin verifies",
+        repr(stale_build),
     )
 
     # A pending crash is explicit resumable work and preempts card claiming.

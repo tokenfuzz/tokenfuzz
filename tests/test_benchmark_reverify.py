@@ -1752,27 +1752,6 @@ class BenchmarkReverifyTests(unittest.TestCase):
         )
         self.assertFalse(ok, reason)
 
-    def test_an_unverifiable_build_does_not_relabel_a_failed_cell(self) -> None:
-        # Regeneration promotes `incomplete` back to `done` once finalizers
-        # succeed. A failed or provider-limited cell relabelled `incomplete`
-        # would take that route into the aggregate it is excluded from.
-        cases = {
-            # Only `status` gates that promotion, so a failed cell keeps it;
-            # its quality may still record that finalization did not finish.
-            "failed": ({"status": "failed", "run_quality": "clean"}, "failed", "incomplete"),
-            "provider-limited": (
-                {"status": "done", "run_quality": "provider_limited"},
-                "incomplete", "provider_limited",
-            ),
-            "clean": ({"status": "done", "run_quality": "clean"}, "incomplete", "incomplete"),
-        }
-        for name, (cell, status, quality) in cases.items():
-            with self.subTest(name):
-                benchmark_runner._mark_build_finalization_incomplete(cell, "why")
-                self.assertEqual(cell["status"], status)
-                self.assertEqual(cell["run_quality"], quality)
-                self.assertEqual(cell["build_finalization_error"], "why")
-
     def test_pooled_bundles_survive_a_replay_the_build_cannot_verify(self) -> None:
         # Every accepted crash owes a maintainer a bundle. A bundle reproduces
         # from source at the recorded revision, so an unverifiable live build

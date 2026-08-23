@@ -856,20 +856,6 @@ def _cell_build_identity(cell: dict) -> dict:
     return recorded if isinstance(recorded, dict) else {}
 
 
-def _mark_build_finalization_incomplete(cell: dict, reason: str) -> None:
-    """Record that a cell's replay build could not be verified.
-
-    A cell that failed, or one a provider cut short, keeps that status: a later
-    regeneration promotes `incomplete` back to `done` once the build matches
-    again, which would launder those into the aggregate they are excluded from.
-    """
-    if cell.get("status") != "failed":
-        cell["status"] = "incomplete"
-    if cell.get("run_quality") == "clean":
-        cell["run_quality"] = "incomplete"
-    cell["build_finalization_error"] = reason
-
-
 def _replay_build_status(
     cell: dict, results: Path, target: Path, target_slug: str,
     config: target_config.Config | None = None,
@@ -3190,15 +3176,27 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     )
                     if not replay_build_ok:
                         finalizers_ok = False
-                        _mark_build_finalization_incomplete(cell, reason)
+                        # Regeneration re-derives a report; it does not
+                        # re-measure the cell. Losing the pinned replay build
+                        # cannot erase verdicts settled when that build was
+                        # present. Unsettled evidence remains unadjudicated,
+                        # while finalizers_ok still prevents a genuinely
+                        # incomplete cell from being promoted.
+                        cell["build_finalization_error"] = reason
                         _write_json(cell_dir / "cell.json", cell)
                         log(
                             f"WARN: Regenerate: crash triage skipped for "
-                            f"{cell_dir.name} — {reason}; original evidence "
-                            "was left unchanged"
+                            f"{cell_dir.name} — {reason}; the cell keeps the "
+                            "verdicts it reached under its own build, and "
+                            "anything still unadjudicated stays unconfirmed"
                         )
                     else:
-                        cell.pop("build_finalization_error", None)
+                        if "build_finalization_error" in cell:
+                            del cell["build_finalization_error"]
+                            # A done cell has no later status rewrite. Persist
+                            # the recovered replay state now instead of leaving
+                            # a stale error in its record indefinitely.
+                            _write_json(cell_dir / "cell.json", cell)
                 if replay_build_ok and (results / "crashes").is_dir():
                     log(f"Regenerate: completing crash triage for {cell_dir.name} ({cell.get('condition', '?')})")
                     try:

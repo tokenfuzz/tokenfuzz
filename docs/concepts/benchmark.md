@@ -595,8 +595,11 @@ needed merely to correct deterministic severity, routing, or report metrics.
 It does not substitute the current target build for the one a cell executed.
 Each new cell records the content identity of the binaries and instrumented
 libraries a replay would run. A regeneration that cannot match that identity
-leaves the original crash evidence unchanged, marks finalization incomplete,
-and reports why. Changes to a sanitizer build the evidence never used do not
+leaves the original crash evidence unchanged, records why the replay was
+skipped, and keeps the verdicts the cell already settled under the build it
+pinned — a rebuilt tree costs the replay, not the measurement, and what no
+replay can settle stays unadjudicated rather than costing the cell its place
+in the aggregate. Changes to a sanitizer build the evidence never used do not
 block it. Older cells without a recorded identity can still be re-rendered,
 but target-build-dependent crash replay is skipped.
 
