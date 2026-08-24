@@ -8,7 +8,7 @@ roadmap to the unfixed analogue in peer B.
 **This is NOT Strategy S1.** S1 mines the target's OWN history. S6 mines
 *peer* projects' history and asks whether the target has the same class.
 
-**Review gate:** after 5 peer fixes analyzed with 0 target analogues, rotate.
+**Review gate:** after 5 source-verified peer fixes analyzed with 0 target analogues, rotate.
 Do not stop while a target analogue still needs mapping or a testcase.
 
 ## Procedure
@@ -133,7 +133,7 @@ No single source covers every peer. Pick by target shape:
 
 | Source | Best for | Failure mode |
 |--------|----------|--------------|
-| **OSV (osv.dev)** | Libraries in OSS-Fuzz / GHSA / Debian / Ubuntu ecosystems | Misses fixes that never got a CVE; sparse for older fixes (~pre-2020) and obscure projects |
+| **OSV (osv.dev)** | Advisory leads for libraries in OSS-Fuzz / GHSA / Debian / Ubuntu ecosystems | Its GIT `fixed` event is a vulnerable-range endpoint, which can be later than and unrelated to the repair; resolve the actual fix before mapping |
 | **OSS-Fuzz issue tracker** | C/C++ targets actively fuzzed by Google | Project must be opted into OSS-Fuzz; some bug details require login |
 | **Project-specific tracker** | Big projects with security teams (Mozilla, Chromium, WebKit, GNOME, Apache) | Per-project API; security view restricted on some |
 | **VCS log keyword search** | *Any* git/hg repo — universal fallback | Noisy; depends on commit-message discipline |
@@ -143,15 +143,17 @@ No single source covers every peer. Pick by target shape:
 For a peer with no OSV entries, **VCS log + project tracker is the only path** —
 the strategy still applies, the sourcing is just more work.
 
-### Preferred for advisory-covered peers: OSV (osv.dev)
+### Advisory fallback: OSV (osv.dev)
 
 The command examples in this section use `curl` and `jq`. The GitHub severity
 fallback additionally uses the authenticated `gh` CLI. Install only the tools
 for the path you use; TokenFuzz itself does not require them.
 
 OSV aggregates OSS-Fuzz, GHSA, Debian DSA, Ubuntu USN, Alpine, etc., into one
-JSON schema. Each entry carries a fix commit hash you can `git show`. Highest
-structured signal when the peer is in the ecosystem.
+JSON schema. A GIT `fixed` event marks the end of the vulnerable range; it is
+not guaranteed to be the repair commit. Use the advisory and repository
+history to resolve the actual fix. If the endpoint is unrelated and the repair
+cannot be resolved promptly, record that proof and move on instead of guessing.
 
 ```bash
 # 1. List issues for a peer (try OSS-Fuzz ecosystem first, then
@@ -198,7 +200,7 @@ git -C <peer> show <hash> --name-only  # files only
 ```
 
 OSV ecosystem coverage notes (validated 2026-05-09):
-- **OSS-Fuzz** — clean, project-canonical, has GIT events with fix commits.
+- **OSS-Fuzz** — clean and project-canonical, with GIT vulnerable-range endpoints.
   Best for libxml2 (56), pcre2 (11), openssl (10). Try first.
 - **Debian / Ubuntu** — longer history, IDs are `DSA-*` / `USN-*` (not CVE).
   Use when OSS-Fuzz is sparse; resolve DSA → CVE via `aliases` field, then
@@ -350,7 +352,7 @@ vendor names.
 
 - Read ONE peer fix at a time, distill it, search target, move on. Do not
   bulk-load 50 patches into context.
-- Use the advisory feed (release notes, SECURITY.md, vendor security pages) before reading raw `git log` output.
+- Use an exact local VCS diff first; use advisory feeds when no exact commit is available.
 - Skip peer fixes older than 3 years unless the target subsystem is
   unchanged across that span (some long-lived parsers / TLS / archive
   code rarely change — older fixes still cross-port).

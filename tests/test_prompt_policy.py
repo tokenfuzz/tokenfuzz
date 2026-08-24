@@ -231,6 +231,31 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
             "FIRST-PROBE CHECKPOINT", prompt.deep_investigation_prompt(analysis, 1),
         )
 
+    def test_pinned_s6_verifies_the_peer_fix_before_creating_a_hypothesis(self) -> None:
+        context = self.context()
+        context.fixed_strategy = "S6"
+
+        rendered = prompt.cold_start_prompt(context, 1)
+
+        self.assertIn("S6 SOURCE GATE", rendered)
+        self.assertIn("do not manufacture a testcase", rendered)
+        self.assertIn("verify a target analogue", rendered)
+        self.assertIn("Every hypothesis on this run must be Strategy S6.", rendered)
+        # The default step 4 would have it file a hypothesis before the gate.
+        self.assertNotIn(
+            "Record one concrete hypothesis with `bin/state add-hyp`, take the best",
+            rendered,
+        )
+
+    def test_a_pin_states_the_strategy_without_restating_the_workflow(self) -> None:
+        context = self.context()
+        context.fixed_strategy = "S3"
+
+        rendered = prompt.cold_start_prompt(context, 1)
+
+        self.assertIn("Every hypothesis on this run must be Strategy S3.", rendered)
+        self.assertIn("Record one concrete hypothesis with `bin/state add-hyp`", rendered)
+
     def test_prompt_allows_targeted_revisits_without_an_absolute_ban(self) -> None:
         rendered = self.render()
 

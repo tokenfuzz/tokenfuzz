@@ -2,13 +2,14 @@
 """Build S6 peer-fix cards from configured s6_peers.
 
 Reads cfg.s6_peers from output/<slug>/target.toml, mines security-relevant
-fix commits from each peer via OSV and any locally available peer clones,
-distills the bug class via LLM, maps it to a target-side file analogue via
-LLM, and emits S6 work cards as JSONL matching the patch-cards.jsonl shape.
+fix commits from each peer via OSV and any locally available peer clones, and
+emits evidence-bearing S6 work cards as JSONL matching the patch-cards.jsonl
+shape. The audit agent resolves each candidate to an exact fix, then distills
+and maps it across the full target tree before opening a hypothesis.
 
-Hooks into bin/audit alongside bin/patch-cards. Failure of any peer,
-source, or LLM call is non-fatal — the orchestrator emits whatever it
-could produce and exits 0 unless the target config itself is broken.
+Hooks into bin/audit alongside bin/patch-cards. Failure of any peer or source
+is non-fatal — the orchestrator emits whatever it could produce and exits 0
+unless the target config itself is broken.
 
 Output: <RESULTS_DIR>/s6-peer-cards.jsonl
 Cache:  <RESULTS_DIR>/.s6-cache/  (OSV responses, refreshed weekly)
@@ -20,6 +21,7 @@ import hashlib
 import json
 import os
 import sys
+from itertools import zip_longest
 from pathlib import Path
 
 # .absolute() not .resolve() for the file-based fallback: inside a
@@ -30,200 +32,96 @@ ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT"
 sys.path.insert(0, str(ROOT / "lib"))
 
 import peer_sources  # noqa: E402
-import llm_usage  # noqa: E402
 import target_config as tc  # noqa: E402
 import workqueue  # noqa: E402
-from llm_decide import decision_timeout, llm_decide  # noqa: E402
-from prompt_render import render_template  # noqa: E402
-
-
-def gather_target_file_listing(target_root: Path, max_files: int = 400) -> list[str]:
-    """Sample of auditable source files in the target tree.
-
-    Capped so the LLM-map prompt doesn't balloon. Sourced from
-    workqueue.iter_source_files which already filters out build/ test/
-    generated/ etc. — same files the work-card ranker considers.
-    """
-    out: list[str] = []
-    try:
-        for p in workqueue.iter_source_files(target_root, max_files=max_files):
-            rel = workqueue.relpath(p, target_root)
-            if workqueue.is_auditable_source_path(rel):
-                out.append(rel)
-    except Exception:
-        return out
-    return out
-
-
-# ── LLM verdict cache ────────────────────────────────────────────────
-# The fixes mined from OSV/peer clones are stable between work-card
-# refreshes, but distill/map used to re-ask the LLM for the same fix on
-# every refresh (two ~10-20s calls per fix per iteration). Verdicts are
-# a function of the rendered prompt and the decider, so memoize them in
-# .s6-cache keyed by both. Transport failures (llm_decide → None) are
-# never cached; a genuine "no good match" verdict is.
-
-def _decider_key(decision: str) -> str:
-    upper = decision.upper().replace("-", "_")
-    mock = os.environ.get(f"LLM_DECIDE_MOCK_{upper}") or os.environ.get("LLM_DECIDE_MOCK") or ""
-    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
-    # Resolve the backend's default when MODEL is unset (mirrors
-    # workqueue.llm_rerank_cards): an empty model would replay stale
-    # verdicts across a harness default-model change.
-    model = os.environ.get("MODEL", "")
-    if not model:
-        try:
-            from llm_invoke import default_model
-            model = default_model(backend)
-        except Exception:
-            model = ""
-    return f"{backend}\x00{model}\x00{mock}"
-
-
-def _verdict_cache_path(cache_dir: Path | None, decision: str, prompt: str) -> Path | None:
-    if cache_dir is None:
-        return None
-    key = hashlib.sha1(
-        (decision + "\x00" + _decider_key(decision) + "\x00" + prompt).encode("utf-8", "replace")
-    ).hexdigest()
-    return cache_dir / f"llm-{decision}-{key}.json"
-
-
-def _verdict_cache_load(path: Path | None) -> dict | None:
-    if path is None:
-        return None
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-        return obj if isinstance(obj, dict) else None
-    except (OSError, ValueError):
-        return None
-
-
-def _verdict_cache_store(path: Path | None, payload: dict) -> None:
-    if path is None:
-        return
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # PID-unique temp name: two refreshes racing on the same
-        # RESULTS_DIR must not interleave writes into one temp file.
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(payload), encoding="utf-8")
-        tmp.replace(path)
-    except OSError:
-        pass
-
-
-def distill_bug_class(
-    peer: str, fix_entry: dict, diff_excerpt: str, timeout: int | None = None,
-    cache_dir: Path | None = None,
-    usage_index: Path | None = None,
-) -> str:
-    """LLM-distill the bug class from a peer fix. Empty string on failure."""
-    timeout = decision_timeout("s6-peer-distill") if timeout is None else timeout
-    prompt = render_template("peer_fix_distill.md.j2", {
-        "peer": peer,
-        "fix_id": str(fix_entry.get("id", "")),
-        "summary": str(fix_entry.get("summary", "")),
-        "source": str(fix_entry.get("source", "")),
-        "url": str(fix_entry.get("url", "")),
-        "diff_excerpt": diff_excerpt[:6000] if diff_excerpt else "(no diff available — use the summary)",
-    })
-    cache_path = _verdict_cache_path(cache_dir, "s6-peer-distill", prompt)
-    cached = _verdict_cache_load(cache_path)
-    if cached is not None and "bug_class" in cached:
-        return str(cached["bug_class"])
-    result = llm_decide(
-        "s6-peer-distill", "class,summary,shape", prompt, timeout=timeout,
-        usage_index=usage_index,
-    )
-    if result is None:
-        return ""
-    cls = str(result.get("class", "")).strip()
-    summary = str(result.get("summary", "")).strip()
-    shape = str(result.get("shape", "")).strip()
-    if not cls or not summary:
-        return ""
-    bug_class = f"{cls}: {summary} ({shape})"
-    _verdict_cache_store(cache_path, {"bug_class": bug_class})
-    return bug_class
-
-
-def map_to_target_file(
-    bug_class_summary: str,
-    target_file_listing: list[str],
-    target_slug: str,
-    timeout: int | None = None,
-    cache_dir: Path | None = None,
-    usage_index: Path | None = None,
-) -> str:
-    """LLM-map a distilled bug class to a target-side file analogue.
-
-    Returns the relative path or empty string on failure / no good match.
-    """
-    timeout = decision_timeout("s6-peer-map") if timeout is None else timeout
-    if not target_file_listing or not bug_class_summary:
-        return ""
-    # Cap the listing in the prompt — file lists are noisy and the LLM
-    # only needs enough to anchor on. 200 files is plenty for ranking.
-    listing_excerpt = "\n".join(target_file_listing[:200])
-    prompt = render_template("peer_fix_map.md.j2", {
-        "target_slug": target_slug,
-        "bug_class_summary": bug_class_summary,
-        "listing_excerpt": listing_excerpt,
-    })
-    cache_path = _verdict_cache_path(cache_dir, "s6-peer-map", prompt)
-    cached = _verdict_cache_load(cache_path)
-    if cached is not None and "file" in cached:
-        f = str(cached["file"])
-        # Defensive replay guard: the listing excerpt keys the cache, so
-        # membership still holds, but re-checking costs nothing.
-        return f if (not f or f in target_file_listing) else ""
-    result = llm_decide(
-        "s6-peer-map", "file,reason", prompt, timeout=timeout,
-        usage_index=usage_index,
-    )
-    if result is None:
-        return ""
-    f = str(result.get("file", "")).strip()
-    if f and f not in target_file_listing:
-        # Hallucination guard: only accept files that were in the listing.
-        f = ""
-    _verdict_cache_store(cache_path, {"file": f})
-    return f
 
 
 def build_s6_card(
     target_slug: str,
     peer: str,
     fix_entry: dict,
-    bug_class_summary: str,
-    target_file: str,
+    diff_excerpt: str = "",
 ) -> dict:
-    raw_id = f"{target_slug}:{peer}:{fix_entry.get('fix_hash', fix_entry.get('id', ''))}"
+    source = str(fix_entry.get("source", ""))
+    # Identify the card by what the entry *is*: an advisory by its id, a mined
+    # commit by its hash. Keying an advisory on its range endpoint both merged
+    # distinct advisories and let one card id later stand for a different one.
+    identity = (
+        str(fix_entry.get("id", "")) if source == "osv"
+        else str(fix_entry.get("fix_hash") or fix_entry.get("id", ""))
+    )
+    raw_id = f"{target_slug}:{peer}:{source}:{identity}"
     card_id = "S6-PEER-" + hashlib.sha1(raw_id.encode("utf-8")).hexdigest()[:12]
+    score = 40
+    if source == "osv" and (
+        fix_entry.get("evidence_kind") != "fixed-range" or not diff_excerpt
+    ):
+        score = 15
     return {
         "id": card_id,
         "kind": "s6-peer-fix",
         "target_slug": target_slug,
-        "subsystem": workqueue.subsystem_for(target_file),
-        "file": target_file,
+        # No target file: the agent maps the fix across the whole tree. Both
+        # fields come from the shared helpers so an S6 card carries the same
+        # unmapped-card shape every other consumer already expects.
+        "subsystem": workqueue.subsystem_for(""),
+        "file": "",
         "function": "",
-        "mode": workqueue.mode_for_file(target_file),
+        "mode": workqueue.mode_for_file(""),
         "strategy": "S6",
-        "score": 40,  # base S6 score; rank-work may re-score downstream
+        "score": score,
         "seed": "",
         "patch_cards": [],
         "reason": (
-            f"S6 peer-fix mining: {peer} fix {fix_entry.get('id', '')[:24]} "
-            f"({fix_entry.get('source', '')}); class = {bug_class_summary[:160]}"
+            f"S6 peer-fix mining: {peer} "
+            f"{workqueue.peer_revision_kind(source).lower()} "
+            f"{fix_entry.get('id', '')[:24]} ({source}): "
+            f"{str(fix_entry.get('summary', ''))[:160]}"
         ),
         "status": "unclaimed",
         "created_at": workqueue.now_iso(),
         "peer_project": peer,
+        "peer_fix_id": fix_entry.get("id", ""),
         "peer_fix_hash": fix_entry.get("fix_hash", ""),
         "peer_fix_url": fix_entry.get("url", ""),
-        "bug_class": bug_class_summary,
+        "peer_repo_url": fix_entry.get("repo_url", ""),
+        "peer_range_start_hash": fix_entry.get("range_start_hash", ""),
+        "peer_fix_evidence_url": fix_entry.get("evidence_url", ""),
+        "peer_fix_evidence_kind": fix_entry.get("evidence_kind", ""),
+        "peer_fix_source": fix_entry.get("source", ""),
+        "peer_fix_summary": fix_entry.get("summary", ""),
+        "peer_fix_diff_excerpt": diff_excerpt[:6000],
     }
+
+
+def build_s6_discovery_card(
+    target_slug: str, peer: str, source_error: str = "",
+) -> dict:
+    """Keep one configured peer visible when feeds found no exact fix.
+
+    A feed that raised and one that answered "nothing" both arrive here, and a
+    degraded source is not an empty one. The card says which: the audit runs
+    this generator with stderr discarded, so the card is the only place that
+    difference survives to an operator or the agent working the lane.
+    """
+    silence = (
+        f"source unavailable ({source_error})" if source_error
+        else "produced no exact fix"
+    )
+    summary = (
+        f"No exact VCS or fixed-range repair was available ({silence}). "
+        "Resolve one exact security-relevant fix from official history before "
+        "searching the target; close the card if none exists."
+    )
+    card = build_s6_card(
+        target_slug, peer, {"source": "discovery", "summary": summary},
+    )
+    card["score"] = 20
+    card["reason"] = (
+        f"S6 peer discovery: {peer} {silence}; resolve one exact "
+        "security-relevant fix from official history before mapping the target"
+    )
+    return card
 
 
 def main(argv: list[str]) -> int:
@@ -246,18 +144,27 @@ def main(argv: list[str]) -> int:
                         help="OSV cache TTL (default 7 days)")
     parser.add_argument("--peer-clone-roots", default="",
                         help="Colon-separated dirs to search for local peer "
-                        "clones (enables VCS-log fallback)")
+                        "clones (preferred exact-fix source)")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
     ctx = workqueue.context_from_args(args)
-    usage_index = llm_usage.find_usage_index(ctx.results_dir)
     output = Path(args.output).expanduser().resolve() if args.output \
         else ctx.results_dir / "s6-peer-cards.jsonl"
 
-    # Load target config. output/<slug>/target.toml is the only source of
-    # S6 peers; run bin/suggest-peers to populate [s6_peers].
-    target_toml = ROOT / "output" / ctx.target_slug / "target.toml"
+    # [s6_peers] is the only source of peers; run bin/suggest-peers to
+    # populate it. A live audit reads its digest-pinned snapshot, the same
+    # contract bin/probe uses, so a concurrent agent editing the shared
+    # target.toml cannot change which peers this run mines. Standalone
+    # generation has no session and keeps using the shared config.
+    if (ctx.results_dir / ".session-env").is_file():
+        try:
+            target_toml = tc.target_toml_for_session_dir(ctx.results_dir)
+        except tc.PinnedConfigError as e:
+            print(f"[peer-fix-cards] pinned target.toml: {e}", file=sys.stderr)
+            return 1
+    else:
+        target_toml = ROOT / "output" / ctx.target_slug / "target.toml"
     if not target_toml.is_file():
         print(f"[peer-fix-cards] target.toml not found: {target_toml}",
               file=sys.stderr)
@@ -291,13 +198,12 @@ def main(argv: list[str]) -> int:
     # peers alongside the bundled targets.
     clone_roots.append(ROOT / "targets")
 
-    target_files = gather_target_file_listing(ctx.target_root)
-
-    cards: list[dict] = []
+    # Round-robin below takes each peer's Nth card in turn, so only the first
+    # `limit` peers can contribute one — the rest are not worth mining.
+    peer_cards: list[list[dict]] = []
     seen_ids: set[str] = set()
-    for peer in cfg.s6_peers:
-        if len(cards) >= args.limit:
-            break
+    for peer in cfg.s6_peers[:args.limit]:
+        source_error = ""
         try:
             fixes = peer_sources.gather_peer_fixes(
                 peer,
@@ -305,55 +211,103 @@ def main(argv: list[str]) -> int:
                 cache_ttl_seconds=args.cache_ttl_days * 24 * 3600,
                 days=args.days,
                 peer_clone_search_roots=clone_roots,
-                max_per_source=args.max_per_peer * 2,  # over-fetch; dedupe below
+                max_per_source=args.max_per_peer,
             )
         except Exception as e:
             if not args.quiet:
                 print(f"[peer-fix-cards] {peer}: source error: {e}",
                       file=sys.stderr)
-            continue
+            fixes = []
+            source_error = str(e)[:120]
 
-        emitted_for_peer = 0
+        # Interleave this peer's sources before the per-peer cap, the same way
+        # peers are interleaved below. A local commit is exact but only
+        # keyword-matched — build-warning and test cleanups pass that filter —
+        # whereas an OSV entry is vulnerability-scoped by construction. Taking
+        # the first N of a VCS-first list let six local commits hide every
+        # advisory this peer has.
+        by_source: dict[str, list[dict]] = {}
         for fix in fixes:
-            if emitted_for_peer >= args.max_per_peer:
-                break
-            if len(cards) >= args.limit:
+            by_source.setdefault(str(fix.get("source", "")), []).append(fix)
+        fixes = [
+            fix for row in zip_longest(*by_source.values())
+            for fix in row if fix
+        ]
+
+        group: list[dict] = []
+        clone = peer_sources.find_peer_clone(peer, clone_roots)
+        for fix in fixes:
+            if len(group) >= args.max_per_peer:
                 break
             if not fix.get("fix_hash") and fix.get("source") == "ossfuzz":
                 # Skip the tracker hint when we have nothing else — it's
                 # useful as a pointer but not as a work card.
                 continue
 
-            # Try to fetch a diff for LLM-distillation. Only works if we
-            # have a local clone of the peer; without one we fall back to
-            # using just the summary.
+            # A mined VCS commit ships its exact diff. An OSV `fixed` event is
+            # only a range endpoint. Prefer OSV's last-affected..first-fixed
+            # diff, which contains the repair; fall back to the endpoint patch.
+            # The prompt labels either excerpt so adjacent changes cannot
+            # silently masquerade as the advertised fix.
             diff_excerpt = ""
-            clone = peer_sources.find_peer_clone(peer, clone_roots)
-            if clone is not None and fix.get("fix_hash"):
+            if fix.get("source") == "vcs" and clone is not None and fix.get("fix_hash"):
                 diff_excerpt = peer_sources.fetch_fix_diff(clone, fix["fix_hash"])
+            elif fix.get("source") == "osv" and fix.get("evidence_url"):
+                diff_excerpt = peer_sources.fetch_patch_excerpt(
+                    str(fix["evidence_url"]), cache_dir=cache_dir,
+                    cache_ttl_seconds=args.cache_ttl_days * 24 * 3600,
+                    summary=str(fix.get("summary", "")),
+                )
 
-            bug_class = distill_bug_class(peer, fix, diff_excerpt,
-                                          cache_dir=cache_dir,
-                                          usage_index=usage_index)
-            if not bug_class:
-                # LLM unavailable / failed — fall back to the raw summary.
-                bug_class = f"unknown class: {fix.get('summary', '')[:160]}"
-
-            target_file = map_to_target_file(bug_class, target_files,
-                                             ctx.target_slug,
-                                             cache_dir=cache_dir,
-                                             usage_index=usage_index)
-            if not target_file:
-                # No credible analogue — skip the card rather than emit
-                # noise. Operator can re-run if the listing changes.
-                continue
-
-            card = build_s6_card(ctx.target_slug, peer, fix, bug_class, target_file)
+            card = build_s6_card(ctx.target_slug, peer, fix, diff_excerpt)
             if card["id"] in seen_ids:
                 continue
             seen_ids.add(card["id"])
-            cards.append(card)
-            emitted_for_peer += 1
+            group.append(card)
+        # An advisory range endpoint is a lead, not the repair. Keep one
+        # bounded discovery route whenever the feeds supplied no exact VCS or
+        # fixed-range diff; otherwise a noisy OSV feed can suppress the only
+        # route to a reviewable fix and consume the whole S6 wall on history
+        # searches. Retain endpoint leads behind it and stay within the
+        # per-peer cap.
+        has_exact_fix = any(
+            card.get("peer_fix_source") == "vcs"
+            or (
+                card.get("peer_fix_evidence_kind") == "fixed-range"
+                and card.get("peer_fix_diff_excerpt")
+            )
+            for card in group
+        )
+        if not has_exact_fix:
+            group = [
+                build_s6_discovery_card(ctx.target_slug, peer, source_error),
+                *group,
+            ]
+        peer_cards.append(group[:args.max_per_peer])
+
+    # Interleave peers so one noisy advisory feed cannot consume the review
+    # gate before the agent sees another implementation of the same spec.
+    cards = [
+        card for row in zip_longest(*peer_cards) for card in row if card
+    ][:args.limit]
+
+    # Spend the finite lane on exact evidence, then bounded discovery, before
+    # ambiguous advisory leads.
+    def source_rank(card: dict) -> int:
+        source = card.get("peer_fix_source")
+        if source == "vcs":
+            return 0
+        if (
+            source == "osv"
+            and card.get("peer_fix_evidence_kind") == "fixed-range"
+            and card.get("peer_fix_diff_excerpt")
+        ):
+            return 1
+        if source == "discovery":
+            return 2
+        return 3
+
+    cards.sort(key=source_rank)
 
     workqueue.write_cards(output, cards)
     if not args.quiet:
@@ -361,6 +315,15 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         for card in cards:
             print(json.dumps(card, sort_keys=True))
+    if not cards:
+        # Configured peers that yield nothing are a degraded source, not an
+        # empty one: OSV returns [] for a network failure exactly as it does
+        # for "no advisories". Reporting success here let an unreachable
+        # provider read downstream as a legitimate zero-yield campaign.
+        print(f"[peer-fix-cards] no cards from configured peers "
+              f"{', '.join(cfg.s6_peers)}; sources unreachable or empty",
+              file=sys.stderr)
+        return 1
     return 0
 
 

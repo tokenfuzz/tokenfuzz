@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Integration coverage for S6 peer-fix card generation and caching."""
+"""Integration coverage for evidence-bearing S6 peer-fix cards."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import runpy
@@ -12,14 +13,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
-
-from llm_invoke import default_model
-
 
 class PeerFixCardTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -49,10 +46,24 @@ class PeerFixCardTests(unittest.TestCase):
             "sys.path.insert(0, root + '/lib')\n"
             "import peer_sources\n"
             "def fake_osv_query(peer, **kwargs):\n"
-            "    return [{'source':'osv','id':'CVE-2099-0001','fix_hash':'deadbeef'*5,"
-            "'summary':'fix bounds check in entity parser','url':'https://osv.dev/vulnerability/CVE-2099-0001',"
-            "'modified':'2099-01-01T00:00:00Z'}]\n"
+            "    if peer == os.environ.get('S6_TEST_EMPTY_PEER'): return []\n"
+            "    return [{'source':'osv','id':f'CVE-2099-{index:04d}','fix_hash':(peer + str(index)).encode().hex().ljust(40, '0')[:40],"
+            "'summary':f'fix bounds check in {peer} entity parser {index}','url':f'https://osv.dev/vulnerability/CVE-2099-{index:04d}',"
+            "'repo_url':f'https://example.test/{peer}.git',"
+            "'range_start_hash':('' if peer == os.environ.get('S6_TEST_ENDPOINT_PEER') else 'b' * 40),'evidence_url':f'https://example.test/{peer}/compare/{index}.diff','evidence_kind':('endpoint' if peer == os.environ.get('S6_TEST_ENDPOINT_PEER') else 'fixed-range'),"
+            "'modified':'2099-01-01T00:00:00Z'} for index in range(1, int(os.environ.get('S6_TEST_FIXES', '1')) + 1)]\n"
             "peer_sources.osv_query = fake_osv_query\n"
+            "_real_gather = peer_sources.gather_peer_fixes\n"
+            "def fake_gather(peer, **kwargs):\n"
+            "    if peer == os.environ.get('S6_TEST_FAIL_PEER'): raise RuntimeError('feed unavailable')\n"
+            "    return _real_gather(peer, **kwargs)\n"
+            "peer_sources.gather_peer_fixes = fake_gather\n"
+            "peer_sources.fetch_patch_excerpt = lambda url, **kwargs: 'Subject: endpoint patch evidence\\n+guard;'\n"
+            "if os.environ.get('S6_TEST_VCS'):\n"
+            "    _n = int(os.environ['S6_TEST_VCS'])\n"
+            "    peer_sources.gather_peer_fixes = lambda peer, **kwargs: "
+            "([{'source':'vcs','id':f'{peer}-commit{i}','fix_hash':(peer+'vcs'+str(i)).encode().hex().ljust(40, '0')[:40],"
+            "'summary':'fix use-after-free in '+peer,'url':'','modified':'2099-01-02T00:00:00Z'} for i in range(_n)] if peer == 'libxml' else []) + fake_osv_query(peer)\n"
             "sys.argv = ['peer-fix-cards', '--target-slug', 'myxml', '--quiet']\n"
             "runpy.run_path(root + '/bin/peer-fix-cards', run_name='__main__')\n",
             encoding="utf-8",
@@ -61,29 +72,22 @@ class PeerFixCardTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def write_config(self, peers=False) -> None:
+    def write_config(self, peers: list[str] | None = None) -> None:
         text = 'target = "myxml"\n'
         if peers:
-            text += '\n[s6_peers]\ndomain = "XML / SGML"\npeers = ["expat"]\n'
+            rendered = ", ".join(json.dumps(peer) for peer in peers)
+            text += f'\n[s6_peers]\ndomain = "XML / SGML"\npeers = [{rendered}]\n'
         self.toml.write_text(text, encoding="utf-8")
 
-    def environment(self, mapped_file="parser.c", log=None, model=None):
+    def environment(self, log=None, fixes=1):
         env = os.environ.copy()
         env.update(
             SCRIPT_ROOT=str(self.sandbox), RESULTS_DIR=str(self.results),
             TARGET_ROOT=str(self.target), TARGET_SLUG="myxml",
-            LLM_DECIDE_MOCK_S6_PEER_DISTILL=json.dumps({
-                "class": "bounds", "summary": "entity expansion writes past buffer",
-                "shape": "adds bounds check",
-            }),
-            LLM_DECIDE_MOCK_S6_PEER_MAP=json.dumps({
-                "file": mapped_file, "reason": "target equivalent of entity parser",
-            }),
+            S6_TEST_FIXES=str(fixes),
         )
         if log is not None:
             env["LLM_DECIDE_LOG"] = str(log)
-        if model is not None:
-            env.update(ACTIVE_BACKEND="codex", MODEL=model)
         return env
 
     def run_shim(self, **kwargs):
@@ -108,8 +112,8 @@ class PeerFixCardTests(unittest.TestCase):
         self.assertTrue(self.card_file.is_file())
         self.assertEqual(self.card_file.read_text(encoding="utf-8"), "")
 
-    def test_osv_and_llm_results_produce_a_structured_card(self) -> None:
-        self.write_config(peers=True)
+    def test_osv_result_produces_a_structured_card(self) -> None:
+        self.write_config(peers=["expat"])
         proc = self.run_shim()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         rows = [json.loads(line) for line in self.card_file.read_text(encoding="utf-8").splitlines()]
@@ -118,74 +122,203 @@ class PeerFixCardTests(unittest.TestCase):
         self.assertEqual(card["strategy"], "S6")
         self.assertEqual(card["kind"], "s6-peer-fix")
         self.assertEqual(card["peer_project"], "expat")
-        self.assertEqual(card["file"], "parser.c")
-        self.assertIn("bounds", json.dumps(card))
+        self.assertEqual(card["file"], "")
+        self.assertEqual(card["mode"], "auto")
+        self.assertEqual(card["peer_fix_id"], "CVE-2099-0001")
+        self.assertEqual(len(card["peer_fix_hash"]), 40)
+        self.assertEqual(card["peer_fix_source"], "osv")
+        self.assertEqual(card["peer_repo_url"], "https://example.test/expat.git")
+        self.assertEqual(
+            card["peer_fix_evidence_url"],
+            "https://example.test/expat/compare/1.diff",
+        )
+        self.assertEqual(card["peer_range_start_hash"], "b" * 40)
+        self.assertEqual(card["peer_fix_evidence_kind"], "fixed-range")
+        self.assertIn("osv range endpoint", card["reason"])
+        self.assertIn("fix bounds check", card["peer_fix_summary"])
+        self.assertIn("fix bounds check", card["reason"])
 
-    def test_mapped_file_outside_source_listing_is_dropped(self) -> None:
-        self.write_config(peers=True)
-        proc = self.run_shim(mapped_file="fictitious-file-does-not-exist.c")
+    def test_generation_reads_the_sessions_pinned_config(self) -> None:
+        self.write_config(peers=["expat"])
+        snapshot = 'target = "myxml"\n[s6_peers]\npeers = ["libxml"]\n'
+        (self.results / ".target.toml").write_text(snapshot, encoding="utf-8")
+        digest = hashlib.sha256(snapshot.encode()).hexdigest()
+        (self.results / ".session-env").write_text(
+            f"TARGET_CONFIG_SHA256={digest}\n", encoding="utf-8",
+        )
+
+        proc = self.run_shim()
+
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertTrue(self.card_file.is_file())
-        self.assertEqual(self.card_file.read_text(encoding="utf-8"), "")
+        card = json.loads(self.card_file.read_text(encoding="utf-8"))
+        self.assertEqual(card["peer_project"], "libxml")
 
-    def test_identical_refresh_replays_both_llm_decisions_from_cache(self) -> None:
-        self.write_config(peers=True)
+    def test_card_is_not_dropped_when_no_target_file_is_preselected(self) -> None:
+        self.write_config(peers=["expat"])
+        proc = self.run_shim()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        card = json.loads(self.card_file.read_text(encoding="utf-8"))
+        self.assertEqual(card["file"], "")
+        self.assertEqual(card["subsystem"], "root")
+
+    def test_generation_uses_no_llm_decisions(self) -> None:
+        self.write_config(peers=["expat"])
         log = self.sandbox / "s6-decisions.log"
-        for _ in range(2):
-            proc = self.run_shim(log=log)
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        text = log.read_text(encoding="utf-8")
-        self.assertEqual(text.count("s6-peer-distill MOCK"), 1)
-        self.assertEqual(text.count("s6-peer-map MOCK"), 1)
-        self.assertEqual(json.loads(self.card_file.read_text(encoding="utf-8"))["file"], "parser.c")
+        proc = self.run_shim(log=log)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertFalse(log.exists())
 
-    def test_cache_key_uses_resolved_default_model(self) -> None:
-        self.write_config(peers=True)
-        log = self.sandbox / "s6-model-decisions.log"
-        for model in ("", default_model("codex"), "some-other-model"):
-            proc = self.run_shim(log=log, model=model)
-            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        text = log.read_text(encoding="utf-8")
-        self.assertEqual(text.count("s6-peer-distill MOCK"), 2)
-        self.assertEqual(text.count("s6-peer-map MOCK"), 2)
+    def test_cards_are_interleaved_across_peers(self) -> None:
+        self.write_config(peers=["expat", "libxml"])
 
-    def test_peer_decisions_use_named_defaults_unless_explicit(self) -> None:
-        facade = runpy.run_path(str(ROOT / "bin" / "peer-fix-cards"))
-        observed: list[tuple[str, int]] = []
+        proc = self.run_shim(fixes=2)
 
-        def decide(decision, _required, _prompt, timeout, **_kwargs):
-            observed.append((decision, timeout))
-            if decision == "s6-peer-distill":
-                return {"class": "bounds", "summary": "size mismatch", "shape": "guard"}
-            return {"file": "parser.c", "reason": "format analogue"}
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        self.assertEqual(
+            [card["peer_project"] for card in cards],
+            ["expat", "libxml", "expat", "libxml"],
+        )
 
-        facade["distill_bug_class"].__globals__["llm_decide"] = decide
-        with mock.patch.dict(
-            os.environ, {"ACTIVE_BACKEND": "claude"}, clear=True,
-        ):
-            facade["distill_bug_class"]("peer", {"id": "FIX-1"}, "diff")
-            facade["map_to_target_file"](
-                "bounds: size mismatch", ["parser.c"], "myxml",
-            )
-        with mock.patch.dict(
-            os.environ,
-            {"ACTIVE_BACKEND": "claude", "LLM_DECISION_TIMEOUT": "37"},
-            clear=True,
-        ):
-            facade["distill_bug_class"]("peer", {"id": "FIX-1"}, "diff")
-            facade["map_to_target_file"](
-                "bounds: size mismatch", ["parser.c"], "myxml",
-            )
-            facade["map_to_target_file"](
-                "bounds: size mismatch", ["parser.c"], "myxml", timeout=9,
-            )
-        self.assertEqual(observed, [
-            ("s6-peer-distill", 45),
-            ("s6-peer-map", 90),
-            ("s6-peer-distill", 37),
-            ("s6-peer-map", 37),
-            ("s6-peer-map", 9),
-        ])
+    def test_a_source_silent_peer_gets_one_bounded_discovery_card(self) -> None:
+        self.write_config(peers=["expat", "libxml"])
+        env = self.environment()
+        env["S6_TEST_EMPTY_PEER"] = "libxml"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        self.assertEqual(
+            [(card["peer_project"], card["peer_fix_source"]) for card in cards],
+            [("expat", "osv"), ("libxml", "discovery")],
+        )
+        discovery = cards[1]
+        self.assertEqual(discovery["file"], "")
+        self.assertIn(
+            "resolve one exact security-relevant fix",
+            discovery["peer_fix_summary"].lower(),
+        )
+        self.assertNotIn("source unavailable", discovery["reason"])
+
+    def test_a_source_failure_falls_open_to_peer_discovery(self) -> None:
+        self.write_config(peers=["expat"])
+        env = self.environment()
+        env["S6_TEST_FAIL_PEER"] = "expat"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        card = json.loads(self.card_file.read_text())
+        self.assertEqual(card["peer_project"], "expat")
+        self.assertEqual(card["peer_fix_source"], "discovery")
+        # A dead feed and an empty one both fall open to this card, and the
+        # audit discards this generator's stderr, so the card carries which.
+        self.assertIn("source unavailable", card["reason"])
+        self.assertIn("feed unavailable", card["reason"])
+
+    def test_endpoint_only_peer_keeps_one_exact_fix_discovery_route(self) -> None:
+        self.write_config(peers=["expat"])
+        env = self.environment(fixes=8)
+        env["S6_TEST_ENDPOINT_PEER"] = "expat"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        self.assertEqual(
+            [card["peer_fix_source"] for card in cards],
+            ["discovery", "osv", "osv", "osv", "osv", "osv"],
+        )
+        self.assertEqual([card["score"] for card in cards], [20, 15, 15, 15, 15, 15])
+
+    def test_local_commits_do_not_crowd_out_a_peers_advisories(self) -> None:
+        self.write_config(peers=["libxml"])
+        env = self.environment(fixes=6)
+        env["S6_TEST_VCS"] = "6"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        sources = [card["peer_fix_source"] for card in cards]
+        # Keyword-matched local commits are exact but not necessarily
+        # security-relevant; OSV entries are vulnerability-scoped. Neither
+        # source may consume the whole per-peer cap.
+        self.assertIn("osv", sources)
+        self.assertIn("vcs", sources)
+
+    def test_an_advisory_ships_a_labeled_resolution_excerpt(self) -> None:
+        # An OSS-Fuzz `fixed` event bisects to a range boundary, not the
+        # repair. Its excerpt is resolution evidence and must remain visibly
+        # distinct from a mined VCS fix.
+        self.write_config(peers=["libxml"])
+        env = self.environment(fixes=1)
+        env["S6_TEST_VCS"] = "1"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        by_source = {card["peer_fix_source"]: card for card in cards}
+        self.assertIn("endpoint patch evidence", by_source["osv"]["peer_fix_diff_excerpt"])
+        self.assertTrue(by_source["osv"]["peer_fix_hash"])
+
+    def test_exact_commits_precede_advisory_only_leads(self) -> None:
+        self.write_config(peers=["expat", "libxml"])
+        env = self.environment(fixes=1)
+        env["S6_TEST_VCS"] = "1"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        self.assertEqual(
+            [card["peer_fix_source"] for card in cards],
+            ["vcs", "osv", "osv"],
+        )
+
+    def test_fixed_range_and_peer_discovery_precede_endpoint_only_leads(self) -> None:
+        self.write_config(peers=["expat", "libxml", "otherxml"])
+        env = self.environment(fixes=1)
+        env["S6_TEST_ENDPOINT_PEER"] = "expat"
+        env["S6_TEST_EMPTY_PEER"] = "otherxml"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        self.assertEqual(
+            [(card["peer_project"], card["peer_fix_source"]) for card in cards],
+            [
+                ("libxml", "osv"),
+                ("expat", "discovery"),
+                ("otherxml", "discovery"),
+                ("expat", "osv"),
+            ],
+        )
+        self.assertEqual([card["score"] for card in cards], [40, 20, 20, 15])
 
 
 if __name__ == "__main__":

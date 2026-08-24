@@ -1779,6 +1779,142 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         marked_clean.call_args.args[1] == should_refresh.call_args.args[1],
         "a refresh marks clean the state it ranked, not the state after it",
     )
+    refresh_runtime.fixed_strategy = "S6"
+    (refresh_results / "s6-peer-cards.jsonl").write_text(
+        json.dumps({"id": "S6-only", "kind": "s6-peer-fix", "strategy": "S6", "file": "", "mode": "auto"}) + "\n",
+        encoding="utf-8",
+    )
+    with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
+         mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
+         mock.patch.object(audit_runner.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as pinned_launch:
+        audit_runner.refresh_work_cards(refresh_runtime)
+    pinned_tools = [Path(call.args[0][0]).name for call in pinned_launch.call_args_list]
+    pinned_cards = audit_runner.workqueue.read_jsonl(refresh_results / "work-cards.jsonl")
+    check(
+        pinned_tools == ["peer-fix-cards"] and [card.get("id") for card in pinned_cards] == ["S6-only"],
+        "a pinned S6 refresh skips unrelated patch and source ranking",
+        f"tools={pinned_tools!r} cards={pinned_cards!r}",
+    )
+    audit_runner.workqueue.update_card_status(
+        audit_runner._queue_context(refresh_runtime), "S6-only", "blocked",
+        agent="1", note="source proof",
+    )
+    check(
+        audit_runner.fixed_campaign_exhausted(refresh_runtime),
+        "a pinned S6 campaign stops when every supplied card is terminal",
+    )
+    # Closing the card does not close the investigation it started: stopping
+    # here would strand an open hypothesis mid-analysis.
+    (refresh_results / "state" / "hypotheses.jsonl").write_text(
+        json.dumps({"agent": "1", "id": "HYP-1", "status": "INVESTIGATING",
+                    "card_id": "S6-only"}) + "\n",
+        encoding="utf-8",
+    )
+    check(
+        not audit_runner.fixed_campaign_exhausted(refresh_runtime),
+        "an open hypothesis holds a pinned S6 campaign open",
+    )
+    (refresh_results / "state" / "hypotheses.jsonl").write_text(
+        json.dumps({"agent": "1", "id": "HYP-1", "status": "FIND-001",
+                    "card_id": "S6-only", "hypothesis": "one angle",
+                    "input_shape": "shape", "guard_gap": "gap",
+                    "diagnostic": "bounds", "strategy": "S6"}) + "\n",
+        encoding="utf-8",
+    )
+    audit_runner.workqueue.update_card_status(
+        audit_runner._queue_context(refresh_runtime), "S6-only", "find",
+        agent="1", note="finding filed",
+    )
+    check(
+        not audit_runner.fixed_campaign_exhausted(refresh_runtime),
+        "a first productive S6 conclusion remains open for clustered variants",
+    )
+    audit_runner.workqueue.write_cards(refresh_results / "work-cards.jsonl", [])
+    refresh_runtime.config = SimpleNamespace(s6_peers=["peerlib"])
+    refresh_runtime.s6_source_degraded = False
+    check(
+        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=1)
+        and audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
+        "a healthy but empty S6 source gets exactly one discovery iteration",
+    )
+    refresh_runtime.config = generic_config
+    # A pin decides which generators run, so it is part of the queue identity:
+    # without it a re-run under a new --strategy reads the old queue as fresh.
+    pin_signatures = {
+        pin: audit_runner._work_card_signature(
+            SimpleNamespace(
+                root=ROOT, target_root=generic_target, target_slug="demo",
+                target_rev="rev1", results=refresh_results, repo_type="none",
+                config=generic_config, fixed_strategy=pin,
+            ),
+            source_signature="fixed-source",
+        )
+        for pin in ("", "S2", "S6")
+    }
+    check(
+        len(set(pin_signatures.values())) == 3,
+        "changing the strategy pin invalidates the work-card refresh signature",
+        repr(sorted(s[:8] for s in pin_signatures.values())),
+    )
+    refresh_runtime.fixed_strategy = "S2"
+    (refresh_results / "s6-peer-cards.jsonl").write_text("stale\n", encoding="utf-8")
+    with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
+         mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
+         mock.patch.object(audit_runner.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as other_pin:
+        audit_runner.refresh_work_cards(refresh_runtime)
+    other_tools = [Path(call.args[0][0]).name for call in other_pin.call_args_list]
+    check(
+        other_tools == ["patch-cards", "rank-work"]
+        and not (refresh_results / "s6-peer-cards.jsonl").exists(),
+        "a pinned non-S6 lane skips peer mining and drops stale S6 cards",
+        repr(other_tools),
+    )
+    # Work carried in from an earlier pin belongs to that strategy; counting
+    # it would keep this campaign alive on results S6 never produced.
+    refresh_runtime.fixed_strategy = "S6"
+    audit_runner.workqueue.write_cards(
+        refresh_results / "work-cards.jsonl",
+        [{"id": "S6-only", "kind": "s6-peer-fix", "strategy": "S6",
+          "file": "", "mode": "auto", "subsystem": "root"}],
+    )
+    audit_runner.workqueue.update_card_status(
+        audit_runner._queue_context(refresh_runtime), "S6-only", "blocked",
+        agent="1", note="source proof: no analogue in this tree",
+    )
+    (refresh_results / "state" / "hypotheses.jsonl").write_text(
+        json.dumps({"agent": "1", "id": "H-OLD", "status": "INVESTIGATING",
+                    "strategy": "S1", "card_id": "WORK-OLD"}) + "\n",
+        encoding="utf-8",
+    )
+    foreign_stops = audit_runner.fixed_campaign_exhausted(refresh_runtime, 3)
+    (refresh_results / "state" / "hypotheses.jsonl").write_text(
+        json.dumps({"agent": "1", "id": "H-OWN", "status": "INVESTIGATING",
+                    "strategy": "S6", "card_id": "S6-only"}) + "\n",
+        encoding="utf-8",
+    )
+    check(
+        foreign_stops and not audit_runner.fixed_campaign_exhausted(refresh_runtime, 3),
+        "only the pinned lane's own open work holds its campaign open",
+    )
+    # An empty queue proves exhaustion only when the source could answer.
+    # OSV returns [] for an outage exactly as it does for "no advisories", so
+    # a degraded or unconfigured source must not read as a finished campaign.
+    audit_runner.workqueue.write_cards(refresh_results / "work-cards.jsonl", [])
+    (refresh_results / "state" / "hypotheses.jsonl").write_text("", encoding="utf-8")
+    refresh_runtime.config = SimpleNamespace(s6_peers=["peerlib"])
+    refresh_runtime.s6_source_degraded = True
+    degraded = audit_runner.fixed_campaign_exhausted(refresh_runtime, 2)
+    refresh_runtime.s6_source_degraded = False
+    healthy = audit_runner.fixed_campaign_exhausted(refresh_runtime, 2)
+    refresh_runtime.config = SimpleNamespace(s6_peers=[])
+    unconfigured = audit_runner.fixed_campaign_exhausted(refresh_runtime, 2)
+    check(
+        not degraded and not unconfigured and healthy,
+        "only a healthy, configured S6 source can report an exhausted campaign",
+        f"degraded={degraded} unconfigured={unconfigured} healthy={healthy}",
+    )
+    refresh_runtime.config = generic_config
+    refresh_runtime.fixed_strategy = ""
     with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=False), \
          mock.patch.object(audit_runner.subprocess, "run") as skipped_refresh:
         unchanged = audit_runner.refresh_work_cards(refresh_runtime)

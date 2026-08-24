@@ -1240,6 +1240,103 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(finding_row["cluster"], "FCL-one")
         self.assertIn("repro.py", finding_row["repro"])
 
+    def test_s6_resume_carries_peer_evidence_and_requires_mapping_first(self) -> None:
+        self.write_cards([
+            self.card(
+                "S6-PEER-1", "", strategy="S6", kind="s6-peer-fix", mode="auto",
+                peer_project="peerlib", peer_fix_id="FIX-17",
+                peer_fix_hash="abc123", peer_fix_url="https://example.test/fix/17",
+                peer_repo_url="https://example.test/peerlib.git",
+                peer_range_start_hash="def456",
+                peer_fix_evidence_url="https://example.test/peerlib/compare/def456...abc123.diff",
+                peer_fix_evidence_kind="fixed-range",
+                peer_fix_source="osv", peer_fix_summary="reject a truncated record",
+                peer_fix_diff_excerpt="diff --git a/parse.c b/parse.c\n+if (size > left) return ERR;",
+            ),
+        ])
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S6",
+        )
+        shown = workqueue.show_work_card(self.ctx, "S6-PEER-1")
+
+        for value in (
+            "peerlib", "FIX-17", "abc123", "https://example.test/fix/17",
+            "https://example.test/peerlib.git", "reject a truncated record",
+            "def456", "https://example.test/peerlib/compare/def456...abc123.diff",
+        ):
+            self.assertIn(value, rendered)
+        # Resume runs every session and after every compaction; the patch is
+        # supplied once by the assigned-card section, not re-sent each time.
+        self.assertNotIn("+if (size > left) return ERR;", rendered)
+        self.assertIn(
+            "+if (size > left) return ERR;",
+            "\n".join(workqueue.peer_fix_markdown(
+                workqueue.read_jsonl(self.results / "work-cards.jsonl")[0],
+            )),
+        )
+        self.assertIn(
+            "OSV fixed-range diff excerpt (contains the repair",
+            "\n".join(workqueue.peer_fix_markdown(
+                workqueue.read_jsonl(self.results / "work-cards.jsonl")[0],
+            )),
+        )
+        self.assertIn("closest analogue plus bounded siblings", rendered)
+        self.assertIn("Create a hypothesis only", rendered)
+        self.assertIn("update-card --card-id <id> --status blocked", rendered)
+        self.assertNotIn("create one structured hypothesis for this card", rendered)
+        self.assertIn("OSV range endpoint: abc123", rendered)
+        self.assertNotIn("Open the peer evidence URL directly before broad web search", rendered)
+        self.assertIn("matching code change or regression testcase", rendered)
+        self.assertEqual(shown["peer_project"], "peerlib")
+        self.assertEqual(shown["peer_fix_hash"], "abc123")
+        self.assertEqual(shown["peer_repo_url"], "https://example.test/peerlib.git")
+        self.assertEqual(shown["peer_range_start_hash"], "def456")
+        self.assertEqual(
+            shown["peer_fix_evidence_url"],
+            "https://example.test/peerlib/compare/def456...abc123.diff",
+        )
+        self.assertEqual(shown["peer_fix_evidence_kind"], "fixed-range")
+        self.assertNotIn("peer_fix_diff_excerpt", shown)
+
+    def test_s6_discovery_resume_requires_exact_fix_before_target_search(self) -> None:
+        self.write_cards([
+            self.card(
+                "S6-DISCOVERY-1", "", strategy="S6", kind="s6-peer-fix",
+                mode="auto", peer_project="peerlib", peer_fix_source="discovery",
+                peer_fix_summary="No structured fix was available.",
+            ),
+        ])
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S6",
+        )
+
+        self.assertIn(
+            "resolve one exact security-relevant fix from the peer's official history",
+            rendered,
+        )
+        self.assertIn("block this card with that source proof instead of guessing", rendered)
+        self.assertNotIn("create one structured hypothesis for this card", rendered)
+
+    def test_s6_endpoint_only_resume_bounds_resolution_work(self) -> None:
+        self.write_cards([
+            self.card(
+                "S6-ENDPOINT-1", "", strategy="S6", kind="s6-peer-fix",
+                mode="auto", peer_project="peerlib", peer_fix_source="osv",
+                peer_fix_hash="abc123", peer_fix_evidence_kind="endpoint",
+                peer_fix_summary="state failure in parser",
+                peer_fix_diff_excerpt="diff --git a/src/parser.c b/src/parser.c\n+change;",
+            ),
+        ])
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S6",
+        )
+
+        self.assertIn("check one official reference", rendered)
+        self.assertIn("instead of broad-searching or guessing", rendered)
+
     def test_recent_digests_strategy_yield_and_runtime_feedback(self) -> None:
         self.write_cards([
             self.card("WORK-A2", "src/a.c", strategy="S8"),
@@ -1630,6 +1727,71 @@ class WorkQueueTests(unittest.TestCase):
         listed = self.run_command(base + ["list-cards", "--limit", "1"])
         self.assertEqual(listed.returncode, 0, listed.stdout + listed.stderr)
         self.assertEqual(json.loads(listed.stdout)["id"], "WORK-A")
+
+    def test_blocking_a_card_requires_a_rationale_note(self) -> None:
+        self.write_cards([
+            self.card("WORK-B", "", strategy="S6", kind="s6-peer-fix", mode="auto"),
+        ])
+        base = [
+            sys.executable, str(ROOT / "bin/state"),
+            "--results-dir", str(self.results), "--target-path", str(self.target),
+            "--target-slug", "sample", "update-card", "--card-id", "WORK-B",
+            "--status", "blocked",
+        ]
+
+        empty = self.run_command(base + ["--note", "   "])
+        proved = self.run_command(base + ["--note", "read peer fix abc123; no analogue here"])
+
+        # A blocked card retires for the run, so a finite campaign must not be
+        # drainable by an agent that read neither the fix nor the analogue.
+        self.assertEqual(empty.returncode, 2, empty.stdout + empty.stderr)
+        # The gate applies to every strategy, so the message must not describe
+        # one strategy's evidence.
+        self.assertIn("why this card cannot be pursued", empty.stdout + empty.stderr)
+        self.assertNotIn("peer fix", empty.stdout + empty.stderr)
+        self.assertEqual(proved.returncode, 0, proved.stdout + proved.stderr)
+
+    def test_an_operator_pin_rejects_a_hypothesis_from_another_strategy(self) -> None:
+        self.write_cards([
+            self.card("WORK-S1", "src/one.c", strategy="S1", touched_files=["src/one.c"]),
+            self.card(
+                "WORK-S6", "", strategy="S6", kind="s6-peer-fix", mode="auto",
+                peer_fix_diff_excerpt="diff --git a/parse.c b/parse.c\n+guard;",
+            ),
+        ])
+        (self.results / "state/fixed-strategy").write_text("S6\n", encoding="utf-8")
+        base = [
+            sys.executable, str(ROOT / "bin/state"),
+            "--results-dir", str(self.results), "--target-path", str(self.target),
+            "--target-slug", "sample",
+        ]
+        add_hyp = base + [
+            "add-hyp", "--agent", "1", "--card-id", "WORK-S6",
+            "--hypothesis", "issue in app_parse", "--file", "src/one.c:app_parse:10",
+            "--input-shape", "crafted bytes", "--guard-gap", "missing guard",
+            "--diagnostic", "bounds",
+        ]
+
+        claimed = self.run_command(base + [
+            "next-card", "--agent", "1", "--mode", "generic", "--strategy", "S6",
+        ])
+        off_pin = self.run_command(base + [
+            "resume", "--agent", "1", "--mode", "generic", "--strategy", "S1",
+        ])
+        rejected = self.run_command(add_hyp + ["--strategy", "S1"])
+        accepted = self.run_command(add_hyp + ["--strategy", "S6-cross-project"])
+
+        self.assertEqual(claimed.returncode, 0, claimed.stdout + claimed.stderr)
+        # The card is claimable, but its unbounded evidence field is not what a
+        # queue read is for -- the prompt's assigned-card section renders it.
+        self.assertEqual(json.loads(claimed.stdout)["id"], "WORK-S6")
+        self.assertNotIn("peer_fix_diff_excerpt", json.loads(claimed.stdout))
+        self.assertEqual(rejected.returncode, 2)
+        self.assertIn("operator-pinned strategy S6", rejected.stderr)
+        # An off-pin queue read must say so, not read as an empty queue.
+        self.assertEqual(off_pin.returncode, 2)
+        self.assertIn("operator-pinned strategy S6", off_pin.stderr)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
 
 
 if __name__ == "__main__":

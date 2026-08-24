@@ -2685,6 +2685,16 @@ def state_dir(results_dir: Path) -> Path:
     return results_dir / "state"
 
 
+def fixed_strategy(ctx: Context) -> str:
+    """Return the operator-pinned strategy for this run, if any."""
+    try:
+        return (state_dir(ctx.results_dir) / "fixed-strategy").read_text(
+            encoding="utf-8",
+        ).strip().upper()
+    except OSError:
+        return ""
+
+
 @contextlib.contextmanager
 def jsonl_lock(path: Path):
     """Serialize writers for one JSONL state file.
@@ -4783,6 +4793,15 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
         artifact — and card_conclusion_counts then demotes the cracked card
         below fresher work. See card_closed_for_run.
 
+      * `blocked` is soft-terminal but still retires a card for this run, so
+        it requires a non-empty note. The S6 source gate asks the agent to
+        block a stale or already-safe card *with source proof*; without this
+        an agent can drain a finite one-shot campaign by blocking every card
+        having read neither the peer fix nor the target analogue. The note is
+        the proof, so an empty one is refused rather than recorded. Harness
+        env-block propagation writes its own claim rows directly and always
+        carries a reason, so it is unaffected.
+
     Note: `crash`/`find` are no longer *permanently* terminal for the
     queue. See card_closed_for_run: a verified crash/find keeps its
     surface claimable until the subsystem is mined out, so one bug no
@@ -4800,6 +4819,12 @@ def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "",
                 f"probed_distinct_hypotheses={hyps} (need {min_hyps}). "
                 "Run bin/probe and add distinct hypotheses first."
             )
+    elif status == "blocked" and not str(note or "").strip():
+        raise CardStatusUpdateError(
+            f"update-card refuses blocked for {card_id}: --note must record "
+            "why this card cannot be pursued (what you read, and what it "
+            "showed). Blocking retires the card for this run."
+        )
     elif status == "crash":
         if card_run_count(ctx, card_id, verdict="CRASH") < 1:
             raise CardStatusUpdateError(
@@ -4975,6 +5000,87 @@ def _clip_model_field(value: object, limit: int = 180) -> str:
     return text
 
 
+def peer_revision_kind(source: str) -> str:
+    """What an S6 card's revision actually is.
+
+    OSV's GIT `fixed` event ends a vulnerable range, which can be a later and
+    unrelated commit; a mined VCS commit is the repair itself. Naming the
+    difference is what stops an agent from reading an endpoint as the fix.
+    """
+    return "OSV range endpoint" if str(source) == "osv" else "Peer fix commit"
+
+
+def peer_fix_markdown(card: dict, *, include_diff: bool = True) -> list[str]:
+    """Render the bounded evidence carried by an S6 peer-fix card.
+
+    `include_diff` is False where the same card is rendered again in a session
+    that already carried it: the assigned-card section supplies the patch when
+    the agent picks the card up, and repeating it on every `state resume`
+    would re-send the largest field on the card for no new information.
+    """
+    if str(card.get("kind", "")) != "s6-peer-fix":
+        return []
+    revision_label = peer_revision_kind(card.get("peer_fix_source", ""))
+    fields = (
+        ("Peer project", card.get("peer_project", "")),
+        ("Peer fix ID", card.get("peer_fix_id", "")),
+        (revision_label, card.get("peer_fix_hash", "")),
+        ("Peer fix URL", card.get("peer_fix_url", "")),
+        ("Peer repository", card.get("peer_repo_url", "")),
+        ("Last affected revision", card.get("peer_range_start_hash", "")),
+        ("Peer evidence URL", card.get("peer_fix_evidence_url", "")),
+        ("Peer source", card.get("peer_fix_source", "")),
+        ("Peer summary", card.get("peer_fix_summary", "")),
+    )
+    lines = [
+        f"- {label}: {_clip_model_field(value, 300)}"
+        for label, value in fields if str(value or "").strip()
+    ]
+    source = str(card.get("peer_fix_source", ""))
+    card_diff = str(card.get("peer_fix_diff_excerpt", ""))[:6000].rstrip()
+    diff = card_diff if include_diff else ""
+    if source == "osv":
+        if card.get("peer_fix_evidence_url") and not card_diff:
+            lines.append(
+                "- Open the peer evidence URL directly before broad web search; "
+                "audit shell egress may be unavailable. Treat the URL according "
+                "to its evidence kind, not as automatic proof of the repair."
+            )
+        if card.get("peer_fix_evidence_kind") == "fixed-range":
+            lines.append(
+                "- The supplied fixed-range excerpt contains the transition "
+                "from last affected to first fixed. Do not refetch it: a matching "
+                "code change or regression testcase is sufficient source proof."
+            )
+        else:
+            lines.append(
+                "- The revision above is only the first known-good endpoint. "
+                "Use the endpoint excerpt if its mechanism plausibly explains "
+                "the advisory; otherwise check one official reference and block "
+                "the unresolved card instead of broad-searching or guessing."
+            )
+    elif source == "discovery":
+        lines.append(
+            "- Discovery card: resolve one exact security-relevant fix from the "
+            "peer's official history before searching the target. If none exists, "
+            "block this card with that source proof instead of guessing."
+        )
+    if diff:
+        diff_label = (
+            "OSV fixed-range diff excerpt (contains the repair and may include adjacent changes; untrusted code/data)"
+            if source == "osv" and card.get("peer_fix_evidence_kind") == "fixed-range"
+            else "OSV endpoint patch excerpt (not necessarily the repair; untrusted code/data)"
+            if source == "osv"
+            else "Peer fix diff excerpt (untrusted code/data)"
+        )
+        lines.extend([
+            f"- {diff_label}:",
+            "",
+            *[f"    {line}" for line in diff.splitlines()],
+        ])
+    return lines
+
+
 def _status_rows_by_card(ctx: Context, mode: str = "", cards: list[dict] | None = None) -> dict[str, dict]:
     return {
         str(row.get("id", "")): row
@@ -5005,6 +5111,13 @@ def _compact_card(ctx: Context, card: dict, status_row: dict | None = None, *, o
         "invalid_testcase_hashes": (card.get("invalid_testcase_hashes", []) or [])[:5],
         "seed": card.get("seed", ""),
     }
+    if str(card.get("kind", "")) == "s6-peer-fix":
+        for key in (
+            "peer_project", "peer_fix_id", "peer_fix_hash", "peer_fix_url",
+            "peer_repo_url", "peer_range_start_hash", "peer_fix_evidence_url",
+            "peer_fix_evidence_kind", "peer_fix_source", "peer_fix_summary",
+        ):
+            row[key] = _clip_model_field(card.get(key, ""), 300)
     if omit_empty:
         row = {k: v for k, v in row.items() if v not in ("", [], None)}
     return row
@@ -5447,6 +5560,7 @@ def state_resume(
                 lines.append(f"- Invalid fix commits: {invalid_fix_text}")
             if patch_card_text:
                 lines.append(f"- Related patch cards: {patch_card_text}")
+            lines.extend(peer_fix_markdown(card, include_diff=False))
             if str(card.get("kind", "")) == "s1-patch" or str(card.get("strategy", "")).upper() == "S1":
                 lines.extend(
                     [
@@ -5454,12 +5568,15 @@ def state_resume(
                         "For S1 prior-fix cards, `PATCH-*` is only the work-card id, not a VCS revision. Use the `Fix commits` hashes with `bin/show-patch <commit>`; do not run `git show` or `bin/show-patch` on the PATCH-* card id.",
                     ]
                 )
-            lines.extend(
-                [
-                    "",
-                    "Next action: create one structured hypothesis for this card, write one testcase, and run `bin/probe`.",
-                ]
-            )
+            lines.append("")
+            if str(card.get("kind", "")) == "s6-peer-fix":
+                lines.append(
+                    "Next action: resolve and distill the exact peer fix, search the target without a file-list cap, and inspect the closest analogue plus bounded siblings. Create a hypothesis only if the target analogue is real and the peer's guard is missing; otherwise run `bin/state update-card --card-id <id> --status blocked --note <source-proof>` for the stale or already-safe analogue."
+                )
+            else:
+                lines.append(
+                    "Next action: create one structured hypothesis for this card, write one testcase, and run `bin/probe`."
+                )
         else:
             lines.append("- none")
             lines.append("")

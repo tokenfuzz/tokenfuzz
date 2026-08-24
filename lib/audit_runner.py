@@ -318,6 +318,11 @@ def prepare_runtime(
         (results / f"scratch-{agent}").mkdir(exist_ok=True)
         if fixed_strategy:
             (results / "state" / f"strategy-{agent}").write_text(fixed_strategy + "\n", encoding="utf-8")
+    fixed_strategy_path = results / "state" / "fixed-strategy"
+    if fixed_strategy:
+        fixed_strategy_path.write_text(fixed_strategy + "\n", encoding="utf-8")
+    else:
+        fixed_strategy_path.unlink(missing_ok=True)
     target_rev = target_config.detect_rev(target_root)
     repo_type = target_config.detect_repo_type(target_root)
     target_config.write_session_env(results, str(results), str(target_root), target_slug, target_rev, str(logs))
@@ -664,6 +669,11 @@ def _work_card_signature(
     # peer selection is the only remaining config input. Hash those parsed
     # values by content so an asan_bin repair or cosmetic rewrite does not
     # force a whole-repo source scan, which takes minutes on browser trees.
+    #
+    # The pin and the peer-mining switch decide which generators run at all,
+    # so they are part of the queue's identity. Without them a re-run under a
+    # different --strategy reads its predecessor's queue as fresh and never
+    # rebuilds it — and on a VCS target ttl=0 makes that permanent.
     inputs: list[str] = []
     inputs.extend(str(path) for path in sorted((runtime.results / "coverage").glob("edges-agent-*.journal")))
     inputs.extend(str(path) for path in sorted((runtime.results / "corpus").glob("COVER-*/metadata.md")))
@@ -678,6 +688,9 @@ def _work_card_signature(
         {
             "s6_domain": getattr(config, "s6_domain", ""),
             "s6_peers": getattr(config, "s6_peers", []),
+            "fixed_strategy": str(getattr(runtime, "fixed_strategy", "")).upper(),
+            "peer_mining_disabled":
+                os.environ.get("AUDIT_DISABLE_PEER_FIX_CARDS", "") == "1",
         },
         sort_keys=True, separators=(",", ":"),
     )
@@ -751,7 +764,11 @@ def refresh_work_cards(
         raise ValueError("rank-work limit must be positive")
     refresh_ok = True
     patch_cards = runtime.results / "patch-cards.jsonl"
-    if (runtime.root / "bin" / "patch-cards").is_file():
+    pinned_strategy = str(getattr(runtime, "fixed_strategy", "")).upper()
+    pinned_s6 = pinned_strategy == "S6"
+    if pinned_s6:
+        patch_cards.unlink(missing_ok=True)
+    elif (runtime.root / "bin" / "patch-cards").is_file():
         completed = subprocess.run(
             [str(runtime.root / "bin" / "patch-cards"), "--target-path", str(runtime.target_root),
              "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
@@ -763,7 +780,11 @@ def refresh_work_cards(
             refresh_ok = False
             index_log(runtime, f"WARN: patch-cards refresh failed rc={completed.returncode}; stale cards removed")
     peer_cards = runtime.root / "bin" / "peer-fix-cards"
-    if os.environ.get("AUDIT_DISABLE_PEER_FIX_CARDS") != "1" and peer_cards.is_file():
+    if pinned_strategy and not pinned_s6:
+        # Peer mining is S6's card source alone; another pinned lane can never
+        # claim what it produces, so paying for it would only stale the queue.
+        (runtime.results / "s6-peer-cards.jsonl").unlink(missing_ok=True)
+    elif os.environ.get("AUDIT_DISABLE_PEER_FIX_CARDS") != "1" and peer_cards.is_file():
         completed = subprocess.run(
             [str(peer_cards), "--target-path", str(runtime.target_root),
              "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
@@ -773,9 +794,24 @@ def refresh_work_cards(
         if completed.returncode:
             (runtime.results / "s6-peer-cards.jsonl").unlink(missing_ok=True)
             refresh_ok = False
+            runtime.s6_source_degraded = True
             index_log(runtime, f"WARN: peer-fix-cards refresh failed rc={completed.returncode}; stale cards removed")
+        else:
+            runtime.s6_source_degraded = False
     rank = runtime.root / "bin" / "rank-work"
-    if rank.is_file():
+    if pinned_s6:
+        s6_cards = [
+            card for card in workqueue.read_jsonl(runtime.results / "s6-peer-cards.jsonl")
+            if card.get("kind") == "s6-peer-fix"
+        ]
+        s6_cards = workqueue.annotate_card_buildability(
+            _queue_context(runtime), s6_cards,
+        )
+        workqueue.write_cards(
+            runtime.results / "work-cards.jsonl",
+            workqueue.apply_latest_claim_status(_queue_context(runtime), s6_cards),
+        )
+    elif rank.is_file():
         completed = subprocess.run(
             [str(rank), "--target-path", str(runtime.target_root), "--target-slug", runtime.target_slug,
              "--results-dir", str(runtime.results), "--patch-cards", str(patch_cards),
@@ -787,7 +823,7 @@ def refresh_work_cards(
             (runtime.results / "work-cards.jsonl").unlink(missing_ok=True)
             refresh_ok = False
             index_log(runtime, f"WARN: rank-work refresh failed rc={completed.returncode}; stale cards removed")
-    else:
+    elif not pinned_s6:
         refresh_ok = False
         index_log(runtime, "WARN: rank-work is missing; work-card refresh remains dirty")
     if refresh_ok:
@@ -1826,6 +1862,102 @@ def should_skip_launch(
     return _fuzz_leads_empty(runtime.results)
 
 
+def _s6_peers_configured(runtime: Runtime) -> bool:
+    return bool(getattr(getattr(runtime, "config", None), "s6_peers", []))
+
+
+def _pinned_lane_work_open(runtime: Runtime, card_ids: set[str]) -> bool:
+    """Is an active hypothesis still doing this pinned lane's work?
+
+    Matched by one of the lane's own cards or by the pin, never by activity
+    alone: work carried in from an earlier pin belongs to that strategy, and
+    counting it would keep this campaign running on results it never produced.
+    """
+    pinned = str(getattr(runtime, "fixed_strategy", "")).upper()
+    for row in structured_state.rows(runtime.results):
+        if str(row.get("status", "")) not in structured_state.ACTIVE:
+            continue
+        if str(row.get("card_id", "")) in card_ids:
+            return True
+        if str(row.get("strategy", "")).strip().upper().startswith(pinned):
+            return True
+    return False
+
+
+def _log_foreign_active_work(runtime: Runtime) -> None:
+    """Name pre-existing active work that a new pin does not cover.
+
+    `add-hyp` refuses an off-pin hypothesis, so this can only be work carried
+    in from an earlier run in the same results directory. It stays runnable
+    rather than filtered — hiding it would strand the rows with no owner — but
+    a pinned run whose totals include another strategy's yield must say so.
+    """
+    pinned = str(getattr(runtime, "fixed_strategy", "")).upper()
+    if not pinned:
+        return
+    foreign = sorted({
+        str(row.get("strategy", "")).strip().upper() or "unlabelled"
+        for row in structured_state.rows(runtime.results)
+        if str(row.get("status", "")) in structured_state.ACTIVE
+        and not str(row.get("strategy", "")).strip().upper().startswith(pinned)
+    })
+    if foreign:
+        index_log(
+            runtime,
+            f"WARN: pinned {pinned} run carries active work from "
+            f"{', '.join(foreign)}; those results are attributed to their own "
+            "strategy, not to the pin",
+        )
+
+
+def fixed_campaign_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
+    """Whether a pinned, finite S6 card campaign has no work left.
+
+    An absent/empty source file gets one worker so source failures are visible.
+    Productive cards use the queue's normal scope-aware closure rule: one
+    finding is a reason to search clustered variants, not an exhaustion proof.
+
+    An open hypothesis still can, so it holds the run open the way STALL_STOP
+    requires: an agent can close its card and keep investigating what the card
+    started, and stopping there would strand that work unfinished. Only *this
+    lane's* open work counts: a results directory reused across pins carries
+    active hypotheses from the earlier strategy, and letting those hold an S6
+    campaign open keeps the run alive on work S6 never did.
+    """
+    if str(getattr(runtime, "fixed_strategy", "")).upper() != "S6":
+        return False
+    ctx = _queue_context(runtime)
+    supplied = [
+        card for card in workqueue.apply_latest_claim_status(
+            ctx, workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
+        )
+        if card.get("kind") == "s6-peer-fix"
+    ]
+    if not supplied:
+        # An empty queue only proves exhaustion when the source could answer.
+        # A peer set that is missing, unreachable, or returning nothing is a
+        # fault to surface, not a campaign that finished with no yield.
+        if getattr(runtime, "s6_source_degraded", False) or not _s6_peers_configured(runtime):
+            return False
+        return iteration > 1
+    if _pinned_lane_work_open(
+        runtime, {str(card.get("id", "")) for card in supplied},
+    ):
+        return False
+    conclusion_counts = workqueue.card_conclusion_counts(ctx)
+    distinct_counts = workqueue.card_distinct_hypothesis_counts(ctx)
+    dry_streaks: dict[str, int] = {}
+    return all(
+        workqueue.card_closed_for_run(
+            ctx, card, str(card.get("status", "unclaimed")),
+            conclusion_counts=conclusion_counts,
+            distinct_counts=distinct_counts,
+            dry_streaks=dry_streaks,
+        )
+        for card in supplied
+    )
+
+
 def release_stale_card_claims(runtime: Runtime) -> int:
     try:
         return len(workqueue.release_stale_claims(_queue_context(runtime)))
@@ -2424,6 +2556,21 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     # Once, after every step that can change card supply, and unconditionally:
     # a lane starves between iterations without the queue itself changing.
     initialize_agent_strategies(runtime)
+    if state.iteration == 1:
+        _log_foreign_active_work(runtime)
+        if str(getattr(runtime, "fixed_strategy", "")).upper() == "S6" \
+                and not _s6_peers_configured(runtime):
+            index_log(
+                runtime,
+                "S6_SOURCE_UNAVAILABLE: this run is pinned to S6 but the "
+                "target configures no [s6_peers]; peer mining has no input. "
+                "Run bin/suggest-peers or drop the pin — an empty queue here "
+                "is a configuration fault, not an exhausted campaign",
+            )
+    if fixed_campaign_exhausted(runtime, state.iteration):
+        index_log(runtime, "CAMPAIGN_EXHAUSTED: no open S6 card or hypothesis remains")
+        state.stopped = True
+        return "stalled", []
     if _productive_wall_exhausted(state):
         return "budget", []
     assign_build_configs(runtime, context, state.iteration)

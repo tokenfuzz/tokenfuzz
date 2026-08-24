@@ -26,6 +26,7 @@ from workqueue import (
     context_from_args,
     DuplicateHypothesisIdError,
     explain_queue,
+    fixed_strategy,
     HYPOTHESIS_DIAGNOSTIC_CATEGORIES,
     init_state,
     list_work_cards,
@@ -48,6 +49,29 @@ from workqueue import (
     update_hypothesis,
     update_card_status,
 )
+
+
+def _strategy_matches_pin(label: str, pinned: str) -> bool:
+    value = str(label or "").strip().upper()
+    return value == pinned or (
+        value.startswith(pinned) and len(value) > len(pinned)
+        and value[len(pinned)] in "-_ ("
+    )
+
+
+def _claim_strategy(ctx, requested: str) -> str:
+    """Resolve a queue read against an explicit operator pin, if present.
+
+    Rejecting an off-pin request beats silently returning no card: under a pin
+    the queue holds only that lane, so a mistyped `--strategy` reads as an
+    empty queue and ends the session instead of correcting the command.
+    """
+    pinned = fixed_strategy(ctx)
+    if pinned and requested and not _strategy_matches_pin(requested, pinned):
+        raise ValueError(
+            f"operator-pinned strategy {pinned} rejects queue strategy {requested}"
+        )
+    return pinned or requested
 
 
 def _format_mutator_ok(cmd: str, row: dict) -> str:
@@ -342,9 +366,17 @@ def main(argv: list[str]) -> int:
         init_state(ctx)
         return 0
     if args.cmd == "next-card":
-        card = claim_next_card(ctx, args.agent, args.mode, args.role, claim=not args.peek, strategy=args.strategy)
+        try:
+            strategy = _claim_strategy(ctx, args.strategy)
+        except ValueError as exc:
+            print(f"[state] {exc}", file=sys.stderr)
+            return 2
+        card = claim_next_card(ctx, args.agent, args.mode, args.role, claim=not args.peek, strategy=strategy)
         if card is None:
             return 1
+        # The peer diff is the one unbounded card field, and the assigned-card
+        # section of the session prompt already renders it.
+        card.pop("peer_fix_diff_excerpt", None)
         print(json.dumps(card, sort_keys=True))
         return 0
     if args.cmd == "explain-queue":
@@ -398,9 +430,21 @@ def main(argv: list[str]) -> int:
             print(json.dumps(row, sort_keys=True))
         return 0
     if args.cmd == "resume":
-        print(state_resume(ctx, args.agent, args.mode, args.role, claim=not args.peek, strategy=args.strategy), end="")
+        try:
+            strategy = _claim_strategy(ctx, args.strategy)
+        except ValueError as exc:
+            print(f"[state] {exc}", file=sys.stderr)
+            return 2
+        print(state_resume(ctx, args.agent, args.mode, args.role, claim=not args.peek, strategy=strategy), end="")
         return 0
     if args.cmd == "add-hyp":
+        pinned = fixed_strategy(ctx)
+        if pinned and not _strategy_matches_pin(args.strategy, pinned):
+            print(
+                f"[state] operator-pinned strategy {pinned} rejects hypothesis strategy {args.strategy}",
+                file=sys.stderr,
+            )
+            return 2
         try:
             row = add_hypothesis(ctx, args)
         except DuplicateHypothesisIdError as exc:

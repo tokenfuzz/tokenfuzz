@@ -23,7 +23,7 @@ _STRATEGIES = {
     "S3": ("S3-spec-vs-impl.md", "Rule-vs-implementation: trace a security, published-spec, or fast/slow-path rule to the exact code that must enforce it. For a boundary-ranked card, start with access control, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions."),
     "S4": ("S4-directed-fuzzing.md", "Boundary-directed fuzzing: run `bin/fuzz candidates` to find published APIs that untrusted input reaches and no harness drives, improve or write one faithful harness, then spend one bounded campaign on it. The only strategy that runs a fuzzer."),
     "S5": ("S5-reentrancy.md", "Lifetime/state: target re-entrancy, rollback, races, and harmful but valid call sequences."),
-    "S6": ("S6-cross-project.md", "Cross-project variant mining: map peer security fixes onto analogous local surfaces and confirm local reachability."),
+    "S6": ("S6-cross-project.md", "Cross-project variant mining: resolve exact peer fixes, distill their repaired invariants, then search the closest target analogue and bounded siblings before opening a hypothesis."),
     "S7": ("S7-adversarial-input.md", "Adversarial input engineering: mutate real seeds around lengths, nesting, and checksums, by hand. Fuzz harnesses and campaigns belong to S4."),
     "S8": ("S8-property-based.md", "Property oracle: test security-relevant inverse, injectivity, idempotence, canonicalization, and numeric invariants."),
     "REF": ("REF-pattern-search.md", "Pattern library: use broad target-agnostic searches to support the assigned strategy, then form concrete hypotheses."),
@@ -329,13 +329,20 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
         )
     fixes = card.get("fix_hashes") or []
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
+    lines += workqueue.peer_fix_markdown(card)
     lines += _ruled_out_routes(context, card.get("file", ""))
     lines += callgraph.block_for(context.results_dir, card.get("file", ""))
-    lines += [
+    lines.extend([
         "",
         "Use this card first unless structured state already has a higher-priority active row.",
-        f"Include `--card-id {card.get('id', '')}` in structured state and `CARD-ID: {card.get('id', '')}` in testcase headers.",
-    ]
+    ])
+    if str(card.get("kind", "")) == "s6-peer-fix":
+        lines.append(
+            "Resolve and distill the exact peer fix, then search the target without a file-list cap and inspect the closest analogue plus bounded siblings. Create a hypothesis only for a source-verified target analogue with a missing guard; block a stale or already-safe card with source proof."
+        )
+    lines.append(
+        f"Include `--card-id {card.get('id', '')}` in structured state and `CARD-ID: {card.get('id', '')}` in testcase headers."
+    )
     return "\n".join(lines)
 
 
@@ -539,6 +546,13 @@ def _role_guidance(context: PromptContext, agent: int) -> str:
 def first_probe_checkpoint(context: PromptContext, agent: int) -> str:
     if context.role(agent) != "reproduce":
         return ""
+    if context.strategy(agent) == "S6":
+        return (
+            "**S6 SOURCE GATE:** Resolve the exact peer fix and verify the target analogue "
+            "before creating a hypothesis. If the target is already safe or has no analogue, "
+            "block the card with source proof; do not manufacture a testcase. Once a real "
+            "missing guard is named, write and run its trigger-aimed `bin/probe` in the same turn."
+        )
     return (
         "**FIRST-PROBE CHECKPOINT:** Create or adopt one card-linked hypothesis, then "
         "run a trigger-aimed `bin/probe` before turn 20. Put its required TARGET / "
@@ -620,10 +634,27 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
     strategy_block = ""
     if strategy != "S1":
         strategy_block = f"## ASSIGNED STRATEGY - {strategy}\n\n{strategy_brief(strategy, context.reference_dir)}"
+    # The pin says which strategy, never how to work it — step 4 below owns
+    # the procedure, so restating it here only paraphrases the same rule.
     fixed = (
-        f"Pinned strategy: create a Strategy {context.fixed_strategy} hypothesis and run one probe."
+        f"Every hypothesis on this run must be Strategy {context.fixed_strategy}."
         if context.fixed_strategy else ""
     )
+    if strategy == "S6":
+        workflow = (
+            "Distill the peer fix's repaired invariant and verify a target analogue. "
+            "Only when the same input reaches the same operation without the peer's "
+            "guard, record one concrete hypothesis with `bin/state add-hyp`, take the "
+            "best `bin/find-seed` candidate, and run `bin/probe`; otherwise block the "
+            "stale or already-safe card with source proof."
+        )
+    else:
+        workflow = (
+            "Record one concrete hypothesis with `bin/state add-hyp`, take the best "
+            "`bin/find-seed` candidate, and run `bin/probe`. Then fill the "
+            "same-subsystem queue to 3-5 hypotheses; add concise "
+            "data-flow/guard/variant context with `bin/state add-note`."
+        )
     return render_template(
         "cold_start.md.j2",
         {
@@ -632,6 +663,7 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
             "guide_section": guide_section(context, True),
             "state_strategy_arg": _state_strategy_arg(context, agent),
             "suggested_sub_line": "", "audit_fixed_strategy_hint": fixed,
+            "cold_start_workflow": workflow,
             "reference_dir": str(context.reference_dir), "strategy_a_block": strategy_block,
             "role_guidance": _role_guidance(context, agent),
             "first_probe_checkpoint": first_probe_checkpoint(context, agent),

@@ -137,7 +137,6 @@ DECISION_TIMEOUT_HOSTED_DEFAULTS = {
     # cannot size it. Derived instead from its uncensored single-item sibling
     # (`reachability-fields`, 37s slowest) doubled and scaled for the batch.
     "reachability_fields_batch": 120,
-    "s6-peer-map": 90,
     "trigger_validator": 700,
     "work_rerank": 150,
 }
@@ -947,7 +946,6 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     known_decisions = {
         "find_quality", "find_quality_batch", "reachability_fields_batch",
         "work_rerank", "runner-suggest", "s6-peer-suggest", "threat-model-suggest",
-        "s6-peer-distill", "s6-peer-map",
     }
     if decision not in known_decisions:
         return True
@@ -1012,15 +1010,6 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
             _is_string_list(parsed.get("attacker_controls"))
             and _is_string(parsed.get("reasoning", ""))
         )
-    if decision == "s6-peer-distill":
-        return (
-            _is_string(parsed.get("class"))
-            and _is_string(parsed.get("summary"))
-            and _is_string(parsed.get("shape"))
-        )
-    if decision == "s6-peer-map":
-        return _is_string(parsed.get("file")) and _is_string(parsed.get("reason"))
-
     return True
 
 
