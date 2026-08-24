@@ -583,7 +583,7 @@ def render(
             # ubsan/msan/tsan-only target gets its own build advertised.
             san, bin_path, lib_path = _select_sanitizer(cfg)
             include_dirs = [cfg.resolve_path(i) for i in cfg.includes if i]
-            link_libs = list(cfg.link_libs)
+            link_libs = cfg.resolved_link_libs()
             if san is not None:
                 build_dir = Path(cfg.resolve_path(f"build-{san}"))
             elif "race" in cfg.sanitizers_enabled:

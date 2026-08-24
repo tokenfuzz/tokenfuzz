@@ -23,6 +23,9 @@ substitute the fallback default when the queue assigned something else.
 - Run `bin/probe "{{ scratch_dir }}/<testcase>"` immediately; after a first
   diagnostic, run the same path with `--confirm`. For opaque bytes, preserve
   them exactly and pass `--hypothesis-id H-...`.
+- If target code must generate, transform, or inspect a seed, perform that
+  setup inside the testcase's `HARNESS` under `bin/probe`, never by invoking
+  the target ad hoc from the shell first.
 - Search target source with scoped `bin/rg-safe` calls, inspect ranges with
   `bin/peek FILE:start-end`, and view fixes with `bin/show-patch <commit>
   [path]`. Search artifacts with `bin/scratch-search`, not the raw log tree.

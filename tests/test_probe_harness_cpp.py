@@ -152,9 +152,12 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertIn("reaped stale harness build lock", proc.stdout + proc.stderr)
 
     def test_target_defines_and_selected_sanitizer_flags_and_libraries(self) -> None:
+        support = self.target / "support.c"
+        support.write_text("void support(void) {}\n", encoding="utf-8")
         (self.slug_dir / "target.toml").write_text(
             'target = "testproject"\nasan_lib = "build/libtarget.a"\nincludes = ["include"]\n'
-            'defines = ["-DPROBE_TARGET_DEFINE=1", "-DSECOND_DEFINE=2"]\nlink_libs = ["-lm"]\n'
+            'defines = ["-DPROBE_TARGET_DEFINE=1", "-DSECOND_DEFINE=2"]\n'
+            'link_libs = ["support.c", "-lm"]\n'
             '[sanitizer]\nenabled = ["asan"]\n'
         )
         compiler = self.fake_compiler()
@@ -164,6 +167,7 @@ class ProbeCppHarnessTests(unittest.TestCase):
         args = args_file.read_text()
         self.assertRegex(args, r"(?m)^-DPROBE_TARGET_DEFINE=1$")
         self.assertRegex(args, r"(?m)^-DSECOND_DEFINE=2$")
+        self.assertIn(str(support), args.splitlines())
         for sanitizer, upper, flag in (
             ("ubsan", "UBSAN", "undefined"), ("msan", "MSAN", "memory"),
             ("tsan", "TSAN", "thread"),

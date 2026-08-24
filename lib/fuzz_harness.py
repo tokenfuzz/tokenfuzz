@@ -1170,7 +1170,8 @@ def build_command(source: Path, binary: Path, san: str, config,
         "-DFUZZ_CAMPAIGN_BUILD=1",
         "-fno-omit-frame-pointer", "-g", "-O1", *flags,
         *config.defines, *includes, str(source), *library_args,
-        *config.link_libs, *shlex.split(os.environ.get("LDFLAGS", "")),
+        *config.resolved_link_libs(),
+        *shlex.split(os.environ.get("LDFLAGS", "")),
         "-o", str(binary),
     ]
 
@@ -1198,7 +1199,7 @@ def build_identity(source: Path, san: str, config, library: str,
         f"library={library}:{stat.st_size if stat else '-'}:"
         f"{stat.st_mtime_ns if stat else '-'}",
         f"includes={config.includes}", f"defines={config.defines}",
-        f"links={config.link_libs}", f"flags={flags}",
+        f"links={config.resolved_link_libs()}", f"flags={flags}",
         f"ldflags={os.environ.get('LDFLAGS', '')}",
     )
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:12]

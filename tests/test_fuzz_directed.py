@@ -468,10 +468,13 @@ class BuildIsolationTests(unittest.TestCase):
     def test_the_campaign_build_defines_out_the_replay_entry_point(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             config = config_for(Path(raw), ["bytes"])
+            config.link_libs = ["support.c", "-lm"]
             command = fuzz_harness.build_command(
                 Path(raw) / "fuzz_x.c", Path(raw) / "out", "asan", config, "", [])
         self.assertIn("-DFUZZ_CAMPAIGN_BUILD=1", command)
         self.assertIn("-fsanitize=fuzzer,address", command)
+        self.assertIn(str(Path(raw) / "support.c"), command)
+        self.assertIn("-lm", command)
 
 
 class SliceReadingTests(unittest.TestCase):

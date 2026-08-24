@@ -3458,6 +3458,13 @@ class Config:
             return ""
         return str(_resolve_target_path(self.target_root, p))
 
+    def resolved_link_libs(self) -> list[str]:
+        """Linker flags plus target-root-resolved archive/source inputs."""
+        return [
+            value if value.startswith("-") else self.resolve_path(value)
+            for value in self.link_libs
+        ]
+
 
 def _apply_attacker_controls(cfg: Config, raw: list, source_path: str) -> None:
     for item in raw:

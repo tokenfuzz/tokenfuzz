@@ -443,6 +443,7 @@ class HarnessBuilder:
             return binary, [*self.dispatch["interpreter_preargs"], str(self.source)], kind
         compiler = os.environ.get(self.dispatch["compiler_env"], "") or self.dispatch["compiler_default"]
         flags = shlex.split(os.environ.get(self.dispatch["flags_env"], ""))
+        resolved_links = self.probe.config.resolved_link_libs()
         cache = Path(self.probe.config.results_dir) / f"scratch-{self.probe.agent}" / ".harness-cache"
         cache.mkdir(parents=True, exist_ok=True)
         sanitizer_lib = self._sanitizer_lib() if kind == "cc" else ""
@@ -452,7 +453,7 @@ class HarnessBuilder:
             f"kind={kind}", f"flags={flags}", f"sanitizer={self.probe.sanitizer}",
             f"library={sanitizer_lib}", f"library_stat={stat_key(sanitizer_lib)}",
             f"includes={self.probe.config.includes}", f"defines={self.probe.config.defines}",
-            f"links={self.probe.config.link_libs}", f"ldflags={os.environ.get('LDFLAGS', '')}",
+            f"links={resolved_links}", f"ldflags={os.environ.get('LDFLAGS', '')}",
         ))
         digest = hashlib.sha1(identity.encode()).hexdigest()
         binary = cache / f"{self.source.name}.{digest}.bin"
@@ -524,7 +525,8 @@ class HarnessBuilder:
             return [
                 compiler, f"-fsanitize={sanitizer_flag}", "-g1", "-O0", *flags,
                 *self.probe.config.defines, *includes, str(self.source), *library_args,
-                *self.probe.config.link_libs, *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary),
+                *self.probe.config.resolved_link_libs(),
+                *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary),
             ]
         if kind == "rust":
             return [compiler, "-C", "debuginfo=1", "-C", "opt-level=0", *flags, "-o", str(binary), str(self.source)]

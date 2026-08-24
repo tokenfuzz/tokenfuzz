@@ -257,6 +257,7 @@ class BenchmarkReportTests(unittest.TestCase):
         library.parent.mkdir(parents=True)
         (native / "include").mkdir()
         (native / "lib").mkdir()
+        (native / "support.c").write_text("void support(void) {}\n", encoding="utf-8")
         (native / "CMakeLists.txt").write_text("project(sample C)\n")
         (native / "target.toml").write_text(
             'target = "sample"\n'
@@ -264,7 +265,7 @@ class BenchmarkReportTests(unittest.TestCase):
             'asan_bin = "build-asan/src/sample-cli"\n'
             'asan_lib = "build-asan/lib/libsample.a"\n'
             'includes = ["include", "lib"]\n'
-            'link_libs = ["-lm", "-lpthread"]\n'
+            'link_libs = ["support.c", "-lm", "-lpthread"]\n'
             '[sanitizer]\nenabled = ["asan"]\n'
             '[runner]\n'
             'args = ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"]\n',
@@ -284,6 +285,7 @@ class BenchmarkReportTests(unittest.TestCase):
             "build-asan/src/sample-cli", "Driving the asan binary directly",
             "Building a one-off harness driver", "build-asan/lib/libsample.a",
             "fsanitize=address",
+            str(native / "support.c"),
             # Execution is framed as a way to FIND bugs, not only to confirm
             # what source review already suspects — the prior verification-only
             # framing produced crash-free passes. The evidence bar (a real

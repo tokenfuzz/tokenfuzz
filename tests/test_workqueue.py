@@ -1526,6 +1526,15 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIn("H-ACTIVE-A", resume)
         self.assertIn("H-ACTIVE-B", resume)
 
+    def test_runtime_feedback_mixed_clean_and_no_exec_is_not_setup_failure(self) -> None:
+        verdicts = {"CLEAN": 1, "NO_EXEC": 1}
+
+        diagnosis, _feedback = workqueue._runtime_feedback_decision(
+            verdicts, 2, {},
+        )
+
+        self.assertNotEqual(diagnosis, "harness-setup")
+
     def test_run_effort_is_recorded_in_seconds_not_only_invocations(self) -> None:
         """A run count cannot see inside an agent-authored sweep.
 

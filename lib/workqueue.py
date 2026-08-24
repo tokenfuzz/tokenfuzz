@@ -5957,7 +5957,12 @@ def _runtime_feedback_decision(
             "artifact-mismatch",
             "crash or sanitizer text appears in saved output; inspect artifact before discarding",
         )
-    if verdicts.get("NO_EXEC", 0):
+    # All-or-nothing on purpose. NO_EXEC is overloaded: bin/probe also records
+    # it for a non-zero exit with no output and for a crash it attributes to a
+    # binary it did not build. A single such row alongside executed runs is not
+    # a broken harness, and this advice would send the agent to re-debug a
+    # working one.
+    if total and verdicts.get("NO_EXEC", 0) == total:
         return (
             "harness-setup",
             "runs are not executing; fix the testcase header or scratch harness, or record proven pinned runner/build metadata as ENV-BLOCKED before mutating inputs",
