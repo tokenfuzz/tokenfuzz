@@ -1335,6 +1335,28 @@ class WorkQueueTests(unittest.TestCase):
         finding_row = workqueue.show_finding(self.ctx, "FIND-1")
         self.assertEqual(finding_row["cluster"], "FCL-one")
         self.assertIn("repro.py", finding_row["repro"])
+        self.assertEqual(finding_row["status"], "PENDING REVIEW")
+
+        import validation_receipt
+        validation_receipt.write(finding, kind="finding", state="reportable")
+        self.assertEqual(workqueue.show_finding(self.ctx, "FIND-1")["status"], "OK")
+
+    def test_show_finding_resolves_one_descriptive_directory_by_base_id(self) -> None:
+        finding = self.results / "findings" / "FIND-007-size-amplification"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text(
+            "# Finding\n\nClass: dos:algorithmic\n", encoding="utf-8",
+        )
+
+        shown = workqueue.show_finding(self.ctx, "FIND-007")
+
+        self.assertEqual(shown["id"], "FIND-007-size-amplification")
+        self.assertEqual(shown["status"], "PENDING REVIEW")
+
+        second = self.results / "findings" / "FIND-007-other"
+        second.mkdir()
+        (second / "report.md").write_text("# Other\n", encoding="utf-8")
+        self.assertIsNone(workqueue.show_finding(self.ctx, "FIND-007"))
 
     def test_s6_resume_carries_peer_evidence_and_requires_mapping_first(self) -> None:
         self.write_cards([

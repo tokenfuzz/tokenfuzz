@@ -304,6 +304,22 @@ def claims_state(directory: Path, states: frozenset[str]) -> bool:
     return isinstance(payload, dict) and payload.get("state") in states
 
 
+def claims_no_security_credit(directory: Path) -> bool:
+    """Whether a *current* final receipt says the artifact earns no credit.
+
+    Deliberately stricter than `claims_state`: an edited report or a changed
+    bundle invalidates the receipt, and a verdict that no longer describes the
+    artifact must not keep labelling it. Such an artifact returns to review
+    instead. Matches what `bin/severity` and the benchmark's admission check
+    read, so the page, the score, and the count cannot disagree.
+    """
+    payload = read_current(directory)
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("state") in FINAL_STATES - SECURITY_STATES
+    )
+
+
 def read_current(directory: Path) -> dict | None:
     """Return a receipt only while its report, artifacts, and scope still match.
 

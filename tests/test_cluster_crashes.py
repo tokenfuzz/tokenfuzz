@@ -15,6 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMAND = ROOT / "bin" / "cluster-crashes"
+sys.path.insert(0, str(ROOT / "lib"))
+
+import validation_receipt  # noqa: E402
 
 
 class ClusterCrashesTests(unittest.TestCase):
@@ -422,16 +425,15 @@ The parser writes past `{object_name}`.
             "CRASH-N1-1", "heap-buffer-overflow", "uncredited_fn",
             "The capacity field is reused across two parse modes.",
         )
-        (crash / "validation.json").write_text(
-            json.dumps({"kind": "crash", "state": "not-reportable"}),
-            encoding="utf-8",
+        validation_receipt.write(
+            crash, kind="crash", state="not-reportable",
         )
         credited = self.make_crash(
             "CRASH-N2-1", "heap-use-after-free", "credited_fn",
             "The node is freed before the dependent read.",
         )
-        (credited / "validation.json").write_text(
-            json.dumps({"kind": "crash", "state": "reportable"}), encoding="utf-8",
+        validation_receipt.write(
+            credited, kind="crash", state="reportable",
         )
         self.assertEqual(self.run_cluster().returncode, 0)
         rows = {

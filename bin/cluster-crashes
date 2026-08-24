@@ -71,9 +71,6 @@ from cluster_common import (  # noqa: E402
     texts_differ_beyond_padding,
 )
 
-# Final states that keep a bundle on disk without security credit.
-_UNCREDITED_STATES = frozenset({"not-reportable"})
-
 
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write text atomically: tempfile in the same dir, then os.replace.
@@ -547,7 +544,7 @@ def _signature(crash_dir: Path) -> dict:
     missing = promotion_pending_reasons(crash_dir)
     if missing:
         status = f"PENDING (missing: {','.join(missing)})"
-    elif validation_receipt.claims_state(crash_dir, _UNCREDITED_STATES):
+    elif validation_receipt.claims_no_security_credit(crash_dir):
         # The index agents read before filing said OK about crashes the scorer
         # had already written off, so a whole seam looked productive while it
         # earned nothing. Name the state instead: same bundle, same evidence,

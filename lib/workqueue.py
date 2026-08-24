@@ -29,8 +29,9 @@ import languages
 import report_identity
 from audit_scope import is_excluded_path_part
 # target_config (only detect_repo_type, below), llm_decide (only timeout
-# resolution), and prompt_render.render_template (only the work_rerank gate)
-# are imported lazily inside their single call sites:
+# resolution), prompt_render.render_template (only the work_rerank gate), and
+# validation_receipt (only the finding-listing status) are imported lazily
+# inside their single call sites:
 # workqueue backs bin/state, which agents invoke 30+ times per session, and each
 # of these modules adds ~3-4 ms of import (target_config pulls shutil; together
 # ~5 ms) that the common state ops (resume/add-hyp/update-hyp) never use —
@@ -5465,7 +5466,18 @@ def _compact_finding(ctx: Context, row: dict[str, str]) -> dict:
         elif (artifact_dir / ".reviewed").is_file() or (artifact_dir / ".keep").is_file():
             status = "OK (override)"
         else:
-            status = "OK"
+            # A directory is only a filed candidate. Publication authority is
+            # the content-addressed validation receipt, so a deadline-created
+            # FIND must not look accepted merely because housekeeping did not
+            # reach it before the wall ended.
+            import validation_receipt  # lazy: see import note at top of file
+
+            receipt = validation_receipt.read_current(artifact_dir)
+            status = {
+                "reportable": "OK",
+                "not-reportable": "NOT REPORTABLE",
+                "rejected": "REJECTED",
+            }.get(str((receipt or {}).get("state", "")), "PENDING REVIEW")
     return {
         "id": fid,
         "cluster": fields.get("cluster", ""),
@@ -5505,13 +5517,20 @@ def list_findings(ctx: Context, status_filter: str = "", limit: int = 20) -> lis
 
 
 def show_finding(ctx: Context, finding_id: str) -> dict | None:
-    for row in list_findings(ctx, limit=0):
-        if row.get("id") == finding_id:
-            return row
-    artifact_dir = ctx.results_dir / "findings" / finding_id
-    if artifact_dir.is_dir():
+    # An exact directory is the common case, and answering it here is what
+    # keeps one lookup from re-deriving validation evidence for every finding
+    # on disk. `list_findings` only ever yields ids that are directories, so
+    # the scan below can add nothing this branch would have missed.
+    if (ctx.results_dir / "findings" / finding_id).is_dir():
         return _compact_finding(ctx, {"id": finding_id, "status": ""})
-    return None
+    # Artifact directories carry a descriptive suffix, so the bare id an agent
+    # read off a hypothesis status resolves only when it is unambiguous.
+    requested = _artifact_status_id(finding_id)
+    matches = [
+        row for row in list_findings(ctx, limit=0)
+        if _artifact_status_id(str(row.get("id", ""))) == requested
+    ]
+    return matches[0] if len(matches) == 1 else None
 
 
 def state_resume(

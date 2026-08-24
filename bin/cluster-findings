@@ -47,6 +47,7 @@ import strategies  # noqa: E402
 import finding_signature  # noqa: E402
 import finding_dedup  # noqa: E402
 import report_identity  # noqa: E402
+import validation_receipt  # noqa: E402
 from cluster_common import (  # noqa: E402
     render_member_report_siblings,
     render_md_sibling,
@@ -186,14 +187,20 @@ def _signature(find_dir: Path, target_root: str) -> dict:
     # been scored yet (carries no Severity line), which would otherwise show
     # as Pending. Mirrors how bin/cluster-crashes already sources severity.
     report_level, _report_rank, report_score = finding_signature.extract_severity(text)
-    if report_level and report_level != "—":
+    no_security_credit = validation_receipt.claims_no_security_credit(find_dir)
+    if no_security_credit:
+        sev = ""
+    elif report_level and report_level != "—":
         sev = report_level.lower()
     else:
         sev = (cache.get("severity") or "") if cache.get("accept") else ""
     sig["severity"] = sev
-    sig["severity_label"] = _severity_label(sev)
-    sig["severity_rank"] = _severity_rank(sev)
-    sig["severity_score"] = report_score
+    sig["severity_label"] = (
+        "Not a security report" if no_security_credit else _severity_label(sev)
+    )
+    sig["severity_rank"] = -1 if no_security_credit else _severity_rank(sev)
+    sig["severity_score"] = None if no_security_credit else report_score
+    sig["security_credit_rank"] = 0 if no_security_credit else 1
     sig["evidence_rank"] = _evidence_rank(text)
     sig["strategy"] = _extract_strategy(text)
     status = "OK" if report and text else "NEEDS CONTENT"
@@ -203,7 +210,11 @@ def _signature(find_dir: Path, target_root: str) -> dict:
         status = "NEEDS ATTENTION"
     elif sig["severity_label"] == "Needs review":
         status = "NEEDS REVIEW"
-    if (find_dir / ".reviewed").is_file() or (find_dir / ".keep").is_file():
+    # Last word, and ahead of the human pin: a pin says "keep this artifact",
+    # which is not a claim that it earns security credit.
+    if no_security_credit:
+        status = "NOT-REPORTABLE (no security credit)"
+    elif (find_dir / ".reviewed").is_file() or (find_dir / ".keep").is_file():
         status = "OK (override)"
     sig["status"] = status
     return sig
@@ -291,15 +302,16 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
     clusters: list[dict] = []
     for comp in components:
         members = [by_disp[i] for i in comp["members"]]
-        # Canonical = proven-over-unproven, then severity, then id: an unproven
-        # theory can't outrank a proven duplicate. One evidence tier → falls
-        # through to severity, unchanged.
+        # A retained no-credit defect cannot represent a reportable duplicate.
+        # Within one credit tier, proven evidence wins, then severity and id.
         canonical = max(members, key=lambda m: (
-            m.get("evidence_rank", 0), m["severity_rank"], -_lex_rank(disp(m))))
+            m.get("security_credit_rank", 1), m.get("evidence_rank", 0),
+            m["severity_rank"], -_lex_rank(disp(m))))
         cid = _component_cluster_id(canonical, display_key)
         can_disp = disp(canonical)
         ordered = sorted(members, key=lambda m: (
-            -m.get("evidence_rank", 0), -m["severity_rank"], _lex_rank(disp(m))))
+            -m.get("security_credit_rank", 1), -m.get("evidence_rank", 0),
+            -m["severity_rank"], _lex_rank(disp(m))))
         for m in members:
             m["cluster"] = cid
             m["is_canonical"] = (disp(m) == can_disp)
@@ -601,7 +613,9 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
         f"disabled for this run, or the finding is pinned by "
         f"`.keep`/`.reviewed` and bypassed the gate). A `Needs review` "
         f"severity is a terminal, validated finding whose accepted class "
-        f"cannot be mapped to a trustworthy CVSS primitive without human input."
+        f"cannot be mapped to a trustworthy CVSS primitive without human input. "
+        f"`Not a security report` / `NOT-REPORTABLE` identifies a retained real "
+        f"defect that earns no security credit."
     )
     lines.append("")
     n_findings = sum(c["size"] for c in clusters)
@@ -636,9 +650,10 @@ def _format_clusters_md(clusters: list[dict], findings_root: Path,
     lines.append("---")
     lines.append("")
     lines.append(
-        "_Findings triaged out as non-actionable (out-of-scope, false "
-        "positive, or robustness-only) are tracked separately — see the "
-        f"[rejected findings index]({_rejected_report_link(findings_root)})._"
+        "_Rejected finding claims are tracked separately — see the "
+        f"[rejected findings index]({_rejected_report_link(findings_root)}). "
+        "Retained `NOT-REPORTABLE` rows remain above as engineering evidence "
+        "and earn no security credit._"
     )
     lines.append("")
     return "\n".join(lines) + "\n"
@@ -826,7 +841,9 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
         f"A `Pending` severity means the find-quality gate has not "
         f"rendered a final verdict yet (LLM disabled, or pinned by "
         f"`.keep`/`.reviewed`). `Needs review` means validation completed but "
-        f"the accepted class has no trustworthy CVSS primitive mapping."
+        f"the accepted class has no trustworthy CVSS primitive mapping. "
+        f"`Not a security report` / `NOT-REPORTABLE` identifies a retained "
+        f"real defect that earns no security credit."
     )
     md_lines.append("")
     md_lines.append(

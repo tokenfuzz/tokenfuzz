@@ -20,6 +20,7 @@ COMMAND = ROOT / "bin" / "cluster-findings"
 sys.path.insert(0, str(ROOT / "lib"))
 
 import report_identity  # noqa: E402
+import validation_receipt  # noqa: E402
 
 
 class ClusterFindingsTests(unittest.TestCase):
@@ -226,6 +227,80 @@ class ClusterFindingsTests(unittest.TestCase):
         self.assertIn("Needs review", markdown)
         self.assertIn("NEEDS REVIEW", markdown)
         self.assertIn("sev-Needs-review", html)
+
+    def test_uncredited_findings_are_named_and_cannot_be_canonical(self) -> None:
+        """Retained engineering defects must not read as security yield."""
+        uncredited = self.make_find(
+            "FIND-N1",
+            "# Retained state defect\n"
+            "Location: `src/state.c:app_reset:41`\nClass: state",
+            "state", severity="high",
+        )
+        validation_receipt.write(
+            uncredited.parent, kind="finding", state="not-reportable",
+        )
+        duplicate = self.make_find(
+            "FIND-N2",
+            "# Retained duplicate\n"
+            "Location: `src/shared.c:app_parse:91`\nClass: memory-safety",
+            "memory-safety", severity="high",
+        )
+        validation_receipt.write(
+            duplicate.parent, kind="finding", state="not-reportable",
+        )
+        reportable = self.make_find(
+            "FIND-R1",
+            "# Reportable duplicate\n"
+            "Location: `src/shared.c:app_parse:91`\nClass: memory-safety",
+            "memory-safety", severity="low",
+        )
+        validation_receipt.write(
+            reportable.parent, kind="finding", state="reportable",
+        )
+
+        process = self.run_cluster()
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        rows = (self.results / "findings" / "FINDING-CLUSTERS.md").read_text()
+        uncredited_row = next(
+            line for line in rows.splitlines() if "FIND-N1" in line
+        )
+        mixed_row = next(
+            line for line in rows.splitlines()
+            if "FIND-N2" in line and "FIND-R1" in line
+        )
+        self.assertIn("Not a security report", uncredited_row)
+        self.assertIn("NOT-REPORTABLE (no security credit)", uncredited_row)
+        self.assertNotIn("| High |", uncredited_row)
+        self.assertTrue(mixed_row.startswith("| Low "), mixed_row)
+        self.assertIn("[FIND-R1]", mixed_row)
+        self.assertLess(mixed_row.index("[FIND-R1]"), mixed_row.index("FIND-N2"))
+        self.assertIn("NOT-REPORTABLE (no security credit)", mixed_row)
+
+    def test_stale_no_credit_receipt_returns_to_review(self) -> None:
+        """A verdict that no longer describes the report cannot keep labelling it."""
+        report = self.make_find(
+            "FIND-N3", "# Initial defect\nLocation: `src/state.c:reset:9`\nClass: state",
+            "state", severity="high",
+        )
+        validation_receipt.write(
+            report.parent, kind="finding", state="not-reportable",
+        )
+        report.write_text(
+            report.read_text(encoding="utf-8") + "\nNew security-boundary evidence.\n",
+            encoding="utf-8",
+        )
+
+        process = self.run_cluster()
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        row = next(
+            line for line in
+            (self.results / "findings" / "FINDING-CLUSTERS.md").read_text().splitlines()
+            if "FIND-N3" in line
+        )
+        self.assertNotIn("NOT-REPORTABLE", row)
+        self.assertNotIn("Not a security report", row)
 
     def test_stamp_stays_out_of_a_code_fence(self) -> None:
         """Stamping must not move the report's content identity.
