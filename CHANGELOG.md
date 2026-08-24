@@ -1,5 +1,183 @@
 # Changelog
 
+## 1.5.1 - 2026-08-23
+
+- **A benchmark row is priced and labelled by the model that actually served
+  it.** A CLI answered `--model gemini-3.7-flash` with a cheerful OK while
+  serving gemini-3.5-flash for 100% of tokens, so every row named a model that
+  never ran and priced $1.50/$9 traffic at $0.75/$3.75.
+  `llm_usage.substituted_model()` now gates the `bin/audit` preflight and ranks
+  ahead of the quota marker in `bin/benchmark`: a substitution is settled
+  evidence that the cell measured something else, while a capacity limit only
+  means it was cut short. It judges on the busiest served model, since one
+  session legitimately bills a small helper model beside the one it asked for
+  while a token of the requested model beside a million of another is still a
+  mislabelled row; it reads exact telemetry positions so a "models" object in
+  tool output cannot trip it, and absent telemetry falls open. A TTL-shaped
+  `[1m]` decoration is stripped and an arbitrary bracket is not, so flash and
+  flash-lite stay distinct and `claude-opus-5[1m]` still gets its real price
+  row. The preflight records a refusal through the provider markers, so a
+  harness-only run recognises it instead of retrying a deterministic rejection
+  every replicate.
+
+  The rate card is the cross-backend denominator, and four of its rows were
+  wrong. The whole GPT-5.6 family carried the previous generation's rates —
+  Sol, the codex default, billing 5/0.50/30 where OpenAI publishes 4/0.40/20,
+  and Luna out by 5x; Gemini 3.6 Flash was pinned at its post-promotion rate
+  while it is on the same promotion as 3.7; Sonnet 5 stepped up on an announced
+  increase that was cancelled; and Sonnet 4/4.5 carried a >200k premium that
+  existed only under the retired 1M-context beta, where no real request can
+  reach the threshold. No row keys on a date any more and the machinery for it
+  is gone with them: an announced future change is not a rate — Sonnet 5 is the
+  standing proof — and a dated table restates a completed run's spend on a day
+  nothing actually happened. When a price changes, change the row.
+
+  Token counts were wrong on one backend in the same direction. `harvest_tokens`
+  normalized oss as cumulative-input and subtracted cache reads, but OpenCode
+  reports `input` disjoint from `cache.read`, so a real ffmpeg cell reported
+  64,939 input tokens instead of 2,886,075.
+
+- **Regeneration no longer rewrites a finished cell as incomplete.** A rebuilt
+  target tree failed the run's build pin, and `--regenerate` scored that as a
+  fresh measurement of cell quality — dropping a done/clean cell out of its own
+  aggregate even though its finalized receipts still described evidence produced
+  under the pinned build. An unavailable replay build is a replay limitation:
+  status and `run_quality` are preserved, the reason is recorded in
+  `build_finalization_error` and removed if the pinned generation becomes
+  available again, and unresolved evidence stays unadjudicated. The conservative
+  gate itself is unchanged — replay still fails closed, only current
+  content-addressed receipts earn credit, `finalizers_ok` still keeps a
+  genuinely incomplete cell from being promoted, and no unavailable build can
+  manufacture a verdict.
+
+- **A cell stops spending its wall idle.** An agent on a lane with no claimable
+  card was never reassigned: `initialize_agent_strategies` wrote only when the
+  value was unrecognised, and post-iteration rotation never runs on a
+  provider-interrupted iteration, so one cell held an agent idle for 88% of the
+  run beside 104 unclaimed cards. Rotation now happens at assignment time, after
+  the rank pass that mints companions, and only when the agent holds neither a
+  live claim nor an open hypothesis in that lane — counted across the card's
+  primary strategy and its `allowed_strategies`, since a claim taken through a
+  carried-over companion angle is still that agent's work. An operator
+  `--strategy` pin still wins.
+
+  The direct condition wasted its wall a different way: the prompt banned
+  ps/pgrep-driven kills without saying how to keep a PID, so jobs started as
+  `( ... & )` held slots to the deadline and one cell spent 52% of its wall
+  asleep at the concurrency cap. The guidance now appends the PID to a rendered
+  absolute path under the cell's own output dir, because a shell variable does
+  not survive between tool calls. `benchmark_model_direct_render.main()` also
+  dropped `argv[4]` and rendered a CLI prompt with no deadline line at all.
+
+- **`--backend oss` starts an audit without a hand-typed security flag.**
+  `sandboxed` was the default for every backend and OpenCode is refused under
+  it, so even inside a proper container every oss launch needed
+  `--agent-security external-bypass` spelled out. The default now resolves per
+  backend: oss picks external-bypass, the only profile it can actually run
+  under. OpenCode's permissions were verified against its CLI and its own docs
+  to be an in-process approval gate rather than an OS sandbox — there is no
+  sandbox flag anywhere in its command tree — so `sandboxed` has nothing to run
+  it inside. Hosted backends are untouched and `--backend all` still resolves
+  sandboxed.
+
+  An unasserted bypass now warns rather than refusing, which relaxes the gate
+  1.4.1 shipped. `IS_SANDBOX=1` is the operator's assertion that an outer
+  container or VM exists, not a measurement of one, and gating the oss default
+  on it only moves the refusal — the fallback is the profile OpenCode cannot
+  use. Its absence prints one warning per process naming exactly what is
+  unconfined: no CLI sandbox confines the agent, nothing has asserted that a
+  container does, and agents run target build scripts and harness-authored
+  testcases with this account's filesystem, credentials and network. Capability
+  refusals are a different claim and are unchanged — no flag grants a CLI a
+  sandbox it does not have — and that reasoning now lives in
+  `--agent-security`'s help so the guides state it once.
+
+  Defaults moved with it. gemini is gemini-3.7-flash and grok is grok-4.6, with
+  the new Gemini slug mapped to its exact `agy` display label: agy selects by
+  label and silently falls back to its remembered `/model` when handed anything
+  it cannot resolve, so an unmapped slug means every gemini run quietly audits
+  under whatever the CLI last used. An `opencode/<id>` catalog model is passed
+  through untouched instead of being rewritten to `local/opencode/<id>` and
+  handed a synthetic provider pointed at 127.0.0.1, while a served model id that
+  merely contains a slash still routes to the local adapter. The container shell
+  installs OpenCode, so the boundary it asserts has something to hold.
+
+- **A crash that reproduces reaches a verdict instead of stalling as unjudged.**
+  Three defects each held a reproducing crash unadjudicated: replay substituted
+  only an argument equal to the bare token, so `scheme:{TESTCASE}` stayed
+  literal; the bundle contract asked for `harness.c` while the gate reruns a
+  compiled binary; and UBSan/TSan/MSan named their checks from fixed lists that
+  had rotted, leaving division by zero and MSan's own SEGV with no fault key, so
+  a replay that reproduced 5/5 read the same as one that never ran. The kind is
+  now read from what the report states, anchored to the sanitizer's own line so
+  target output cannot supply it, with the fatal-signal ERROR line as the
+  fallback. A CLI replay also dropped the configured `[runner]` block when no
+  `[runner] bin` was set and substituted `asan_bin` for a sanitizer the binary
+  is not built with — the run is then clean whatever the input does, and
+  `not-reproduced` disqualifies the crash. The block now applies on `bin/probe`'s
+  carrier rule, where it belongs to `runner_bin`, and no contract resolves where
+  the binary cannot be shown to carry the instrumentation. Three ffmpeg bundles
+  that had stalled now replay 5/5.
+
+- **A stuck trigger review is settled instead of staying pending forever.** A
+  lone Uncertain vote and a Reject/Promote split were both treated as
+  cache-complete while publication correctly kept them pending, so regeneration
+  had no path to adjudicate the unjudged remainder that marks a benchmark count
+  a floor, and the state was absorbing. Independent reviewers also never saw
+  each other's evidence, so a Reject naming a disproved consequence and a
+  Promote arguing a reachable trigger answered different questions and could not
+  converge. One focused resolution review now runs for exactly those two states:
+  it receives the prior rationales, is asked to settle their specific
+  disagreement rather than review blind, and emits a verdict only when source
+  anchors establish which prior reading is correct — otherwise it stays
+  Uncertain and names the open fact. It owns the verdict and the question it was
+  asked, not the facts the reviews already agreed on: `vulnerable_boundary_surface`
+  overrides the Surface that severity scores, and the split reviewers agreed on
+  it every time while disagreeing only about scope, so consensus stands there
+  and the resolution fills the rest. Its cache is bound to the report, the
+  evidence, the prompt version and the exact prior reviews it adjudicated, and
+  carries its own decision version so changing resolver policy never invalidates
+  the first-pass votes. The two-Reject suppression rule is unchanged, and
+  genuinely unresolved cases still stay pending. On the artifacts on disk, 16 of
+  321 reach the new review, and only in states that previously had no path to a
+  verdict.
+
+- **A work card cannot be hard-closed outside the evidence gate.** `done`
+  closes a card exactly like `discarded` but was missing from
+  `update_card_status`'s status list, so one benchmark cell retired 18 cards
+  that way — 11 of them never probed. The gated set is derived from
+  `PERMANENT_TERMINAL_CARD_STATUSES`, and `bin/state` maps `done` onto
+  `discarded`.
+
+- **A report's rendered sibling survives a case-insensitive filesystem.**
+  `find_report` probed `directory / name`, which APFS — or a Docker Desktop bind
+  mount over one — answers for whichever spelling it is asked. Triage hands that
+  path to `render-md --html-sibling`, which names the sibling after it, so a
+  `report.md` artifact published `REPORT.html` that the exact-name link lookup
+  then missed. The exact-case lookup three modules had each grown privately now
+  lives once in `report_identity` beside `REPORT_NAMES`, reading the directory
+  with `scandir` so the correct answer costs tens of microseconds in triage's
+  per-iteration passes rather than hundreds.
+
+- **The handbook says what the code does.** Every concrete claim in `docs/` was
+  checked against `bin/`, `lib/`, `.agents/` and `AGENTS.md`, and eight were
+  wrong in ways a reader would act on: cluster ids are `CL-<8 hex>` and
+  `FCL-<8 hex>` hashes of the cluster signature, not `C1`/`F3`; an out-of-scope
+  crash takes no numeric score at all rather than a downgrade; the glossary had
+  the Validator ranking the work queue and made attacker reachability a
+  promotion gate rather than a reportability one; and Java sanitizer support was
+  credited to a component that appears nowhere in the tree.
+  `findings-rejected/REJECTED-FINDINGS.html` is written on every triage pass and
+  was documented nowhere, so a reviewer had no way to audit a rejected finding;
+  it is now named everywhere its crash-side twin is, along with the fourth
+  result lane it implies, `validation.json` in every bundle listing,
+  `--allow-concurrent`, `--no-alternates`, `AUDIT_MODEL_PREFLIGHT_TIMEOUT`,
+  `AUDIT_FORWARD_CREDENTIALS`, the `{NULL_DEVICE}` runner token,
+  `TARGET_CONFIG_SHA256`, and the rlang/perl runner rows. Counting policy, the
+  triage gate rules and the prerequisites tool table were restructured rather
+  than trimmed, with anchors preserved and nav labels matching the page titles
+  they disagreed with.
+
 ## 1.5.0 - 2026-08-21
 
 - **S4 is now boundary-directed fuzzing, and it actually runs.** S4 was a
