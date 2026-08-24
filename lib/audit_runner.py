@@ -765,12 +765,14 @@ def refresh_work_cards(
     refresh_ok = True
     patch_cards = runtime.results / "patch-cards.jsonl"
     pinned_strategy = str(getattr(runtime, "fixed_strategy", "")).upper()
+    pinned_s1 = pinned_strategy == "S1"
     pinned_s6 = pinned_strategy == "S6"
+    patch_generator = runtime.root / "bin" / "patch-cards"
     if pinned_s6:
         patch_cards.unlink(missing_ok=True)
-    elif (runtime.root / "bin" / "patch-cards").is_file():
+    elif patch_generator.is_file():
         completed = subprocess.run(
-            [str(runtime.root / "bin" / "patch-cards"), "--target-path", str(runtime.target_root),
+            [str(patch_generator), "--target-path", str(runtime.target_root),
              "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
              "--limit", str(rank_limit), "--output", str(patch_cards), "--quiet"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
@@ -778,13 +780,25 @@ def refresh_work_cards(
         if completed.returncode:
             patch_cards.unlink(missing_ok=True)
             refresh_ok = False
+            runtime.s1_source_degraded = True
             index_log(runtime, f"WARN: patch-cards refresh failed rc={completed.returncode}; stale cards removed")
+        else:
+            runtime.s1_source_degraded = False
+    else:
+        # Missing generator: a permanent fault, not a degraded source (see the
+        # peer-mining branch below), so a pinned lane is left to stop.
+        patch_cards.unlink(missing_ok=True)
+        if pinned_s1:
+            refresh_ok = False
+            index_log(runtime, "WARN: patch-cards is missing; pinned S1 queue cannot be generated")
     peer_cards = runtime.root / "bin" / "peer-fix-cards"
-    if pinned_strategy and not pinned_s6:
+    peer_mining_disabled = os.environ.get("AUDIT_DISABLE_PEER_FIX_CARDS") == "1"
+    if (pinned_strategy and not pinned_s6) or peer_mining_disabled:
         # Peer mining is S6's card source alone; another pinned lane can never
-        # claim what it produces, so paying for it would only stale the queue.
+        # claim what it produces, and an operator disable must remove prior
+        # output before rank-work can merge it back into the queue.
         (runtime.results / "s6-peer-cards.jsonl").unlink(missing_ok=True)
-    elif os.environ.get("AUDIT_DISABLE_PEER_FIX_CARDS") != "1" and peer_cards.is_file():
+    elif peer_cards.is_file():
         completed = subprocess.run(
             [str(peer_cards), "--target-path", str(runtime.target_root),
              "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
@@ -798,8 +812,25 @@ def refresh_work_cards(
             index_log(runtime, f"WARN: peer-fix-cards refresh failed rc={completed.returncode}; stale cards removed")
         else:
             runtime.s6_source_degraded = False
+    else:
+        # A missing generator is a permanent fault, not a degraded source, so
+        # the campaign is left to stop rather than retried for the whole wall.
+        (runtime.results / "s6-peer-cards.jsonl").unlink(missing_ok=True)
+        if pinned_s6:
+            refresh_ok = False
+            index_log(runtime, "WARN: peer-fix-cards is missing; pinned S6 queue cannot be generated")
     rank = runtime.root / "bin" / "rank-work"
-    if pinned_s6:
+    if pinned_s1:
+        ctx = _queue_context(runtime)
+        callgraph.refresh(ctx)
+        s1_cards = workqueue.load_patch_cards(
+            patch_cards, rank_limit, ctx=ctx,
+        )
+        workqueue.write_cards(
+            runtime.results / "work-cards.jsonl",
+            workqueue.apply_latest_claim_status(ctx, s1_cards),
+        )
+    elif pinned_s6:
         s6_cards = [
             card for card in workqueue.read_jsonl(runtime.results / "s6-peer-cards.jsonl")
             if card.get("kind") == "s6-peer-fix"
@@ -1879,7 +1910,7 @@ def _pinned_lane_work_open(runtime: Runtime, card_ids: set[str]) -> bool:
             continue
         if str(row.get("card_id", "")) in card_ids:
             return True
-        if str(row.get("strategy", "")).strip().upper().startswith(pinned):
+        if workqueue.strategy_matches_pin(row.get("strategy", ""), pinned):
             return True
     return False
 
@@ -1899,7 +1930,7 @@ def _log_foreign_active_work(runtime: Runtime) -> None:
         str(row.get("strategy", "")).strip().upper() or "unlabelled"
         for row in structured_state.rows(runtime.results)
         if str(row.get("status", "")) in structured_state.ACTIVE
-        and not str(row.get("strategy", "")).strip().upper().startswith(pinned)
+        and not workqueue.strategy_matches_pin(row.get("strategy", ""), pinned)
     })
     if foreign:
         index_log(
@@ -1910,8 +1941,24 @@ def _log_foreign_active_work(runtime: Runtime) -> None:
         )
 
 
+# The card kind each pinned campaign consumes. A pin outside this map draws
+# from the shared ranked window, which is never finite, so it has no campaign
+# to exhaust.
+_FIXED_CAMPAIGN_KINDS = {"S1": "s1-patch", "S6": "s6-peer-fix"}
+
+
+def _fixed_campaign_source_degraded(runtime: Runtime, strategy: str) -> bool:
+    """Whether this pin's card source failed rather than answered "nothing"."""
+    if strategy == "S6":
+        return (
+            bool(getattr(runtime, "s6_source_degraded", False))
+            or not _s6_peers_configured(runtime)
+        )
+    return bool(getattr(runtime, "s1_source_degraded", False))
+
+
 def fixed_campaign_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
-    """Whether a pinned, finite S6 card campaign has no work left.
+    """Whether a pinned, finite card campaign has no work left.
 
     An absent/empty source file gets one worker so source failures are visible.
     Productive cards use the queue's normal scope-aware closure rule: one
@@ -1924,26 +1971,28 @@ def fixed_campaign_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
     active hypotheses from the earlier strategy, and letting those hold an S6
     campaign open keeps the run alive on work S6 never did.
     """
-    if str(getattr(runtime, "fixed_strategy", "")).upper() != "S6":
+    strategy = str(getattr(runtime, "fixed_strategy", "")).upper()
+    kind = _FIXED_CAMPAIGN_KINDS.get(strategy)
+    if not kind:
         return False
     ctx = _queue_context(runtime)
     supplied = [
         card for card in workqueue.apply_latest_claim_status(
             ctx, workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
         )
-        if card.get("kind") == "s6-peer-fix"
+        if card.get("kind") == kind
     ]
-    if not supplied:
-        # An empty queue only proves exhaustion when the source could answer.
-        # A peer set that is missing, unreachable, or returning nothing is a
-        # fault to surface, not a campaign that finished with no yield.
-        if getattr(runtime, "s6_source_degraded", False) or not _s6_peers_configured(runtime):
-            return False
-        return iteration > 1
     if _pinned_lane_work_open(
         runtime, {str(card.get("id", "")) for card in supplied},
     ):
         return False
+    if not supplied:
+        # An empty queue only proves exhaustion when the source could answer.
+        # A peer set that is missing, unreachable, or returning nothing is a
+        # fault to surface, not a campaign that finished with no yield.
+        if _fixed_campaign_source_degraded(runtime, strategy):
+            return False
+        return iteration > 1
     conclusion_counts = workqueue.card_conclusion_counts(ctx)
     distinct_counts = workqueue.card_distinct_hypothesis_counts(ctx)
     dry_streaks: dict[str, int] = {}
@@ -2568,7 +2617,11 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
                 "is a configuration fault, not an exhausted campaign",
             )
     if fixed_campaign_exhausted(runtime, state.iteration):
-        index_log(runtime, "CAMPAIGN_EXHAUSTED: no open S6 card or hypothesis remains")
+        index_log(
+            runtime,
+            "CAMPAIGN_EXHAUSTED: no open "
+            f"{str(runtime.fixed_strategy).upper()} card or hypothesis remains",
+        )
         state.stopped = True
         return "stalled", []
     if _productive_wall_exhausted(state):

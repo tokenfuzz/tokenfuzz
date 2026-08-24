@@ -122,6 +122,18 @@ class TargetTomlAutoRepairTests(unittest.TestCase):
         self.assertNotIn(str(target), text)
         self.assertNotIn("/etc/passwd", text)
 
+    def test_a_missing_array_is_inserted_before_an_array_of_tables(self) -> None:
+        self.toml.write_text(
+            'target = "sampleproj"\n\n[[build_config]]\nname = "compact"\n',
+            encoding="utf-8",
+        )
+
+        proc = self.run_repair({"includes": ["include"]})
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        text = self.toml.read_text(encoding="utf-8")
+        self.assertLess(text.index("includes"), text.index("[[build_config]]"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

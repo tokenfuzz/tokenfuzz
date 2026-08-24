@@ -1736,6 +1736,73 @@ def set_sanitizer_bin(text: str, sanitizer: str, value: str) -> str:
     return text
 
 
+def _format_top_level_array(name: str, values: list[str]) -> str:
+    rendered = ", ".join(toml_basic_string(value) for value in values)
+    return f"{name:<13} = [{rendered}]"
+
+
+def replace_top_level_array(
+    text: str, name: str, values: list[str], *, add_missing: bool = True,
+) -> str:
+    """Replace one top-level string array without disturbing later tables."""
+    head_re = re.compile(
+        rf"^(?P<indent>[ \t]*){re.escape(name)}[ \t]*=[ \t]*\[",
+        re.MULTILINE,
+    )
+    section_re = re.compile(
+        r"^[ \t]*(?:\[\[[^\]\r\n]+\]\]|\[[^\]\r\n]+\])"
+        r"[ \t]*(?:#.*)?$",
+        re.MULTILINE,
+    )
+    section = section_re.search(text)
+    scan_end = section.start() if section else len(text)
+    head = head_re.search(text, 0, scan_end)
+    if head is None:
+        if not add_missing:
+            return text
+        insertion = _format_top_level_array(name, values) + "\n"
+        if section:
+            return text[:section.start()] + insertion + text[section.start():]
+        separator = "" if not text or text.endswith("\n") else "\n"
+        return text + separator + insertion
+
+    depth = 0
+    quote = ""
+    escaped = False
+    comment = False
+    for index in range(head.end() - 1, len(text)):
+        character = text[index]
+        if comment:
+            if character == "\n":
+                comment = False
+            continue
+        if quote:
+            if escaped:
+                escaped = False
+            elif quote == '"' and character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = ""
+            continue
+        if character in ('"', "'"):
+            quote = character
+        elif character == "#":
+            comment = True
+        elif character == "[":
+            depth += 1
+        elif character == "]":
+            depth -= 1
+            if depth == 0:
+                replacement = head.group("indent") + _format_top_level_array(name, values)
+                return text[:head.start()] + replacement + text[index + 1:]
+    raise ValueError(f"{name}: unbalanced array literal in target.toml")
+
+
+def set_harness_includes(text: str, includes: list[str]) -> str:
+    """Replace an active top-level harness include list, if present."""
+    return replace_top_level_array(text, "includes", includes, add_missing=False)
+
+
 def _in_other_sanitizer_build(
     target_root: Path, sanitizer: str, candidate: Path,
 ) -> bool:

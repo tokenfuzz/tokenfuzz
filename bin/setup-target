@@ -956,7 +956,7 @@ class Setup:
                 log("bootstrap: alternate build configurations could not be prepared; primary build is unaffected")
 
     def report_harness_input_mismatch(self) -> None:
-        """Report a library and include set that cannot see each other.
+        """Repair, or report, a library and include set that cannot see each other.
 
         The CLI route is proved by launching the program, and a binary that
         cannot start is re-detected and replaced. The library route was proved
@@ -965,12 +965,11 @@ class Setup:
         declares nothing survived every rerun. Downstream that reads as "this
         target has no API", which is also what a target with no API looks like.
 
-        Symbol/header overlap is strong enough to diagnose the configuration,
-        but not to overrule it. A build may contain several real libraries, and
-        an operator-selected nested archive is stronger provenance than generic
-        artifact ranking. Re-detection is therefore a suggestion, never an
-        automatic replacement. A CLI-first target remains auditable while the
-        C-harness route is reviewed.
+        Generic artifact ranking is not enough to overrule an operator-selected
+        library. Zero overlap proves only that the configured pair cannot expose
+        a C API. Try the detected public headers against that same library and
+        repair `includes` when they agree; otherwise retain the configuration
+        and report the unresolved route instead of auditing a nearby helper.
         """
         for sanitizer_name in self.harness_input_sanitizers():
             config = target_config.Config(target_root=str(self.target_root))
@@ -978,29 +977,38 @@ class Setup:
             exported, declared = self.declared_exports(config, sanitizer_name)
             if not exported or declared:
                 continue
-            library, includes = target_config.detected_harness_inputs(
+            _, includes = target_config.detected_harness_inputs(
                 self.target_root, sanitizer_name,
             )
+            configured_library = config.sanitizer_lib(sanitizer_name)
             candidate = target_config.Config(target_root=str(self.target_root))
             target_config.load_toml_into(candidate, self.toml)
-            if library:
-                setattr(candidate, f"{sanitizer_name}_lib", library)
             candidate.includes = list(includes)
             _, repaired = self.declared_exports(candidate, sanitizer_name)
             if repaired:
+                before = self.toml.read_text(encoding="utf-8")
+                after = target_config.set_harness_includes(before, includes)
+                if after != before:
+                    self.toml.write_text(after, encoding="utf-8")
+                    log(
+                        "Repaired harness inputs (kept the configured library, "
+                        f"repaired includes): configured pair "
+                        f"declared none of the library's {exported} exported "
+                        f"symbol(s); {configured_library} + {includes} declares {repaired}"
+                    )
+                    continue
                 log(
-                    f"WARN: {sanitizer_name}_lib/includes declared "
-                    f"none of the library's {exported} exported symbol(s); "
-                    f"re-detection suggests {library} + {includes}, which "
-                    f"declares {repaired}. Keeping the configured pair because "
-                    "artifact detection cannot distinguish a product library "
-                    "from every helper; review these C-harness inputs"
+                    f"WARN: {sanitizer_name}_lib/includes declared none of the "
+                    f"library's {exported} exported symbol(s); {configured_library} + "
+                    f"{includes} declares {repaired}, but target.toml "
+                    "carries no active top-level `includes` array to repair"
                 )
                 continue
             log(
                 f"WARN: {sanitizer_name}_lib exports {exported} symbol(s) that "
-                f"`includes` does not declare, and re-detection found no better "
-                f"pair; a C harness cannot be written against this target. "
+                f"`includes` does not declare, and the detected include set "
+                f"still exposes none of them; a C harness cannot be written "
+                f"against this target. "
                 f"Check that {sanitizer_name}_lib names the library the build "
                 f"publishes rather than a helper archive beside it, and that "
                 f"`includes` reaches its public headers"

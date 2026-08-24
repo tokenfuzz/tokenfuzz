@@ -631,9 +631,7 @@ def handoff_directive(context: PromptContext, agent: int) -> str:
 def cold_start_prompt(context: PromptContext, agent: int) -> str:
     mode = context.mode(agent)
     strategy = context.strategy(agent)
-    strategy_block = ""
-    if strategy != "S1":
-        strategy_block = f"## ASSIGNED STRATEGY - {strategy}\n\n{strategy_brief(strategy, context.reference_dir)}"
+    strategy_block = f"## ASSIGNED STRATEGY - {strategy}\n\n{strategy_brief(strategy, context.reference_dir)}"
     # The pin says which strategy, never how to work it — step 4 below owns
     # the procedure, so restating it here only paraphrases the same rule.
     fixed = (

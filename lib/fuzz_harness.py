@@ -270,7 +270,14 @@ def declaration_index(target_root: "str | os.PathLike",
     for a project whose target.toml points straight at a build tree.
     """
     root = Path(target_root)
-    roots = [Path(d) for d in (include_dirs or []) if Path(d).is_dir()] or [root]
+    configured = [Path(d) for d in (include_dirs or []) if str(d)]
+    roots = [path for path in configured if path.is_dir()]
+    # No configured include contract means the source tree is the best
+    # available discovery surface. An explicit but missing contract is
+    # different: falling back there makes an unusable -I list look healthy and
+    # prevents setup-target from repairing it.
+    if not configured:
+        roots = [root]
     index: "dict[str, str]" = {}
     for base in roots:
         for path in _walk(base):

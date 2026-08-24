@@ -235,11 +235,21 @@ class HarnessInputAgreementTests(unittest.TestCase):
 
     def test_includes_that_resolve_to_no_header_are_reported(self) -> None:
         # The shipped shape: `includes` names the build directory, which exists
-        # and holds no header. An include list that resolves to nothing at all
-        # falls back to scanning the tree and quietly works, so only a list that
-        # resolves to a real but header-less directory reaches the gate empty —
-        # which is why this went unnoticed on the two targets that had it.
+        # and holds no header.
         configuration, root = self.config("build-asan/libdemo.a", ["build-asan"])
+        (root / "build-asan" / "libdemo.a").write_bytes(b"!<arch>\n")
+        with mock.patch.object(
+            fuzz_harness.native_symbols, "defined_symbols",
+            return_value={"app_parse"},
+        ):
+            self.assertEqual(
+                fuzz_harness.declared_exports(configuration, "asan"), (1, 0),
+            )
+
+    def test_a_missing_configured_include_never_falls_back_to_the_whole_tree(self) -> None:
+        configuration, root = self.config(
+            "build-asan/libdemo.a", ["missing/include"],
+        )
         (root / "build-asan" / "libdemo.a").write_bytes(b"!<arch>\n")
         with mock.patch.object(
             fuzz_harness.native_symbols, "defined_symbols",

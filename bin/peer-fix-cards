@@ -75,8 +75,7 @@ def build_s6_card(
         "reason": (
             f"S6 peer-fix mining: {peer} "
             f"{workqueue.peer_revision_kind(source).lower()} "
-            f"{fix_entry.get('id', '')[:24]} ({source}): "
-            f"{str(fix_entry.get('summary', ''))[:160]}"
+            f"{str(fix_entry.get('id', ''))[:24]} ({source})"
         ),
         "status": "unclaimed",
         "created_at": workqueue.now_iso(),

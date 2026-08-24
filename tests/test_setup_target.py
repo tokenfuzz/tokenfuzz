@@ -109,7 +109,7 @@ class SetupTargetTests(unittest.TestCase):
     def config(self, slug: str) -> Path:
         return self.harness / "output" / slug / "target.toml"
 
-    def test_a_detected_harness_input_mismatch_never_overwrites_config(self) -> None:
+    def test_a_detected_harness_input_mismatch_does_not_retarget_the_library(self) -> None:
         setup_target = _load_setup_target()
         target = self.temp / "mismatch-target"
         target.mkdir()
@@ -126,7 +126,7 @@ class SetupTargetTests(unittest.TestCase):
         before = config.read_bytes()
         with (
             mock.patch.object(
-                setup, "declared_exports", side_effect=[(3, 0), (5, 2)],
+                setup, "declared_exports", side_effect=[(3, 0), (3, 0)],
             ),
             mock.patch.object(
                 setup_target.target_config, "detected_harness_inputs",
@@ -135,6 +135,37 @@ class SetupTargetTests(unittest.TestCase):
         ):
             setup.report_harness_input_mismatch()
         self.assertEqual(before, config.read_bytes())
+
+    def test_a_header_only_repair_preserves_the_configured_library(self) -> None:
+        setup_target = _load_setup_target()
+        target = self.temp / "header-mismatch-target"
+        target.mkdir()
+        config = self.temp / "header-mismatch-target.toml"
+        config.write_text(
+            'target = "demo"\nasan_lib = "build-asan/libproduct.a"\n'
+            'includes = [\n  "stale/include", # old\n  "generated/[old]",\n]\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        setup = setup_target.Setup.__new__(setup_target.Setup)
+        setup.target_root = target
+        setup.toml = config
+        with (
+            mock.patch.object(
+                setup, "declared_exports", side_effect=[(3, 0), (3, 2)],
+            ),
+            mock.patch.object(
+                setup_target.target_config, "detected_harness_inputs",
+                return_value=("build-asan/libhelper.a", ["include"]),
+            ),
+        ):
+            setup.report_harness_input_mismatch()
+        text = config.read_text(encoding="utf-8")
+        self.assertIn('asan_lib = "build-asan/libproduct.a"', text)
+        self.assertIn('includes      = ["include"]', text)
+        self.assertNotIn("libhelper.a", text)
+        self.assertNotIn("stale/include", text)
+        setup_target.target_config.parse_toml(config)
 
     def test_browser_setup_does_not_invent_a_c_harness_contract(self) -> None:
         setup_target = _load_setup_target()

@@ -1795,6 +1795,40 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "a pinned S6 refresh skips unrelated patch and source ranking",
         f"tools={pinned_tools!r} cards={pinned_cards!r}",
     )
+    refresh_runtime.fixed_strategy = "S1"
+    audit_runner.workqueue.write_cards(
+        refresh_results / "patch-cards.jsonl",
+        [
+            {
+                "id": f"PATCH-{index:02d}", "kind": "s1-patch",
+                "strategy": "S1", "target_slug": "demo",
+                "touched_files": [f"src/unit{index:02d}.c"],
+                "description": "fix bounds check", "score": 80 - index,
+                "fix_hashes": [f"abc{index:03d}"], "status": "unclaimed",
+            }
+            for index in range(12)
+        ],
+    )
+    with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
+         mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
+         mock.patch.object(audit_runner.callgraph, "refresh", return_value="fresh"), \
+         mock.patch.object(audit_runner.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as pinned_launch:
+        audit_runner.refresh_work_cards(refresh_runtime, limit=4)
+    pinned_tools = [Path(call.args[0][0]).name for call in pinned_launch.call_args_list]
+    pinned_cards = audit_runner.workqueue.read_jsonl(refresh_results / "work-cards.jsonl")
+    check(
+        pinned_tools == ["patch-cards"]
+        and [card.get("id") for card in pinned_cards]
+        == ["PATCH-00", "PATCH-01", "PATCH-02", "PATCH-03"]
+        and audit_runner._rank_window(refresh_runtime) == (4, 4),
+        "a pinned S1 refresh uses the full expandable window and skips unrelated ranking",
+        f"tools={pinned_tools!r} cards={pinned_cards!r}",
+    )
+    refresh_runtime.fixed_strategy = "S6"
+    audit_runner.workqueue.write_cards(
+        refresh_results / "work-cards.jsonl",
+        [{"id": "S6-only", "kind": "s6-peer-fix", "strategy": "S6", "file": "", "mode": "auto"}],
+    )
     audit_runner.workqueue.update_card_status(
         audit_runner._queue_context(refresh_runtime), "S6-only", "blocked",
         agent="1", note="source proof",
@@ -1837,7 +1871,47 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         and audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
         "a healthy but empty S6 source gets exactly one discovery iteration",
     )
+    (refresh_results / "state" / "hypotheses.jsonl").write_text(
+        json.dumps({
+            "agent": "1", "id": "H-MANUAL-S6", "status": "INVESTIGATING",
+            "strategy": "S6", "card_id": "",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    check(
+        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
+        "an empty source cannot strand an active cardless S6 hypothesis",
+    )
+    (refresh_results / "state" / "hypotheses.jsonl").write_text(
+        "", encoding="utf-8",
+    )
     refresh_runtime.config = generic_config
+    # A pinned S1 lane draws only from patch cards, so a target whose history
+    # mines nothing must stop rather than skip agents for the whole wall.
+    refresh_runtime.fixed_strategy = "S1"
+    audit_runner.workqueue.write_cards(refresh_results / "work-cards.jsonl", [])
+    refresh_runtime.s1_source_degraded = False
+    check(
+        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=1)
+        and audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
+        "a healthy but empty S1 patch source gets exactly one discovery iteration",
+    )
+    refresh_runtime.s1_source_degraded = True
+    check(
+        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
+        "a failed patch-cards generation is a fault, not an exhausted S1 campaign",
+    )
+    refresh_runtime.s1_source_degraded = False
+    audit_runner.workqueue.write_cards(
+        refresh_results / "work-cards.jsonl",
+        [{"id": "PATCH-open", "kind": "s1-patch", "strategy": "S1",
+          "file": "src/unit.c", "mode": "auto"}],
+    )
+    check(
+        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=9),
+        "an unclaimed S1 patch card keeps its campaign open",
+    )
+    refresh_runtime.fixed_strategy = "S6"
     # A pin decides which generators run, so it is part of the queue identity:
     # without it a re-run under a new --strategy reads the old queue as fresh.
     pin_signatures = {
@@ -1869,6 +1943,53 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "a pinned non-S6 lane skips peer mining and drops stale S6 cards",
         repr(other_tools),
     )
+    refresh_runtime.fixed_strategy = ""
+    (refresh_results / "s6-peer-cards.jsonl").write_text(
+        json.dumps({"id": "S6-stale", "kind": "s6-peer-fix"}) + "\n",
+        encoding="utf-8",
+    )
+    with mock.patch.dict(
+        os.environ, {"AUDIT_DISABLE_PEER_FIX_CARDS": "1"}, clear=False,
+    ), mock.patch.object(
+        audit_runner.housekeeping, "should_run", return_value=True,
+    ), mock.patch.object(
+        audit_runner.housekeeping, "mark_clean",
+    ), mock.patch.object(
+        audit_runner.subprocess, "run", return_value=SimpleNamespace(returncode=0),
+    ) as disabled_peer_launch:
+        audit_runner.refresh_work_cards(refresh_runtime)
+    disabled_tools = [
+        Path(call.args[0][0]).name
+        for call in disabled_peer_launch.call_args_list
+    ]
+    check(
+        disabled_tools == ["patch-cards", "rank-work"]
+        and not (refresh_results / "s6-peer-cards.jsonl").exists(),
+        "disabling peer mining removes stale S6 cards before source ranking",
+        repr(disabled_tools),
+    )
+    saved_refresh_root = refresh_runtime.root
+    refresh_runtime.root = refresh_results / "missing-tools"
+    refresh_runtime.fixed_strategy = "S6"
+    (refresh_results / "s6-peer-cards.jsonl").write_text(
+        json.dumps({"id": "S6-stale", "kind": "s6-peer-fix"}) + "\n",
+        encoding="utf-8",
+    )
+    with mock.patch.object(
+        audit_runner.housekeeping, "should_run", return_value=True,
+    ), mock.patch.object(
+        audit_runner.housekeeping, "mark_clean",
+    ) as missing_generator_clean:
+        audit_runner.refresh_work_cards(refresh_runtime)
+    check(
+        not (refresh_results / "s6-peer-cards.jsonl").exists()
+        and audit_runner.workqueue.read_jsonl(
+            refresh_results / "work-cards.jsonl",
+        ) == []
+        and not missing_generator_clean.called,
+        "a missing pinned-lane generator removes stale cards and leaves refresh dirty",
+    )
+    refresh_runtime.root = saved_refresh_root
     # Work carried in from an earlier pin belongs to that strategy; counting
     # it would keep this campaign alive on results S6 never produced.
     refresh_runtime.fixed_strategy = "S6"

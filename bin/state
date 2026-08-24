@@ -43,20 +43,13 @@ from workqueue import (
     show_crash,
     show_finding,
     show_work_card,
+    strategy_matches_pin,
     strategy_completion_status,
     strategy_yield,
     summarize_queue,
     update_hypothesis,
     update_card_status,
 )
-
-
-def _strategy_matches_pin(label: str, pinned: str) -> bool:
-    value = str(label or "").strip().upper()
-    return value == pinned or (
-        value.startswith(pinned) and len(value) > len(pinned)
-        and value[len(pinned)] in "-_ ("
-    )
 
 
 def _claim_strategy(ctx, requested: str) -> str:
@@ -67,7 +60,7 @@ def _claim_strategy(ctx, requested: str) -> str:
     empty queue and ends the session instead of correcting the command.
     """
     pinned = fixed_strategy(ctx)
-    if pinned and requested and not _strategy_matches_pin(requested, pinned):
+    if pinned and requested and not strategy_matches_pin(requested, pinned):
         raise ValueError(
             f"operator-pinned strategy {pinned} rejects queue strategy {requested}"
         )
@@ -439,7 +432,7 @@ def main(argv: list[str]) -> int:
         return 0
     if args.cmd == "add-hyp":
         pinned = fixed_strategy(ctx)
-        if pinned and not _strategy_matches_pin(args.strategy, pinned):
+        if pinned and not strategy_matches_pin(args.strategy, pinned):
             print(
                 f"[state] operator-pinned strategy {pinned} rejects hypothesis strategy {args.strategy}",
                 file=sys.stderr,

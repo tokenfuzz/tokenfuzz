@@ -136,7 +136,7 @@ class PeerFixCardTests(unittest.TestCase):
         self.assertEqual(card["peer_fix_evidence_kind"], "fixed-range")
         self.assertIn("osv range endpoint", card["reason"])
         self.assertIn("fix bounds check", card["peer_fix_summary"])
-        self.assertIn("fix bounds check", card["reason"])
+        self.assertNotIn("fix bounds check", card["reason"])
 
     def test_generation_reads_the_sessions_pinned_config(self) -> None:
         self.write_config(peers=["expat"])

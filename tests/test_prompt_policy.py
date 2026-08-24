@@ -256,6 +256,15 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertIn("Every hypothesis on this run must be Strategy S3.", rendered)
         self.assertIn("Record one concrete hypothesis with `bin/state add-hyp`", rendered)
 
+    def test_s1_cold_prompt_names_its_playbook(self) -> None:
+        context = self.context()
+        context.fixed_strategy = "S1"
+
+        rendered = prompt.cold_start_prompt(context, 1)
+
+        self.assertIn("Strategy brief (S1)", rendered)
+        self.assertIn("S1-prior-fix-review.md", rendered)
+
     def test_prompt_allows_targeted_revisits_without_an_absolute_ban(self) -> None:
         rendered = self.render()
 
