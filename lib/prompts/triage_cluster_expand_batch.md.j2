@@ -1,0 +1,25 @@
+The following new crashes just landed. Expand each bug cluster: for every id,
+name up to 3 sibling hypotheses worth investigating next. Look for same-file
+siblings, neighbor handlers with the same pattern, callers that share the bug
+class, or peer functions in the same file.
+{{ scope_block }}
+Output one JSON object with key "items". Include exactly one item for every id
+you can assess. A missing id is treated as unavailable and retried later, not
+as an empty result. Each item has its exact id and a "rows" array containing
+only genuine sibling hypotheses; use an empty array when there are no strong
+siblings and never pad with weak guesses. Each row needs:
+  file        string  source path
+  function    string  function or method name
+  line        integer best-guess line number (use 0 if unsure)
+  hypothesis  string  one sentence describing the suspected bug
+  category    string  one of: bounds, lifetime, type, size, uninit, state
+
+Do not repeat a seed crash itself. Keep the JSON valid and parseable.
+
+{{ items_block }}
+
+JSON schema:
+  { "items": [ { "id": "CRASH-...", "rows": [
+    { "file": "...", "function": "...", "line": 0,
+      "hypothesis": "...", "category": "..." }
+  ] } ] }

@@ -690,6 +690,16 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
         r"|\bsync\.(?:Mutex|RWMutex|WaitGroup|Once)\b|\bgo\s+func\b"
         r"|\bthread::spawn\b|\bMutex::new\b|\bRwLock\b"
     ), 7, "concurrency primitive"),
+    # S5 — explicit state-machine transition.  Require an object field,
+    # conventional state field, transition method, or switch discriminator;
+    # a local variable merely named `state` is too common to be evidence.
+    (re.compile(
+        r"\b(?:self|this|[A-Za-z_]\w*)(?:->|\.)state\s*="
+        r"|\b(?:mState|state_|current_state)\s*="
+        r"|\b(?:set|change|advance|transition)(?:[_-]?(?:state|phase)|_to)\w*\s*\("
+        r"|\bswitch\s*\(\s*(?:\w+(?:->|\.)?)?(?:state|phase)\s*\)",
+        re.IGNORECASE,
+    ), 8, "state-machine transition"),
     # S3 — size / integer arithmetic: overflow, truncation, signedness.
     (re.compile(
         r"\b(?:u?int(?:8|16|32|64)_t|size_t|ssize_t|ptrdiff_t)\b[^;\n]{0,40}?[-+*]"
@@ -749,7 +759,7 @@ _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
         "raw memory operation", "allocation/resize"})),
     ("S5", frozenset({
         "lifetime/ownership operation", "unmanaged escape hatch",
-        "concurrency primitive"})),
+        "concurrency primitive", "state-machine transition"})),
     ("S2", frozenset({"asserted invariant"})),
     ("S3", frozenset({
         "cast-heavy path", "size math", "exported API surface",
@@ -758,6 +768,10 @@ _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
         "round-trip property surface", "hash/injectivity surface",
         "numerical-domain surface"})),
 )
+
+# Patch proximity is useful ranking context only for prior-fix review.  It is
+# not evidence for a lifetime, parser, invariant, or property hypothesis.
+_S1_REASON_TAGS = frozenset({"near prior-fix card"})
 
 def expected_yield_rank(strategy: str) -> int:
     """Order strategies by expected yield, best first.
@@ -1163,6 +1177,36 @@ def card_strategy_matches(card: dict, strategy: str = "") -> bool:
     allowed_raw = card.get("allowed_strategies") or []
     allowed = {str(s).strip().upper() for s in allowed_raw if str(s).strip()}
     return primary == requested or requested in allowed
+
+
+def card_reason_for_strategy(card: dict, strategy: str = "") -> str:
+    """Return the ranking evidence relevant to one assigned strategy.
+
+    Ranked files can signal several audit methods.  Showing every signal to a
+    pinned agent makes the easiest-looking sibling method compete with the
+    assigned one (for example, malformed-input S7 work on an S5 card).  Keep
+    the stored reason complete, but lead the claimed card with only this
+    strategy's feature evidence plus strategy-neutral ranking context.
+    """
+    reason = str(card.get("reason", "") or "").strip()
+    assigned = str(strategy or card.get("strategy", "")).strip().upper()
+    if not reason or card.get("kind") != "ranked-source" or not assigned:
+        return reason
+    parts = [part.strip() for part in reason.split(";") if part.strip()]
+    tags_by_strategy = {**dict(_STRATEGY_BUCKETS), "S1": _S1_REASON_TAGS}
+    tags = tags_by_strategy.get(assigned, frozenset())
+    all_tags = frozenset().union(
+        *(bucket for _, bucket in _STRATEGY_BUCKETS), _S1_REASON_TAGS,
+    )
+    specific = [part for part in parts if part in tags]
+    context = [
+        part for part in parts
+        if part not in all_tags
+        and not part.startswith(("companion strategy ", "llm-rerank:"))
+    ]
+    if not specific:
+        return "; ".join(context) or reason
+    return "; ".join([f"{assigned} evidence: {', '.join(specific)}", *context])
 
 
 def is_auditable_work_card(card: dict) -> bool:
@@ -1802,10 +1846,9 @@ def rank_target(ctx: Context, limit: int, patch_cards: Path | None = None) -> li
             # Every fired strategy gets one. A cap dropped them in bucket
             # order, which starves the tail of that order queue-wide rather
             # than per file, and a strategy owning no cards is never
-            # assignable to an agent. On a tree with more ranked files than
-            # window slots these stay candidates: `select_strategy_window`
-            # admits a file's second angle only once the rotation runs out
-            # of fresh files to prefer.
+            # assignable to an agent. `select_strategy_window` spends its
+            # bound on distinct files, then keeps every companion for each
+            # selected file so their closure evidence remains independent.
             companions = complementary_strategies(reasons, primary_strategy)
             for idx, comp_strategy in enumerate(companions):
                 ch = hashlib.sha1(
@@ -1906,7 +1949,7 @@ def campaign_card(ctx: Context) -> dict:
 
 
 def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
-    """Choose which ranked cards fill a bounded window, one file at a time.
+    """Choose which ranked files fill a bounded window.
 
     `cards` arrives in final rank order and that order is preserved — only
     membership changes, so claim ordering and buildability priority are
@@ -1923,12 +1966,12 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
     every strategy owning assignable work, which is what an unbounded
     companion count was reaching for.
 
-    Companions therefore stop being pre-minted queue-wide. The angles they
-    carried are not lost: a selected card lists the strategies its dropped
-    same-file siblings held in `allowed_strategies`, so an agent on any of
-    them can still claim that file. Nothing recreates a dropped card later —
-    the claim path only ever reads persisted cards — so without this the file
-    would be reachable under one strategy for the whole run.
+    Once a file is selected, keep each of its strategy cards.  Collapsing them
+    into one card with ``allowed_strategies`` makes their completion state
+    inseparable: clean S5 work can then discard the still-untried S3/S7/S8
+    angles.  The limit therefore bounds distinct ranked files, not strategy
+    surfaces; the small companion expansion costs no additional source scan
+    or model call and preserves independent stopping evidence.
     """
     if limit <= 0:
         return []
@@ -1981,7 +2024,8 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
             if not placed:
                 break
         # Fewer distinct files than slots, or a tier no strategy claims:
-        # fall back to rank order, which restores companions and S1 fill.
+        # fall back to rank order for S1 and non-ranked fill. Ranked-source
+        # companions are restored for every chosen file below.
         for card in tier:
             if len(chosen_ids) >= limit:
                 break
@@ -1996,45 +2040,23 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
         if len(chosen_ids) >= limit:
             break
         rotate([card for card in cards if _built_first(card) == tier_rank])
-    return _carry_dropped_angles(
-        [card for card in cards if card.get("id", "") in chosen_ids],
-        cards, chosen_ids,
-    )
-
-
-def _carry_dropped_angles(
-    chosen: list[dict], cards: list[dict], chosen_ids: set[str],
-) -> list[dict]:
-    """Let a selected card be claimed under the angles its siblings held.
-
-    A dropped companion is gone for the run: `claim_next_card` reads only
-    persisted cards, and the productive-agent relaxation lifts a subsystem
-    restriction on cards that exist rather than recreating one. Recording the
-    strategies on the surviving card reopens those angles without a second
-    card, a second claim surface, or any mid-run minting.
-    """
-    by_file: dict[str, set[str]] = {}
-    for card in cards:
-        if card.get("kind") != "ranked-source" or card.get("id", "") in chosen_ids:
-            continue
-        rel = normalized_relpath(card.get("file", ""))
-        strategy = str(card.get("strategy", "")).strip().upper()
-        if rel and strategy:
-            by_file.setdefault(rel, set()).add(strategy)
-    out: list[dict] = []
-    for card in chosen:
-        dropped = by_file.get(normalized_relpath(card.get("file", "")))
-        if not dropped or card.get("kind") != "ranked-source":
-            out.append(card)
-            continue
-        extra = sorted(dropped - {str(card.get("strategy", "")).strip().upper()})
-        if not extra:
-            out.append(card)
-            continue
-        carried = dict(card)
-        carried["allowed_strategies"] = extra
-        out.append(carried)
-    return out
+    # Keyed on a real path only: an empty key would readmit every fileless
+    # ranked card the window deliberately left out.
+    selected_files = {
+        rel
+        for card in cards
+        if card.get("id", "") in chosen_ids
+        and card.get("kind") == "ranked-source"
+        and (rel := normalized_relpath(card.get("file", "")))
+    }
+    return [
+        card for card in cards
+        if card.get("id", "") in chosen_ids
+        or (
+            card.get("kind") == "ranked-source"
+            and normalized_relpath(card.get("file", "")) in selected_files
+        )
+    ]
 
 
 def select_diversity_floor(cards: list[dict], limit: int, excluded_ids: set[str]) -> list[dict]:
@@ -3881,13 +3903,14 @@ def _claim_next_card_locked(
 
             preferred.sort(key=_demotion_key)
 
-    # A carried angle preserves recall when its same-file companion was
-    # dropped from the bounded queue, but it is fallback work for that lane.
-    # Prefer cards authored for the requested strategy, and prefer real patch
-    # cards in S1. A live same-agent lease stays first: changing lanes between
-    # `resume` and `add-hyp` would strand the card the agent is already reading.
-    # Ranked below the buildability pass that follows: a lane preference is
-    # soft, while an uncompiled file is a hard blocker for a reproduce shot.
+    # Prefer cards authored for the requested strategy, and inside S1 prefer a
+    # real patch card over a diversity-floor card that merely carries the S1
+    # label. A queue resumed from an older run can still collapse angles onto
+    # one card, and that carried angle is fallback work for this lane. A live
+    # same-agent lease stays first: changing lanes between `resume` and
+    # `add-hyp` would strand the card the agent is already reading. Ranked
+    # below the buildability pass that follows: a lane preference is soft,
+    # while an uncompiled file is a hard blocker for a reproduce shot.
     if strategy_filter and len(preferred) > 1:
         def _lane_priority(card: dict) -> tuple[int, int, int]:
             current = latest.get(card.get("id", ""))
@@ -3940,16 +3963,27 @@ def _claim_next_card_locked(
                 "expires_at": expires_at,
             }
             _append_jsonl_unlocked(claims_path, claim_row)
-        selected = dict(card)
+        # The claimed copy is relabelled to the lane that claimed it, so a
+        # resumed queue's collapsed angle cannot hand an agent a card whose
+        # strategy `add-hyp` then refuses. `source_strategy` keeps that
+        # provenance visible; the reason and patch metadata are narrowed to
+        # the evidence this lane can act on.
         primary_strategy = str(card.get("strategy", "")).strip().upper()
-        if strategy_filter and primary_strategy != strategy_filter:
-            selected["source_strategy"] = primary_strategy
-            selected["strategy"] = strategy_filter
-            selected["reason"] = (
-                f"carried {strategy_filter} angle on {primary_strategy}-ranked card; "
-                f"{card.get('reason', '')}"
-            ).rstrip("; ")
-        return selected
+        effective_strategy = strategy_filter or primary_strategy
+        shown_reason = card_reason_for_strategy(card, effective_strategy)
+        if (
+            effective_strategy != primary_strategy
+            or shown_reason != card.get("reason", "")
+            or (effective_strategy != "S1" and card.get("patch_cards"))
+        ):
+            card = dict(card)
+            card["strategy"] = effective_strategy
+            card["reason"] = shown_reason
+            if effective_strategy != primary_strategy:
+                card["source_strategy"] = primary_strategy
+            if effective_strategy != "S1":
+                card["patch_cards"] = []
+        return card
     return None
 
 
@@ -4128,23 +4162,6 @@ def add_cluster_hypotheses(
     return {"agent": agent, "added": added, "skipped": skipped}
 
 
-# Note fingerprints that indicate an environmental / build wall: the
-# next hypothesis on the same compilation unit will hit the same wall,
-# so blocking sibling cards saves wasted sessions. Kept tight on
-# purpose — these phrases name the failure (the runner couldn't import
-# the extension, a header is missing, the loader rejected the .so) so
-# false matches in narrative testcase notes are unlikely.
-ENV_BLOCK_FINGERPRINT_RE = re.compile(
-    r"ModuleNotFoundError"
-    r"|ImportError"
-    r"|cannot find [^\n]*?\.h\b"
-    r"|missing [^\n]*?\.h\b"
-    r"|unable to load shared library"
-    r"|library not loaded",
-    re.IGNORECASE,
-)
-
-
 def _block_card_unconditional(
     ctx: Context,
     card_id: str,
@@ -4181,68 +4198,6 @@ def _block_card_unconditional(
             },
         )
     return True
-
-
-def _propagate_env_block_to_sibling_cards(
-    ctx: Context, hyp_file: str, note: str, agent: str
-) -> int:
-    """Mark unclaimed work cards sharing the env-blocked hypothesis's
-    compilation unit as terminal `blocked`.
-
-    Triggered when ``update_hypothesis`` transitions a row to
-    ``ENV-BLOCKED`` and ``note`` matches ``ENV_BLOCK_FINGERPRINT_RE``.
-    Sibling cards = same directory, same filename stem (the part before
-    the extension). Concretely, a hypothesis at ``yaml/_yaml.pyx:foo:1``
-    propagates to cards on ``yaml/_yaml.{c,h,pxd}`` because they share
-    the ``yaml/_yaml`` stem. Cards in unrelated subsystems are untouched.
-
-    The hypothesis's *own* card is blocked unconditionally by
-    ``_block_card_unconditional`` in ``update_hypothesis`` — that path
-    does not require a fingerprint match because the agent already
-    proved that specific surface is unreachable. The fingerprint regex
-    here gates only the sibling-propagation expansion, which is the
-    riskier "this build is broken too" inference.
-
-    Bug-finding impact: zero. The blocked cards are unreachable in the
-    current environment by definition — every sibling on the same
-    compilation unit will fail to import / build for the same reason.
-    The block is recorded against the live results dir only; a fresh
-    run with a fixed environment regenerates the queue and re-evaluates.
-    """
-    if not note or not ENV_BLOCK_FINGERPRINT_RE.search(note):
-        return 0
-    file_path = hyp_file.split(":", 1)[0].strip()
-    if not file_path:
-        return 0
-    hyp_stem = Path(file_path).with_suffix("")
-    if not hyp_stem.name:
-        return 0
-    latest = latest_claims_by_card(ctx)
-    claims_path = state_dir(ctx.results_dir) / "claims.jsonl"
-    blocked = 0
-    with jsonl_lock(claims_path):
-        for card in read_jsonl(work_cards_path(ctx)):
-            cid = card.get("id", "")
-            if not cid:
-                continue
-            cur = latest.get(cid)
-            if cur and cur.get("status", "") in TERMINAL_CARD_STATUSES:
-                continue
-            card_file = card.get("file", "")
-            if not card_file:
-                continue
-            if Path(card_file).with_suffix("") != hyp_stem:
-                continue
-            _append_jsonl_unlocked(claims_path, {
-                "card_id": cid,
-                "agent": agent or "",
-                "status": "blocked",
-                "updated_at": now_iso(),
-                "source": "env-block-propagation",
-                "note": f"sibling of env-blocked hypothesis on {file_path}",
-            })
-            blocked += 1
-    return blocked
 
 
 def update_hypothesis(
@@ -4286,27 +4241,15 @@ def update_hypothesis(
 
     _rows, found = update_jsonl(path, mutate)
     if found and status == "ENV-BLOCKED":
-        # The hypothesis's own card is blocked unconditionally — the
-        # agent just proved this surface is unreachable in the current
-        # environment, so re-offering it to a sibling agent is wasted
-        # work even when the note doesn't match ENV_BLOCK_FINGERPRINT_RE.
+        # The hypothesis proves only its own card cannot execute. Other cards
+        # on the same file may carry independent source-review strategies, so
+        # inferring that they are blocked would discard work without proof.
         _block_card_unconditional(
             ctx,
             card_id=str(found.get("card_id", "") or ""),
             agent=str(found.get("agent", "") or ""),
             note=note or str(found.get("note", "") or ""),
             source="env-block-own-card",
-        )
-        # Sibling propagation (different cards on the same compilation
-        # unit) still requires a fingerprint match — that's the broader
-        # "this whole compilation unit is broken" inference, which
-        # warrants extra evidence before flipping cards the agent
-        # didn't directly touch.
-        _propagate_env_block_to_sibling_cards(
-            ctx,
-            found.get("file", ""),
-            note or found.get("note", ""),
-            found.get("agent", ""),
         )
     return found
 
@@ -4332,6 +4275,66 @@ def card_run_count(ctx: Context, card_id: str, verdict: str = "") -> int:
             continue
         n += 1
     return n
+
+
+def record_accepted_artifact_card(
+    results_dir: Path, artifact_id: str, kind: str,
+) -> bool:
+    """Demote the card that produced an accepted finding or crash.
+
+    Agents close hypotheses with the concrete artifact id, while queue ranking
+    reads productive conclusions from ``claims.jsonl``.  Join those two
+    append-only records only after triage accepts the artifact, so rejected
+    reports neither camp at the front of the queue nor count as productive.
+    Returns whether a new conclusion row was written.
+    """
+    artifact = str(artifact_id or "").strip()
+    terminal = str(kind or "").strip().lower()
+    prefix = "FIND-" if terminal == "find" else "CRASH-" if terminal == "crash" else ""
+    if not artifact or not prefix or not artifact.upper().startswith(prefix):
+        return False
+
+    latest: dict[tuple[str, str], dict] = {}
+    for row in read_jsonl(state_dir(results_dir) / "hypotheses.jsonl"):
+        hid = str(row.get("id", "")).strip()
+        if hid:
+            latest[(str(row.get("agent", "")), hid)] = row
+    matches = []
+    artifact_upper = artifact.upper()
+    for row in latest.values():
+        status = str(row.get("status", "")).strip().upper()
+        if not status.startswith(prefix):
+            continue
+        if artifact_upper == status or artifact_upper.startswith(status + "-"):
+            if row.get("card_id"):
+                matches.append(row)
+    if not matches:
+        return False
+    origin = max(
+        matches,
+        key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""),
+    )
+    claims_path = state_dir(results_dir) / "claims.jsonl"
+    with jsonl_lock(claims_path):
+        if any(
+            row.get("source") == "accepted-artifact"
+            and row.get("artifact") == artifact
+            for row in _read_jsonl_unlocked(claims_path)
+        ):
+            return False
+        _append_jsonl_unlocked(
+            claims_path,
+            {
+                "card_id": str(origin.get("card_id", "")),
+                "agent": str(origin.get("agent", "")),
+                "hypothesis_id": str(origin.get("id", "")),
+                "artifact": artifact,
+                "status": terminal,
+                "source": "accepted-artifact",
+                "updated_at": now_iso(),
+            },
+        )
+    return True
 
 
 def card_conclusion_counts(ctx: Context, *, claims: list[dict] | None = None) -> dict[str, int]:
@@ -5138,6 +5141,7 @@ def _status_rows_by_card(ctx: Context, mode: str = "", cards: list[dict] | None 
 
 def _compact_card(ctx: Context, card: dict, status_row: dict | None = None, *, omit_empty: bool = False) -> dict:
     status_row = status_row or {}
+    strategy = str(card.get("strategy", "") or "").strip().upper()
     row = {
         "id": card.get("id", ""),
         "kind": card.get("kind", ""),
@@ -5149,11 +5153,16 @@ def _compact_card(ctx: Context, card: dict, status_row: dict | None = None, *, o
         "status": status_row.get("status", "unclaimed"),
         "reason": status_row.get("reason", ""),
         "score": card.get("score", ""),
-        "why_ranked": _clip_model_field(card.get("reason", ""), 220),
+        "why_ranked": _clip_model_field(
+            card_reason_for_strategy(card, strategy), 220,
+        ),
         "description": _clip_model_field(card.get("description", ""), 220),
         "fix_hashes": (card.get("fix_hashes", []) or [])[:5],
         "invalid_fix_hashes": (card.get("invalid_fix_hashes", []) or [])[:5],
-        "patch_cards": (card.get("patch_cards", []) or [])[:5],
+        "patch_cards": (
+            (card.get("patch_cards", []) or [])[:5]
+            if strategy == "S1" else []
+        ),
         "testcase_hashes": (card.get("testcase_hashes", []) or [])[:5],
         "invalid_testcase_hashes": (card.get("invalid_testcase_hashes", []) or [])[:5],
         "seed": card.get("seed", ""),

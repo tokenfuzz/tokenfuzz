@@ -545,6 +545,9 @@ def _finding_quality_accepted(finding_dir: Path) -> bool:
 
 def _finding_is_admitted(finding_dir: Path) -> bool:
     """True iff a FIND is substantive enough to count as audit progress."""
+    receipt = validation_receipt.read_current(finding_dir)
+    if receipt and receipt.get("state") in validation_receipt.FINAL_STATES:
+        return receipt.get("state") in validation_receipt.SECURITY_STATES
     return _finding_is_pinned(finding_dir) or _finding_quality_accepted(finding_dir)
 
 

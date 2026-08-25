@@ -102,18 +102,14 @@ A crash is legitimate when ALL of the following hold:
    an owner before using a dependent object in an order the public
    docs explicitly require.
 
-   Re-entering the library through PUBLIC API from inside a public
-   callback (e.g. calling `*_cleanup()` from inside a registered
-   `LOCKFUNC` / `WRITE_CALLBACK` / `HEADER_CALLBACK`) is LEGITIMATE
-   unless the callback's documentation explicitly prohibits re-entry.
-   If the library fires the callback before establishing its own
-   invariants (refcount, lifetime, init order) and the harness then
-   triggers a UAF or use-of-uninit by calling a public function from
-   inside the callback, that is a LIBRARY ordering bug — promote it.
-   The fix is library-side: establish the invariant first, then fire
-   the callback (or refuse re-entry from inside the library). A
-   "caller contract" rejection requires you to *quote the documented
-   prohibition*; silence in the docs means the contract is in-domain.
+   Re-entering the library through a public API from a public callback can
+   be legitimate when the callback performs ordinary documented work and
+   obeys ownership and lifetime rules. It is not legitimate for the testcase
+   to free the active callback state itself. Prefer cases where normal
+   callback work makes target code release or replace an object, or where a
+   documented public operation legitimately invalidates a separately owned
+   object. Documentation silence does not turn destruction of the active
+   callback state into an in-domain action.
 
 The distinction is "did the caller break a contract the docs state, OR
 did the implementation fail to validate an in-domain typed value the
@@ -216,6 +212,14 @@ route to it earns nothing either. A neighbouring code path is a separate
 question — its reachability is its own, and one can be externally-reachable
 next to a crash that is not — so judge each on its own trigger rather than
 inheriting the neighbour's verdict.
+
+Source-only defects have no crash evidence to preserve. When the named trigger
+is **proven** outside this target's `attacker_controls` and the defect adds no
+independent security-boundary violation, record it with `bin/state add-note`
+instead of filing a `FIND-*`. If reachability or boundary impact is uncertain,
+file the concrete finding for review. This does not change the crash rule
+above: a sanitizer diagnostic reached through a public API is still confirmed
+and filed for triage regardless of trigger source.
 
 If the crash needs a NON-DEFAULT mode, module, codec, filter, or option that
 the application or operator selects — not one the input bytes choose — write

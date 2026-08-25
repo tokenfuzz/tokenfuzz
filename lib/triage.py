@@ -1272,21 +1272,10 @@ def _cluster_source_path(location: str, target_root: Path) -> tuple[Path, int] |
     return (resolved, max(1, int(match.group(2)))) if resolved.is_file() else None
 
 
-def cluster_expansion_decision(
-    crash_dir: Path, target_root: Path, *,
-    attacker_controls: list[str] | None = None,
-    deadline: float | None = None,
-) -> list[dict] | None:
-    """Return up to three source-grounded sibling leads for one new crash.
-
-    ``None`` means retryable/unavailable; an empty list is a completed decision
-    that found no strong siblings and may be marked final by the caller.
-
-    `attacker_controls` scopes the leads. A seed crash is expanded whatever its
-    own publication state, because a neighbour's reachability is not the
-    seed's; asking for siblings the declared model can reach is what keeps an
-    out-of-model seed from breeding a generation of out-of-model variants.
-    """
+def _cluster_expansion_item(
+    crash_dir: Path, target_root: Path,
+) -> dict | None:
+    """Build bounded source evidence for one cluster-expansion item."""
     sanitizer = _sanitizer_file(crash_dir)
     if sanitizer is None:
         return None
@@ -1314,35 +1303,96 @@ def cluster_expansion_decision(
         source_parts.append(f">>> {relative}:{line}\n" + "\n".join(lines[start:end]))
         if len(source_parts) >= 3:
             break
+    return {
+        "id": crash_dir.name,
+        "frames": "\n".join(frame.raw for frame in frames),
+        "source_block": "\n\n".join(source_parts) or "(source unavailable)",
+    }
+
+
+def cluster_expansion_decisions(
+    crash_dirs: list[Path], target_root: Path, *,
+    attacker_controls: list[str] | None = None,
+    deadline: float | None = None,
+) -> dict[Path, list[dict] | None]:
+    """Return keyed source-grounded sibling leads for new crashes in one call.
+
+    Each missing or malformed id remains ``None`` (retryable); an explicit
+    empty row list is a completed decision.  Keying the response lets one
+    independent model session cover the post-iteration group without treating
+    a partial answer as evidence about crashes it omitted.
+
+    `attacker_controls` scopes the leads. A seed crash is expanded whatever its
+    own publication state, because a neighbour's reachability is not the
+    seed's; asking for siblings the declared model can reach is what keeps an
+    out-of-model seed from breeding a generation of out-of-model variants.
+    """
+    decisions = {crash: None for crash in crash_dirs}
+    items = []
+    by_id: dict[str, Path] = {}
+    for crash in crash_dirs:
+        item = _cluster_expansion_item(crash, target_root)
+        if item is None:
+            continue
+        items.append(item)
+        by_id[crash.name] = crash
+    if not items:
+        return decisions
     controls = ",".join(attacker_controls or [])
     scope_block = (
         f"\nName only siblings an attacker could reach supplying `{controls}`.\n"
-        f"{crash_dir.name}'s own trigger does not bind you — a neighbour's\n"
+        "A seed crash's own trigger does not bind you — a neighbour's\n"
         "reachability is its own, and a sibling beside an out-of-scope crash may\n"
         f"still be reachable — but one needing something outside `{controls}`\n"
         "earns no security credit however it turns out, so it is not worth a\n"
         "session. Drop it and return fewer rows.\n"
     ) if controls else ""
     prompt = render_template(
-        "triage_cluster_expand.md.j2",
+        "triage_cluster_expand_batch.md.j2",
         {
-            "id": crash_dir.name,
-            "frames": "\n".join(frame.raw for frame in frames),
-            "source_block": "\n\n".join(source_parts) or "(source unavailable)",
+            "items_block": "\n\n".join(
+                f"## {item['id']}\n\nTop frames:\n{item['frames']}\n\n"
+                f"Nearby source:\n{item['source_block']}"
+                for item in items
+            ),
             "scope_block": scope_block,
         },
     )
     configured = llm_decide.decision_timeout("cluster_expand")
     timeout = _decision_timeout(configured, deadline)
     if timeout <= 0:
-        return None
+        return decisions
     decision = llm_decide.llm_decide(
-        "cluster_expand", "rows", prompt, timeout,
-        usage_index=llm_usage.find_usage_index(crash_dir.parents[1]),
+        "cluster_expand", "items", prompt, timeout,
+        usage_index=llm_usage.find_usage_index(crash_dirs[0].parents[1]),
     )
-    if not isinstance(decision, dict) or not isinstance(decision.get("rows"), list):
-        return None
-    return [row for row in decision["rows"][:3] if isinstance(row, dict)]
+    if not isinstance(decision, dict) or not isinstance(decision.get("items"), list):
+        return decisions
+    seen_ids: set[str] = set()
+    for answer in decision["items"]:
+        if not isinstance(answer, dict):
+            continue
+        item_id = str(answer.get("id", ""))
+        rows = answer.get("rows")
+        if item_id in seen_ids or item_id not in by_id or not isinstance(rows, list):
+            continue
+        seen_ids.add(item_id)
+        decisions[by_id[item_id]] = [
+            row for row in rows[:3] if isinstance(row, dict)
+        ]
+    return decisions
+
+
+def cluster_expansion_decision(
+    crash_dir: Path, target_root: Path, *,
+    attacker_controls: list[str] | None = None,
+    deadline: float | None = None,
+) -> list[dict] | None:
+    """Single-crash form used by standalone callers and focused tests."""
+    return cluster_expansion_decisions(
+        [crash_dir], target_root,
+        attacker_controls=attacker_controls, deadline=deadline,
+    ).get(crash_dir)
 
 
 def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, str]:
@@ -2464,6 +2514,7 @@ def triage_one_crash(
     reach_fields_override: object = _NO_REACH_DECISION,
     confirmed_trigger_bypass: bool = False,
     age_pending: bool = True,
+    trigger_batch_attempted: bool = False,
 ) -> str:
     report = _report(crash_dir)
     if _deadline_expired(deadline):
@@ -2592,6 +2643,19 @@ def triage_one_crash(
             target_root_is_product,
         )
         reject_trigger = False
+    elif trigger_batch_attempted and not _cached_trigger_resolution(
+        crash_dir, report,
+    ):
+        # The keyed batch already spent this artifact's review attempt.  A
+        # missing or malformed id is unadjudicated evidence, not permission to
+        # launch another serial review in the same pass or to publish on one
+        # incomplete vote.
+        validation_receipt.write(
+            crash_dir, kind="crash", state="pending",
+            detail="batched source review is incomplete",
+            attacker_controls=attacker_controls,
+        )
+        return "pending"
     else:
         reject_trigger = _crash_trigger_gate(
             crash_dir, report, Path(target_root), deadline, usage_index,
@@ -2679,7 +2743,7 @@ def triage_crash_dirs(
     crashes = results / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
     controls = attacker_controls or ["bytes"]
-    bypasses = confirmed_trigger_bypasses or set()
+    bypasses = set(confirmed_trigger_bypasses or ())
     withheld = held or set()
     for directory in withheld:
         if directory.is_dir():
@@ -2772,9 +2836,98 @@ def triage_crash_dirs(
             and not autodiscard_reason(sanitizer_text)
         ):
             reach_directories.append(directory)
-    # Converge before the per-crash pass, so the verdict and the receipt it
-    # produces cover a report no later pass needs to rewrite.
+    environment = os.environ.copy()
+    environment.update(
+        RESULTS_DIR=str(results), TARGET_ROOT=str(target_root),
+        TARGET_SLUG=target_slug,
+    )
+    # Trigger votes bind to report content. Export first so a vote cannot be
+    # invalidated immediately when report.md becomes the canonical REPORT.md.
+    # Incomplete bundles remain on triage_one_crash's ordinary pending path and
+    # do not consume a source-review session.
+    for directory in reach_directories:
+        report = _report(directory)
+        sanitizer = _sanitizer_file(directory)
+        sanitizer_text = _read(sanitizer) if sanitizer else ""
+        testcase = crash_artifacts.find_testcase(
+            (directory, directory / ".audit"),
+            sanitizer_files=(sanitizer,) if sanitizer else (),
+        )
+        harness = crash_artifacts.find_harness_source(
+            (directory, directory / ".audit"),
+        )
+        if (
+            report is not None
+            and not _SKELETON_MARKER.search(_read(report))
+            and has_valid_diagnostic(sanitizer_text, findings_only)
+            and (testcase is not None or harness is not None)
+            and _bundle_needs_refresh(directory)
+            and _decision_timeout(1, deadline)
+        ):
+            _run_tool(
+                "export-repro", directory.name, "--crash-dir", str(directory),
+                "--slug", target_slug, env=environment,
+            )
+    # Export chooses the canonical REPORT.md and moves audit-side caches under
+    # .audit/.  Converge only after that boundary so the field decision, trigger
+    # review, and final receipt all bind the same report.  Doing this first
+    # bought a second field review and then invalidated conservative trigger
+    # votes when the canonical report was annotated later.
     converge_reach_fields(reach_directories, usage_index, deadline, workers)
+    trigger_candidates: list[Path] = []
+    for directory in directories:
+        report = _report(directory)
+        sanitizer = _sanitizer_file(directory)
+        sanitizer_text = _read(sanitizer) if sanitizer else ""
+        if (
+            report is None
+            or _SKELETON_MARKER.search(_read(report))
+            or not has_valid_diagnostic(sanitizer_text, findings_only)
+            or _runtime_only_diagnostic(sanitizer_text, findings_only)
+            or autodiscard_reason(sanitizer_text)
+            or not _has_memory_safety_signal(sanitizer_text)
+            or _bundle_missing_artifacts(directory)
+        ):
+            continue
+        if directory in bypasses or _direct_probe_trigger_bypass(
+            directory, Path(target_root), controls,
+        ):
+            bypasses.add(directory)
+            continue
+        trigger_candidates.append(directory)
+
+    trigger_attempted = _batch_finding_trigger_votes(
+        trigger_candidates, results, deadline, usage_index,
+        target_root_is_product, workers,
+    )
+    second_round = [
+        directory for directory in trigger_candidates
+        if (
+            (report := _report(directory)) is not None
+            and _cached_trigger_vote(
+                report, directory / _TRIGGER_PRIMARY_NAME,
+            ) == "Reject"
+        )
+    ]
+    if second_round:
+        trigger_attempted.update(_batch_finding_trigger_votes(
+            second_round, results, deadline, usage_index,
+            target_root_is_product, workers,
+            vote_name=_TRIGGER_SECOND_NAME,
+        ))
+    resolution_round = [
+        directory for directory in trigger_candidates
+        if (
+            (report := _report(directory)) is not None
+            and _trigger_resolution_sources(report, directory)
+        )
+    ]
+    if resolution_round:
+        trigger_attempted.update(_batch_finding_trigger_votes(
+            resolution_round, results, deadline, usage_index,
+            target_root_is_product, workers,
+            vote_name=_TRIGGER_RESOLUTION_NAME,
+        ))
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         statuses = pool.map(
             lambda directory: triage_one_crash(
@@ -2782,8 +2935,9 @@ def triage_crash_dirs(
                 findings_only, deadline,
                 target_root_is_product,
                 _NO_REACH_DECISION,
-                directory in bypasses,
-                age_pending,
+                confirmed_trigger_bypass=directory in bypasses,
+                age_pending=age_pending,
+                trigger_batch_attempted=directory in trigger_attempted,
             ),
             directories,
         )
@@ -3335,6 +3489,19 @@ def _score_final_report(
     return "pending"
 
 
+def _record_accepted_finding_card(finding_dir: Path, results_dir: Path) -> None:
+    """Feed an accepted finding back to queue ranking without gating triage."""
+    try:
+        workqueue.record_accepted_artifact_card(
+            results_dir, finding_dir.name, "find",
+        )
+    except OSError as exc:
+        print(
+            f"WARN: could not record productive card for {finding_dir.name}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _finalize_accepted_finding(
     finding_dir: Path, results_dir: Path, report: Path,
     deadline: float | None,
@@ -3394,7 +3561,9 @@ def _finalize_accepted_finding(
             finding_dir, report, "finding", "not-reportable",
             attacker_controls=controls,
         )
-        return "pending" if state == "pending" else "accepted"
+        if state == "pending":
+            return "pending"
+        return "accepted"
     reach_verdict, reach_detail = evaluate_crash_verdict(_read(report), controls)
     if reach_verdict == "incomplete":
         validation_receipt.write(
@@ -3433,7 +3602,10 @@ def _finalize_accepted_finding(
     state = _score_final_report(
         finding_dir, report, "finding", state, attacker_controls=controls,
     )
-    return "pending" if state == "pending" else "accepted"
+    if state == "pending":
+        return "pending"
+    _record_accepted_finding_card(finding_dir, results_dir)
+    return "accepted"
 
 
 def validate_one_finding(

@@ -1012,6 +1012,14 @@ class Probe:
 
     def _classify(self, returncode: int) -> str:
         if self.output.is_file() and self.output.stat().st_size:
+            if self.sanitizer == "runner":
+                testcase_failure = verdict_lib.runner_testcase_failure(
+                    self.output, self.exec_testcase,
+                )
+                if testcase_failure == "import":
+                    return "NO_EXEC"
+                if testcase_failure == "assertion":
+                    return "EXEC_FAIL"
             if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
                 return "CRASH"
             if verdict_lib.file_is_clean(self.output):

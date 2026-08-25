@@ -406,13 +406,18 @@ class IncrementalFindingValidationTests(unittest.TestCase):
             triage, "_finding_trigger_disposition", return_value="accepted",
         ), mock.patch.object(
             triage, "evaluate_crash_verdict", return_value=("promote", ""),
-        ), mock.patch.object(triage, "_run_tool", side_effect=score):
+        ), mock.patch.object(
+            triage, "_run_tool", side_effect=score,
+        ), mock.patch.object(
+            triage, "_record_accepted_finding_card",
+        ) as record_productive:
             self.assertEqual(
                 triage._finalize_accepted_finding(
                     self.finding, self.root, self.report, None,
                 ),
                 "accepted",
             )
+        record_productive.assert_called_once_with(self.finding, self.root)
         finalized = json.loads(cache.read_text())
         self.assertEqual(
             finalized["content_sha1"],
@@ -1918,6 +1923,136 @@ Generated score text.
                 {"promoted": 1, "rejected": 0, "pending": 1, "demoted": 0},
             )
 
+    def test_crash_gate_batches_two_trigger_rounds_before_per_crash_triage(self) -> None:
+        crashes = self.root / "crashes"
+        directories = [crashes / "CRASH-001", crashes / "CRASH-002"]
+        report_text = (
+            "# Bounds issue\n\nSurface: library-api\n"
+            "Caller contract: obeyed\nTrigger source: call-sequence\n"
+            "Boundary: public API\nCaller controls: call order\n"
+            "Trusted caller actions: callback\n"
+        )
+        for directory in directories:
+            directory.mkdir(parents=True)
+            (directory / "report.md").write_text(report_text, encoding="utf-8")
+            (directory / "sanitizer.txt").write_text(
+                "==1==ERROR: AddressSanitizer: heap-use-after-free\n",
+                encoding="utf-8",
+            )
+
+        rounds: list[tuple[str, list[Path]]] = []
+
+        def batch(items, _results, _deadline, _usage, _product, _workers, vote_name=".trigger-gate.json"):
+            rounds.append((vote_name, list(items)))
+            for directory in items:
+                report = directory / "report.md"
+                (directory / vote_name).write_text(
+                    json.dumps(trigger_vote(report, self.root, "Reject")),
+                    encoding="utf-8",
+                )
+            return set(items)
+
+        attempted: list[bool] = []
+
+        def triage_one(_directory, *_args, **kwargs):
+            attempted.append(bool(kwargs.get("trigger_batch_attempted")))
+            return "rejected"
+
+        with mock.patch.object(
+            triage, "converge_reach_fields",
+        ), mock.patch.object(
+            triage, "_direct_probe_trigger_bypass", return_value=False,
+        ), mock.patch.object(
+            triage, "_bundle_needs_refresh", return_value=False,
+        ), mock.patch.object(
+            triage, "_bundle_missing_artifacts", return_value=[],
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", side_effect=batch,
+        ), mock.patch.object(
+            triage, "triage_one_crash", side_effect=triage_one,
+        ):
+            counts = triage.triage_crash_dirs(
+                self.root, self.root, "sampleproj", workers=1,
+            )
+
+        self.assertEqual(
+            rounds,
+            [
+                (".trigger-gate.json", directories),
+                (".trigger-gate-2.json", directories),
+            ],
+        )
+        self.assertEqual(attempted, [True, True])
+        self.assertEqual(
+            counts,
+            {"promoted": 0, "rejected": 2, "pending": 0, "demoted": 0},
+        )
+
+    def test_crash_gate_converges_fields_on_canonical_report_after_export(self) -> None:
+        crash = self.root / "crashes" / "CRASH-001"
+        crash.mkdir(parents=True)
+        report = crash / "report.md"
+        report.write_text(
+            "# Lifetime issue\n\n"
+            "Surface: library-api\n"
+            "Caller contract: obeyed\n"
+            "Trigger source: call-sequence\n"
+            "Boundary: public API\n"
+            "Caller controls: call order\n"
+            "Trusted caller actions: callback\n",
+            encoding="utf-8",
+        )
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-use-after-free\n",
+            encoding="utf-8",
+        )
+        testcase = crash / "input.txt"
+        testcase.write_text("sample\n", encoding="utf-8")
+        events: list[str] = []
+
+        def run(tool, *_args, **_kwargs):
+            self.assertEqual(tool, "export-repro")
+            events.append("export")
+            report.rename(crash / "REPORT.md")
+            return 0
+
+        def converge(directories, *_args, **_kwargs):
+            self.assertEqual(directories, [crash])
+            self.assertTrue((crash / "REPORT.md").is_file())
+            self.assertEqual(triage._report(crash).name, "REPORT.md")
+            events.append("converge")
+
+        with mock.patch.object(
+            triage.crash_artifacts, "find_testcase", return_value=testcase,
+        ), mock.patch.object(
+            triage.crash_artifacts, "find_harness_source", return_value=None,
+        ), mock.patch.object(
+            triage, "_bundle_needs_refresh", return_value=True,
+        ), mock.patch.object(
+            triage, "_bundle_missing_artifacts", return_value=[],
+        ), mock.patch.object(
+            triage, "has_valid_diagnostic", return_value=True,
+        ), mock.patch.object(
+            triage, "_run_tool", side_effect=run,
+        ), mock.patch.object(
+            triage, "converge_reach_fields", side_effect=converge,
+        ), mock.patch.object(
+            triage, "_direct_probe_trigger_bypass", return_value=False,
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", return_value=set(),
+        ), mock.patch.object(
+            triage, "triage_one_crash", return_value="promoted",
+        ):
+            counts = triage.triage_crash_dirs(
+                self.root, self.root, "sampleproj", workers=1,
+            )
+
+        self.assertEqual(events, ["export", "converge"])
+        self.assertEqual(
+            counts,
+            {"promoted": 1, "rejected": 0, "pending": 0, "demoted": 0},
+        )
+
     def test_index_maintenance_rebinds_receipts_after_generated_report_edits(self) -> None:
         validation_receipt.write(
             self.finding, kind="finding", state="reportable",
@@ -3126,7 +3261,9 @@ Generated score text.
         )
         with mock.patch.object(
             triage, "_run_tool", return_value=0,
-        ) as scorer:
+        ) as scorer, mock.patch.object(
+            triage, "_record_accepted_finding_card",
+        ) as record_productive:
             self.assertEqual(
                 triage._finalize_accepted_finding(
                     self.finding, self.root, self.report, None, None,
@@ -3140,6 +3277,7 @@ Generated score text.
         scorer.assert_called_once_with(
             "severity", "--report", str(self.finding),
         )
+        record_productive.assert_not_called()
 
     def test_failed_severity_clear_holds_the_artifact_retryable(self) -> None:
         """A final receipt must not freeze a voided score onto the report.

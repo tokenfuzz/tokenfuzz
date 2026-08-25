@@ -181,6 +181,18 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         benchmark.count_confirmed_findings(findings)[0] == 4,
         "strict benchmark credit still excludes the trigger-pending finding",
     )
+    validation_receipt.write(
+        trigger_pending,
+        kind="finding",
+        state="not-reportable",
+        detail="real defect outside the configured security boundary",
+    )
+    uncredited_progress = audit_runner.progress(runtime)
+    check(
+        uncredited_progress.findings == pending_progress.findings - 1
+        and "FIND-005" not in uncredited_progress.artifact_roots,
+        "a final not-reportable receipt removes live security progress",
+    )
     (state / "hypotheses.jsonl").write_text(
         json.dumps({"agent": "1", "status": "ENV-BLOCKED"}) + "\n",
         encoding="utf-8",
@@ -213,6 +225,27 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     check(
         expanded and refresh.call_args.kwargs == {"force": True, "limit": 240},
         "an exhausted full rank window expands before audit shutdown",
+    )
+
+    window_results = root / "window-results"
+    (window_results / "state").mkdir(parents=True)
+    (window_results / "work-cards.jsonl").write_text(
+        "\n".join([
+            json.dumps({"id": "A-S5", "kind": "ranked-source", "file": "src/a.c"}),
+            json.dumps({"id": "A-S7", "kind": "ranked-source", "file": "src/a.c"}),
+            json.dumps({"id": "PATCH-1", "kind": "s1-patch", "file": "src/b.c"}),
+            json.dumps({"id": "PEER-1", "kind": "s6-peer-fix", "file": ""}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    window_runtime = SimpleNamespace(results=window_results)
+    audit_runner._write_rank_window(window_runtime, 120)
+    window_row = json.loads(
+        (window_results / "state" / "rank-work-window.json").read_text()
+    )
+    check(
+        window_row == {"limit": 120, "core_count": 2},
+        "rank-window exhaustion counts one slot per source file, not per strategy angle",
     )
 
     strategy_results = root / "strategy-results"

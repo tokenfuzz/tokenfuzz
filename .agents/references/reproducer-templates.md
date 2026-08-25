@@ -97,6 +97,13 @@ bin/probe "${RESULTS_DIR}/scratch-1/tc_H3.xml" -- 8 100        # trailing args g
 # exit 2 → tool/env problem, missing testcase, or no execution evidence
 ```
 
+For a wrapper that launches child processes, propagate setup and child
+failures and assert the expected observation before exiting zero. Do not let a
+final print or cleanup command mask a failed bind, import, compile, or child
+launch as CLEAN. Put orchestration in a sibling `HARNESS:` file; a direct
+`.sh` testcase remains input to the configured target runner unless that
+runner is itself a shell interpreter.
+
 Default 1 run (exploration). Add `--confirm` (5 runs) ONLY after you've seen one
 crash and need reproducibility proof — timing-dependent UAFs don't crash every
 run. A 0/5 exploration variant is 4 wasted browser launches.

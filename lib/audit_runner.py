@@ -731,10 +731,19 @@ def _rank_window(runtime: Runtime) -> tuple[int, int]:
 
 def _write_rank_window(runtime: Runtime, limit: int) -> None:
     cards = workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
-    core_count = sum(
-        card.get("kind") not in {"s4-campaign", "s6-peer-fix"}
+    # The rank limit buys distinct source files; their per-strategy cards are
+    # independent completion surfaces but did not consume extra window slots.
+    # Count each file once so a small target does not trigger a needless second
+    # full ranking pass merely because each file signalled many angles. The
+    # campaign and peer cards never came from the window at all.
+    core_surfaces = {
+        ("file", workqueue.normalized_relpath(card.get("file", "")))
+        if card.get("kind") == "ranked-source"
+        else ("card", str(card.get("id", "")))
         for card in cards
-    )
+        if card.get("kind") not in {"s4-campaign", "s6-peer-fix"}
+    }
+    core_count = len(core_surfaces)
     path = _rank_window_path(runtime)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(
@@ -888,7 +897,7 @@ def refresh_work_cards(
 
 def expand_work_cards_if_exhausted(runtime: Runtime) -> bool:
     """Grow a fully-consumed ranked batch until the source itself is exhausted."""
-    if str(getattr(runtime, "fixed_strategy", "")).upper() in _UNRANKED_CAMPAIGN_STRATEGIES:
+    if str(getattr(runtime, "fixed_strategy", "")).upper() in _UNRANKED_LANE_STRATEGIES:
         return False
     if hasattr(runtime, "prompt_context") and hasattr(runtime, "num_agents"):
         context = runtime.prompt_context("")
@@ -963,11 +972,9 @@ def _agent_live_strategies(runtime: Runtime) -> dict[str, set[str]]:
     held: dict[str, set[str]] = {}
 
     def _record(agent: object, *sources: object) -> None:
-        # A card is claimable under its primary strategy and under every angle
-        # in `allowed_strategies` -- select_strategy_window carries dropped
-        # companions there, so a claim through one of them is ordinary. Reading
-        # only the primary would leave an agent's own claimed card invisible in
-        # the lane it is actually working.
+        # Current queues keep one card per strategy angle. Older resumed queues
+        # may still carry collapsed angles in `allowed_strategies`, so include
+        # those when identifying the lane an agent is already working.
         angles: set[str] = set()
         for source in sources:
             if isinstance(source, dict):
@@ -1688,25 +1695,16 @@ def expand_new_crash_clusters(
     # decision remains eligible after an audit resume, but retrying the same
     # timed-out prompt after every live iteration can consume the audit wall.
     attempted.update(crashes)
-    decisions: dict[Path, list[dict] | None] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, runtime.num_agents)) as pool:
-        futures = {
-            pool.submit(
-                triage.cluster_expansion_decision,
-                crash,
-                runtime.target_root,
-                attacker_controls=runtime.config.attacker_controls,
-                deadline=deadline,
-            ): crash
-            for crash in crashes
-        }
-        for future in concurrent.futures.as_completed(futures):
-            crash = futures[future]
-            try:
-                decisions[crash] = future.result()
-            except Exception as exc:
-                decisions[crash] = None
-                index_log(runtime, f"WARN: cluster expansion failed for {crash.name}: {exc}")
+    try:
+        decisions = triage.cluster_expansion_decisions(
+            crashes,
+            runtime.target_root,
+            attacker_controls=runtime.config.attacker_controls,
+            deadline=deadline,
+        )
+    except Exception as exc:
+        decisions = {crash: None for crash in crashes}
+        index_log(runtime, f"WARN: cluster expansion failed: {exc}")
     context = _queue_context(runtime)
     for crash in crashes:
         rows = decisions.get(crash)
@@ -1963,20 +1961,20 @@ def _log_foreign_active_work(runtime: Runtime) -> None:
         )
 
 
-# The card kind each pinned campaign consumes. A pin outside this map draws
-# from the shared ranked window, which is never finite, so it has no campaign
-# to exhaust.
-_FIXED_CAMPAIGN_KINDS = {
+# The card kind a pinned lane consumes when it has a generator of its own. A
+# pin outside this map draws from the ranked window, where "no card" means the
+# scorer signalled nothing — not that the strategy has no surface to audit.
+_FIXED_LANE_KINDS = {
     "S1": "s1-patch", "S4": "s4-campaign", "S6": "s6-peer-fix",
 }
 
 # The subset whose cards do not come from the ranked window at all. S1 is not
 # one of them: its patch cards are capped by that window, so growing it is
 # what mines the next batch of prior fixes.
-_UNRANKED_CAMPAIGN_STRATEGIES = frozenset({"S4", "S6"})
+_UNRANKED_LANE_STRATEGIES = frozenset({"S4", "S6"})
 
 
-def _fixed_campaign_source_degraded(runtime: Runtime, strategy: str) -> bool:
+def _fixed_lane_source_degraded(runtime: Runtime, strategy: str) -> bool:
     """Whether this pin's card source failed rather than answered "nothing"."""
     if strategy == "S1":
         return bool(getattr(runtime, "s1_source_degraded", False))
@@ -1986,11 +1984,11 @@ def _fixed_campaign_source_degraded(runtime: Runtime, strategy: str) -> bool:
             or not _s6_peers_configured(runtime)
         )
     # S4's source is the target config, which is read fresh every refresh and
-    # answers definitively; `_fixed_campaign_unavailable` reports a "no".
+    # answers definitively; `_fixed_lane_unavailable` reports a "no".
     return False
 
 
-def _fixed_campaign_unavailable(runtime: Runtime) -> str:
+def _fixed_lane_unavailable(runtime: Runtime) -> str:
     """Why this pin cannot run against this target at all, or "" if it can."""
     if str(getattr(runtime, "fixed_strategy", "")).upper() == "S4" and not \
             workqueue.campaign_supported(runtime.config):
@@ -2001,10 +1999,15 @@ def _fixed_campaign_unavailable(runtime: Runtime) -> str:
     return ""
 
 
-def fixed_campaign_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
-    """Whether a pinned, finite card campaign has no work left.
+def fixed_lane_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
+    """Whether a pinned, finite card lane has no work left.
 
-    An absent/empty source file gets one worker so source failures are visible.
+    A lane with its own generator (S1 patch cards, S4's campaign, S6 peer
+    fixes) can read an empty queue as its source's answer, so it gets one
+    discovery iteration and then stops.  A ranked-window lane cannot: no ranked
+    card only means the scorer signalled nothing, which is not proof the
+    strategy has no surface, so it keeps its normal runway.  Once any lane did
+    receive cards, relaunching after every one is closed cannot expose more.
     Productive cards use the queue's normal scope-aware closure rule: one
     finding is a reason to search clustered variants, not an exhaustion proof.
 
@@ -2012,31 +2015,37 @@ def fixed_campaign_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
     requires: an agent can close its card and keep investigating what the card
     started, and stopping there would strand that work unfinished. Only *this
     lane's* open work counts: a results directory reused across pins carries
-    active hypotheses from the earlier strategy, and letting those hold an S6
-    campaign open keeps the run alive on work S6 never did.
+    active hypotheses from the earlier strategy, and letting those hold the
+    current lane open keeps the run alive on work that lane never did.
     """
-    strategy = str(getattr(runtime, "fixed_strategy", "")).upper()
-    kind = _FIXED_CAMPAIGN_KINDS.get(strategy)
-    if not kind:
+    pinned = str(getattr(runtime, "fixed_strategy", "")).upper()
+    if not pinned:
         return False
-    if _fixed_campaign_unavailable(runtime):
+    if _fixed_lane_unavailable(runtime):
         return True
+    kind = _FIXED_LANE_KINDS.get(pinned)
     ctx = _queue_context(runtime)
     supplied = [
         card for card in workqueue.apply_latest_claim_status(
             ctx, workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
         )
-        if card.get("kind") == kind
+        if (
+            card.get("kind") == kind if kind
+            else workqueue.card_strategy_matches(card, pinned)
+        )
     ]
     if _pinned_lane_work_open(
         runtime, {str(card.get("id", "")) for card in supplied},
     ):
         return False
     if not supplied:
-        # An empty queue only proves exhaustion when the source could answer.
-        # A peer set that is missing, unreachable, or returning nothing is a
-        # fault to surface, not a campaign that finished with no yield.
-        if _fixed_campaign_source_degraded(runtime, strategy):
+        # An empty ranked window is a ranking gap, not a finished lane.
+        if kind is None:
+            return False
+        # An empty generator result only proves exhaustion when the source
+        # could answer. A peer set that is missing, unreachable, or returning
+        # nothing is a fault to surface, not a lane that finished with no yield.
+        if _fixed_lane_source_degraded(runtime, pinned):
             return False
         return iteration > 1
     conclusion_counts = workqueue.card_conclusion_counts(ctx)
@@ -2660,16 +2669,16 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
                 "S6_SOURCE_UNAVAILABLE: this run is pinned to S6 but the "
                 "target configures no [s6_peers]; peer mining has no input. "
                 "Run bin/suggest-peers or drop the pin — an empty queue here "
-                "is a configuration fault, not an exhausted campaign",
+                "is a configuration fault, not an exhausted lane",
             )
-    if fixed_campaign_exhausted(runtime, state.iteration):
-        unavailable = _fixed_campaign_unavailable(runtime)
+    if fixed_lane_exhausted(runtime, state.iteration):
+        unavailable = _fixed_lane_unavailable(runtime)
         if unavailable:
-            index_log(runtime, f"CAMPAIGN_UNAVAILABLE: {unavailable}")
+            index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
         else:
             index_log(
                 runtime,
-                "CAMPAIGN_EXHAUSTED: no open "
+                "LANE_EXHAUSTED: no open "
                 f"{str(runtime.fixed_strategy).upper()} card or hypothesis remains",
             )
         state.stopped = True
@@ -2793,10 +2802,10 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         runner_preflight.validate(
             runtime.config, lambda message: index_log(runtime, message)
         )
-        unavailable = _fixed_campaign_unavailable(runtime)
+        unavailable = _fixed_lane_unavailable(runtime)
         if unavailable:
             refresh_work_cards(runtime, force=True)
-            index_log(runtime, f"CAMPAIGN_UNAVAILABLE: {unavailable}")
+            index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
             return 0
         validate_model(runtime)
         preflight_build(runtime)
@@ -2843,11 +2852,11 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
             runtimes[0].config,
             lambda message: index_log(runtimes[0], message),
         )
-        unavailable = _fixed_campaign_unavailable(runtimes[0])
+        unavailable = _fixed_lane_unavailable(runtimes[0])
         if unavailable:
             for runtime in runtimes:
                 refresh_work_cards(runtime, force=True)
-                index_log(runtime, f"CAMPAIGN_UNAVAILABLE: {unavailable}")
+                index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
             return 0
         for runtime in runtimes:
             _activate_runtime(runtime)

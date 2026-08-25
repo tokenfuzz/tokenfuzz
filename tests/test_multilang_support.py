@@ -168,7 +168,8 @@ class MultiLanguageSupportTests(unittest.TestCase):
         scratch = self.tree(
             "python",
             f'target = "multilang"\nbuild_system = "python"\n[sanitizer]\nenabled = []\n'
-            f'[runner]\nbin = "{sys.executable}"\nargs = ["{{TESTCASE}}"]\n',
+            f'[runner]\nbin = "{sys.executable}"\nargs = ["{{TESTCASE}}"]\n'
+            'crash_patterns = ["Traceback \\\\(most recent call last\\\\):"]\n',
         )
         clean = self.make_testcase(scratch / "clean.py", 'print("TESTCASE_EXECUTED")\n')
         bare = scratch / "bare.py"
@@ -184,6 +185,33 @@ class MultiLanguageSupportTests(unittest.TestCase):
             'print("B" * 2048)\nprint("TESTCASE_EXECUTED")\n',
         )
         traceback = self.make_testcase(scratch / "traceback.py", 'raise RecursionError("forced")\n')
+        assertion = self.make_testcase(scratch / "assertion.py", "assert False\n")
+        missing_module = self.make_testcase(
+            scratch / "missing-module.py",
+            "import tokenfuzz_fixture_module_that_does_not_exist\n",
+        )
+        unavailable = self.make_testcase(
+            scratch / "unavailable.py",
+            "raise RuntimeError('feature is not available in this build')\n",
+        )
+        (self.target / "assertion_origin.py").write_text(
+            "def fail():\n    raise AssertionError('target invariant')\n",
+            encoding="utf-8",
+        )
+        target_assertion = self.make_testcase(
+            scratch / "target-assertion.py",
+            f"import sys\nsys.path.insert(0, {str(self.target)!r})\n"
+            "from assertion_origin import fail\nfail()\n",
+        )
+        (self.target / "unavailable_origin.py").write_text(
+            "def fail():\n    raise RuntimeError('feature is unavailable in this build')\n",
+            encoding="utf-8",
+        )
+        target_unavailable = self.make_testcase(
+            scratch / "target-unavailable.py",
+            f"import sys\nsys.path.insert(0, {str(self.target)!r})\n"
+            "from unavailable_origin import fail\nfail()\n",
+        )
         dry = self.run_probe(clean, "--dry-run")
         self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
         self.assertIn("mode=generic", dry.stdout + dry.stderr)
@@ -206,7 +234,22 @@ class MultiLanguageSupportTests(unittest.TestCase):
         crash_result = self.run_probe(huge_crash, environment=cap_env)
         self.assertLess(huge_crash.with_suffix(".asan.txt").stat().st_size, 1200)
         self.assertIn("verdict=CRASH", crash_result.stdout + crash_result.stderr)
-        self.assertIn("Traceback", (self.run_probe(traceback).stdout + self.run_probe(traceback).stderr))
+        traceback_result = self.run_probe(traceback)
+        self.assertIn("Traceback", traceback_result.stdout + traceback_result.stderr)
+        self.assertIn("verdict=CRASH", traceback_result.stdout + traceback_result.stderr)
+        assertion_result = self.run_probe(assertion)
+        self.assertIn("AssertionError", assertion_result.stdout + assertion_result.stderr)
+        self.assertIn("verdict=EXEC_FAIL", assertion_result.stdout + assertion_result.stderr)
+        missing_result = self.run_probe(missing_module)
+        self.assertIn("ModuleNotFoundError", missing_result.stdout + missing_result.stderr)
+        self.assertIn("verdict=NO_EXEC", missing_result.stdout + missing_result.stderr)
+        unavailable_result = self.run_probe(unavailable)
+        self.assertIn("verdict=NO_EXEC", unavailable_result.stdout + unavailable_result.stderr)
+        target_assertion_result = self.run_probe(target_assertion)
+        self.assertIn("AssertionError", target_assertion_result.stdout + target_assertion_result.stderr)
+        self.assertIn("verdict=CRASH", target_assertion_result.stdout + target_assertion_result.stderr)
+        target_unavailable_result = self.run_probe(target_unavailable)
+        self.assertIn("verdict=CRASH", target_unavailable_result.stdout + target_unavailable_result.stderr)
 
         printer = self.executable(
             self.root / "argv-printer",

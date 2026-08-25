@@ -59,6 +59,14 @@ the FIND is preserved whether or not the reproducer lands.
    - **Signal:** a newly cleared guard, closer coverage, suspicious output, or
      crash-adjacent state earns deeper variants. Follow it while it converges.
 
+**Wrapper testcases must fail closed:** when a testcase or sibling harness
+launches child processes, check setup, every required child exit status, and
+the expected observation before returning success. A trailing `printf`,
+cleanup command, or ignored child failure must not turn a bind/import/compile
+failure into CLEAN. Put orchestration in an explicit sibling `HARNESS:` file;
+a direct `.sh` testcase is target input unless the pinned runner itself is a
+shell interpreter.
+
 **For JS testcases:** Always end with `print('TESTCASE_EXECUTED');` as a sentinel.
 Wrap risky operations in try/catch that still exercises the target path on exception.
 

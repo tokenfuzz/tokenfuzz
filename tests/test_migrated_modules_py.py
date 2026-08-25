@@ -603,7 +603,6 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         and "bin/state resume --agent `" not in static_text,
         "static prompt suffix keeps its compression resume command agent-neutral",
     )
-
     generic_target = root / "generic-target"
     (generic_target / "build-asan").mkdir(parents=True)
     generic_config = target_config.Config(
@@ -613,6 +612,13 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     generic_context = prompt.PromptContext(
         results, generic_target, "demo", references, 2, config=generic_config,
+    )
+    generic_cold = prompt.cold_start_prompt(generic_context, 1)
+    check(
+        "It is not legitimate for the testcase" in generic_cold
+        and "free the active callback state itself" in generic_cold
+        and "silence in the docs means the contract is in-domain" not in generic_cold,
+        "safety rules reject testcase-driven callback self-destruction",
     )
     directive = prompt.sanitizer_build_directive(generic_context)
     check(
@@ -1863,7 +1869,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         agent="1", note="source proof",
     )
     check(
-        audit_runner.fixed_campaign_exhausted(refresh_runtime),
+        audit_runner.fixed_lane_exhausted(refresh_runtime),
         "a pinned S6 campaign stops when every supplied card is terminal",
     )
     # Closing the card does not close the investigation it started: stopping
@@ -1874,7 +1880,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         encoding="utf-8",
     )
     check(
-        not audit_runner.fixed_campaign_exhausted(refresh_runtime),
+        not audit_runner.fixed_lane_exhausted(refresh_runtime),
         "an open hypothesis holds a pinned S6 campaign open",
     )
     (refresh_results / "state" / "hypotheses.jsonl").write_text(
@@ -1889,15 +1895,15 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         agent="1", note="finding filed",
     )
     check(
-        not audit_runner.fixed_campaign_exhausted(refresh_runtime),
+        not audit_runner.fixed_lane_exhausted(refresh_runtime),
         "a first productive S6 conclusion remains open for clustered variants",
     )
     audit_runner.workqueue.write_cards(refresh_results / "work-cards.jsonl", [])
     refresh_runtime.config = SimpleNamespace(s6_peers=["peerlib"])
     refresh_runtime.s6_source_degraded = False
     check(
-        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=1)
-        and audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
+        not audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=1)
+        and audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=2),
         "a healthy but empty S6 source gets exactly one discovery iteration",
     )
     (refresh_results / "state" / "hypotheses.jsonl").write_text(
@@ -1908,7 +1914,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         encoding="utf-8",
     )
     check(
-        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
+        not audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=2),
         "an empty source cannot strand an active cardless S6 hypothesis",
     )
     (refresh_results / "state" / "hypotheses.jsonl").write_text(
@@ -1921,14 +1927,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     audit_runner.workqueue.write_cards(refresh_results / "work-cards.jsonl", [])
     refresh_runtime.s1_source_degraded = False
     check(
-        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=1)
-        and audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
+        not audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=1)
+        and audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=2),
         "a healthy but empty S1 patch source gets exactly one discovery iteration",
     )
     refresh_runtime.s1_source_degraded = True
     check(
-        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=2),
-        "a failed patch-cards generation is a fault, not an exhausted S1 campaign",
+        not audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=2),
+        "a failed patch-cards generation is a fault, not an exhausted S1 lane",
     )
     refresh_runtime.s1_source_degraded = False
     audit_runner.workqueue.write_cards(
@@ -1937,8 +1943,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
           "file": "src/unit.c", "mode": "auto"}],
     )
     check(
-        not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=9),
-        "an unclaimed S1 patch card keeps its campaign open",
+        not audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=9),
+        "an unclaimed S1 patch card keeps its lane open",
     )
     # S1's patch cards are capped by the ranked window, so a consumed batch
     # must still grow it — unlike the campaigns that never read that window.
@@ -1961,7 +1967,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         agent="1", note="campaign cannot build",
     )
     check(
-        audit_runner.fixed_campaign_exhausted(refresh_runtime),
+        audit_runner.fixed_lane_exhausted(refresh_runtime),
         "a blocked pinned S4 campaign stops without empty agent relaunches",
     )
     with mock.patch.object(audit_runner, "_rank_window", return_value=(120, 120)), \
@@ -1974,12 +1980,44 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     with mock.patch.object(
         audit_runner.workqueue, "campaign_supported", return_value=False,
     ):
-        unavailable_stops = audit_runner.fixed_campaign_exhausted(
+        unavailable_stops = audit_runner.fixed_lane_exhausted(
             refresh_runtime, iteration=1,
         )
     check(
         unavailable_stops,
         "a structurally unsupported S4 campaign stops before launching an agent",
+    )
+    # Card-backed pinned lanes stop once their ranked work is genuinely closed,
+    # but an empty one still gets the normal discovery runway: ranking can miss
+    # a useful manual strategy angle, which an absent generator answer cannot.
+    refresh_runtime.fixed_strategy = "S5"
+    audit_runner.workqueue.write_cards(
+        refresh_results / "work-cards.jsonl",
+        [{"id": "S5-only", "kind": "ranked-source", "strategy": "S5",
+          "file": "src/state.c", "mode": "auto", "subsystem": "src"}],
+    )
+    audit_runner.workqueue.update_card_status(
+        audit_runner._queue_context(refresh_runtime), "S5-only", "blocked",
+        agent="1", note="source proof: configured build cannot execute this surface",
+    )
+    check(
+        audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=2),
+        "a pinned card-backed lane stops after all of its supplied work closes",
+    )
+    (refresh_results / "state" / "hypotheses.jsonl").write_text(
+        json.dumps({"agent": "1", "id": "H-S5", "status": "INVESTIGATING",
+                    "strategy": "S5", "card_id": "S5-only"}) + "\n",
+        encoding="utf-8",
+    )
+    check(
+        not audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=2),
+        "an active hypothesis keeps its pinned card-backed lane open",
+    )
+    (refresh_results / "state" / "hypotheses.jsonl").write_text("", encoding="utf-8")
+    audit_runner.workqueue.write_cards(refresh_results / "work-cards.jsonl", [])
+    check(
+        not audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=20),
+        "an empty ranked-window lane retains manual discovery turns",
     )
     refresh_runtime.fixed_strategy = "S6"
     # A pin decides which generators run, so it is part of the queue identity:
@@ -2077,14 +2115,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
                     "strategy": "S1", "card_id": "WORK-OLD"}) + "\n",
         encoding="utf-8",
     )
-    foreign_stops = audit_runner.fixed_campaign_exhausted(refresh_runtime, 3)
+    foreign_stops = audit_runner.fixed_lane_exhausted(refresh_runtime, 3)
     (refresh_results / "state" / "hypotheses.jsonl").write_text(
         json.dumps({"agent": "1", "id": "H-OWN", "status": "INVESTIGATING",
                     "strategy": "S6", "card_id": "S6-only"}) + "\n",
         encoding="utf-8",
     )
     check(
-        foreign_stops and not audit_runner.fixed_campaign_exhausted(refresh_runtime, 3),
+        foreign_stops and not audit_runner.fixed_lane_exhausted(refresh_runtime, 3),
         "only the pinned lane's own open work holds its campaign open",
     )
     # An empty queue proves exhaustion only when the source could answer.
@@ -2094,11 +2132,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     (refresh_results / "state" / "hypotheses.jsonl").write_text("", encoding="utf-8")
     refresh_runtime.config = SimpleNamespace(s6_peers=["peerlib"])
     refresh_runtime.s6_source_degraded = True
-    degraded = audit_runner.fixed_campaign_exhausted(refresh_runtime, 2)
+    degraded = audit_runner.fixed_lane_exhausted(refresh_runtime, 2)
     refresh_runtime.s6_source_degraded = False
-    healthy = audit_runner.fixed_campaign_exhausted(refresh_runtime, 2)
+    healthy = audit_runner.fixed_lane_exhausted(refresh_runtime, 2)
     refresh_runtime.config = SimpleNamespace(s6_peers=[])
-    unconfigured = audit_runner.fixed_campaign_exhausted(refresh_runtime, 2)
+    unconfigured = audit_runner.fixed_lane_exhausted(refresh_runtime, 2)
     check(
         not degraded and not unconfigured and healthy,
         "only a healthy, configured S6 source can report an exhausted campaign",

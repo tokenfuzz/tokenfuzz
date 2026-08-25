@@ -54,9 +54,12 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     def decide(_name, _keys, prompt, timeout, **kwargs):
         captured.update(prompt=prompt, timeout=timeout, **kwargs)
         return {
-            "rows": [{
-                "file": "src/parser.c", "function": "parse_next", "line": 24,
-                "hypothesis": "neighbor parser shares the unchecked length", "category": "bounds",
+            "items": [{
+                "id": crash.name,
+                "rows": [{
+                    "file": "src/parser.c", "function": "parse_next", "line": 24,
+                    "hypothesis": "neighbor parser shares the unchecked length", "category": "bounds",
+                }],
             }]
         }
 
@@ -70,6 +73,16 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
         captured.get("usage_index") == results / "logs" / "index.jsonl",
         "cluster decisions charge the results-tree usage ledger",
     )
+
+    partial = crash_with_frame(results, target, "CRASH-011-2")
+    with mock.patch.object(
+        triage.llm_decide, "llm_decide", side_effect=decide,
+    ) as one_batch:
+        keyed = triage.cluster_expansion_decisions([crash, partial], target)
+    check(one_batch.call_count == 1, "a crash group uses one keyed expansion decision")
+    check(keyed[crash] == rows, "a returned crash id keeps its sibling rows")
+    check(keyed[partial] is None, "a missing crash id remains retryable")
+    (partial / ".cluster_expanded").write_text("covered by batch parsing test\n")
 
     # Unset, this decision gets its own measured default -- the tier ceiling is
     # shorter than a single observed call, so every call would time out.
@@ -125,24 +138,25 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     empty = crash_with_frame(results, target, "CRASH-031-1")
     retry = crash_with_frame(results, target, "CRASH-032-1")
 
-    def expansion(directory, _target, **_kwargs):
-        if directory == retry:
-            return None
-        if directory == empty:
-            return []
-        return [{
-            "file": "src/parser.c", "function": "parse_fresh", "line": 35,
-            "hypothesis": "fresh crash exposes another neighbor", "category": "size",
-        }]
+    def expansion(directories, _target, **_kwargs):
+        return {
+            directory: (
+                None if directory == retry else [] if directory == empty else [{
+                    "file": "src/parser.c", "function": "parse_fresh", "line": 35,
+                    "hypothesis": "fresh crash exposes another neighbor", "category": "size",
+                }]
+            )
+            for directory in directories
+        }
 
-    with mock.patch.object(triage, "cluster_expansion_decision", side_effect=expansion) as decision:
+    with mock.patch.object(triage, "cluster_expansion_decisions", side_effect=expansion) as decision:
         counts = audit_runner.expand_new_crash_clusters(runtime)
         retried = audit_runner.expand_new_crash_clusters(runtime)
     check(counts == {"expanded": 2, "added": 1, "skipped": 0, "pending": 1},
           "driver distinguishes completed, empty, and retryable decisions")
     check(retried == {"expanded": 0, "added": 0, "skipped": 0, "pending": 1},
           "unavailable expansion remains pending without retrying in the same audit")
-    check(decision.call_count == 3, "each new crash gets at most one expansion attempt per audit")
+    check(decision.call_count == 1, "new crashes share one expansion attempt per audit")
     check((fresh / ".cluster_expanded").is_file(), "successful expansion is marked exactly once")
     check((empty / ".cluster_expanded").is_file(), "empty rows are a completed expansion")
     check(not (retry / ".cluster_expanded").exists(), "unavailable decisions remain retryable")
@@ -157,9 +171,9 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     )
     runtime.config = SimpleNamespace(attacker_controls=["bytes"])
     runtime.cluster_expansion_attempted = set()
-    with mock.patch.object(triage, "cluster_expansion_decision", side_effect=expansion) as scoped:
+    with mock.patch.object(triage, "cluster_expansion_decisions", side_effect=expansion) as scoped:
         audit_runner.expand_new_crash_clusters(runtime)
-    considered = [call.args[0] for call in scoped.call_args_list]
+    considered = [directory for call in scoped.call_args_list for directory in call.args[0]]
     check(uncredited in considered, "an out-of-model crash is still expanded")
     check(
         all(call.kwargs.get("attacker_controls") == ["bytes"]
@@ -171,7 +185,7 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
 
     def scoped_decide(_name, _keys, prompt, timeout, **kwargs):
         captured["prompt"] = prompt
-        return {"rows": []}
+        return {"items": [{"id": crash.name, "rows": []}]}
 
     with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=scoped_decide):
         triage.cluster_expansion_decision(

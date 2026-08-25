@@ -48,6 +48,14 @@ CLEAN_PATTERN = (
 )
 _CRASH_RE = re.compile("|".join(CRASH_PATTERNS))
 _CLEAN_RE = re.compile(CLEAN_PATTERN)
+_RUNNER_IMPORT_FAILURE_RE = re.compile(
+    r"^(?:ModuleNotFoundError: No module named|ImportError: cannot import name)\b"
+)
+_RUNNER_UNAVAILABLE_RE = re.compile(
+    r"^(?:RuntimeError|OSError): .*\b(?:unavailable|not available)\b", re.IGNORECASE,
+)
+_RUNNER_ASSERTION_RE = re.compile(r"^AssertionError(?::|$)")
+_PYTHON_FRAME_RE = re.compile(r'^\s*File "([^"]+)"')
 
 
 def _file_matches(path: str | Path, pattern: re.Pattern) -> bool:
@@ -65,6 +73,36 @@ def file_has_crash(path: str | Path, extra_patterns: tuple[str, ...] = ()) -> bo
 
 def file_is_clean(path: str | Path) -> bool:
     return _file_matches(path, _CLEAN_RE)
+
+
+def runner_testcase_failure(path: str | Path, testcase: str | Path) -> str:
+    """Classify a Python exception whose deepest frame is the testcase.
+
+    A bare exception name is insufficient: target code can legitimately raise
+    the same exception.  Traceback provenance keeps target-origin diagnostics
+    visible while separating an unavailable import from a testcase assertion.
+    """
+    try:
+        expected = Path(testcase).resolve()
+        last_frame: Path | None = None
+        with Path(path).open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if line.startswith("Traceback (most recent call last):"):
+                    last_frame = None
+                    continue
+                frame = _PYTHON_FRAME_RE.match(line)
+                if frame:
+                    last_frame = Path(frame.group(1)).resolve()
+                    continue
+                if last_frame != expected:
+                    continue
+                if _RUNNER_IMPORT_FAILURE_RE.match(line) or _RUNNER_UNAVAILABLE_RE.match(line):
+                    return "import"
+                if _RUNNER_ASSERTION_RE.match(line):
+                    return "assertion"
+    except OSError:
+        pass
+    return ""
 
 
 def main() -> int:

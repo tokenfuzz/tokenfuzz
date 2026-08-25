@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
@@ -192,10 +191,13 @@ class WorkQueueTests(unittest.TestCase):
         )
         window = workqueue.select_strategy_window(cards, 8)
 
-        self.assertEqual(len(window), 8)
         self.assertEqual(
             len({card["file"] for card in window}), 8,
             "every slot bought a distinct file",
+        )
+        self.assertEqual(
+            len(window), 8 * 4,
+            "each selected file keeps independently closable strategy cards",
         )
         self.assertEqual(
             {card["strategy"] for card in window}, {"S7", "S5", "S3", "S8"},
@@ -209,11 +211,7 @@ class WorkQueueTests(unittest.TestCase):
         # Slots beyond the file supply fall back to rank order, so a small
         # target still gets its companions.
         wide = workqueue.select_strategy_window(cards, 40)
-        self.assertEqual(len(wide), 40)
-        self.assertGreater(
-            max(Counter(card["file"] for card in wide).values()), 1,
-            "a file earns a second angle once fresh files run out",
-        )
+        self.assertEqual(len(wide), len(cards))
 
     def test_coverage_buckets_match_the_identity_cards_carry(self) -> None:
         """A coverage lookup keyed differently from a card never hits.
@@ -276,25 +274,20 @@ class WorkQueueTests(unittest.TestCase):
         limit = 10
         cards = workqueue.rank_target(self.ctx, limit)
 
-        self.assertEqual(len(cards), limit)
         self.assertEqual(
             len({card["file"] for card in cards}), limit,
             "the window reached as many files as it had slots",
+        )
+        self.assertGreater(
+            len(cards), limit,
+            "strategy companions do not consume the distinct-file budget",
         )
         self.assertGreater(
             len({card["strategy"] for card in cards}), 1,
             "spreading over files still leaves more than one angle live",
         )
 
-    def test_a_dropped_angle_stays_claimable_on_the_surviving_card(self) -> None:
-        """Nothing recreates a companion the window dropped.
-
-        `claim_next_card` reads only persisted cards, and the productive-agent
-        relaxation lifts a subsystem restriction on cards that exist rather
-        than minting one. So a file selected under S7 would be reachable under
-        no other strategy for the whole run unless the surviving card carries
-        the angles its dropped siblings held.
-        """
+    def test_selected_files_keep_independently_closable_strategy_cards(self) -> None:
         cards = []
         for index in range(6):
             for offset, strategy in enumerate(("S7", "S5", "S3")):
@@ -305,17 +298,37 @@ class WorkQueueTests(unittest.TestCase):
         window = workqueue.select_strategy_window(cards, 6)
 
         self.assertEqual(len({card["file"] for card in window}), 6)
+        self.assertEqual(len(window), 6 * 3)
+        by_file: dict[str, set[str]] = {}
         for card in window:
-            with self.subTest(file=card["file"]):
-                claimable = {card["strategy"], *card.get("allowed_strategies", [])}
-                self.assertEqual(
-                    claimable, {"S7", "S5", "S3"},
-                    "every angle the file signalled is still claimable",
-                )
-                for strategy in ("S7", "S5", "S3"):
-                    self.assertTrue(workqueue.card_strategy_matches(card, strategy))
+            by_file.setdefault(card["file"], set()).add(card["strategy"])
+            self.assertNotIn("allowed_strategies", card)
+        self.assertTrue(
+            all(strategies == {"S7", "S5", "S3"} for strategies in by_file.values())
+        )
+
+    def test_closing_one_strategy_companion_keeps_the_other_claimable(self) -> None:
+        self.write_cards([
+            self.card("WORK-S5", "src/a.c", strategy="S5", score=20),
+            self.card("WORK-S7", "src/a.c", strategy="S7", score=19),
+        ])
+
+        workqueue.update_card_status(
+            self.ctx, "WORK-S5", "blocked", agent="1",
+            note="configured runner cannot exercise the stateful callback surface",
+        )
+
+        chosen = workqueue.claim_next_card(
+            self.ctx, "2", mode="generic", strategy="S7", claim=False,
+        )
+        self.assertEqual(chosen["id"], "WORK-S7")
 
     def test_a_carried_angle_is_returned_as_the_requested_strategy(self) -> None:
+        """A resumed queue can still collapse angles onto one card.
+
+        The claimed copy has to name the lane that claimed it, or `add-hyp`
+        refuses the very hypothesis this card was handed out for.
+        """
         self.write_cards([
             self.card(
                 "WORK-S7", "src/unit.c", strategy="S7", score=500,
@@ -330,7 +343,6 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["strategy"], "S8")
         self.assertEqual(claimed["source_strategy"], "S7")
-        self.assertIn("carried S8 angle", claimed["reason"])
         persisted = workqueue.read_jsonl(self.results / "work-cards.jsonl")[0]
         self.assertEqual(persisted["strategy"], "S7")
         self.assertNotIn("source_strategy", persisted)
@@ -487,6 +499,7 @@ class WorkQueueTests(unittest.TestCase):
             ("MOZ_ASSERT(index < length);", "S2", "asserted invariant"),
             ("extern \"C\" int public_api();", "S3", "exported API surface"),
             ("free(node); callback(owner);", "S5", "lifetime/ownership operation"),
+            ("self.state = self.step_next", "S5", "state-machine transition"),
             ("return normalize(normalize(value));", "S8", "round-trip property surface"),
             # Boundary surfaces are spec-vs-implementation work, not S7 seed
             # mutation: the defect is a rule the code fails to enforce.
@@ -537,6 +550,7 @@ class WorkQueueTests(unittest.TestCase):
             "static int proxyLock(unixFile *pFile, int eFileLock){",
             "/* Insertion completes in constant time on average. */",
             "int redirect_stdout(int fd);",
+            'state = "ready";',
             "sqlite3_bind_parameter_index(pStmt, zName);",
             "ret = gnutls_x509_privkey_export(key, format, out, &size);",
             "result = database.exec(statement); match = regex.exec(text);",
@@ -815,7 +829,7 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(updated["agent"], "2")
         self.assertEqual(updated["status"], "DISCARDED")
 
-    def test_environment_block_closes_own_card_and_matching_siblings_only(self) -> None:
+    def test_environment_block_closes_only_its_own_card(self) -> None:
         cards = [
             self.card("WORK-C", "yaml/_yaml.c"),
             self.card("WORK-H", "yaml/_yaml.h"),
@@ -829,7 +843,7 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(updated["status"], "ENV-BLOCKED")
         latest = workqueue.latest_claims_by_card(self.ctx)
         self.assertEqual(latest["WORK-C"]["status"], "blocked")
-        self.assertEqual(latest["WORK-H"]["status"], "blocked")
+        self.assertNotIn("WORK-H", latest)
         self.assertNotIn("WORK-OTHER", latest)
 
     def test_claiming_honors_mode_strategy_surface_and_fresh_leases(self) -> None:
@@ -853,6 +867,67 @@ class WorkQueueTests(unittest.TestCase):
         workqueue.append_jsonl(self.results / "state" / "claims.jsonl", stale)
         reclaimed = workqueue.claim_next_card(self.ctx, "2", mode="generic", strategy="S7", claim=False)
         self.assertEqual(reclaimed["id"], "WORK-B")
+
+    def test_claim_reports_requested_carried_strategy(self) -> None:
+        self.write_cards([
+            self.card(
+                "WORK-A", "src/a.c", strategy="S7",
+                allowed_strategies=["S5"],
+                patch_cards=["PATCH-1"],
+                reason=(
+                    "input-consumption entrypoint; lifetime/ownership operation; "
+                    "asserted invariant; near prior-fix card; shallow source path; "
+                    "llm-rerank: parser boundary"
+                ),
+            ),
+        ])
+
+        chosen = workqueue.claim_next_card(
+            self.ctx, "1", mode="generic", strategy="S5", claim=False,
+        )
+
+        self.assertEqual(chosen["strategy"], "S5")
+        self.assertEqual(
+            chosen["reason"],
+            "S5 evidence: lifetime/ownership operation; shallow source path",
+        )
+        self.assertEqual(chosen["patch_cards"], [])
+        self.assertIn(
+            "- Strategy: `S5`",
+            workqueue.state_resume(
+                self.ctx, "1", mode="generic", claim=False, strategy="S5",
+            ),
+        )
+        self.assertEqual(
+            workqueue.read_jsonl(self.results / "work-cards.jsonl")[0]["strategy"],
+            "S7",
+        )
+        self.assertIn(
+            "input-consumption entrypoint",
+            workqueue.read_jsonl(self.results / "work-cards.jsonl")[0]["reason"],
+        )
+        shown = workqueue.show_work_card(self.ctx, "WORK-A")
+        self.assertEqual(shown["patch_cards"], [])
+        self.assertNotIn("near prior-fix card", shown["why_ranked"])
+        self.assertNotIn("lifetime/ownership operation", shown["why_ranked"])
+        self.assertNotIn("llm-rerank", shown["why_ranked"])
+
+    def test_accepted_finding_demotes_its_origin_card_once(self) -> None:
+        self.add_hypothesis(hyp_id="H-find", card_id="WORK-A")
+        workqueue.update_hypothesis(self.ctx, "H-find", "FIND-007", agent="1")
+
+        self.assertTrue(
+            workqueue.record_accepted_artifact_card(
+                self.results, "FIND-007-example", "find",
+            )
+        )
+        self.assertFalse(
+            workqueue.record_accepted_artifact_card(
+                self.results, "FIND-007-example", "find",
+            ),
+            "repeated housekeeping is idempotent",
+        )
+        self.assertEqual(workqueue.card_conclusion_counts(self.ctx), {"WORK-A": 1})
 
     def test_reproducers_prefer_built_units_without_hiding_source_review(self) -> None:
         (self.target / "src").mkdir()

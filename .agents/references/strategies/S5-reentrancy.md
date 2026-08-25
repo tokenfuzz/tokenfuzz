@@ -12,14 +12,18 @@ in an order the implementation doesn't handle.
 Function A holds raw reference to Object X
   → A calls function B (event dispatch, script execution)
     → Callback C fires
-      → C destroys/releases Object X
+      → ordinary callback work makes target code destroy/replace Object X
   → A returns from B, dereferences stale pointer → lifetime issue
 ```
 
 **Procedure:**
 1. Find functions holding raw pointers that call re-entrant APIs
-2. Trace: between pointer capture and pointer use, can any callback destroy the object?
+2. Trace: between pointer capture and pointer use, can ordinary callback work
+   make target code destroy or replace the object?
 3. Key question: is the reference RefPtr/prevent-destroy, or raw?
+
+Do not manufacture the transition by freeing the active callback state in the
+testcase. That is trusted-caller ordering, not externally-driven re-entrancy.
 
 ```bash
 rg -l 'MOZ_CAN_RUN_SCRIPT' --type cpp <dir>/

@@ -22,7 +22,7 @@ _STRATEGIES = {
     "S2": ("S2-assert-negation.md", "Invariant negation: identify checks and preconditions, then reach a violated assumption through the public boundary."),
     "S3": ("S3-spec-vs-impl.md", "Rule-vs-implementation: trace a security, published-spec, or fast/slow-path rule to the exact code that must enforce it. For a boundary-ranked card, start with access control, identity/origin, credential/assertion, outbound-request, query/template, path, injection, deserialization, or external-entity decisions."),
     "S4": ("S4-directed-fuzzing.md", "Boundary-directed fuzzing: run `bin/fuzz candidates` to find published APIs that untrusted input reaches and no harness drives, improve or write one faithful harness, then spend one bounded campaign on it. The only strategy that runs a fuzzer."),
-    "S5": ("S5-reentrancy.md", "Lifetime/state: target re-entrancy, rollback, races, and harmful but valid call sequences."),
+    "S5": ("S5-reentrancy.md", "Lifetime/state: target-driven re-entrancy, rollback, races, and harmful but valid call sequences; do not free active callback state in the testcase."),
     "S6": ("S6-cross-project.md", "Cross-project variant mining: resolve exact peer fixes, distill their repaired invariants, then search the closest target analogue and bounded siblings before opening a hypothesis."),
     "S7": ("S7-adversarial-input.md", "Adversarial input engineering: mutate real seeds around lengths, nesting, and checksums, by hand. Fuzz harnesses and campaigns belong to S4."),
     "S8": ("S8-property-based.md", "Property oracle: test security-relevant inverse, injectivity, idempotence, canonicalization, and numeric invariants."),

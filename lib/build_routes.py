@@ -44,9 +44,8 @@ import build_config
 # Industry-wide feature-disabled phrases. Inclusion criterion: the
 # phrase names a *configure-time feature flag that wasn't set in this
 # build* and would succeed against a sibling build with the flag
-# enabled. Missing-library / missing-header phrases live in
-# workqueue.ENV_BLOCK_FINGERPRINT_RE and are intentionally NOT here —
-# no alternate build saves you when libssl.so is absent.
+# enabled. Missing-library / missing-header failures are intentionally not
+# here: they do not prove that a sibling build merely enables the feature.
 #
 # The expression is a single alternation so callers do one regex pass
 # per output. Add new phrases here when a target produces a distinct
