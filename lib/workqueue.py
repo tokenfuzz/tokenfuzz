@@ -3149,6 +3149,16 @@ def latest_claims_by_card(ctx: Context) -> dict[str, dict]:
     return latest
 
 
+def agent_has_card_activity(results_dir: Path, agent: str) -> bool:
+    """Whether an agent has already received a card in this results tree."""
+    wanted = str(agent)
+    return any(
+        str(row.get("agent", "")) == wanted and row.get("card_id")
+        for row in read_jsonl(state_dir(results_dir) / "claims.jsonl")
+    )
+
+
+
 def latest_terminal_status_by_card(ctx: Context) -> dict[str, str]:
     """Per-card last real terminal status (crash/find/done/discarded/blocked).
 
@@ -4804,7 +4814,13 @@ def card_discard_evidence(ctx: Context, card_id: str) -> tuple[int, int]:
     return clean_runs, len(probed_shapes)
 
 
-def update_card_status(ctx: Context, card_id: str, status: str, agent: str = "", note: str = "") -> dict:
+def update_card_status(
+    ctx: Context,
+    card_id: str,
+    status: str,
+    agent: str = "",
+    note: str = "",
+) -> dict:
     """Append a card-status row to claims.jsonl with evidence gates.
 
     Evidence-free *terminal* closures drain a finite, one-shot card queue
@@ -5131,6 +5147,55 @@ def peer_fix_markdown(card: dict, *, include_diff: bool = True) -> list[str]:
     return lines
 
 
+def card_next_action(
+    card: dict, assigned_strategy: str = "", *,
+    has_prior_hypotheses: bool = False,
+) -> str:
+    """Return the first action for the method actually assigned to a card."""
+    strategy = assigned_strategy.strip().upper() or str(
+        card.get("strategy", "")
+    ).strip().upper()
+    if str(card.get("kind", "")) == "s6-peer-fix":
+        return (
+            "Resolve and distill the exact peer fix, then search the target "
+            "without a file-list cap and inspect the closest analogue plus "
+            "bounded siblings. Create a hypothesis only for a source-verified "
+            "target analogue with a missing guard; otherwise run `bin/state "
+            "update-card --card-id <id> --status blocked --note <source-proof>` "
+            "for a stale or already-safe card."
+        )
+    if strategy == "S7":
+        return (
+            "First verify that the configured runner or a minimal deterministic "
+            "public-API harness can deliver testcase bytes to this exact parse "
+            "or decode surface. If not, run `bin/state update-card --card-id "
+            "<id> --status blocked --note <configuration-and-source-proof>`. Otherwise use `bin/find-seed`, "
+            "mutate one final H-prefixed testcase by hand around one named "
+            "boundary. If a managed testcase prerequisite is absent, print "
+            "`NO_EXEC: <proof>` and exit 2; do not raise an exception; then "
+            "create one S7 hypothesis and run `bin/probe`; do not "
+            "create a corpus, fuzz harness, or campaign. An exception such as "
+            "RecursionError that ends only the current parse or request is "
+            "robustness, not durable denial of service; do not file it without "
+            "proof that it terminates or blocks a durable service or crosses "
+            "another security boundary. After closing this S7 "
+            "angle, end the model session instead of claiming another card; the "
+            "worker pool will resume fresh."
+        )
+    if has_prior_hypotheses:
+        # A re-offered card already has closed shapes; naming that is what
+        # keeps the next hypothesis from repeating one.
+        return (
+            "Review the card-linked history below, then create one distinct "
+            "hypothesis that does not repeat a closed shape, write one "
+            "testcase, and run `bin/probe`."
+        )
+    return (
+        "Create one structured hypothesis for this card, write one testcase, "
+        "and run `bin/probe`."
+    )
+
+
 def _status_rows_by_card(ctx: Context, mode: str = "", cards: list[dict] | None = None) -> dict[str, dict]:
     return {
         str(row.get("id", "")): row
@@ -5262,6 +5327,7 @@ def list_work_cards(
             claimed_surfaces=claimed_surfaces,
             owned_subsystems=owned_subsystems,
             agent_modes=agent_modes,
+            strategy=strategy_filter,
         )
         visible_status = str(status_row.get("status", ""))
         reason = str(status_row.get("reason", ""))
@@ -5613,6 +5679,16 @@ def state_resume(
         lines.append("")
         lines.append("## Assigned Work Card")
         if card:
+            assigned_strategy = (
+                str(card.get("strategy", "")).strip().upper()
+                or strategy.strip().upper()
+            )
+            # `claim_next_card` relabels a carried angle to the claiming lane
+            # and keeps the card's own strategy in `source_strategy`.
+            card_strategy = (
+                str(card.get("source_strategy", "")).strip().upper()
+                or assigned_strategy
+            )
             fix_hashes = card.get("fix_hashes") or []
             invalid_fix_hashes = card.get("invalid_fix_hashes") or []
             patch_cards = card.get("patch_cards") or []
@@ -5625,11 +5701,15 @@ def state_resume(
                     f"- Kind: `{card.get('kind','')}`",
                     f"- File: `{card.get('file','')}`",
                     f"- Subsystem: `{card.get('subsystem','')}`",
-                    f"- Strategy: `{card.get('strategy','')}`",
-                    f"- Reason: {card.get('reason','')}",
-                    f"- Fix commits: {fix_hash_text}",
+                    f"- Strategy: `{assigned_strategy}`",
                 ]
             )
+            if assigned_strategy != card_strategy:
+                lines.append(f"- Card primary strategy: `{card_strategy}`")
+            lines.extend([
+                f"- Reason: {card.get('reason','')}",
+                f"- Fix commits: {fix_hash_text}",
+            ])
             if invalid_fix_text:
                 lines.append(f"- Invalid fix commits: {invalid_fix_text}")
             if patch_card_text:
@@ -5643,19 +5723,12 @@ def state_resume(
                     ]
                 )
             lines.append("")
-            if str(card.get("kind", "")) == "s6-peer-fix":
-                lines.append(
-                    "Next action: resolve and distill the exact peer fix, search the target without a file-list cap, and inspect the closest analogue plus bounded siblings. Create a hypothesis only if the target analogue is real and the peer's guard is missing; otherwise run `bin/state update-card --card-id <id> --status blocked --note <source-proof>` for the stale or already-safe analogue."
-                )
-            else:
-                if any(h.get("card_id", "") == card.get("id", "") for h in hyps):
-                    lines.append(
-                        "Next action: review the card-linked history below, then create one distinct hypothesis that does not repeat a closed shape, write one testcase, and run `bin/probe`."
-                    )
-                else:
-                    lines.append(
-                        "Next action: create one structured hypothesis for this card, write one testcase, and run `bin/probe`."
-                    )
+            lines.append("Next action: " + card_next_action(
+                card, assigned_strategy,
+                has_prior_hypotheses=any(
+                    h.get("card_id", "") == card.get("id", "") for h in hyps
+                ),
+            ))
         else:
             lines.append("- none")
             lines.append("")
@@ -5890,8 +5963,8 @@ def runtime_feedback(
     out = ["scope|recent_verdicts|runtime_signals|diagnosis|feedback"]
     if not rows and not accepted_artifacts:
         out.append(
-            f"{scope}|none|none|needs-first-probe|"
-            "write one testcase, run bin/probe, then update structured state"
+            f"{scope}|none|none|no-runtime-evidence|"
+            "follow the assigned card's Next action"
         )
         return "\n".join(out) + "\n"
 

@@ -311,6 +311,10 @@ ok("MUST name" in fq and "the allocation that memory comes from" in fq,
    "quality gate requires a disclosure claim to name its memory source")
 ok("known value" in fq,
    "quality gate exempts disclosure of an already-named value")
+ok("Managed-runtime exception mismatch" in fq and "per-request" in fq,
+   "quality gate rejects exception-type drift without boundary impact")
+ok("pre-existing symlink" in fq and "relative to the current directory" in fq,
+   "quality gate rejects trusted-filesystem path claims without containment")
 
 rc, reach = render_named("triage_reachability_fields.md.j2", {"body": "sample report"})
 ok(rc == 0, "reach-field prompt renders for disclosure classification")

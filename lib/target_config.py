@@ -3275,6 +3275,7 @@ def seed_toml(
             '# args           = ["python3", "{TESTCASE}"]',
             '# env            = []',
             '# crash_patterns = []',
+            '# success_codes  = [0]',
         ]
 
     # Carry a curated [s6_peers] forward. A plain seed never emits this section
@@ -3372,10 +3373,15 @@ class Config:
     # treats as additional crash signals (Go data races, Python panics,
     # any project-specific runtime markers). Empty list means
     # triage uses only its built-in language-agnostic patterns.
+    # `success_codes` lists normal process exits. Parser CLIs often return a
+    # stable nonzero code after correctly rejecting malformed input; declaring
+    # that code lets bin/probe record the sanitizer-clean execution without
+    # mistaking every arbitrary failure for target reachability.
     runner_bin: str = ""
     runner_args: list[str] = field(default_factory=list)
     runner_env: list[str] = field(default_factory=list)
     runner_crash_patterns: list[str] = field(default_factory=list)
+    runner_success_codes: list[int] = field(default_factory=lambda: [0])
 
     def attacker_controls_csv(self) -> str:
         if not self.attacker_controls:
@@ -3568,6 +3574,7 @@ def _apply_runner_section(cfg: Config, raw: dict, source_path: str) -> None:
                                                     # for the testcase path)
       env            = ["GORACE=halt_on_error=1"]  # env vars layered on
       crash_patterns = ["my project's crash header"]  # extra regex signals
+      success_codes  = [0, 1]  # exits proving a normal completed invocation
 
     Unknown keys are ignored. The loader keeps all the literal strings —
     bin/probe and lib/triage.py substitute "{TESTCASE}" at run time.
@@ -3582,6 +3589,14 @@ def _apply_runner_section(cfg: Config, raw: dict, source_path: str) -> None:
         cfg.runner_crash_patterns = [
             x for x in raw["crash_patterns"] if isinstance(x, str) and x
         ]
+    if isinstance(raw.get("success_codes"), list):
+        codes = {
+            x for x in raw["success_codes"]
+            if isinstance(x, int) and not isinstance(x, bool)
+            and 0 <= x < 124
+        }
+        codes.add(0)
+        cfg.runner_success_codes = sorted(codes)
 
 
 def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
@@ -3613,6 +3628,7 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     cfg.runner_args = []
     cfg.runner_env = []
     cfg.runner_crash_patterns = []
+    cfg.runner_success_codes = [0]
     cfg.build_widening = False
     cfg.build_configs = []
     for k, v in parsed.items():

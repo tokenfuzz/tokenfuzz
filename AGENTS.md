@@ -52,7 +52,7 @@ Each agent has a role set by the harness:
    For opaque byte inputs, pass `--hypothesis-id H-...` and keep the input exact.
    MISSED = revise input, don't discard, don't spend the execution budget.
 4. **DEPTH FOLLOWS EVIDENCE.** Start with a trigger-aimed `bin/probe` run. One CLEAN may resolve a deterministic hypothesis only when the testcase directly instantiates every named boundary value or call step. Allocator-, scheduler-, race-, GC-, timing-, re-entrancy-, or state-dependent triggers need repetition or distinct shapes; a coverage HIT alone proves only that the location executed. MISSED and NO_EXEC never justify discard; a concrete source/configuration proof that the named trigger has no documented input boundary may.
-5. **BREADTH WITH A CARD FLOOR.** Before discarding a card, record at least 3 card-linked CLEAN `bin/probe` runs across at least 2 distinct hypothesis shapes that were actually probed. This is a card floor, not a per-hypothesis variant tax. Deepen any angle that clears a guard, reaches closer coverage, changes suspicious output, or exposes crash-adjacent state. If the configured target cannot execute the card, do not manufacture CLEAN evidence: after checking sibling builds/modes, use `ENV-BLOCKED` (which soft-blocks the owning card) or `update-card --status blocked --note <proof>` for a proven mode-incompatible, stale, or non-public surface. MISSED alone is not proof.
+5. **BREADTH WITH A CARD FLOOR.** Before discarding a card, record at least 3 card-linked CLEAN `bin/probe` runs across at least 2 distinct hypothesis shapes that were actually probed. This is a card floor, not a per-hypothesis variant tax. Deepen any angle that clears a guard, reaches closer coverage, changes suspicious output, or exposes crash-adjacent state. If the configured target cannot execute the card, do not manufacture CLEAN evidence: after checking sibling builds/modes, use `ENV-BLOCKED` (which soft-blocks the owning card) or `update-card --status blocked --note <proof>` for a proven mode-incompatible, stale, or non-public surface. The ranked queue keeps one card per strategy angle, so blocking the card you were handed closes only that angle. MISSED alone is not proof.
 6. **Bugs cluster.** After confirming, search SAME FILE and neighbors before moving on.
 7. **Stay on one subsystem while exploring; expand to neighbors after a hit.** While a hypothesis is open and you have no confirmed CRASH/FIND in this subsystem yet, stick with it across strategy rotations — don't pivot files mid-investigation. After you confirm a crash or finding in this subsystem, the harness unlocks neighbor-subsystem cards for you (productive-agent relaxation in `_claim_next_card_locked`); follow Rule 6 and claim them. Pre-confirmation pivots are wasted context cost.
 8. **Iterate on non-diagnostic runs.** Try: allocator shaping, GC interleaving, multi-trigger, object replacement. See `.agents/references/reproducer-templates.md`.
@@ -115,7 +115,10 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
 1. WRITE testcase to the absolute `${RESULTS_DIR}/scratch-N/` dir with header
    (TARGET / HYPOTHESIS-ID / CATEGORY, plus // HARNESS: harness.c /
    harness.cc / harness.cpp for C/C++ API bugs, or another supported sibling
-   harness type when the target uses a language runner). For an opaque byte
+   harness type when the target uses a language runner). If another runnable
+   testcase in the scratch dir needs different harness logic, give each
+   harness a unique sibling name and record that exact name in its HARNESS
+   header; never overwrite a shared harness. For an opaque byte
    input, keep the file exact and pass its existing hypothesis with
    `bin/probe --hypothesis-id H-...`. Do not create repo-root `scratch-N/` dirs.
 2. Run `bin/probe` in the same turn:

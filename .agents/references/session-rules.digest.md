@@ -25,6 +25,8 @@ harness's harvester only looks under `${RESULTS_DIR}`.
   HARNESS from the testcase header. For opaque byte inputs, preserve the bytes
   and pass `--hypothesis-id H-...`; target/card come from state. No env vars.
   - Write testcases and sibling harnesses under `${RESULTS_DIR}/scratch-N/`.
+    Different C/C++ harness logic needs a unique sibling filename per testcase;
+    put that exact name in HARNESS and never overwrite a shared harness.
   - `bin/probe "${RESULTS_DIR}/scratch-N/tc.html"` → 1 run; `--confirm` → 5 runs.
   - Do not create repo-root `scratch-N/` dirs; a bare relative path writes to
     the shell cwd, not the active audit scratch dir.
@@ -132,10 +134,13 @@ recent probe artifacts. It is not filing or discard evidence.
 
 Card discard uses the configured floor (default: three card-linked CLEAN rows
 across two actually-probed hypothesis shapes). MISSED, NO_EXEC, and CRASH do
-not count. A surface unavailable in every configured sibling
+not count. In a pinned run, pass `--strategy S<N>` so only that strategy angle
+closes. A surface unavailable in every configured sibling
 build/mode exits through ENV-BLOCKED (which soft-blocks its owning card), or a
 proven mode-incompatible, stale, or non-public card may be marked `blocked`
-with a precise note. MISSED alone is not proof of unreachability.
+with a precise note. The queue keeps one card per strategy angle, so
+blocking the card you were handed closes only that angle.
+MISSED alone is not proof of unreachability.
 
 ## Structured state discipline
 

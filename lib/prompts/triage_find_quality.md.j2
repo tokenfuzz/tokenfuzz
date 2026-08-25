@@ -64,6 +64,19 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     "An app that trusts this could be confused" is NOT a security
     implication — it has to be the LIBRARY's job to enforce, not the
     caller's.
+  - Managed-runtime exception mismatch with only per-call, per-request, or
+    CLI-invocation failure. An unexpected exception class escaping the
+    library's documented error hierarchy is a robustness/API-contract defect,
+    not availability impact by itself. Keep only when the report proves that
+    it terminates a process or worker beyond the current operation, bypasses a
+    security boundary, or causes another concrete security impact.
+  - File disclosure or path escape that requires a pre-existing symlink,
+    junction, mount, hard link, or alias created by a trusted party inside the
+    served root. Choosing the name of a trusted filesystem entry is not
+    arbitrary file access. Keep only when the report proves the attacker can
+    create or control that filesystem state, or cites an explicit product
+    contract requiring resolution to remain beneath the root or refusing
+    links; "relative to the current directory" alone is not that contract.
   - Missing-feature, API-shape, or documentation complaint.
   - Speculative ("looks suspicious", "could be unsafe", "may be
     exploitable") with no concrete impact described.

@@ -51,6 +51,9 @@ _CLEAN_RE = re.compile(CLEAN_PATTERN)
 _RUNNER_IMPORT_FAILURE_RE = re.compile(
     r"^(?:ModuleNotFoundError: No module named|ImportError: cannot import name)\b"
 )
+_RUNNER_ATTRIBUTE_FAILURE_RE = re.compile(
+    r"^AttributeError: module '[^']+' has no attribute '[^']+'$"
+)
 _RUNNER_UNAVAILABLE_RE = re.compile(
     r"^(?:RuntimeError|OSError): .*\b(?:unavailable|not available)\b", re.IGNORECASE,
 )
@@ -80,7 +83,9 @@ def runner_testcase_failure(path: str | Path, testcase: str | Path) -> str:
 
     A bare exception name is insufficient: target code can legitimately raise
     the same exception.  Traceback provenance keeps target-origin diagnostics
-    visible while separating an unavailable import from a testcase assertion.
+    visible while separating an unavailable prerequisite — a missing module,
+    a missing attribute, a runtime that reports itself unavailable — from a
+    testcase assertion.
     """
     try:
         expected = Path(testcase).resolve()
@@ -96,8 +101,12 @@ def runner_testcase_failure(path: str | Path, testcase: str | Path) -> str:
                     continue
                 if last_frame != expected:
                     continue
-                if _RUNNER_IMPORT_FAILURE_RE.match(line) or _RUNNER_UNAVAILABLE_RE.match(line):
-                    return "import"
+                if (
+                    _RUNNER_IMPORT_FAILURE_RE.match(line)
+                    or _RUNNER_ATTRIBUTE_FAILURE_RE.match(line)
+                    or _RUNNER_UNAVAILABLE_RE.match(line)
+                ):
+                    return "unavailable"
                 if _RUNNER_ASSERTION_RE.match(line):
                     return "assertion"
     except OSError:

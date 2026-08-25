@@ -20,6 +20,8 @@ substitute the fallback default when the queue assigned something else.
   `TARGET:`, `HYPOTHESIS-ID:`, and
   `CATEGORY: bounds|lifetime|type|size|uninit|state`; C/C++ API cases may add
   `HARNESS: harness.c|harness.cc|harness.cpp`.
+- Different C/C++ harness logic needs a unique sibling filename per runnable
+  testcase; put that exact name in HARNESS and never overwrite a shared harness.
 - Run `bin/probe "{{ scratch_dir }}/<testcase>"` immediately; after a first
   diagnostic, run the same path with `--confirm`. For opaque bytes, preserve
   them exactly and pass `--hypothesis-id H-...`.

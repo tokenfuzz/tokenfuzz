@@ -1632,6 +1632,56 @@ class WorkQueueTests(unittest.TestCase):
 
         self.assertNotEqual(diagnosis, "harness-setup")
 
+    def test_s7_resume_checks_the_configured_input_route_before_a_hypothesis(self) -> None:
+        self.write_cards([
+            self.card("S7-PARSER-1", "src/parser.c", strategy="S7"),
+        ])
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S7",
+        )
+
+        self.assertIn("First verify that the configured runner", rendered)
+        self.assertIn("minimal deterministic public-API harness", rendered)
+        self.assertIn("exact parse or decode surface", rendered)
+        self.assertIn("--status blocked", rendered)
+        self.assertIn("mutate one final H-prefixed testcase", rendered)
+        self.assertIn("RecursionError that ends only the current parse", rendered)
+        self.assertIn("not durable denial of service", rendered)
+        self.assertIn("no-runtime-evidence", rendered)
+        self.assertIn("follow the assigned card's Next action", rendered)
+        self.assertNotIn("needs-first-probe", rendered)
+        self.assertLess(
+            rendered.index("First verify that the configured runner"),
+            rendered.index("create one S7 hypothesis"),
+        )
+
+    def test_primary_s7_card_gets_the_route_gate_without_an_operator_pin(self) -> None:
+        self.write_cards([
+            self.card("S7-PARSER-1", "src/parser.c", strategy="S7"),
+        ])
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce",
+        )
+
+        self.assertIn("minimal deterministic public-API harness", rendered)
+
+    def test_s7_companion_resume_labels_the_assigned_angle_not_the_primary(self) -> None:
+        """A resumed queue can still collapse angles onto one card."""
+        companion = self.card("S7-COMPANION-1", "src/parser.c", strategy="S2")
+        companion["allowed_strategies"] = ["S7"]
+        self.write_cards([companion])
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S7",
+        )
+
+        self.assertIn("- Strategy: `S7`", rendered)
+        self.assertIn("- Card primary strategy: `S2`", rendered)
+        self.assertIn("minimal deterministic public-API harness", rendered)
+        self.assertNotIn("- Strategy: `S2`", rendered)
+
     def test_run_effort_is_recorded_in_seconds_not_only_invocations(self) -> None:
         """A run count cannot see inside an agent-authored sweep.
 
@@ -2011,6 +2061,33 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIn("why this card cannot be pursued", empty.stdout + empty.stderr)
         self.assertNotIn("peer fix", empty.stdout + empty.stderr)
         self.assertEqual(proved.returncode, 0, proved.stdout + proved.stderr)
+
+    def test_state_cli_reports_the_lane_that_claimed_a_carried_angle(self) -> None:
+        """A resumed queue can still collapse angles onto one card."""
+        card = self.card("WORK-SHARED", "src/parser.c", strategy="S2")
+        card["allowed_strategies"] = ["S7"]
+        self.write_cards([card])
+        peek = [
+            sys.executable, str(ROOT / "bin/state"),
+            "--results-dir", str(self.results), "--target-path", str(self.target),
+            "--target-slug", "sample", "next-card", "--agent", "1",
+            "--mode", "generic", "--peek",
+        ]
+
+        assigned = self.run_command(peek + ["--strategy", "S7"])
+        blocked = self.run_command([
+            sys.executable, str(ROOT / "bin/state"),
+            "--results-dir", str(self.results), "--target-path", str(self.target),
+            "--target-slug", "sample", "update-card", "--card-id", card["id"],
+            "--status", "blocked", "--note", "runner cannot enter parser",
+        ])
+        after = self.run_command(peek + ["--strategy", "S7"])
+
+        self.assertEqual(assigned.returncode, 0, assigned.stdout + assigned.stderr)
+        self.assertEqual(json.loads(assigned.stdout)["strategy"], "S7")
+        self.assertEqual(json.loads(assigned.stdout)["source_strategy"], "S2")
+        self.assertEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
+        self.assertEqual(after.stdout.strip(), "")
 
     def test_an_operator_pin_rejects_a_hypothesis_from_another_strategy(self) -> None:
         self.write_cards([

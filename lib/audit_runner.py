@@ -1870,7 +1870,11 @@ def enforce_orphan_testcases(runtime: Runtime, *, deadline: float | None = None)
 
 
 def _cold(runtime: Runtime) -> bool:
-    return not any(structured_state.agent_rows(str(i), runtime.results) for i in range(1, runtime.num_agents + 1))
+    return not any(
+        structured_state.agent_rows(str(agent), runtime.results)
+        or workqueue.agent_has_card_activity(runtime.results, str(agent))
+        for agent in range(1, runtime.num_agents + 1)
+    )
 
 
 def _fuzz_leads_empty(results: Path) -> bool:

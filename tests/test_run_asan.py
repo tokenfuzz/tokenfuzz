@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -233,6 +234,30 @@ class RunAsanTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(argv_log.read_text(encoding="utf-8"), "")
+
+    def test_generic_accepts_only_configured_success_codes(self) -> None:
+        binary = self.executable("rejecting-parser", "raise SystemExit(1)\n")
+        config = run_asan.target_config.Config(runner_success_codes=[0, 1])
+        with mock.patch.object(run_asan, "CONFIG", config), \
+             mock.patch.dict(
+                 run_asan.BASE_ENV, {"ASAN_GENERIC_BIN": str(binary)}, clear=True,
+             ), \
+             mock.patch.object(
+                 run_asan, "run_symbolized",
+                 return_value=SimpleNamespace(returncode=1),
+             ):
+            self.assertEqual(run_asan.run_generic("", 1, ["input.bin"]), 0)
+
+        config.runner_success_codes = [0]
+        with mock.patch.object(run_asan, "CONFIG", config), \
+             mock.patch.dict(
+                 run_asan.BASE_ENV, {"ASAN_GENERIC_BIN": str(binary)}, clear=True,
+             ), \
+             mock.patch.object(
+                 run_asan, "run_symbolized",
+                 return_value=SimpleNamespace(returncode=1),
+             ):
+            self.assertEqual(run_asan.run_generic("", 1, ["input.bin"]), 1)
 
 
 if __name__ == "__main__":

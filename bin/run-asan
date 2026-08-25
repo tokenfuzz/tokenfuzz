@@ -294,13 +294,18 @@ def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
         completed = run_timeout(command, timeout, rss_mb=rss_mb, env=environment)
     else:
         completed = run_symbolized(command, timeout, environment, rss_mb=rss_mb)
+    succeeded = sanitizer_run.runner_exit_succeeded(CONFIG, completed.returncode)
     if completed.returncode == 124:
         print(f"[run-asan] generic runner timed out after {timeout}s", file=sys.stderr)
-    elif completed.returncode == 0:
-        print("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)", file=sys.stderr)
+    elif succeeded:
+        print(
+            f"[run-asan] generic EXECUTION VERIFIED (post-run, "
+            f"rc={completed.returncode})",
+            file=sys.stderr,
+        )
     else:
         print(f"[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc={completed.returncode})", file=sys.stderr)
-    return completed.returncode
+    return 0 if succeeded else completed.returncode
 
 
 def require_fuzzer() -> tuple[str, int]:

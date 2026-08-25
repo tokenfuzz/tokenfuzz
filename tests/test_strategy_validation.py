@@ -73,6 +73,10 @@ class StrategyValidationTests(unittest.TestCase):
         for pattern in (
             r"Strategy S7", r"Adversarial", r"Truncation",
             r"Size issue", r"Encoding.*charset", r"Format confusion", r"bin/probe",
+            r"one documented parse or\s+decode operation",
+            r"runner fixed to another subcommand",
+            r"Startup or teardown code",
+            r"update-card --card-id <id> --status\s+blocked",
         ):
             self.assertRegex(s7, pattern)
         # Fuzzing moved to S4 wholesale. If any of it comes back here, two
@@ -82,6 +86,10 @@ class StrategyValidationTests(unittest.TestCase):
                       "Do NOT run the fuzzer yourself", "artifact_prefix"):
             self.assertNotIn(stale, s7)
         self.assertIn("S4-directed-fuzzing.md", s7)
+        self.assertIn("Existing parser fixture mutation", s7)
+        self.assertIn("state/lifetime experiments owned by S5", s7)
+        self.assertNotIn("Remove waits/syncs", s7)
+        self.assertNotIn("Double operations", s7)
         s8 = self.text("S8-property-based.md")
         for pattern in (
             r"Strategy S8", r"Category 1.*Inverse", r"Category 2.*Idempotence",

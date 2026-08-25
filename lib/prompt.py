@@ -309,16 +309,25 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
         return ""
     if card is None:
         return ""
+    assigned_strategy = (
+        str(card.get("strategy", "")).strip().upper()
+        or context.strategy(agent).strip().upper()
+    )
+    primary_strategy = (
+        str(card.get("source_strategy", "")).strip().upper() or assigned_strategy
+    )
     lines = [
         "\n## ASSIGNED WORK CARD", "",
         f"- **ID:** {card.get('id', '')}",
         f"- **Kind:** {card.get('kind', '')}",
         f"- **Subsystem:** `{card.get('subsystem', '')}`",
         f"- **File:** `{card.get('file', '')}`",
-        f"- **Strategy:** {card.get('strategy', '')}",
+        f"- **Strategy:** {assigned_strategy}",
         f"- **Score:** {card.get('score', '')}",
         f"- **Why ranked:** {card.get('reason', 'structural/code-feature score')}",
     ]
+    if assigned_strategy != primary_strategy:
+        lines.append(f"- **Card primary strategy:** {primary_strategy}")
     if card.get("seed"):
         lines.append(f"- **Seed:** `{card['seed']}`")
     if card.get("buildability") == "not-built":
@@ -336,10 +345,7 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
         "",
         "Use this card first unless structured state already has a higher-priority active row.",
     ])
-    if str(card.get("kind", "")) == "s6-peer-fix":
-        lines.append(
-            "Resolve and distill the exact peer fix, then search the target without a file-list cap and inspect the closest analogue plus bounded siblings. Create a hypothesis only for a source-verified target analogue with a missing guard; block a stale or already-safe card with source proof."
-        )
+    lines.append(f"Next action: {workqueue.card_next_action(card, assigned_strategy)}")
     lines.append(
         f"Include `--card-id {card.get('id', '')}` in structured state and `CARD-ID: {card.get('id', '')}` in testcase headers."
     )
@@ -702,6 +708,8 @@ def compact_fresh_prompt(context: PromptContext, agent: int) -> str:
 def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
     counts = structured_state.agent_counts(str(agent), context.results_dir)
     if not counts:
+        if workqueue.agent_has_card_activity(context.results_dir, str(agent)):
+            return compact_fresh_prompt(context, agent)
         return cold_start_prompt(context, agent)
     if not counts["active"]:
         return compact_fresh_prompt(context, agent)

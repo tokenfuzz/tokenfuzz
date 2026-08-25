@@ -126,6 +126,19 @@ tc.load_toml_into(cfg, TEST_TMPDIR / "empty.toml")
 assert_eq(["bytes"], cfg.attacker_controls,
           "load_toml_into: empty attacker_controls defaults to ['bytes']")
 
+cfg = tc.Config()
+write(
+    "runner-success.toml",
+    'slug = "runner-success"\n[runner]\nsuccess_codes = [123, 1, 0, 1, -1, 124, 125, 137, 256, true]\n',
+)
+tc.load_toml_into(cfg, TEST_TMPDIR / "runner-success.toml")
+assert_eq([0, 1, 123], cfg.runner_success_codes,
+          "runner success_codes keeps unique non-signal process exit values")
+cfg = tc.Config()
+tc.load_toml_into(cfg, TEST_TMPDIR / "no-tm.toml")
+assert_eq([0], cfg.runner_success_codes,
+          "runner success_codes defaults to zero")
+
 
 # ─── 3. Bad section headers are rejected ───────────────────────────
 

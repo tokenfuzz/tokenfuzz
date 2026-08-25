@@ -117,6 +117,39 @@ class ProbeCppHarnessTests(unittest.TestCase):
         binaries = list((self.scratch / ".harness-cache").glob("harness.cpp.*.bin"))
         self.assertEqual(len([path for path in binaries if os.access(str(path), os.X_OK)]), 1)
 
+    def _pin_s7(self) -> None:
+        state = self.results / "state"
+        state.mkdir(exist_ok=True)
+        (state / "hypotheses.jsonl").write_text(
+            '{"id":"H-cpp","agent":"1","strategy":"S7"}\n',
+            encoding="utf-8",
+        )
+
+    def test_s7_rejects_a_harness_when_a_runner_route_exists(self) -> None:
+        """S7 drives the configured runner; rebuilding a driver is S4's job."""
+        (self.slug_dir / "target.toml").write_text(
+            'target = "testproject"\nasan_lib = "build/libtarget.a"\n'
+            'asan_bin = "build/target-cli"\n'
+            'includes = []\ndefines = []\nlink_libs = []\n'
+            '[sanitizer]\nenabled = ["asan"]\n'
+        )
+        self._pin_s7()
+
+        process = self.run_probe()
+
+        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+        self.assertIn("S7 drives the configured runner", process.stdout + process.stderr)
+        self.assertFalse((self.scratch / ".harness-cache").exists())
+
+    def test_s7_keeps_its_harness_on_a_library_only_target(self) -> None:
+        """With no CLI route, a public-API harness is S7's only way to run."""
+        self._pin_s7()
+
+        process = self.run_probe()
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertNotIn("S7 drives the configured runner", process.stdout + process.stderr)
+
     def test_concurrent_builds_share_lock_and_stale_locks_are_reaped(self) -> None:
         race_harness = self.scratch / "race-harness.cpp"
         race_harness.write_text("int main(int, char **) { return 0; }\n")

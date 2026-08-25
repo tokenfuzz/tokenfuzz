@@ -74,6 +74,10 @@ bin/probe "${RESULTS_DIR}/scratch-N/tc.xml" -- 8 100       # trailing args go to
   do not create top-level repo `scratch-N/` dirs. Native harness outputs
   belong under `RESULTS_DIR/scratch-N/` and should normally be built by
   `bin/probe`.
+- If two runnable C/C++ testcases need different harness logic, give each
+  harness a unique sibling filename and put that exact name in its HARNESS
+  header. Never overwrite a shared `harness.c` while another testcase points
+  to it.
 - MISSED → revise input, don't discard. Don't spend ASan budget.
 - Generic C/C++ targets do not support coverage gating; `bin/probe` falls back
   to `bin/run-sanitizer-multi asan generic` and saves a sibling `.asan.txt`.
@@ -224,12 +228,13 @@ filing/discard evidence.
 
 `update-card --status discarded` requires the configured evidence floor
 (default: three card-linked CLEAN runs across two distinct hypothesis shapes
-that were actually probed). MISSED, NO_EXEC, and CRASH rows do not count.
+that were actually probed. MISSED, NO_EXEC, and CRASH rows do not count.
 If the configured target cannot execute a surface, do not manufacture CLEAN
 evidence: after checking sibling builds/modes, mark its hypothesis ENV-BLOCKED
 (which soft-blocks the owning card) or mark a proven mode-incompatible,
 stale, or non-public card `blocked` with a precise note. MISSED alone is not
-proof of unreachability.
+proof of unreachability. The ranked queue keeps one card per strategy
+angle, so blocking the card you were handed closes only that angle.
 
 Search & diff helpers:
 

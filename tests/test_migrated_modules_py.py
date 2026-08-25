@@ -271,6 +271,20 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     runner = sanitizer_run.SanitizerRunner("ubsan", env={"UBSAN_GENERIC_BIN": str(executable), "PATH": os.environ["PATH"]})
     with mock.patch.object(sanitizer, "symbolize_available", return_value=False):
         equal(0, runner.generic("", 5, [str(testcase)]), "sanitizer generic runner executes configured command")
+    accepting = sanitizer_run.SanitizerRunner(
+        "ubsan",
+        config=SimpleNamespace(
+            runner_success_codes=[0, 1],
+            runner_env=[],
+            sanitizer_bin=lambda _name: "",
+        ),
+        env={"UBSAN_GENERIC_BIN": str(executable), "PATH": os.environ["PATH"]},
+    )
+    with mock.patch.object(
+        accepting, "_run_symbolized", return_value=SimpleNamespace(returncode=1),
+    ):
+        equal(0, accepting.generic("", 5, [str(testcase)]),
+              "shared sanitizer runner accepts a configured normal rejection exit")
     equal(1, sanitizer_run.run_standard("ubsan", []), "sanitizer runner rejects a missing mode")
 
     crash_log = root / "verdict-crash.log"
@@ -653,6 +667,31 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
          mock.patch.object(structured_state, "agent_counts", return_value=None):
         directive = prompt.work_card_directive(context, 1)
     check("src/parser.c" in directive and "abc123" in directive, "prompt renders work-card detail")
+
+    # What claim_next_card actually returns for a carried angle: relabelled to
+    # the claiming lane, with the card's own strategy kept as provenance.
+    companion_payload = {
+        **card_payload, "strategy": "S7", "source_strategy": "S2",
+        "allowed_strategies": ["S7"],
+    }
+    with mock.patch.object(prompt.workqueue, "claim_next_card", return_value=companion_payload), \
+         mock.patch.object(structured_state, "agent_counts", return_value=None):
+        companion_directive = prompt.work_card_directive(context, 1)
+    check(
+        "**Strategy:** S7" in companion_directive
+        and "**Card primary strategy:** S2" in companion_directive
+        and "minimal deterministic public-API harness" in companion_directive
+        and "NO_EXEC: <proof>" in companion_directive,
+        "initial prompts label and instruct the assigned S7 companion strategy",
+        companion_directive,
+    )
+    compact_after_claim = prompt.deep_investigation_prompt(context, 1)
+    check(
+        "COMPACT FRESH START" in compact_after_claim
+        and not audit_runner._cold(SimpleNamespace(num_agents=1, results=results)),
+        "a claimed card makes a no-hypothesis relaunch compact instead of cold",
+        compact_after_claim,
+    )
 
     equal("null-deref", triage.autodiscard_reason("Hint: address points to the zero page"), "triage rejects null dereferences")
     equal("", triage.autodiscard_reason("ERROR: AddressSanitizer: heap-buffer-overflow"), "triage retains memory-safety diagnostics")
@@ -1473,6 +1512,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         ],
         "cold-start strategies fan out by available queue load",
     )
+
 
     # Card supply is the first key, but a queue that gives every strategy a
     # comparable share leaves the whole decision to the tie-break. Canonical

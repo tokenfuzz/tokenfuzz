@@ -14,6 +14,10 @@ from sanitizer_helpers import copy_file
 from timeout import capture_timeout, run_timeout
 
 
+def runner_exit_succeeded(config, returncode: int) -> bool:
+    return returncode in (config.runner_success_codes if config else [0])
+
+
 def expand_runner_value(
     value: str,
     config,
@@ -150,13 +154,18 @@ class SanitizerRunner:
             command, options, timeout,
             rss_mb=sanitizer.generic_rss_limit_mb(self.env),
         )
+        succeeded = runner_exit_succeeded(self.config, completed.returncode)
         if completed.returncode == 124:
             print(f"[run-{self.name}] generic runner timed out after {timeout}s", file=sys.stderr)
-        elif completed.returncode == 0:
-            print(f"[run-{self.name}] generic EXECUTION VERIFIED (post-run, rc=0)", file=sys.stderr)
+        elif succeeded:
+            print(
+                f"[run-{self.name}] generic EXECUTION VERIFIED "
+                f"(post-run, rc={completed.returncode})",
+                file=sys.stderr,
+            )
         else:
             print(f"[run-{self.name}] generic EXECUTION INCONCLUSIVE (post-run, rc={completed.returncode})", file=sys.stderr)
-        return completed.returncode
+        return 0 if succeeded else completed.returncode
 
     def _run_symbolized(
         self, command: list[str], options: str, timeout: int,

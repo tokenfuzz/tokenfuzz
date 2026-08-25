@@ -86,6 +86,7 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertIn("Keep compiled harnesses on the public boundary", compact)
         self.assertIn("Fixture setup is testcase execution", compact)
         self.assertIn("do not invoke the target binary or library ad hoc", compact)
+        self.assertIn("never overwrite a shared harness", compact)
         self.assertIn("refuses process wrappers that set loader interposition", compact)
         self.assertIn("inject a constructor that fabricates target-owned typed state", compact)
         self.assertIn("Wrapper testcases must fail closed", rendered)
@@ -196,6 +197,13 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         compact_contract = prompt.compact_suffix(context, 1)
         self.assertIn("--strategy STRATEGY", compact_contract)
         self.assertNotIn("--strategy S1", compact_contract)
+
+    def test_compact_prompt_defers_to_the_resumed_cards_strategy_gate(self) -> None:
+        compact = prompt.compact_fresh_prompt(self.context(), 1)
+
+        self.assertIn("follow its `Next action` from the structured resume", compact)
+        self.assertIn("strategy-specific source or input-route gate", compact)
+        self.assertNotIn("If a card is assigned, create one hypothesis", compact)
 
     def test_turn_budget_is_backend_neutral_and_bounds_the_soft_target(self) -> None:
         self.assertEqual(prompt.DEFAULT_TURN_SOFT_CAP, 128)

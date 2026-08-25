@@ -1,20 +1,61 @@
 # Strategy S7: Adversarial Input Engineering
 
 Write targeted adversarial inputs that stress parsers and decoders at boundary
-conditions, delivered through the normal sanitizer pipeline. No fuzzer, and no
-fuzz harness: reasoning backwards from parser code to the input that reaches a
-specific error path is what an LLM does better than mutation, and it needs
-nothing built.
+conditions, delivered through the normal sanitizer pipeline. No fuzzer and no
+fuzz harness: reason backwards from parser code to the input that reaches one
+specific error path. A minimal deterministic harness is still the normal
+`bin/probe` carrier when the documented boundary is a C/C++ library API.
 
 **Fuzzing belongs to S4.** If this surface deserves a fuzz target — an
 untrusted-input entry point on a published API with no harness driving it —
 that is a boundary-directed fuzzing card, not a detour here. See
-`S4-directed-fuzzing.md`. Do not build harnesses, generate corpora, or run a
-fuzzer under S7.
+`S4-directed-fuzzing.md`. Do not build a fuzz harness, generate a corpus, or run
+a fuzzer under S7.
 
 **Review gate:** after 6 targeted inputs with 0 crashes and no
 HIT/NEEDS_TESTCASE lead, rotate strategy. Do not stop while an input is
 reaching closer to the intended parser/decoder path.
+
+When the S7 card floor is complete, discard with `--strategy S7`; the harness
+closes only the S7 angle. Then end the model session instead of claiming the
+next card so the worker pool resumes from compact state.
+
+**Scratch hygiene:** create only the final H-prefixed testcase in `scratch-N`.
+Copy or generate a valid seed straight into that path, then mutate it in place;
+do not leave unmodified or intermediate seed files there. Housekeeping treats
+every scratch input as a runnable testcase and will otherwise probe it again.
+
+**Route gate:** before committing a hypothesis, verify from the configured
+runner and build metadata that `bin/probe` can invoke the card's exact parse or
+decode surface with the crafted testcase. A runner fixed to another subcommand
+does not make the surface reachable merely because the same binary contains
+it. If no route exists, run `bin/state update-card --card-id <id> --status
+blocked --note <configuration-and-source-proof>`; do
+not create a hypothesis or replace the missing route with an undocumented
+wrapper, trusted setup, or source-only rule audit. A one-shot API harness is a
+valid route only when it faithfully calls a documented public library boundary.
+Startup or teardown code that executes identically for every testcase is not
+an input route: the testcase bytes must select or shape the named boundary,
+not merely cause the process to initialize it.
+
+If a managed testcase prerequisite is absent, print `NO_EXEC: <proof>` and
+exit 2; do not raise an exception.
+
+**Direct-input gate:** the trigger must occur during one documented parse or
+decode operation on the crafted input. Do not add a dump, encode, round trip,
+or other trusted follow-up operation merely to make an output-only surface
+reachable; block that card for S7 and leave the surface to its owning strategy.
+
+**Managed runtimes:** catch the parser library's documented rejection
+exception around the one target call, even when the crafted input is expected
+to be valid. Let every other exception escape. A normal rejection is CLEAN
+evidence; an uncaught expected parse error is testcase noise that looks like a
+runtime crash. An unexpected exception type is still only a robustness or API
+contract defect unless you can show it escaping a real request/process
+isolation boundary or causing another concrete security impact; do not confirm
+or file it merely because it reproduces. In particular, an exception such as
+`RecursionError` that ends only the current parse or request is not durable
+denial of service.
 
 ## Adversarial Parser/Decoder Inputs
 
@@ -132,22 +173,13 @@ testcase. When a surface resists hand-written inputs because it is guarded by a
 format or checksum a reasoned guess cannot satisfy, that is the signal to file
 an S4 card for it rather than to keep guessing here.
 
-## Existing test mutation
+## Existing parser fixture mutation
 
-Mutate the project's own test suite to violate preconditions:
-
-| Mutation | What it breaks | Example |
-|----------|---------------|---------|
-| Remove waits/syncs | Race exposure | Delete `await`, `sleep`, `sync()` |
-| Double operations | Lifetime issue/init | `open()` twice, `close()` twice |
-| Reverse order | State confusion | Close before open |
-| Boundary values | Size issue | Replace `10` with `MAX_INT`, `0`, `-1` |
-| Skip cleanup | Leak-to-reuse | Delete `finally`, `cleanup()` |
-
-```bash
-# Tests near recent prior fixes:
-git log --name-only --diff-filter=M --since="6 months ago" -- "*/test*" | sort -u | head -20
-```
+Project fixtures are often the best valid seeds. Copy one to the final
+H-prefixed testcase, then change only its input bytes: truncate at a field
+boundary, alter a length/count, substitute an encoding edge, or deepen a
+nested value. Do not mutate test code, call order, synchronization, setup, or
+cleanup; those are state/lifetime experiments owned by S5, not S7 inputs.
 
 ## Priority targets for adversarial inputs
 

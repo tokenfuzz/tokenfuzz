@@ -19,6 +19,68 @@ LOADER.exec_module(probe)
 
 
 class ProbeArgumentTests(unittest.TestCase):
+    def test_runner_unavailable_exception_requires_testcase_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            testcase = root / "testcase.py"
+            target = root / "target.py"
+            output = root / "runner.txt"
+            instance = object.__new__(probe.Probe)
+            instance.output = output
+            instance.exec_testcase = testcase
+            instance.sanitizer = "runner"
+            instance.config = SimpleNamespace(runner_crash_patterns=["Traceback"])
+
+            for message in (
+                "feature is unavailable in this build",
+                "feature is not available in this build",
+            ):
+                output.write_text(
+                    "Traceback (most recent call last):\n"
+                    f'  File "{testcase}", line 1, in <module>\n'
+                    f"RuntimeError: {message}\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(instance._classify(1), "NO_EXEC", message)
+
+            output.write_text(
+                "Traceback (most recent call last):\n"
+                f'  File "{testcase}", line 1, in <module>\n'
+                f'  File "{target}", line 2, in parse\n'
+                "RuntimeError: feature is unavailable in this build\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(1), "CRASH")
+
+    def test_missing_module_attribute_requires_testcase_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            testcase = root / "testcase.py"
+            target = root / "target.py"
+            output = root / "runner.txt"
+            instance = object.__new__(probe.Probe)
+            instance.output = output
+            instance.exec_testcase = testcase
+            instance.sanitizer = "runner"
+            instance.config = SimpleNamespace(runner_crash_patterns=["Traceback"])
+
+            output.write_text(
+                "Traceback (most recent call last):\n"
+                f'  File "{testcase}", line 1, in <module>\n'
+                "AttributeError: module 'sample' has no attribute 'FastLoader'\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(1), "NO_EXEC")
+
+            output.write_text(
+                "Traceback (most recent call last):\n"
+                f'  File "{testcase}", line 1, in <module>\n'
+                f'  File "{target}", line 2, in parse\n'
+                "AttributeError: module 'sample' has no attribute 'FastLoader'\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(1), "CRASH")
+
     def test_opaque_browser_input_uses_browser_runner(self) -> None:
         instance = object.__new__(probe.Probe)
         instance.args = SimpleNamespace(mode="auto")
