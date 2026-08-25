@@ -983,24 +983,28 @@ class Setup:
             configured_library = config.sanitizer_lib(sanitizer_name)
             candidate = target_config.Config(target_root=str(self.target_root))
             target_config.load_toml_into(candidate, self.toml)
-            candidate.includes = list(includes)
+            repaired_includes = list(dict.fromkeys([*config.includes, *includes]))
+            candidate.includes = repaired_includes
             _, repaired = self.declared_exports(candidate, sanitizer_name)
             if repaired:
                 before = self.toml.read_text(encoding="utf-8")
-                after = target_config.set_harness_includes(before, includes)
+                after = target_config.set_harness_includes(
+                    before, repaired_includes,
+                )
                 if after != before:
                     self.toml.write_text(after, encoding="utf-8")
                     log(
                         "Repaired harness inputs (kept the configured library, "
                         f"repaired includes): configured pair "
                         f"declared none of the library's {exported} exported "
-                        f"symbol(s); {configured_library} + {includes} declares {repaired}"
+                        f"symbol(s); {configured_library} + {repaired_includes} "
+                        f"declares {repaired}"
                     )
                     continue
                 log(
                     f"WARN: {sanitizer_name}_lib/includes declared none of the "
                     f"library's {exported} exported symbol(s); {configured_library} + "
-                    f"{includes} declares {repaired}, but target.toml "
+                    f"{repaired_includes} declares {repaired}, but target.toml "
                     "carries no active top-level `includes` array to repair"
                 )
                 continue

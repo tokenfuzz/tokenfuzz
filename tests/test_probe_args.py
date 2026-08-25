@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -44,6 +48,14 @@ class ProbeArgumentTests(unittest.TestCase):
 
             self.assertEqual(instance._classify(2), "PROPERTY")
             self.assertNotEqual(instance._classify(0), "PROPERTY")
+
+            instance.output.write_text(
+                "ASAN_RUN_HEADER: sanitizer=asan runs=1\n"
+                "PROPERTY VIOLATION: equivalent forms differ\n"
+                "[run-asan] generic EXECUTION VERIFIED (post-run, rc=1)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(0), "PROPERTY")
 
     def test_runner_unavailable_exception_requires_testcase_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -225,25 +237,89 @@ class ProbeArgumentTests(unittest.TestCase):
 
 
 class OpaqueInputHeaderTests(unittest.TestCase):
-    """An opaque byte input cannot carry a header, so both of the fields a
+    """An opaque byte input cannot carry a header, so the fields a
     testcase would declare in one arrive as flags instead."""
 
-    def test_both_opaque_input_flags_are_accepted(self) -> None:
+    def test_opaque_input_flags_are_accepted(self) -> None:
         args = probe.parse_args(
-            ["--hypothesis-id", "H-7", "--harness", "fuzz_api.c", "input.bin"])
+            ["--hypothesis-id", "H-7", "--harness", "fuzz_api.c",
+             "--property", "inverse", "input.bin"])
         self.assertEqual(args.hypothesis_id, "H-7")
         self.assertEqual(args.harness, "fuzz_api.c")
+        self.assertEqual(args.property, "inverse")
 
     def test_they_default_empty_so_a_headered_testcase_is_unaffected(self) -> None:
         args = probe.parse_args(["testcase.html"])
         self.assertEqual(args.hypothesis_id, "")
         self.assertEqual(args.harness, "")
+        self.assertEqual(args.property, "")
 
     def test_the_flag_supplies_the_harness_a_binary_input_cannot_declare(self) -> None:
         # A fuzz artifact is exact bytes: prepending a `HARNESS:` comment would
         # change the input that reproduces the crash.
         self.assertIn("HARNESS", probe.HEADER_RE["harness"].pattern)
         self.assertIn("--harness", probe.HELP)
+        self.assertIn("--property", probe.HELP)
+
+    def test_opaque_s8_violation_survives_a_configured_nonzero_success_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            results = root / "output" / "sampleproj" / "codex" / "results"
+            logs = results.parent / "logs"
+            scratch = results / "scratch-1"
+            target.mkdir()
+            logs.mkdir(parents=True)
+            scratch.mkdir(parents=True)
+            driver = target / "driver.py"
+            driver.write_text(
+                "import pathlib, sys\n"
+                "assert pathlib.Path(sys.argv[1]).read_bytes() == b'\\x00oracle\\xff'\n"
+                "print('PROPERTY VIOLATION: inverse forms differ')\n"
+                "raise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+            shared = results.parents[1] / "target.toml"
+            shared.write_text(
+                'target = "sampleproj"\nis_browser = "0"\n'
+                '[sanitizer]\nenabled = []\n'
+                '[runner]\n'
+                f'bin = {json.dumps(sys.executable)}\n'
+                f'args = [{json.dumps(str(driver))}, "{{TESTCASE}}"]\n'
+                'success_codes = [0, 1]\n',
+                encoding="utf-8",
+            )
+            probe.target_config.write_session_env(
+                results, str(results), str(target), "sampleproj", "plain",
+                str(logs),
+            )
+            probe.target_config.pin_session_config(results, shared)
+            state = results / "state"
+            state.mkdir()
+            (state / "fixed-strategy").write_text("S8\n", encoding="utf-8")
+            (state / "hypotheses.jsonl").write_text(json.dumps({
+                "id": "H-7", "agent": "1", "strategy": "S8",
+                "status": "INVESTIGATING", "file": "driver.py:main:1",
+                "card_id": "WORK-S8",
+            }) + "\n", encoding="utf-8")
+            testcase = scratch / "input.bin"
+            original = b"\x00oracle\xff"
+            testcase.write_bytes(original)
+            environment = os.environ.copy()
+            environment["PROBE_AUTO_ROUTE"] = "0"
+
+            completed = subprocess.run(
+                [str(ROOT / "bin/probe"), "--hypothesis-id", "H-7",
+                 "--property", "inverse", str(testcase)],
+                env=environment, capture_output=True, text=True, check=False,
+                timeout=30,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("[probe] verdict=PROPERTY", completed.stdout)
+            self.assertEqual(testcase.read_bytes(), original)
+            run = json.loads((state / "runs.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(run["verdict"], "PROPERTY")
 
 
 if __name__ == "__main__":

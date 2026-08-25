@@ -129,9 +129,9 @@ class ProbeCppHarnessTests(unittest.TestCase):
         """S7 drives the configured runner; rebuilding a driver is S4's job."""
         (self.slug_dir / "target.toml").write_text(
             'target = "testproject"\nasan_lib = "build/libtarget.a"\n'
-            'asan_bin = "build/target-cli"\n'
             'includes = []\ndefines = []\nlink_libs = []\n'
             '[sanitizer]\nenabled = ["asan"]\n'
+            '[runner]\nbin = "build/target-cli"\n'
         )
         self._pin_s7()
 
@@ -140,6 +140,29 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
         self.assertIn("S7 drives the configured runner", process.stdout + process.stderr)
         self.assertFalse((self.scratch / ".harness-cache").exists())
+
+    def test_s7_keeps_its_harness_beside_a_sanitizer_binary(self) -> None:
+        """A sanitizer binary is not proof that bytes reach the target.
+
+        `asan_bin` may be a fixed-workload test binary that never reads the
+        testcase. Refusing the harness on its presence stranded S7 on exactly
+        those targets, and S7 accepts a faithful public-API harness where no
+        byte route exists.
+        """
+        (self.slug_dir / "target.toml").write_text(
+            'target = "testproject"\nasan_lib = "build/libtarget.a"\n'
+            'asan_bin = "build/target-cli"\n'
+            'includes = []\ndefines = []\nlink_libs = []\n'
+            '[sanitizer]\nenabled = ["asan"]\n'
+        )
+        self._pin_s7()
+
+        process = self.run_probe()
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertNotIn(
+            "S7 drives the configured runner", process.stdout + process.stderr,
+        )
 
     def test_s7_keeps_its_harness_on_a_library_only_target(self) -> None:
         """With no CLI route, a public-API harness is S7's only way to run."""

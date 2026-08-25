@@ -797,7 +797,7 @@ def refresh_work_cards(
         _write_rank_window(runtime, rank_limit)
         housekeeping.mark_clean("work-cards-refresh", signature)
         return True
-    if pinned_s6:
+    if pinned_strategy and not pinned_s1:
         patch_cards.unlink(missing_ok=True)
     elif patch_generator.is_file():
         completed = subprocess.run(
@@ -872,11 +872,17 @@ def refresh_work_cards(
             workqueue.apply_latest_claim_status(_queue_context(runtime), s6_cards),
         )
     elif rank.is_file():
+        command = [
+            str(rank), "--target-path", str(runtime.target_root),
+            "--target-slug", runtime.target_slug,
+            "--results-dir", str(runtime.results),
+            "--patch-cards", str(patch_cards), "--limit", str(rank_limit),
+            "--output", str(runtime.results / "work-cards.jsonl"), "--quiet",
+        ]
+        if pinned_strategy:
+            command += ["--strategy", pinned_strategy]
         completed = subprocess.run(
-            [str(rank), "--target-path", str(runtime.target_root), "--target-slug", runtime.target_slug,
-             "--results-dir", str(runtime.results), "--patch-cards", str(patch_cards),
-             "--limit", str(rank_limit),
-             "--output", str(runtime.results / "work-cards.jsonl"), "--quiet"],
+            command,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
         if completed.returncode:

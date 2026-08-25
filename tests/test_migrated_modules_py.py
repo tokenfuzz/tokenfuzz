@@ -756,7 +756,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         )
     with mock.patch.dict(
         os.environ,
-        {"ACTIVE_BACKEND": "claude", "TARGET_ROOT": str(root)},
+        {
+            "ACTIVE_BACKEND": "claude", "TARGET_ROOT": str(root),
+            "LLM_DECIDE_DISABLE": "0",
+        },
         clear=False,
     ), mock.patch.object(triage.llm_decide, "provider_limit_open", return_value=True):
         equal(
@@ -2086,11 +2089,16 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
          mock.patch.object(audit_runner.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as other_pin:
         audit_runner.refresh_work_cards(refresh_runtime)
     other_tools = [Path(call.args[0][0]).name for call in other_pin.call_args_list]
+    rank_command = next(
+        call.args[0] for call in other_pin.call_args_list
+        if Path(call.args[0][0]).name == "rank-work"
+    )
     check(
-        other_tools == ["patch-cards", "rank-work"]
+        other_tools == ["rank-work"]
+        and rank_command[-2:] == ["--strategy", "S2"]
         and not (refresh_results / "s6-peer-cards.jsonl").exists(),
-        "a pinned non-S6 lane skips peer mining and drops stale S6 cards",
-        repr(other_tools),
+        "a pinned ranked lane generates and ranks only its own cards",
+        repr((other_tools, rank_command)),
     )
     refresh_runtime.fixed_strategy = ""
     (refresh_results / "s6-peer-cards.jsonl").write_text(

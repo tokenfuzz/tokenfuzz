@@ -140,6 +140,16 @@ class AdmissionGateTests(unittest.TestCase):
             self.assertIn(fuzz_harness.SHAPE_BUFFER,
                           fuzz_harness.input_shapes(declaration), declaration)
 
+    def test_a_structurally_named_custom_byte_typedef_stays_admitted(self) -> None:
+        for declaration in (
+            "int api_parse(const my_byte_t *ptr, int len);",
+            "int api_unpack(packet_octet *src, size_t length);",
+            "int api_read(const PRODUCT_BYTE_T *src, size_t length);",
+            "int api_decode(CustomOctetT *src, size_t length);",
+        ):
+            self.assertIn(fuzz_harness.SHAPE_BUFFER,
+                          fuzz_harness.input_shapes(declaration), declaration)
+
     def test_a_handle_beside_an_unrelated_integer_is_not_a_buffer(self) -> None:
         for declaration in (
             "int api_x(api_stmt *stmt, int nLen);",

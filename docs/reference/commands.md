@@ -152,8 +152,9 @@ testcase, and records the verdict in `state/runs.jsonl`.
   without executing target code.
 - Use `--mode browser|js|generic` only when automatic mode detection is wrong.
 - Use `--hypothesis-id H1` for an opaque binary input that cannot carry a
-  comment header, and `--want <symbol-regex>` to name the code a coverage-gated
-  browser or JS probe must reach.
+  comment header. An opaque S8 input also uses `--property <kind>`. Use
+  `--want <symbol-regex>` to name the code a coverage-gated browser or JS probe
+  must reach.
 - Compiled C/C++ harnesses that set `LD_PRELOAD` or
   `DYLD_INSERT_LIBRARIES` and then launch a process are refused before
   compilation. Injected process state is not a testcase-derived public

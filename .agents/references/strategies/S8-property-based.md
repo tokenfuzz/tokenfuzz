@@ -347,6 +347,12 @@ exit nonzero. `bin/probe` records this as `PROPERTY` (executed oracle evidence,
 not a sanitizer crash and not `NO_EXEC`). Then minimize and file only if the
 security-consumer test below is satisfied.
 
+For an opaque byte input, keep the bytes exact and provide the fields that
+cannot live in a header as flags:
+```
+bin/probe --hypothesis-id Hn --property inverse <testcase>
+```
+
 When the property is violated and ASan is clean, **first decide whether the
 violation has a security implication** — the same consumer test from *Pick the
 target by its security consumer* (above). Only security-relevant property

@@ -1748,7 +1748,10 @@ def structural_path_score(rel: str) -> tuple[int, list[str]]:
     return score, reasons
 
 
-def rank_target(ctx: Context, limit: int, patch_cards: Path | None = None) -> list[dict]:
+def rank_target(
+    ctx: Context, limit: int, patch_cards: Path | None = None,
+    strategy: str = "",
+) -> list[dict]:
     if not ctx.target_root.is_dir():
         raise SystemExit(f"[rank-work] target not found: {ctx.target_root}")
     patch_path = patch_cards or (ctx.results_dir / "patch-cards.jsonl")
@@ -1870,6 +1873,16 @@ def rank_target(ctx: Context, limit: int, patch_cards: Path | None = None) -> li
                 existing["reason"] = "; ".join(merged)
                 existing["score"] = int(existing.get("score", 0)) + min(feature_score, 20)
                 break
+    # A fixed lane cannot claim its companion strategies. Select the lane
+    # before buildability annotation and the bounded window so `limit` buys
+    # that lane's best distinct files rather than a fraction of a mixed queue.
+    if strategy:
+        cards = [card for card in cards if card_strategy_matches(card, strategy)]
+        floor_cards = [
+            card for card in floor_cards
+            if card_strategy_matches(card, strategy)
+        ]
+
     # Compilation evidence must shape the bounded window, not merely claims
     # inside it. Otherwise high-scoring optional units — an unselected
     # backend, a foreign-architecture code path — evict executable work
@@ -2121,7 +2134,28 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
     if not mock_present and backend == "oss" and not path_has_executable(os.environ.get("OPENCODE_BIN") or "opencode"):
         return cards
 
-    top = cards[: min(top_n, len(cards))]
+    # One candidate per source surface. A file's strategy companions differ
+    # only in strategy, so sending each spends the candidate budget on repeats
+    # and halves how many distinct files the reranker ever sees; function-level
+    # cards on one file stay separate because they are independent work. The
+    # boost the lead earns is applied to every card on its surface.
+    lead_of: dict[str, str] = {}
+    top: list[dict] = []
+    surface_lead: dict[str, str] = {}
+    for c in cards:
+        cid = str(c.get("id", ""))
+        rel = normalized_relpath(c.get("file", ""))
+        key = (
+            f"{rel}\x00{(c.get('function') or '').strip()}" if rel else f"\x00{cid}"
+        )
+        lead = surface_lead.get(key)
+        if lead is None:
+            if len(top) >= top_n:
+                continue
+            surface_lead[key] = cid
+            top.append(c)
+            lead = cid
+        lead_of[cid] = lead
     candidate_lines = []
     for c in top:
         candidate_lines.append(
@@ -2230,8 +2264,9 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
     for card in cards:
         card = dict(card)
         cid = card.get("id", "")
-        if cid in boosts:
-            boost, reason = boosts[cid]
+        entry = boosts.get(lead_of.get(cid, cid))
+        if entry:
+            boost, reason = entry
             card["score"] = int(card.get("score", 0)) + boost
             if reason:
                 existing = card.get("reason", "")
@@ -5555,8 +5590,6 @@ def _compact_finding(ctx: Context, row: dict[str, str]) -> dict:
             status = "NEEDS CONTENT"
         elif (artifact_dir / ".needs-attention").is_file():
             status = "NEEDS ATTENTION"
-        elif (artifact_dir / ".reviewed").is_file() or (artifact_dir / ".keep").is_file():
-            status = "OK (override)"
         else:
             # A directory is only a filed candidate. Publication authority is
             # the content-addressed validation receipt, so a deadline-created
@@ -5565,11 +5598,17 @@ def _compact_finding(ctx: Context, row: dict[str, str]) -> dict:
             import validation_receipt  # lazy: see import note at top of file
 
             receipt = validation_receipt.read_current(artifact_dir)
-            status = {
+            receipt_status = {
                 "reportable": "OK",
                 "not-reportable": "NOT REPORTABLE",
                 "rejected": "REJECTED",
-            }.get(str((receipt or {}).get("state", "")), "PENDING REVIEW")
+            }.get(str((receipt or {}).get("state", "")), "")
+            if receipt_status:
+                status = receipt_status
+            elif (artifact_dir / ".reviewed").is_file() or (artifact_dir / ".keep").is_file():
+                status = "OK (override)"
+            else:
+                status = "PENDING REVIEW"
     return {
         "id": fid,
         "cluster": fields.get("cluster", ""),

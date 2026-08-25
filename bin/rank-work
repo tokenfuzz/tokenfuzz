@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import callgraph
 from llm_decide import decision_timeout
+import strategies
 import target_config
 from workqueue import add_common_args, campaign_supported, annotate_card_buildability, apply_latest_claim_status, campaign_card, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
 
@@ -39,6 +40,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Rank target source files into concrete audit work cards")
     add_common_args(parser)
     parser.add_argument("--limit", type=int, default=80)
+    parser.add_argument("--strategy", choices=strategies.ACTIVE, default="")
     parser.add_argument("--patch-cards", help="Patch-card JSONL path; defaults to <RESULTS_DIR>/patch-cards.jsonl")
     parser.add_argument("--s6-cards", help="S6 peer-fix card JSONL path; defaults to <RESULTS_DIR>/s6-peer-cards.jsonl")
     parser.add_argument("--llm-top-n", type=int, default=int(os.environ.get("RANK_WORK_LLM_TOP_N", "160")))
@@ -64,7 +66,7 @@ def main(argv: list[str]) -> int:
     callgraph_status = callgraph.refresh(ctx)
     patch_cards = Path(args.patch_cards).expanduser().resolve() if args.patch_cards else None
     out = Path(args.output).expanduser().resolve() if args.output else ctx.results_dir / "work-cards.jsonl"
-    cards = rank_target(ctx, args.limit, patch_cards)
+    cards = rank_target(ctx, args.limit, patch_cards, strategy=args.strategy)
     cards = llm_rerank_cards(ctx, cards, args.llm_top_n, args.llm_timeout)
     # Merge S6 peer-fix cards. bin/peer-fix-cards writes these to a
     # separate s6-peer-cards.jsonl, refreshed each iteration alongside
@@ -76,7 +78,7 @@ def main(argv: list[str]) -> int:
     s6_path = Path(args.s6_cards).expanduser().resolve() if args.s6_cards \
         else ctx.results_dir / "s6-peer-cards.jsonl"
     merged_ids = {c.get("id") for c in cards}
-    s6_cards = [
+    s6_cards = [] if args.strategy and args.strategy != "S6" else [
         c for c in read_jsonl(s6_path)
         if c.get("kind") == "s6-peer-fix"
         and c.get("id") not in merged_ids
@@ -85,7 +87,8 @@ def main(argv: list[str]) -> int:
     # The single S4 campaign card, appended like the S6 merge above and for
     # the same reason: it is not ranked source, so it must not consume a
     # window slot, and without it S4 owns no card and is never assignable.
-    if not any(c.get("kind") == "s4-campaign" for c in cards) \
+    if (not args.strategy or args.strategy == "S4") \
+            and not any(c.get("kind") == "s4-campaign" for c in cards) \
             and campaign_supported(_target_config_for(ctx)):
         cards = cards + [campaign_card(ctx)]
     cards = apply_latest_claim_status(ctx, cards)

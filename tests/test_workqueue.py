@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import report_identity
+import validation_receipt
 import workqueue
 
 
@@ -66,6 +67,22 @@ class WorkQueueTests(unittest.TestCase):
         report.write_text(report.read_text() + "\nRevised substantive analysis.\n")
         stale = workqueue._compact_finding(self.ctx, {"id": finding.name})
         self.assertEqual((stale["class"], stale["severity"]), ("", ""))
+
+    def test_current_no_credit_receipt_overrides_an_old_keep_marker(self) -> None:
+        finding = self.results / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text(
+            "# State issue\n\nConcrete boundary rationale.\n",
+            encoding="utf-8",
+        )
+        (finding / ".keep").touch()
+        validation_receipt.write(
+            finding, kind="finding", state="not-reportable",
+        )
+
+        compact = workqueue._compact_finding(self.ctx, {"id": finding.name})
+
+        self.assertEqual(compact["status"], "NOT REPORTABLE")
 
     def run_command(
         self, command: list[str], *, env: dict[str, str] | None = None,
@@ -285,6 +302,13 @@ class WorkQueueTests(unittest.TestCase):
         self.assertGreater(
             len({card["strategy"] for card in cards}), 1,
             "spreading over files still leaves more than one angle live",
+        )
+
+        pinned = workqueue.rank_target(self.ctx, limit, strategy="S2")
+        self.assertEqual({card["strategy"] for card in pinned}, {"S2"})
+        self.assertEqual(
+            len({card["file"] for card in pinned}), limit,
+            "a pinned lane spends the whole window on its own best files",
         )
 
     def test_selected_files_keep_independently_closable_strategy_cards(self) -> None:
@@ -1900,6 +1924,51 @@ class WorkQueueTests(unittest.TestCase):
             self.assertEqual(
                 workqueue.llm_rerank_cards(self.ctx, cards, top_n=2, timeout=5), cards,
             )
+
+    def test_llm_rerank_budget_buys_distinct_surfaces_not_repeats(self) -> None:
+        """Companion cards must not spend the candidate budget on repeats.
+
+        A file's strategy companions differ only in strategy, so sending each
+        one halves how many distinct files the reranker ever sees. The lead is
+        the only candidate, and the boost it earns reaches every angle on that
+        surface -- while a second function on the same file stays its own
+        candidate, because that is independent work.
+        """
+        cards = [
+            self.card("WORK-A1", "src/a.c", strategy="S3", function="parse"),
+            self.card("WORK-A2", "src/a.c", strategy="S7", function="parse"),
+            self.card("WORK-A3", "src/a.c", strategy="S5", function="decode"),
+            self.card("WORK-B1", "src/b.c", strategy="S3", function="load"),
+        ]
+        captured: dict[str, object] = {}
+
+        def decide(command, **kwargs):
+            captured["prompt"] = kwargs.get("input", "")
+            return json.dumps(
+                {"cards": [{"id": "WORK-A1", "boost": 20, "reason": "parser"}]},
+            )
+
+        environment = {
+            "ACTIVE_BACKEND": "", "LLM_DECIDE_MOCK_WORK_RERANK": '{"cards":[]}',
+        }
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            workqueue.subprocess, "check_output", side_effect=decide,
+        ):
+            out = workqueue.llm_rerank_cards(self.ctx, cards, top_n=2, timeout=5)
+
+        prompt = str(captured["prompt"])
+        # Budget of 2 surfaces: src/a.c:parse and src/a.c:decode. The S7
+        # companion rides on its lead; src/b.c falls outside the budget.
+        self.assertIn("WORK-A1", prompt)
+        self.assertIn("WORK-A3", prompt)
+        self.assertNotIn("WORK-A2", prompt)
+        self.assertNotIn("WORK-B1", prompt)
+
+        scores = {row["id"]: row["score"] for row in out}
+        self.assertEqual(scores["WORK-A1"], 30)
+        self.assertEqual(scores["WORK-A2"], 30, "companion shares its lead's boost")
+        self.assertEqual(scores["WORK-A3"], 10, "a distinct function is not boosted")
+        self.assertEqual(scores["WORK-B1"], 10)
 
     def test_llm_rerank_uses_the_session_timeout_when_unspecified(self) -> None:
         cards = [self.card("WORK-A", "src/a.c")]

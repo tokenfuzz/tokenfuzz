@@ -99,9 +99,14 @@ _LOADER_STRING_RE = re.compile(
     r'^"(?:DYLD_INSERT_LIBRARIES|LD_PRELOAD)(?:=[^"]*)?"$'
 )
 _EMPTY_STRING_RE = re.compile(r'^(?:u8|[uUL])?""$')
+_VERIFIED_NONZERO_RUNNER_RE = re.compile(
+    r"^\[run-(?:asan|ubsan|msan|tsan)\] generic EXECUTION VERIFIED "
+    r"\(post-run, rc=[1-9][0-9]*\)$",
+    re.MULTILINE,
+)
 HELP = """Usage:
   bin/probe [--confirm | --sanitizer-runs N] [--dry-run] [--mode auto|browser|js|generic] \\
-            [--hypothesis-id HYPOTHESIS-ID] [--harness NAME] \\
+            [--hypothesis-id HYPOTHESIS-ID] [--harness NAME] [--property KIND] \\
             [--want REGEX] testcase [-- harness-args...]
 
 Required testcase headers:
@@ -119,6 +124,7 @@ For opaque byte inputs that cannot carry comments, pass --hypothesis-id;
 TARGET and CARD-ID are derived from that hypothesis in structured state.
 --harness supplies the HARNESS header the same way, for a fuzz artifact
 replayed against the harness that produced it.
+--property supplies the required PROPERTY header for an opaque S8 input.
 
 PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner overrides target.toml.
 --confirm runs five times; --sanitizer-runs runs an explicit positive count;
@@ -135,11 +141,12 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--want", default="")
     parser.add_argument("--hypothesis-id", default="")
-    # An opaque byte input cannot carry a header, so the two fields a testcase
+    # An opaque byte input cannot carry a header, so fields a testcase
     # would otherwise declare in one arrive as flags instead. Same resolution
     # rules apply either way: the name stays relative to the testcase's own
     # directory.
     parser.add_argument("--harness", default="")
+    parser.add_argument("--property", default="")
     parser.add_argument("-h", "--help", action="store_true")
     parser.add_argument("testcase", nargs="?")
     parser.add_argument("args", nargs=argparse.REMAINDER)
@@ -238,6 +245,22 @@ def validate_s8_property(strategy: str, property_kind: str) -> None:
     if normalized not in S8_PROPERTY_KINDS:
         allowed = "|".join(sorted(S8_PROPERTY_KINDS))
         raise ValueError(f"S8 testcase requires PROPERTY: {allowed}")
+
+
+def file_has_property_violation(path: Path, returncode: int) -> bool:
+    """Require both the oracle marker and its raw nonzero child exit."""
+    marker = False
+    failed = returncode != 0
+    try:
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                marker = marker or line.startswith("PROPERTY VIOLATION:")
+                failed = failed or bool(_VERIFIED_NONZERO_RUNNER_RE.match(line.rstrip("\n")))
+                if marker and failed:
+                    return True
+    except OSError:
+        pass
+    return False
 
 
 def derive_want(target: str) -> str:
@@ -642,6 +665,8 @@ class Probe:
             self.header["hypothesis"] = self.args.hypothesis_id
         if self.args.harness:
             self.header["harness"] = self.args.harness
+        if self.args.property:
+            self.header["property"] = self.args.property
         hypothesis_row = self._hypothesis_from_state(self.header["hypothesis"])
         self.hypothesis_strategy = strategies.normalize(str(
             hypothesis_row.get("strategy", "") if hypothesis_row else ""
@@ -664,17 +689,14 @@ class Probe:
         if (
             self.hypothesis_strategy == "S7"
             and self.header["harness"]
-            and (
-                self.config.runner_bin
-                or any(
-                    self.config.sanitizer_bin(name)
-                    for name in ("asan", "ubsan", "msan", "tsan")
-                )
-            )
+            and self.config.runner_bin
         ):
-            # Only when a runner route exists. A library-only target has no
-            # other way to deliver bytes, and S7's own card guidance offers a
-            # minimal public-API harness as the fallback there.
+            # A configured runner CLI is the one unambiguous input route, so a
+            # hand-built driver beside it is the undocumented wrapper S7
+            # forbids. A sanitizer binary is not that evidence: it may be a
+            # fixed-workload test binary that never reads the testcase, and
+            # S7 accepts a faithful public-API harness where no byte route
+            # exists -- blocking on one stranded those targets entirely.
             raise ValueError(
                 "S7 drives the configured runner, not a HARNESS file; probe "
                 "a hand-crafted input through the runner, or hand an "
@@ -1070,10 +1092,12 @@ class Probe:
                     return "EXEC_FAIL"
             if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
                 return "CRASH"
-            if returncode != 0 and self.hypothesis_strategy == "S8" and self.header["property"]:
-                with self.output.open(encoding="utf-8", errors="replace") as stream:
-                    if any(line.startswith("PROPERTY VIOLATION:") for line in stream):
-                        return "PROPERTY"
+            if (
+                self.hypothesis_strategy == "S8"
+                and self.header["property"]
+                and file_has_property_violation(self.output, returncode)
+            ):
+                return "PROPERTY"
             if verdict_lib.file_is_clean(self.output):
                 return "CLEAN"
             return "NO_EXEC"
@@ -1283,6 +1307,8 @@ class Probe:
             command += ["--harness", self.args.harness]
         if self.args.hypothesis_id:
             command += ["--hypothesis-id", self.args.hypothesis_id]
+        if self.args.property:
+            command += ["--property", self.args.property]
         command += ["--confirm", str(self.testcase)]
         if self.args.args:
             command += ["--", *self.args.args]

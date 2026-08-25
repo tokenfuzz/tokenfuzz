@@ -374,6 +374,10 @@ _BYTE_ELEMENT_NAMES = frozenset({
     "byte", "bytef", "char", "gchar", "guchar", "int8_t", "octet",
     "schar", "u_char", "uchar", "uint8_t", "void", "xmlchar",
 })
+_BYTE_ALIAS_NAME = re.compile(
+    r"(?:^|_)(?:byte|octet)s?(?:_t)?$|(?:Byte|Octet)s?(?:T)?$",
+    re.IGNORECASE,
+)
 
 
 def _has_byte_element_type(pointer: str) -> bool:
@@ -385,7 +389,7 @@ def _has_byte_element_type(pointer: str) -> bool:
     """
     element = pointer.rsplit("(", 1)[-1].split("*", 1)[0]
     return any(
-        name.lower() in _BYTE_ELEMENT_NAMES
+        name.lower() in _BYTE_ELEMENT_NAMES or _BYTE_ALIAS_NAME.search(name)
         for name in re.findall(r"[A-Za-z_]\w*", element)
     )
 _INT_TYPE = (
@@ -417,9 +421,10 @@ _LENGTH_NAME = re.compile(
 # carries an *element count* rather than a byte length: the mutator's bytes
 # cannot supply it, so a harness admitted here reaches the target only by
 # claiming its array holds more elements than it allocated, and every crash
-# that follows is the harness miscounting. Named builtins only — an unknown
-# typedef stays admitted, for the reason `_buffer_pair` gives below — and any
-# spelling of `char` is the byte buffer this must not touch.
+# that follows is the harness miscounting. Known byte typedefs and custom
+# aliases whose whole type name ends in byte/octet remain eligible; an opaque
+# context that merely contains that word does not. Any spelling of `char` is
+# the byte buffer this must not touch.
 _BYTE_ELEMENT = re.compile(r"\bchar\b")
 _WIDE_ELEMENT = re.compile(
     r"\b(?:short|int|long|float|double|unsigned|"

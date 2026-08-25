@@ -2205,7 +2205,15 @@ def _batch_finding_trigger_votes(
     resolution = vote_name == _TRIGGER_RESOLUTION_NAME
     backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     target_root = Path(os.environ.get("TARGET_ROOT", ""))
-    if not backend or not target_root.is_dir():
+    # Same preconditions `_trigger_vote` checks before spending a session. With
+    # reviews disabled nothing is attempted, so claim nothing: the serial gate
+    # reaches the same no-verdict outcome without spawning the reviewer an
+    # operator switched off.
+    if (
+        not backend
+        or not target_root.is_dir()
+        or os.environ.get("LLM_DECIDE_DISABLE") == "1"
+    ):
         return set()
     if llm_decide.provider_limit_open():
         return set(directories)

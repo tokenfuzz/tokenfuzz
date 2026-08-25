@@ -228,6 +228,9 @@ bin/rank-work --target <target>                     # appends "(call neighbourho
 python3 lib/callgraph.py --target <target> <file>   # print one file's block
 ```
 
+`bin/audit --strategy S<N>` passes that pin through to ranking, so the bounded
+window and optional model rerank contain only cards that lane can claim.
+
 The middle line reports only states worth acting on, so a later run that
 rebuilt nothing stays quiet — an unchanged graph is `fresh`, and an absent
 trailmark is the default rather than a fault. The last line prints the exact

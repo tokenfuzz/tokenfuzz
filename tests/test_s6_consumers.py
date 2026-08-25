@@ -47,6 +47,9 @@ class PeerFixCardTests(unittest.TestCase):
             "import peer_sources\n"
             "def fake_osv_query(peer, **kwargs):\n"
             "    if peer == os.environ.get('S6_TEST_EMPTY_PEER'): return []\n"
+            "    if peer == os.environ.get('S6_TEST_UNAVAILABLE_PEER'):\n"
+            "        kwargs.get('source_errors', []).append('OSV unavailable: TimeoutError')\n"
+            "        return []\n"
             "    return [{'source':'osv','id':f'CVE-2099-{index:04d}','fix_hash':(peer + str(index)).encode().hex().ljust(40, '0')[:40],"
             "'summary':f'fix bounds check in {peer} entity parser {index}','url':f'https://osv.dev/vulnerability/CVE-2099-{index:04d}',"
             "'repo_url':f'https://example.test/{peer}.git',"
@@ -222,6 +225,22 @@ class PeerFixCardTests(unittest.TestCase):
         # audit discards this generator's stderr, so the card carries which.
         self.assertIn("source unavailable", card["reason"])
         self.assertIn("feed unavailable", card["reason"])
+
+    def test_an_osv_outage_is_not_reported_as_an_empty_feed(self) -> None:
+        self.write_config(peers=["expat"])
+        env = self.environment()
+        env["S6_TEST_UNAVAILABLE_PEER"] = "expat"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        card = json.loads(self.card_file.read_text())
+        self.assertEqual(card["peer_fix_source"], "discovery")
+        self.assertIn("source unavailable", card["reason"])
+        self.assertIn("OSV unavailable: TimeoutError", card["reason"])
 
     def test_endpoint_only_peer_keeps_one_exact_fix_discovery_route(self) -> None:
         self.write_config(peers=["expat"])

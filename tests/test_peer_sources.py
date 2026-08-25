@@ -386,6 +386,20 @@ check("ossfuzz_tracker_reference: shape",
       _ref["source"] == "ossfuzz" and "libxml2" in _ref["url"]
       and _ref["fix_hash"] == "")
 
+# A hung or missing VCS is an outage too. Reporting it is what keeps the
+# discovery card from naming an unreachable clone an exhausted peer.
+with tempfile.TemporaryDirectory() as d:
+    _clone = Path(d) / "peer"
+    (_clone / ".git").mkdir(parents=True)
+    _source_errors = []
+    with mock.patch("peer_sources.subprocess.run",
+                    side_effect=ps.subprocess.TimeoutExpired("git", 15)):
+        check("vcs_log_search: a hung clone returns empty",
+              ps.vcs_log_search(_clone, source_errors=_source_errors) == [])
+    check("vcs_log_search: a hung clone is distinguishable from no commits",
+          _source_errors == ["git log unavailable: TimeoutExpired"],
+          _source_errors)
+
 # ─── OSV query with network mocked ─────────────────────────────────
 
 # A network failure must NOT poison the cache: a negative cache entry is
@@ -393,10 +407,16 @@ check("ossfuzz_tracker_reference: shape",
 # mining for the full TTL after a single transient failure.
 with tempfile.TemporaryDirectory() as d:
     cache = Path(d)
+    _source_errors = []
     with mock.patch("peer_sources.urllib.request.urlopen",
                     side_effect=ps.urllib.error.URLError("nope")):
         check("osv_query: network error returns empty",
-              ps.osv_query("anything", cache_dir=cache, days=365) == [])
+              ps.osv_query(
+                  "anything", cache_dir=cache, days=365,
+                  source_errors=_source_errors,
+              ) == [])
+    check("osv_query: network error is distinguishable from an empty feed",
+          _source_errors == ["OSV unavailable: URLError"], _source_errors)
     check("osv_query: network error writes no cache file",
           not any(cache.iterdir()),
           f"unexpected cache files: {list(cache.iterdir())}")
@@ -488,13 +508,21 @@ with tempfile.TemporaryDirectory() as d:
 # ─── gather_peer_fixes ──────────────────────────────────────────────
 
 with tempfile.TemporaryDirectory() as d:
-    with mock.patch("peer_sources.osv_query", return_value=[]):
+    def _unavailable_osv(*args, source_errors=None, **kwargs):
+        source_errors.append("OSV unavailable: TimeoutError")
+        return []
+
+    _source_errors = []
+    with mock.patch("peer_sources.osv_query", side_effect=_unavailable_osv):
         _out = ps.gather_peer_fixes(
             "obscure", cache_dir=Path(d),
             peer_clone_search_roots=[Path(d)],
+            source_errors=_source_errors,
         )
     check("gather_peer_fixes: empty OSV falls back to ossfuzz hint",
           len(_out) == 1 and _out[0]["source"] == "ossfuzz")
+    check("gather_peer_fixes: reports an unavailable source to its caller",
+          _source_errors == ["OSV unavailable: TimeoutError"], _source_errors)
 
 with tempfile.TemporaryDirectory() as d:
     fake_osv = [

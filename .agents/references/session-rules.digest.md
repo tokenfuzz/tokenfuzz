@@ -23,7 +23,8 @@ harness's harvester only looks under `${RESULTS_DIR}`.
 
 - Default reproducer: `bin/probe <testcase>`. Reads TARGET / HYPOTHESIS-ID /
   HARNESS from the testcase header. For opaque byte inputs, preserve the bytes
-  and pass `--hypothesis-id H-...`; target/card come from state. No env vars.
+  and pass `--hypothesis-id H-...`; target/card come from state. S8 also passes
+  `--property <kind>`. No env vars.
   - Write testcases and sibling harnesses under `${RESULTS_DIR}/scratch-N/`.
     Different C/C++ harness logic needs a unique sibling filename per testcase;
     put that exact name in HARNESS and never overwrite a shared harness.

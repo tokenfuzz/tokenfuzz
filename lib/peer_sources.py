@@ -164,6 +164,7 @@ def osv_query(
     cache_dir: Optional[Path] = None,
     cache_ttl_seconds: int = 7 * 24 * 3600,
     max_results: int = 30,
+    source_errors: Optional[list[str]] = None,
 ) -> list[dict]:
     """Query OSV for recent fixes affecting `peer`.
 
@@ -208,13 +209,15 @@ def osv_query(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
         # Network failure — return [] but do NOT cache it. A negative
         # cache entry here is byte-identical to a legitimate empty OSV
         # result, so caching it would suppress S6 mining for the full
         # TTL (default 7 days) after a single transient failure — e.g.
         # one sandboxed run with no network poisons every later run.
         # Leaving it uncached means the next run simply retries.
+        if source_errors is not None:
+            source_errors.append(f"OSV unavailable: {type(error).__name__}")
         return []
 
     try:
@@ -222,6 +225,8 @@ def osv_query(
     except json.JSONDecodeError:
         # Malformed body — also a fetch failure, not a real empty result.
         # Same reasoning as above: return [] without caching.
+        if source_errors is not None:
+            source_errors.append("OSV unavailable: malformed response")
         return []
 
     vulns = payload.get("vulns") or []
@@ -410,6 +415,7 @@ def vcs_log_search(
     days: int = 1095,
     timeout: int = 15,
     max_results: int = 30,
+    source_errors: Optional[list[str]] = None,
 ) -> list[dict]:
     """Scan a local git/hg clone of a peer for security-shaped commits.
 
@@ -420,13 +426,16 @@ def vcs_log_search(
     if not peer_clone.is_dir():
         return []
     if (peer_clone / ".git").exists() or (peer_clone / "HEAD").is_file():
-        return _vcs_log_git(peer_clone, days, timeout, max_results)
+        return _vcs_log_git(peer_clone, days, timeout, max_results, source_errors)
     if (peer_clone / ".hg").exists():
-        return _vcs_log_hg(peer_clone, days, timeout, max_results)
+        return _vcs_log_hg(peer_clone, days, timeout, max_results, source_errors)
     return []
 
 
-def _vcs_log_git(peer_clone: Path, days: int, timeout: int, max_results: int) -> list[dict]:
+def _vcs_log_git(
+    peer_clone: Path, days: int, timeout: int, max_results: int,
+    source_errors: Optional[list[str]] = None,
+) -> list[dict]:
     # Use --shortstat so we can filter small diffs in Python (cheaper than
     # parsing inside an awk one-liner that splits on changing column widths).
     cmd = [
@@ -443,7 +452,9 @@ def _vcs_log_git(peer_clone: Path, days: int, timeout: int, max_results: int) ->
         out = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
         ).stdout
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError) as error:
+        if source_errors is not None:
+            source_errors.append(f"git log unavailable: {type(error).__name__}")
         return []
 
     return _parse_git_shortstat(out, max_results)
@@ -494,7 +505,10 @@ def _parse_git_shortstat(out: str, max_results: int) -> list[dict]:
 _HG_DIFFSTAT = re.compile(r"^(\d+): \+(\d+)/-(\d+)$")
 
 
-def _vcs_log_hg(peer_clone: Path, days: int, timeout: int, max_results: int) -> list[dict]:
+def _vcs_log_hg(
+    peer_clone: Path, days: int, timeout: int, max_results: int,
+    source_errors: Optional[list[str]] = None,
+) -> list[dict]:
     # {diffstat} is Mercurial's --shortstat, so the same size bounds apply to
     # both VCSes; sort(-rev) keeps newest-first, which the revset would
     # otherwise reorder to ascending.
@@ -509,7 +523,9 @@ def _vcs_log_hg(peer_clone: Path, days: int, timeout: int, max_results: int) -> 
         out = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout,
         ).stdout
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError) as error:
+        if source_errors is not None:
+            source_errors.append(f"hg log unavailable: {type(error).__name__}")
         return []
     entries: list[dict] = []
     for line in out.splitlines():
@@ -629,6 +645,7 @@ def gather_peer_fixes(
     days: int = 3650,
     peer_clone_search_roots: Optional[list[Path]] = None,
     max_per_source: int = 20,
+    source_errors: Optional[list[str]] = None,
 ) -> list[dict]:
     """One-stop entrypoint: gather fixes for a peer from all available sources.
 
@@ -652,7 +669,10 @@ def gather_peer_fixes(
     if peer_clone_search_roots:
         clone = find_peer_clone(peer, peer_clone_search_roots)
         if clone is not None:
-            for entry in vcs_log_search(clone, days=days, max_results=max_per_source):
+            for entry in vcs_log_search(
+                clone, days=days, max_results=max_per_source,
+                source_errors=source_errors,
+            ):
                 key = ("vcs", entry.get("fix_hash", ""))
                 if key[1] and key in seen:
                     continue
@@ -672,6 +692,7 @@ def gather_peer_fixes(
         peer, ecosystem="OSS-Fuzz", days=days,
         cache_dir=cache_dir, cache_ttl_seconds=cache_ttl_seconds,
         max_results=max_per_source,
+        source_errors=source_errors,
     ):
         key = ("osv", entry.get("id", ""))
         if key[1] and key in seen:

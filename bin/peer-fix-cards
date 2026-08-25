@@ -203,6 +203,7 @@ def main(argv: list[str]) -> int:
     seen_ids: set[str] = set()
     for peer in cfg.s6_peers[:args.limit]:
         source_error = ""
+        source_errors: list[str] = []
         try:
             fixes = peer_sources.gather_peer_fixes(
                 peer,
@@ -211,7 +212,9 @@ def main(argv: list[str]) -> int:
                 days=args.days,
                 peer_clone_search_roots=clone_roots,
                 max_per_source=args.max_per_peer,
+                source_errors=source_errors,
             )
+            source_error = "; ".join(source_errors)[:120]
         except Exception as e:
             if not args.quiet:
                 print(f"[peer-fix-cards] {peer}: source error: {e}",

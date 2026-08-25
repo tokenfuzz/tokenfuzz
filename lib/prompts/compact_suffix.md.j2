@@ -24,7 +24,8 @@ substitute the fallback default when the queue assigned something else.
   testcase; put that exact name in HARNESS and never overwrite a shared harness.
 - Run `bin/probe "{{ scratch_dir }}/<testcase>"` immediately; after a first
   diagnostic, run the same path with `--confirm`. For opaque bytes, preserve
-  them exactly and pass `--hypothesis-id H-...`.
+  them exactly and pass `--hypothesis-id H-...`; under S8 add
+  `--property <kind>`.
 - If target code must generate, transform, or inspect a seed, perform that
   setup inside the testcase's `HARNESS` under `bin/probe`, never by invoking
   the target ad hoc from the shell first.

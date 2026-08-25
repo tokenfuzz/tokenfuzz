@@ -741,6 +741,7 @@ Generated score text.
 
         with mock.patch.dict(os.environ, {
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "0",
         }, clear=False), mock.patch.object(
             triage.llm_decide, "provider_limit_open", return_value=False,
         ), mock.patch.object(triage.subprocess, "run", side_effect=run):
@@ -749,6 +750,38 @@ Generated score text.
             )
         self.assertEqual(attempted, set(directories))
         self.assertEqual((calls, maximum), (3, 2))
+
+    def test_disabled_llm_decisions_reach_no_trigger_reviewer(self) -> None:
+        """LLM_DECIDE_DISABLE must stop the batch reviewer, as it stops the serial one.
+
+        The batch path spends a provider session per group rather than per
+        artifact, so an unchecked switch here costs a whole review wall an
+        operator asked not to pay. Claiming the ids as attempted would also
+        file each one pending on a review that never ran.
+        """
+        directory = self.root / "findings" / "FIND-900"
+        directory.mkdir()
+        (directory / "report.md").write_text(
+            "# State issue\n\nA public request crosses a boundary.\n",
+            encoding="utf-8",
+        )
+        spawned: list[list[str]] = []
+
+        def run(command, *_args, **_kwargs):
+            spawned.append(command)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "1",
+        }, clear=False), mock.patch.object(
+            triage.llm_decide, "provider_limit_open", return_value=False,
+        ), mock.patch.object(triage.subprocess, "run", side_effect=run):
+            attempted = triage._batch_finding_trigger_votes(
+                [directory], self.root, None, None, False, workers=2,
+            )
+        self.assertEqual(spawned, [])
+        self.assertEqual(attempted, set())
 
     def test_repeat_finalization_of_unchanged_findings_spends_no_provider_call(self) -> None:
         """Finalize twice; the second pass must reach no provider at all.
@@ -799,6 +832,7 @@ Generated score text.
         def gate() -> dict[str, int]:
             with mock.patch.dict(os.environ, {
                 "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+                "LLM_DECIDE_DISABLE": "0",
             }, clear=False), mock.patch.object(
                 triage.llm_decide, "provider_limit_open", return_value=False,
             ), mock.patch.object(
@@ -857,6 +891,7 @@ Generated score text.
 
         with mock.patch.dict(os.environ, {
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "0",
         }, clear=False), mock.patch.object(
             triage.llm_decide, "provider_limit_open", return_value=False,
         ), mock.patch.object(triage.subprocess, "run", side_effect=run):
@@ -892,6 +927,7 @@ Generated score text.
 
         with mock.patch.dict(os.environ, {
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "0",
         }, clear=False), mock.patch.object(
             triage.llm_decide, "provider_limit_open", return_value=False,
         ), mock.patch.object(triage.subprocess, "run", side_effect=run):
@@ -928,6 +964,7 @@ Generated score text.
 
         with mock.patch.dict(os.environ, {
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "0",
         }, clear=False), mock.patch.object(
             triage.llm_decide, "provider_limit_open", return_value=False,
         ), mock.patch.object(triage.subprocess, "run", side_effect=run):
@@ -1154,6 +1191,7 @@ Generated score text.
 
         with mock.patch.dict(os.environ, {
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "0",
         }, clear=False), mock.patch.object(
             triage.llm_decide, "provider_limit_open", return_value=False,
         ), mock.patch.object(triage.subprocess, "run", side_effect=run):
@@ -1172,6 +1210,7 @@ Generated score text.
             (directory / ".trigger-gate.json").unlink(missing_ok=True)
         with mock.patch.dict(os.environ, {
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "0",
             "LLM_DECISION_TIMEOUT": "30",
         }, clear=False), mock.patch.object(
             triage.llm_decide, "provider_limit_open", return_value=False,
@@ -1207,6 +1246,7 @@ Generated score text.
 
         with mock.patch.dict(os.environ, {
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "0",
         }, clear=False), mock.patch.object(
             triage.llm_decide, "provider_limit_open", return_value=False,
         ), mock.patch.object(triage.subprocess, "run", side_effect=run):
@@ -1234,6 +1274,7 @@ Generated score text.
 
         with mock.patch.dict(os.environ, {
             "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+            "LLM_DECIDE_DISABLE": "0",
         }, clear=False), mock.patch.object(
             triage.llm_decide, "provider_limit_open", return_value=False,
         ), mock.patch.object(triage.subprocess, "run", side_effect=run):

@@ -136,7 +136,7 @@ class SetupTargetTests(unittest.TestCase):
             setup.report_harness_input_mismatch()
         self.assertEqual(before, config.read_bytes())
 
-    def test_a_header_only_repair_preserves_the_configured_library(self) -> None:
+    def test_a_header_only_repair_preserves_curated_harness_inputs(self) -> None:
         setup_target = _load_setup_target()
         target = self.temp / "header-mismatch-target"
         target.mkdir()
@@ -162,9 +162,11 @@ class SetupTargetTests(unittest.TestCase):
             setup.report_harness_input_mismatch()
         text = config.read_text(encoding="utf-8")
         self.assertIn('asan_lib = "build-asan/libproduct.a"', text)
-        self.assertIn('includes      = ["include"]', text)
+        self.assertIn(
+            'includes      = ["stale/include", "generated/[old]", "include"]',
+            text,
+        )
         self.assertNotIn("libhelper.a", text)
-        self.assertNotIn("stale/include", text)
         setup_target.target_config.parse_toml(config)
 
     def test_browser_setup_does_not_invent_a_c_harness_contract(self) -> None:
