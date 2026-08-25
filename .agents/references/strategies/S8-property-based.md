@@ -3,18 +3,15 @@
 **Sanitizer-free oracles for silent-corruption bugs.** ASan catches memory-safety
 violations; UBSan catches undefined behaviour; TSan catches races. None of them
 catch *semantic* corruption: encode then decode and get back something different,
-hash two distinct inputs to the same value, idempotent operation that mutates on
-the second call, function whose output sits outside its declared numerical domain.
+an identity key that drops a security discriminator, an idempotent operation
+that mutates on the second call, or a function whose output sits outside its
+declared numerical domain.
 
 These bugs are real (silent data loss, signature confusion, cache poisoning,
 sandbox-policy bypass) and invisible to S1–S7. S8 closes that gap by inferring
 *properties* from the target's own type signatures, docstrings, and naming
 conventions, then writing testcases whose oracle is the property — not a
 sanitizer report.
-
-**Review gate:** after 8 properties exercised across at least 3 categories with 0
-violations and no NEEDS_TESTCASE lead, rotate strategy. Do not stop while a
-property generator is still narrowing toward a counter-example.
 
 ## Pick the target by its security consumer (do this FIRST)
 
@@ -33,32 +30,46 @@ another pure-data path, a counter-example is an upstream correctness bug — rec
 it with `bin/state add-note` and move on; do **not** file it.
 Use local source, call sites, comments, and docs for this filter.
 
+Before testing a boundary value, quote the callee-specific input contract and
+trace that value from the configured caller-controlled boundary through a real
+caller.
+Do not call a framework callback directly with a value its caller guarantees it
+never passes. A generic error return does not override a concrete minimum,
+buffer-size, or sequencing precondition; violating one is harness misuse, not a
+property counter-example.
+
+For managed-runtime oracles, catch only the parser or API's documented
+input-rejection exceptions. Let every other exception escape so a shared
+unexpected failure cannot be normalized into an apparently equal result.
+If a managed testcase prerequisite is absent, print `NO_EXEC: <proof>` and
+exit 2; do not raise an exception.
+
+A wrong exception type or one request's uncaught exception is robustness, not
+durable denial of service. File it only with proof that it crosses a security
+boundary or terminates or blocks a durable service beyond that request.
+
 | Category | In scope when the consumer is… | Security primitive it becomes |
 |----------|--------------------------------|-------------------------------|
 | Inverse (round-trip) | a trust/parse check enforced on one form but made on the other | smuggle a value past the check (parser/filter desync) |
 | Idempotence | a sanitiser / canonicaliser feeding a filter, ACL, or SOP/CSP check | single-pass residual bypasses the check |
-| Injectivity | a hash / cache-key feeding a lookup, or an identifier feeding identity/ACL | hash-flooding DoS, cache poisoning, identity confusion |
+| Injectivity | a key/identifier explicitly promised unique within its domain | cache poisoning, identity confusion |
 | Numerical domain | an allocation size, index, length, or resource limit | negative→huge-unsigned / `INT_MIN` → OOB or DoS |
 | Format compliance | an escaper/emitter whose output crosses into another parser/context | injection across the context boundary |
+| Equivalence | two documented-equivalent forms feed an auth, policy, or validation decision | policy bypass or interpretation differential |
 
 Run a category procedure below only on functions with such a consumer. A clean
 encode/decode pair that nothing security-sensitive consumes is not worth a
 hypothesis. The closing **Delivery** section is the full filing rubric; this
 table is the up-front filter so you *generate* security-relevant work instead of
-*discarding* it at the end.
+*discarding* it at the end. If a card has no such pair, record the source proof
+with `bin/state update-card --card-id <id> --status blocked --note <proof>`;
+the queue keeps one card per strategy angle, so this closes only the S8 angle.
 
-## Why this is LLM-native
+When the S8 card floor is complete, discard the card. Then end the model
+session instead of claiming the next card. The worker pool relaunches from compact state, avoiding a growing
+multi-card context without reducing investigation depth.
 
-- **Hypothesis libraries** (Python, Haskell QuickCheck, Rust proptest) expect the
-  developer to *write* the property. The LLM can *read* the target and *derive*
-  the property — function name, docstring, return type, and call-site usage are
-  all the input it needs.
-- **Random fuzzers** generate inputs but have no oracle for "this output is wrong
-  even though it didn't crash." S8 is the oracle.
-- Cross-implementation comparison needs two implementations of the same spec.
-  Properties don't — `decode(encode(x)) == x` only needs one implementation.
-
-## The five property categories
+## The six property categories
 
 Each category gets its own procedure, search patterns, oracle shape, and
 worked-example skeleton. Run the procedure end-to-end on one category before
@@ -82,11 +93,11 @@ IDN normalisation, UTF-8↔UTF-16 conversion, HTML / XML round-trips, regex
 match-then-replace, image / audio encode→decode, archive create→extract.
 
 ```bash
-# Find paired encoder/decoder functions:
-rg -nE '\b(encode|serialize|marshal|write|to_bytes|to_json|to_string)\w*\s*\(' --type c --type cpp --type rust --type python <dir>/ | head -30
-rg -nE '\b(decode|deserialize|unmarshal|read|from_bytes|from_json|from_string|parse)\w*\s*\(' --type c --type cpp --type rust --type python <dir>/ | head -30
-# Find round-trip claims in docs/comments:
-rg -nE 'round[\s_-]?trip|roundtrip|encode.*decode|decode.*encode|inverse' --type c --type cpp --type rust --type python <dir>/ | head -20
+# Find files containing paired operations or an explicit round-trip claim,
+# then read only 2-3 matching files:
+bin/rg-safe -l '\b(encode|serialize|marshal|write|to_bytes|to_json|to_string)\w*\s*\(' <dir>/
+bin/rg-safe -l '\b(decode|deserialize|unmarshal|read|from_bytes|from_json|from_string|parse)\w*\s*\(' <dir>/
+bin/rg-safe -l 'round[\s_-]?trip|roundtrip|encode.*decode|decode.*encode|inverse' <dir>/
 ```
 
 **Procedure:**
@@ -127,11 +138,8 @@ HTML sanitisation, SQL identifier quoting, cryptographic key derivation
 cache warmup, deduplication.
 
 ```bash
-# Idempotence keywords in code & docs:
-rg -nE '\b(idempotent|canonicalize|normalize|sanitize|dedupe|deduplicate|reduce)\w*' --type c --type cpp --type rust --type python <dir>/ | head -30
-# Functions that return the same type they accept (idempotence is type-shaped):
-rg -nE 'fn (\w+)\(.*: ?(&?\w+)\).*-> *\2' --type rust <dir>/ | head -20
-rg -nE '(\w+\*?)\s+(\w+)\s*\(\s*\1\s+\w+\s*\)' --type c --type cpp <dir>/ | head -20
+# Find candidate files, then read only 2-3 with a documented fixed-point claim:
+bin/rg-safe -l '\b(idempotent|canonicalize|normalize|sanitize|dedupe|deduplicate|reduce)\w*' <dir>/
 ```
 
 **Procedure:**
@@ -151,49 +159,37 @@ rg -nE '(\w+\*?)\s+(\w+)\s*\(\s*\1\s+\w+\s*\)' --type c --type cpp <dir>/ | head
 canonical inputs, so `f(canonical) == canonical` passes trivially. Make sure
 your inputs are *non-canonical*.
 
-### Category 3 — Injectivity (uniqueness)
+### Category 3 — Injectivity (uniqueness contracts)
 
 **Property:** for all distinct `x`, `y` in the documented domain,
-`f(x) != f(y)`. Strict form: pure injectivity (hash, ID generator). Weak form:
-collision resistance up to the documented output width.
+`f(x) != f(y)` — only when the API explicitly promises uniqueness over that
+domain, or when a structured key must preserve every security discriminator.
 
-**Why this finds bugs:** hash collisions over short inputs (truncated MD5,
-fingerprint-32 over byte strings), ID generators that wrap silently, identifier
-canonicalisation that collapses Unicode look-alikes (homoglyph confusions),
-cache-key derivation that drops a discriminator field.
+**Why this finds bugs:** ID generators wrap silently, identifier
+canonicalisation collapses identities that policy treats separately, and
+cache-key derivation drops a tenant, privilege, method, or origin field.
 
-**Highest yield:** non-cryptographic hashers (xxHash, CityHash, MurmurHash,
-FNV, Adler-32), identifier interning / symbol tables, request-ID / span-ID
-generators, cache-key derivation, dictionary key folding (lowercase keys,
-NFC keys), URL hashing for cache lookup.
+**Highest yield:** identifier interning, bounded ID allocators, and structured
+cache-key derivation used by an authorization-sensitive lookup.
 
 ```bash
-# Hash / fingerprint / id functions:
-rg -nE '\b(hash|fingerprint|digest|checksum|murmur|fnv|xxhash|crc(16|32|64))\w*\s*\(' --type c --type cpp --type rust --type python --type go <dir>/ | head -30
-# Custom interning / id maps:
-rg -nE '\b(intern|symbol_id|gen_id|next_id|allocate_id|key_for)\w*\s*\(' --type c --type cpp --type rust <dir>/ | head -30
+# Find files containing custom identity/key generation, then read 2-3 callers:
+bin/rg-safe -l '\b(intern|symbol_id|gen_id|next_id|allocate_id|cache_key|key_for)\w*\s*\(' <dir>/
 ```
 
 **Procedure:**
 
-1. Identify the function's *output width* (bits). 32-bit output → birthday
-   collisions become likely around 2^16 inputs; explicitly *don't* claim a
-   collision in a 256-bit hash is a finding without 2^128 trials.
-2. Read the input *domain* — what does the function claim it can be unique over?
-   Bytes? Strings? Identifiers? UTF-8 codepoints?
-3. Generate inputs *adversarial* for that domain: similar-prefix strings,
-   single-bit flips, Unicode look-alikes (NFC vs NFD, fullwidth/halfwidth),
-   inputs differing only in a field the implementation is suspected of dropping.
-4. Compute outputs into a set; any duplicate where the inputs were distinct is
-   a counter-example.
-5. **Document the search budget.** Injectivity properties are statistical — a
-   clean run over N inputs means "no collisions in this N", not "is injective."
-   Report the N in the testcase header.
+1. Quote the exact uniqueness/key-completeness contract and its domain.
+2. For a structured key, vary one security discriminator at a time while
+   holding every other field fixed. For a bounded ID allocator, test the
+   documented lifetime and wrap boundary.
+3. Minimize any pair that maps to the same identity and show the downstream
+   lookup treats the pair as one principal/object.
 
-**Don't file:** trivial collisions in cryptographic hashes (those are research
-results, not bugs). Do file: any collision in a function whose docstring
-implies uniqueness on a domain you stayed inside, and whose output reaches a
-security consumer from *Pick the target by its security consumer*.
+**Never use ordinary hash collisions as an oracle.** A finite-width hash over a
+larger domain must collide, and non-cryptographic hashes are not uniqueness
+contracts. A collision matters only when the defect is a dropped required key
+field or a broken explicit collision-handling contract.
 
 ### Category 4 — Numerical-domain invariants
 
@@ -215,20 +211,20 @@ for unsigned amounts), geometry / collision math (vectors must stay
 normalised).
 
 ```bash
-# Functions returning numerical types:
-rg -nE 'fn \w+\(.*\) -> *(f32|f64|i\d+|u\d+|usize|isize)\b' --type rust <dir>/ | head -30
-rg -nE '(float|double|int\d*_t|uint\d*_t)\s+(\w+)\s*\(' --type c --type cpp <dir>/ | head -30
-# Sign / range claims in docstrings & comments:
-rg -nE 'positive|non[\s_-]?negative|always >= 0|in \[[0-9]|in \(0,|normalized|finite' --type c --type cpp --type rust --type python <dir>/ | head -30
+# Find files with explicit range/domain claims, then read 2-3 functions and callers:
+bin/rg-safe -l 'positive|non[\s_-]?negative|always >= 0|in \[[0-9]|in \(0,|normalized|finite' <dir>/
 ```
 
 **Procedure:**
 
 1. Pick a function whose return type / doc declares a numerical invariant. Write
    the invariant down explicitly — `out >= 0`, `0 <= out <= 1`, `out finite`.
+   Confirm that the tested input is within this function's contract and reaches
+   it through a real caller-controlled path; do not invent out-of-contract API
+   arguments just because zero, MIN, or MAX is mechanically available.
 2. Generate inputs covering: zero, ±0.0, ±1, ±MAX, ±MIN, NaN, ±Inf, smallest
    subnormal, `INT_MIN` (the only int whose `abs()` is itself negative), array
-   inputs with cancellation (`[1e18, -1e18, 1.0]` — exact answer 1.0; naive sum
+   inputs with cancellation (`[1e18, 1.0, -1e18]` — exact answer 1.0; naive sum
    gives 0.0), array inputs that trigger Kahan-summation differences.
 3. For each, evaluate `f(x)` and check the invariant. **Failure shapes:**
    - `f(MIN_NEGATIVE_INT)` returns negative because `abs(INT_MIN) == INT_MIN`
@@ -261,10 +257,9 @@ highest false-positive rate (regexes are not full grammars) — so use a parser
 when one exists, fall back to regex only for terminal-symbol-shaped formats.
 
 ```bash
-# Format-emitting functions:
-rg -nE '\b(format|serialize|render|emit|to_string|escape|quote)\w*\s*\(' --type c --type cpp --type rust --type python <dir>/ | head -30
-# Existing format / regex claims in code or doc strings:
-rg -nE 'matches \^|regex.*= |format.*=' --type c --type cpp --type rust --type python <dir>/ | head -20
+# Find candidate files, then read 2-3 emitters and their consumers:
+bin/rg-safe -l '\b(format|serialize|render|emit|to_string|escape|quote)\w*\s*\(' <dir>/
+bin/rg-safe -l 'matches \^|regex.*= |format.*=' <dir>/
 ```
 
 **Procedure:**
@@ -283,6 +278,20 @@ rg -nE 'matches \^|regex.*= |format.*=' --type c --type cpp --type rust --type p
    non-compliant byte becomes an injection (see *Pick the target by its
    security consumer*).
 
+### Category 6 — Semantic equivalence
+
+**Property:** two input forms the public contract treats as equivalent must
+produce the same security decision and security-relevant observable state.
+
+Use this for alternate syntax, canonical/non-canonical representations, or
+fast/slow paths that reach the same operation. Hold semantics constant, change
+one representation feature, and compare the exact auth/policy/validation
+result. A difference is a counter-example only after source or documentation
+establishes equivalence; similar-looking inputs with different semantics are
+not an oracle. This category owns generated differential checks such as
+`USING(x)` versus its equivalent explicit join predicate; S3 owns a direct
+one-form rule audit.
+
 ## The generator step (Hypothesis-style)
 
 S8 is *property-based testing* — it expects an input generator, not a hand-
@@ -295,43 +304,16 @@ demonstrates a counter-example within a bounded budget.
 1. **Read the documented domain.** Type signature, docstring, runtime
    precondition checks. The domain is what the function *claims* it accepts —
    not what it *happens* to accept (those would be S2 invariant negations).
-2. **Pick the shrinking strategy.** When a counter-example is found, the
-   generator must reduce it to a minimal form (smallest input, fewest fields
-   set, smallest counts). Use the Hypothesis library when the harness language
-   is Python; QuickCheck / proptest for Haskell / Rust; for languages without
-   a property library, write a manual shrinker that halves lists, zeros
-   numeric fields, and drops optional structure elements.
+2. **Pick the shrinking strategy.** Reduce a counter-example to the smallest
+   input and fewest differing fields. Reuse Hypothesis, QuickCheck, or proptest
+   only when it is already available; do not install dependencies during an
+   audit. A short deterministic generator and manual reducer are enough.
 3. **Adversarial bias.** Pure uniform random is wasteful. Bias generators
    toward: empty, single-element, max-length, near-boundary numeric values,
    the documented "interesting" bytes for the format.
 4. **Run budget.** Default 1000 cases per property. Bump to 100K for cheap
-   pure-function properties (hash, normalisation), drop to 100 for expensive
+   pure-function properties (such as normalisation), drop to 100 for expensive
    ones (full encode/decode round-trip on multi-MB inputs).
-
-```python
-# Hypothesis (Python) — round-trip property for a hypothetical urlencode
-from hypothesis import given, strategies as st
-import urllib.parse as up
-
-@given(st.text(min_size=0, max_size=512))
-def test_urlencode_roundtrip(s):
-    encoded = up.quote(s, safe="")
-    decoded = up.unquote(encoded)
-    assert decoded == s, f"round-trip failed: {s!r} → {encoded!r} → {decoded!r}"
-```
-
-```rust
-// proptest (Rust) — idempotence property for a canonicalize function
-use proptest::prelude::*;
-proptest! {
-    #[test]
-    fn canonicalize_is_idempotent(s in ".{0,512}") {
-        let once = my_crate::canonicalize(&s);
-        let twice = my_crate::canonicalize(&once);
-        prop_assert_eq!(once, twice);
-    }
-}
-```
 
 For C / C++ targets without a property library, generate inputs in the
 testcase harness directly (deterministic seeded PRNG → produce N inputs in a
@@ -347,7 +329,7 @@ shapes:
 // TARGET: file:function:line
 // HYPOTHESIS-ID: Hn
 // CATEGORY: state                ← logic/state-corruption findings use 'state'
-// PROPERTY: roundtrip|idempotence|injectivity|domain|format
+// PROPERTY: inverse|idempotence|injectivity|domain|format|equivalence
 // PROPERTY-BUDGET: <N inputs tested>
 // PROPERTY-ORACLE: <one-line description of what was compared>
 ```
@@ -357,8 +339,13 @@ shapes:
 // TARGET: file:function:line
 // HYPOTHESIS-ID: Hn
 // CATEGORY: <real category>
-// PROPERTY: <one of the five>
+// PROPERTY: <one of the six>
 ```
+
+On a counter-example, print a line beginning exactly `PROPERTY VIOLATION:` and
+exit nonzero. `bin/probe` records this as `PROPERTY` (executed oracle evidence,
+not a sanitizer crash and not `NO_EXEC`). Then minimize and file only if the
+security-consumer test below is satisfied.
 
 When the property is violated and ASan is clean, **first decide whether the
 violation has a security implication** — the same consumer test from *Pick the
@@ -371,8 +358,8 @@ triage, not a wishlist of upstream correctness bugs.
 A property violation IS security-relevant if it:
 - Crosses or weakens a security boundary (sandbox, SOP, privilege, isolation),
 - Lets caller-controlled input change the output of a security-sensitive
-  function (sanitiser, normalizer feeding an SOP/CSP/auth check, cache key
-  derivation feeding cache lookup, hash feeding signature verification),
+  function (sanitiser, normalizer feeding an SOP/CSP/auth check, or structured
+  key derivation feeding an authorization-sensitive lookup),
 - Leaks data the caller should not see, or
 - Lets the caller change interpretation of trusted data in a way an
   external party can leverage.
@@ -389,7 +376,7 @@ A property violation is NOT a finding (do not file) if it is:
 
 When you do file, `report.md` must describe:
 
-- Which property was checked (one of the five, named explicitly)
+- Which property was checked (one of the six, named explicitly)
 - The generator domain (what inputs were sampled, with what bias)
 - The counter-example (minimised — run the shrinker before filing)
 - The expected output vs actual output (byte-exact diff)
@@ -418,8 +405,10 @@ non-security paths should not have been filed at all.
 
 - Read ONE function pair (or one function for idempotence/injectivity/domain/
   format) per hypothesis. Do not bulk-load 20 function pairs.
-- Reuse generators across hypotheses on the same target; cache them in
-  `${RESULTS_DIR}/scratch-N/generators/`.
+- Keep only runnable H-prefixed testcases at the top of `scratch-N`. Put
+  generators and trusted auxiliary data under `scratch-N/generators/`, or have
+  the harness create and remove temporary data during its run; otherwise
+  orphan enforcement will probe support files as if they were testcases.
 - For C/C++ targets, build the property harness with `// HARNESS: harness.c`
   so `bin/probe` caches the compile.
 - For interpreted targets (Python, Ruby, Node) the Hypothesis-equivalent
@@ -434,7 +423,7 @@ non-security paths should not have been filed at all.
 | Serialisation libraries (JSON, CBOR, MsgPack, protobuf, BSON) | Inverse | Encoder/decoder pairs are the property's natural shape |
 | URL / IRI / IDN handling | Idempotence + Inverse | `normalize(normalize(u))` and `parse(format(u))` are both expected to hold |
 | Unicode normalisers (NFC/NFD/NFKC/NFKD) | Idempotence | Definition of normalisation is "fixed point under further normalisation" |
-| Hashers / fingerprinters / ID generators | Injectivity | Output-width-bounded collision search |
+| Identity and structured cache-key generators | Injectivity | Required discriminators must survive key construction |
 | Codecs (image / audio / video) | Inverse + Domain | Lossy round-trip bounds, sample-range invariants |
 | Statistical / numerical libraries | Domain | Documented distribution bounds, finite-output claims |
 | HTML / XML / SVG sanitisers | Idempotence + Format | `sanitize(sanitize(x))` and parser-acceptance of output |

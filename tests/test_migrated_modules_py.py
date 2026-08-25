@@ -692,6 +692,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "a claimed card makes a no-hypothesis relaunch compact instead of cold",
         compact_after_claim,
     )
+    (results / "state" / "strategy-1").write_text("S7\n", encoding="utf-8")
 
     equal("null-deref", triage.autodiscard_reason("Hint: address points to the zero page"), "triage rejects null dereferences")
     equal("", triage.autodiscard_reason("ERROR: AddressSanitizer: heap-buffer-overflow"), "triage retains memory-safety diagnostics")

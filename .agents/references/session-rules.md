@@ -197,7 +197,7 @@ documentation.
 
 ```
 bin/state resume        --agent N [--mode browser|js|generic] [--role reproduce|analysis]
-bin/state next-card     --agent N [--mode browser|js|generic] [--peek]
+bin/state next-card     --agent N [--mode browser|js|generic] [--role reproduce|analysis] [--strategy S1|S2|S3|S4|S5|S6|S7|S8] [--peek]
 bin/state show-card     CARD_ID [--mode MODE]                    # compact JSON
 bin/state list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
 bin/state show-crash    CRASH-ID                                # compact JSON

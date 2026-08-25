@@ -646,25 +646,14 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
         r"|[Ii]nflate|[Mm]arshal|[Ee]ncrypt|[Dd]ecrypt|[Nn]ormaliz"
         r"|[Cc]anonicaliz|[Ss]anitiz|[Dd]edup|[Ee]scape)\w*\b"
     ), 8, "round-trip property surface"),
-    # S8 — injectivity surface: non-cryptographic hashers, fingerprinters,
-    # and id/key generators carry a uniqueness oracle (collision → hash-
-    # flooding DoS, cache poisoning, identity confusion). Three alternatives:
-    #   1. distinctive hasher/fingerprint families — safe with any affix;
-    #   2. the generic `hash`/`digest` token in a call (covers compute_hash,
-    #      hash_bytes, hashString, digest_update, …), guarded by a negative
-    #      lookahead so container plumbing (hashmap, hashtable, hash_table,
-    #      hash_map, rehash) does NOT match;
-    #   3. id/key/symbol generators (injective-by-contract).
+    # S8 — injectivity surface: explicit identity/key generators. An ordinary
+    # finite-width hash must collide and carries no uniqueness oracle, so
+    # ranking one invites guaranteed false positives and birthday searches.
     (re.compile(
-        r"\b\w*(?:md[45]|sha[0-9]{1,3}|blake\w*|murmur\w*|xxhash|cityhash"
-        r"|siphash|spooky\w*|fnv1?a?|adler32?|crc(?:16|32|64)|fingerprint"
-        r"|checksum|digest)\w*\s*\("
-        r"|\b(?!\w*(?:hashmap|hashtable|hash_table|hash_map|rehash))"
-        r"\w*hash\w*\s*\("
-        r"|\b(?:intern|symbol_id|cache_key|key_for|id_for"
-        r"|(?:gen(?:erate)?|make|new|next|alloc(?:ate)?|create)_id)\w*\s*\(",
-        re.IGNORECASE,
-    ), 6, "hash/injectivity surface"),
+        r"\b(?:[iI]ntern(?:s|ed|ing|_[A-Za-z]\w*|[A-Z]\w*)?"
+        r"|(?i:symbol_id|cache_key|key_for|id_for"
+        r"|(?:gen(?:erate)?|make|new|next|alloc(?:ate)?|create)_id)\w*)\s*\(",
+    ), 6, "identity-key property surface"),
     # S8 — numerical-domain surface: a declared output domain (non-negative,
     # finite, probability, [0,1]) or a range-enforcement call (clamp/saturate)
     # carries a domain oracle — an out-of-domain value feeding an allocation
@@ -765,7 +754,7 @@ _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
         "cast-heavy path", "size math", "exported API surface",
     }) | S3_SECURITY_REASONS),
     ("S8", frozenset({
-        "round-trip property surface", "hash/injectivity surface",
+        "round-trip property surface", "identity-key property surface",
         "numerical-domain surface"})),
 )
 
@@ -796,7 +785,7 @@ def expected_yield_rank(strategy: str) -> int:
 # off the per-match ×4 multiplier is what holds the commit's intent that a
 # repetition-dense S8 file cannot outrank a single high-signal S7 entrypoint.
 _PRESENCE_ONLY_REASONS: frozenset[str] = frozenset({
-    "round-trip property surface", "hash/injectivity surface",
+    "round-trip property surface", "identity-key property surface",
     "numerical-domain surface",
 })
 
@@ -1430,10 +1419,13 @@ def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
 
 
 def _buildability_priority(card: dict) -> int:
-    """Rank order for reordering *within* an already-selected card set."""
-    return {"built": 0, "unknown": 1, "not-built": 2}.get(
-        card.get("buildability", "unknown"), 1,
-    )
+    """Promote positive build evidence without ranking absence as proof.
+
+    Generated and unity builds compile many sources through one aggregate
+    object, so `not-built` is no stronger than `unknown` at claim time. Only a
+    found object promotes; nothing is demoted for lacking one.
+    """
+    return 0 if card.get("buildability") == "built" else 1
 
 
 def _built_first(card: dict) -> int:
@@ -1444,8 +1436,8 @@ def _built_first(card: dict) -> int:
     covers every non-native source, every header, and every build layout the
     object index cannot read, so demoting `not-built` beneath it would hand
     the window to whatever the classifier says nothing about.
-    `_buildability_priority` keeps the finer three-way order for claim
-    ordering, which reorders a chosen set and never drops from it.
+    Claim ordering uses the same evidence-only distinction, so a generated or
+    amalgamated source is not buried after the window is selected either.
     """
     return 0 if card.get("buildability") == "built" else 1
 
@@ -4738,7 +4730,7 @@ def strategy_yield(ctx: Context) -> dict:
         b = buckets.setdefault(
             strategy,
             {"strategy": strategy, "runs": 0, "crash": 0,
-             "clean": 0, "no_exec": 0, "other": 0,
+             "property": 0, "clean": 0, "no_exec": 0, "other": 0,
              "seconds": 0.0, "timed_runs": 0},
         )
         b["runs"] += 1
@@ -4751,6 +4743,8 @@ def strategy_yield(ctx: Context) -> dict:
         # `other` rather than silently inflating `clean`.
         if verdict == "CRASH":
             b["crash"] += 1
+        elif verdict == "PROPERTY":
+            b["property"] += 1
         elif verdict == "CLEAN":
             b["clean"] += 1
         elif verdict == "NO_EXEC":
@@ -5181,6 +5175,29 @@ def card_next_action(
             "another security boundary. After closing this S7 "
             "angle, end the model session instead of claiming another card; the "
             "worker pool will resume fresh."
+        )
+    if strategy == "S8":
+        return (
+            "First identify a documented property whose output reaches a concrete "
+            "security consumer and verify the configured probe can exercise both. "
+            "Quote the callee-specific input contract and show the tested value is "
+            "controlled through the configured caller-controlled boundary; do not call a "
+            "framework callback directly with a value its real caller excludes. "
+            "In managed-runtime comparisons, catch only the documented input-"
+            "rejection exceptions and let every other exception escape. "
+            "If a managed testcase prerequisite is absent, print `NO_EXEC: "
+            "<proof>` and exit 2; do not raise an exception. "
+            "A wrong exception type or one request's uncaught exception is "
+            "robustness, not durable denial of service; file it only with proof "
+            "that it crosses a security boundary or terminates or blocks a "
+            "durable service beyond that request. "
+            "Only then create one S8 hypothesis and testcase, and put `PROPERTY: "
+            "<inverse|idempotence|injectivity|domain|format|equivalence>` in its "
+            "native-comment header before the first `bin/probe`. If the property "
+            "or its security consumer is absent, run `bin/state update-card "
+            "--card-id <id> --status blocked --note <source-proof>`. After "
+            "closing this S8 angle, end the model session instead of claiming "
+            "another card; the worker pool will resume fresh."
         )
     if has_prior_hypotheses:
         # A re-offered card already has closed shapes; naming that is what
@@ -6052,6 +6069,11 @@ def _runtime_feedback_decision(
         return (
             "productive-artifact",
             "an accepted artifact exists on this scope; do not re-probe a recorded shape, and cluster only distinct mechanisms nearby",
+        )
+    if verdicts.get("PROPERTY", 0):
+        return (
+            "property-counterexample",
+            "minimize the counterexample, verify its security consumer and boundary, then file a FIND or record a correctness note",
         )
     if signals.get("crash-signal", 0):
         return (

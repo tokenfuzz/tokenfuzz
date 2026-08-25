@@ -108,7 +108,7 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 
 ```
 resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1|S2|S3|S4|S5|S6|S7|S8]
-next-card     --agent N [--mode MODE] [--peek]
+next-card     --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1|S2|S3|S4|S5|S6|S7|S8] [--peek]
 show-card     CARD_ID [--mode MODE]                     # compact JSON
 list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
 show-crash    CRASH-ID ;  list-crashes [--status OK|NEW] [--limit N]

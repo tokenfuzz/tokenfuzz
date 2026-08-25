@@ -55,6 +55,10 @@ HEADER_RE = {
     "card": re.compile(r"CARD-ID:\s*([^\s>*]+)"),
     "mode": re.compile(r"^[^A-Za-z]*MODE:\s*([A-Za-z0-9_-]+)", re.M),
     "harness": re.compile(r"^[^A-Za-z]*HARNESS:\s*([^\s>*]+)", re.M),
+    "property": re.compile(r"^[^A-Za-z]*PROPERTY:\s*([A-Za-z0-9_-]+)", re.M),
+}
+S8_PROPERTY_KINDS = {
+    "inverse", "idempotence", "injectivity", "domain", "format", "equivalence",
 }
 BARE_METADATA = re.compile(r"^\s*(TARGET|HYPOTHESIS-ID|CARD-ID|CATEGORY|MODE|HARNESS|PROPERTY):\s*")
 # A setter names the variable and supplies the library as a later argument.
@@ -109,6 +113,7 @@ Optional testcase headers:
   MODE: auto|browser|js|generic
   HARNESS: harness.c
   CARD-ID: <id>
+  PROPERTY: inverse|idempotence|injectivity|domain|format|equivalence (required for S8)
 
 For opaque byte inputs that cannot carry comments, pass --hypothesis-id;
 TARGET and CARD-ID are derived from that hypothesis in structured state.
@@ -224,6 +229,15 @@ def parse_header(testcase: Path) -> dict[str, str]:
         match = pattern.search(text)
         result[name] = match.group(1).strip() if match else ""
     return result
+
+
+def validate_s8_property(strategy: str, property_kind: str) -> None:
+    if strategies.normalize(strategy) != "S8":
+        return
+    normalized = property_kind.strip().lower()
+    if normalized not in S8_PROPERTY_KINDS:
+        allowed = "|".join(sorted(S8_PROPERTY_KINDS))
+        raise ValueError(f"S8 testcase requires PROPERTY: {allowed}")
 
 
 def derive_want(target: str) -> str:
@@ -629,28 +643,43 @@ class Probe:
         if self.args.harness:
             self.header["harness"] = self.args.harness
         hypothesis_row = self._hypothesis_from_state(self.header["hypothesis"])
+        self.hypothesis_strategy = strategies.normalize(str(
+            hypothesis_row.get("strategy", "") if hypothesis_row else ""
+        ))
+        if not self.hypothesis_strategy:
+            for name in (f"strategy-{self.agent}", "fixed-strategy"):
+                path = Path(self.config.results_dir) / "state" / name
+                try:
+                    self.hypothesis_strategy = strategies.normalize(
+                        path.read_text(encoding="utf-8")
+                    )
+                except OSError:
+                    continue
+                if self.hypothesis_strategy:
+                    break
         if hypothesis_row:
             self.header["target"] = self.header["target"] or str(hypothesis_row.get("file", ""))
             self.header["card"] = self.header["card"] or str(hypothesis_row.get("card_id", ""))
-            if (
-                str(hypothesis_row.get("strategy", "")).strip().upper() == "S7"
-                and self.header["harness"]
-                and (
-                    self.config.runner_bin
-                    or any(
-                        self.config.sanitizer_bin(name)
-                        for name in ("asan", "ubsan", "msan", "tsan")
-                    )
+        validate_s8_property(self.hypothesis_strategy, self.header["property"])
+        if (
+            self.hypothesis_strategy == "S7"
+            and self.header["harness"]
+            and (
+                self.config.runner_bin
+                or any(
+                    self.config.sanitizer_bin(name)
+                    for name in ("asan", "ubsan", "msan", "tsan")
                 )
-            ):
-                # Only when a runner route exists. A library-only target has no
-                # other way to deliver bytes, and S7's own card guidance offers
-                # a minimal public-API harness as the fallback there.
-                raise ValueError(
-                    "S7 drives the configured runner, not a HARNESS file; probe "
-                    "a hand-crafted input through the runner, or hand an "
-                    "uncovered public API to S4"
-                )
+            )
+        ):
+            # Only when a runner route exists. A library-only target has no
+            # other way to deliver bytes, and S7's own card guidance offers a
+            # minimal public-API harness as the fallback there.
+            raise ValueError(
+                "S7 drives the configured runner, not a HARNESS file; probe "
+                "a hand-crafted input through the runner, or hand an "
+                "uncovered public API to S4"
+            )
         self.mode = self._mode()
         default_output = self.testcase.with_suffix(".asan.txt") if self.testcase.suffix else Path(str(self.testcase) + ".asan.txt")
         internal_output = (
@@ -966,7 +995,7 @@ class Probe:
         print(f"[probe] verdict={probe_verdict}")
         self._record_state(probe_verdict)
         self._file_crash(probe_verdict)
-        return result
+        return 0 if probe_verdict == "PROPERTY" else result
 
     def _actual_sanitizer_runs(self) -> int:
         try:
@@ -1041,6 +1070,10 @@ class Probe:
                     return "EXEC_FAIL"
             if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
                 return "CRASH"
+            if returncode != 0 and self.hypothesis_strategy == "S8" and self.header["property"]:
+                with self.output.open(encoding="utf-8", errors="replace") as stream:
+                    if any(line.startswith("PROPERTY VIOLATION:") for line in stream):
+                        return "PROPERTY"
             if verdict_lib.file_is_clean(self.output):
                 return "CLEAN"
             return "NO_EXEC"
@@ -1048,7 +1081,7 @@ class Probe:
 
     def _auto_route(self, returncode: int, current: str) -> tuple[int, str]:
         binary = self.environment.get("ASAN_GENERIC_BIN", "")
-        if os.environ.get("PROBE_AUTO_ROUTE", "1") == "0" or self.mode != "generic" or self.sanitizer != "asan" or current == "CRASH" or not binary or not self.output.is_file():
+        if os.environ.get("PROBE_AUTO_ROUTE", "1") == "0" or self.mode != "generic" or self.sanitizer != "asan" or current in {"CRASH", "PROPERTY"} or not binary or not self.output.is_file():
             return returncode, current
         feature = feature_disabled_marker(self.output)
         if not feature:

@@ -25,7 +25,7 @@ _STRATEGIES = {
     "S5": ("S5-reentrancy.md", "Lifetime/state: target-driven re-entrancy, rollback, races, and harmful but valid call sequences; do not free active callback state in the testcase."),
     "S6": ("S6-cross-project.md", "Cross-project variant mining: resolve exact peer fixes, distill their repaired invariants, then search the closest target analogue and bounded siblings before opening a hypothesis."),
     "S7": ("S7-adversarial-input.md", "Adversarial input engineering: mutate real seeds around lengths, nesting, and checksums, by hand. Fuzz harnesses and campaigns belong to S4."),
-    "S8": ("S8-property-based.md", "Property oracle: test security-relevant inverse, injectivity, idempotence, canonicalization, and numeric invariants."),
+    "S8": ("S8-property-based.md", "Property oracle: derive inverse, idempotence, identity-key, domain, format, or equivalence checks only where output reaches a concrete security consumer."),
     "REF": ("REF-pattern-search.md", "Pattern library: use broad target-agnostic searches to support the assigned strategy, then form concrete hypotheses."),
 }
 

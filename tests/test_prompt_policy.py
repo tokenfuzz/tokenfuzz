@@ -202,7 +202,7 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         compact = prompt.compact_fresh_prompt(self.context(), 1)
 
         self.assertIn("follow its `Next action` from the structured resume", compact)
-        self.assertIn("strategy-specific source or input-route gate", compact)
+        self.assertIn("strategy-specific source, consumer, or input-route gate", compact)
         self.assertNotIn("If a card is assigned, create one hypothesis", compact)
 
     def test_turn_budget_is_backend_neutral_and_bounds_the_soft_target(self) -> None:

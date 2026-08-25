@@ -501,6 +501,7 @@ class WorkQueueTests(unittest.TestCase):
             ("free(node); callback(owner);", "S5", "lifetime/ownership operation"),
             ("self.state = self.step_next", "S5", "state-machine transition"),
             ("return normalize(normalize(value));", "S8", "round-trip property surface"),
+            ("return cache_key_for(request);", "S8", "identity-key property surface"),
             # Boundary surfaces are spec-vs-implementation work, not S7 seed
             # mutation: the defect is a rule the code fails to enforce.
             ("pickle.loads(data)", "S3", "deserialization sink"),
@@ -528,6 +529,16 @@ class WorkQueueTests(unittest.TestCase):
                 self.assertEqual(workqueue.strategy_for(reasons), strategy)
         score, reasons = workqueue.code_feature_reasons("int checksum = 0; int thread_count = 1;")
         self.assertEqual((score, reasons), (0, []))
+        _score, reasons = workqueue.code_feature_reasons("return crc32(data, size);")
+        self.assertNotIn("identity-key property surface", reasons)
+        for source in ("internal_error();", "internalize();", "internet_open();"):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertNotIn("identity-key property surface", reasons)
+        for source in ("intern(value);", "intern_string(value);", "internString(value);"):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertIn("identity-key property surface", reasons)
 
     def test_boundary_rows_ignore_the_prose_that_surrounds_real_source(self) -> None:
         """Every pattern runs over comments and licence headers too.
@@ -952,6 +963,25 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual(reproduced["id"], "WORK-BUILT")
         self.assertEqual(analyzed["id"], "WORK-OPTIONAL")
+
+    def test_missing_object_is_not_ranked_below_unknown_build_evidence(self) -> None:
+        """Unity/amalgamation sources have no same-name object of their own."""
+        self.write_cards([
+            self.card(
+                "WORK-AGGREGATED", "src/core.c", score=100,
+                buildability="not-built",
+            ),
+            self.card(
+                "WORK-UNKNOWN", "include/api.h", score=10,
+                buildability="unknown",
+            ),
+        ])
+
+        chosen = workqueue.claim_next_card(
+            self.ctx, "1", mode="generic", role="reproduce", claim=False,
+        )
+
+        self.assertEqual(chosen["id"], "WORK-AGGREGATED")
 
     def test_rank_limit_keeps_built_source_ahead_of_unbuilt_source(self) -> None:
         """Unbuilt work must not consume the window before executable work."""
@@ -2146,6 +2176,7 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(off_pin.returncode, 2)
         self.assertIn("operator-pinned strategy S6", off_pin.stderr)
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+
 
 
 if __name__ == "__main__":

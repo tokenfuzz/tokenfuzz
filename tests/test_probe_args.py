@@ -19,6 +19,32 @@ LOADER.exec_module(probe)
 
 
 class ProbeArgumentTests(unittest.TestCase):
+    def test_s8_requires_a_named_property_kind(self) -> None:
+        probe.validate_s8_property("S8", "equivalence")
+        probe.validate_s8_property("S8-property", "inverse")
+        with self.assertRaisesRegex(ValueError, "S8 testcase requires PROPERTY"):
+            probe.validate_s8_property("S8", "")
+        with self.assertRaisesRegex(ValueError, "S8 testcase requires PROPERTY"):
+            probe.validate_s8_property("S8", "collision")
+        probe.validate_s8_property("S7", "")
+
+    def test_s8_property_violation_is_executed_evidence_not_no_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            instance = object.__new__(probe.Probe)
+            instance.output = Path(directory) / "property.asan.txt"
+            instance.output.write_text(
+                "ASAN_RUN_HEADER: sanitizer=asan runs=1\n"
+                "PROPERTY VIOLATION: equivalent forms differ\n",
+                encoding="utf-8",
+            )
+            instance.config = SimpleNamespace(runner_crash_patterns=[])
+            instance.sanitizer = "asan"
+            instance.hypothesis_strategy = "S8"
+            instance.header = {"property": "equivalence"}
+
+            self.assertEqual(instance._classify(2), "PROPERTY")
+            self.assertNotEqual(instance._classify(0), "PROPERTY")
+
     def test_runner_unavailable_exception_requires_testcase_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -30,6 +56,8 @@ class ProbeArgumentTests(unittest.TestCase):
             instance.exec_testcase = testcase
             instance.sanitizer = "runner"
             instance.config = SimpleNamespace(runner_crash_patterns=["Traceback"])
+            instance.hypothesis_strategy = "S8"
+            instance.header = {"property": "equivalence"}
 
             for message in (
                 "feature is unavailable in this build",
@@ -63,6 +91,8 @@ class ProbeArgumentTests(unittest.TestCase):
             instance.exec_testcase = testcase
             instance.sanitizer = "runner"
             instance.config = SimpleNamespace(runner_crash_patterns=["Traceback"])
+            instance.hypothesis_strategy = "S8"
+            instance.header = {"property": "equivalence"}
 
             output.write_text(
                 "Traceback (most recent call last):\n"
