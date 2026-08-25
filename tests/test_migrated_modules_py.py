@@ -1779,6 +1779,35 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         marked_clean.call_args.args[1] == should_refresh.call_args.args[1],
         "a refresh marks clean the state it ranked, not the state after it",
     )
+    refresh_runtime.fixed_strategy = "S4"
+    with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
+         mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
+         mock.patch.object(audit_runner.workqueue, "campaign_supported", return_value=True), \
+         mock.patch.object(audit_runner.subprocess, "run") as s4_launch:
+        audit_runner.refresh_work_cards(refresh_runtime, force=True)
+    s4_cards = audit_runner.workqueue.read_jsonl(
+        refresh_results / "work-cards.jsonl"
+    )
+    s4_window = json.loads(
+        (refresh_results / "state" / "rank-work-window.json").read_text()
+    )
+    check(
+        not s4_launch.called
+        and [card.get("kind") for card in s4_cards] == ["s4-campaign"]
+        and s4_window.get("core_count") == 0,
+        "a pinned S4 refresh creates only its unranked campaign card",
+        f"cards={s4_cards!r} window={s4_window!r}",
+    )
+    with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
+         mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
+         mock.patch.object(audit_runner.workqueue, "campaign_supported", return_value=False), \
+         mock.patch.object(audit_runner.subprocess, "run") as unsupported_launch:
+        audit_runner.refresh_work_cards(refresh_runtime, force=True)
+    check(
+        not unsupported_launch.called
+        and not audit_runner.workqueue.read_jsonl(refresh_results / "work-cards.jsonl"),
+        "an unsupported pinned S4 refresh skips every unrelated card source",
+    )
     refresh_runtime.fixed_strategy = "S6"
     (refresh_results / "s6-peer-cards.jsonl").write_text(
         json.dumps({"id": "S6-only", "kind": "s6-peer-fix", "strategy": "S6", "file": "", "mode": "auto"}) + "\n",
@@ -1910,6 +1939,47 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(
         not audit_runner.fixed_campaign_exhausted(refresh_runtime, iteration=9),
         "an unclaimed S1 patch card keeps its campaign open",
+    )
+    # S1's patch cards are capped by the ranked window, so a consumed batch
+    # must still grow it — unlike the campaigns that never read that window.
+    audit_runner.workqueue.write_cards(refresh_results / "work-cards.jsonl", [])
+    with mock.patch.object(audit_runner, "_rank_window", return_value=(120, 120)), \
+         mock.patch.object(audit_runner, "refresh_work_cards") as s1_expansion:
+        audit_runner.expand_work_cards_if_exhausted(refresh_runtime)
+    check(
+        s1_expansion.called,
+        "a pinned S1 lane still grows the window its patch cards are capped by",
+    )
+    refresh_runtime.fixed_strategy = "S4"
+    audit_runner.workqueue.write_cards(
+        refresh_results / "work-cards.jsonl",
+        [{"id": "S4-only", "kind": "s4-campaign", "strategy": "S4",
+          "file": "", "mode": "auto"}],
+    )
+    audit_runner.workqueue.update_card_status(
+        audit_runner._queue_context(refresh_runtime), "S4-only", "blocked",
+        agent="1", note="campaign cannot build",
+    )
+    check(
+        audit_runner.fixed_campaign_exhausted(refresh_runtime),
+        "a blocked pinned S4 campaign stops without empty agent relaunches",
+    )
+    with mock.patch.object(audit_runner, "_rank_window", return_value=(120, 120)), \
+         mock.patch.object(audit_runner, "refresh_work_cards") as no_expansion:
+        expanded = audit_runner.expand_work_cards_if_exhausted(refresh_runtime)
+    check(
+        not expanded and not no_expansion.called,
+        "a pinned finite campaign does not expand unrelated ranked-source cards",
+    )
+    with mock.patch.object(
+        audit_runner.workqueue, "campaign_supported", return_value=False,
+    ):
+        unavailable_stops = audit_runner.fixed_campaign_exhausted(
+            refresh_runtime, iteration=1,
+        )
+    check(
+        unavailable_stops,
+        "a structurally unsupported S4 campaign stops before launching an agent",
     )
     refresh_runtime.fixed_strategy = "S6"
     # A pin decides which generators run, so it is part of the queue identity:

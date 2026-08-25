@@ -281,7 +281,13 @@ def declaration_index(target_root: "str | os.PathLike",
     index: "dict[str, str]" = {}
     for base in roots:
         for path in _walk(base):
-            if path.suffix.lower() not in _HEADER_SUFFIXES:
+            # `.h.in` is a public header a project generates at configure
+            # time; the sorted walk keeps a real `.h` ahead of its template.
+            filename = path.name.lower()
+            if not any(
+                filename.endswith(suffix) or filename.endswith(f"{suffix}.in")
+                for suffix in _HEADER_SUFFIXES
+            ):
                 continue
             try:
                 if path.stat().st_size > _MAX_HEADER_BYTES:
@@ -359,10 +365,29 @@ _NON_API_NAMES = frozenset({
 # admitted on its signature saying nothing at all, which is the failure mode
 # this gate exists to prevent.
 
-_CHAR_TYPE = (
-    r"(?:void|char|unsigned\s+char|signed\s+char|u_char|uchar|byte|"
-    r"uint8_t|int8_t|std::byte)"
-)
+# Built-in byte types plus the established public-API aliases. Substring
+# matching is unsafe here: `wchar_t`, `charset_context`, and `api_byte_context`
+# all contain a byte-type spelling and are wide or opaque, not input bytes. A
+# custom alias outside this list remains admissible when the pointer parameter
+# itself carries a payload name.
+_BYTE_ELEMENT_NAMES = frozenset({
+    "byte", "bytef", "char", "gchar", "guchar", "int8_t", "octet",
+    "schar", "u_char", "uchar", "uint8_t", "void", "xmlchar",
+})
+
+
+def _has_byte_element_type(pointer: str) -> bool:
+    """Whether the pointer's element type is a byte the mutator can supply.
+
+    The element type is what precedes the star, read from the last open paren
+    because a macro-wrapped declaration puts its own return type in front of
+    the first parameter.
+    """
+    element = pointer.rsplit("(", 1)[-1].split("*", 1)[0]
+    return any(
+        name.lower() in _BYTE_ELEMENT_NAMES
+        for name in re.findall(r"[A-Za-z_]\w*", element)
+    )
 _INT_TYPE = (
     r"(?:size_t|ssize_t|int|unsigned(?:\s+\w+)?|long(?:\s+long)?|short|"
     r"u?int(?:8|16|32|64)_t|off_t|ptrdiff_t)"
@@ -378,9 +403,16 @@ _PATH_NAME = re.compile(
 # buffer and its length rather than two unrelated arguments — which is the
 # difference between `xmlReadMemory(const char *buf, int size, ...)` and
 # `htmlSaveFile(const char *filename, xmlDoc *cur, ...)`.
+# A length parameter's last word says so — `size`, `len`, `count`, `bytes` —
+# after a word start, an underscore, or a camelCase hump, plus the bare
+# Hungarian forms (`n`, `nbytes`, `cbSize`, `destLen`). The looser `n\w*` that
+# used to stand here read every `nPage`-style handle parameter as a byte
+# length, which admitted an opaque handle as a fuzzable buffer.
 _LENGTH_NAME = re.compile(
-    r"\b(?:size|sz|len|length|count|cnt|num|n|nbytes|nbyte|bytes|cb|"
-    r"\w+_(?:size|len|length|count))\w*\s*$", re.I)
+    r"(?:\b[nNcC]?_?|\w_|[A-Za-z0-9](?=[A-Z]))"
+    r"(?i:size|sz|len|length|count|cnt|num|bytes?|cb)\w*\s*$"
+    r"|\b[nN]\s*$"
+)
 # A pointer to something wider than a byte, measured by an adjacent integer,
 # carries an *element count* rather than a byte length: the mutator's bytes
 # cannot supply it, so a harness admitted here reaches the target only by
@@ -394,7 +426,7 @@ _WIDE_ELEMENT = re.compile(
     r"u?int(?:16|32|64|128)_t|size_t|ssize_t|ptrdiff_t)\b")
 _PAYLOAD_NAME = re.compile(
     r"\b(?:data|buf|buffer|bytes|input|in|content|payload|chunk|blob|msg|"
-    r"message|str|s|p|ptr|mem|memory|\w*_(?:data|buf|buffer|bytes))\s*$", re.I)
+    r"message|str|mem|memory|\w*_(?:data|buf|buffer|bytes))\s*$", re.I)
 
 SHAPE_BUFFER = "buffer+length"
 SHAPE_STRING = "nul-terminated string"
@@ -463,7 +495,16 @@ def _is_single_pointer(param: str) -> bool:
 
 
 def _is_integer(param: str) -> bool:
-    return bool(re.fullmatch(rf"(?:const\s+)?{_INT_TYPE}\s*\w*", param.strip()))
+    stripped = param.strip()
+    if re.fullmatch(rf"(?:const\s+)?{_INT_TYPE}\s*\w*", stripped):
+        return True
+    # Public APIs frequently typedef their sizes. A scalar whose parameter
+    # name explicitly says length is the same structural evidence without a
+    # project-specific typedef list.
+    return bool(
+        _LENGTH_NAME.search(stripped)
+        and re.fullmatch(r"(?:const\s+)?[A-Za-z_]\w*\s+[A-Za-z_]\w*", stripped)
+    )
 
 
 def counted_array(pointer: str, length: str) -> bool:
@@ -488,11 +529,13 @@ def _buffer_pair(pointer: str, length: str) -> bool:
     the declaration names neither parameter an adjacent pointer/integer pair
     is the convention with nothing else it could be.
 
-    The pointer's element type is deliberately not required to be a byte type:
-    every C library spells its byte buffer differently (``xmlChar``,
-    ``guchar``, ``uint8_t``, plain ``char``), and enumerating those names is
-    the kind of list that rots. A single pointer measured by an adjacent
-    length *is* the shape, whatever the typedef is called.
+    A length name alone is not enough either: `api_stmt *stmt, int N` is an
+    opaque handle beside an unrelated integer, and a harness admitted on it
+    hands mutator bytes to a pointer the API never parses. The pointer must
+    also read as bytes — by element type or by payload name — which is why the
+    element test names the byte types and their established aliases
+    (``xmlChar``, ``guchar``, ``Bytef``) rather than matching a substring,
+    which would read ``wchar_t`` and ``charset_context`` as byte buffers.
     """
     if not _is_single_pointer(pointer) or not _is_integer(length):
         return False
@@ -500,10 +543,12 @@ def _buffer_pair(pointer: str, length: str) -> bool:
         return False
     if counted_array(pointer, length):
         return False
-    if _LENGTH_NAME.search(length) or _PAYLOAD_NAME.search(pointer):
-        return True
+    byte_pointer = _has_byte_element_type(pointer)
+    payload_named = bool(_PAYLOAD_NAME.search(pointer))
+    if _LENGTH_NAME.search(length) or payload_named:
+        return byte_pointer or payload_named
     # Unnamed on both sides: `int f(const void *, size_t)`.
-    return not re.search(r"\w\s*$", length.replace("*", " "))
+    return byte_pointer and not re.search(r"\w\s*$", length.replace("*", " "))
 
 
 def input_shapes(declaration: str) -> "set[str]":

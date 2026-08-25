@@ -111,6 +111,44 @@ class AdmissionGateTests(unittest.TestCase):
             fuzz_harness.input_shapes(
                 "xmlDoc *xmlReadDoc(const char *encoding, int options);"))
 
+    def test_an_opaque_handle_and_integer_are_not_a_buffer(self) -> None:
+        for declaration in (
+            "void *api_context(api_context *ctx, int nBytes);",
+            "int api_step(api_backup *p, int nPage);",
+            "const char *api_name(api_stmt *stmt, int N);",
+            "int api_scan(api_byte_context *ctx, int nBytes);",
+            "int api_decode(charset_context *ctx, int len);",
+            "int api_wide(wchar_t *text, int length);",
+        ):
+            self.assertNotIn(fuzz_harness.SHAPE_BUFFER,
+                             fuzz_harness.input_shapes(declaration), declaration)
+
+    def test_a_void_buffer_with_single_letter_length_is_a_buffer(self) -> None:
+        declaration = "int api_read(api_blob *blob, void *Z, int N, int offset);"
+        self.assertIn(fuzz_harness.SHAPE_BUFFER,
+                      fuzz_harness.input_shapes(declaration))
+
+    def test_a_typedef_byte_buffer_stays_admitted(self) -> None:
+        """Every library spells its byte buffer differently."""
+        for declaration in (
+            "int api_parse(const xmlChar *ptr, int len);",
+            "int api_pack(Bytef *dest, uLong destLen);",
+            "int api_read(const guchar *p, gsize n_bytes);",
+            "int api_scan(const unsigned char *b, size_t nbytes);",
+            "int api_take(const char *b, int cbSize);",
+        ):
+            self.assertIn(fuzz_harness.SHAPE_BUFFER,
+                          fuzz_harness.input_shapes(declaration), declaration)
+
+    def test_a_handle_beside_an_unrelated_integer_is_not_a_buffer(self) -> None:
+        for declaration in (
+            "int api_x(api_stmt *stmt, int nLen);",
+            "int api_y(api_stmt *stmt, int span);",
+            "int api_z(api_stmt *stmt, int iOffset);",
+        ):
+            self.assertNotIn(fuzz_harness.SHAPE_BUFFER,
+                             fuzz_harness.input_shapes(declaration), declaration)
+
 
     def test_an_element_count_is_not_a_byte_length(self) -> None:
         # A pointer to a wider element measured by an adjacent integer counts
@@ -135,6 +173,14 @@ class AdmissionGateTests(unittest.TestCase):
         # means fabricating pointers out of mutator bytes.
         declaration = "int vl_set_names(const char *const *names, int count);"
         self.assertEqual(fuzz_harness.input_shapes(declaration), set())
+
+    def test_a_mutable_byte_buffer_with_a_named_typedef_length_is_input(self) -> None:
+        declaration = (
+            "int api_deserialize(ctx *db, unsigned char *data, "
+            "api_int64 size, api_int64 capacity, unsigned flags);"
+        )
+        self.assertIn(fuzz_harness.SHAPE_BUFFER,
+                      fuzz_harness.input_shapes(declaration))
 
 
 class DeclarationReadingTests(unittest.TestCase):
@@ -185,6 +231,16 @@ class DeclarationReadingTests(unittest.TestCase):
             "#define API_CHECK(cond) do { if (!(cond)) return -1; } while (0)\n"
             "int api_parse(const char *b, size_t n);\n")
         self.assertEqual(sorted(index), ["api_parse"])
+
+    def test_a_public_header_template_is_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "api.h.in").write_text(
+                "int api_parse(const char *data, size_t size);\n",
+                encoding="utf-8",
+            )
+            index = fuzz_harness.declaration_index(root, [str(root)])
+        self.assertIn("api_parse", index)
 
 
 class HarnessInputAgreementTests(unittest.TestCase):

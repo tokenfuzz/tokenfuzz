@@ -364,6 +364,34 @@ class RunnerPreflightTests(unittest.TestCase):
             benchmark_runner.preflight_build(bench_args, Path("/bench"), "fixture-model")
         checked.assert_called_once()
 
+    def test_unsupported_s4_stops_before_model_or_build_preflight(self):
+        events = []
+        runtime = SimpleNamespace(
+            config=self.config(Path("/target"), "python3"),
+            fixed_strategy="S4",
+        )
+        args = SimpleNamespace(allow_concurrent=False, max_iterations=0)
+        with mock.patch.object(
+            audit_runner, "instance_lock", return_value=contextlib.nullcontext()
+        ), mock.patch.object(
+            audit_runner.runner_preflight, "validate",
+            side_effect=lambda *_a, **_k: events.append("runner"),
+        ), mock.patch.object(
+            audit_runner, "refresh_work_cards", side_effect=lambda *_a, **_k: events.append("queue")
+        ), mock.patch.object(
+            audit_runner, "index_log", side_effect=lambda *_a, **_k: events.append("unavailable")
+        ), mock.patch.object(
+            audit_runner, "validate_model", side_effect=lambda *_a: events.append("model")
+        ), mock.patch.object(
+            audit_runner, "preflight_build", side_effect=lambda *_a: events.append("build")
+        ), mock.patch.object(
+            audit_runner, "initialize_backend", side_effect=lambda *_a, **_k: events.append("agent")
+        ):
+            result = audit_runner.run_backend(runtime, args, "")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(events, ["runner", "queue", "unavailable"])
+
 
 class TestcaseDependenceTests(unittest.TestCase):
     """Does the configured program actually read the input it is handed?

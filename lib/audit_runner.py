@@ -686,6 +686,7 @@ def _work_card_signature(
     config = getattr(runtime, "config", None)
     rank_config = json.dumps(
         {
+            "s4_campaign_supported": workqueue.campaign_supported(config),
             "s6_domain": getattr(config, "s6_domain", ""),
             "s6_peers": getattr(config, "s6_peers", []),
             "fixed_strategy": str(getattr(runtime, "fixed_strategy", "")).upper(),
@@ -730,7 +731,10 @@ def _rank_window(runtime: Runtime) -> tuple[int, int]:
 
 def _write_rank_window(runtime: Runtime, limit: int) -> None:
     cards = workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
-    core_count = sum(card.get("kind") != "s6-peer-fix" for card in cards)
+    core_count = sum(
+        card.get("kind") not in {"s4-campaign", "s6-peer-fix"}
+        for card in cards
+    )
     path = _rank_window_path(runtime)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(
@@ -766,8 +770,24 @@ def refresh_work_cards(
     patch_cards = runtime.results / "patch-cards.jsonl"
     pinned_strategy = str(getattr(runtime, "fixed_strategy", "")).upper()
     pinned_s1 = pinned_strategy == "S1"
+    pinned_s4 = pinned_strategy == "S4"
     pinned_s6 = pinned_strategy == "S6"
     patch_generator = runtime.root / "bin" / "patch-cards"
+    if pinned_s4:
+        # The campaign card has no generator and is not ranked source, so a
+        # pinned S4 queue is that one card and every other source is skipped.
+        patch_cards.unlink(missing_ok=True)
+        (runtime.results / "s6-peer-cards.jsonl").unlink(missing_ok=True)
+        cards = []
+        if workqueue.campaign_supported(runtime.config):
+            cards.append(workqueue.campaign_card(_queue_context(runtime)))
+        workqueue.write_cards(
+            runtime.results / "work-cards.jsonl",
+            workqueue.apply_latest_claim_status(_queue_context(runtime), cards),
+        )
+        _write_rank_window(runtime, rank_limit)
+        housekeeping.mark_clean("work-cards-refresh", signature)
+        return True
     if pinned_s6:
         patch_cards.unlink(missing_ok=True)
     elif patch_generator.is_file():
@@ -868,6 +888,8 @@ def refresh_work_cards(
 
 def expand_work_cards_if_exhausted(runtime: Runtime) -> bool:
     """Grow a fully-consumed ranked batch until the source itself is exhausted."""
+    if str(getattr(runtime, "fixed_strategy", "")).upper() in _UNRANKED_CAMPAIGN_STRATEGIES:
+        return False
     if hasattr(runtime, "prompt_context") and hasattr(runtime, "num_agents"):
         context = runtime.prompt_context("")
         try:
@@ -1944,17 +1966,39 @@ def _log_foreign_active_work(runtime: Runtime) -> None:
 # The card kind each pinned campaign consumes. A pin outside this map draws
 # from the shared ranked window, which is never finite, so it has no campaign
 # to exhaust.
-_FIXED_CAMPAIGN_KINDS = {"S1": "s1-patch", "S6": "s6-peer-fix"}
+_FIXED_CAMPAIGN_KINDS = {
+    "S1": "s1-patch", "S4": "s4-campaign", "S6": "s6-peer-fix",
+}
+
+# The subset whose cards do not come from the ranked window at all. S1 is not
+# one of them: its patch cards are capped by that window, so growing it is
+# what mines the next batch of prior fixes.
+_UNRANKED_CAMPAIGN_STRATEGIES = frozenset({"S4", "S6"})
 
 
 def _fixed_campaign_source_degraded(runtime: Runtime, strategy: str) -> bool:
     """Whether this pin's card source failed rather than answered "nothing"."""
+    if strategy == "S1":
+        return bool(getattr(runtime, "s1_source_degraded", False))
     if strategy == "S6":
         return (
             bool(getattr(runtime, "s6_source_degraded", False))
             or not _s6_peers_configured(runtime)
         )
-    return bool(getattr(runtime, "s1_source_degraded", False))
+    # S4's source is the target config, which is read fresh every refresh and
+    # answers definitively; `_fixed_campaign_unavailable` reports a "no".
+    return False
+
+
+def _fixed_campaign_unavailable(runtime: Runtime) -> str:
+    """Why this pin cannot run against this target at all, or "" if it can."""
+    if str(getattr(runtime, "fixed_strategy", "")).upper() == "S4" and not \
+            workqueue.campaign_supported(runtime.config):
+        return (
+            "S4 requires a native sanitizer library; use S7 for this "
+            "findings-only or CLI-only target"
+        )
+    return ""
 
 
 def fixed_campaign_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
@@ -1975,6 +2019,8 @@ def fixed_campaign_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
     kind = _FIXED_CAMPAIGN_KINDS.get(strategy)
     if not kind:
         return False
+    if _fixed_campaign_unavailable(runtime):
+        return True
     ctx = _queue_context(runtime)
     supplied = [
         card for card in workqueue.apply_latest_claim_status(
@@ -2617,11 +2663,15 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
                 "is a configuration fault, not an exhausted campaign",
             )
     if fixed_campaign_exhausted(runtime, state.iteration):
-        index_log(
-            runtime,
-            "CAMPAIGN_EXHAUSTED: no open "
-            f"{str(runtime.fixed_strategy).upper()} card or hypothesis remains",
-        )
+        unavailable = _fixed_campaign_unavailable(runtime)
+        if unavailable:
+            index_log(runtime, f"CAMPAIGN_UNAVAILABLE: {unavailable}")
+        else:
+            index_log(
+                runtime,
+                "CAMPAIGN_EXHAUSTED: no open "
+                f"{str(runtime.fixed_strategy).upper()} card or hypothesis remains",
+            )
         state.stopped = True
         return "stalled", []
     if _productive_wall_exhausted(state):
@@ -2743,6 +2793,11 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         runner_preflight.validate(
             runtime.config, lambda message: index_log(runtime, message)
         )
+        unavailable = _fixed_campaign_unavailable(runtime)
+        if unavailable:
+            refresh_work_cards(runtime, force=True)
+            index_log(runtime, f"CAMPAIGN_UNAVAILABLE: {unavailable}")
+            return 0
         validate_model(runtime)
         preflight_build(runtime)
         state = initialize_backend(runtime, args, guide, started_at=time.monotonic())
@@ -2788,6 +2843,12 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
             runtimes[0].config,
             lambda message: index_log(runtimes[0], message),
         )
+        unavailable = _fixed_campaign_unavailable(runtimes[0])
+        if unavailable:
+            for runtime in runtimes:
+                refresh_work_cards(runtime, force=True)
+                index_log(runtime, f"CAMPAIGN_UNAVAILABLE: {unavailable}")
+            return 0
         for runtime in runtimes:
             _activate_runtime(runtime)
             validate_model(runtime)
