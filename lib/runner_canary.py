@@ -123,10 +123,13 @@ def _reasons(config, output: str) -> list[str]:
                 "cannot find the audited package"
             )
         if claim == "path" and not inside:
+            # Name what the runtime did search: the fix is an import path in
+            # [runner].env, and the operator needs to see the shape it takes.
+            sample = ", ".join(values[:3]) + (" ..." if len(values) > 3 else "")
             failures.append(
                 f"none of the {len(values)} runtime search paths is inside "
                 f"{target_root}, so an import resolves an installed copy "
-                "instead of the audited checkout"
+                f"instead of the audited checkout (searched: {sample})"
             )
     return failures
 
