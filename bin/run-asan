@@ -288,7 +288,7 @@ def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
         command.append(testcase)
     command.extend(extra)
     rss_mb = sanitizer.generic_rss_limit_mb(BASE_ENV)
-    cwd = sanitizer_run.configured_runner_cwd(CONFIG, binary)
+    cwd = sanitizer_run.configured_runner_cwd(CONFIG, binary, "asan")
     if disabled:
         # Options are off by operator choice, so there is no ASAN_OPTIONS to
         # turn symbolization off in and nothing to symbolize.

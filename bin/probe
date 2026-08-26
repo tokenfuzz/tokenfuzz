@@ -1145,6 +1145,10 @@ class Probe:
             skip = True
         self.environment["ASAN_GENERIC_SKIP_TESTCASE"] = "1" if skip else "0"
         self.environment["SANITIZER_GENERIC_SKIP_TESTCASE"] = "1" if skip else "0"
+        # Only this process knows whether the configured runner won the route.
+        runner_cwd = self.config.target_root if uses_runner else ""
+        self.environment["ASAN_GENERIC_RUNNER_CWD"] = runner_cwd
+        self.environment["SANITIZER_GENERIC_RUNNER_CWD"] = runner_cwd
         return [
             str(BIN_DIR / "run-sanitizer-multi"), self.sanitizer, "generic",
             str(self.exec_testcase), *generic_args, *self.args.args,

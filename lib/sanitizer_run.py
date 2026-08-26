@@ -31,7 +31,9 @@ def end_child_output_line() -> None:
     print(file=sys.stderr)
 
 
-def configured_runner_cwd(config, binary: str | os.PathLike[str]) -> str | None:
+def configured_runner_cwd(
+    config, binary: str | os.PathLike[str], sanitizer_name: str = "asan",
+) -> str | None:
     """Run a configured language tool from the target's module root.
 
     Testcases live under output/, outside Go modules and similar package roots.
@@ -39,7 +41,14 @@ def configured_runner_cwd(config, binary: str | os.PathLike[str]) -> str | None:
     dependency resolver still uses the current directory. Native sanitizer
     binaries keep their historical cwd; only the configured runner gets the
     stable package context declared by target.toml.
+
+    bin/probe states its routing decision, and that answer wins: it is the
+    process that chose the program. The comparison below is for a `run-<san>
+    generic` invoked by hand, which sends no such answer.
     """
+    told = sanitizer.generic_runner_cwd(sanitizer_name, os.environ)
+    if told:
+        return told
     raw = str(getattr(config, "runner_bin", "") or "").strip() if config else ""
     if not raw:
         return None
@@ -190,7 +199,7 @@ class SanitizerRunner:
         completed = self._run_symbolized(
             command, options, timeout,
             rss_mb=sanitizer.generic_rss_limit_mb(self.env),
-            cwd=configured_runner_cwd(self.config, binary),
+            cwd=configured_runner_cwd(self.config, binary, self.name),
         )
         end_child_output_line()
         succeeded = runner_exit_succeeded(self.config, completed.returncode)

@@ -201,6 +201,23 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertIn("TARGET_REACHED", output)
         self.assertIn("verdict=CLEAN", result.stdout + result.stderr)
 
+        # An overridden [runner].bin is a different file from the name the
+        # child resolves out of target.toml, so a child deriving the routing
+        # decision by comparing paths disagreed with probe and dropped the
+        # module directory. Only probe knows which program it picked.
+        wrapper = self.executable(
+            self.root / "go-wrapper",
+            f"import os, sys\nos.execv({GO!r}, [{GO!r}, *sys.argv[1:]])\n",
+        )
+        overridden = self.run_probe(
+            testcase, environment={"TARGET_RUNNER_BIN": str(wrapper)},
+        )
+        self.assertEqual(overridden.returncode, 0, overridden.stdout + overridden.stderr)
+        self.assertIn(
+            "TARGET_REACHED",
+            testcase.with_suffix(".asan.txt").read_text(encoding="utf-8"),
+        )
+
     def test_probe_runs_without_tomllib(self) -> None:
         """Python 3.9 has no `tomllib`; probe is an agent's only run route."""
         shim = self.root / "shim"

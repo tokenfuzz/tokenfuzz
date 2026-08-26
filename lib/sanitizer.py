@@ -79,6 +79,25 @@ def generic_skips_testcase(name: str, env: Mapping[str, str] | None = None) -> b
     ) == "1"
 
 
+def generic_runner_cwd(name: str, env: Mapping[str, str] | None = None) -> str:
+    """The directory bin/probe chose for a configured language runner.
+
+    Probe has already decided whether the configured runner owns this
+    execution. The child re-deriving that by comparing paths disagreed with it
+    whenever the two resolved the runner differently -- an overridden
+    [runner].bin resolves to one program in probe and another here -- and the
+    module search directory was dropped with no diagnostic. Empty means "not
+    the configured runner", which is also what a direct invocation sends.
+    """
+    environment = os.environ if env is None else env
+    if name in {"asan", "race", "runner"}:
+        return environment.get("ASAN_GENERIC_RUNNER_CWD", "")
+    return environment.get(
+        "SANITIZER_GENERIC_RUNNER_CWD",
+        environment.get("ASAN_GENERIC_RUNNER_CWD", ""),
+    )
+
+
 #: Carrier for a loader search path a caller needs the executed binary to have.
 #: A caller cannot set DYLD_LIBRARY_PATH itself and have it survive: every
 #: bin/ entry point starts `#!/usr/bin/env python3`, and macOS SIP strips
