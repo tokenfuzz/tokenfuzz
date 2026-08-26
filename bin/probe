@@ -27,6 +27,7 @@ import build_routes
 import build_config
 import crash_bundle
 import languages
+import runner_preflight
 import sanitizer as sanitizer_lib
 import sanitizer_run
 import stack_frames
@@ -462,6 +463,31 @@ def foreign_crash_main_sources(
     return list(dict.fromkeys(foreign))
 
 
+def cargo_package_is_library_only(target_root: str | os.PathLike[str]) -> bool:
+    """Whether the root Cargo package declares no binary at all.
+
+    Only a certain answer routes the agent elsewhere: an unreadable manifest,
+    a virtual workspace, or any binary target — declared or autodiscovered —
+    leaves ``cargo run`` to give its own error. Cargo autodiscovers
+    ``src/main.rs`` and ``src/bin/*.rs`` unless ``autobins`` says otherwise.
+    """
+    root = Path(target_root)
+    try:
+        raw = target_config.parse_toml(root / "Cargo.toml")
+    except (OSError, ValueError):
+        return False
+    package = raw.get("package")
+    if not isinstance(package, dict):
+        return False
+    if raw.get("bin") or package.get("default-run"):
+        return False
+    if package.get("autobins") is False:
+        return True
+    return not (root / "src" / "main.rs").is_file() and not any(
+        (root / "src" / "bin").glob("*.rs")
+    )
+
+
 class HarnessBuilder:
     def __init__(self, probe: "Probe", source: Path):
         self.probe = probe
@@ -507,11 +533,14 @@ class HarnessBuilder:
                 return str(binary), [], kind
             if failed_log.is_file() and failed_log.stat().st_size:
                 self._show_failure(failed_log)
-            command = self._command(kind, compiler, flags, binary, sanitizer_lib)
-            completed = subprocess.run(
-                command, capture_output=True, check=False,
-                cwd=self.probe.config.target_root if kind == "go" else None,
-            )
+            if kind == "rust":
+                completed = self._build_rust(binary)
+            else:
+                command = self._command(kind, compiler, flags, binary, sanitizer_lib)
+                completed = subprocess.run(
+                    command, capture_output=True, check=False,
+                    cwd=self.probe.config.target_root if kind == "go" else None,
+                )
             if completed.returncode:
                 failed_log.write_bytes(completed.stderr + completed.stdout)
                 binary.unlink(missing_ok=True)
@@ -525,6 +554,133 @@ class HarnessBuilder:
                 lock.rmdir()
             except OSError:
                 pass
+
+    def _build_rust(self, binary: Path) -> subprocess.CompletedProcess:
+        """Build one direct Rust testcase against the audited crate.
+
+        A library-only crate has no ``cargo run`` route, so the testcase gets a
+        detached package that path-depends on the audited crate. Release mode
+        matches the bootstrap build: `debug_assert!` and overflow checks fire on
+        conditions a shipped build does not have.
+        """
+        manifest = Path(self.probe.config.target_root) / "Cargo.toml"
+        try:
+            raw = target_config.parse_toml(manifest)
+            package = raw["package"]
+            package_name = str(package["name"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError(
+                f"Rust testcases need a root Cargo package in {manifest}: {exc}"
+            ) from exc
+        library = raw.get("lib", {})
+        crate_name = str(library.get("name") or package_name.replace("-", "_"))
+        project = binary.with_suffix(".cargo")
+        project.mkdir(parents=True, exist_ok=True)
+        harness_name = f"tokenfuzz_harness_{hashlib.sha1(str(binary).encode()).hexdigest()[:12]}"
+        harness_manifest = project / "Cargo.toml"
+        quote = target_config.toml_basic_string
+        dependencies = [
+            f"{quote(crate_name)} = {{ package = {quote(package_name)}, "
+            f"path = {quote(self.probe.config.target_root)} }}"
+        ]
+        dev_dependencies = raw.get("dev-dependencies", {})
+        if isinstance(dev_dependencies, dict):
+            for name, spec in dev_dependencies.items():
+                rendered = self._cargo_dependency(str(name), spec, raw, package_name)
+                if rendered is not None:
+                    dependencies.append(f"{quote(str(name))} = {rendered}")
+        harness_manifest.write_text(
+            "[package]\n"
+            f"name = {quote(harness_name)}\n"
+            'version = "0.0.0"\n'
+            'edition = "2021"\n\n'
+            "[dependencies]\n"
+            + "\n".join(dependencies) + "\n\n"
+            "[[bin]]\n"
+            f"name = {quote(harness_name)}\n"
+            f"path = {quote(str(self.source))}\n",
+            encoding="utf-8",
+        )
+        # One target directory for the whole cache: every testcase shares the
+        # audited crate's compiled dependencies instead of rebuilding them.
+        target_dir = binary.parent / "rust-target"
+        command = [
+            "cargo", "build", "--quiet", "--release",
+            "--manifest-path", str(harness_manifest),
+            "--target-dir", str(target_dir),
+        ]
+        completed = subprocess.run(
+            command, capture_output=True, check=False,
+            env=runner_preflight.runner_environment(
+                self.probe.config, self.probe.sanitizer,
+            ),
+        )
+        if completed.returncode == 0:
+            built = target_dir / "release" / (
+                harness_name + (".exe" if os.name == "nt" else "")
+            )
+            shutil.copy2(built, binary)
+            binary.chmod(binary.stat().st_mode | 0o111)
+        return completed
+
+    def _cargo_dependency(
+        self, name: str, value: object, manifest: dict, package_name: str,
+    ) -> str | None:
+        """Render one parsed dev-dependency, or None when it cannot be carried.
+
+        Dev-dependencies are a convenience for public-API testcases, not the
+        route to the audited crate, which is always the path dependency above.
+        A shape this cannot resolve — an external workspace, a self-reference
+        that would pull the published crate instead of the checkout — is
+        dropped, and `rustc` names it if the testcase actually needed it.
+        """
+        resolved = str(value.get("package", name)) if isinstance(value, dict) else name
+        if resolved == package_name:
+            return None
+        if isinstance(value, dict) and value.get("workspace") is True:
+            workspace = manifest.get("workspace", {})
+            shared = workspace.get("dependencies", {}) if isinstance(workspace, dict) else {}
+            inherited = shared.get(name)
+            if inherited is None and value.get("package"):
+                inherited = shared.get(str(value["package"]))
+            if inherited is None:
+                return None
+            base = dict(inherited) if isinstance(inherited, dict) else {"version": inherited}
+            local = {k: v for k, v in value.items() if k != "workspace"}
+            # Cargo adds an inheriting member's features to the workspace's.
+            features = list(base.get("features", [])) + list(local.pop("features", []))
+            base.update(local)
+            if features:
+                base["features"] = list(dict.fromkeys(features))
+            value = base
+        if isinstance(value, dict):
+            value = dict(value)
+            path = value.get("path")
+            if isinstance(path, str):
+                value["path"] = str(
+                    (Path(self.probe.config.target_root) / path).resolve()
+                )
+        try:
+            return self._toml_value(value)
+        except ValueError:
+            return None
+
+    @classmethod
+    def _toml_value(cls, value: object) -> str:
+        if isinstance(value, str):
+            return target_config.toml_basic_string(value)
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, list):
+            return "[" + ", ".join(cls._toml_value(item) for item in value) + "]"
+        if isinstance(value, dict):
+            return "{ " + ", ".join(
+                f"{target_config.toml_basic_string(str(key))} = {cls._toml_value(item)}"
+                for key, item in value.items()
+            ) + " }"
+        raise ValueError(f"unsupported Cargo dependency value: {value!r}")
 
     def _sanitizer_lib(self) -> str:
         raw = self.probe.config.sanitizer_lib(self.probe.sanitizer)
@@ -569,8 +725,6 @@ class HarnessBuilder:
                 *self.probe.config.resolved_link_libs(),
                 *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary),
             ]
-        if kind == "rust":
-            return [compiler, "-C", "debuginfo=1", "-C", "opt-level=0", *flags, "-o", str(binary), str(self.source)]
         if kind == "go":
             return [compiler, "build", "-o", str(binary), *flags, str(self.source)]
         if kind == "swift":
@@ -892,6 +1046,16 @@ class Probe:
             self.harness_source = source
             override, preargs, self.build_kind = HarnessBuilder(self, source).build()
             self.mode = "generic"
+        elif self._runs_cargo() and self.exec_testcase.suffix.lower() == ".rs":
+            override, preargs, self.build_kind = HarnessBuilder(
+                self, self.exec_testcase,
+            ).build()
+        elif self._runs_cargo() and cargo_package_is_library_only(self.config.target_root):
+            raise ValueError(
+                "Cargo library target has no binary for opaque input; write a "
+                "direct .rs public-API testcase, or a `// HARNESS: <name>.rs` "
+                "driver beside the input, and run it with bin/probe"
+            )
         elif self.mode == "generic" and self.exec_testcase.suffix.lower() in {".ts", ".tsx"} and self._can_use_runner():
             if Path(self.config.runner_bin).name == "node":
                 ts_node = Path(self.config.target_root) / "node_modules/.bin/ts-node"
@@ -971,6 +1135,9 @@ class Probe:
         elif preargs:
             generic_args = [*preargs, str(self.exec_testcase)]
             skip = True
+        elif self.build_kind == "rust" and not harness:
+            # A direct .rs testcase compiled itself; there is no input to pass.
+            skip = True
         elif self.exec_testcase != self.testcase:
             generic_args = [str(self.exec_testcase)]
             skip = True
@@ -980,6 +1147,14 @@ class Probe:
             str(BIN_DIR / "run-sanitizer-multi"), self.sanitizer, "generic",
             str(self.exec_testcase), *generic_args, *self.args.args,
         ]
+
+    def _runs_cargo(self) -> bool:
+        """Whether this probe's route is the configured `cargo` runner."""
+        return (
+            self.mode == "generic"
+            and self._can_use_runner()
+            and Path(self.config.runner_bin).name == "cargo"
+        )
 
     def _can_use_runner(self) -> bool:
         return bool(self.config.runner_bin and (self.sanitizer in {"runner", "race"} or not self.config.sanitizer_bin(self.sanitizer)))

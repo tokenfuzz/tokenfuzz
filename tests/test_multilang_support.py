@@ -17,6 +17,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 PROBE = ROOT / "bin" / "probe"
+CARGO = shutil.which("cargo")
 GO = shutil.which("go")
 sys.path.insert(0, str(ROOT / "lib"))
 
@@ -97,6 +98,9 @@ class MultiLanguageSupportTests(unittest.TestCase):
         cargo_args = target_config.language_runner_defaults("cargo")["args"]
         self.assertIn("--manifest-path", cargo_args)
         self.assertIn("{TARGET_ROOT}/Cargo.toml", cargo_args)
+        cargo_env = target_config.language_runner_defaults("cargo")["env"]
+        self.assertIn("CARGO_HOME={TARGET_ROOT}/.audit/cargo-home", cargo_env)
+        self.assertIn("CARGO_NET_OFFLINE=true", cargo_env)
         swift_args = target_config.language_runner_defaults("swift")["args"]
         for token in ("--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "-sanitize={SWIFT_SANITIZER}"):
             self.assertIn(token, swift_args)
@@ -194,6 +198,144 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         output = testcase.with_suffix(".asan.txt").read_text(encoding="utf-8")
         self.assertIn("TARGET_REACHED", output)
+        self.assertIn("verdict=CLEAN", result.stdout + result.stderr)
+
+    def test_probe_runs_without_tomllib(self) -> None:
+        """Python 3.9 has no `tomllib`; probe is an agent's only run route."""
+        shim = self.root / "shim"
+        shim.mkdir()
+        (shim / "sitecustomize.py").write_text(
+            "import sys\nsys.modules['tomllib'] = None\nsys.modules['tomli'] = None\n",
+            encoding="utf-8",
+        )
+        scratch = self.tree(
+            "no-tomllib",
+            'target = "multilang"\nbuild_system = "python"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[runner]\nbin = "%s"\nargs = ["{TESTCASE}"]\n' % sys.executable,
+        )
+        testcase = self.make_testcase(scratch / "clean.py", 'print("TESTCASE_EXECUTED")\n')
+
+        result = self.run_probe(testcase, environment={"PYTHONPATH": str(shim)})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("TESTCASE_EXECUTED", result.stdout + result.stderr)
+
+    def test_instrumented_rust_binary_keeps_the_route(self) -> None:
+        """An uninstrumented cargo build of a .rs testcase would read CLEAN."""
+        self.executable(self.target / "build-asan" / "sample", 'print("ran")\n')
+        scratch = self.tree(
+            "rust-asan",
+            'target = "multilang"\nbuild_system = "cargo"\n'
+            'asan_bin = "build-asan/sample"\n'
+            '[sanitizer]\nenabled = ["asan"]\n'
+            '[runner]\nbin = "cargo"\n'
+            'args = ["run", "--quiet", "--manifest-path", '
+            '"{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]\n',
+        )
+        testcase = self.make_testcase(scratch / "route.rs", "fn main() {}\n")
+
+        result = self.run_probe(testcase, "--dry-run")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # No detached cargo harness: the instrumented binary keeps the route,
+        # and the testcase reaches it as an ordinary generic input.
+        self.assertNotIn(".harness-cache", result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r"command: .*run-sanitizer-multi asan generic \S+route\.rs\n")
+
+    @unittest.skipUnless(CARGO, "Cargo toolchain is required")
+    def test_direct_rust_testcase_links_target_crate(self) -> None:
+        helper = self.root / "probe-helper"
+        (helper / "src").mkdir(parents=True)
+        (helper / "Cargo.toml").write_text(
+            '[package]\nname = "probe-helper"\nversion = "0.1.0"\n'
+            'edition = "2021"\n\n[features]\nbase = []\nlocal = []\n',
+            encoding="utf-8",
+        )
+        (helper / "src" / "lib.rs").write_text(
+            '#[cfg(all(feature = "base", feature = "local"))]\n'
+            'pub fn marker() -> &\'static str { "DEV_DEP_REACHED" }\n',
+            encoding="utf-8",
+        )
+        (self.target / "src").mkdir()
+        (self.target / "Cargo.toml").write_text(
+            '[package]\nname = "probe-target"\nversion = "0.1.0"\n'
+            'edition = "2021"\n\n[lib]\nname = "probe_target"\n\n'
+            '[workspace]\n\n[workspace.dependencies]\n'
+            'probe-helper = { path = "../probe-helper", features = ["base"] }\n\n'
+            '[dev-dependencies]\n'
+            'probe-helper = { workspace = true, features = ["local"] }\n',
+            encoding="utf-8",
+        )
+        (self.target / "src" / "lib.rs").write_text(
+            'pub fn marker() -> &\'static str { '
+            'debug_assert!(false, "debug profile must stay off"); '
+            '"TARGET_REACHED" }\n',
+            encoding="utf-8",
+        )
+        scratch = self.tree(
+            "rust-library",
+            'target = "multilang"\nbuild_system = "cargo"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[runner]\nbin = "cargo"\n'
+            'args = ["run", "--quiet", "--manifest-path", '
+            '"{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]\n'
+            'env = ["CARGO_HOME={TARGET_ROOT}/.audit/cargo-home", '
+            '"CARGO_NET_OFFLINE=true"]\n',
+        )
+        testcase = self.make_testcase(
+            scratch / "route.rs",
+            'fn main() { println!("{} {}", probe_target::marker(), '
+            'probe_helper::marker()); }\n',
+        )
+        opaque = self.make_testcase(scratch / "opaque.json", '{"route":true}\n')
+
+        rejected = self.run_probe(opaque)
+        self.assertEqual(rejected.returncode, 2, rejected.stdout + rejected.stderr)
+        self.assertIn(
+            "Cargo library target has no binary for opaque input",
+            rejected.stdout + rejected.stderr,
+        )
+
+        # A `HARNESS: <name>.rs` driver is the byte route into a library crate:
+        # it must survive the gate and still receive the testcase path.
+        driven = self.make_testcase(
+            scratch / "driven.json", '{"route":true}\n', harness="driver.rs",
+        )
+        (scratch / "driver.rs").write_text(
+            'fn main() { println!("ARG={} {}", '
+            'std::env::args().nth(1).unwrap(), probe_target::marker()); }\n',
+            encoding="utf-8",
+        )
+        harnessed = self.run_probe(driven)
+        self.assertEqual(harnessed.returncode, 0, harnessed.stdout + harnessed.stderr)
+        driven_output = driven.with_suffix(".asan.txt").read_text(encoding="utf-8")
+        self.assertIn(f"ARG={driven.resolve()} TARGET_REACHED", driven_output)
+
+        # A declared `[[bin]]` over src/main.rs, and src/bin/ autodiscovery, are
+        # both real `cargo run` routes; neither may be turned away.
+        for layout, extra in (
+            ("[[bin]]\nname = \"probe-target\"\npath = \"src/main.rs\"\n", "src/main.rs"),
+            ("", "src/bin/tool.rs"),
+        ):
+            with self.subTest(layout=extra):
+                source = self.target / extra
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("fn main() {}\n", encoding="utf-8")
+                manifest = self.target / "Cargo.toml"
+                original = manifest.read_text(encoding="utf-8")
+                manifest.write_text(original + "\n" + layout, encoding="utf-8")
+                allowed = self.run_probe(opaque, "--dry-run")
+                manifest.write_text(original, encoding="utf-8")
+                source.unlink()
+                self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
+        result = self.run_probe(testcase, environment={"CARGO_HOME": "/dev/null"})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = testcase.with_suffix(".asan.txt").read_text(encoding="utf-8")
+        self.assertIn("TARGET_REACHED", output)
+        self.assertIn("DEV_DEP_REACHED", output)
         self.assertIn("verdict=CLEAN", result.stdout + result.stderr)
 
     def test_findings_only_runner_headers_output_caps_and_argument_tokens(self) -> None:

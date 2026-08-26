@@ -89,7 +89,7 @@ The other ecosystems differ only in the `[runner]` fields:
 | --- | --- | --- | --- | --- |
 | Python | `python` | `python3` | `["{TESTCASE}"]` | `PYTHONDEVMODE=1` |
 | Go | `go` | `go` | `["run", "{TESTCASE}"]` | `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
-| Rust | `cargo` | `cargo` | `["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]` | — |
+| Rust | `cargo` | `cargo` | `["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]` | `CARGO_HOME={TARGET_ROOT}/.audit/cargo-home`, `CARGO_NET_OFFLINE=true` |
 | Swift | `swift` | `swift` | `["run", "--quiet", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]` | — |
 | Ruby | `bundler` | `ruby` | `["{TESTCASE}"]` | — |
 | Java / JVM | `maven` or `gradle` | `java` | `["{TESTCASE}"]` | — |
@@ -120,6 +120,13 @@ A few ecosystem notes:
   `args = ["run", "-race", "{TESTCASE}"]`, or point the `[runner]` at a
   pre-built `go build -race` binary (the `samples/sample-go` benchmark
   target does the latter, and its concurrent `merge` op trips the detector).
+- **Rust** — a library-only crate has no `cargo run` route. Write the
+  testcase as a direct `.rs` file calling the crate's public API, or a
+  `// HARNESS: <name>.rs` driver beside an opaque input; `bin/probe` builds
+  either against the audited crate in release mode (matching the bootstrap
+  build, so `debug_assert!` is not mistaken for a finding).
+  `bin/setup-target --build` prefetches dependencies into
+  `.audit/cargo-home`, which those builds then read offline.
 - **Rust** can opt into an AddressSanitizer build: set
   `[sanitizer] enabled = ["asan"]`, point `asan_bin` at the instrumented
   binary, and commit a `.audit/build.sh` that produces it with a nightly

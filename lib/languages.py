@@ -264,6 +264,13 @@ LANGUAGES: tuple[Language, ...] = (
             "--manifest-path", "{TARGET_ROOT}/Cargo.toml",
             "--", "{TESTCASE}",
         ),
+        # Audit agents cannot populate a user-global Cargo registry from their
+        # sandbox. Setup fills this target-owned cache before the audit, and
+        # probes consume it without reaching the network.
+        runner_env=(
+            "CARGO_HOME={TARGET_ROOT}/.audit/cargo-home",
+            "CARGO_NET_OFFLINE=true",
+        ),
         crash_patterns=(
             r"thread '.*'( \([^)]*\))? panicked at",
             r"fatal runtime error:",
@@ -275,7 +282,14 @@ LANGUAGES: tuple[Language, ...] = (
         # equivalent of C `assert()`) and `overflow-checks` are off —
         # they produce panics on conditions that are not security
         # findings. `--locked` makes the bootstrap reproducible.
-        bootstrap_cmds=(("cargo", "build", "--release", "--locked"),),
+        # `cargo fetch` runs first because it also pulls dev-dependencies,
+        # which a direct .rs testcase links and `cargo build` never fetches.
+        # It regenerates a drifted lockfile, reaching the same place the
+        # fallback below would; the exact commands stay in .audit/bootstrap.sh.
+        bootstrap_cmds=(
+            ("cargo", "fetch"),
+            ("cargo", "build", "--release", "--locked"),
+        ),
         # Fallback drops --locked: handles lockfile drift (older
         # Cargo.lock schema vs. current cargo, transitive yanks,
         # minimum-rust-version bumps). Cargo may regenerate the lock,
@@ -285,6 +299,7 @@ LANGUAGES: tuple[Language, ...] = (
             ("cargo", "build", "--release"),
         ),
         bootstrap_manifests=("Cargo.toml",),
+        sanitizer_env=(("CARGO_HOME", ".audit/cargo-home"),),
         # ASan via `-Zsanitizer=address` requires the nightly toolchain
         # plus `rust-src` to rebuild std. That's a real setup step the
         # operator must take separately; we don't try to inject it here

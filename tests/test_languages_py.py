@@ -306,17 +306,21 @@ with tempfile.TemporaryDirectory() as td:
     # lockfile-drift recovery).
     (tmp_root / "Cargo.toml").write_text("[package]\n")
     cmds = languages.bootstrap_for_target(tmp_root, "cargo")
-    assert_eq(1, len(cmds), "bootstrap: rust with Cargo.toml -> 1 command")
+    assert_eq(2, len(cmds), "bootstrap: rust fetches then builds")
     assert_in("cargo", cmds[0], "bootstrap: rust command starts with cargo")
-    assert_in("--release", cmds[0],
+    assert_in("fetch", cmds[0],
+              "bootstrap: rust prefetches testcase dev-dependencies")
+    assert_in("--release", cmds[1],
               "bootstrap: rust uses release mode (no debug-assertions noise)")
-    assert_in("--locked", cmds[0],
+    assert_in("--locked", cmds[1],
               "bootstrap: rust primary uses --locked for reproducibility")
     rust_plan = languages.bootstrap_plan_for_target(tmp_root, "cargo")
     assert_eq(1, len(rust_plan["alternatives"]),
               "bootstrap: rust has 1 fallback (drops --locked)")
     assert_true("--locked" not in rust_plan["alternatives"][0],
                 "bootstrap: rust fallback drops --locked (drift recovery)")
+    assert_in(["CARGO_HOME", ".audit/cargo-home"], rust_plan["env"],
+              "bootstrap: rust populates a target-owned Cargo cache")
     (tmp_root / "Cargo.toml").unlink()
 
     # go.mod -> go bootstrap with -race (Go's maintained sanitizer).
