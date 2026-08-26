@@ -19,6 +19,7 @@ import build_materialize
 import build_lease
 import fuzz_harness
 import languages
+import runner_canary
 import runner_preflight
 import sanitizer
 import target_config
@@ -583,6 +584,35 @@ class Setup:
                 f"startup:\n{failure}"
             )
 
+    def require_reachable_runner(self, config: target_config.Config) -> None:
+        """Prove the seeded [runner] reaches the target it was written for.
+
+        Only after `--build`: until the recipe has run there is nothing to
+        reach, and an R package installs into the target-local library the
+        seeded runner points at. The check is the one an audit runs, so a
+        target that passes here is one bin/audit will accept.
+        """
+        if not self.args.build:
+            return
+        fresh = target_config.Config(
+            slug=self.name, target_root=str(self.target_root),
+            results_dir=str(self.toml.parent / "preflight" / "results"),
+        )
+        try:
+            target_config.load_toml_into(fresh, self.toml)
+        except (OSError, ValueError):
+            return
+        skipped = runner_canary.skip_reason(fresh)
+        if skipped:
+            log(f"Runner reachability: not checked ({skipped})")
+            return
+        unreachable = runner_canary.check(fresh)
+        if unreachable:
+            raise RuntimeError(
+                f"the seeded [runner] cannot reach {self.name}: {unreachable}"
+            )
+        log(f"Runner reachability OK: a testcase reaches {self.target_root}")
+
     def report_invariant_runners(self) -> None:
         """Say when a configured runner's behaviour never varies with its input.
 
@@ -1058,6 +1088,7 @@ class Setup:
         self.sanitizer_builds(config)
         self.runner_bootstrap()
         self.report_invariant_runners()
+        self.require_reachable_runner(config)
         self.report_harness_input_mismatch()
         print(f"\nNext steps:\n  1. Review output/{self.name}/target.toml.\n  2. Smoke-test with: bin/audit --target {self.requested_name} --backend <claude|codex|gemini|grok|oss> 1")
         return 0

@@ -22,6 +22,7 @@ GO = shutil.which("go")
 sys.path.insert(0, str(ROOT / "lib"))
 
 import languages
+import runner_canary
 import target_config
 
 
@@ -217,6 +218,53 @@ class MultiLanguageSupportTests(unittest.TestCase):
             "TARGET_REACHED",
             testcase.with_suffix(".asan.txt").read_text(encoding="utf-8"),
         )
+
+    def canary_config(self, scratch: Path):
+        config = target_config.Config(
+            slug="multilang", target_root=str(self.target),
+            results_dir=str(scratch.parent),
+        )
+        target_config.load_toml_into(
+            config, scratch.parent.parent.parent / "target.toml",
+        )
+        return config
+
+    def test_runner_canary_proves_the_target_is_reachable(self) -> None:
+        """A runner that starts can still resolve an installed copy instead."""
+        (self.target / "reachable.py").write_text("VALUE = 1\n", encoding="utf-8")
+        reaching = self.tree(
+            "canary-reaching",
+            'target = "multilang"\nbuild_system = "python"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[runner]\nbin = "python3"\nargs = ["{TESTCASE}"]\n'
+            'env = ["PYTHONPATH={TARGET_ROOT}"]\n',
+        )
+        self.assertEqual(runner_canary.check(self.canary_config(reaching)), "")
+
+        # Same runner, same interpreter, no import path: it starts and runs,
+        # and every import it resolves comes from outside the audited tree.
+        stranded = self.tree(
+            "canary-stranded",
+            'target = "multilang"\nbuild_system = "python"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[runner]\nbin = "python3"\nargs = ["{TESTCASE}"]\n',
+        )
+        reason = runner_canary.check(self.canary_config(stranded))
+        self.assertIn("search paths", reason)
+        self.assertIn(str(self.target), reason)
+
+    def test_runner_canary_defers_to_a_target_that_owns_its_invocation(self) -> None:
+        """The canary checks the registry's seed, not an operator's argv."""
+        custom = self.tree(
+            "canary-custom",
+            'target = "multilang"\nbuild_system = "python"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[runner]\nbin = "python3"\n'
+            'args = ["{TARGET_ROOT}/driver.py", "{TESTCASE}"]\n',
+        )
+        config = self.canary_config(custom)
+        self.assertIn("[runner].args", runner_canary.skip_reason(config))
+        self.assertEqual(runner_canary.check(config), "")
 
     def test_probe_runs_without_tomllib(self) -> None:
         """Python 3.9 has no `tomllib`; probe is an agent's only run route."""

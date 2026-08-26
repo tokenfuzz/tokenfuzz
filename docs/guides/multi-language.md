@@ -99,8 +99,18 @@ The other ecosystems differ only in the `[runner]` fields:
 | R | `rlang` | `Rscript` | `["{TESTCASE}"]` | target-local `R_LIBS_USER` |
 | Perl | `perl` | `perl` | `["{TESTCASE}"]` | `PERL5LIB={TARGET_ROOT}/lib` |
 
-`bin/setup-target` writes the matching starter `[runner]` block for each. To
-print the registry's own answer for any build system:
+`bin/setup-target` writes the matching starter `[runner]` block for each, and
+`--build` then proves that block reaches the target: it runs one generated
+testcase in the target's own language through `bin/probe`, and fails setup if
+the runner executed outside `targets/<slug>/` or resolved its imports entirely
+outside it. `bin/audit` and `bin/benchmark` repeat that check before spending a
+model on the target, so a runner that starts but loads an installed copy of the
+audited package is rejected instead of auditing the wrong code. The check stands
+aside for a target that has taken the invocation over — a changed `[runner].bin`
+or `args`, or a `[sanitizer]` binary that owns testcase execution — because the
+registry's seed is then no longer what runs.
+
+To print the registry's own answer for any build system:
 
 ```bash
 python3 lib/languages.py runner-block <build_system> --pretty

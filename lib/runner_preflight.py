@@ -321,6 +321,18 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
             )
             raise RuntimeError(f"configured [runner].bin failed startup check `{command}`: {reason}")
 
+    # Starting is not reaching: a runtime that runs but resolves an installed
+    # copy of the audited package audits code the operator never chose.
+    import runner_canary
+
+    unreachable = runner_canary.check(config)
+    if unreachable:
+        raise RuntimeError(
+            f"configured [runner] starts but cannot reach the audited tree: "
+            f"{unreachable}. Re-run `bin/setup-target --target "
+            f"{config.slug or '<slug>'} --build`, or correct [runner] in the "
+            f"target's target.toml."
+        )
     if logger is not None:
         logger(f"Runner preflight OK: {raw} -> {binary}")
     return binary

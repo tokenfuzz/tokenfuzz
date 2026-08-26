@@ -154,6 +154,15 @@ class Language:
     # tool consumes. KEY/value pairs; never expanded by a shell.
     sanitizer_env: tuple[tuple[str, str], ...] = ()
 
+    # A reachability canary: one testcase in this language that bin/probe runs
+    # through the seeded [runner] before an audit starts. What it prints is
+    # what it asserts -- a `cwd=` line claims the runner executes from
+    # TARGET_ROOT, and `path=` lines claim the runtime searches inside it.
+    # Printing neither still proves the route executes at all. Empty means the
+    # language cannot self-check: Swift's runner hands the testcase to the
+    # package's own executable rather than running it as source.
+    canary_source: str = ""
+
     # Maintained sanitizer / coverage-guided fuzzer toolchains that
     # exist for this language as of 2025. Informational; setup-target
     # prints it as one line so the operator sees what's auditable for
@@ -259,6 +268,8 @@ LANGUAGES: tuple[Language, ...] = (
         compiler_default="rustc",
         compiler_flags_env="RUSTFLAGS",
         runner_bin="cargo",
+        canary_source=r"""fn main() { print!("TOKENFUZZ-CANARY built"); }
+""",
         runner_args=(
             "run", "--quiet",
             "--manifest-path", "{TARGET_ROOT}/Cargo.toml",
@@ -321,6 +332,18 @@ LANGUAGES: tuple[Language, ...] = (
         compiler_default="go",
         compiler_flags_env="GOFLAGS",
         runner_bin="go",
+        canary_source=r"""package main
+
+import (
+	"fmt"
+	"os"
+)
+
+func main() {
+	d, _ := os.Getwd()
+	fmt.Print("TOKENFUZZ-CANARY cwd=" + d)
+}
+""",
         runner_args=("run", "{TESTCASE}"),
         runner_env=("GOFLAGS=-mod=mod", "GORACE=halt_on_error=1"),
         crash_patterns=(
@@ -395,6 +418,12 @@ LANGUAGES: tuple[Language, ...] = (
         build_kind="java",
         interpreter_env="JAVA",
         interpreter_default="java",
+        canary_source=r"""public class Canary {
+    public static void main(String[] args) {
+        System.out.print("TOKENFUZZ-CANARY cwd=" + System.getProperty("user.dir"));
+    }
+}
+""",
         runner_bin="java",
         runner_args=("{TESTCASE}",),
         crash_patterns=(
@@ -433,6 +462,8 @@ LANGUAGES: tuple[Language, ...] = (
         script_exts=(".kts",),
         interpreter_env="KOTLINC",
         interpreter_default="kotlinc",
+        canary_source=r"""print("TOKENFUZZ-CANARY cwd=" + java.io.File(".").canonicalPath)
+""",
         interpreter_preargs=("-script",),
         runner_bin="kotlinc",
         runner_args=("-script", "{TESTCASE}"),
@@ -457,6 +488,12 @@ LANGUAGES: tuple[Language, ...] = (
         interpreted=True,
         interpreter_env="PYTHON3",
         interpreter_default="python3",
+        canary_source=r"""import os, sys
+sys.stdout.write("\n".join(
+    ["TOKENFUZZ-CANARY cwd=" + os.getcwd()]
+    + ["TOKENFUZZ-CANARY path=" + p for p in sys.path if p]
+))
+""",
         runner_bin="python3",
         runner_args=("{TESTCASE}",),
         runner_env=(
@@ -530,6 +567,8 @@ LANGUAGES: tuple[Language, ...] = (
         interpreted=True,
         interpreter_env="NODE",
         interpreter_default="node",
+        canary_source=r"""process.stdout.write("TOKENFUZZ-CANARY cwd=" + process.cwd())
+""",
         runner_bin="node",
         runner_args=("{TESTCASE}",),
         crash_patterns=(
@@ -597,6 +636,8 @@ LANGUAGES: tuple[Language, ...] = (
         interpreted=True,
         interpreter_env="PHP",
         interpreter_default="php",
+        canary_source=r"""<?php print("TOKENFUZZ-CANARY cwd=" . getcwd());
+""",
         runner_bin="php",
         runner_args=("{TESTCASE}",),
         crash_patterns=(
@@ -625,6 +666,10 @@ LANGUAGES: tuple[Language, ...] = (
         interpreted=True,
         interpreter_env="RUBY",
         interpreter_default="ruby",
+        canary_source=r"""print(["TOKENFUZZ-CANARY cwd=#{Dir.pwd}"]
+    .concat($LOAD_PATH.map { |p| "TOKENFUZZ-CANARY path=#{p}" })
+    .join("\n"))
+""",
         runner_bin="ruby",
         runner_args=("{TESTCASE}",),
         runner_env=("RUBYLIB={TARGET_ROOT}/lib",),
@@ -658,6 +703,11 @@ LANGUAGES: tuple[Language, ...] = (
         interpreted=True,
         interpreter_env="PERL",
         interpreter_default="perl",
+        canary_source=r"""use Cwd ();
+print join("\n",
+    "TOKENFUZZ-CANARY cwd=" . Cwd::getcwd(),
+    map { "TOKENFUZZ-CANARY path=$_" } @INC);
+""",
         runner_bin="perl",
         runner_args=("{TESTCASE}",),
         runner_env=("PERL5LIB={TARGET_ROOT}/lib",),
@@ -677,6 +727,9 @@ LANGUAGES: tuple[Language, ...] = (
         interpreted=True,
         interpreter_env="RSCRIPT",
         interpreter_default="Rscript",
+        canary_source=r"""cat(paste0("TOKENFUZZ-CANARY ", c(paste0("cwd=", getwd()),
+                     paste0("path=", .libPaths()))), sep="\n")
+""",
         runner_bin="Rscript",
         runner_args=("{TESTCASE}",),
         runner_env=("R_LIBS_USER={TARGET_ROOT}/.audit/r-library",),

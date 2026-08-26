@@ -159,6 +159,20 @@ assert_eq(("PERL5LIB={TARGET_ROOT}/lib",),
 assert_eq(("R_LIBS_USER={TARGET_ROOT}/.audit/r-library",),
           languages.for_build_system("rlang").runner_env,
           "R runner imports the target-local package install")
+# Every language whose runner executes a testcase as source can prove it
+# reaches the target. Swift is the documented exemption: its runner hands the
+# testcase to the package's own executable, so there is no source to run.
+_CANARY_EXEMPT = {"swift"}
+for _lang in languages.LANGUAGES:
+    if not _lang.runner_bin or _lang.name in _CANARY_EXEMPT:
+        continue
+    assert_true(bool(_lang.canary_source),
+                f"{_lang.name} runner carries a reachability canary")
+    assert_in("TOKENFUZZ-CANARY", _lang.canary_source,
+              f"{_lang.name} canary prints the marker the harness reads")
+assert_eq("", languages.for_build_system("swift").canary_source,
+          "swift declares no canary rather than a canary it cannot run")
+
 # Native C/C++ build systems -> c (which carries the union)
 assert_eq("c", languages.for_build_system("cmake").name,
           "for_build_system: cmake -> c")
