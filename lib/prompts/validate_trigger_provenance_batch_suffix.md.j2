@@ -10,6 +10,10 @@ Review every item independently using the source-reading method above. Do not
 let evidence for one item establish or disprove another. Missing or ambiguous
 evidence must produce `Uncertain`, never a guessed rejection.
 
+The {{ tool_call_limit }}-call limit is shared by the whole batch. Prefer one
+focused source read per item. Stop before the limit and emit every unsettled
+item as `Uncertain`; do not spend one item's budget on a deeper audit.
+
 Emit the answer object as soon as you have decided your first item, and emit it
 again — carrying every item decided so far — each time you decide another. The
 last object you emit is the answer; earlier ones are only a running record, so

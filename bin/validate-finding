@@ -24,6 +24,14 @@ import report_identity
 import triage_validate
 
 VOTES = {"Promote": 0, "Reject": 1, "Uncertain": 2}
+# The trigger gate is a bounded source check: it asks whether one already-known
+# trigger is attacker-reachable, and an unbounded reviewer has spent most of an
+# audit wall on a single finding. The hard cap sits above the budget the prompt
+# states so the reviewer still has turns left to emit its verdict — a session
+# killed mid-answer parses as nothing and is re-run, costing more wall than it
+# saved. The finding gate is a full second-opinion review and stays unbounded.
+TRIGGER_REVIEW_TOOL_CALLS = 12
+TRIGGER_REVIEW_TURN_CAP = TRIGGER_REVIEW_TOOL_CALLS + 4
 
 
 def log_validator_decision(
@@ -280,6 +288,7 @@ def render_validator_prompt(args, facts: dict) -> str:
         "resolution_block": resolution,
         "skeptic_block": skeptic,
         "timeout_secs": str(args.timeout),
+        "tool_call_limit": str(TRIGGER_REVIEW_TOOL_CALLS),
     })
 
 
@@ -293,6 +302,7 @@ def render_trigger_batch_prompt(args, items: list[dict]) -> str:
         {
             "candidates_json": json.dumps(items, sort_keys=True),
             "timeout_secs": str(args.timeout),
+            "tool_call_limit": str(TRIGGER_REVIEW_TOOL_CALLS),
         },
     )
     return prefix + suffix
@@ -429,7 +439,10 @@ def main(argv=None) -> int:
         started = time.monotonic()
         status = llm_invoke.run_agent_prompt(
             args.backend, prompt, args.timeout, raw, model=args.model,
-            max_turns=0, add_dirs=f"{ROOT},{target}",
+            max_turns=TRIGGER_REVIEW_TURN_CAP,
+            turn_cap=TRIGGER_REVIEW_TURN_CAP,
+            allow_subagents=False,
+            add_dirs=f"{ROOT},{target}",
             cwd=validator_cwd(findings[0], target),
         )
         # Bank votes before any telemetry pass. A timed-out review has already
@@ -505,9 +518,13 @@ def main(argv=None) -> int:
     # validators, allowing the invariant prompt prefix to hit provider caches
     # without letting incidental writes land in the target checkout.
     started = time.monotonic()
+    bounded = args.gate == "trigger"
     status = llm_invoke.run_agent_prompt(
         args.backend, prompt, args.timeout, raw, model=args.model,
-        max_turns=0, add_dirs=f"{ROOT},{target}", cwd=validator_cwd(finding, target),
+        max_turns=TRIGGER_REVIEW_TURN_CAP if bounded else 0,
+        turn_cap=TRIGGER_REVIEW_TURN_CAP if bounded else None,
+        allow_subagents=not bounded,
+        add_dirs=f"{ROOT},{target}", cwd=validator_cwd(finding, target),
     )
     # Read the verdict out of the transcript before the telemetry passes, for
     # the same reason as the batch path above: past its wall this process has

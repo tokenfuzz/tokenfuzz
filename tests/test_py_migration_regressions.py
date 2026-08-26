@@ -1192,6 +1192,18 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         == finding_prompt_b.split("# Finding under review", 1)[0],
         "source validators place changing facts after their cacheable preamble",
     )
+    trigger_args = validator["parse_args"]([
+        "--finding", str(report_path), "--target-path", str(root),
+        "--backend", "codex", "--gate", "trigger",
+    ])
+    trigger_prompt = validator["render_validator_prompt"](trigger_args, {})
+    # Two budgets in one prompt is worse than none: the reviewer plans for the
+    # larger and the smaller one is what the launch enforces.
+    check(
+        set(re.findall(r"(\d+) tool calls", trigger_prompt))
+        == {str(validator["TRIGGER_REVIEW_TOOL_CALLS"])},
+        "the trigger prompt states one tool-call budget, the enforced one",
+    )
     validator_output = root / "validator-output.json"
     with mock.patch.dict(
         os.environ,
@@ -1208,16 +1220,32 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
             "--backend", "codex", "--gate", "trigger",
             "--output", str(validator_output),
         ])
+        trigger_launch = validator_launch.call_args.kwargs
         # Resolved inside the patched environment: the launch inherits the
         # parent profile rather than restating it.
         validator_profile = validator["llm_invoke"].resolve_agent_security(
-            validator_launch.call_args.kwargs.get("agent_security")
+            trigger_launch.get("agent_security")
         )
+        validator["main"]([
+            "--finding", str(report_path), "--target-path", str(root),
+            "--backend", "codex", "--gate", "finding",
+            "--output", str(validator_output),
+        ])
+        finding_launch = validator_launch.call_args.kwargs
     check(
         validator_rc == 2
-        and validator_launch.call_args.kwargs.get("cwd") == root / ".validator-cwd"
+        and trigger_launch.get("cwd") == root / ".validator-cwd"
+        and trigger_launch.get("turn_cap") == 16
+        and trigger_launch.get("max_turns") == 16
+        and trigger_launch.get("allow_subagents") is False
         and validator_profile == "external-bypass",
-        "validator launches reuse a stable cwd and the parent security profile",
+        "validator source review is isolated and bounded",
+    )
+    check(
+        finding_launch.get("max_turns") == 0
+        and finding_launch.get("turn_cap") is None
+        and finding_launch.get("allow_subagents") is True,
+        "the finding-quality second opinion keeps its unbounded review",
     )
     finding_root = root / "finding-trigger"
     finding = finding_root / "findings" / "FIND-001"

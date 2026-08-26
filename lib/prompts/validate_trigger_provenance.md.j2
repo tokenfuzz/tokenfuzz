@@ -117,6 +117,12 @@ that the surface is test-only, internal tooling, or otherwise not shipped.
 
 # Method
 
+This is a bounded source check, not an open-ended audit. Use at most
+{{ tool_call_limit }} tool calls across the review. Before reaching that limit,
+stop exploring and emit the required verdict; use `Uncertain` for any source
+question you have not settled. Do not browse the web, run broad test suites,
+inspect history, or investigate a different bug.
+
 1. Identify the triggering state the primitive needs (the exact object,
    buffer, length, or call-sequence that must hold for the bug to fire).
 2. Start from a public / attacker-reachable entry per the threat model — the
@@ -273,4 +279,4 @@ Output ONE JSON object on a single line, nothing else:
 {"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the blocking invariant, plus which of (a)-(g) applies>","rejection_kind":"contract-invalid|unreachable|nonshipping|no-added-boundary|consequence-disproved|unknown","surface_applies":"yes|no","review_mode":"memory-contract|resource|disclosure|semantic-boundary","vulnerable_boundary_surface":"network|library-api|file-format|cli|dev-tool|internal|unknown","reproducer_carrier":"network|library-api|file-format|cli|harness|runner|unknown","trigger_controls_fit":"within|outside|unclear","anchors":[{"path":"relative/path.c","line":123,"symbol":"function_or_section","kind":"source|contract|build","excerpt":"exact trimmed source line"}]}
 ```
 
-Budget: {{ timeout_secs }}s wall time, ~60 tool calls. Be calibrated.
+Budget: {{ timeout_secs }}s wall time, {{ tool_call_limit }} tool calls. Be calibrated.
