@@ -2098,7 +2098,11 @@ def _detect_build_system(target_root: Path) -> str:
         return "composer"
     if (target_root / "DESCRIPTION").is_file():
         return "rlang"
-    if (target_root / "Makefile.PL").is_file() or any(target_root.glob("*.pm")):
+    if (
+        (target_root / "Makefile.PL").is_file()
+        or (target_root / "dist.ini").is_file()
+        or any(target_root.glob("*.pm"))
+    ):
         return "perl"
     return ""
 

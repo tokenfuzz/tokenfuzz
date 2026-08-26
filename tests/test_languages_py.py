@@ -144,12 +144,21 @@ assert_eq("php", languages.for_build_system("composer").name,
           "for_build_system: composer -> php")
 assert_eq("ruby", languages.for_build_system("bundler").name,
           "for_build_system: bundler -> ruby")
+assert_eq(("RUBYLIB={TARGET_ROOT}/lib",),
+          languages.for_build_system("bundler").runner_env,
+          "Ruby runner imports the audited checkout")
 assert_eq("java", languages.for_build_system("maven").name,
           "for_build_system: maven -> java")
 assert_eq("java", languages.for_build_system("gradle").name,
           "for_build_system: gradle -> java")
 assert_eq("kotlin", languages.for_build_system("kotlin").name,
           "for_build_system: kotlin -> kotlin")
+assert_eq(("PERL5LIB={TARGET_ROOT}/lib",),
+          languages.for_build_system("perl").runner_env,
+          "Perl runner imports the audited checkout")
+assert_eq(("R_LIBS_USER={TARGET_ROOT}/.audit/r-library",),
+          languages.for_build_system("rlang").runner_env,
+          "R runner imports the target-local package install")
 # Native C/C++ build systems -> c (which carries the union)
 assert_eq("c", languages.for_build_system("cmake").name,
           "for_build_system: cmake -> c")
@@ -322,6 +331,14 @@ with tempfile.TemporaryDirectory() as td:
     assert_in(["CARGO_HOME", ".audit/cargo-home"], rust_plan["env"],
               "bootstrap: rust populates a target-owned Cargo cache")
     (tmp_root / "Cargo.toml").unlink()
+
+    (tmp_root / "DESCRIPTION").write_text("Package: sample\n")
+    r_plan = languages.bootstrap_plan_for_target(tmp_root, "rlang")
+    assert_eq(2, len(r_plan["cmds"]),
+              "bootstrap: R creates a local library then installs the package")
+    assert_in(["R_LIBS_USER", ".audit/r-library"], r_plan["env"],
+              "bootstrap: R install stays target-local")
+    (tmp_root / "DESCRIPTION").unlink()
 
     # go.mod -> go bootstrap with -race (Go's maintained sanitizer).
     (tmp_root / "go.mod").write_text("module x\n")

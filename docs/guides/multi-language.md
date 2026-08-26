@@ -91,13 +91,13 @@ The other ecosystems differ only in the `[runner]` fields:
 | Go | `go` | `go` | `["run", "{TESTCASE}"]` | `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
 | Rust | `cargo` | `cargo` | `["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]` | `CARGO_HOME={TARGET_ROOT}/.audit/cargo-home`, `CARGO_NET_OFFLINE=true` |
 | Swift | `swift` | `swift` | `["run", "--quiet", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]` | — |
-| Ruby | `bundler` | `ruby` | `["{TESTCASE}"]` | — |
+| Ruby | `bundler` | `ruby` | `["{TESTCASE}"]` | `RUBYLIB={TARGET_ROOT}/lib` |
 | Java / JVM | `maven` or `gradle` | `java` | `["{TESTCASE}"]` | — |
 | Kotlin | `kotlin` | `kotlinc` | `["-script", "{TESTCASE}"]` | — |
 | Node | `npm` | `node` | `["{TESTCASE}"]` | — |
 | PHP | `composer` | `php` | `["{TESTCASE}"]` | — |
-| R | `rlang` | `Rscript` | `["{TESTCASE}"]` | — |
-| Perl | `perl` | `perl` | `["{TESTCASE}"]` | — |
+| R | `rlang` | `Rscript` | `["{TESTCASE}"]` | target-local `R_LIBS_USER` |
+| Perl | `perl` | `perl` | `["{TESTCASE}"]` | `PERL5LIB={TARGET_ROOT}/lib` |
 
 `bin/setup-target` writes the matching starter `[runner]` block for each. To
 print the registry's own answer for any build system:
@@ -144,6 +144,10 @@ A few ecosystem notes:
   Plain `.kt` sidecar harnesses compile through
   `kotlinc -include-runtime`. Gradle-driven Kotlin apps should keep
   the generated `gradle` build system and runner.
+- **R** — `bin/setup-target --build` installs a package with a
+  `DESCRIPTION` manifest into `.audit/r-library`, so a compiled component is
+  built rather than skipped; the seeded runner points `R_LIBS_USER` at that
+  target-local library.
 
 ## Crash vs finding routing
 

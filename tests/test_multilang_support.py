@@ -121,6 +121,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
             "settings.gradle": "gradle", "Main.kts": "kotlin", "pyproject.toml": "python",
             "setup.py": "python", "package.json": "npm", "Gemfile": "bundler",
             "composer.json": "composer", "DESCRIPTION": "rlang", "Makefile.PL": "perl",
+            "dist.ini": "perl",
         }
         for index, (manifest, expected) in enumerate(manifests.items()):
             with self.subTest(manifest=manifest):

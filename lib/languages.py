@@ -627,6 +627,7 @@ LANGUAGES: tuple[Language, ...] = (
         interpreter_default="ruby",
         runner_bin="ruby",
         runner_args=("{TESTCASE}",),
+        runner_env=("RUBYLIB={TARGET_ROOT}/lib",),
         crash_patterns=(
             r"^[A-Z]\w*Error",
             r"SystemStackError",
@@ -659,6 +660,7 @@ LANGUAGES: tuple[Language, ...] = (
         interpreter_default="perl",
         runner_bin="perl",
         runner_args=("{TESTCASE}",),
+        runner_env=("PERL5LIB={TARGET_ROOT}/lib",),
         crash_patterns=(
             r"^Out of memory!",
             r"^Segmentation fault",
@@ -677,7 +679,16 @@ LANGUAGES: tuple[Language, ...] = (
         interpreter_default="Rscript",
         runner_bin="Rscript",
         runner_args=("{TESTCASE}",),
+        runner_env=("R_LIBS_USER={TARGET_ROOT}/.audit/r-library",),
         crash_patterns=(r"^Error in", r"^Error:"),
+        # Sourcing the package's R files would miss any compiled component,
+        # so the package is installed into a target-local library instead.
+        bootstrap_cmds=(
+            ("mkdir", "-p", ".audit/r-library"),
+            ("R", "CMD", "INSTALL", "--library=.audit/r-library", "."),
+        ),
+        bootstrap_manifests=("DESCRIPTION",),
+        sanitizer_env=(("R_LIBS_USER", ".audit/r-library"),),
     ),
 
     # ── Shell ──────────────────────────────────────────────────────
