@@ -288,12 +288,17 @@ def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
         command.append(testcase)
     command.extend(extra)
     rss_mb = sanitizer.generic_rss_limit_mb(BASE_ENV)
+    cwd = sanitizer_run.configured_runner_cwd(CONFIG, binary)
     if disabled:
         # Options are off by operator choice, so there is no ASAN_OPTIONS to
         # turn symbolization off in and nothing to symbolize.
-        completed = run_timeout(command, timeout, rss_mb=rss_mb, env=environment)
+        completed = run_timeout(
+            command, timeout, rss_mb=rss_mb, env=environment, cwd=cwd,
+        )
     else:
-        completed = run_symbolized(command, timeout, environment, rss_mb=rss_mb)
+        completed = run_symbolized(
+            command, timeout, environment, rss_mb=rss_mb, cwd=cwd,
+        )
     succeeded = sanitizer_run.runner_exit_succeeded(CONFIG, completed.returncode)
     if completed.returncode == 124:
         print(f"[run-asan] generic runner timed out after {timeout}s", file=sys.stderr)

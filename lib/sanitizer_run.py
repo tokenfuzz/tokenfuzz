@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -16,6 +17,30 @@ from timeout import capture_timeout, run_timeout
 
 def runner_exit_succeeded(config, returncode: int) -> bool:
     return returncode in (config.runner_success_codes if config else [0])
+
+
+def configured_runner_cwd(config, binary: str | os.PathLike[str]) -> str | None:
+    """Run a configured language tool from the target's module root.
+
+    Testcases live under output/, outside Go modules and similar package roots.
+    Interpreters can open that absolute source path from anywhere, but their
+    dependency resolver still uses the current directory. Native sanitizer
+    binaries keep their historical cwd; only the configured runner gets the
+    stable package context declared by target.toml.
+    """
+    raw = str(getattr(config, "runner_bin", "") or "").strip() if config else ""
+    if not raw:
+        return None
+    selected = shutil.which(raw) or (
+        raw if os.access(raw, os.X_OK) else config.resolve_path(raw)
+    )
+    try:
+        if os.path.samefile(binary, selected):
+            return config.target_root
+    except OSError:
+        if os.path.abspath(binary) == os.path.abspath(selected):
+            return config.target_root
+    return None
 
 
 def expand_runner_value(
@@ -153,6 +178,7 @@ class SanitizerRunner:
         completed = self._run_symbolized(
             command, options, timeout,
             rss_mb=sanitizer.generic_rss_limit_mb(self.env),
+            cwd=configured_runner_cwd(self.config, binary),
         )
         succeeded = runner_exit_succeeded(self.config, completed.returncode)
         if completed.returncode == 124:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -16,6 +17,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 PROBE = ROOT / "bin" / "probe"
+GO = shutil.which("go")
 sys.path.insert(0, str(ROOT / "lib"))
 
 import languages
@@ -163,6 +165,36 @@ class MultiLanguageSupportTests(unittest.TestCase):
         for extension in required_harnesses:
             self.assertIsNotNone(languages.probe_dispatch(extension))
         self.assertIsNone(languages.probe_dispatch(".bogus"))
+
+    @unittest.skipUnless(GO, "Go toolchain is required")
+    def test_go_testcase_runs_in_target_module_context(self) -> None:
+        (self.target / "go.mod").write_text(
+            "module example.com/probetarget\n\ngo 1.22\n", encoding="utf-8",
+        )
+        (self.target / "target.go").write_text(
+            'package probetarget\n\nfunc Marker() string { return "TARGET_REACHED" }\n',
+            encoding="utf-8",
+        )
+        scratch = self.tree(
+            "go-module",
+            'target = "multilang"\nbuild_system = "go"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[runner]\nbin = "go"\nargs = ["run", "{TESTCASE}"]\n'
+            'env = ["GOFLAGS=-mod=mod"]\n',
+        )
+        testcase = self.make_testcase(
+            scratch / "route.go",
+            'package main\n\nimport (\n  "fmt"\n'
+            '  target "example.com/probetarget"\n)\n\n'
+            'func main() { fmt.Println(target.Marker()) }\n',
+        )
+
+        result = self.run_probe(testcase)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = testcase.with_suffix(".asan.txt").read_text(encoding="utf-8")
+        self.assertIn("TARGET_REACHED", output)
+        self.assertIn("verdict=CLEAN", result.stdout + result.stderr)
 
     def test_findings_only_runner_headers_output_caps_and_argument_tokens(self) -> None:
         scratch = self.tree(

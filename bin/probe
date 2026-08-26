@@ -508,7 +508,10 @@ class HarnessBuilder:
             if failed_log.is_file() and failed_log.stat().st_size:
                 self._show_failure(failed_log)
             command = self._command(kind, compiler, flags, binary, sanitizer_lib)
-            completed = subprocess.run(command, capture_output=True, check=False)
+            completed = subprocess.run(
+                command, capture_output=True, check=False,
+                cwd=self.probe.config.target_root if kind == "go" else None,
+            )
             if completed.returncode:
                 failed_log.write_bytes(completed.stderr + completed.stdout)
                 binary.unlink(missing_ok=True)

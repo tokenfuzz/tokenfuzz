@@ -242,7 +242,7 @@ targets that want to plug in a custom driver script.
 
 | Key | Meaning |
 | --- | --- |
-| `bin` | Interpreter or driver program (`python3`, `node`, `cargo`, `ruby`, an absolute path to a wrapper script, …). A bare name is resolved on `PATH` first, then as a path relative to `targets/<target>/` — which is how a config points at a binary the target's own build produced. |
+| `bin` | Interpreter or driver program (`python3`, `node`, `cargo`, `ruby`, an absolute path to a wrapper script, …). A bare name is resolved on `PATH` first, then as a path relative to `targets/<target>/` — which is how a config points at a binary the target's own build produced. It runs with `targets/<target>/` as its working directory, so a language whose dependency resolver reads the current directory (Go modules, for one) finds the audited package; testcase paths reach it absolute. |
 | `args` | Literal argument list, with the runner tokens below substituted at run time. |
 | `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). The same tokens are substituted. |
 | `crash_patterns` | Additional regex strings the triager treats as crash signals beyond its built-in language-agnostic markers. Use sparingly. |
