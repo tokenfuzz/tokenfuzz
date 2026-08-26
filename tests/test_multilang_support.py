@@ -318,6 +318,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
         for layout, extra in (
             ("[[bin]]\nname = \"probe-target\"\npath = \"src/main.rs\"\n", "src/main.rs"),
             ("", "src/bin/tool.rs"),
+            ("", "src/bin/tool/main.rs"),
         ):
             with self.subTest(layout=extra):
                 source = self.target / extra

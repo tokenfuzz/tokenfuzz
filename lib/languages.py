@@ -684,7 +684,10 @@ LANGUAGES: tuple[Language, ...] = (
         # Sourcing the package's R files would miss any compiled component,
         # so the package is installed into a target-local library instead.
         bootstrap_cmds=(
-            ("mkdir", "-p", ".audit/r-library"),
+            (
+                "Rscript", "-e",
+                "dir.create('.audit/r-library', recursive=TRUE, showWarnings=FALSE)",
+            ),
             ("R", "CMD", "INSTALL", "--library=.audit/r-library", "."),
         ),
         bootstrap_manifests=("DESCRIPTION",),

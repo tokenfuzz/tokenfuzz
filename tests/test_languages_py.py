@@ -336,6 +336,8 @@ with tempfile.TemporaryDirectory() as td:
     r_plan = languages.bootstrap_plan_for_target(tmp_root, "rlang")
     assert_eq(2, len(r_plan["cmds"]),
               "bootstrap: R creates a local library then installs the package")
+    assert_eq("Rscript", r_plan["cmds"][0][0],
+              "bootstrap: R creates its local library portably")
     assert_in(["R_LIBS_USER", ".audit/r-library"], r_plan["env"],
               "bootstrap: R install stays target-local")
     (tmp_root / "DESCRIPTION").unlink()

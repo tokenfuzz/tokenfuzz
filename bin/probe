@@ -469,7 +469,8 @@ def cargo_package_is_library_only(target_root: str | os.PathLike[str]) -> bool:
     Only a certain answer routes the agent elsewhere: an unreadable manifest,
     a virtual workspace, or any binary target — declared or autodiscovered —
     leaves ``cargo run`` to give its own error. Cargo autodiscovers
-    ``src/main.rs`` and ``src/bin/*.rs`` unless ``autobins`` says otherwise.
+    ``src/main.rs``, ``src/bin/*.rs``, and ``src/bin/*/main.rs`` unless
+    ``autobins`` says otherwise.
     """
     root = Path(target_root)
     try:
@@ -483,9 +484,10 @@ def cargo_package_is_library_only(target_root: str | os.PathLike[str]) -> bool:
         return False
     if package.get("autobins") is False:
         return True
+    bin_dir = root / "src" / "bin"
     return not (root / "src" / "main.rs").is_file() and not any(
-        (root / "src" / "bin").glob("*.rs")
-    )
+        bin_dir.glob("*.rs")
+    ) and not any(bin_dir.glob("*/main.rs"))
 
 
 class HarnessBuilder:
