@@ -485,12 +485,13 @@ class HarnessBuilder:
         cache.mkdir(parents=True, exist_ok=True)
         sanitizer_lib = self._sanitizer_lib() if kind == "cc" else ""
         identity = "\n".join((
-            "schema=4", f"source={hashlib.sha1(self.source.read_bytes()).hexdigest()}",
+            "schema=5", f"source={hashlib.sha1(self.source.read_bytes()).hexdigest()}",
             f"compiler={shutil.which(compiler) or compiler}", f"compiler_stat={stat_key(shutil.which(compiler) or compiler)}",
             f"kind={kind}", f"flags={flags}", f"sanitizer={self.probe.sanitizer}",
             f"library={sanitizer_lib}", f"library_stat={stat_key(sanitizer_lib)}",
             f"includes={self.probe.config.includes}", f"defines={self.probe.config.defines}",
             f"links={resolved_links}", f"ldflags={os.environ.get('LDFLAGS', '')}",
+            f"target_rev={self.probe.config.target_rev}",
         ))
         digest = hashlib.sha1(identity.encode()).hexdigest()
         binary = cache / f"{self.source.name}.{digest}.bin"
