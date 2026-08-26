@@ -19,6 +19,18 @@ def runner_exit_succeeded(config, returncode: int) -> bool:
     return returncode in (config.runner_success_codes if config else [0])
 
 
+def end_child_output_line() -> None:
+    """Start the runner's trusted status marker on a fresh line.
+
+    A child can end its output without a trailing newline, and every consumer
+    of the merged stream anchors its EXECUTION VERIFIED match at `^`. Flushing
+    first is what makes the newline land after the child's text on the
+    symbolized path, where this process buffers the captured report.
+    """
+    sys.stdout.flush()
+    print(file=sys.stderr)
+
+
 def configured_runner_cwd(config, binary: str | os.PathLike[str]) -> str | None:
     """Run a configured language tool from the target's module root.
 
@@ -180,6 +192,7 @@ class SanitizerRunner:
             rss_mb=sanitizer.generic_rss_limit_mb(self.env),
             cwd=configured_runner_cwd(self.config, binary),
         )
+        end_child_output_line()
         succeeded = runner_exit_succeeded(self.config, completed.returncode)
         if completed.returncode == 124:
             print(f"[run-{self.name}] generic runner timed out after {timeout}s", file=sys.stderr)

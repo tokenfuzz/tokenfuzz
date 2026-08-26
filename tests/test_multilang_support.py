@@ -204,6 +204,10 @@ class MultiLanguageSupportTests(unittest.TestCase):
             'crash_patterns = ["Traceback \\\\(most recent call last\\\\):"]\n',
         )
         clean = self.make_testcase(scratch / "clean.py", 'print("TESTCASE_EXECUTED")\n')
+        no_newline = self.make_testcase(
+            scratch / "no-newline.py",
+            'import sys\nsys.stdout.write("TESTCASE_EXECUTED")\n',
+        )
         bare = scratch / "bare.py"
         bare.write_text(
             'TARGET: sample:main:1\nHYPOTHESIS-ID: H_bare\nCATEGORY: state\nprint("TESTCASE_EXECUTED")\n'
@@ -250,6 +254,9 @@ class MultiLanguageSupportTests(unittest.TestCase):
         real = self.run_probe(clean)
         self.assertIn("TESTCASE_EXECUTED", real.stdout + real.stderr)
         self.assertIn("EXECUTION VERIFIED", real.stdout + real.stderr)
+        no_newline_result = self.run_probe(no_newline)
+        self.assertIn("verdict=CLEAN", no_newline_result.stdout + no_newline_result.stderr)
+        self.assertIn("EXECUTION_RATE: 1/1", no_newline.with_suffix(".asan.txt").read_text())
         bare_result = self.run_probe(bare)
         self.assertIn("TESTCASE_EXECUTED", bare_result.stdout + bare_result.stderr)
         self.assertIn(f"testcase={bare.resolve()}", bare.with_suffix(".asan.txt").read_text())

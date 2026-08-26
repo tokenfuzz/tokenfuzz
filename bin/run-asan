@@ -299,6 +299,7 @@ def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
         completed = run_symbolized(
             command, timeout, environment, rss_mb=rss_mb, cwd=cwd,
         )
+    sanitizer_run.end_child_output_line()
     succeeded = sanitizer_run.runner_exit_succeeded(CONFIG, completed.returncode)
     if completed.returncode == 124:
         print(f"[run-asan] generic runner timed out after {timeout}s", file=sys.stderr)
