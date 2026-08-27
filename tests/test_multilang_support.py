@@ -292,6 +292,45 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertIn("[runner].args", runner_canary.skip_reason(config))
         self.assertEqual(runner_canary.check(config), "")
 
+    def _cargo_canary_config(self, name: str, *sources: str):
+        """A cargo target whose [runner] is the registry's own invocation."""
+        (self.target / "src").mkdir(exist_ok=True)
+        (self.target / "Cargo.toml").write_text(
+            '[package]\nname = "probe-bin"\nversion = "0.1.0"\n'
+            'edition = "2021"\n',
+            encoding="utf-8",
+        )
+        for source in sources:
+            (self.target / "src" / source).write_text(
+                'pub fn reached() -> u8 { 1 }\n' if source == "lib.rs"
+                else 'fn main() { println!("TARGET_REACHED"); }\n',
+                encoding="utf-8",
+            )
+        return self.canary_config(self.tree(
+            name,
+            'target = "multilang"\nbuild_system = "cargo"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[runner]\nbin = "cargo"\n'
+            'args = ["run", "--quiet", "--manifest-path", '
+            '"{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]\n',
+        ))
+
+    def test_runner_canary_does_not_treat_a_binary_crate_as_a_dependency(self) -> None:
+        """Cargo ignores a lib-less path dependency, so building proves nothing."""
+        config = self._cargo_canary_config("canary-rust-binary", "main.rs")
+
+        self.assertIn(
+            "exposes no library", runner_canary.skip_reason(config),
+        )
+
+    def test_runner_canary_still_checks_a_crate_that_also_ships_a_binary(self) -> None:
+        """A library the canary links is what makes the route provable."""
+        config = self._cargo_canary_config(
+            "canary-rust-lib-and-bin", "lib.rs", "main.rs",
+        )
+
+        self.assertEqual("", runner_canary.skip_reason(config))
+
     def test_probe_runs_without_tomllib(self) -> None:
         """Python 3.9 has no `tomllib`; probe is an agent's only run route."""
         shim = self.root / "shim"

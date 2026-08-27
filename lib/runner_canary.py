@@ -23,8 +23,10 @@ marker reached the transcript while EXECUTION_RATE stayed 0 is a probe that will
 report NO_EXEC for every real testcase too.
 
 It runs in a throwaway tree so a live audit's results directory is untouched,
-and it stays quiet -- returning no reason -- whenever the target has taken the
-invocation over, because then the registry is no longer the thing under test.
+and it stays quiet -- returning no reason -- whenever it cannot make one of
+those claims: the target has taken the invocation over, or the language's own
+canary cannot bind to the audited tree. Passing on evidence it never had would
+be worse than not looking.
 """
 
 from __future__ import annotations
@@ -61,6 +63,10 @@ def skip_reason(config) -> str:
         return f"[runner].bin is not the registry's {language.runner_bin}"
     if list(config.runner_args) != list(language.runner_args):
         return "[runner].args no longer match the registry's own invocation"
+    if language.name == "rust" and not target_config.cargo_root_has_library(
+        config.target_root,
+    ):
+        return "the root Cargo package exposes no library to depend on"
     # A configured sanitizer binary owns the route instead of the runner, so a
     # canary would exercise a program the audit never reaches through it.
     for name in config.sanitizers_enabled:

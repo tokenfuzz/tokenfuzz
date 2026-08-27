@@ -2215,6 +2215,62 @@ def _detect_build_system(target_root: Path) -> str:
     return ""
 
 
+def _cargo_root_package(root: Path) -> tuple[dict, dict] | None:
+    """The root Cargo manifest and its [package] table, or None for neither.
+
+    An unreadable manifest and a virtual workspace both answer nothing, and a
+    caller that cannot read the manifest must not claim what it declares.
+    """
+    try:
+        raw = parse_toml(root / "Cargo.toml")
+    except (OSError, ValueError):
+        return None
+    package = raw.get("package")
+    return (raw, package) if isinstance(package, dict) else None
+
+
+def cargo_root_has_library(target_root: str | os.PathLike[str]) -> bool:
+    """Whether the root Cargo package declares or autodiscovers a library.
+
+    Cargo ignores a path dependency on a package without one -- with a warning,
+    not an error -- so a detached testcase that depends on the audited crate
+    builds either way, and building proves nothing unless this is True.
+    """
+    root = Path(target_root)
+    parsed = _cargo_root_package(root)
+    if parsed is None:
+        return False
+    raw, package = parsed
+    return isinstance(raw.get("lib"), dict) or (
+        package.get("autolib") is not False
+        and (root / "src" / "lib.rs").is_file()
+    )
+
+
+def cargo_package_is_library_only(
+    target_root: str | os.PathLike[str],
+) -> bool:
+    """Whether the root Cargo package certainly has a library and no binary.
+
+    Unreadable manifests, virtual workspaces, packages with no library target,
+    and any declared or autodiscovered binary return False. Callers may route
+    away from ``cargo run`` only on the certain answer.
+    """
+    root = Path(target_root)
+    parsed = _cargo_root_package(root)
+    if parsed is None or not cargo_root_has_library(root):
+        return False
+    raw, package = parsed
+    if raw.get("bin") or package.get("default-run"):
+        return False
+    if package.get("autobins") is False:
+        return True
+    bin_dir = root / "src" / "bin"
+    return not (root / "src" / "main.rs").is_file() and not any(
+        bin_dir.glob("*.rs")
+    ) and not any(bin_dir.glob("*/main.rs"))
+
+
 # ─── Per-build-system runner defaults ───────────────────────────────
 #
 # When seed_toml writes a target.toml for a tree with no ASan binary

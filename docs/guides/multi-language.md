@@ -117,9 +117,10 @@ the runner executed outside `targets/<slug>/` or resolved its imports entirely
 outside it. `bin/audit` and `bin/benchmark` repeat that check before spending a
 model on the target, so a runner that starts but loads an installed copy of the
 audited package is rejected instead of auditing the wrong code. The check stands
-aside for a target that has taken the invocation over — a changed `[runner].bin`
-or `args`, or a `[sanitizer]` binary that owns testcase execution — because the
-registry's seed is then no longer what runs.
+aside when it cannot make that claim — a Cargo root package that exposes no
+library for the canary to depend on, a changed `[runner].bin` or `args`, or a
+`[sanitizer]` binary that owns testcase execution — because the registry's
+generated source is then no longer proof of what runs.
 
 To print the registry's own answer for any build system:
 
