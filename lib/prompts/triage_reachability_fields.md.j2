@@ -106,6 +106,13 @@ Rules:
   attacker bytes decides whether the fault occurs. If it does, use `bytes`, not
   `both`; if the same fault occurs independently of those bytes, the setup or
   call-sequence is the trigger.
+- The same rule covers contract-obeying resource shaping performed before
+  input consumption to select a built-in fallback, such as filling a bounded
+  cache, pool, or descriptor allowance. When that state is held fixed, do not
+  label the calls used to establish it as an attacker-controlled call-sequence.
+  If the setup is non-default, record `parameter_control` as
+  `application-supplied`; if changing the bytes then decides the fault, keep
+  `trigger_source` as `bytes`.
 - "env" and "fs-state" are for state the fuzz input does NOT control: "env" is
   process environment variables; "fs-state" is filesystem path/presence/
   permission/symlink layout. The CONTENTS of an attacker-supplied input file,

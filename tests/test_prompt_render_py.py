@@ -238,6 +238,12 @@ ok("AND a specific application call order is `outside`" in vp,
    "validator: a mixed bytes-plus-call-order trigger is out of a bytes model")
 ok("calling the documented entry point that consumes the input" in vp,
    "validator: ordinary fixed setup is not a trigger component")
+ok("resource shaping performed before input consumption" in rf
+   and "keep `trigger_source` as `bytes`" in rf,
+   "reach-fields: a fixed production fallback remains byte-triggered")
+ok("resource shaping performed before input consumption" in vp
+   and "not an attacker call-sequence" in vp,
+   "validator: fixed production fallback is setup, not trigger sequence")
 
 # The batch reviewer is the single template's prefix (everything before the
 # finding marker) plus the batch suffix, so anything below that marker is

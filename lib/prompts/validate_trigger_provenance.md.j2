@@ -247,16 +247,21 @@ Definitions:
   What is NOT a component: the application's fixed, contract-obeying setup —
   creating or reusing a context, selecting a supported mode or option, and
   calling the documented entry point that consumes the input. Those the
-  application always performs, whatever the bytes say. What IS a component: a
-  post-parse call order, a specific lifetime or teardown order the application
-  chooses, environment, filesystem state, or timing that the fault needs and no
-  listed control covers. Answer **unclear** only when source did not settle it
-  in budget. Decide this from the code you read, never from the report's
-  self-declared `Trigger source`: that field is written by whoever found the bug
-  and is unreliable in both directions — a driver exercising documented entry
-  points reads as caller-driven even when attacker bytes alone decide the fault,
-  and an unreproduced claim reads as byte-driven even when only a caller can
-  reach it.
+  application always performs, whatever the bytes say. This also includes
+  contract-obeying resource shaping performed before input consumption to
+  select a built-in fallback, such as filling a bounded cache, pool, or
+  descriptor allowance, when that state is held fixed. The calls used to
+  establish such a state are not an attacker call-sequence; record non-default
+  setup as application-supplied. What IS a component: shaping the attacker must
+  control or repeat for each attempt, a post-parse call order, a specific
+  lifetime or teardown order the application chooses, environment, filesystem
+  state, or timing that the fault needs and no listed control covers. Answer
+  **unclear** only when source did not settle it in budget. Decide this from the
+  code you read, never from the report's self-declared `Trigger source`: that
+  field is written by whoever found the bug and is unreliable in both
+  directions — a driver exercising documented entry points reads as
+  caller-driven even when attacker bytes alone decide the fault, and an
+  unreproduced claim reads as byte-driven even when only a caller can reach it.
 - For Reject, `rejection_kind` distinguishes a false security claim from a
   real target defect that adds no capability at a code-execution or trusted
   operator surface. Use `no-added-boundary` only for the latter; it remains
