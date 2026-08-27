@@ -749,8 +749,11 @@ class Setup:
         # shipping a hand-authored .audit/build.sh (or build-<san>.sh) recipe.
         # With neither a native build system nor such a recipe there is nothing
         # to materialize.
-        recipes = ["build.sh", *(f"build-{s}.sh" for s in ("ubsan", "msan", "tsan"))]
-        has_recipe = any((audit_dir / name).is_file() for name in recipes)
+        primary_recipe = target_config.build_recipe_path(self.target_root, "asan")
+        has_recipe = primary_recipe.is_file() or any(
+            target_config.build_recipe_path(self.target_root, name).is_file()
+            for name in ("ubsan", "msan", "tsan")
+        )
         if (
             config.build_system not in target_config.NATIVE_BUILD_SYSTEMS
             and not has_recipe
@@ -769,7 +772,9 @@ class Setup:
             for sanitizer_name in sanitizers:
                 if sanitizer_name not in {"asan", "ubsan", "msan", "tsan"}:
                     continue
-                recipe = audit_dir / ("build.sh" if sanitizer_name == "asan" else f"build-{sanitizer_name}.sh")
+                recipe = target_config.build_recipe_path(
+                    self.target_root, sanitizer_name
+                )
                 candidate_dir = audit_dir / "build-candidates"
                 candidate = candidate_dir / f"{recipe.name}.{os.getpid()}"
                 candidate.unlink(missing_ok=True)
@@ -929,8 +934,8 @@ class Setup:
                     # that recipe without validating this candidate against the
                     # canonical tree.
                     candidate.unlink(missing_ok=True)
-        elif sanitizers and not (audit_dir / "build.sh").is_file():
-            log(f"hint: {self.name} is a {config.build_system} target with no {audit_dir / 'build.sh'} yet; bin/audit builds it automatically")
+        elif sanitizers and not primary_recipe.is_file():
+            log(f"hint: {self.name} is a {config.build_system} target with no {primary_recipe} yet; bin/audit builds it automatically")
         preferred_browser_bins = {}
         if (
             self.profile is not None

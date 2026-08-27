@@ -2631,7 +2631,12 @@ def vcs_source_signature(
     return _fold_signature(found[0], found[1])
 
 
-def _primary_build_recipe(root: Path, san: str) -> Path:
+def build_recipe_path(root: Path, san: str) -> Path:
+    """The canonical `.audit/` recipe filename for one sanitizer.
+
+    Shared so no caller re-derives the asan special case and drifts from the
+    name the build stamp records.
+    """
     name = "build.sh" if san == "asan" else f"build-{san}.sh"
     return root / ".audit" / name
 
@@ -2672,7 +2677,7 @@ def build_write_stamp(
         # An empty signature line reads as stale until a real one is written.
         sig = ""
     recipe = Path(recipe_path) if recipe_path is not None else \
-        _primary_build_recipe(root, san)
+        build_recipe_path(root, san)
     recipe_digest = _build_recipe_digest(recipe)
     (build_dir / ".audit-build-stamp").write_text(
         f"{rev}\n{sig}\n{recipe_digest}\n{secrets.token_hex(16)}\n",
@@ -2710,7 +2715,7 @@ def changed_build_recipe(
     """Return the canonical recipe path when it differs from the build stamp."""
     root = Path(target_root)
     fields = build_stamp_fields(root, san)
-    recipe = _primary_build_recipe(root, san)
+    recipe = build_recipe_path(root, san)
     if fields is not None and fields[2] and \
             fields[2] != _build_recipe_digest(recipe):
         try:
@@ -2735,7 +2740,7 @@ def build_input_key(
     """
     root = Path(target_root)
     recipe = Path(recipe_path) if recipe_path is not None else \
-        _primary_build_recipe(root, san)
+        build_recipe_path(root, san)
     payload = f"{_source_state_signature(root)}\n{_build_recipe_digest(recipe)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
 
@@ -2781,7 +2786,7 @@ def build_freshness(
     if not stored_sig:
         return "stale"  # old-format (rev-only) stamp → rebuild to upgrade it
     recipe = Path(recipe_path) if recipe_path is not None else \
-        _primary_build_recipe(root, san)
+        build_recipe_path(root, san)
     current_recipe_digest = _build_recipe_digest(recipe)
     stored_recipe_digest = stamp_lines[2] if len(stamp_lines) >= 3 else ""
     # Two-line stamps predate recipe identity. Accept them once when their

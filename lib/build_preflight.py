@@ -55,6 +55,20 @@ def enabled_sanitizers(config) -> list[str]:
     return ["asan", *(name for name in enabled if name in _NATIVE_SANITIZERS)]
 
 
+def _build_freshness(target_root: Path, config, sanitizer: str) -> str:
+    """Freshness under the build system selected by the pinned config."""
+    build_system = str(getattr(config, "build_system", "") or "")
+    if build_system not in ("", "unknown") and \
+            build_system not in target_config.NATIVE_BUILD_SYSTEMS:
+        recipe = target_config.build_recipe_path(target_root, sanitizer)
+        if not recipe.is_file():
+            return "skip"
+        return target_config.build_freshness(
+            target_root, sanitizer, recipe_path=recipe,
+        )
+    return target_config.build_freshness(target_root, sanitizer)
+
+
 def _file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -310,10 +324,8 @@ def build_problems(target_root: Path, config) -> list[str]:
     # source edit here. Read at most once: every tree shares this one source.
     changed: list[str] | None = None
     for name in enabled_sanitizers(config):
-        state = target_config.build_freshness(target_root, name)
-        if state == "skip":
-            continue
-        if state != "fresh":
+        state = _build_freshness(target_root, config, name)
+        if state not in ("fresh", "skip"):
             problem = f"{target_config.build_dir_name(name)} is {state}"
             if state == "stale":
                 if changed is None:
@@ -326,6 +338,9 @@ def build_problems(target_root: Path, config) -> list[str]:
                     problem += f" (changed: {', '.join(causes[:5])})"
             problems.append(problem)
             continue
+        # A configured artifact is an execution route even when no harness-
+        # owned native build exists. Never let a language build-system label
+        # suppress the cheaper and definitive existence/executable check.
         for kind, raw in (
             ("bin", config.sanitizer_bin(name)), ("lib", config.sanitizer_lib(name)),
         ):
@@ -460,7 +475,7 @@ def _converge(
 ) -> None:
     try:
         before = {
-            name: target_config.build_freshness(target_root, name)
+            name: _build_freshness(target_root, config, name)
             for name in sanitizers
         }
     except OSError as exc:
@@ -517,7 +532,7 @@ def _converge(
 
     try:
         after = {
-            name: target_config.build_freshness(target_root, name)
+            name: _build_freshness(target_root, config, name)
             for name in sanitizers
         }
     except OSError as exc:

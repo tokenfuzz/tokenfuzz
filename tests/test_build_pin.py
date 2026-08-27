@@ -146,6 +146,40 @@ class VerifyOnlyCellTests(unittest.TestCase):
         self.config.sanitizers_explicitly_disabled = True
         self.assertEqual([], build_preflight.build_problems(self.target, self.config))
 
+    def test_configured_runner_system_beats_a_secondary_native_manifest(self) -> None:
+        """A Swift package may ship CMake support without using build-asan."""
+        (self.target / ".audit" / "build.sh").unlink()
+        self.config.build_system = "swift"
+        self.config.sanitizer_bin = lambda name: ""
+        self.assertEqual([], build_preflight.build_problems(self.target, self.config))
+        with mock.patch.object(build_preflight.subprocess, "run") as run:
+            build_preflight.refresh(
+                self.tmp, self.target, "sampleproj", self.config, self.tmp,
+                "codex", "", lambda message: None,
+            )
+        run.assert_not_called()
+
+    def test_language_label_does_not_hide_a_configured_native_route(self) -> None:
+        """A declared sanitizer binary wins probe routing over the runner."""
+        (self.target / ".audit" / "build.sh").unlink()
+        self.config.build_system = "swift"
+        problems = build_preflight.build_problems(self.target, self.config)
+        self.assertEqual(
+            ["asan_bin is missing (build-asan/app)"], problems,
+        )
+
+    def test_language_artifact_existence_is_checked_without_a_native_manifest(self) -> None:
+        (self.target / ".audit" / "build.sh").unlink()
+        (self.target / "CMakeLists.txt").unlink()
+        self.config.build_system = "swift"
+        problems = build_preflight.build_problems(self.target, self.config)
+        self.assertTrue(any("asan_bin is missing" in item for item in problems), problems)
+
+    def test_explicit_language_recipe_still_requires_its_build(self) -> None:
+        self.config.build_system = "cargo"
+        problems = build_preflight.build_problems(self.target, self.config)
+        self.assertTrue(any("missing" in item for item in problems), problems)
+
     def test_findings_only_target_does_not_pin_leftover_native_builds(self) -> None:
         self._build()
         self.config.sanitizers_explicitly_disabled = True
