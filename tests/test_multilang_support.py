@@ -240,6 +240,27 @@ class MultiLanguageSupportTests(unittest.TestCase):
             'env = ["PYTHONPATH={TARGET_ROOT}"]\n',
         )
         self.assertEqual(runner_canary.check(self.canary_config(reaching)), "")
+        contextless = target_config.Config(target_root=str(self.target))
+        target_config.load_toml_into(
+            contextless, reaching.parent.parent.parent / "target.toml",
+        )
+        self.assertEqual(contextless.results_dir, "")
+        self.assertEqual(runner_canary.check(contextless), "")
+        missing_rate = runner_canary._reasons(
+            self.canary_config(reaching),
+            f"{runner_canary.MARKER} cwd={self.target}\n",
+        )
+        self.assertIn("the harness did not report an EXECUTION_RATE", missing_rate)
+        failed_probe = subprocess.CompletedProcess(
+            [], 7,
+            f"{runner_canary.MARKER} cwd={self.target}\nEXECUTION_RATE: 1/1\n",
+            "",
+        )
+        with mock.patch.object(runner_canary.subprocess, "run", return_value=failed_probe):
+            self.assertIn(
+                "bin/probe exited 7",
+                runner_canary.check(self.canary_config(reaching)),
+            )
 
         # Same runner, same interpreter, no import path: it starts and runs,
         # and every import it resolves comes from outside the audited tree.

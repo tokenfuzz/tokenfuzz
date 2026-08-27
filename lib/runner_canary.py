@@ -76,7 +76,9 @@ def _stage(config, language, tree: Path) -> Path:
     scratch = results / "scratch-1"
     scratch.mkdir(parents=True)
     (tree / "logs").mkdir()
-    source = Path(config.results_dir).resolve().parent.parent / "target.toml"
+    source = Path(getattr(config, "source_path", ""))
+    if not source.is_file() and config.results_dir:
+        source = Path(config.results_dir).resolve().parent.parent / "target.toml"
     if source.is_file():
         shutil.copy2(source, tree / "output" / slug / "target.toml")
     # Every tool below bin/probe rediscovers the session from this file, so a
@@ -105,7 +107,9 @@ def _reasons(config, output: str) -> list[str]:
     # status marker that lands mid-line is not counted, and every downstream
     # verdict reads the rate rather than the output.
     rate = re.search(r"EXECUTION_RATE: (\d+)/(\d+)", output)
-    if rate and rate.group(1) == "0":
+    if rate is None:
+        failures.append("the harness did not report an EXECUTION_RATE")
+    elif rate.group(1) == "0":
         failures.append(
             f"the canary printed {MARKER} but the harness recorded "
             f"EXECUTION_RATE {rate.group(0).split(': ')[1]}, so a run that "
@@ -169,6 +173,8 @@ def check(config, timeout: int = 300) -> str:
         report = canary.with_suffix(".asan.txt")
         output = report.read_text(errors="replace") if report.is_file() else ""
         failures = _reasons(config, output + completed.stdout + completed.stderr)
+        if completed.returncode:
+            failures.append(f"bin/probe exited {completed.returncode}")
     if not failures:
         return ""
     return "; ".join(failures)

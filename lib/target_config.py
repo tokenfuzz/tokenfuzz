@@ -3386,6 +3386,8 @@ class Config:
     runner_env: list[str] = field(default_factory=list)
     runner_crash_patterns: list[str] = field(default_factory=list)
     runner_success_codes: list[int] = field(default_factory=lambda: [0])
+    # Exact target.toml behind this normalized view; runtime-only metadata.
+    source_path: str = ""
 
     def attacker_controls_csv(self) -> str:
         if not self.attacker_controls:
@@ -3612,6 +3614,7 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     """
     parsed = parse_toml(toml_path)
     p = str(toml_path)
+    cfg.source_path = str(Path(toml_path).resolve())
     cfg.attacker_controls = []
     cfg.includes = []
     cfg.defines = []
