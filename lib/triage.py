@@ -2510,6 +2510,32 @@ def _crash_surface_needs_review(report: Path) -> bool:
     return kind in {"", "cli", "unknown"}
 
 
+def _is_final_crash_receipt(receipt: dict | None) -> bool:
+    """Whether a receipt is this crash's own, current, final publication."""
+    return (
+        receipt is not None
+        and receipt.get("kind") == "crash"
+        and receipt.get("state") in validation_receipt.FINAL_STATES
+    )
+
+
+def _crash_review_is_reusable(crash_dir: Path) -> bool:
+    """Whether a receipt's trigger review still answers the current policy.
+
+    A receipt binds its own report and gate files, so the one thing it cannot
+    notice is `TRIGGER_GATE_DECISION_VERSION` moving under an unchanged vote.
+    Asking here is what lets a bumped version reach an already-published crash,
+    the way the findings lane's cached-finalization gate already does. Only
+    callers that can actually spend a review ask: on an expired deadline the
+    answer changes nothing, and discarding a verdict no pass will replace
+    would lose an adjudication rather than refresh it.
+    """
+    if os.environ.get("CRASH_TRIGGER_GATE", "1") == "0":
+        return True
+    report = _report(crash_dir)
+    return report is not None and _cached_trigger_resolution(crash_dir, report)
+
+
 def triage_one_crash(
     crash_dir: Path,
     results_dir: Path,
@@ -2527,10 +2553,7 @@ def triage_one_crash(
     report = _report(crash_dir)
     if _deadline_expired(deadline):
         current_receipt = validation_receipt.read_current(crash_dir)
-        if (
-            current_receipt is not None
-            and current_receipt.get("state") in validation_receipt.FINAL_STATES
-        ):
+        if _is_final_crash_receipt(current_receipt):
             return "promoted"
         validation_receipt.write(
             crash_dir, kind="crash", state="pending",
@@ -2784,11 +2807,9 @@ def triage_crash_dirs(
     finalized: list[Path] = []
     cached_ready: list[Path] = []
     for directory in directories:
-        receipt = validation_receipt.read_current(directory)
         if (
-            receipt is not None
-            and receipt.get("kind") == "crash"
-            and receipt.get("state") in validation_receipt.FINAL_STATES
+            _is_final_crash_receipt(validation_receipt.read_current(directory))
+            and _crash_review_is_reusable(directory)
         ):
             finalized.append(directory)
             continue

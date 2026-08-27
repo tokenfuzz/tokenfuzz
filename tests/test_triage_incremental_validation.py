@@ -1964,6 +1964,121 @@ Generated score text.
                 {"promoted": 1, "rejected": 0, "pending": 1, "demoted": 0},
             )
 
+    def test_crash_final_receipt_does_not_hide_a_stale_trigger_review(self) -> None:
+        crash = self.root / "crashes" / "CRASH-001"
+        crash.mkdir(parents=True)
+        report = crash / "report.md"
+        report.write_text(
+            "# Bounds issue\n\n"
+            "Surface: library-api\n"
+            "Primitive: heap_read_small\n"
+            "Class: memory-safety\n"
+            "Caller contract: obeyed\n"
+            "Trigger source: bytes\n"
+            "Parameter control: application-supplied\n"
+            "Boundary: public parser\n"
+            "Caller controls: bytes\n"
+            "Trusted caller actions: normal public call\n"
+            "Advisory: no\n",
+            encoding="utf-8",
+        )
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n",
+            encoding="utf-8",
+        )
+        stale = trigger_vote(report, self.root)
+        # Any identity that is not the current one is stale; naming a real past
+        # version instead would stop testing that the moment it is bumped.
+        stale["decision_version"] = "trigger-superseded-policy"
+        stale["review_facts"] = {"trigger_controls_fit": "outside"}
+        (crash / ".trigger-gate.json").write_text(
+            json.dumps(stale), encoding="utf-8",
+        )
+        validation_receipt.write(
+            crash, kind="crash", state="not-reportable",
+            attacker_controls=["bytes"], review_facts=stale["review_facts"],
+        )
+        self.assertIsNotNone(validation_receipt.read_current(crash))
+        attempted: list[Path] = []
+
+        def batch(items, *_args, **_kwargs):
+            attempted.extend(items)
+            for directory in items:
+                current_report = directory / "report.md"
+                (directory / ".trigger-gate.json").write_text(
+                    json.dumps(trigger_vote(current_report, self.root)),
+                    encoding="utf-8",
+                )
+            return set(items)
+
+        with mock.patch.object(
+            triage, "_bundle_needs_refresh", return_value=False,
+        ), mock.patch.object(
+            triage, "_bundle_missing_artifacts", return_value=[],
+        ), mock.patch.object(
+            triage, "converge_reach_fields",
+        ), mock.patch.object(
+            triage, "_direct_probe_trigger_bypass", return_value=False,
+        ), mock.patch.object(
+            triage, "_batch_finding_trigger_votes", side_effect=batch,
+        ), mock.patch.object(
+            triage, "triage_one_crash", return_value="promoted",
+        ):
+            counts = triage.triage_crash_dirs(
+                self.root, self.root, "sampleproj", workers=1,
+            )
+
+        self.assertEqual(attempted, [crash])
+        self.assertEqual(
+            counts,
+            {"promoted": 1, "rejected": 0, "pending": 0, "demoted": 0},
+        )
+
+    def test_expired_deadline_keeps_a_final_receipt_it_cannot_refresh(self) -> None:
+        """Staleness reopens a review; with no budget it must not erase one."""
+        crash = self.root / "crashes" / "CRASH-001"
+        crash.mkdir(parents=True)
+        report = crash / "report.md"
+        report.write_text(
+            "# Bounds issue\n\n"
+            "Surface: library-api\n"
+            "Primitive: heap_read_small\n"
+            "Class: memory-safety\n"
+            "Caller contract: obeyed\n"
+            "Trigger source: bytes\n"
+            "Parameter control: direct\n"
+            "Boundary: public parser\n"
+            "Caller controls: bytes\n"
+            "Trusted caller actions: normal public call\n"
+            "Advisory: no\n",
+            encoding="utf-8",
+        )
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n",
+            encoding="utf-8",
+        )
+        stale = trigger_vote(report, self.root)
+        # Any identity that is not the current one is stale; naming a real past
+        # version instead would stop testing that the moment it is bumped.
+        stale["decision_version"] = "trigger-superseded-policy"
+        (crash / ".trigger-gate.json").write_text(
+            json.dumps(stale), encoding="utf-8",
+        )
+        validation_receipt.write(
+            crash, kind="crash", state="not-reportable",
+            attacker_controls=["bytes"],
+        )
+        before = validation_receipt.read_current(crash)
+        self.assertIsNotNone(before)
+
+        status = triage.triage_one_crash(
+            crash, self.root, self.root, "sampleproj", ["bytes"],
+            deadline=0.0,
+        )
+
+        self.assertEqual(status, "promoted")
+        self.assertEqual(validation_receipt.read_current(crash), before)
+
     def test_crash_gate_batches_two_trigger_rounds_before_per_crash_triage(self) -> None:
         crashes = self.root / "crashes"
         directories = [crashes / "CRASH-001", crashes / "CRASH-002"]
