@@ -1859,6 +1859,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "an unsupported pinned S4 refresh skips every unrelated card source",
     )
     refresh_runtime.fixed_strategy = "S6"
+    refresh_runtime.config.s6_peers = ["peerlib"]
     (refresh_results / "s6-peer-cards.jsonl").write_text(
         json.dumps({"id": "S6-only", "kind": "s6-peer-fix", "strategy": "S6", "file": "", "mode": "auto"}) + "\n",
         encoding="utf-8",
@@ -2031,6 +2032,14 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         unavailable_stops,
         "a structurally unsupported S4 campaign stops before launching an agent",
     )
+    refresh_runtime.fixed_strategy = "S6"
+    refresh_runtime.config.s6_peers = []
+    check(
+        audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=1)
+        and "suggest-peers" in audit_runner._fixed_lane_unavailable(refresh_runtime),
+        "an S6 pin without peers stops before launching an agent",
+    )
+    refresh_runtime.config.s6_peers = ["peerlib"]
     # Card-backed pinned lanes stop once their ranked work is genuinely closed,
     # but an empty one still gets the normal discovery runway: ranking can miss
     # a useful manual strategy angle, which an absent generator answer cannot.
@@ -2176,7 +2185,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     # An empty queue proves exhaustion only when the source could answer.
     # OSV returns [] for an outage exactly as it does for "no advisories", so
-    # a degraded or unconfigured source must not read as a finished campaign.
+    # a degraded source must not read as a finished campaign. Missing peer
+    # configuration is instead an explicit unavailable lane before launch.
     audit_runner.workqueue.write_cards(refresh_results / "work-cards.jsonl", [])
     (refresh_results / "state" / "hypotheses.jsonl").write_text("", encoding="utf-8")
     refresh_runtime.config = SimpleNamespace(s6_peers=["peerlib"])
@@ -2187,8 +2197,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     refresh_runtime.config = SimpleNamespace(s6_peers=[])
     unconfigured = audit_runner.fixed_lane_exhausted(refresh_runtime, 2)
     check(
-        not degraded and not unconfigured and healthy,
-        "only a healthy, configured S6 source can report an exhausted campaign",
+        not degraded and unconfigured and healthy
+        and "suggest-peers" in audit_runner._fixed_lane_unavailable(refresh_runtime),
+        "a source outage stays open while missing S6 configuration stops unavailable",
         f"degraded={degraded} unconfigured={unconfigured} healthy={healthy}",
     )
     refresh_runtime.config = generic_config

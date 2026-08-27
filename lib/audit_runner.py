@@ -1989,22 +1989,25 @@ def _fixed_lane_source_degraded(runtime: Runtime, strategy: str) -> bool:
     if strategy == "S1":
         return bool(getattr(runtime, "s1_source_degraded", False))
     if strategy == "S6":
-        return (
-            bool(getattr(runtime, "s6_source_degraded", False))
-            or not _s6_peers_configured(runtime)
-        )
-    # S4's source is the target config, which is read fresh every refresh and
-    # answers definitively; `_fixed_lane_unavailable` reports a "no".
+        return bool(getattr(runtime, "s6_source_degraded", False))
+    # S4 and a missing peer set are both read fresh from the target config,
+    # which answers definitively; `_fixed_lane_unavailable` reports that "no"
+    # rather than holding the lane open for a source that cannot recover.
     return False
 
 
 def _fixed_lane_unavailable(runtime: Runtime) -> str:
     """Why this pin cannot run against this target at all, or "" if it can."""
-    if str(getattr(runtime, "fixed_strategy", "")).upper() == "S4" and not \
-            workqueue.campaign_supported(runtime.config):
+    pinned = str(getattr(runtime, "fixed_strategy", "")).upper()
+    if pinned == "S4" and not workqueue.campaign_supported(runtime.config):
         return (
             "S4 requires a native sanitizer library; use S7 for this "
             "findings-only or CLI-only target"
+        )
+    if pinned == "S6" and not _s6_peers_configured(runtime):
+        return (
+            "S6 requires configured peer projects; run bin/suggest-peers "
+            "or drop the pin"
         )
     return ""
 
@@ -2672,15 +2675,6 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     initialize_agent_strategies(runtime)
     if state.iteration == 1:
         _log_foreign_active_work(runtime)
-        if str(getattr(runtime, "fixed_strategy", "")).upper() == "S6" \
-                and not _s6_peers_configured(runtime):
-            index_log(
-                runtime,
-                "S6_SOURCE_UNAVAILABLE: this run is pinned to S6 but the "
-                "target configures no [s6_peers]; peer mining has no input. "
-                "Run bin/suggest-peers or drop the pin — an empty queue here "
-                "is a configuration fault, not an exhausted lane",
-            )
     if fixed_lane_exhausted(runtime, state.iteration):
         unavailable = _fixed_lane_unavailable(runtime)
         if unavailable:
@@ -2809,14 +2803,14 @@ def _recover_transient(state: BackendState) -> bool:
 
 def run_backend(runtime: Runtime, args, guide: str) -> int:
     with instance_lock(runtime, args.allow_concurrent):
-        runner_preflight.validate(
-            runtime.config, lambda message: index_log(runtime, message)
-        )
         unavailable = _fixed_lane_unavailable(runtime)
         if unavailable:
             refresh_work_cards(runtime, force=True)
             index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
             return 0
+        runner_preflight.validate(
+            runtime.config, lambda message: index_log(runtime, message)
+        )
         validate_model(runtime)
         preflight_build(runtime)
         state = initialize_backend(runtime, args, guide, started_at=time.monotonic())
@@ -2858,16 +2852,16 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
     with ExitStack() as stack:
         for runtime in runtimes:
             stack.enter_context(instance_lock(runtime, args.allow_concurrent))
-        runner_preflight.validate(
-            runtimes[0].config,
-            lambda message: index_log(runtimes[0], message),
-        )
         unavailable = _fixed_lane_unavailable(runtimes[0])
         if unavailable:
             for runtime in runtimes:
                 refresh_work_cards(runtime, force=True)
                 index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
             return 0
+        runner_preflight.validate(
+            runtimes[0].config,
+            lambda message: index_log(runtimes[0], message),
+        )
         for runtime in runtimes:
             _activate_runtime(runtime)
             validate_model(runtime)

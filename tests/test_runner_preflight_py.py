@@ -495,7 +495,7 @@ class RunnerPreflightTests(unittest.TestCase):
             benchmark_runner.preflight_build(bench_args, Path("/bench"), "fixture-model")
         checked.assert_called_once()
 
-    def test_unsupported_s4_stops_before_model_or_build_preflight(self):
+    def test_unsupported_s4_stops_before_any_preflight(self):
         events = []
         runtime = SimpleNamespace(
             config=self.config(Path("/target"), "python3"),
@@ -521,7 +521,7 @@ class RunnerPreflightTests(unittest.TestCase):
             result = audit_runner.run_backend(runtime, args, "")
 
         self.assertEqual(result, 0)
-        self.assertEqual(events, ["runner", "queue", "unavailable"])
+        self.assertEqual(events, ["queue", "unavailable"])
 
 
 class TestcaseDependenceTests(unittest.TestCase):
