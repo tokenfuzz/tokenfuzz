@@ -292,6 +292,29 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertIn("[runner].args", runner_canary.skip_reason(config))
         self.assertEqual(runner_canary.check(config), "")
 
+    def test_runner_canary_checks_the_runner_owned_sanitizer_route(self) -> None:
+        """One sanitizer binary must not hide another sanitizer's runner route."""
+        scratch = self.tree(
+            "canary-mixed-routes",
+            'target = "multilang"\nbuild_system = "python"\n'
+            'asan_bin = "build-asan/app"\n'
+            '[sanitizer]\nenabled = ["asan", "ubsan"]\n'
+            '[runner]\nbin = "python3"\nargs = ["{TESTCASE}"]\n'
+            'env = ["PYTHONPATH={TARGET_ROOT}"]\n',
+        )
+        completed = subprocess.CompletedProcess(
+            [], 0,
+            f"{runner_canary.MARKER} cwd={self.target}\nEXECUTION_RATE: 1/1\n",
+            "",
+        )
+
+        with mock.patch.object(
+            runner_canary.subprocess, "run", return_value=completed,
+        ) as run:
+            self.assertEqual(runner_canary.check(self.canary_config(scratch)), "")
+
+        self.assertEqual(run.call_args.kwargs["env"]["PROBE_SANITIZER"], "ubsan")
+
     def _cargo_canary_config(self, name: str, *sources: str):
         """A cargo target whose [runner] is the registry's own invocation."""
         (self.target / "src").mkdir(exist_ok=True)

@@ -52,6 +52,16 @@ def canary_suffix(language) -> str:
     return language.source_exts[0] if language.source_exts else ""
 
 
+def runner_sanitizer(config) -> str:
+    """An enabled route that still executes through [runner], or ""."""
+    if config.sanitizers_explicitly_disabled:
+        return "runner"
+    for name in config.sanitizers_enabled:
+        if not config.sanitizer_bin(name):
+            return name
+    return ""
+
+
 def skip_reason(config) -> str:
     """Why this target cannot be canary-checked, or "" when it can be."""
     language = languages.for_build_system(getattr(config, "build_system", ""))
@@ -67,11 +77,10 @@ def skip_reason(config) -> str:
         config.target_root,
     ):
         return "the root Cargo package exposes no library to depend on"
-    # A configured sanitizer binary owns the route instead of the runner, so a
-    # canary would exercise a program the audit never reaches through it.
-    for name in config.sanitizers_enabled:
-        if config.sanitizer_bin(name):
-            return f"[sanitizer].{name}_bin owns testcase execution"
+    # Stand aside only when every enabled route has its own binary. In a mixed
+    # configuration, the runner still needs proving on the sanitizer it owns.
+    if not runner_sanitizer(config):
+        return "configured sanitizer binaries own every enabled route"
     return ""
 
 
@@ -167,6 +176,7 @@ def check(config, timeout: int = 300) -> str:
             "TARGET_ROOT": str(Path(config.target_root).resolve()),
             "TARGET_SLUG": config.slug or "canary",
             "LOGDIR": str(tree / "logs"),
+            "PROBE_SANITIZER": runner_sanitizer(config),
         })
         try:
             completed = subprocess.run(
