@@ -168,6 +168,31 @@ class VerifyOnlyCellTests(unittest.TestCase):
             ["asan_bin is missing (build-asan/app)"], problems,
         )
 
+    def test_language_label_does_not_accept_a_stale_target_owned_tree(self) -> None:
+        """A runner language can still route one sanitizer to build-asan."""
+        self._build()
+        (self.target / ".audit" / "build.sh").unlink()
+        self.config.build_system = "swift"
+        (self.target / "main.c").write_text("int main(void){return 1;}\n")
+
+        problems = build_preflight.build_problems(self.target, self.config)
+
+        self.assertTrue(
+            any("build-asan is stale" in item for item in problems), problems,
+        )
+
+    def test_language_target_can_use_an_unmanaged_prebuilt_binary(self) -> None:
+        """No recipe or harness stamp means existence is the whole contract."""
+        (self.target / ".audit" / "build.sh").unlink()
+        self.config.build_system = "swift"
+        binary = self.target / "build-asan" / "app"
+        binary.parent.mkdir()
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        (self.target / "main.c").write_text("int main(void){return 1;}\n")
+
+        self.assertEqual([], build_preflight.build_problems(self.target, self.config))
+
     def test_language_artifact_existence_is_checked_without_a_native_manifest(self) -> None:
         (self.target / ".audit" / "build.sh").unlink()
         (self.target / "CMakeLists.txt").unlink()

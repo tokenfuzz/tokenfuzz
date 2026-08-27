@@ -61,7 +61,14 @@ def _build_freshness(target_root: Path, config, sanitizer: str) -> str:
     if build_system not in ("", "unknown") and \
             build_system not in target_config.NATIVE_BUILD_SYSTEMS:
         recipe = target_config.build_recipe_path(target_root, sanitizer)
-        if not recipe.is_file():
+        # A tree this harness built carries its stamp, and stays answerable
+        # even once its recipe is gone -- a deleted recipe reads as stale, not
+        # as nothing to check. A tree with no stamp is the operator's own
+        # prebuilt artifact: nothing here can rebuild or date it, so existence
+        # below is the whole contract.
+        stamp = target_root / target_config.build_dir_name(sanitizer) / \
+            ".audit-build-stamp"
+        if not recipe.is_file() and not stamp.is_file():
             return "skip"
         return target_config.build_freshness(
             target_root, sanitizer, recipe_path=recipe,
