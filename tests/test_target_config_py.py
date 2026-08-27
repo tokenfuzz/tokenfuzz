@@ -1489,6 +1489,80 @@ assert_eq(["build-asan/aaa_test_driver", "build-asan/wcat", "build-asan/wtool"],
           _scanned,
           "cli_candidates: falls back to the free scan when no manifest name matches")
 
+# Generated CMake install metadata resolves target types and computed names.
+# A library target that installs no executable must not fall back to selecting
+# a root-level test program as its generic byte-input runner.
+cmake_api_root = TEST_TMPDIR / "cmake-api-artifacts"
+(cmake_api_root / "build-asan").mkdir(parents=True)
+(cmake_api_root / "CMakeLists.txt").write_text(
+    "cmake_minimum_required(VERSION 3.16)\n"
+    "add_executable(c-test test.c)\n",
+    encoding="utf-8",
+)
+_api_lib = cmake_api_root / "build-asan" / "libcmakeapiartifacts.a"
+_api_lib.write_bytes(b"!<arch>\n")
+_api_test = cmake_api_root / "build-asan" / "c-test"
+_api_test.write_bytes(b"\x7fELF"); os.chmod(_api_test, 0o755)
+(cmake_api_root / "build-asan" / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE STATIC_LIBRARY '
+    f'FILES "{_api_lib}")\n', encoding="utf-8",
+)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda p, s="asan": True
+try:
+    assert_eq([], tc.cli_candidates(cmake_api_root, "asan", 8),
+              "cli_candidates: complete CMake install plan keeps an API target library-only")
+    _api_toml = cmake_api_root / "target.toml"
+    tc.seed_toml(cmake_api_root, _api_toml)
+    _api_seed = tc.parse_toml(_api_toml)
+    assert_eq(None, _api_seed.get("asan_bin"),
+              "seed_toml: API-only CMake build does not persist its test driver")
+    assert_eq("build-asan/libcmakeapiartifacts.a", _api_seed.get("asan_lib"),
+              "seed_toml: API-only CMake build persists its core archive")
+    _api_cli = cmake_api_root / "build-asan" / "wtool"
+    _api_cli.write_bytes(b"\x7fELF"); os.chmod(_api_cli, 0o755)
+    (cmake_api_root / "build-asan" / "cmake_install.cmake").write_text(
+        'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/bin" TYPE EXECUTABLE '
+        f'FILES "{_api_cli}")\n', encoding="utf-8",
+    )
+    assert_eq(["build-asan/wtool"], tc.cli_candidates(cmake_api_root, "asan", 8),
+              "cli_candidates: CMake install plan keeps its product executable")
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+
+# CMake writes OPTIONAL/PERMISSIONS/RENAME between TYPE and FILES, and a
+# FetchContent dependency ships its own install plan under _deps/. Reading
+# either wrong drops the product CLI or publishes a dependency's tool as it.
+cmake_shapes_root = TEST_TMPDIR / "cmake-install-shapes"
+_shapes_build = cmake_shapes_root / "build-asan"
+(_shapes_build / "_deps" / "dep-build").mkdir(parents=True)
+(cmake_shapes_root / "CMakeLists.txt").write_text(
+    "cmake_minimum_required(VERSION 3.16)\n", encoding="utf-8",
+)
+(_shapes_build / "libcmakeinstallshapes.a").write_bytes(b"!<arch>\n")
+_shapes_cli = _shapes_build / "wtool"
+_shapes_cli.write_bytes(b"\x7fELF"); os.chmod(_shapes_cli, 0o755)
+_shapes_dep = _shapes_build / "_deps" / "dep-build" / "depgen"
+_shapes_dep.write_bytes(b"\x7fELF"); os.chmod(_shapes_dep, 0o755)
+# Both rules live in the reachable top-level script: `_find_under` never
+# descends into _deps, so a dependency path can only arrive as file content.
+(_shapes_build / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/bin" TYPE EXECUTABLE '
+    f'FILES "{_shapes_dep}")\n'
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/bin" TYPE EXECUTABLE '
+    'OPTIONAL PERMISSIONS OWNER_READ OWNER_EXECUTE RENAME "wtool" '
+    f'FILES "{_shapes_cli}")\n', encoding="utf-8",
+)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda p, s="asan": True
+try:
+    assert_eq(["build-asan/wtool"],
+              tc.cli_candidates(cmake_shapes_root, "asan", 8),
+              "cli_candidates: install keywords between TYPE and FILES still name the product, "
+              "and a dependency's installed tool is not the target's CLI")
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+
 # A same-named product archive beats a sibling wrapper archive at the same
 # depth. The CMake project identity, not an arbitrary operator slug, supplies
 # the name; punctuation is intentionally insignificant.

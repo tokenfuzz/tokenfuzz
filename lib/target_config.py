@@ -1487,16 +1487,71 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     return _pick_shared_lib(san_dir, root)
 
 
+def _cmake_installed_build_executables(san_dir: Path) -> "list[Path] | None":
+    """Executables CMake's generated install plan publishes from this build.
+
+    ``None`` means no generated install metadata exists, so callers may use
+    source-manifest heuristics. An empty list is an authoritative result: the
+    project installs no executable. Generated metadata has resolved CMake
+    variables and target types, so it distinguishes product CLIs from test and
+    benchmark executables without project-specific filename rules.
+    """
+    scripts = _find_under(san_dir, name="cmake_install.cmake")
+    if not scripts:
+        return None
+    # CMake writes `TYPE <kind>` and `FILES` on one line, with OPTIONAL,
+    # MESSAGE_*, PERMISSIONS and RENAME allowed between them, so the span
+    # between the two is skipped rather than assumed empty.
+    installed_files = re.compile(
+        r"\bTYPE\s+EXECUTABLE\b[^\n]*?\bFILES\s+"
+        r"(?P<files>(?:\"[^\"\r\n]+\"\s*)+)",
+        re.IGNORECASE,
+    )
+    found: list[Path] = []
+    seen: set[str] = set()
+    read_any = False
+    for script in scripts:
+        try:
+            text = script.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        read_any = True
+        for match in installed_files.finditer(text):
+            for value in re.findall(r'"([^"\r\n]+)"', match.group("files")):
+                if "$" in value:
+                    continue
+                candidate = Path(value)
+                if not candidate.is_absolute():
+                    candidate = san_dir / candidate
+                # Re-anchor on san_dir: the script records the absolute path
+                # configure-time saw, and callers name artifacts relative to
+                # the tree they are scanning.
+                try:
+                    relative = candidate.resolve().relative_to(
+                        san_dir.resolve()
+                    )
+                except (OSError, ValueError):
+                    continue
+                candidate = san_dir / relative
+                if _is_aux_build_path(candidate, san_dir):
+                    continue
+                key = str(candidate)
+                if key not in seen:
+                    seen.add(key)
+                    found.append(candidate)
+    return found if read_any else None
+
+
 def _cli_candidates(san_dir: Path, root: Path, build_system: str,
                     sanitizer: str, limit: int) -> list[str]:
     """Up to `limit` instrumented CLI executables under `san_dir` (a
-    build-<san>/ tree), best first: the CLI names the build manifests
-    declare, else — only when those match nothing — the instrumented
-    executables that are not a shared library, object file, or
-    build-system-internal artifact (CMakeFiles/ compiler probes, test
-    helpers). Empty when the build ships no CLI: a library-only or
-    header-only target. The aux-dir prune is what stops a CMake compiler
-    probe (CMakeDetermineCompilerABI_C.bin) being mistaken for the tool.
+    build-<san>/ tree), best first: products in generated install metadata,
+    then CLI names the source manifests declare, else the instrumented
+    executables that are not a shared library, object file, or build-system
+    internal artifact (CMakeFiles/ compiler probes, test helpers). Empty when
+    the build ships no CLI: a library-only or header-only target. The aux-dir
+    prune is what stops a CMake compiler probe
+    (CMakeDetermineCompilerABI_C.bin) being mistaken for the tool.
 
     The manifest pass is kept exclusive because the free scan cannot tell
     a project's own tool from the test drivers and benchmarks beside it —
@@ -1515,6 +1570,25 @@ def _cli_candidates(san_dir: Path, root: Path, build_system: str,
         if rel not in found:
             found.append(rel)
         return len(found) >= limit
+
+    # CMake's generated install plan is stronger than source scraping: target
+    # types and computed names have already been resolved. When the project
+    # publishes a linkable library but no executable, it is an API target;
+    # scanning the remaining build products would select unit tests,
+    # benchmarks, or maintenance utilities as a fake byte-input runner. A
+    # CLI-only project still falls through so a missing install() rule cannot
+    # make its sole execution route disappear.
+    if build_system == "cmake":
+        installed = _cmake_installed_build_executables(san_dir)
+        if installed is not None:
+            for path in installed:
+                if (
+                    path.is_file() and os.access(path, os.X_OK)
+                    and _binary_uses_sanitizer(path, sanitizer) and take(path)
+                ):
+                    return found
+            if found or _detect_sanitizer_lib(san_dir, root):
+                return found
 
     declared, complete = declared_cli_extraction(root, build_system)
     for cand_name in declared:
