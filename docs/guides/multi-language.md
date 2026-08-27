@@ -43,7 +43,7 @@ Opt into `race` or another sanitizer by editing
 | C / C++ | `-fsanitize=address` / `undefined` / `memory` / `thread` | `asan`, `ubsan`, `msan`, `tsan` |
 | Rust | `RUSTFLAGS="-Z sanitizer=address"` (nightly) | `asan`; also `tsan` and `msan` on supported targets |
 | Go | `go build -race` | `race` |
-| Swift | `swift run -Xswiftc -sanitize={SWIFT_SANITIZER}` | `asan`, `ubsan`, `tsan` |
+| Swift | `swift run --disable-sandbox --skip-build --scratch-path … -Xswiftc -sanitize={SWIFT_SANITIZER}` | `asan`, `ubsan`, `tsan` |
 | Java / JVM | None for JVM code; a JNI library can be built with ASan and driven separately | none for the JVM; rely on `crash_patterns` |
 | Python | `PYTHONMALLOC=malloc` plus CPython-ASan for C extensions | optional `asan` for native extensions |
 | Node / V8 | `--abort-on-uncaught-exception`; native modules can link ASan | optional `asan` for native add-ons |
@@ -90,7 +90,7 @@ The other ecosystems differ only in the `[runner]` fields:
 | Python | `python` | `python3` | `["{TESTCASE}"]` | `PYTHONDEVMODE=1` |
 | Go | `go` | `go` | `["run", "{TESTCASE}"]` | `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
 | Rust | `cargo` | `cargo` | `["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]` | `CARGO_HOME={TARGET_ROOT}/.audit/cargo-home`, `CARGO_NET_OFFLINE=true` |
-| Swift | `swift` | `swift` | `["run", "--quiet", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]` | — |
+| Swift | `swift` | `swift` | `["run", "--quiet", "--disable-sandbox", "--skip-build", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--scratch-path", "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]` | — |
 | Ruby | `bundler` | `ruby` | `["{TESTCASE}"]` | `RUBYLIB={TARGET_ROOT}/lib` |
 | Java / JVM | `maven` or `gradle` | `java` | `["{TESTCASE}"]` | — |
 | Kotlin | `kotlin` | `kotlinc` | `["-script", "{TESTCASE}"]` | — |
@@ -98,6 +98,17 @@ The other ecosystems differ only in the `[runner]` fields:
 | PHP | `composer` | `php` | `["{TESTCASE}"]` | — |
 | R | `rlang` | `Rscript` | `["{TESTCASE}"]` | target-local `R_LIBS_USER` |
 | Perl | `perl` | `perl` | `["{TESTCASE}"]` | `PERL5LIB={TARGET_ROOT}/lib` |
+
+For Swift, audit preflight builds every enabled release sanitizer configuration
+whose route uses the Swift runner with `--skip-build`, each in
+`.audit/swift-build-<sanitizer>`. That keeps compilation out of each testcase's
+15-second execution budget and prevents audits on different sanitizers from
+replacing each other's products. A configured sanitizer binary still owns its
+route and does not pay for an unused Swift build. Preflight builds only
+`--product <name>`, where `<name>` is the executable `[runner].args` names before
+`{TESTCASE}` — so unrelated test-support targets stay out of the build, and a
+package whose product is named differently from the slug needs only that one
+edit.
 
 `bin/setup-target` writes the matching starter `[runner]` block for each, and
 `--build` then proves that block reaches the target: it runs one generated

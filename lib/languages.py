@@ -382,9 +382,11 @@ func main() {
         # active sanitizer slug (asan -> address, ubsan -> undefined, tsan ->
         # thread).
         runner_args=(
-            "run", "--quiet", "-c", "release",
+            "run", "--quiet", "--disable-sandbox", "--skip-build",
+            "-c", "release",
             "-Xswiftc", "-sanitize={SWIFT_SANITIZER}",
             "-Xswiftc", "-O",
+            "--scratch-path", "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}",
             "--package-path", "{TARGET_ROOT}",
             "{TARGET_SLUG}", "{TESTCASE}",
         ),
@@ -394,10 +396,14 @@ func main() {
             _TSAN_BANNER,
         ),
         # Release config (`-c release` strips Swift debug asserts and turns on
-        # optimizer). Sanitizer-specific compilation happens through the runner
-        # so probes can select asan, ubsan, or tsan without rewriting target.toml.
+        # optimization). Runner preflight builds the selected sanitizer once in
+        # its own scratch tree; probes reuse that product without putting
+        # SwiftPM work inside the testcase timeout.
         bootstrap_cmds=(
-            ("swift", "build", "-c", "release", "-Xswiftc", "-O"),
+            (
+                "swift", "build", "--disable-sandbox", "-c", "release",
+                "-Xswiftc", "-O",
+            ),
         ),
         bootstrap_manifests=("Package.swift",),
         fuzz_backends=("asan", "tsan", "ubsan", "libfuzzer"),
@@ -873,6 +879,37 @@ def for_name(name: str) -> Optional[Language]:
 def for_build_system(slug: str) -> Optional[Language]:
     """Return the language that owns `slug` as one of its build_systems."""
     return _by_build_system().get(slug)
+
+
+def runner_preflight_args(
+    language: Language, configured_args: Sequence[str],
+) -> tuple[str, ...]:
+    """Build argv matching a configured runner route, or no preparation.
+
+    Swift's ``--skip-build`` route is the only registry runner that requires a
+    prepared product. Derive its build prefix from the operator-visible run
+    argv so target-local compiler flags and scratch paths cannot drift from
+    the binary probes execute.
+    """
+    values = tuple(str(value) for value in configured_args)
+    if language.name != "swift" or "--skip-build" not in values:
+        return ()
+    if not values or values[0] != "run" or values.count("{TESTCASE}") != 1:
+        raise ValueError(
+            "Swift [runner].args with --skip-build must be `run <options> "
+            "<product> {TESTCASE}`"
+        )
+    testcase_index = values.index("{TESTCASE}")
+    if testcase_index < 2 or values[testcase_index - 1].startswith("-"):
+        raise ValueError(
+            "Swift [runner].args must name the executable product immediately "
+            "before {TESTCASE}"
+        )
+    return (
+        "build",
+        *(value for value in values[1:testcase_index - 1] if value != "--skip-build"),
+        "--product", values[testcase_index - 1],
+    )
 
 
 def for_harness_ext(ext: str) -> Optional[Language]:

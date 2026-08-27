@@ -44,6 +44,7 @@ import strategies  # noqa: E402
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
 import crash_bundle  # noqa: E402
 import report_identity  # noqa: E402
+import sanitizer_run  # noqa: E402  (runtime sys.path adjustment)
 import sanitizer as sanitizer_policy  # noqa: E402
 import stack_frames  # noqa: E402  (runtime sys.path adjustment)
 import symbol_names  # noqa: E402  (runtime sys.path adjustment)
@@ -2933,6 +2934,7 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
                                    recorded_env_options: str = "",
                                    local_src: str = "",
                                    cli_args: str = '"$testcase"',
+                                   runner_program: str = "",
                                    audit_build_script: str = "") -> None:
     meta = sanitizer_meta(sanitizer)
     if build_system == "swift" and not san_bin_rel:
@@ -2946,7 +2948,10 @@ def write_cli_with_input_template(out: Path, *, build_system: str, upstream_url:
                 __INPUT_NAME__=input_name,
                 __SANITIZER_LABEL__=meta["label"],
                 __SWIFT_SANITIZER__=meta["flag"],
-                __SWIFT_EXECUTABLE__=shq(slug),
+                # The recorded invocation names the executable it ran; the
+                # slug only matches it when the target is not nested and the
+                # operator never renamed the product.
+                __SWIFT_EXECUTABLE__=shq(runner_program or slug),
                 __SANITIZER_ENV_BLOCK__=sanitizer_runtime_env_block(
                     sanitizer, extra_options, mode, recorded_env_options
                 ),
@@ -3647,6 +3652,7 @@ def main(argv: list[str]) -> int:
                 mode=run_mode or "generic",
                 recorded_env_options=recorded_env_options,
                 local_src=local_src, cli_args=cli_args,
+                runner_program=sanitizer_run.runner_program_arg(repro_args),
                 audit_build_script=audit_build_script,
             )
         else:

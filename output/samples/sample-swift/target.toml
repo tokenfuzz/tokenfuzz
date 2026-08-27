@@ -21,9 +21,10 @@ enabled = ["asan"]
 [runner]
 bin  = "swift"
 args = [
-  "run", "--quiet", "-c", "release",
+  "run", "--quiet", "--disable-sandbox", "--skip-build", "-c", "release",
   "-Xswiftc", "-sanitize={SWIFT_SANITIZER}",
   "-Xswiftc", "-O",
+  "--scratch-path", "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}",
   "--package-path", "{TARGET_ROOT}",
   "sample-swift", "{TESTCASE}",
 ]

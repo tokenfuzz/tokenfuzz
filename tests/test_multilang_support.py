@@ -103,7 +103,12 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertIn("CARGO_HOME={TARGET_ROOT}/.audit/cargo-home", cargo_env)
         self.assertIn("CARGO_NET_OFFLINE=true", cargo_env)
         swift_args = target_config.language_runner_defaults("swift")["args"]
-        for token in ("--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "-sanitize={SWIFT_SANITIZER}"):
+        for token in (
+            "--disable-sandbox", "--skip-build", "--package-path", "{TARGET_ROOT}",
+            "--scratch-path",
+            "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}",
+            "{TARGET_SLUG}", "-sanitize={SWIFT_SANITIZER}",
+        ):
             self.assertIn(token, swift_args)
 
         fake_home = self.root / "jdk"

@@ -315,10 +315,13 @@ crash_patterns = []
 
 ```toml
 # Swift package — runner compiles with the selected Swift sanitizer
-# (`address`, `undefined`, or `thread`).
+# (`address`, `undefined`, or `thread`). The argument before `{TESTCASE}`
+# names the executable product to run, and is what audit preflight builds;
+# replace `{TARGET_SLUG}` with the product's own name whenever the two
+# differ, which they always do under a nested slug.
 [runner]
 bin            = "swift"
-args           = ["run", "--quiet", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]
+args           = ["run", "--quiet", "--disable-sandbox", "--skip-build", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--scratch-path", "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]
 env            = []
 crash_patterns = []
 ```

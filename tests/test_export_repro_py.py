@@ -636,6 +636,34 @@ assert_in('sample-swift-asan "$testcase"', swift_repro_text,
 assert_not_in("ASan binary not configured", swift_repro_text,
               "Swift export does not emit missing-binary stub")
 
+# A nested slug never names the package product, so the recorded invocation
+# decides which executable the maintainer's reproducer runs.
+er.write_cli_with_input_template(
+    swift_repro,
+    build_system="swift",
+    upstream_url="FILL_ME",
+    pinned_rev="HEAD",
+    slug="samples/sample-swift",
+    san_bin_rel="",
+    cmake_target="",
+    input_name="input.txt",
+    sanitizer="asan",
+    runner_program=er.sanitizer_run.runner_program_arg(
+        ["run", "--quiet", "sample-swift", "{TESTCASE}"]
+    ),
+)
+swift_nested_text = swift_repro.read_text(encoding="utf-8")
+assert_in('sample-swift "$testcase"', swift_nested_text,
+          "Swift export runs the recorded executable, not the nested slug")
+assert_not_in("samples/sample-swift \"$testcase\"", swift_nested_text,
+              "Swift export does not pass a nested slug as the executable")
+assert_eq("", er.sanitizer_run.runner_program_arg(["{TESTCASE}"]),
+          "runner_program_arg: args that launch no separate program name none")
+assert_eq("", er.sanitizer_run.runner_program_arg([]),
+          "runner_program_arg: empty args name no program")
+assert_eq("", er.sanitizer_run.runner_program_arg(["run", "--input", "{TESTCASE}"]),
+          "runner_program_arg: an option before the testcase names no program")
+
 
 # 3. ext_of
 assert_eq("html", er.ext_of("foo.html"), "ext_of: .html")

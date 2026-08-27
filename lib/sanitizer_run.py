@@ -64,6 +64,29 @@ def configured_runner_cwd(
     return None
 
 
+def runner_program_arg(args) -> str:
+    """The argument launcher-style runner args select as the program, or "".
+
+    A launcher that takes both a program and an input -- `swift run [options]
+    <executable> <testcase>` -- names what it starts in the argument before the
+    testcase. That name is not the slug and not derivable from it: a target
+    under a nested slug never matches its package's product name, and an
+    operator may point the runner at a differently named executable.
+
+    An option in that position means these args name no program, so a caller
+    keeps its own default rather than running a flag as one. Configuration that
+    must name a program -- `languages.runner_preflight_args` -- rejects the
+    same shape loudly instead of falling back.
+    """
+    values = [str(value) for value in args or ()]
+    if "{TESTCASE}" not in values:
+        return ""
+    index = values.index("{TESTCASE}")
+    if index < 1 or values[index - 1].startswith("-"):
+        return ""
+    return values[index - 1]
+
+
 def expand_runner_value(
     value: str,
     config,

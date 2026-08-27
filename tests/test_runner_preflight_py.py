@@ -32,7 +32,7 @@ def executable(path: Path) -> None:
 class RunnerPreflightTests(unittest.TestCase):
     def config(self, root: Path, runner: str, *, findings_only: bool = True):
         return target_config.Config(
-            target_root=str(root), runner_bin=runner,
+            target_root=str(root), slug="sampleproj", runner_bin=runner,
             sanitizers_explicitly_disabled=findings_only,
         )
 
@@ -67,6 +67,137 @@ class RunnerPreflightTests(unittest.TestCase):
                  mock.patch.object(runner_preflight, "run_timeout", return_value=failed):
                 with self.assertRaisesRegex(RuntimeError, "runtime unavailable"):
                     runner_preflight.validate(self.config(root, "java"))
+
+    def test_swift_preflight_builds_the_sanitized_package(self):
+        with tempfile.TemporaryDirectory(prefix="swift-preflight-") as temporary:
+            root = Path(temporary)
+            swift = root / "swift"
+            executable(swift)
+            config = self.config(root, "swift", findings_only=False)
+            config.build_system = "swift"
+            config.sanitizers_enabled = ["asan"]
+            # A nested slug never names the package product, so preflight has
+            # to build what [runner].args select, not what the slug says.
+            config.slug = "samples/sampleproj"
+            config.runner_args = [
+                arg.replace("{TARGET_SLUG}", "sampleproj")
+                for arg in runner_preflight.languages.for_build_system(
+                    "swift"
+                ).runner_args
+            ]
+            failed = SimpleNamespace(
+                returncode=1, stdout=b"SDK does not match this compiler\n",
+            )
+            with mock.patch.object(
+                runner_preflight.shutil, "which", return_value=str(swift),
+            ), mock.patch.object(
+                runner_preflight, "run_timeout",
+                side_effect=[SimpleNamespace(returncode=0, stdout=b"Swift 6\n"), failed],
+            ) as launched:
+                with self.assertRaisesRegex(RuntimeError, "SDK does not match"):
+                    runner_preflight.validate(config)
+            self.assertEqual(
+                [
+                    str(swift), "build", "--quiet", "--disable-sandbox",
+                    "-c", "release", "-Xswiftc", "-sanitize=address",
+                    "-Xswiftc", "-O", "--scratch-path",
+                    str(root / ".audit" / "swift-build-address"),
+                    "--package-path", str(root), "--product", "sampleproj",
+                ],
+                launched.call_args_list[1].args[0],
+            )
+
+    def test_preflight_is_skipped_when_no_program_is_named(self):
+        """A script route without --skip-build prepares itself at execution."""
+        with tempfile.TemporaryDirectory(prefix="swift-noprogram-") as temporary:
+            root = Path(temporary)
+            swift = root / "swift"
+            executable(swift)
+            config = self.config(root, "swift", findings_only=False)
+            config.build_system = "swift"
+            config.sanitizers_enabled = ["asan"]
+            config.runner_args = ["{TESTCASE}"]
+            with mock.patch.object(
+                runner_preflight.shutil, "which", return_value=str(swift),
+            ), mock.patch.object(
+                runner_preflight, "run_timeout",
+                return_value=SimpleNamespace(returncode=0, stdout=b"Swift 6\n"),
+            ) as launched, mock.patch("runner_canary.check", return_value=""):
+                runner_preflight.validate(config)
+            self.assertEqual(1, launched.call_count)
+
+    def test_swift_preflight_preserves_configured_build_flags(self):
+        language = runner_preflight.languages.for_build_system("swift")
+        self.assertEqual(
+            (
+                "build", "-c", "debug", "-Xswiftc", "-DCUSTOM",
+                "--scratch-path", "{TARGET_ROOT}/.audit/custom",
+                "--package-path", "{TARGET_ROOT}",
+                "--product", "sampleproj",
+            ),
+            runner_preflight.languages.runner_preflight_args(
+                language,
+                (
+                    "run", "--skip-build", "-c", "debug", "-Xswiftc",
+                    "-DCUSTOM", "--scratch-path", "{TARGET_ROOT}/.audit/custom",
+                    "--package-path", "{TARGET_ROOT}", "sampleproj", "{TESTCASE}",
+                ),
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "immediately before"):
+            runner_preflight.languages.runner_preflight_args(
+                language,
+                ("run", "--skip-build", "sampleproj", "--input", "{TESTCASE}"),
+            )
+
+    def test_swift_preflight_builds_every_enabled_sanitizer(self):
+        with tempfile.TemporaryDirectory(prefix="swift-multisan-preflight-") as temporary:
+            root = Path(temporary)
+            swift = root / "swift"
+            executable(swift)
+            config = self.config(root, "swift", findings_only=False)
+            config.build_system = "swift"
+            config.sanitizers_enabled = ["asan", "ubsan"]
+            config.runner_args = [
+                arg.replace("{TARGET_SLUG}", "sampleproj")
+                for arg in runner_preflight.languages.for_build_system(
+                    "swift"
+                ).runner_args
+            ]
+            completed = SimpleNamespace(returncode=0, stdout=b"ok\n")
+            with mock.patch.object(
+                runner_preflight.shutil, "which", return_value=str(swift),
+            ), mock.patch.object(
+                runner_preflight, "run_timeout", return_value=completed,
+            ) as launched, mock.patch("runner_canary.check", return_value=""):
+                runner_preflight.validate(config)
+            prepares = [call.args[0] for call in launched.call_args_list[1:]]
+            self.assertEqual(2, len(prepares))
+            self.assertIn("-sanitize=address", prepares[0])
+            self.assertIn(str(root / ".audit" / "swift-build-address"), prepares[0])
+            self.assertIn("-sanitize=undefined", prepares[1])
+            self.assertIn(str(root / ".audit" / "swift-build-undefined"), prepares[1])
+
+    def test_swift_preflight_skips_a_sanitizer_owned_route(self):
+        with tempfile.TemporaryDirectory(prefix="swift-native-route-") as temporary:
+            root = Path(temporary)
+            swift = root / "swift"
+            executable(swift)
+            config = self.config(root, "swift", findings_only=False)
+            config.build_system = "swift"
+            config.sanitizers_enabled = ["asan"]
+            config.asan_bin = "build-asan/sampleproj"
+            config.runner_args = [
+                "run", "--skip-build", "sampleproj", "{TESTCASE}",
+            ]
+            completed = SimpleNamespace(returncode=0, stdout=b"Swift 6\n")
+            with mock.patch.object(
+                runner_preflight.shutil, "which", return_value=str(swift),
+            ), mock.patch.object(
+                runner_preflight, "run_timeout", return_value=completed,
+            ) as launched, mock.patch("runner_canary.check", return_value=""):
+                runner_preflight.validate(config)
+            self.assertEqual(1, launched.call_count)
 
     def test_startup_probe_reports_only_pre_main_failures(self):
         for diagnostic in (

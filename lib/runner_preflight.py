@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+import languages
 import sanitizer_run
 from timeout import capture_timeout, run_timeout
 
@@ -52,6 +53,7 @@ _STARTUP_FAILURE_RE = re.compile(
 )
 _STARTUP_PROBE_SECONDS = 3
 _STARTUP_PROBE_BYTES = 16384
+_TARGET_CONTEXT_SECONDS = 600
 _RUN_SCOPED_ENV_TOKENS = ("{TESTCASE}", "{RESULTS_DIR}", "{PROFILE}")
 
 
@@ -300,16 +302,32 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
         return None
 
     binary = resolve(config)
+    sanitizer_names = (
+        ["runner"]
+        if config.sanitizers_explicitly_disabled
+        else list(dict.fromkeys(config.sanitizers_enabled or ["asan"]))
+    )
+    sanitizer_name = sanitizer_names[0]
     version_args = _VERSION_ARGS.get(Path(raw).name)
+    language = languages.for_build_system(getattr(config, "build_system", ""))
+    preflight_args = (
+        languages.runner_preflight_args(language, config.runner_args)
+        if language is not None and Path(raw).name == language.runner_bin
+        else ()
+    )
+    # Only runners with a check expand their environment: a custom executable
+    # carrying a run-scoped token cannot be expanded outside a real run.
+    environments: dict[str, dict[str, str]] = {}
+
+    def environment_for(name: str) -> dict[str, str]:
+        if name not in environments:
+            environments[name] = runner_environment(config, name)
+        return environments[name]
+
     if version_args:
-        sanitizer_name = (
-            "runner"
-            if config.sanitizers_explicitly_disabled
-            else (config.sanitizers_enabled[0] if config.sanitizers_enabled else "asan")
-        )
         completed = run_timeout(
             [str(binary), *version_args], 10,
-            env=runner_environment(config, sanitizer_name),
+            env=environment_for(sanitizer_name),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
@@ -320,6 +338,32 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
                 else f"exited {completed.returncode}: {_output_summary(completed.stdout)}"
             )
             raise RuntimeError(f"configured [runner].bin failed startup check `{command}`: {reason}")
+
+    # Prepare exactly what this config will run for every runner-owned route.
+    for selected in sanitizer_names if preflight_args else ():
+        if selected not in {"runner", "race"} and config.sanitizer_bin(selected):
+            continue
+        prepare = [str(binary), *(
+            sanitizer_run.expand_runner_value(
+                arg, config, selected,
+            )
+            for arg in preflight_args
+        )]
+        completed = run_timeout(
+            prepare, _TARGET_CONTEXT_SECONDS, cwd=config.target_root,
+            env=environment_for(selected),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        if completed.returncode != 0:
+            reason = (
+                f"timed out after {_TARGET_CONTEXT_SECONDS}s"
+                if completed.returncode == 124
+                else f"exited {completed.returncode}: {_output_summary(completed.stdout)}"
+            )
+            raise RuntimeError(
+                f"configured [runner].bin cannot prepare the {selected} target "
+                f"context `{' '.join(prepare)}`: {reason}"
+            )
 
     # Starting is not reaching: a runtime that runs but resolves an installed
     # copy of the audited package audits code the operator never chose.
