@@ -1437,13 +1437,47 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
         return ""
     archives = [a for a in _find_under(san_dir, name=None)
                 if a.suffix == ".a" and not _is_aux_build_path(a, san_dir)]
-    # Shallowest first. `_find_under` walks alphabetically depth-first, so a
-    # nested helper whose directory sorts first otherwise beats the aggregate
-    # archive many build systems place at their output root. This remains a
-    # generated default, not proof of product identity; refresh keeps any
-    # usable operator-selected library. A stable sort preserves the existing
-    # deterministic order within one level.
-    archives.sort(key=lambda archive: len(archive.relative_to(san_dir).parts))
+    # A same-named product archive is stronger evidence than alphabetical
+    # order when a build emits several public libraries (for example a core
+    # C++ library beside a C wrapper). Normalize punctuation so target slugs
+    # such as c-ares still match conventional library names such as cares.
+    project_name = re.sub(r"[^a-z0-9]", "", root.name.lower())
+    # The operator may choose an arbitrary target slug. CMake's cache carries
+    # the project's own resolved identity, so prefer it when available rather
+    # than making archive selection depend on that slug.
+    try:
+        cache_lines = (san_dir / "CMakeCache.txt").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+    except OSError:
+        cache_lines = []
+    for line in cache_lines:
+        key, separator, value = line.partition("=")
+        if separator and key.partition(":")[0] == "CMAKE_PROJECT_NAME":
+            # A half-written cache can carry the key with no value; that names
+            # nothing, so the directory name stays the better answer.
+            if value.strip():
+                project_name = re.sub(r"[^a-z0-9]", "", value.lower())
+            break
+
+    def archive_name(archive: Path) -> str:
+        name = archive.name
+        if name.startswith("lib"):
+            name = name[3:]
+        if name.endswith(".a"):
+            name = name[:-2]
+        return re.sub(r"[^a-z0-9]", "", name.lower())
+
+    # Then shallowest first. `_find_under` walks alphabetically depth-first,
+    # so a nested helper whose directory sorts first otherwise beats the
+    # aggregate archive many build systems place at their output root. This
+    # remains a generated default, not proof of product identity; refresh
+    # keeps any usable operator-selected library. A stable sort preserves the
+    # existing deterministic order within one level.
+    archives.sort(key=lambda archive: (
+        archive_name(archive) != project_name,
+        len(archive.relative_to(san_dir).parts),
+    ))
     for a in archives[:3]:
         if "posix" in a.name:
             continue

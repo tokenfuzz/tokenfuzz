@@ -1489,6 +1489,38 @@ assert_eq(["build-asan/aaa_test_driver", "build-asan/wcat", "build-asan/wtool"],
           _scanned,
           "cli_candidates: falls back to the free scan when no manifest name matches")
 
+# A same-named product archive beats a sibling wrapper archive at the same
+# depth. The CMake project identity, not an arbitrary operator slug, supplies
+# the name; punctuation is intentionally insignificant.
+named_lib_root = TEST_TMPDIR / "audit-alias"
+(named_lib_root / "build-asan").mkdir(parents=True)
+(named_lib_root / "build-asan" / "CMakeCache.txt").write_text(
+    "CMAKE_PROJECT_NAME:STATIC=named-lib\n", encoding="utf-8",
+)
+(named_lib_root / "build-asan" / "libaudit-alias.a").write_bytes(b"!<arch>\n")
+(named_lib_root / "build-asan" / "libnamed-lib-c.a").write_bytes(b"!<arch>\n")
+(named_lib_root / "build-asan" / "libnamedlib.a").write_bytes(b"!<arch>\n")
+assert_eq(
+    "build-asan/libnamedlib.a",
+    tc.detect_sanitizer_build_artifacts(named_lib_root, "asan")[1],
+    "detect_sanitizer_build_artifacts: project-named core archive beats slug and wrapper siblings",
+)
+# A half-written cache carries the key with no value. That names nothing, so
+# the directory name must still decide; the archive it names sorts last here,
+# so an empty override would be visible.
+blank_cache_root = TEST_TMPDIR / "wtool-core"
+(blank_cache_root / "build-asan").mkdir(parents=True)
+(blank_cache_root / "build-asan" / "CMakeCache.txt").write_text(
+    "CMAKE_PROJECT_NAME:STATIC=\n", encoding="utf-8",
+)
+(blank_cache_root / "build-asan" / "libaaa.a").write_bytes(b"!<arch>\n")
+(blank_cache_root / "build-asan" / "libwtoolcore.a").write_bytes(b"!<arch>\n")
+assert_eq(
+    "build-asan/libwtoolcore.a",
+    tc.detect_sanitizer_build_artifacts(blank_cache_root, "asan")[1],
+    "detect_sanitizer_build_artifacts: a value-less cache key keeps the directory name",
+)
+
 
 # ─── 11. Fallback parser works without tomllib ─────────────────────
 
