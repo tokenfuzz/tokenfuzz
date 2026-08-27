@@ -3036,6 +3036,12 @@ def _is_broad_file_card(card: dict) -> bool:
     return str(card.get("kind", "")) == "ranked-source"
 
 
+#: Prefix `record_artifact_rejection` stamps on a hypothesis it discards. The
+#: note is the only durable record that *triage* closed the row rather than the
+#: agent, so reconsideration and runtime feedback both read it back.
+TRIAGE_REJECTED_NOTE = "Triage rejected "
+
+
 def _artifact_status_id(value: str) -> str:
     normalized = (value or "").strip().upper()
     match = re.match(r"^(?:CRASH|FIND)-\d+(?:-\d+)?", normalized)
@@ -3045,7 +3051,7 @@ def _artifact_status_id(value: str) -> str:
 def record_artifact_rejection(
     results_dir: Path, artifact_name: str, reason: str, *, category: str = "",
 ) -> list[dict]:
-    """Replace accepted-artifact statuses with their final rejected disposition.
+    """Replace filed-artifact statuses with their final rejected disposition.
 
     Triage rejects one concrete artifact, not every hypothesis on its work card.
     Keeping this update artifact-scoped prevents a rejected filing from retaining
@@ -3075,7 +3081,7 @@ def record_artifact_rejection(
                 continue
             row["status"] = "DISCARDED"
             row["updated_at"] = now_iso()
-            row["note"] = f"Triage rejected {previous}: {reason}".strip()
+            row["note"] = f"{TRIAGE_REJECTED_NOTE}{previous}: {reason}".strip()
             if category:
                 row["rejected_category"] = category
             changed.append(dict(row))
@@ -3096,7 +3102,7 @@ def record_artifact_reconsideration(
     if not artifact_id:
         return []
     rejected_note = re.compile(
-        rf"^Triage rejected\s+({re.escape(artifact_id)}(?:-\d+)?)\s*:",
+        rf"^{TRIAGE_REJECTED_NOTE.strip()}\s+({re.escape(artifact_id)}(?:-\d+)?)\s*:",
         re.IGNORECASE,
     )
 
@@ -6008,16 +6014,26 @@ def runtime_feedback(
         state_rows = [r for r in state_rows if r.get("id", "") == hypothesis_id]
     elif card_id:
         state_rows = [r for r in state_rows if r.get("card_id", "") == card_id]
-    accepted_artifacts = {
-        artifact_id
+    rejected_hypotheses = {
+        str(row.get("id", "")): str(row.get("note", ""))[len(TRIAGE_REJECTED_NOTE):]
         for row in state_rows
-        if (artifact_id := _artifact_status_id(str(row.get("status", "")))).startswith(
-            ("CRASH-", "FIND-")
-        )
+        if str(row.get("status", "")).upper() == "DISCARDED"
+        and str(row.get("note", "")).startswith(TRIAGE_REJECTED_NOTE)
     }
+    # Hypothesis id -> the artifact its status names, for every filing
+    # structured state records. Both the ids and the artifacts are read back
+    # below, and one pass cannot admit a row that names no artifact.
+    filed = {
+        str(row.get("id", "")): artifact
+        for row in state_rows
+        if (artifact := _artifact_status_id(
+            str(row.get("status", ""))
+        )).startswith(("CRASH-", "FIND-"))
+    }
+    filed_artifacts = set(filed.values())
 
     out = ["scope|recent_verdicts|runtime_signals|diagnosis|feedback"]
-    if not rows and not accepted_artifacts:
+    if not rows and not filed_artifacts:
         out.append(
             f"{scope}|none|none|no-runtime-evidence|"
             "follow the assigned card's Next action"
@@ -6026,13 +6042,34 @@ def runtime_feedback(
 
     verdict_counts: dict[str, int] = {}
     signal_counts: dict[str, int] = {}
+    candidate_verdicts = 0
+    rejected_verdicts = 0
+    rejection = ""
     for row in rows:
         verdict = (row.get("verdict") or "UNKNOWN").strip().upper() or "UNKNOWN"
         verdict_counts[verdict] = verdict_counts.get(verdict, 0) + 1
+        if (
+            verdict in {"CRASH", "FIND"}
+            and str(row.get("hypothesis_id", "")) in rejected_hypotheses
+        ):
+            rejected_verdicts += 1
+            # Rows are newest-first, so the first match is the latest word.
+            rejection = rejection or rejected_hypotheses[
+                str(row.get("hypothesis_id", ""))
+            ]
+        elif (
+            verdict in {"CRASH", "FIND"}
+            and str(row.get("hypothesis_id", "")) not in filed
+        ):
+            candidate_verdicts += 1
         for signal in _runtime_row_signals(ctx, row):
             signal_counts[signal] = signal_counts.get(signal, 0) + 1
-    if accepted_artifacts:
-        signal_counts["accepted-artifact"] = len(accepted_artifacts)
+    if rejected_verdicts:
+        signal_counts["triage-rejected-run"] = rejected_verdicts
+    if candidate_verdicts:
+        signal_counts["unfiled-artifact-run"] = candidate_verdicts
+    if filed_artifacts:
+        signal_counts["filed-artifact"] = len(filed_artifacts)
 
     verdict_text = ", ".join(
         f"{verdict}={verdict_counts[verdict]}"
@@ -6043,10 +6080,16 @@ def runtime_feedback(
         for signal in sorted(signal_counts)
     ) or "none"
     diagnosis, feedback = _runtime_feedback_decision(
-        verdict_counts, sum(verdict_counts.values()), signal_counts
+        verdict_counts, sum(verdict_counts.values()), signal_counts, rejection,
     )
     out.append(f"{scope}|{verdict_text}|{signal_text}|{diagnosis}|{feedback}")
     return "\n".join(out) + "\n"
+
+
+def _one_line(value: str, limit: int) -> str:
+    """One digest cell's worth of free text: no separators, bounded length."""
+    text = " ".join(str(value).replace("|", "/").split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 def _runtime_row_signals(ctx: Context, row: dict) -> list[str]:
@@ -6103,11 +6146,35 @@ def _runtime_feedback_decision(
     verdicts: dict[str, int],
     total: int,
     signals: dict[str, int],
+    rejection: str = "",
 ) -> tuple[str, str]:
-    if any(v in verdicts for v in ("CRASH", "FIND")) or signals.get("accepted-artifact", 0):
+    recorded = sum(verdicts.get(value, 0) for value in ("CRASH", "FIND"))
+    rejected = signals.get("triage-rejected-run", 0)
+    filed = signals.get("filed-artifact", 0)
+    if recorded and rejected >= recorded and not filed:
+        # Carry triage's own words. Without them "rejected" is only
+        # discouragement: the reason separates a shape worth abandoning from
+        # one worth re-filing with the evidence it was missing, so name both
+        # exits. It lives nowhere else the agent reads.
         return (
-            "productive-artifact",
-            "an accepted artifact exists on this scope; do not re-probe a recorded shape, and cluster only distinct mechanisms nearby",
+            "artifact-rejected",
+            "triage rejected every recent crash or finding shown on this scope"
+            + (f" ({_one_line(rejection, 160)})" if rejection else "")
+            + "; do not re-file the same shape on the same evidence — supply what that reason names, or investigate a different boundary or mechanism",
+        )
+    if signals.get("unfiled-artifact-run", 0) or (recorded and not filed):
+        # A one-run crash is evidence to confirm, not an artifact: bin/probe
+        # records the verdict before its five-run filing gate. A scope may also
+        # show a sibling hypothesis that is already filed, and a broad
+        # "recorded" answer would strand the unfiled one before that gate.
+        return (
+            "artifact-candidate",
+            "a crash or finding verdict exists without a filed artifact status; keep that hypothesis and card active, complete the required confirmation or report, and update structured state before moving on",
+        )
+    if filed:
+        return (
+            "artifact-recorded",
+            "a crash or finding is recorded on this scope; do not re-probe a recorded shape, and cluster only distinct mechanisms nearby; acceptance remains gated",
         )
     if verdicts.get("PROPERTY", 0):
         return (

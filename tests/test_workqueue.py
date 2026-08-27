@@ -1611,7 +1611,9 @@ class WorkQueueTests(unittest.TestCase):
         recent_runs = workqueue.recent_runs(self.ctx, limit=2, agent="1")
         self.assertEqual(len(recent_runs.strip().splitlines()), 3)
         feedback = workqueue.runtime_feedback(self.ctx, agent="1", card_id="WORK-A2")
-        self.assertIn("productive-artifact", feedback)
+        self.assertIn("artifact-candidate", feedback)
+        self.assertIn("complete the required confirmation or report", feedback)
+        self.assertNotIn("do not re-probe a recorded shape", feedback)
         yields = {row["strategy"]: row for row in workqueue.strategy_yield(self.ctx)["strategies"]}
         self.assertEqual(yields["S8"]["runs"], 2)
         self.assertEqual(yields["S8"]["crash"], 1)
@@ -1634,7 +1636,7 @@ class WorkQueueTests(unittest.TestCase):
             hypothesis="accepted size amplification",
         )
         self.add_run(
-            card_id="PATCH-HOT", hypothesis_id="H-KEPT", verdict="CLEAN",
+            card_id="PATCH-HOT", hypothesis_id="H-KEPT", verdict="CRASH",
         )
         # Newer unrelated rows used to displace the assigned card's prior
         # conclusion from the five-row global digest.
@@ -1652,9 +1654,52 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIn("H-KEPT", resume)
         self.assertNotIn("H-OTHER-5", resume)
         self.assertIn("does not repeat a closed shape", resume)
-        self.assertIn("accepted-artifact=1", resume)
-        self.assertIn("productive-artifact", resume)
+        self.assertIn("filed-artifact=1", resume)
+        self.assertIn("artifact-recorded", resume)
+        self.assertIn("acceptance remains gated", resume)
         self.assertNotIn("CLEAN-only evidence", resume)
+
+        workqueue.record_artifact_rejection(
+            self.results, "FIND-007", "outside the public boundary",
+        )
+        rejected_resume = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S1",
+        )
+        self.assertIn("triage-rejected-run=1", rejected_resume)
+        self.assertIn("artifact-rejected", rejected_resume)
+        self.assertIn("investigate a different boundary or mechanism", rejected_resume)
+        # Triage's own reason, or "rejected" is only discouragement. Both
+        # exits stay open: a rejection for missing evidence is not a reason to
+        # abandon the shape.
+        self.assertIn("(FIND-007: outside the public boundary)", rejected_resume)
+        self.assertIn("supply what that reason names", rejected_resume)
+
+        self.add_hypothesis(
+            hyp_id="H-NEW", card_id="PATCH-HOT", status="DISCARDED",
+            hypothesis="different unresolved boundary",
+        )
+        self.add_run(
+            index=2, card_id="PATCH-HOT", hypothesis_id="H-NEW",
+            verdict="CRASH",
+        )
+        mixed = workqueue.runtime_feedback(
+            self.ctx, agent="1", card_id="PATCH-HOT",
+        )
+        self.assertIn("unfiled-artifact-run=1", mixed)
+        self.assertIn("artifact-candidate", mixed)
+        self.assertNotIn("artifact-rejected|", mixed)
+
+        # A filed sibling must not hide a new one-run crash that still needs
+        # bin/probe --confirm before it can become an artifact.
+        workqueue.update_hypothesis(
+            self.ctx, "H-KEPT", "FIND-007", agent="1",
+        )
+        filed_and_candidate = workqueue.runtime_feedback(
+            self.ctx, agent="1", card_id="PATCH-HOT",
+        )
+        self.assertIn("filed-artifact=1", filed_and_candidate)
+        self.assertIn("unfiled-artifact-run=1", filed_and_candidate)
+        self.assertIn("artifact-candidate", filed_and_candidate)
 
     def test_resume_does_not_hide_other_active_hypotheses(self) -> None:
         self.write_cards([
@@ -1676,6 +1721,16 @@ class WorkQueueTests(unittest.TestCase):
 
         self.assertIn("H-ACTIVE-A", resume)
         self.assertIn("H-ACTIVE-B", resume)
+
+    def test_digest_free_text_stays_one_bounded_cell(self) -> None:
+        """A triage reason is free text landing in a pipe-delimited row."""
+        self.assertEqual(
+            "line one line two / with a separator",
+            workqueue._one_line("line one\nline two | with a separator", 160),
+        )
+        bounded = workqueue._one_line("x" * 400, 160)
+        self.assertEqual(160, len(bounded))
+        self.assertTrue(bounded.endswith("..."))
 
     def test_runtime_feedback_mixed_clean_and_no_exec_is_not_setup_failure(self) -> None:
         verdicts = {"CLEAN": 1, "NO_EXEC": 1}
