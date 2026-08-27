@@ -47,8 +47,8 @@ def configured_runner_cwd(
     generic` invoked by hand, which sends no such answer.
     """
     told = sanitizer.generic_runner_cwd(sanitizer_name, os.environ)
-    if told:
-        return told
+    if told is not None:
+        return told or None
     raw = str(getattr(config, "runner_bin", "") or "").strip() if config else ""
     if not raw:
         return None
@@ -82,7 +82,14 @@ def expand_runner_value(
         "{SANITIZER}": sanitizer_name,
         "{SWIFT_SANITIZER}": swift or "",
         "{TARGET_ROOT}": config.target_root if config else os.environ.get("TARGET_ROOT", ""),
-        "{RESULTS_DIR}": config.results_dir if config else os.environ.get("RESULTS_DIR", ""),
+        # A config parsed straight from target.toml carries no session, so a
+        # blank field must not expand to "" and send caches to the filesystem
+        # root; the active session environment is the answer it lacks.
+        "{RESULTS_DIR}": (
+            config.results_dir
+            if config and config.results_dir
+            else os.environ.get("RESULTS_DIR", "")
+        ),
         "{TARGET_SLUG}": config.slug if config else os.environ.get("TARGET_SLUG", ""),
         "{NULL_DEVICE}": os.devnull,
     }

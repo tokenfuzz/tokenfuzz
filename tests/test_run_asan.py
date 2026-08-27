@@ -66,6 +66,16 @@ class RunAsanTests(unittest.TestCase):
                 "--profile={PROFILE}", None, "asan"
             )
 
+    def test_runner_results_placeholder_uses_the_active_session(self) -> None:
+        config = SimpleNamespace(results_dir="", target_root="", slug="")
+        with mock.patch.dict(os.environ, {"RESULTS_DIR": "/tmp/session-results"}):
+            self.assertEqual(
+                "/tmp/session-results/cache",
+                run_asan.sanitizer_run.expand_runner_value(
+                    "{RESULTS_DIR}/cache", config, "asan",
+                ),
+            )
+
     def test_live_dispatch_defaults_and_overrides(self) -> None:
         with mock.patch.object(run_asan, "options", return_value={}), \
              mock.patch.object(run_asan.sanitizer, "warn_if_disabled"), \
@@ -234,6 +244,31 @@ class RunAsanTests(unittest.TestCase):
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(argv_log.read_text(encoding="utf-8"), "")
+
+    def test_probe_explicit_non_runner_cwd_beats_path_fallback(self) -> None:
+        binary = self.executable("shared-runner", "pass\n")
+        config = SimpleNamespace(
+            runner_bin=str(binary), target_root=str(self.root),
+            resolve_path=lambda value: value,
+        )
+        for sanitizer_name, key in (
+            ("asan", "ASAN_GENERIC_RUNNER_CWD"),
+            ("ubsan", "SANITIZER_GENERIC_RUNNER_CWD"),
+        ):
+            with self.subTest(sanitizer=sanitizer_name):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    self.assertEqual(
+                        run_asan.sanitizer_run.configured_runner_cwd(
+                            config, binary, sanitizer_name,
+                        ),
+                        str(self.root),
+                    )
+                with mock.patch.dict(os.environ, {key: ""}, clear=True):
+                    self.assertIsNone(
+                        run_asan.sanitizer_run.configured_runner_cwd(
+                            config, binary, sanitizer_name,
+                        )
+                    )
 
     def test_generic_accepts_only_configured_success_codes(self) -> None:
         binary = self.executable("rejecting-parser", "raise SystemExit(1)\n")
