@@ -1651,29 +1651,46 @@ def code_feature_reasons(text: str) -> tuple[int, list[str]]:
     return score, reasons
 
 
-def corpus_seed_for(results_dir: Path, rel: str, subsystem: str) -> str:
+def corpus_index(results_dir: Path) -> list[tuple[str, float, str]]:
+    """Scan the promoted corpus once: (lowercased metadata, mtime, testcase).
+
+    `rank_target` asks about every source file in the target, and reading each
+    COVER-* metadata per question made the scan quadratic — the whole corpus
+    re-read per file, growing with both. The answer depends only on corpus
+    state, so it is gathered once per ranking pass and matched in memory.
+    """
     corpus = results_dir / "corpus"
     if not corpus.is_dir():
-        return ""
+        return []
+    entries: list[tuple[str, float, str]] = []
+    for meta in corpus.glob("COVER-*/metadata.md"):
+        try:
+            body = meta.read_text(encoding="utf-8", errors="replace").lower()
+            mtime = meta.stat().st_mtime
+        except OSError:
+            continue
+        tests = [p for p in meta.parent.iterdir() if p.name != "metadata.md" and p.is_file() and not p.name.endswith(".asan.txt")]
+        if tests:
+            entries.append((body, mtime, tests[0].as_posix()))
+    return entries
+
+
+def corpus_seed_for(
+    index: list[tuple[str, float, str]], rel: str, subsystem: str,
+) -> str:
+    """The best promoted seed for one file, from a `corpus_index` snapshot."""
     candidates: list[tuple[float, str]] = []
     rel_low = rel.lower()
     sub_low = subsystem.lower()
-    for meta in corpus.glob("COVER-*/metadata.md"):
-        try:
-            body = meta.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            continue
+    for body_low, mtime, testcase in index:
         score = 0
-        body_low = body.lower()
         if rel_low in body_low:
             score += 10
         if sub_low in body_low:
             score += 6
         if score == 0:
             continue
-        tests = [p for p in meta.parent.iterdir() if p.name != "metadata.md" and p.is_file() and not p.name.endswith(".asan.txt")]
-        if tests:
-            candidates.append((score + meta.stat().st_mtime / 10_000_000_000, tests[0].as_posix()))
+        candidates.append((score + mtime / 10_000_000_000, testcase))
     if not candidates:
         return ""
     return sorted(candidates, reverse=True)[0][1]
@@ -1771,6 +1788,7 @@ def rank_target(
         persist_to=ctx.results_dir / "state" / "subsystem-depth",
     )
     coverage_counts = coverage_subsystem_counts(ctx)
+    seed_index = corpus_index(ctx.results_dir)
     cards: list[dict] = load_patch_cards(patch_path, max(10, limit // 2), ctx=ctx)
     floor_cards: list[dict] = []
     seen_ids = {c.get("id") for c in cards}
@@ -1794,7 +1812,7 @@ def rank_target(
         gap_score, gap_reasons = coverage_gap_score(coverage_counts, subsystem)
         score += gap_score
         reasons.extend(gap_reasons)
-        seed = corpus_seed_for(ctx.results_dir, rel, subsystem)
+        seed = corpus_seed_for(seed_index, rel, subsystem)
         if seed:
             score += 16
             reasons.append("has clean HIT seed")

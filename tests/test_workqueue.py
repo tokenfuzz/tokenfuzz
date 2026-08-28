@@ -1789,6 +1789,41 @@ class WorkQueueTests(unittest.TestCase):
 
         self.assertNotEqual(diagnosis, "harness-setup")
 
+    def test_corpus_seed_prefers_the_file_match_and_is_scanned_once(self) -> None:
+        """One corpus scan serves every ranked file.
+
+        The per-file scan re-read the whole promoted corpus for each source
+        file, so the cost grew with files x corpus entries. Selection must be
+        unchanged: an entry naming the file outranks a subsystem-only entry,
+        and an entry with no testcase beside its metadata is not offered.
+        """
+        corpus = Path(self.results) / "corpus"
+        for name, body, testcase in (
+            ("COVER-0001", "subsystem: net\n", "sub-only.bin"),
+            ("COVER-0002", "file: src/parser.c\nsubsystem: src\n", "exact.bin"),
+            ("COVER-0003", "file: src/parser.c\n", None),
+        ):
+            entry = corpus / name
+            entry.mkdir(parents=True)
+            (entry / "metadata.md").write_text(body, encoding="utf-8")
+            if testcase:
+                (entry / testcase).write_bytes(b"seed")
+
+        index = workqueue.corpus_index(Path(self.results))
+        self.assertEqual(2, len(index), "an entry with no testcase is not indexed")
+        self.assertTrue(
+            workqueue.corpus_seed_for(index, "src/parser.c", "src").endswith("exact.bin"),
+            "the entry naming the file outranks a subsystem-only entry",
+        )
+        self.assertTrue(
+            workqueue.corpus_seed_for(index, "net/other.c", "net").endswith("sub-only.bin"),
+            "a subsystem-only match still offers a seed",
+        )
+        self.assertEqual(
+            "", workqueue.corpus_seed_for(index, "lib/unrelated.c", "lib"),
+        )
+        self.assertEqual([], workqueue.corpus_index(Path(self.results) / "missing"))
+
     def test_s7_resume_checks_the_configured_input_route_before_a_hypothesis(self) -> None:
         self.write_cards([
             self.card("S7-PARSER-1", "src/parser.c", strategy="S7"),
