@@ -35,6 +35,18 @@ output=$(ZDOTDIR="$GUARD_ZDOTDIR" AGENT_SHELL_GUARDS_PATH="$GUARDS" \
           PATH="$GUARDS:$BASE_PATH" "$ZSH_BIN" -lc 'echo "$PATH" | cut -d: -f1')
 assert_eq "$GUARDS" "$output" "zdotdir: guards dir is first in PATH inside zsh -lc"
 
+# macOS path_helper can move /usr/bin ahead of an operator-selected runtime.
+# Preserve the complete inherited order, not only TokenFuzz's own prefixes.
+RUNTIME_BIN="$TEST_TMPDIR/runtime-bin"
+mkdir -p "$RUNTIME_BIN"
+touch "$RUNTIME_BIN/java"
+chmod +x "$RUNTIME_BIN/java"
+output=$(ZDOTDIR="$GUARD_ZDOTDIR" AGENT_SHELL_GUARDS_PATH="$GUARDS" \
+          PATH="$GUARDS:$RUNTIME_BIN:$BASE_PATH" \
+          "$ZSH_BIN" -lc 'command -v java')
+assert_eq "$RUNTIME_BIN/java" "$output" \
+  "zdotdir: login shell preserves the operator-selected runtime"
+
 # ── A launcher that forwards ZDOTDIR but filters other env vars still gets the
 #    guards: the shim infers them from the bootstrap path. ──
 for mode in -lc -c; do
