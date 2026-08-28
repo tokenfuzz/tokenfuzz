@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from typing import Iterable, Optional
 
+import stack_frames
+
 
 ARTIFACT_EXACT = {
     "REPORT.md",
@@ -288,33 +290,51 @@ def recorded_sanitizer_options(text: str) -> str | None:
 
 
 def sanitizer_fault_key(text: str) -> tuple[str, str] | None:
-    """Identify a sanitizer fault without depending on unstable stack frames."""
-    sanitizer = infer_sanitizer_from_text(text, default="")
+    """Identify the first sanitizer fault without unstable stack frames.
+
+    A confirmation transcript can concatenate several runtime reports. The
+    crash site and access direction are read from the first complete report,
+    so taking a later report's primitive would create a fault pair that never
+    occurred. Within one report the closing SUMMARY still wins over its
+    headline, which is required for ASan's ``attempting double-free`` prose.
+    """
+    diagnostic = stack_frames.first_sanitizer_diagnostic(text) or text
+    configured = sanitizer_run_header_fields(text).get("sanitizer", "").lower()
+    sanitizer = (
+        configured if configured in SANITIZER_NAMES
+        else infer_sanitizer_from_text(diagnostic, default="")
+    )
     if sanitizer == "asan":
-        kinds = _ASAN_FAULT_RE.findall(text)
+        kinds = _ASAN_FAULT_RE.findall(diagnostic)
         if not kinds:
             return None
         kind = kinds[-1].lower()
         if kind == "attempting":
-            if re.search(r"AddressSanitizer:\s+attempting double-free", text):
+            if re.search(r"AddressSanitizer:\s+attempting double-free", diagnostic):
                 kind = "double-free"
             elif re.search(
-                r"AddressSanitizer:\s+attempting free on address", text
+                r"AddressSanitizer:\s+attempting free on address", diagnostic
             ):
                 kind = "bad-free"
         return sanitizer, kind
     if sanitizer == "ubsan":
-        kind = _ubsan_fault_kind(text) or _fatal_signal_kind(_UBSAN_FATAL_RE, text)
+        kind = _ubsan_fault_kind(diagnostic) or _fatal_signal_kind(
+            _UBSAN_FATAL_RE, diagnostic
+        )
         return (sanitizer, kind) if kind else None
     if sanitizer == "msan":
         # Read the reported kind rather than naming one: MSan's own SEGV had
         # no fault key, so a crash under it could never be measured.
-        kinds = _MSAN_FAULT_RE.findall(text)
+        kinds = _MSAN_FAULT_RE.findall(diagnostic)
         return (sanitizer, kinds[-1].lower()) if kinds else None
     if sanitizer == "tsan":
-        kind = _tsan_fault_kind(text) or _fatal_signal_kind(_TSAN_FATAL_RE, text)
+        kind = _tsan_fault_kind(diagnostic) or _fatal_signal_kind(
+            _TSAN_FATAL_RE, diagnostic
+        )
         return (sanitizer, kind) if kind else None
-    if sanitizer == "race" and re.search(r"^WARNING: DATA RACE$", text, re.MULTILINE):
+    if sanitizer == "race" and re.search(
+        r"^WARNING: DATA RACE$", diagnostic, re.MULTILINE
+    ):
         return sanitizer, "data-race"
     return None
 

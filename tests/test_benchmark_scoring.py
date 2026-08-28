@@ -261,6 +261,35 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(score["overall"]["recall"], 1.0)
         self.assertEqual(score["overall"]["precision"], 1.0)
 
+    def test_multi_report_attribution_does_not_splice_faults(self) -> None:
+        run = self.root / "multi-report"
+        crash = self.make_crash(
+            run, "MULTI-0001", "consume", "heap-use-after-free", access="READ",
+        )
+        with (crash / "sanitizer.txt").open("a", encoding="utf-8") as output:
+            output.write(
+                "SUMMARY: AddressSanitizer: heap-use-after-free sample.c:42 in consume\n"
+                "\n==43==ERROR: AddressSanitizer: double-free on address 0x602000000020\n"
+                "WRITE of size 8 at 0x602000000020 thread T0\n"
+                "    #0 0x0000 in cleanup sample.c:77\n"
+                "SUMMARY: AddressSanitizer: double-free sample.c:77 in cleanup\n"
+            )
+        manifest = self.root / "multi-report-gt.json"
+        manifest.write_text(json.dumps({"planted_bugs": [
+            {
+                "id": "first-fault", "primitive": "heap-use-after-free",
+                "signature_symbol": "consume",
+            },
+            {
+                "id": "spliced-non-fault", "primitive": "double-free",
+                "signature_symbol": "consume",
+            },
+        ]}) + "\n", encoding="utf-8")
+
+        _, score = self.score(run, manifest=manifest)
+
+        self.assertEqual(score["overall"]["detected"], ["first-fault"])
+
     def test_access_qualified_alternates_disambiguate_inlined_crashes(self) -> None:
         run = self.root / "inlined"
         self.make_crash(

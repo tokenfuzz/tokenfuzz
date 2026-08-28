@@ -1550,8 +1550,9 @@ def _fault_sites(text: str) -> list[tuple[str, str, int | None]]:
     replay symbolized differently from the original still matches on the name
     both reports do show.
     """
+    diagnostic = stack_frames.first_sanitizer_diagnostic(text) or text
     sites = []
-    for frame in stack_frames.leading_inline_group(text):
+    for frame in stack_frames.leading_inline_group(diagnostic):
         path, line = _source_location(frame.location)
         sites.append((frame.state_function, path, line))
     return sites

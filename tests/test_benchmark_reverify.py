@@ -1018,6 +1018,43 @@ class BenchmarkReverifyTests(unittest.TestCase):
             benchmark_runner.crash_artifacts.sanitizer_fault_key(ubsan_divzero),
             ("ubsan", "division by zero"),
         )
+        self.assertEqual(
+            benchmark_runner.crash_artifacts.sanitizer_fault_key(
+                "==1==ERROR: AddressSanitizer: heap-use-after-free on 0x1\n"
+                "READ of size 1 at 0x1\n"
+                "#0 0x1 in consume child.c:91\n"
+                "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in consume\n"
+                "==2==ERROR: AddressSanitizer: double-free on 0x2\n"
+                "#0 0x2 in cleanup child.c:117\n"
+            ),
+            ("asan", "heap-use-after-free"),
+        )
+        self.assertEqual(
+            benchmark_runner.crash_artifacts.sanitizer_fault_key(
+                "child.c:91:4: runtime error: division by zero\n"
+                "==2==ERROR: AddressSanitizer: heap-use-after-free on 0x1\n"
+            ),
+            ("ubsan", "division by zero"),
+        )
+        first_then_cleanup = (
+            "==1==ERROR: AddressSanitizer: heap-use-after-free on 0x1\n"
+            "READ of size 1 at 0x1\n"
+            "#0 0x1 in consume child.c:91\n"
+            "SUMMARY: AddressSanitizer: heap-use-after-free child.c:91 in consume\n"
+            "==2==ERROR: AddressSanitizer: double-free on 0x2\n"
+            "#0 0x2 in cleanup child.c:117\n"
+        )
+        self.assertEqual(
+            self.reproducing(
+                first_then_cleanup,
+                [
+                    "==3==ERROR: AddressSanitizer: heap-use-after-free on 0x3\n"
+                    "READ of size 1 at 0x3\n"
+                    "#0 0x3 in consume child.c:91\n"
+                ],
+            ),
+            1,
+        )
         # Without a parseable frame the primitive is all the evidence
         # available; another sanitizer's and another primitive are not equal.
         cases = {

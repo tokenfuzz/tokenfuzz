@@ -2595,22 +2595,32 @@ def _attribution_evidence(
         text = san.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    m = _PRIMITIVE_RE.search(text)
+    # Bind primitive, access, and crash site to one runtime report. Confirmed
+    # artifacts may concatenate several repetitions whose manifestations
+    # differ; mixing fields across them manufactures an attribution key no run
+    # actually produced.
+    diagnostic = (
+        _sf.first_sanitizer_diagnostic(text) if _sf is not None else None
+    ) or text
+    m = _PRIMITIVE_RE.search(diagnostic)
     # Preserve fatal signal tokens exactly: trap manifests intentionally use
     # ASan's uppercase ABRT/SEGV spelling, while the shared fault key
     # canonicalizes ordinary diagnostic classes to lowercase.
     if m and m.group(1).isupper():
         primitive = m.group(1)
-    elif fault := (_ca.sanitizer_fault_key(text) if _ca is not None else None):
+    elif fault := (
+        # Reads the same first diagnostic, and the run header names the family.
+        _ca.sanitizer_fault_key(text) if _ca is not None else None
+    ):
         _sanitizer, primitive = fault
     else:
         if m:
             primitive = m.group(1)
         else:
-            primitive = "data-race" if _DATA_RACE_RE.search(text) else ""
-    access_match = _ACCESS_RE.search(text)
+            primitive = "data-race" if _DATA_RACE_RE.search(diagnostic) else ""
+    access_match = _ACCESS_RE.search(diagnostic)
     access = access_match.group(1) if access_match else ""
-    return primitive, _crash_site_functions(text, rust), access
+    return primitive, _crash_site_functions(diagnostic, rust), access
 
 
 # A trap's expected_outcome names what a *benign* occurrence looks like.
