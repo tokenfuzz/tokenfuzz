@@ -917,13 +917,13 @@ def expand_work_cards_if_exhausted(runtime: Runtime) -> bool:
         context = runtime.prompt_context("")
         try:
             ctx = _queue_context(runtime)
-            worked = workqueue.card_distinct_hypothesis_counts(ctx)
             for agent in range(1, runtime.num_agents + 1):
                 offer = workqueue.claim_next_card(
                     ctx, str(agent), context.mode(agent),
                     context.role(agent), claim=False, strategy=context.strategy(agent),
+                    unworked_only=True,
                 )
-                if offer is not None and not worked.get(str(offer.get("id", "")), 0):
+                if offer is not None:
                     return False
         except (OSError, ValueError):
             return False

@@ -655,7 +655,12 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
     strategy = context.strategy(agent)
     card_directive = work_card_directive(context, agent)
     cards_path = context.results_dir / "work-cards.jsonl"
-    queue_has_cards = cards_path.is_file() and cards_path.stat().st_size > 0
+    try:
+        queue_has_cards = cards_path.is_file() and cards_path.stat().st_size > 0
+    except OSError:
+        # A concurrent refresh replaces or removes the queue atomically. Fail
+        # open to ordinary discovery when it changes between prompt reads.
+        queue_has_cards = False
     strategy_block = f"## ASSIGNED STRATEGY - {strategy}\n\n{strategy_brief(strategy, context.reference_dir)}"
     # The pin says which strategy, never how to work it — step 4 below owns
     # the procedure, so restating it here only paraphrases the same rule.

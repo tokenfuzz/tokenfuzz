@@ -3742,13 +3742,21 @@ def claim_next_card(
     role: str = "",
     claim: bool = True,
     strategy: str = "",
+    *,
+    unworked_only: bool = False,
 ) -> dict | None:
     init_state(ctx)
     claims_path = state_dir(ctx.results_dir) / "claims.jsonl"
     if claim:
         with jsonl_lock(claims_path):
-            return _claim_next_card_locked(ctx, agent, mode, role, claims_path, claim=True, strategy=strategy)
-    return _claim_next_card_locked(ctx, agent, mode, role, claims_path, claim=False, strategy=strategy)
+            return _claim_next_card_locked(
+                ctx, agent, mode, role, claims_path, claim=True,
+                strategy=strategy, unworked_only=unworked_only,
+            )
+    return _claim_next_card_locked(
+        ctx, agent, mode, role, claims_path, claim=False,
+        strategy=strategy, unworked_only=unworked_only,
+    )
 
 
 def _claim_next_card_locked(
@@ -3759,6 +3767,7 @@ def _claim_next_card_locked(
     claims_path: Path,
     claim: bool,
     strategy: str = "",
+    unworked_only: bool = False,
 ) -> dict | None:
     cards = read_jsonl(work_cards_path(ctx))
     cards_by_id = {c.get("id", ""): c for c in cards}
@@ -3818,6 +3827,8 @@ def _claim_next_card_locked(
         for card in cards:
             cid = card.get("id", "")
             if not is_auditable_work_card(card):
+                continue
+            if unworked_only and distinct_counts.get(cid, 0):
                 continue
             if strategy_filter:
                 if not card_strategy_matches(card, strategy_filter):
@@ -5850,10 +5861,16 @@ def state_resume(
             [
                 "",
                 "## Last Terminal Reason",
-                last_terminal_reason(ctx, agent, card_id=card_id, rows=hyps).strip(),
+                last_terminal_reason(
+                    ctx, history_agent, card_id=card_id, rows=hyps,
+                ).strip(),
                 "",
                 "## Guard Notes",
-                recent_notes(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, kind="guard", rows=notes).strip(),
+                recent_notes(
+                    ctx, limit=resume_limit, agent=history_agent,
+                    hypothesis_id=hyp_id, card_id=card_id, kind="guard",
+                    rows=notes,
+                ).strip(),
             ]
         )
     if include_tried:

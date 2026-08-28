@@ -1716,8 +1716,20 @@ class WorkQueueTests(unittest.TestCase):
         ])
         self.add_hypothesis(
             hyp_id="H-PRIOR", card_id="WORK-HOT", agent="3",
-            status="FIND-001", hypothesis="external entity at parse_manifest",
+            hypothesis="external entity at parse_manifest",
         )
+        workqueue.update_hypothesis(
+            self.ctx, "H-PRIOR", "FIND-001",
+            note="filed after the parser fetched a remote entity", agent="3",
+        )
+        workqueue.add_note(self.ctx, argparse.Namespace(
+            agent="3", hypothesis_id="H-PRIOR", card_id="WORK-HOT",
+            kind="guard", text="factory flag is applied after parser construction",
+        ))
+        workqueue.add_note(self.ctx, argparse.Namespace(
+            agent="1", hypothesis_id="H-OTHER", card_id="WORK-OTHER",
+            kind="guard", text="unrelated guard note from the new owner",
+        ))
         workqueue.update_card_status(
             self.ctx, "WORK-HOT", "find", agent="3",
         )
@@ -1733,6 +1745,9 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIn("the next hypothesis must either name and test", resume)
         self.assertIn("different encoded size/count", resume)
         self.assertIn("Do not file the sink-only claim again", resume)
+        self.assertIn("filed after the parser fetched a remote entity", resume)
+        self.assertIn("factory flag is applied after parser construction", resume)
+        self.assertNotIn("unrelated guard note from the new owner", resume)
 
     def test_resume_does_not_hide_other_active_hypotheses(self) -> None:
         self.write_cards([

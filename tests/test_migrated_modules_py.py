@@ -2192,6 +2192,15 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         [worked_card, {"id": "WORK-fresh", "kind": "ranked-source", "strategy": "S7",
                        "file": "src/lexer.c", "mode": "auto", "subsystem": "src"}],
     )
+    # A live lease on the already-worked card remains the normal claimer's
+    # first offer. Window growth must still see the fresh card behind it;
+    # otherwise a single-worker run expands another batch every iteration.
+    audit_runner.workqueue.append_jsonl(
+        supply_results / "state" / "claims.jsonl",
+        {"card_id": "WORK-worked", "agent": "1", "status": "claimed",
+         "claimed_at": audit_runner.workqueue.now_iso(),
+         "expires_at": "2999-01-01T00:00:00Z"},
+    )
     with mock.patch.object(audit_runner, "_rank_window", return_value=(120, 120)), \
          mock.patch.object(audit_runner, "refresh_work_cards") as fresh_expansion:
         held = audit_runner.expand_work_cards_if_exhausted(supply_runtime)
