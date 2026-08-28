@@ -34,13 +34,11 @@ They exist for one reason:
 | **S8** Property-based oracles | Check inverse, idempotence, injectivity, numerical-domain, or format properties — silent corruption that no sanitizer catches. | A generated input with a minimised property counter-example. |
 | **REF** Pattern search | Shared grep recipes used alongside any strategy. | Candidate sites and guard shapes. |
 
-S1 is the **fallback** default, not a directive to always start with
-patch mining. Prior fixes happen to carry concrete information — what
-changed, what assumption was wrong, what input shape reached the
-code, and what nearby code may still share that shape — but a
-high-signal parser surface or a peer-project fix can outrank ordinary
-S1 work. The agent follows
-the assigned card.
+S1 is the **fallback** default, not a directive to always start with patch
+mining. Prior fixes happen to carry concrete information — what changed, what
+assumption was wrong, what input shape reached the code, and what nearby code
+may still share that shape — but a high-signal parser surface or a peer-project
+fix can outrank ordinary S1 work. The agent follows the assigned card.
 
 ## How a strategy gets assigned to a card
 

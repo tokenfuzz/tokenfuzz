@@ -13,7 +13,7 @@ Set short shell variables for the commands on this page:
 
 ```bash
 export TARGET=<target>
-export BACKEND=<claude|codex|gemini|grok|oss>
+export BACKEND=claude               # or codex, gemini, grok, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 export LOGS="output/$TARGET/$BACKEND/logs"
 ```

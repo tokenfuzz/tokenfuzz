@@ -20,7 +20,7 @@ that baseline.
 4. [Triage results](triage-results.md) — review crashes, findings,
    rejected candidates, and duplicate clusters.
 
-## Two rules that shape the guides
+## Two rules every guide assumes
 
 - `findings/` is for concrete security issues, with or without a
   runnable reproducer.

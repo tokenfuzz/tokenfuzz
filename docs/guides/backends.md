@@ -39,7 +39,7 @@ and backend-native reasoning effort. Model precedence is:
 2. the backend's `*_MODEL_DEFAULT` environment override;
 3. `config/models.toml`.
 
-The `[effort]` table is applied in the backend's native form—for example Codex
+The `[effort]` table is applied in the backend's native form — for example Codex
 model reasoning effort, Gemini thinking level, or the corresponding Claude and
 Grok flags. Edit the config when changing project defaults so normal audits,
 validation and direct model decisions stay aligned.
@@ -324,7 +324,7 @@ output.
 - Diagnose startup in `logs/index.log`, then use the named trimmed session log.
 - Expect quota pauses on long runs rather than treating them as failures — see
   [The run paused, or the backend went unavailable](../reference/troubleshooting.md#the-run-paused-or-the-backend-went-unavailable).
-- Evaluate results through findings, crashes, and rejected indexes—not the
+- Evaluate results through findings, crashes, and rejected indexes — not the
   style or length of the backend transcript.
 
 For hosted defensive research, the provider-access links are collected under

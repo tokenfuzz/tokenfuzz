@@ -8,7 +8,7 @@ Set the active result directory once when you start inspecting:
 
 ```bash
 export TARGET=<your-target>
-export BACKEND="<backend>"        # one of: claude, codex, gemini, grok, oss
+export BACKEND=claude             # or codex, gemini, grok, oss
 # Optional convenience path for inspecting results.
 export RESULTS="output/$TARGET/$BACKEND/results"
 ```
@@ -119,6 +119,7 @@ and threat model. Its states are `reportable`, `not-reportable`, `pending`, and
 severity. `not-reportable` is a final retained engineering defect, not a
 security report; `pending` is an artifact no review settled, which is neither
 credited nor written off.
+
 Changing the report, testcase, harness, sanitizer diagnostic, invocation
 evidence, target/config identity, or review evidence invalidates the receipt
 and returns the artifact to review.
@@ -158,7 +159,7 @@ CRASH-001-1/
   REPORT.html           # auto-generated sibling of REPORT.md
   reproduce.sh          # ./reproduce.sh /path/to/source
   input.<ext>           # the testcase bytes
-  harness.{c,cc,cpp,cxx} # present iff the bug uses a C/C++ harness
+  harness.{c,cc,cpp,cxx} # only when the bug uses a C/C++ harness
   sanitizer.txt         # original sanitizer output
   patch.diff            # optional: candidate fix
   validation.json       # current publication state + evidence identity

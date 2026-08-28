@@ -85,14 +85,23 @@ Most operators arrive on this page because something landed in
 | Harness-only misuse | The testcase violates a contract no real caller can violate. |
 | Missing files | No testcase, no sanitizer output, or an incomplete report. |
 
-For non-crashing findings, a dangerous API name is not enough. The substance
-gate rejects a path escape when the same untrusted input chooses both root and
-child and no independent policy is crossed; external-file execution without
-attacker placement or a named existing effectful module; and native-object
-reconstruction without a concrete reachable hook, gadget, memory consequence,
-authorization effect, or other demonstrated impact. A changed capability—such
-as a URL wrapper causing a server-side request or a path API interpreting a
-command channel—remains reportable.
+For non-crashing findings, naming a dangerous API is not enough. The substance
+gate rejects a report whose only evidence is that the API accepted attacker
+data. These are the shapes it turns away most often, and what would have kept
+each one:
+
+| Rejected shape | What would keep it |
+| --- | --- |
+| Correctness, robustness, or spec-deviation bugs that cross no security boundary. | Name the boundary. "An application that trusted this could be confused" is not one — enforcing the invariant has to be the library's job. |
+| Path escape where the same untrusted input picks both the base and the child, or where the escape needs a symlink a trusted party planted. | A capability that changes despite that control — a URL scheme turning a local read into a server-side request, a path API interpreting the value as a command channel — or proof the attacker controls the filesystem state. |
+| Code execution by loading an outside file the attacker cannot place there. | An existing effectful module in the shipped target, or attacker-controlled placement inside the threat model. A fixture the testcase created is neither. |
+| Deserialization, reflection, or prototype pollution showing only that a dangerous sink accepted the value. | A reachable gadget, magic hook, memory consequence, or authorization effect in the environment the target actually loads. |
+| Resource exhaustion driven by an attacker-controlled count or length. | Quantified amplification (attacker bytes in versus bytes or CPU consumed) *and* the demand surviving the project's own size ceiling. |
+| Residual-memory disclosure that never says where the leaked bytes came from. | Name the allocation — the call, buffer, or field the bytes live in. An agent that established the leak can always say what leaked. |
+| Caller-contract misuse: a bogus length for the caller's own pointer, use after handing an object to the API, racing cleanup against the library. | Untrusted bytes driving the parameter into that state through a public entry. Then it is the library's job, and the "caller misuse" label in the report is wrong. |
+
+A thin but real security case is kept: the buckets target missing substance,
+not weak writing.
 
 **Not reportable — keep the engineering defect, do not security-report it.** A
 reproducing sanitizer crash whose `Trigger source` falls outside the target's

@@ -301,9 +301,9 @@ Reportable and rejected results go through the same deduplication, because a raw
 directory tally counts matching evidence many times over and would not be
 comparable with a clustered one. Signature clustering is a deterministic
 deduplication proxy: one root cause can split across different sites, and
-different root causes can share a sink signature. Where duplicates could not be resolved the
-count is shown as `up to N` — it over-states rather than hides, so a rejected
-result never quietly vanishes from the column.
+different root causes can share a sink signature. Where duplicates could not be
+resolved the count is shown as `up to N` — it over-states rather than hides, so
+a rejected result never quietly vanishes from the column.
 
 The count cells are links. They point into the condition-specific
 crash, finding, rejected-crash, rejected-finding, and cluster reports
@@ -628,13 +628,13 @@ gone, a harness nobody compiled — is held the same way; one that carries no
 reproducer to run at all is left to the completeness gate instead, which holds
 it pending before it rejects. Only a replay that ran and disagreed with the
 report moves a crash into `findings/`.
-Each pooled crash is checked against its owning cell and only
-its own replay artifacts, so one changed binary does not cost unrelated
-crashes their rates. A rate counts only runs that reproduced the original
-fault — same sanitizer, primitive, faulting function, and normalized source
-path and line where both diagnostics name them — so a replay that crashes
-elsewhere is not a reproduction. Evidence whose own fault cannot be
-characterised claims no rate.
+
+Each pooled crash is checked against its owning cell and only its own replay
+artifacts, so one changed binary does not cost unrelated crashes their rates. A
+rate counts only runs that reproduced the original fault — same sanitizer,
+primitive, faulting function, and normalized source path and line where both
+diagnostics name them — so a replay that crashes elsewhere is not a
+reproduction. Evidence whose own fault cannot be characterised claims no rate.
 
 ## How to make the result worth reading
 

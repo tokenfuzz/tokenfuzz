@@ -2,13 +2,18 @@
 
 ## 1.5.2 - 2026-08-27
 
-### Strategy lanes
+### Strategy lanes and the work queue
 
 - **`--strategy S<N>` pins the queue, not just the labels on cards.** The pin
   never reached `bin/rank-work`, so a pinned lane drew the shared mixed queue:
   S2 on angular claimed 24 of 309 cards, and now claims 120 of 120. A lane with
-  its own card source builds from that source alone, and lanes that can never
-  claim another source's output stop paying to generate it.
+  its own card source builds from that source alone — S1 from patch cards
+  rather than the ranked window, where the diversity floor labels every unscored
+  source file S1 and its cold prompt never named the S1 playbook; S4 from its
+  own campaign card, with an admission gate that stops reading `nPage`-style
+  handle parameters as byte lengths. An empty card source now stops the run
+  instead of skipping agents for the whole wall, and lanes that can never claim
+  another source's output stop paying to generate it.
 
 - **A pin the target cannot host stops before preflight.** Availability is read
   from the config first, so a findings-only target under S4, or an S6 pin with
@@ -17,60 +22,50 @@
   advisories", so an unreachable peer set no longer reads as a finished
   campaign.
 
-- **S1 — the prior-fix lane builds from patch cards.** It drew the shared
-  ranked window, where the diversity floor labels every unscored source file
-  S1, so its queue filled with score-1 cards and its cold prompt never named
-  the S1 playbook. An empty patch source now stops the run instead of skipping
-  agents for the whole wall.
+- **S6 cards carry the peer's real fix, keyed by its advisory id.** Card
+  generation asked the model to distill each peer fix and map it onto a file
+  from a 200-file listing: 46 sequential calls, ~389s of startup, invented
+  mappings, and cards silently dropped when the guess failed. Cards now carry
+  the peer's revision and summary, and the agent maps it across the tree behind
+  a source gate. Keying an advisory on the end of its affected range also merged
+  unrelated bugs — ClusterFuzz bisects distinct ones to the same first-good
+  commit — and dropped 15–58% of a peer's advisories (7 of 12 onto one
+  endpoint). Excerpt fetching now stops at a budget instead of paying peers ×
+  max-per-peer 15-second network reads on every refresh.
 
-- **S2 — `link_libs` resolves from any working directory.** Archive and source
-  entries reached the compiler verbatim while every sibling input was
-  target-root resolved, so a probe or campaign build launched from another cwd
-  failed to link. `Config.resolved_link_libs()` now serves probe, campaign
-  builds, build identities and the model-direct prompt.
+- **S8 declares the property it tests.** It filed exception shapes as denial of
+  service and ranked ordinary hashers as injectivity surfaces, where a collision
+  is the contract. Ranking is now explicit identity/key generators only, a
+  testcase must declare `PROPERTY:` from a fixed set (`bin/probe --property`
+  for an opaque input), and a real `PROPERTY VIOLATION:` records a `PROPERTY`
+  verdict instead of NO_EXEC — it files no crash bundle, and the finding gates
+  still decide.
 
-- **S3 — a filing is not an acceptance.** `bin/state list-findings` reported OK
-  for any directory holding a report, and clusters took severity from the
-  report, so a retained not-reportable defect kept a stale High and could
-  outrank a reportable duplicate. Status now comes from the content-addressed
-  validation receipt, and no-credit rows rank below every credited member.
+- **Each strategy angle on a file is its own card.** A file's companions were
+  collapsed onto one card carrying `allowed_strategies`, so clean S5 work closed
+  the card and discarded the still-untried S3, S7 and S8 angles on that file.
+  Splitting them costs no extra source scan or model call.
 
-- **S4 — an unschedulable campaign stops instead of burning the wall.** Pinned
-  S4 drew from a ranked window it can never claim, and on a findings-only or
-  CLI-only target it launched agents at a campaign the config cannot support.
-  It now mints only its campaign card, and the admission gate stops reading
-  `nPage`-style handle parameters as byte lengths.
+- **A dry conclusion cannot retire a broad whole-file card.** Three CLEAN probes
+  across two hypothesis shapes retired one, leaving every other function on the
+  file untested. Only `blocked` is terminal there; other conclusions record dry
+  work that ranking demotes behind fresher cards, while concrete patch and site
+  cards keep their existing closure rule.
 
-- **S5 — each strategy angle is its own card.** A file's companions were
-  collapsed onto one card carrying `allowed_strategies`, so clean S5 work
-  closed the card and discarded the still-untried S3, S7 and S8 angles on that
-  file. Splitting them costs no extra source scan or model call.
+- **The rank window grows again, and worked lanes stop reporting starved.** Both
+  consumers read raw claim status as fresh work: expansion never grew past
+  `RANK_WORK_LIMIT` files, and `_eligible_strategy_counts` rotated the whole
+  fleet onto its `["S1"]` fallback while the queue was still offering those
+  agents their own cards. Both now ask the claimer for an unworked card.
 
-- **S6 — cards carry the peer's real fix.** Card generation asked the model to
-  distill each peer fix and map it onto a file from a 200-file listing: 46
-  sequential calls, ~389s of startup, invented mappings, and cards silently
-  dropped when the guess failed. Cards now carry the peer's revision and
-  summary, and the agent maps it across the tree behind a source gate.
-
-- **S6 — an advisory is keyed by its id, not by where its range ends.**
-  ClusterFuzz bisects distinct bugs to the same first-good commit, so keying on
-  that endpoint merged unrelated advisories and dropped 15–58% of a peer's (7
-  of 12 onto one endpoint). Excerpt fetching also stops at a budget instead of
-  paying peers × max-per-peer 15-second network reads on every refresh.
-
-- **S7 — a rejected input is not a broken harness.** A parser CLI that
-  correctly rejects malformed input exits nonzero, and every such probe was
-  recorded NO_EXEC. The new `[runner] success_codes` declares which exits mean
-  a completed invocation, bounded to 0–123 so a timeout, a signal, or a
-  sanitizer diagnostic can never be declared success.
-
-- **S8 — the property oracle declares what it tests.** S8 filed exception
-  shapes as denial of service and ranked ordinary hashers as injectivity
-  surfaces, where a collision is the contract. Ranking is now explicit
-  identity/key generators only, a testcase must declare `PROPERTY:` from a
-  fixed set (`bin/probe --property` for an opaque input), and a real `PROPERTY
-  VIOLATION:` records a `PROPERTY` verdict instead of NO_EXEC — it files no
-  crash bundle, and the finding gates still decide.
+- **Workers stop repeating each other.** A card resumed by a different worker
+  showed only that worker's rows, so the new owner re-derived the prior finding
+  and re-probed the same location — a reoffered card now carries every worker's
+  history. A cold worker that lost the claim race started unassigned source
+  review and duplicated the card owner's work, every iteration for agent 1; it
+  ends its session instead. And an ENV-BLOCKED hypothesis proves only that its
+  own card cannot execute, not that a source-review angle on the same
+  compilation unit is dead.
 
 ### Multi-language execution
 
@@ -113,15 +108,19 @@
 - **A timeout is its own outcome, never a clean run.** `run-sanitizer-multi`
   collapsed a timed-out run into "may not have executed", so a target that
   consumed its wall looked like one that never ran. It now reports
-  `verdict=TIMEOUT` and exits 124 — reserved by `lib/timeout.py` and not
+  `verdict=TIMEOUT` and exits 124 — reserved by `lib/timeout.py`, and not
   configurable as a runner success — and any timeout makes a mixed confirmation
-  inconclusive.
+  inconclusive. `bin/probe` classifies that 124 ahead of the agent's own
+  markers, so an S8 oracle that printed its property marker and then hung is no
+  longer credited with a counterexample, and a timed-out runner with clean
+  output is no longer recorded CLEAN against the card-discard floor. A concrete
+  sanitizer diagnostic still wins: a sibling deadline cannot retract it.
 
-- **`bin/probe` classifies 124 ahead of the agent's own markers.** An S8 oracle
-  that printed its property marker and then hung was credited with a
-  counterexample, and a timed-out runner with clean output was recorded CLEAN
-  against the card-discard floor. A concrete sanitizer diagnostic still wins: a
-  sibling deadline cannot retract it.
+- **A rejected input is not a broken harness.** A parser CLI that correctly
+  rejects malformed input exits nonzero, and every such probe was recorded
+  NO_EXEC. The new `[runner] success_codes` declares which exits mean a
+  completed invocation, bounded to 0–123 so a timeout, a signal, or a sanitizer
+  diagnostic can never be declared success.
 
 - **A trusted execution marker starts on its own line.** A runner whose output
   ended without a newline had `EXECUTION VERIFIED` concatenated onto it, and
@@ -132,32 +131,6 @@
 - **A cached harness binary cannot outlive its target revision.** The cache
   identity now carries `TARGET_REV`, so a harness under `results/` no longer
   survives the checkout moving underneath it and judges the previous revision.
-
-### Work queue and scheduling
-
-- **A dry conclusion cannot retire a broad whole-file card.** Three CLEAN
-  probes across two hypothesis shapes retired one, leaving every other function
-  on the file untested. Only `blocked` is terminal there; other conclusions
-  record dry work that ranking demotes behind fresher cards, while concrete
-  patch and site cards keep their existing closure rule.
-
-- **The rank window grows again, and worked lanes stop reporting starved.**
-  Both consumers read raw claim status as fresh work: expansion never grew past
-  `RANK_WORK_LIMIT` files, and `_eligible_strategy_counts` rotated the whole
-  fleet onto its `["S1"]` fallback while the queue was still offering those
-  agents their own cards. Both now ask the claimer for an unworked card.
-
-- **A reoffered card carries every worker's history.** A card resumed by a
-  different worker showed only that worker's rows, so the new owner re-derived
-  the prior finding and re-probed the same location.
-
-- **A cardless cold worker ends its session.** A worker that lost the claim
-  race started unassigned source review and duplicated the card owner's work;
-  agent 1 launched unconditionally and did it every iteration.
-
-- **An ENV-BLOCKED hypothesis no longer blocks its siblings.** It proves only
-  that its own card cannot execute, not that a source-review angle on the same
-  compilation unit is dead.
 
 ### Crash and finding identity
 
@@ -173,12 +146,10 @@
   `-g1` binary prints only the outermost, so requiring frame #0 to match split
   one crash by symbolizer. Clustering now intersects the ordered leading inline
   group, and tolerant tail matching requires the same `top_func` so two faults
-  behind a shared dispatcher stay apart.
-
-- **Darwin symbols keep their text.** The symbolizer stripped every
-  parenthesised span from an `atos` answer, deleting C++ parameter lists and
-  `(anonymous namespace)` markers that the shared normalizer removes
-  structurally later anyway.
+  behind a shared dispatcher stay apart. Darwin symbols also keep their text:
+  the symbolizer stripped every parenthesised span from an `atos` answer,
+  deleting C++ parameter lists and `(anonymous namespace)` markers that the
+  shared normalizer removes structurally later anyway.
 
 - **A report opens with one bare `Location:` line.** Finding clustering keys on
   it, but the prose contract never asked for one and the two parsers carried
@@ -196,12 +167,10 @@
   a managed exception that only fails the current call, an escape needing a
   symlink a trusted party placed, and control bytes on stdout. Each now has an
   explicit reject bucket with a named escape, and the emit contract mirrors
-  them so agents do not file what the gate will drop.
-
-- **Control comes from the traced entrypoint, not from a name.** `hook`,
-  `plugin` and an authored `Boundary` label were read as evidence of trust, and
-  a native fault reached through caller input was classified as a managed
-  exception.
+  them so agents do not file what the gate will drop. Control also comes from
+  the traced entrypoint rather than from a name: `hook`, `plugin` and an
+  authored `Boundary` label were read as evidence of trust, and a native fault
+  reached through caller input was classified as a managed exception.
 
 - **Fixed fallback setup is application setup, not an attacker call sequence.**
   Contract-obeying resource shaping before input consumption — filling a
@@ -210,27 +179,31 @@
   Shaping the attacker must control or repeat per attempt is still a real
   trigger component.
 
-- **The trigger review is bounded.** One reviewer spent ~1339s of an audit wall
-  on a single finding. The gate now states a 12 tool-call budget, refuses
-  subagents, and stops at a hard cap above it so the verdict turn survives; the
-  finding-quality gate stays unbounded as a full second opinion.
+- **A filing is not an acceptance.** `bin/state list-findings` reported OK for
+  any directory holding a report, and clusters took severity from the report, so
+  a retained not-reportable defect kept a stale High and could outrank a
+  reportable duplicate. Status now comes from the content-addressed validation
+  receipt, and no-credit rows rank below every credited member. The same
+  confusion reached the agent's own view, where any FIND/CRASH status on a scope
+  reported "an accepted artifact exists" and a run whose every filing triage had
+  rejected still read as productive; it is called recorded now, and an
+  artifact-scoped triage rejection is surfaced with its reason — which lives
+  nowhere else the agent reads.
+
+- **The review gates cost a bounded share of the wall.** One trigger reviewer
+  spent ~1339s of an audit wall on a single finding; that gate now states a
+  12 tool-call budget, refuses subagents, and stops at a hard cap above it so
+  the verdict turn survives, while the finding-quality gate stays unbounded as a
+  full second opinion. Cluster expansion and the crash trigger rounds spend one
+  session per group instead of one per artifact, and an id a batch omitted stays
+  pending rather than publishing on an incomplete vote —
+  `_batch_finding_trigger_votes` also ignored `LLM_DECIDE_DISABLE`, filing a
+  pending receipt for a review that never ran.
 
 - **A bumped decision version reaches an already-adjudicated crash.** A receipt
   binds its own report and gate files, so it cannot notice
   `TRIGGER_GATE_DECISION_VERSION` moving under an unchanged vote — and the
   crash lane short-circuited on the receipt alone.
-
-- **Housekeeping reviews in batches.** Cluster expansion and the crash trigger
-  rounds spend one session per group instead of one per artifact, and an id a
-  batch omitted stays pending rather than publishing on an incomplete vote.
-  `_batch_finding_trigger_votes` also ignored `LLM_DECIDE_DISABLE`, filing a
-  pending receipt for a review that never ran.
-
-- **A filed artifact is not an accepted one.** Any FIND/CRASH status on a scope
-  reported "an accepted artifact exists", so a run whose every filing triage had
-  rejected still read as productive. It is called recorded now, and an
-  artifact-scoped triage rejection is surfaced with its reason — which lives
-  nowhere else the agent reads.
 
 - **Live triage uses the identities finalization uses.** `post_iteration` ran
   both gates without the product-root identity, so a live run could reject a
@@ -240,17 +213,15 @@
 
 ### Build and target detection
 
-- **CMake's install plan decides whether a target has a CLI.** A library-only
-  build could not say so, so the free scan handed `asan_bin` a unit test,
-  fuzzer driver or examples client and the harness drove a library as a
-  byte-input CLI. An installed executable is the product CLI, while a project
-  declaring no `install()` rule publishes nothing and keeps its scanned route.
-  Across 20 built targets: three fake CLIs dropped, two reordered, none added.
-
-- **Sanitizer archives rank by the project's own identity.** Selection was
-  depth-then-alphabetical, so a build emitting several public libraries handed
-  the harness whichever sorted first — on one target the C wrapper archive
-  instead of the core library, hiding the API under audit.
+- **Detection picks the product, not whatever sorted first.** A library-only
+  CMake build could not say it had no CLI, so the free scan handed `asan_bin` a
+  unit test, fuzzer driver or examples client and the harness drove a library as
+  a byte-input CLI; an installed executable is the product CLI now, while a
+  project declaring no `install()` rule publishes nothing and keeps its scanned
+  route (across 20 built targets: three fake CLIs dropped, two reordered, none
+  added). Sanitizer archives rank by the project's own identity for the same
+  reason — depth-then-alphabetical selection handed one target's harness the C
+  wrapper archive instead of the core library, hiding the API under audit.
 
 - **Build freshness reads the configured build system.** A Swift or Cargo
   package shipping an incidental `CMakeLists.txt` reported `build-asan` missing
@@ -259,9 +230,14 @@
   through, so a stray `build-asan` from an earlier native attempt cannot refuse
   runs and benchmark cells over a tree nothing executes.
 
-- **`setup-target` repairs a broken `includes` set.** It merges the detected
-  public headers when they agree with the configured library, instead of only
-  warning and leaving the C-harness route unusable.
+- **The C-harness build route repairs and resolves itself.** `link_libs`
+  archive and source entries reached the compiler verbatim while every sibling
+  input was target-root resolved, so a probe or campaign build launched from
+  another cwd failed to link; `Config.resolved_link_libs()` now serves probe,
+  campaign builds, build identities and the model-direct prompt. `setup-target`
+  also merges the detected public headers into a broken `includes` set when they
+  agree with the configured library, instead of only warning and leaving the
+  route unusable.
 
 ### Benchmark scoring
 

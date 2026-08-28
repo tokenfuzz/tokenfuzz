@@ -22,6 +22,7 @@ bin/docs build
 | `lib/` | Shared Python: prompt renderers, state, runners, triage, reporting. |
 | `lib/prompts/` | Central Jinja prompt bodies. |
 | `.agents/` | Runtime strategy and reproducer references for audit agents. |
+| `config/` | Checked-in defaults: backend models and reasoning effort. |
 | `tests/` | Shell and Python behavior tests plus neutral fixtures. |
 | `docs/` | MkDocs handbook. |
 

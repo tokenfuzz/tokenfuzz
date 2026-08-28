@@ -7,7 +7,7 @@ For examples below:
 
 ```bash
 export TARGET=<target>
-export BACKEND=<claude|codex|gemini|grok|oss>
+export BACKEND=claude               # or codex, gemini, grok, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 ```
 
@@ -147,7 +147,8 @@ testcase, and records the verdict in `state/runs.jsonl`.
 
 - Use the ordinary command for exploration.
 - Use `--confirm` after a first diagnostic: it re-runs the testcase five times
-  and can file a stable crash bundle.
+  and can file a stable crash bundle. `--sanitizer-runs N` sets an explicit
+  count instead.
 - Use `--dry-run` to inspect mode, sanitizer, output path, and resolved command
   without executing target code.
 - Use `--mode browser|js|generic` only when automatic mode detection is wrong.
@@ -177,7 +178,8 @@ report records both results — a bug in a supported optional feature is still a
 bug, it just carries the build it needs. Use `PROBE_BUILD_CONFIG=<name>` (or
 `primary`) for a deliberate one-off comparison.
 
-Every testcase begins with native-comment headers:
+Every testcase begins with native-comment headers — `//`, `#`, `<!-- … -->`,
+whatever the file's own language uses:
 
 ```text
 TARGET: path/to/file.c:Function:123
@@ -185,11 +187,16 @@ HYPOTHESIS-ID: H1
 CATEGORY: bounds
 MODE: generic          # optional: auto|browser|js|generic
 HARNESS: harness.c     # optional sibling API harness
+CARD-ID: <id>          # optional: the work card this came from
+PROPERTY: inverse      # required under S8; the oracle kind
 ```
 
 The valid categories are `bounds`, `lifetime`, `type`, `size`, `uninit`, and
-`state`. See [Reproduce a crash](../guides/reproduce-a-crash.md) for the
-maintainer-side bundle flow.
+`state`. The valid properties are `inverse`, `idempotence`, `injectivity`,
+`domain`, `format`, and `equivalence`. An opaque byte input that cannot carry a
+comment supplies the same values as flags instead. See
+[Reproduce a crash](../guides/reproduce-a-crash.md) for the maintainer-side
+bundle flow.
 
 ### Testcase helpers
 
@@ -352,7 +359,25 @@ and regeneration.
 
 ## Everything else in `bin/`
 
-The rest of `bin/` is orchestration the audit runs for you: ranking, card
-building, sanitizer runners, report enrichment, validation, and rendering. They
-are not an operator workflow and their interfaces are not stable. If you need
-one for development or diagnosis, read the command source and its tests first.
+The rest of `bin/` is machinery the audit drives for you. It is listed here so
+you can find the right file when diagnosing a run or changing the harness —
+**not** as an operator workflow. These interfaces are not stable; read the
+command's source and its tests before depending on one.
+
+| Command | What it does |
+| --- | --- |
+| `bin/rank-work` | Builds the ranked work-card queue for an iteration. |
+| `bin/patch-cards` | Derives S1 prior-fix cards from the target's own history. |
+| `bin/peer-fix-cards` | Derives S6 cards from the projects in `[s6_peers]`. |
+| `bin/callgraph` | Extracts the optional per-file call neighbourhood a card prompt quotes. |
+| `bin/auto-build-script` | Converges a sanitizer build recipe into `.audit/build*.sh`. |
+| `bin/auto-repair-target-toml` | Proposes an additive `target.toml` repair after repeated harness build failures. |
+| `bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`, `bin/run-tsan` | Per-sanitizer execution wrappers. `bin/probe` selects and invokes these. |
+| `bin/run-sanitizer-multi` | Repeats a sanitizer runner and reduces the results to one verdict — the `--confirm` path. |
+| `bin/triage-fuzz-crashes` | Summarises non-noise libFuzzer artifacts from an S4 campaign. |
+| `bin/validate-finding` | Runs one independent source-reading review over a single FIND. |
+| `bin/enrich-report` | Inlines source snippets and writes the `## Patch` section. The only writer of that section. |
+| `bin/severity-sweep` | Re-scores the cluster representatives of a results pool. |
+| `bin/render-md` | Generates the `.html` sibling of a report or cluster table. |
+| `bin/find-crash-testcase` | Resolves the testcase path for a `CRASH-*` directory. |
+| `bin/peek`, `bin/rg-safe`, `bin/show-patch` | Bounded source read, search, and diff wrappers — the caps that keep agent prompts small. |

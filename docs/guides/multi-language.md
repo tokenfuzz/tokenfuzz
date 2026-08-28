@@ -44,7 +44,7 @@ Opt into `race` or another sanitizer by editing
 | Rust | `RUSTFLAGS="-Z sanitizer=address"` (nightly) | `asan`; also `tsan` and `msan` on supported targets |
 | Go | `go build -race` | `race` |
 | Swift | `swift run --disable-sandbox --skip-build --scratch-path … -Xswiftc -sanitize={SWIFT_SANITIZER}` | `asan`, `ubsan`, `tsan` |
-| Java / JVM | None for JVM code; a JNI library can be built with ASan and driven separately | none for the JVM; rely on `crash_patterns` |
+| Java / JVM | None for JVM code; a JNI library can be built with ASan and driven separately | none for the JVM — exceptions route to `findings/` |
 | Python | `PYTHONMALLOC=malloc` plus CPython-ASan for C extensions | optional `asan` for native extensions |
 | Node / V8 | `--abort-on-uncaught-exception`; native modules can link ASan | optional `asan` for native add-ons |
 | Everything else | None; findings-only mode is the right choice | n/a |

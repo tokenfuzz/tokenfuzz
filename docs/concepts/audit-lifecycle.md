@@ -103,13 +103,16 @@ Each agent works on **one hypothesis at a time**:
 6. If it does, confirm the result and move it through triage.
 
 Investigation depth follows evidence. A deterministic bug can be dismissed
-after one clean probe that hit its exact trigger, but timing-, race-, GC-, and
-state-dependent triggers need repetition or different inputs before the harness
-will accept a card's dry conclusion — so a flaky bug is not written off on a
-single quiet run. The conclusion retires a concrete patch/site card; a broad
-whole-file card yields to fresher work but remains reofferable for unexamined
-functions until campaign limits. A surface that no configured build or mode can even execute is marked
-blocked rather than counted as clean evidence.
+after one clean probe that hit its exact trigger. Timing-, race-, GC-, and
+state-dependent triggers cannot: the harness wants repetition or different
+input shapes before it accepts a card's dry conclusion, so a flaky bug is not
+written off on a single quiet run.
+
+That conclusion retires a concrete patch or site card. A broad whole-file card
+instead yields to fresher work and stays reofferable, because finite probes
+cannot prove its unexamined functions exhausted. A surface that no configured
+build or mode can execute at all is marked blocked rather than counted as clean
+evidence.
 
 Work cards are leased so two agents don't step on each other; after a context
 compaction, the next iteration tells the agent which regions it has already
@@ -140,9 +143,9 @@ Common outcomes:
 Coverage gating only fires in browser and JS modes. Generic CLI
 targets always run the sanitizer directly.
 
-Probe output is a contract, not a log. Crash promotion requires saved
-sanitizer output; report-only FINDs go
-through FIND validation instead.
+Probe output is a contract, not a log: crash promotion requires saved
+sanitizer output on disk. Report-only FINDs go through FIND validation
+instead.
 
 ## 6. Triage
 
@@ -235,7 +238,7 @@ REPORT.md          one-page summary
 REPORT.html        generated sibling
 reproduce.sh       single command, no env vars
 input.<ext>        the testcase bytes
-harness.{c,cc,cpp,cxx} present iff the bug uses a C/C++ harness
+harness.{c,cc,cpp,cxx} only when the bug uses a C/C++ harness
 sanitizer.txt      full sanitizer output
 patch.diff         optional candidate fix
 validation.json    the publication decision, bound to this evidence

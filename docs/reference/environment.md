@@ -15,8 +15,8 @@ internally; those are not a supported interface and you should not need them.
 | Variable | Default | Use it for |
 | --- | --- | --- |
 | `NUM_AGENTS` | unset | A flat pool of `N` workers. On a browser target this replaces the browser/shell split. |
-| `BROWSER_AGENTS` | `1` | Browser-mode workers when `is_browser = "1"`. |
-| `SHELL_AGENTS` | `2` for browsers, `3` otherwise | Shell/generic workers when `NUM_AGENTS` is unset. |
+| `BROWSER_AGENTS` | `1` | Browser-mode workers. Only applies when `[runner].args` declares a `{PROFILE}` page route; a browser-mode script engine gets shell workers only. |
+| `SHELL_AGENTS` | `2` beside browser workers, `3` otherwise | Shell/generic workers when `NUM_AGENTS` is unset. |
 
 A one-iteration smoke test always launches one worker, whatever these say.
 

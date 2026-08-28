@@ -235,7 +235,7 @@ When `bin/audit` launches an agent, it injects the shared runtime guide
 [`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md).
 It defines testcase headers, evidence requirements, strategy discipline, and
 the crash quality bar for every target. Target-specific choices belong in
-`target.toml` or the target source/build—not in the shared guide. Change
+`target.toml` or the target source/build — not in the shared guide. Change
 `AGENTS.md` only when changing the audit contract for all targets.
 
 ## 4. Validate before long runs

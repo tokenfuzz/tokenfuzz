@@ -16,7 +16,7 @@ them to exit.
 audit iterations against the same target and backend, normally
 rooted in the same `output/<target>/<backend>/` tree.
 
-**Cold start.** An iteration where no agent has structured state yet—typically
+**Cold start.** An iteration where no agent has structured state yet — typically
 the first working iteration of a fresh target.
 
 **Resume.** An iteration where the agent reads structured state

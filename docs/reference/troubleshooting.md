@@ -65,36 +65,6 @@ Common fixes:
 - Ensure runtime libraries are discoverable.
 - Install `llvm-symbolizer` so diagnostics are readable.
 
-## A build was not replaced, or a cell refuses to start
-
-These messages all come from one rule: a build in use by a live run is never
-replaced, because the evidence that run already recorded was measured against
-it.
-
-| Message | Meaning | What to do |
-| --- | --- | --- |
-| `build not replaced (another run is using ...)` | Another audit or benchmark holds this build. | Nothing. The existing build stays and work continues on it. |
-| `pinned benchmark build is not usable: <route> changed ...` | A cell found that a route selected by the run snapshot no longer has the bytes its parent pinned. Cells verify and never build. | The message names the path. Stop the process rebuilding it, then start a new run id; this run remains valid only if that exact generation is restored. |
-| `target source changed during the cell` | The revision or tracked source differs at the end-of-cell boundary. Untracked testcases and generated output do not trigger this. Artifacts are kept; the cell leaves the headline comparison. | Check `cells/<cell>/source-drift.json` for the paths. Agents must not leave tracked target edits in place. |
-| `crash triage skipped ... <route> changed` | Replay would execute a different pinned target artifact, so finalization kept the original evidence untouched. | Restore the named artifact generation or rerun the cell in a new run. |
-| `is at a different source state than a live run` | A benchmark refused to start: another live run pinned a different source state. | Use a separate checkout, or wait for that run. `--isolate-build` cannot fix this — both runs read one checkout. |
-| `build-<san> is stale (changed: <paths>)` | A fresh run found source or a build recipe newer than the available native build. This check is never used for a pinned resume. | Remove an accidental generated path, or run `bin/setup-target <target> --build` for a real source/recipe change, then rerun the fresh benchmark. |
-| `<route> changed since this run pinned it (<path>)` | A `--run-id` resume found different bytes than its completed cells used. | Start a new run id, or restore the named artifact and build stamp. The refusal leaves the recorded pin unchanged. |
-| `<route> now selects ... instead of ...`, `<route> is no longer selected by target.toml` | The run-owned `target.toml` execution route no longer matches its build pin. A missing or unexecutable file is reported as that artifact instead, not as this. | Restore the run snapshot from the original run, or start a new run id with the new configuration. |
-| `bootstrap refused ... the configured runner is in use` | `bin/setup-target` would replace a runner an audit or benchmark is holding. It refuses immediately rather than waiting out the lease. | Wait for that run, or use a separate checkout. |
-| `target-tree artifacts have no benchmark owner` | An agent wrote substantive finding or crash evidence into the shared target checkout, where no run can prove ownership. The evidence remains unassigned and is excluded from the cell's metrics; independent cell evidence still counts. Empty/incomplete directories do not trigger this warning. | Move the report into the correct cell results directory only when its provenance is known; agents should always use `RESULTS_DIR`. |
-| `model-direct backend exited ... after writing substantive evidence` | The direct backend stopped nonzero after producing valid report or sanitizer evidence. The cell is retained as an early terminal outcome with `run_quality=backend_terminated`, counted behind a `(Nt)` replicate marker and its shorter actual wall. A cell already excluded for a provider limit or drift keeps that stronger reason instead. | Inspect `backend.raw.log` for the cause. Regeneration can recover an older cell that was failed for this reason; a fresh run is optional, not required to count its evidence. |
-| `<setting> was X for this run and is now Y` | A resume changed something that defines the experiment (model, effort, budget, agents, target revision). | Resume with the original settings, or start a new run id. `--replicates` and `--conditions` may still change. |
-
-Initial build freshness conservatively includes non-ignored untracked files,
-because they may be build inputs; ignored output and reverted edits leave it
-fresh. A build reported stale names the paths that made it so, which is what
-separates a by-product a previous run wrote into the checkout — delete it — from
-a real source edit — rebuild. Once a benchmark pins a build, its cells and
-resumes use only the run-owned config snapshot and exact recorded bytes. They
-do not call freshness, so those by-products cannot make an unchanged pinned
-build read as stale.
-
 ## C harness compilation fails
 
 Check `output/<target>/target.toml`:
@@ -240,6 +210,36 @@ Use an explicit backend while debugging:
 ```bash
 bin/audit --target <target> --backend <backend> 1
 ```
+
+## A build was not replaced, or a cell refuses to start
+
+These messages all come from one rule: a build in use by a live run is never
+replaced, because the evidence that run already recorded was measured against
+it.
+
+| Message | Meaning | What to do |
+| --- | --- | --- |
+| `build not replaced (another run is using ...)` | Another audit or benchmark holds this build. | Nothing. The existing build stays and work continues on it. |
+| `pinned benchmark build is not usable: <route> changed ...` | A cell found that a route selected by the run snapshot no longer has the bytes its parent pinned. Cells verify and never build. | The message names the path. Stop the process rebuilding it, then start a new run id; this run remains valid only if that exact generation is restored. |
+| `target source changed during the cell` | The revision or tracked source differs at the end-of-cell boundary. Untracked testcases and generated output do not trigger this. Artifacts are kept; the cell leaves the headline comparison. | Check `cells/<cell>/source-drift.json` for the paths. Agents must not leave tracked target edits in place. |
+| `crash triage skipped ... <route> changed` | Replay would execute a different pinned target artifact, so finalization kept the original evidence untouched. | Restore the named artifact generation or rerun the cell in a new run. |
+| `is at a different source state than a live run` | A benchmark refused to start: another live run pinned a different source state. | Use a separate checkout, or wait for that run. `--isolate-build` cannot fix this — both runs read one checkout. |
+| `build-<san> is stale (changed: <paths>)` | A fresh run found source or a build recipe newer than the available native build. This check is never used for a pinned resume. | Remove an accidental generated path, or run `bin/setup-target <target> --build` for a real source/recipe change, then rerun the fresh benchmark. |
+| `<route> changed since this run pinned it (<path>)` | A `--run-id` resume found different bytes than its completed cells used. | Start a new run id, or restore the named artifact and build stamp. The refusal leaves the recorded pin unchanged. |
+| `<route> now selects ... instead of ...`, `<route> is no longer selected by target.toml` | The run-owned `target.toml` execution route no longer matches its build pin. A missing or unexecutable file is reported as that artifact instead, not as this. | Restore the run snapshot from the original run, or start a new run id with the new configuration. |
+| `bootstrap refused ... the configured runner is in use` | `bin/setup-target` would replace a runner an audit or benchmark is holding. It refuses immediately rather than waiting out the lease. | Wait for that run, or use a separate checkout. |
+| `target-tree artifacts have no benchmark owner` | An agent wrote substantive finding or crash evidence into the shared target checkout, where no run can prove ownership. The evidence remains unassigned and is excluded from the cell's metrics; independent cell evidence still counts. Empty/incomplete directories do not trigger this warning. | Move the report into the correct cell results directory only when its provenance is known; agents should always use `RESULTS_DIR`. |
+| `model-direct backend exited ... after writing substantive evidence` | The direct backend stopped nonzero after producing valid report or sanitizer evidence. The cell is retained as an early terminal outcome with `run_quality=backend_terminated`, counted behind a `(Nt)` replicate marker and its shorter actual wall. A cell already excluded for a provider limit or drift keeps that stronger reason instead. | Inspect `backend.raw.log` for the cause. Regeneration can recover an older cell that was failed for this reason; a fresh run is optional, not required to count its evidence. |
+| `<setting> was X for this run and is now Y` | A resume changed something that defines the experiment (model, effort, budget, agents, target revision). | Resume with the original settings, or start a new run id. `--replicates` and `--conditions` may still change. |
+
+Initial build freshness conservatively includes non-ignored untracked files,
+because they may be build inputs; ignored output and reverted edits leave it
+fresh. A build reported stale names the paths that made it so, which is what
+separates a by-product a previous run wrote into the checkout — delete it — from
+a real source edit — rebuild. Once a benchmark pins a build, its cells and
+resumes use only the run-owned config snapshot and exact recorded bytes. They
+do not call freshness, so those by-products cannot make an unchanged pinned
+build read as stale.
 
 ## Still unsure
 

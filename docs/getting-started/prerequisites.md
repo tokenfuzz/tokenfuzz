@@ -187,6 +187,14 @@ container as privileged or mount the Docker socket into it.
 - Homebrew LLVM is auto-detected at `/opt/homebrew/opt/llvm` and
   `/usr/local/opt/llvm`. Set `LLVM_PREFIX` only to select another installation.
 
+## If preflight fails
+
+`bin/audit` names missing tools and invalid configuration before launching an
+agent. Install the named dependency, verify the target can build outside the
+harness, then rerun the one-iteration command. See
+[Troubleshooting](../reference/troubleshooting.md) for sanitizer, runner, and
+backend failures.
+
 ## Experimental: call-neighbourhood context
 
 This is optional. Skip it on a first install; the audit is unchanged without
@@ -228,15 +236,12 @@ bin/rank-work --target <target>                     # appends "(call neighbourho
 python3 lib/callgraph.py --target <target> <file>   # print one file's block
 ```
 
-`bin/audit --strategy S<N>` passes that pin through to ranking, so the bounded
-window and optional model rerank contain only cards that lane can claim.
-
-The middle line reports only states worth acting on, so a later run that
+`bin/rank-work` reports only states worth acting on, so a later run that
 rebuilt nothing stays quiet — an unchanged graph is `fresh`, and an absent
-trailmark is the default rather than a fault. The last line prints the exact
-text a work card carries for that file, and on failure names the check that
-stopped it: not installed, artifact not built yet, file absent from the parsed
-graph, or nothing resolved to report.
+trailmark is the default rather than a fault. `lib/callgraph.py` prints the
+exact text a work card carries for that file, and on failure names the check
+that stopped it: not installed, artifact not built yet, file absent from the
+parsed graph, or nothing resolved to report.
 
 ### What the map will not tell you
 
@@ -273,11 +278,3 @@ auditable files — browser checkouts — are declined outright, because staging
 and parsing one costs minutes and has never produced a block. A refusal or a
 parse failure is recorded against the same fingerprint so it is not retried
 every iteration; delete `<results>/state/callgraph.json` to force one.
-
-## If preflight fails
-
-`bin/audit` names missing tools and invalid configuration before launching an
-agent. Install the named dependency, verify the target can build outside the
-harness, then rerun the one-iteration command. See
-[Troubleshooting](../reference/troubleshooting.md) for sanitizer, runner, and
-backend failures.

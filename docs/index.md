@@ -38,7 +38,8 @@ judgment remains with the operator and the upstream maintainer.
 ## Quick start
 
 TokenFuzz supports macOS and Linux. Install Python 3.10+, Git, ripgrep, `file`,
-an LLVM toolchain for native sanitizer targets, and one supported backend.
+an LLVM toolchain for native sanitizer targets, and one supported backend —
+`claude`, `codex`, `gemini`, `grok`, or `oss` for a local model.
 [Prerequisites](getting-started/prerequisites.md) has platform-specific setup.
 
 ```bash
@@ -48,7 +49,7 @@ cd tokenfuzz
 bash tests/run-tests.sh
 
 # A shipped synthetic target — configured already, nothing to clone.
-bin/audit --target samples/sample-python --backend <claude|codex|gemini|grok|oss> 1
+bin/audit --target samples/sample-python --backend <backend> 1
 
 # Or your own project.
 bin/setup-target <target> <repo-url>
@@ -56,8 +57,8 @@ bin/audit --target <target> --backend <backend> 1
 ```
 
 The final `1` runs one bounded iteration. Its purpose is to prove that target
-setup, the backend, state, and result directories work together—not to find a
-vulnerability. [Sample targets](getting-started/sample-targets.md) lists the
+setup, the backend, state, and result directories work together — not to find
+a vulnerability. [Sample targets](getting-started/sample-targets.md) lists the
 sixteen ready-made targets that come with the repository. When the smoke test
 is healthy, omit the count for a continuous run:
 
@@ -163,12 +164,23 @@ Worth knowing before you plan around it:
 
 ## Responsible use
 
-Only run TokenFuzz on software you are authorised to test. Hosted backends
-receive the prompts, source excerpts, state, and reports required for the run;
-use `--backend oss` when source must stay local. Report target findings through
-the upstream project's coordinated-disclosure process. Review benchmark
-archives and research results before sharing them, just as you would any other
-security artifact.
+Only run TokenFuzz on software you are authorised to test. Three facts are
+worth settling before the first long run:
+
+- **The audit executes untrusted code.** Target build scripts and
+  agent-authored testcases run on the machine you start it on. Use a
+  disposable container or an isolated host without long-lived credentials —
+  see [Container runtime](getting-started/prerequisites.md#container-runtime-recommended).
+- **Hosted backends see the target.** Prompts, source excerpts, state, and
+  reports go to the provider by design. Use `--backend oss` with a local model
+  when source must stay on the machine. The agent sandbox contains writes and
+  network, not what the model reads —
+  [Agent security modes](guides/backends.md#agent-security-modes) is explicit
+  about the difference.
+- **Disclosure stays yours.** Report target findings through the upstream
+  project's coordinated-disclosure process, and review benchmark archives and
+  research output before sharing them, as you would any other security
+  artifact.
 
 Security issues in TokenFuzz itself follow
 [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md).

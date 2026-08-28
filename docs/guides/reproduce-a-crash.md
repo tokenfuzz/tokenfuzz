@@ -36,7 +36,7 @@ CRASH-001-1/
 ├── REPORT.html        # browser-friendly render of REPORT.md
 ├── reproduce.sh       # single command, no env vars
 ├── input.<ext>        # the testcase bytes
-├── harness.{c,cc,cpp,cxx} # present iff the bug uses a C/C++ harness
+├── harness.{c,cc,cpp,cxx} # only when the bug uses a C/C++ harness
 ├── sanitizer.txt      # full sanitizer output captured during discovery
 ├── patch.diff         # optional: candidate fix, verified to apply cleanly
 ├── validation.json    # the publication decision, bound to this evidence
