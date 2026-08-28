@@ -47,6 +47,17 @@ output=$(ZDOTDIR="$GUARD_ZDOTDIR" AGENT_SHELL_GUARDS_PATH="$GUARDS" \
 assert_eq "$RUNTIME_BIN/java" "$output" \
   "zdotdir: login shell preserves the operator-selected runtime"
 
+# Keep paths the system profile added after .zshenv, but behind the launcher's
+# explicit order. GUI-launched agents may rely on /etc/paths.d to discover a
+# tool that was absent from the sparse launcher environment.
+SYSTEM_BIN="$TEST_TMPDIR/system-bin"
+mkdir -p "$SYSTEM_BIN"
+output=$(ZDOTDIR="$GUARD_ZDOTDIR" AGENT_SHELL_GUARDS_PATH="$GUARDS" \
+          PATH="$GUARDS:$RUNTIME_BIN:$BASE_PATH" "$ZSH_BIN" -c \
+          '_TOKENFUZZ_INHERITED_PATH="'"$RUNTIME_BIN:$BASE_PATH"'"; PATH="'"$SYSTEM_BIN"':$PATH"; source "$ZDOTDIR/.zprofile"; printf "%s\n" "$PATH"')
+assert_eq "$GUARDS:$RUNTIME_BIN:$BASE_PATH:$SYSTEM_BIN" "$output" \
+  "zdotdir: system-profile additions survive behind launcher PATH"
+
 # ── A launcher that forwards ZDOTDIR but filters other env vars still gets the
 #    guards: the shim infers them from the bootstrap path. ──
 for mode in -lc -c; do
