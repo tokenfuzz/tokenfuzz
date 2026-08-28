@@ -1539,7 +1539,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     # Card supply is the first key, but a queue that gives every strategy a
     # comparable share leaves the whole decision to the tie-break. Canonical
     # S1..S8 numbering would then open the run on the lowest-numbered
-    # methods; expected yield keeps the most productive ones in front.
+    # methods; measured yield keeps the most productive ones in front. S3 leads
+    # on every slice of 162 audit trees across 29 targets — pooled, pinned,
+    # unpinned, and best-lane wins — so it opens the run; the rest keep their
+    # previous relative order, which no single slice contradicts.
     equal_results = root / "equal-share-results"
     (equal_results / "state").mkdir(parents=True)
     (equal_results / "work-cards.jsonl").write_text(
@@ -1560,7 +1563,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         fixed_strategy="", agent_roles=(),
     ))
     equal(
-        ["S7", "S5", "S2"],
+        ["S3", "S7", "S5"],
         [
             (equal_results / "state" / f"strategy-{agent}").read_text().strip()
             for agent in range(1, 4)
@@ -1627,16 +1630,16 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     # handed it the default layout's only analysis agent, whose contract is to
     # read and hand off, so nothing would have run the fuzzer there either.
     equal(
-        ["S7", "S4", "S5"], campaign_strategies(3),
+        ["S3", "S4", "S7"], campaign_strategies(3),
         "the campaign takes a reproduce slot, leaving the analysis lane intact",
     )
     # Its own lock allows one campaign at a time, so one slot is the whole ask.
     equal(
-        ["S7", "S5", "S4", "S2"], campaign_strategies(4),
+        ["S3", "S7", "S4", "S5"], campaign_strategies(4),
         "the campaign takes one slot, not a share that grows with the fleet",
     )
     # A lone agent spent on the campaign would leave the ranked queue untouched.
-    equal(["S7"], campaign_strategies(1), "a single agent is not spent on the campaign")
+    equal(["S3"], campaign_strategies(1), "a single agent is not spent on the campaign")
     # A narrow queue used to put the campaign in the ranked positions as well as
     # the reserved one, so two agents opened on it and the one that lost the
     # exclusive lock exited having done nothing.

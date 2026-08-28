@@ -724,9 +724,12 @@ BOUNDARY_REASONS: frozenset[str] = S3_SECURITY_REASONS | {"remote-peer endpoint"
 # Reason → strategy map. Single source of truth shared by strategy_for
 # (logical-security reasons first, otherwise the first matching bucket) and
 # complementary_strategies (returns every matching bucket). Bucket order is
-# descending expected yield for non-security collisions:
-# S7 adversarial-input and S5 lifetime/state are sanitizer-checked so
-# they lead; S2/S3 are code-grounded; S8 is the no-sanitizer oracle.
+# classification precedence for non-security collisions, not expected yield
+# (that is `_STRATEGY_YIELD_ORDER`): S7 adversarial-input and S5 lifetime/state
+# are sanitizer-checked so they claim a colliding file first; S2/S3 are
+# code-grounded; S8 is the no-sanitizer oracle. Precedence can differ from
+# yield because complementary_strategies files the losing angles as companion
+# cards, so it decides a card's primary label rather than whether it exists.
 # S1 (prior-fix) and S6 (cross-artifact) are not seedable from one file's
 # code features.
 #
@@ -769,20 +772,39 @@ _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
 # not evidence for a lifetime, parser, invariant, or property hypothesis.
 _S1_REASON_TAGS = frozenset({"near prior-fix card"})
 
+#: Strategies ordered by measured yield, best first — a separate question from
+#: the classification precedence in `_STRATEGY_BUCKETS`, which decides only
+#: which bucket claims a file that signals several angles. Reusing that table
+#: as a ranking is what put S3 fourth. With card supply tied this tuple hands
+#: each agent its opening lane, and agent 1 always launches, so the front of it
+#: costs the primary discovery slot for a whole run.
+#:
+#: Measured over 162 audit trees across 29 targets, as productive hypotheses
+#: per hypothesis. Only S3's promotion is landed here, because only it is
+#: unambiguous: S3 leads the pooled figure (0.43), leads both the pinned
+#: per-strategy runs (0.38) and the unpinned ones (0.47), and is the best lane
+#: on 7 of the 16 targets with three comparable lanes — more than any other.
+#: The rest keep their previous relative order. S7 in particular is left where
+#: it was on purpose: it measures 0.41 unpinned but 0.12 pinned, and the
+#: unpinned figure is confounded by agents self-selecting into adversarial
+#: input once they already hold a lead. Settle that with a pinned multi-target
+#: comparison before moving it either way.
+_STRATEGY_YIELD_ORDER: tuple[str, ...] = ("S3", "S7", "S5", "S2", "S8")
+
+
 def expected_yield_rank(strategy: str) -> int:
     """Order strategies by expected yield, best first.
 
-    `_STRATEGY_BUCKETS` is already kept in that order. Callers that would
-    otherwise fall back to the canonical S1..S8 numbering need it: numbering
-    is an identifier, not a ranking, and choosing by it puts a low-yield
-    method in front of a high-yield one. Strategies outside the table sort
-    last, in numbering order, so the result stays total and deterministic.
+    Callers that would otherwise fall back to the canonical S1..S8 numbering
+    need this: numbering is an identifier, not a ranking, and choosing by it
+    puts a low-yield method in front of a high-yield one. Strategies outside
+    the table sort last, in numbering order, so the result stays total and
+    deterministic.
     """
-    order = [name for name, _ in _STRATEGY_BUCKETS]
     strategy = strategy.upper()
-    if strategy in order:
-        return order.index(strategy)
-    return len(order)
+    if strategy in _STRATEGY_YIELD_ORDER:
+        return _STRATEGY_YIELD_ORDER.index(strategy)
+    return len(_STRATEGY_YIELD_ORDER)
 
 
 # Reasons scored once per file regardless of match count (see
@@ -1239,8 +1261,11 @@ def strategy_for(reasons: list[str]) -> str:
     Logical-security decisions are primary S3 work: large parser/protocol
     files almost always also fire S7/S5/S2, which would otherwise rank the
     rule audit below them on a file whose defect is a broken rule. For all
-    other reasons, returns the first strategy bucket (highest expected yield
-    first, see `_STRATEGY_BUCKETS`).
+    other reasons, returns the first matching strategy bucket. That order is
+    classification precedence — which angle claims a file that signals several
+    — and deliberately not the yield ranking in `_STRATEGY_YIELD_ORDER`;
+    `complementary_strategies` keeps the losing angles as companion cards, so
+    precedence decides a card's primary label rather than whether it exists.
     `complementary_strategies` emits the remaining methods so making the rule
     audit primary does not discard memory/state work. Falls back to S1
     (prior-fix default) when no code feature fired.
@@ -1258,7 +1283,8 @@ def complementary_strategies(reasons: list[str], primary: str) -> list[str]:
     """Strategies to try on this file beyond `primary`.
 
     Returns every strategy bucket the file's reasons fall into, excluding
-    `primary`, ordered by expected yield (see `_STRATEGY_BUCKETS`).
+    `primary`, in `_STRATEGY_BUCKETS` precedence order (not yield order — see
+    `_STRATEGY_YIELD_ORDER`).
     `rank_target` emits all of them as companion cards so one file can be
     probed from every angle its own code signals.
     """
