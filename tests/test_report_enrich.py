@@ -226,6 +226,26 @@ Agent-inlined narrative that must be replaced by the sibling diff.
         self.assertRegex(exported_text, r"(?m)^\+new$")
         self.assertRegex(exported_text, r"(?m)^## Patch$")
 
+    def test_sample_language_module_locations_inline_source(self) -> None:
+        locations = (
+            ("ReportKit.pm", "sub perl_site { return 11; }"),
+            ("reportkit.kts", "fun kotlinSite() = 22"),
+            ("reportkit.R", "r_site <- function() 33"),
+        )
+        report = self.root / "multilang" / "report.md"
+        report.parent.mkdir()
+        lines = ["# Multi-language locations", "", "## Data Flow"]
+        for filename, source in locations:
+            (self.source / filename).write_text(source + "\n", encoding="utf-8")
+            lines.append(f"- step: sample ({filename}:1) — reaches source")
+        report.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        process = self.enrich(report, source=self.source)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        text = report.read_text(encoding="utf-8")
+        for _filename, source in locations:
+            self.assertIn(source, text)
+
     def test_patch_placement_fix_reordering_and_sparse_reports(self) -> None:
         cases = {
             "direction": (

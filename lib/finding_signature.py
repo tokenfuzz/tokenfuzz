@@ -35,6 +35,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import languages
 import report_identity
 
 
@@ -313,7 +314,7 @@ def normalize_path(path: str, target_root: str = "") -> str:
 
 # Extension alternation. CRITICAL: longest alternative first so the
 # regex engine doesn't shortcut `foo.cc` to `foo.c` + leftover `c`.
-_SRC_EXT = r"(?:cpp|cxx|cc|hpp|hxx|hh|mm|tsx|jsx|swift|java|kt|rs|go|py|js|ts|sh|pl|rb|php|c|h|m)"
+_SRC_EXT = rf"(?:{languages.source_reference_ext_pattern()})"
 _PATH_FRAG = rf"[A-Za-z0-9_./\-]+\.{_SRC_EXT}"
 # Functions can include namespaces (foo::bar), destructors (~Foo), template
 # brackets (Foo<T>), but never a colon followed by digits — that's the line
@@ -323,15 +324,17 @@ _FUNC_FRAG = r"[A-Za-z_~][\w~]*(?:::[A-Za-z_~][\w~]*)*(?:<[^>]*>)?"
 _LOCATION_HEADER_RE = re.compile(
     r"(?:^|\n)\s*(?:#{1,6}\s+Location|-\s+\*\*Location\*\*|-?\s*Location)\s*:?\s*\n?\s*`?"
     rf"(?P<file>{_PATH_FRAG})(?::(?P<func>{_FUNC_FRAG}))?(?::(?P<line>\d+))?`?",
-    re.MULTILINE,
+    re.MULTILINE | re.IGNORECASE,
 )
 _INLINE_FILE_FUNC_LINE_RE = re.compile(
-    rf"`?(?P<file>{_PATH_FRAG}):(?P<func>{_FUNC_FRAG})(?::(?P<line>\d+))?`?"
+    rf"`?(?P<file>{_PATH_FRAG}):(?P<func>{_FUNC_FRAG})(?::(?P<line>\d+))?`?",
+    re.IGNORECASE,
 )
 _INLINE_FILE_LINE_RE = re.compile(
-    rf"`?(?P<file>{_PATH_FRAG}):(?P<line>\d+)`?"
+    rf"`?(?P<file>{_PATH_FRAG}):(?P<line>\d+)`?",
+    re.IGNORECASE,
 )
-_INLINE_FILE_ONLY_RE = re.compile(rf"`(?P<file>{_PATH_FRAG})`")
+_INLINE_FILE_ONLY_RE = re.compile(rf"`(?P<file>{_PATH_FRAG})`", re.IGNORECASE)
 
 
 # ── Canonical-source extractors (Fields table + ASan frame #0) ─────

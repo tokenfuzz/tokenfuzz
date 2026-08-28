@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+import languages
 import target_config  # sibling lib/ module; callers put lib/ on sys.path
 
 
@@ -114,19 +115,13 @@ _BARE_LABEL_RE = re.compile(r"^([A-Z][A-Za-z][A-Za-z0-9 _-]{0,40}):\s*(.*)$")
 # file:line references — accept common source-file extensions used
 # across the targets we audit. Kept as a prefix-friendly family rather
 # than an exhaustive enum (per project docs/development.md guidance).
-_SRC_EXTS = (
-    r"c|cc|cpp|cxx|h|hpp|hxx|m|mm|"
-    r"py|rb|js|jsx|ts|tsx|"
-    r"rs|go|java|kt|scala|swift|"
-    r"lua|php|cs|fs|ml|hs|"
-    r"sh|bash|zsh|pl|pm"
-)
+_SRC_EXTS = languages.source_reference_ext_pattern()
 _FILE_LINE_RE = re.compile(
     rf"""(?P<path>[\w./+\-]+?\.(?:{_SRC_EXTS}))   # path with allowed ext
          :(?P<line>\d+)                            # :NNN
          (?::\d+)?                                 # optional :col
     """,
-    re.VERBOSE,
+    re.VERBOSE | re.IGNORECASE,
 )
 
 # ASan-style stack frame: `#3 0x... in func file.c:123:4`
@@ -135,7 +130,7 @@ _ASAN_FRAME_RE = re.compile(
          (?P<func>[\w:~<>*&\-]+)\s+
          (?P<path>[\w./+\-]+?\.(?:{_SRC_EXTS})):(?P<line>\d+)
     """,
-    re.VERBOSE,
+    re.VERBOSE | re.IGNORECASE,
 )
 
 _SEVERITY_RE = re.compile(

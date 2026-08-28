@@ -256,7 +256,11 @@ credited as-is.
 ## Report narrative
 
 Crash and finding reports share one narrative shape, so a reviewer reads
-every backend's output the same way. In order:
+every backend's output the same way. Before the narrative headings, one bare
+`Location: path/to/file.ext:function:line` names the root-cause operation.
+Use an endpoint, config key, or protocol step when no source location exists;
+do not list several candidate locations. Finding clustering uses this as the
+primary source identity. The narrative then follows this order:
 
 | Section | Budget | Answers |
 | --- | --- | --- |

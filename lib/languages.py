@@ -25,6 +25,7 @@ Two interfaces:
 
        import languages
        languages.all_source_exts()        # {'.c', '.cc', ..., '.py', '.ts', ...}
+       languages.source_reference_ext_pattern()  # regex alternation for reports
        languages.for_build_system("python")
        languages.for_harness_ext(".rs")
        languages.runner_table()           # {'cargo': {...}, 'python': {...}, ...}
@@ -825,6 +826,23 @@ def all_source_exts() -> frozenset[str]:
         for ext in lang.source_exts:
             out.add(ext.lower())
     return frozenset(out)
+
+
+# Report locations may cite source embedded in a target even when TokenFuzz
+# cannot compile or run that language directly. Keep those established source
+# forms alongside the runnable-language registry so every location parser uses
+# one extension family instead of drifting per consumer.
+_REPORT_ONLY_SOURCE_EXTS = frozenset({
+    ".bash", ".cs", ".fs", ".hs", ".jsx", ".lua", ".m", ".ml", ".mm",
+    ".scala", ".sh", ".zsh",
+})
+
+
+def source_reference_ext_pattern() -> str:
+    """Regex alternation for source paths cited in reports, without dots."""
+    names = {ext.removeprefix(".") for ext in all_source_exts()}
+    names.update(ext.removeprefix(".") for ext in _REPORT_ONLY_SOURCE_EXTS)
+    return "|".join(re.escape(name) for name in sorted(names, key=lambda n: (-len(n), n)))
 
 
 def all_crash_patterns() -> tuple[str, ...]:

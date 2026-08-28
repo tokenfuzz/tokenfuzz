@@ -73,6 +73,13 @@ class SourceAnchorTests(unittest.TestCase):
             hashlib.sha256(self.excerpt.encode()).hexdigest(),
         )
 
+    def test_qualified_symbol_accepts_its_source_spelled_leaf(self) -> None:
+        anchor = self.anchor(symbol="sample::Parser.app_parse")
+        self.assertEqual(
+            triage_validate.verify_source_anchors([anchor], self.root),
+            [anchor],
+        )
+
     def test_review_facts_accept_only_generic_enumerated_values(self) -> None:
         self.assertEqual(
             triage_validate.source_review_facts({

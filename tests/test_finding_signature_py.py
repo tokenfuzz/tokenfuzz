@@ -185,6 +185,23 @@ Location: src/parser.c:parse_main
 assert_eq(("src/parser.c", "parse_main"),
           fs.extract_location(text1c), "Location: bare, no backticks, no line")
 
+# Every language in the sample matrix must recognize its source/module form.
+# Otherwise extraction falls through to a shared CLI frame later in Data Flow
+# and merges distinct findings at that caller.
+for path, func, line in (
+    ("lib/ReportKit.pm", "run_export", "55"),
+    ("reportkit.kts", "parseManifest", "32"),
+    ("R/reportkit.R", "read_asset", "61"),
+):
+    body = (
+        f"Location: {path}:{func}:{line}\n"
+        "Later flow: reportkit_cli.pl:main:111\n"
+    )
+    assert_eq((path, func), fs.extract_location(body),
+              f"sample-language location recognized: {path}")
+    assert_eq(line, fs.extract_line(body),
+              f"sample-language root line wins: {path}")
+
 # Pattern 2 — inline file:func:line
 text2 = """# Issue
 The bug is in `src/lib/net_parse.c:parse_inet6_net:406` where

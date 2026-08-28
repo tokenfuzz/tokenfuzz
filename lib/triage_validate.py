@@ -131,10 +131,22 @@ def verify_source_anchors(value: object, target_root: Path) -> list[dict]:
             ).splitlines()
         except (OSError, ValueError):
             continue
+        # Reviewers naturally qualify methods (`Type::method`, `Type.method`,
+        # `Type#method`) even when the declaration spells only `method`. The
+        # exact path, line, and excerpt remain the citation identity; accept a
+        # qualified label only when its source-spelled leaf is present too.
+        symbol_candidates = {symbol}
+        for separator in ("::", ".", "#"):
+            symbol_candidates.update(
+                candidate.rsplit(separator, 1)[-1]
+                for candidate in tuple(symbol_candidates)
+                if separator in candidate
+            )
+        source_text = "\n".join(source_lines)
         if (
             line > len(source_lines)
             or source_lines[line - 1].strip() != excerpt
-            or symbol not in "\n".join(source_lines)
+            or not any(candidate in source_text for candidate in symbol_candidates)
         ):
             continue
         verified.append({

@@ -339,8 +339,8 @@ Findings live under:
 What every FIND needs:
 
 - A report file at the FIND root: `report.md` or `description.md`.
-- A concrete location — `file:function:line`, an endpoint, a config
-  key, ….
+- Exactly one bare `Location:` naming the root-cause operation —
+  `file:function:line`, an endpoint, a config key, ….
 - The security issue class — memory safety, auth bypass, injection,
   info disclosure, crypto, race, boundary violation, logic flaw, ….
 - A rationale a reviewer can act on (impact, caller control, what
@@ -373,6 +373,7 @@ Trusted caller actions: Creates the handle before policy loading completes.
 Caller contract: obeyed
 Trigger source: bytes
 Strategy: S5
+Location: src/policy.c:check_acl:142
 
 ## Issue
 

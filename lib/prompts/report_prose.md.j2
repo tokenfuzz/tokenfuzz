@@ -5,10 +5,9 @@
    baseline (lib/benchmark_model_direct_render.py). Both conditions must carry
    it or a benchmark prose difference is a prompt artifact.
 
-   Scope is deliberately narrow: heading names, order, and voice. It says
-   nothing about what qualifies as a bug (audit_bug_contract.md.j2) and
-   nothing about the `## Fields` table or the bare-label fields — every
-   downstream parser reads those, so reshaping them would move gate decisions.
+   Scope is deliberately narrow: root location, heading names, order, and
+   voice. It says nothing about what qualifies as a bug
+   (audit_bug_contract.md.j2) or about the `## Fields` table.
 
    The omit-rather-than-guess rule is load-bearing. A word budget a model
    fills with speculation turns a real finding into a rejected one; the
@@ -16,6 +15,12 @@
 
    Keep it terse: it is cache-replayed on every tool call. #}
 ## Report narrative
+
+Before the headings, include exactly one bare
+`Location: path/to/file.ext:function:line` naming the root-cause operation,
+not a caller or downstream effect. Use the equivalent endpoint, config key, or
+protocol step when there is no source file. Do not give a list or line range:
+finding clustering consumes this field as the primary identity.
 
 Write for a maintainer who has never opened the file. Use these headings, in
 this order — `bin/enrich-report` builds the reviewer TL;DR from Summary plus
