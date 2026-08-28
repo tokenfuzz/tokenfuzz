@@ -25,34 +25,36 @@ else there, and everything under `output/`, is a gitignored working area.
 | `canary` | C / cmake | ASan | 3 | 2 |
 | `samples/sample-c` | C / cmake | ASan | 5 | 2 |
 | `samples/sample-cpp` | C++ / cmake | ASan | 5 | 2 |
-| `samples/sample-rust` | Rust / cargo | ASan (nightly `build-std`) | 5 | 2 |
-| `samples/sample-swift` | Swift / SwiftPM | ASan (via `[runner]`) | 5 | 2 |
-| `samples/sample-go` | Go / `go build -race` | `race` | 6 | 2 |
+| `samples/sample-rust` | Rust / cargo | ASan (nightly `build-std`) | 3 | 4 |
+| `samples/sample-swift` | Swift / SwiftPM | ASan (via `[runner]`) | 3 | 4 |
+| `samples/sample-go` | Go / `go build -race` | `race` | 3 | 5 |
 | `samples/sample-python-native` | Python C extension | ASan | 1 | 0 |
-| `samples/sample-python` | Python | findings-only | 5 | 2 |
-| `samples/sample-java` | Java / maven | findings-only | 5 | 2 |
-| `samples/sample-kotlin` | Kotlin | findings-only | 5 | 2 |
-| `samples/sample-javascript` | Node / npm | findings-only | 5 | 2 |
-| `samples/sample-typescript` | TypeScript / npm | findings-only | 5 | 2 |
-| `samples/sample-ruby` | Ruby / bundler | findings-only | 5 | 2 |
-| `samples/sample-php` | PHP / composer | findings-only | 5 | 2 |
-| `samples/sample-perl` | Perl | findings-only | 5 | 2 |
-| `samples/sample-r` | R | findings-only | 5 | 2 |
+| `samples/sample-python` | Python | findings-only | 3 | 4 |
+| `samples/sample-java` | Java / maven | findings-only | 4 | 5 |
+| `samples/sample-kotlin` | Kotlin | findings-only | 4 | 5 |
+| `samples/sample-javascript` | Node / npm | findings-only | 2 | 5 |
+| `samples/sample-typescript` | TypeScript / npm | findings-only | 2 | 5 |
+| `samples/sample-ruby` | Ruby / bundler | findings-only | 2 | 5 |
+| `samples/sample-php` | PHP / composer | findings-only | 6 | 5 |
+| `samples/sample-perl` | Perl | findings-only | 4 | 3 |
+| `samples/sample-r` | R | findings-only | 2 | 5 |
 
 Each one is a small tool built around the same idea — read one attacker-supplied
 job file, do something with it — so the same bug classes can be planted in every
 language and compared fairly. Most also carry deliberate **false-positive
-traps**: code that looks dangerous to a quick scan but is safe. A run that
-promotes a trap is a precision failure, and the answer key says so.
+traps**: code that looks dangerous to a quick scan but is safe, or an operation
+that crosses no independent security boundary because the same job chooses
+both sides of it. A run that promotes a trap is a precision failure, and the
+answer key says so.
 
 !!! note "Not every planted bug can crash"
     The scorer grades crashes, because a sanitizer artifact is the only
     attribution it can trust. A planted bug that no sanitizer can catch — a path
     traversal, a command injection — is marked `findings_only: true` in the
-    manifest and stays out of the crash-recall denominator. On the two sanitizer
-    samples where this matters, `samples/sample-go` counts 1 of its 6 planted
-    bugs toward crash recall and `samples/sample-rust` counts 2 of its 5. The
-    rest are there to exercise the finding path.
+    manifest and stays out of the crash-recall denominator. On the three hybrid
+    sanitizer samples, `samples/sample-go` counts 1 of its 3 planted bugs
+    toward crash recall; `samples/sample-rust` and `samples/sample-swift` each
+    count 2 of 3. The rest exercise the finding path.
 
 ## Run one
 

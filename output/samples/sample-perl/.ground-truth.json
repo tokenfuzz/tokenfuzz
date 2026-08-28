@@ -2,7 +2,7 @@
   "target": "samples/sample-perl",
   "language": "perl",
   "findings_only": true,
-  "description": "Answer key for the synthetic sample-perl target (ReportKit report toolkit). Kept under output/samples/sample-perl/ — NOT inside targets/samples/sample-perl/ — so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. Every planted bug is reachable through reportkit_cli.pl from a single job file; the listed inputs reproduce them against a stock perl. This is a findings-only target (no sanitizer): all five bugs are observable security issues (string eval, Storable thaw, backticks, 2-argument open read and write). The two false-positive traps look dangerous to a naive scanner but are safe.",
+  "description": "Answer key for the synthetic sample-perl target. String eval, default Storable thaw, export backticks, and read_asset's attacker-shaped two-argument open cross the job-file boundary. Attacker-selected output roots remain a precision trap.",
   "runner": "reportkit_cli.pl",
   "planted_bugs": [
     {
@@ -24,8 +24,8 @@
       "signature_symbol": "load_state",
       "input": "repro/case-state",
       "cwe": "CWE-502",
-      "modeled_on": "Storable::thaw untrusted-data class (memory-corruption / hook RCE) — thaw on attacker bytes",
-      "summary": "load_state calls Storable::thaw on an attacker-supplied blob; thawing hostile Storable data is unsafe (STORABLE_thaw hooks, malformed-graph memory corruption). case-state thaws a frozen structure to prove reconstruction from bytes."
+      "modeled_on": "Storable::thaw untrusted-data class — default object reconstruction reaches installed lifecycle hooks",
+      "summary": "load_state passes attacker-supplied bytes to default Storable::thaw. A valid SX_HOOK record can select an installed package and enter its STORABLE_thaw behavior; the audit's DB_File testcase reached that hook and terminated the process by SIGSEGV in five of five runs."
     },
     {
       "id": "shell-command-injection",
@@ -39,26 +39,15 @@
       "summary": "run_export interpolates its hook string into backticks, so any export hook is arbitrary command execution. case-export runs 'true; echo injected' to prove the string is executed as a shell command."
     },
     {
-      "id": "two-arg-open-read-traversal",
+      "id": "two-arg-open-command-injection",
       "kind": "real",
-      "primitive": "path-traversal",
-      "access": "READ",
+      "primitive": "command-injection",
+      "access": "EXEC",
       "signature_symbol": "read_asset",
       "input": "repro/case-asset",
-      "cwe": "CWE-22",
-      "modeled_on": "Perl 2-argument open() footgun — traversal and leading-pipe/redirect injection with no mode or containment check",
-      "summary": "read_asset opens \"$root/$name\" with 2-argument open and no '..' or mode check, so a name like ../etc/passwd reads outside the root and a name like 'cmd |' would run a command. case-asset reads /etc/passwd from outside the root."
-    },
-    {
-      "id": "two-arg-open-write-traversal",
-      "kind": "real",
-      "primitive": "path-traversal",
-      "access": "WRITE",
-      "signature_symbol": "save_render",
-      "input": "repro/case-save",
-      "cwe": "CWE-22",
-      "modeled_on": "arbitrary file write via unchecked join of an attacker name onto an output root",
-      "summary": "save_render opens \">$root/$name\" with no containment check, so a name like ../tmp/x writes outside the output root. case-save writes reportkit-escaped.txt above the root."
+      "cwe": "CWE-78",
+      "modeled_on": "Perl two-argument open footgun — a leading pipe in an attacker-controlled mode string executes a command",
+      "summary": "read_asset passes the attacker-shaped string \"$root/$name\" to two-argument open. A root beginning with '|' selects pipe mode, so the remainder executes as a shell command instead of naming an asset."
     }
   ],
   "false_positive_traps": [
@@ -77,6 +66,13 @@
       "signature_symbol": "run_command",
       "input": "repro/case-command",
       "refute_reason": "run_command calls system with a fixed executable (echo) and the caller argument as a separate list element, which bypasses the shell entirely, so a caller controls neither which program runs nor a shell. It looks like the sibling of run_export but is not injectable; a command-injection report here is a false positive."
+    },
+    {
+      "id": "attacker-selected-output-root",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "save_render",
+      "refute_reason": "The same job chooses both output root and name, so lexical traversal adds no write capability."
     }
   ]
 }

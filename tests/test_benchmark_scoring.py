@@ -45,12 +45,14 @@ class BenchmarkScoringTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def make_crash(self, run, crash_id, symbol, diagnostic, extra=""):
+    def make_crash(
+        self, run, crash_id, symbol, diagnostic, extra="", access="WRITE",
+    ):
         crash = run / "crashes" / crash_id
         crash.mkdir(parents=True)
         (crash / "sanitizer.txt").write_text(
             f"==42==ERROR: AddressSanitizer: {diagnostic} on address 0x602000000010\n"
-            "WRITE of size 64 at 0x602000000010 thread T0\n"
+            f"{access} of size 64 at 0x602000000010 thread T0\n"
             "    #0 0x0000 in __asan_memcpy\n"
             f"    #1 0x0000 in {symbol} sample.c:42\n{extra}",
             encoding="utf-8",
@@ -237,6 +239,58 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(score["overall"]["recall"], 1.0)
         self.assertEqual(score["overall"]["missed"], [])
 
+    def test_alternate_runtime_signature_credits_the_same_source_bug(self) -> None:
+        run = self.root / "alternate"
+        crash = self.make_crash(run, "ALT-0001", "cleanup", "double-free")
+        sanitizer = crash / "sanitizer.txt"
+        sanitizer.write_text(sanitizer.read_text().replace(
+            "AddressSanitizer: double-free",
+            "AddressSanitizer: attempting double-free",
+        ))
+        manifest = self.root / "alternate-gt.json"
+        manifest.write_text(json.dumps({"planted_bugs": [{
+            "id": "lifetime",
+            "primitive": "heap-use-after-free",
+            "signature_symbol": "consume",
+            "alternate_signatures": [{
+                "primitive": "double-free", "signature_symbol": "cleanup",
+            }],
+        }]}) + "\n")
+        _, score = self.score(run, manifest=manifest)
+        self.assertEqual(score["overall"]["detected"], ["lifetime"])
+        self.assertEqual(score["overall"]["recall"], 1.0)
+        self.assertEqual(score["overall"]["precision"], 1.0)
+
+    def test_access_qualified_alternates_disambiguate_inlined_crashes(self) -> None:
+        run = self.root / "inlined"
+        self.make_crash(
+            run, "INLINE-READ", "run", "heap-buffer-overflow", access="READ",
+        )
+        self.make_crash(
+            run, "INLINE-WRITE", "run", "heap-buffer-overflow", access="WRITE",
+        )
+        manifest = self.root / "inlined-gt.json"
+        manifest.write_text(json.dumps({"planted_bugs": [
+            {
+                "id": "read-bug", "primitive": "out-of-bounds-read",
+                "signature_symbol": "sumWindow", "alternate_signatures": [{
+                    "primitive": "heap-buffer-overflow",
+                    "signature_symbol": "run", "access": "READ",
+                }],
+            },
+            {
+                "id": "write-bug", "primitive": "out-of-bounds-write",
+                "signature_symbol": "packTable", "alternate_signatures": [{
+                    "primitive": "heap-buffer-overflow",
+                    "signature_symbol": "run", "access": "WRITE",
+                }],
+            },
+        ]}) + "\n")
+        _, score = self.score(run, manifest=manifest)
+        self.assertEqual(score["overall"]["detected"], ["read-bug", "write-bug"])
+        self.assertEqual(score["overall"]["recall"], 1.0)
+        self.assertEqual(score["overall"]["precision"], 1.0)
+
     def test_trap_requires_the_expected_non_memory_diagnostic(self) -> None:
         trap = self.root / "trap"
         self.make_crash(trap, "TF-0001", "pack_field", "heap-buffer-overflow")
@@ -257,6 +311,27 @@ class BenchmarkScoringTests(unittest.TestCase):
                 {"id": "x", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell",
                  "findings_only": "false"},
             ]},
+            {"planted_bugs": [
+                {"id": "x", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell",
+                 "alternate_signatures": "not-a-list"},
+            ]},
+            {"planted_bugs": [
+                {"id": "x", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell",
+                 "alternate_signatures": [{"primitive": "double-free"}]},
+            ]},
+            {"planted_bugs": [
+                {"id": "a", "primitive": "one", "signature_symbol": "a",
+                 "alternate_signatures": [{"primitive": "heap-buffer-overflow",
+                                            "signature_symbol": "run"}]},
+                {"id": "b", "primitive": "two", "signature_symbol": "b",
+                 "alternate_signatures": [{"primitive": "heap-buffer-overflow",
+                                            "signature_symbol": "run", "access": "READ"}]},
+            ]},
+            {"planted_bugs": [
+                {"id": "x", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell",
+                 "alternate_signatures": [{"primitive": "double-free",
+                                            "signature_symbol": "cleanup", "access": "EXEC"}]},
+            ]},
         )
         for number, payload in enumerate(manifests):
             with self.subTest(number=number):
@@ -265,6 +340,16 @@ class BenchmarkScoringTests(unittest.TestCase):
                 proc, score = self.score(self.pool, manifest=manifest)
                 self.assertEqual(proc.returncode, 1)
                 self.assertIsNone(score)
+
+    def test_committed_sample_manifests_validate(self) -> None:
+        manifests = sorted((ROOT / "output" / "samples").glob(
+            "sample-*/.ground-truth.json"
+        ))
+        self.assertEqual(len(manifests), 15)
+        for manifest in manifests:
+            with self.subTest(manifest=manifest.parent.name):
+                payload = json.loads(manifest.read_text())
+                self.assertEqual(benchmark.manifest_errors(payload), [])
 
     def test_aggregate_and_rendering_handle_not_scored_states_explicitly(self) -> None:
         no_pool = self.root / "no-pool"

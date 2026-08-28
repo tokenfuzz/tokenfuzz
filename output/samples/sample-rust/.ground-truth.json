@@ -3,7 +3,7 @@
   "language": "rust",
   "build": ".audit/build.sh",
   "asan_bin": "build-asan/sample-rust",
-  "description": "Answer key for the synthetic sample-rust target (reportkit report toolkit). Kept under output/samples/sample-rust/ \u2014 NOT inside targets/samples/sample-rust/ \u2014 so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. .audit/build.sh produces an AddressSanitizer build (nightly `-Zsanitizer=address -Zbuild-std`); every planted bug is reachable through build-asan/sample-rust from a single job file. This is a hybrid target: the two unsound-`unsafe` memory bugs (an integer-overflow heap out-of-bounds write and a get_unchecked out-of-bounds read) are verifiable ASan crashes, while the three security bugs (command injection, read/write path traversal) are findings that execute through the same binary without a sanitizer diagnostic. The planted bugs are deliberately NOT memory-safe unwrap panics (a clean abort with no leverage that a correctly calibrated auditor discards). Reproducer job files live in /tmp (not committed). The two false-positive traps look dangerous to a naive scanner but are safe.",
+  "description": "Answer key for the synthetic sample-rust target. Two unsafe memory faults and shell execution cross the attacker-supplied job-file boundary. Read/write roots selected by that same job are precision traps.",
   "runner": "sample-rust",
   "planted_bugs": [
     {
@@ -39,30 +39,6 @@
       "cwe": "CWE-78",
       "modeled_on": "OS command injection class \u2014 Command::new(\"sh\").arg(\"-c\").arg(<attacker>)",
       "summary": "run_export runs its hook string through 'sh -c', so any export hook is arbitrary command execution. case-export runs 'true; echo injected' to prove the string is executed as a shell command."
-    },
-    {
-      "id": "path-traversal-read",
-      "kind": "real",
-      "findings_only": true,
-      "primitive": "path-traversal",
-      "access": "READ",
-      "signature_symbol": "read_asset",
-      "input": "/tmp/rust-asset.job",
-      "cwe": "CWE-22",
-      "modeled_on": "path traversal class \u2014 Path::new(root).join(name) with no containment check",
-      "summary": "read_asset joins an attacker-supplied name onto the asset root with no '..' containment check, so a name like ../etc/passwd reads any file the process can. case-asset reads /etc/passwd from outside the root."
-    },
-    {
-      "id": "path-traversal-write",
-      "kind": "real",
-      "findings_only": true,
-      "primitive": "path-traversal",
-      "access": "WRITE",
-      "signature_symbol": "save_render",
-      "input": "/tmp/rust-save.job",
-      "cwe": "CWE-22",
-      "modeled_on": "arbitrary file write via unchecked Path::join of an attacker name onto an output root",
-      "summary": "save_render joins an attacker-supplied name onto the output root with no containment check, so a name like ../tmp/x writes outside the output root. case-save writes reportkit-escaped.txt above the root."
     }
   ],
   "false_positive_traps": [
@@ -81,6 +57,20 @@
       "signature_symbol": "run_command",
       "input": "/tmp/rust-command.job",
       "refute_reason": "run_command uses Command::new(\"echo\") with the caller argument as a separate arg; Command spawns no shell, so a caller controls neither which program runs nor a shell. It looks like the sibling of run_export but is not injectable; a command-injection report here is a false positive."
+    },
+    {
+      "id": "attacker-selected-asset-root",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "read_asset",
+      "refute_reason": "The same job chooses both root and asset name, so traversal crosses no independently trusted namespace."
+    },
+    {
+      "id": "attacker-selected-output-root",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "save_render",
+      "refute_reason": "The same job chooses both output root and name, so lexical traversal adds no write capability."
     }
   ]
 }

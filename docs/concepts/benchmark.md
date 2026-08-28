@@ -357,6 +357,13 @@ sanitizer primitive and the stack frame it crashes in; each trap declares
 the benign outcome it expects. The canary is 100% synthetic, so the answer
 key discloses no real project's bug.
 
+When one source defect has multiple runtime shapes, its entry may add
+`alternate_signatures`, each with a `primitive` and `signature_symbol`.
+An alternate may also declare `access: READ` or `access: WRITE` when an
+optimizer inlines distinct operations into the same crash-site symbol. These
+are aliases for the same bug id, not extra recall items; ambiguous or
+overlapping aliases make the manifest fail validation.
+
 The canary is not alone: fifteen per-language `samples/sample-*` targets are
 committed the same way, each with its own answer key, so the same measurement
 works for Rust, Go, Python, Java, and the rest. Everything else under
@@ -415,9 +422,9 @@ The same `.ground-truth.json` shape works for any target. To measure
 recall against real CVEs, add a manifest at
 `output/<slug>/.ground-truth.json` whose `planted_bugs` reference the real
 crashing symbols and primitives, pin the target to a vulnerable revision,
-and run the benchmark as usual. The scorer needs no code change — it keys
-on the `(primitive, signature_symbol)` pair the clustering pipeline already
-produces.
+and run the benchmark as usual. The scorer keys on the runtime
+`(primitive, signature_symbol)` pair, plus `access` only for an alternate that
+declares it.
 
 !!! warning "Keep real-bug manifests local — never commit them"
     A real-CVE manifest names actual crashing symbols and primitives, which

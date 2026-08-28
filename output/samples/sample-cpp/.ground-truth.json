@@ -10,7 +10,7 @@
       "kind": "real",
       "primitive": "heap-buffer-overflow",
       "access": "WRITE",
-      "signature_symbol": "handle_table",
+      "signature_symbol": "rbundle::handle_table",
       "input": "repro/case-table",
       "cwe": "CWE-190",
       "modeled_on": "libwebp CVE-2023-4863 class — allocation size computed in a narrower type than the index",
@@ -21,7 +21,7 @@
       "kind": "real",
       "primitive": "stack-buffer-overflow",
       "access": "WRITE",
-      "signature_symbol": "handle_host",
+      "signature_symbol": "rbundle::handle_host",
       "input": "repro/case-host",
       "cwe": "CWE-787",
       "modeled_on": "curl SOCKS5 CVE-2023-38545 class — length checked against the wrong limit",
@@ -32,7 +32,13 @@
       "kind": "real",
       "primitive": "heap-buffer-overflow",
       "access": "READ",
-      "signature_symbol": "handle_slice",
+      "signature_symbol": "rbundle::handle_slice",
+      "alternate_signatures": [
+        {
+          "primitive": "container-overflow",
+          "signature_symbol": "rbundle::handle_slice"
+        }
+      ],
       "input": "repro/case-slice",
       "cwe": "CWE-125",
       "modeled_on": "zlib CVE-2022-37434 class — offset validated but offset+length is not",
@@ -43,7 +49,7 @@
       "kind": "real",
       "primitive": "heap-use-after-free",
       "access": "WRITE",
-      "signature_symbol": "handle_append",
+      "signature_symbol": "rbundle::handle_append",
       "input": "repro/case-append",
       "cwe": "CWE-416",
       "modeled_on": "C++ iterator/pointer invalidation class — a pointer into a std::vector kept across a reallocating push_back",
@@ -54,7 +60,21 @@
       "kind": "real",
       "primitive": "heap-use-after-free",
       "access": "READ",
-      "signature_symbol": "handle_flush",
+      "signature_symbol": "rbundle::handle_flush",
+      "alternate_signatures": [
+        {
+          "primitive": "double-free",
+          "signature_symbol": "rbundle::decode"
+        },
+        {
+          "primitive": "double-free",
+          "signature_symbol": "rbundle::handle_stage"
+        },
+        {
+          "primitive": "double-free",
+          "signature_symbol": "rbundle::handle_drop"
+        }
+      ],
       "input": "repro/case-uaf",
       "cwe": "CWE-416",
       "modeled_on": "classic missing pointer invalidation (CWE-416) — delete without clearing the owner",
@@ -66,7 +86,7 @@
       "id": "guarded-null-deref",
       "kind": "fp",
       "expected_outcome": "clean",
-      "signature_symbol": "handle_opt",
+      "signature_symbol": "rbundle::handle_opt",
       "input": "repro/case-opt",
       "refute_reason": "The OPT value pointer is dereferenced only inside the branch guarded by memcmp(val, \"set\", 3) == 0, so a non-\"set\" value returns before any dereference. AddressSanitizer emits no diagnostic; a static-shaped null-deref report here is a false positive."
     },
@@ -74,7 +94,7 @@
       "id": "debug-only-assert",
       "kind": "fp",
       "expected_outcome": "abort",
-      "signature_symbol": "handle_check",
+      "signature_symbol": "rbundle::handle_check",
       "input": "repro/case-check",
       "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) would be an unexpected crash."
     }

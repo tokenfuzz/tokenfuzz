@@ -2274,8 +2274,9 @@ def load_ground_truth(path: Path) -> dict | None:
 def manifest_errors(manifest: dict) -> list[str]:
     """Validate a ground-truth manifest before scoring.
 
-    The scorer's identity is (primitive, symbol) for a real bug and
-    (outcome, symbol) for a trap; a manifest typo that drops a field, mis-types
+    The scorer's identity is (primitive, symbol) for a real bug, optionally
+    refined by READ/WRITE for an alternate runtime manifestation, and
+    (outcome, symbol) for a trap. A manifest typo that drops a field, mis-types
     the kind, or collides a match-key would silently weaken matching. So
     validate, up front and loudly, everything the matcher and the score_subset
     partition depend on:
@@ -2345,6 +2346,62 @@ def manifest_errors(manifest: dict) -> list[str]:
           need_primitive=True, need_outcome=False, want_kind="real")
     check(manifest.get("false_positive_traps", []), "false_positive_traps",
           need_primitive=False, need_outcome=True, want_kind="fp")
+
+    # One source bug can legitimately surface under more than one sanitizer
+    # signature (for example UAF versus double-free, or an inlined Swift READ
+    # and WRITE at one wrapper). Keep those aliases explicit and exact. An
+    # access-less key is a wildcard, so it overlaps either access-qualified
+    # form and cannot belong to a second bug.
+    bugs = manifest.get("planted_bugs", [])
+    runtime_keys: list[tuple[tuple[str, str, str], str]] = []
+    if isinstance(bugs, list):
+        for i, bug in enumerate(bugs):
+            if not isinstance(bug, dict):
+                continue
+            bug_where = f"planted_bugs[{i}]"
+            candidates = [(
+                str(bug.get("primitive", "")).strip(),
+                str(bug.get("signature_symbol", "")).strip(),
+                "",
+                bug_where,
+            )]
+            alternates = bug.get("alternate_signatures", [])
+            if not isinstance(alternates, list):
+                errors.append(f"{bug_where} alternate_signatures must be a list")
+                alternates = []
+            for j, alternate in enumerate(alternates):
+                where = f"{bug_where}.alternate_signatures[{j}]"
+                if not isinstance(alternate, dict):
+                    errors.append(f"{where} must be an object")
+                    continue
+                unknown = sorted(
+                    set(alternate) - {"primitive", "signature_symbol", "access"}
+                )
+                if unknown:
+                    errors.append(
+                        f"{where} has unknown field(s): {', '.join(unknown)}")
+                prim = str(alternate.get("primitive", "")).strip()
+                sym = str(alternate.get("signature_symbol", "")).strip()
+                access = str(alternate.get("access", "")).strip()
+                if not prim:
+                    errors.append(f"{where} needs a primitive")
+                if not sym:
+                    errors.append(f"{where} needs a signature_symbol")
+                if access not in {"", "READ", "WRITE"}:
+                    errors.append(f"{where} access must be READ or WRITE")
+                candidates.append((prim, sym, access, where))
+            for prim, sym, access, where in candidates:
+                if not prim or not sym:
+                    continue
+                key = (prim, sym, access)
+                for prior, prior_where in runtime_keys:
+                    same_surface = key[:2] == prior[:2]
+                    access_overlaps = not key[2] or not prior[2] or key[2] == prior[2]
+                    if same_surface and access_overlaps:
+                        errors.append(
+                            f"{where} overlaps runtime match key from {prior_where}")
+                        break
+                runtime_keys.append((key, where))
     return errors
 
 
@@ -2374,6 +2431,11 @@ _PRIMITIVE_RE = re.compile(
     r"(?:AddressSanitizer|UndefinedBehaviorSanitizer|MemorySanitizer|"
     r"ThreadSanitizer):\s+([A-Za-z][A-Za-z0-9-]+)"
 )
+
+# ASan/MSan/TSan diagnostics name the fault direction independently of the
+# primitive. It is used only by access-qualified alternate signatures; primary
+# manifest signatures retain their historical (primitive, symbol) semantics.
+_ACCESS_RE = re.compile(r"^(READ|WRITE) of size\b", re.MULTILINE)
 
 # Go's race detector prints "WARNING: DATA RACE" rather than a
 # "ThreadSanitizer: <primitive>" line, so it has no primitive for _PRIMITIVE_RE
@@ -2509,12 +2571,14 @@ def _crash_site_functions(text: str, rust: bool = False) -> set[str]:
     return base | {tail for tail in map(_rust_symbol_tail, base) if tail}
 
 
-def _attribution_evidence(crash_dir: Path, rust: bool = False) -> tuple[str, set[str]] | None:
+def _attribution_evidence(
+    crash_dir: Path, rust: bool = False,
+) -> tuple[str, set[str], str] | None:
     """Trusted runtime evidence for attribution, or None.
 
-    `(primitive, crash-site function names)` parsed from a CANONICAL sanitizer
-    artifact — the sanitizer runtime's own output file (find_primary_sanitizer:
-    sanitizer.txt or a probe sidecar),
+    `(primitive, crash-site function names, access)` parsed from a CANONICAL
+    sanitizer artifact — the sanitizer runtime's own output file
+    (find_primary_sanitizer: sanitizer.txt or a probe sidecar),
     content-verified to carry a real diagnostic.
 
     Attribution is NEVER read from an agent-authored report.md. Prose that
@@ -2532,11 +2596,21 @@ def _attribution_evidence(crash_dir: Path, rust: bool = False) -> tuple[str, set
     except OSError:
         return None
     m = _PRIMITIVE_RE.search(text)
-    if m:
+    # Preserve fatal signal tokens exactly: trap manifests intentionally use
+    # ASan's uppercase ABRT/SEGV spelling, while the shared fault key
+    # canonicalizes ordinary diagnostic classes to lowercase.
+    if m and m.group(1).isupper():
         primitive = m.group(1)
+    elif fault := (_ca.sanitizer_fault_key(text) if _ca is not None else None):
+        _sanitizer, primitive = fault
     else:
-        primitive = "data-race" if _DATA_RACE_RE.search(text) else ""
-    return primitive, _crash_site_functions(text, rust)
+        if m:
+            primitive = m.group(1)
+        else:
+            primitive = "data-race" if _DATA_RACE_RE.search(text) else ""
+    access_match = _ACCESS_RE.search(text)
+    access = access_match.group(1) if access_match else ""
+    return primitive, _crash_site_functions(text, rust), access
 
 
 # A trap's expected_outcome names what a *benign* occurrence looks like.
@@ -2547,21 +2621,33 @@ def _attribution_evidence(crash_dir: Path, rust: bool = False) -> tuple[str, set
 _OUTCOME_PRIMITIVE = {"abort": "ABRT"}
 
 
-def _match_real(primitive: str, crash_site: set[str],
+def _match_real(primitive: str, crash_site: set[str], access: str,
                 bugs: list[dict]) -> dict | None:
     """First planted bug whose (primitive, crash-site symbol) the evidence
     satisfies — both facts bin/cluster-crashes keys a crash on. *crash_site*
     is the faulting frame only, so a planted symbol that merely appears as a
     caller, allocator, or freer does not match."""
     for b in bugs:
-        prim = str(b.get("primitive", ""))
-        sym = str(b.get("signature_symbol", ""))
-        if prim and prim != primitive:
-            continue
-        if sym and sym not in crash_site:
-            continue
-        if prim or sym:
-            return b
+        signatures = [b, *(
+            b.get("alternate_signatures", [])
+            if isinstance(b.get("alternate_signatures", []), list) else []
+        )]
+        for signature in signatures:
+            if not isinstance(signature, dict):
+                continue
+            prim = str(signature.get("primitive", ""))
+            sym = str(signature.get("signature_symbol", ""))
+            wanted_access = (
+                str(signature.get("access", "")) if signature is not b else ""
+            )
+            if prim and prim != primitive:
+                continue
+            if sym and sym not in crash_site:
+                continue
+            if wanted_access and wanted_access != access:
+                continue
+            if prim or sym:
+                return b
     return None
 
 
@@ -2622,7 +2708,7 @@ def score_ground_truth(
     # demangled C++ name is indistinguishable and must stay whole).
     rust = str(manifest.get("language", "")).lower() == "rust"
 
-    confirmed: list[tuple[str, tuple[str, set] | None]] = []
+    confirmed: list[tuple[str, tuple[str, set, str] | None]] = []
     if crashes_dir.is_dir():
         for child in sorted(crashes_dir.iterdir()):
             if not child.is_dir() or child.name.startswith("."):
@@ -2645,8 +2731,8 @@ def score_ground_truth(
             if evidence is None:
                 unattributed.append(name)
                 continue
-            primitive, crash_site = evidence
-            hit = _match_real(primitive, crash_site, real)
+            primitive, crash_site, access = evidence
+            hit = _match_real(primitive, crash_site, access, real)
             if hit:
                 detected.setdefault(hit["id"], []).append(name)
                 continue

@@ -55,6 +55,20 @@
       "primitive": "heap-use-after-free",
       "access": "READ",
       "signature_symbol": "handle_flush",
+      "alternate_signatures": [
+        {
+          "primitive": "double-free",
+          "signature_symbol": "rcfg_decode"
+        },
+        {
+          "primitive": "double-free",
+          "signature_symbol": "handle_stage"
+        },
+        {
+          "primitive": "double-free",
+          "signature_symbol": "handle_drop"
+        }
+      ],
       "input": "repro/case-uaf",
       "cwe": "CWE-416",
       "modeled_on": "classic missing pointer invalidation (CWE-416) — free without clearing the owner",

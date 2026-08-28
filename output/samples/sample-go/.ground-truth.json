@@ -1,7 +1,7 @@
 {
   "target": "samples/sample-go",
   "language": "go",
-  "description": "Answer key for the synthetic sample-go target (reportkit report toolkit). Kept under output/samples/sample-go/ \u2014 NOT inside targets/samples/sample-go/ \u2014 so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. The `go build -race` bootstrap produces the instrumented sample-go binary; every planted bug is reachable through it from a single job file. This is a hybrid target: the concurrent `merge` op has a genuine data race that the race detector reports as a verifiable crash ('WARNING: DATA RACE'), while the five security bugs (template injection info-disclosure, zip-slip arbitrary write, command injection, read/write path traversal) are findings that execute through the same binary. The planted bugs are deliberately NOT memory-safe DoS panics \u2014 a nil-deref or slice-out-of-range is a benign crash a correctly-calibrated auditor discards, and the data race is a real concurrency defect (silently lost updates) that only the race detector surfaces, not a concurrent-map-write DoS. Reproducer job files live in /tmp (not committed) to keep the target tree free of answer leakage. The two false-positive traps look dangerous to a naive scanner but are safe.",
+  "description": "Answer key for the synthetic sample-go target. The race, signing-key disclosure, and shell injection cross the documented attacker-supplied job-file boundary. Filesystem operations whose same job chooses both root and child are precision traps: escaping an attacker-selected namespace adds no capability.",
   "runner": "sample-go",
   "planted_bugs": [
     {
@@ -17,28 +17,16 @@
       "signature_note": "The faulting frame is the goroutine closure main.mergeTallies.func1, not mergeTallies itself."
     },
     {
-      "id": "template-injection",
+      "id": "template-secret-disclosure",
       "kind": "real",
       "findings_only": true,
-      "primitive": "template-injection",
+      "primitive": "info-disclosure",
       "access": "READ",
       "signature_symbol": "renderTemplate",
       "input": "/tmp/go-render.job",
       "cwe": "CWE-1336",
       "modeled_on": "server-side template injection class \u2014 text/template.Parse on an attacker-controlled template string executed against a context holding a secret",
       "summary": "renderTemplate parses the whole job body as a text/template and executes it against a renderContext that carries an internal SigningKey. Because the template text is attacker-controlled, a body of '{{.SigningKey}}' exfiltrates the signing credential (and any other in-scope field or method). /tmp/go-render.job renders {{.SigningKey}} and leaks 'dev-signing-key-do-not-ship'."
-    },
-    {
-      "id": "zip-slip",
-      "kind": "real",
-      "findings_only": true,
-      "primitive": "path-traversal",
-      "access": "WRITE",
-      "signature_symbol": "extractBundle",
-      "input": "/tmp/go-extract.job",
-      "cwe": "CWE-22",
-      "modeled_on": "zip-slip archive-extraction class \u2014 filepath.Join(dest, entry.Name) with no containment check on the archive entry name",
-      "summary": "extractBundle unpacks a zip archive by writing each entry to filepath.Join(dest, f.Name) with no '..' containment check, so an entry named '../x' escapes the destination directory. /tmp/go-extract.job unpacks /tmp/go-evil.zip (entry '../go-zipslip-escaped.txt') to write outside the destination."
     },
     {
       "id": "shell-command-injection",
@@ -51,30 +39,6 @@
       "cwe": "CWE-78",
       "modeled_on": "OS command injection class \u2014 exec.Command(\"sh\", \"-c\", <attacker>) on an attacker string",
       "summary": "runExport runs its hook string through 'sh -c', so any export hook is arbitrary command execution. /tmp/go-export.job runs 'true; echo injected' to prove the string is executed as a shell command."
-    },
-    {
-      "id": "path-traversal-read",
-      "kind": "real",
-      "findings_only": true,
-      "primitive": "path-traversal",
-      "access": "READ",
-      "signature_symbol": "readAsset",
-      "input": "/tmp/go-asset.job",
-      "cwe": "CWE-22",
-      "modeled_on": "path traversal class \u2014 filepath.Join(root, name) with no containment check",
-      "summary": "readAsset joins an attacker-supplied name onto the asset root with no '..' containment check, so a name like ../etc/passwd reads any file the process can. /tmp/go-asset.job reads /etc/passwd from outside the root."
-    },
-    {
-      "id": "path-traversal-write",
-      "kind": "real",
-      "findings_only": true,
-      "primitive": "path-traversal",
-      "access": "WRITE",
-      "signature_symbol": "saveRender",
-      "input": "/tmp/go-save.job",
-      "cwe": "CWE-22",
-      "modeled_on": "arbitrary file write via unchecked filepath.Join of an attacker name onto an output root",
-      "summary": "saveRender joins an attacker-supplied name onto the output root with no containment check, so a name like ../x writes outside the output root. /tmp/go-save.job writes go-save-escaped.txt above the root."
     }
   ],
   "false_positive_traps": [
@@ -93,6 +57,27 @@
       "signature_symbol": "runCommand",
       "input": "/tmp/go-command.job",
       "refute_reason": "runCommand calls exec.Command with a fixed executable (echo) and the caller argument as a separate argv element; exec.Command spawns no shell, so a caller controls neither which program runs nor a shell. It looks like the sibling of runExport but is not injectable; a command-injection report here is a false positive."
+    },
+    {
+      "id": "attacker-selected-extract-root",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "extractBundle",
+      "refute_reason": "The same job chooses the archive and destination root, so an entry escaping that root adds no write capability."
+    },
+    {
+      "id": "attacker-selected-asset-root",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "readAsset",
+      "refute_reason": "The same job chooses both root and asset name, so lexical traversal crosses no independently trusted namespace."
+    },
+    {
+      "id": "attacker-selected-output-root",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "saveRender",
+      "refute_reason": "The same job chooses both output root and name, so lexical traversal adds no write capability."
     }
   ]
 }
