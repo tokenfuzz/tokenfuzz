@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +49,7 @@ class ProbeArgumentTests(unittest.TestCase):
 
             self.assertEqual(instance._classify(2), "PROPERTY")
             self.assertNotEqual(instance._classify(0), "PROPERTY")
+            self.assertEqual(instance._classify(124), "TIMEOUT")
 
             instance.output.write_text(
                 "ASAN_RUN_HEADER: sanitizer=asan runs=1\n"
@@ -56,6 +58,62 @@ class ProbeArgumentTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(instance._classify(0), "PROPERTY")
+
+    def test_timeout_uses_reserved_returncode_not_testcase_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            instance = object.__new__(probe.Probe)
+            instance.output = Path(directory) / "runner.txt"
+            instance.output.write_text(
+                "ASAN_RUN_HEADER: sanitizer=runner runs=1\n"
+                "[run-asan] generic runner timed out after 15s\n",
+                encoding="utf-8",
+            )
+            instance.exec_testcase = Path(directory) / "testcase.kts"
+            instance.config = SimpleNamespace(runner_crash_patterns=[])
+            instance.sanitizer = "runner"
+            instance.hypothesis_strategy = "S5"
+            instance.header = {"property": ""}
+
+            self.assertEqual(instance._classify(124), "TIMEOUT")
+            self.assertEqual(instance._classify(2), "NO_EXEC")
+
+            instance.output.write_text(
+                "[run-sanitizer-multi] SUCCESS_RATE: 1/2\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(124), "TIMEOUT")
+
+            instance.output.write_text(
+                "java.lang.OutOfMemoryError: requested array size exceeds VM limit\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(124), "CRASH")
+
+            instance.output.unlink()
+            self.assertEqual(instance._classify(124), "TIMEOUT")
+
+    def test_runner_diagnostic_note_preserves_compact_amplification(self) -> None:
+        instance = object.__new__(probe.Probe)
+        instance.header = {"hypothesis": "H-RESOURCE"}
+        instance.agent = "2"
+        instance.card = "WORK-PARSER"
+        instance.mode = "generic"
+        instance.testcase = Path("testcase.job")
+        instance.output = Path("runner.txt")
+        instance.sanitizer = "runner"
+        instance.environment = {"SANITIZER_RUNS": "1"}
+        instance.elapsed_seconds = 1.0
+        commands = []
+        instance._state_command = lambda *args: commands.append(args)
+
+        with mock.patch.object(Path, "read_bytes", return_value=b"input"):
+            instance._record_state("CRASH")
+
+        note = next(args for args in commands if args[0] == "add-note")
+        text = note[note.index("--text") + 1]
+        self.assertIn("distinct resource-effect hypothesis", text)
+        self.assertIn("target's size ceiling", text)
+        self.assertIn("ordinary OOM remains noise", text)
 
     def test_runner_unavailable_exception_requires_testcase_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -1252,6 +1252,13 @@ class Probe:
                     return "EXEC_FAIL"
             if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
                 return "CRASH"
+            # A property marker is agent-authored output, while 124 is the
+            # timeout wrapper's reserved process result. An oracle that prints
+            # its marker and then hangs did not complete, so do not credit the
+            # marker as a counterexample. A concrete crash above remains valid
+            # evidence even when the wrapper later reaches its deadline.
+            if returncode == 124:
+                return "TIMEOUT"
             if (
                 self.hypothesis_strategy == "S8"
                 and self.header["property"]
@@ -1261,6 +1268,8 @@ class Probe:
             if verdict_lib.file_is_clean(self.output):
                 return "CLEAN"
             return "NO_EXEC"
+        if returncode == 124:
+            return "TIMEOUT"
         return "CLEAN" if returncode == 0 else "NO_EXEC"
 
     def _auto_route(self, returncode: int, current: str) -> tuple[int, str]:
@@ -1366,7 +1375,14 @@ class Probe:
             self._state_command(
                 "add-note", "--agent", self.agent, "--hypothesis-id", hypothesis,
                 "--card-id", self.card, "--kind", "decision",
-                "--text", "bin/probe observed runner diagnostic in findings-only mode; keep hypothesis/card active until a FIND report or explicit discard closes it",
+                "--text", (
+                    "bin/probe observed a runner diagnostic in findings-only mode; "
+                    "keep the hypothesis/card active until a FIND report or explicit "
+                    "discard closes it. If a compact input encoded a size/count that "
+                    "caused quantified memory or CPU amplification, record that as a "
+                    "distinct resource-effect hypothesis and file it with the target's "
+                    "size ceiling; ordinary OOM remains noise."
+                ),
             )
 
     def _file_crash(self, probe_verdict: str) -> None:
