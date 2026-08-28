@@ -58,11 +58,17 @@ sanitizer, and records `state/runs.jsonl`.
 confirms the testcase reaches the named target code before
 spending a sanitizer-run budget.
 
-**HIT / MISSED / CLEAN.** Probe verdicts.
+**Probe verdicts.** The execution result recorded in `state/runs.jsonl`.
 
 - `MISSED` — the testcase did not reach the target code.
 - `HIT` — it did.
 - `CLEAN` — it ran without sanitizer output.
+- `EXEC_FAIL` — it reached the configured runner but did not complete cleanly.
+- `NO_EXEC` — no target-execution evidence was established.
+- `TIMEOUT` — the runner reached its reserved wall-clock deadline; this is
+  unresolved evidence, never a clean run.
+- `CRASH` — a configured sanitizer or runner diagnostic was observed.
+- `PROPERTY` — an S8 oracle reported a declared property counterexample.
 
 **Confirm run.** A 5-times re-run of a candidate crash
 (`bin/probe --confirm`) before promotion, to filter flaky

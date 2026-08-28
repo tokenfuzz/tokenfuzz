@@ -120,6 +120,30 @@ else:
         self.assertIn("SUCCESS_RATE: 0/2", output)
         self.assertIn("EXECUTION FAILED", output)
 
+    def test_timeout_survives_repetition_as_a_structured_outcome(self) -> None:
+        self.write_runner(
+            "print('[run-asan] generic runner timed out after 15s')\n"
+            "raise SystemExit(124)\n"
+        )
+        tried = self.root / "timeout-tried.log"
+        timed_out = self.run_multi(
+            "generic", runs=2, environment={"TRIED_INPUTS_LOG": str(tried)},
+        )
+        output = self.output(timed_out)
+        self.assertEqual(timed_out.returncode, 124, output)
+        self.assertIn("TIMEOUTS: 2/2 runs reached the deadline", output)
+        self.assertIn("verdict=TIMEOUT", tried.read_text())
+        self.assertIn("timeouts=2", tried.read_text())
+
+        # A testcase can print the human-readable marker, but only the reserved
+        # child return code is authoritative.
+        self.write_runner(
+            "print('[run-asan] generic runner timed out after 15s')\n"
+            "raise SystemExit(7)\n"
+        )
+        spoofed = self.run_multi("generic")
+        self.assertEqual(spoofed.returncode, 2, self.output(spoofed))
+
     def test_coverage_gate_miss_environment_failure_and_execution_failure(self) -> None:
         self.write_runner(
             "print('TESTCASE_EXECUTED')\n"

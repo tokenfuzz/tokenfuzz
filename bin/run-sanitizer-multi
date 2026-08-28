@@ -101,6 +101,7 @@ class Outcome:
     crashed: bool
     executed: bool
     succeeded: bool
+    timed_out: bool
     signature: tuple[str, ...] | None
 
 
@@ -129,6 +130,7 @@ class MultiRun:
         self.crashes = 0
         self.executions = 0
         self.successes = 0
+        self.timeouts = 0
 
     def _output_file(self) -> Path | None:
         configured = os.environ.get("SAN_OUTPUT_FILE", os.environ.get("ASAN_OUTPUT_FILE", ""))
@@ -289,12 +291,12 @@ class MultiRun:
             self.emit(f"[run-sanitizer-multi] BUDGET: {current} sanitizer invocation(s) this iteration")
         return allowed > 0
 
-    def classify(self, path: Path) -> Outcome:
+    def classify(self, path: Path, returncode: int) -> Outcome:
         crashed = _file_matches(path, CRASH_RE)
         succeeded = _file_matches(path, EXEC_VERIFIED_RE)
         executed = succeeded or _file_matches(path, EXEC_INCONCLUSIVE_RE) or crashed
         signature = self._signature(path)
-        return Outcome(crashed, executed, succeeded, signature)
+        return Outcome(crashed, executed, succeeded, returncode == 124, signature)
 
     def _signature(self, path: Path) -> tuple[str, ...] | None:
         if not self.stack_frames.is_file():
@@ -383,10 +385,11 @@ class MultiRun:
                 self.record_actual_runs(1)
                 data = completed.stdout
                 self.append_raw(data)
-                outcome = self.classify(data)
+                outcome = self.classify(data, completed.returncode)
                 self.crashes += int(outcome.crashed)
                 self.executions += int(outcome.executed)
                 self.successes += int(outcome.succeeded)
+                self.timeouts += int(outcome.timed_out)
                 if baseline is None:
                     sys.stdout.flush()
                     self.write_digest(data)
@@ -409,6 +412,8 @@ class MultiRun:
                     self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: VERIFIED — same crash signature as run 1 ({first})")
                 elif outcome.succeeded:
                     self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: VERIFIED - clean (matches run 1)")
+                elif outcome.timed_out:
+                    self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - timed out (matches run 1)")
                 elif outcome.executed:
                     self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: REPEATED - execution failed (matches run 1)")
                 else:
@@ -421,7 +426,7 @@ class MultiRun:
             return
         testcase = self.args[1] if len(self.args) > 1 else ""
         digest = hashlib.sha1(Path(testcase).read_bytes()).hexdigest()[:12] if Path(testcase).is_file() else "?"
-        verdict = "CRASH" if self.crashes else "NO_EXEC" if not self.executions else "EXEC_FAIL" if not self.successes else "CLEAN"
+        verdict = "CRASH" if self.crashes else "TIMEOUT" if self.timeouts else "NO_EXEC" if not self.executions else "EXEC_FAIL" if not self.successes else "CLEAN"
         destination = Path(configured)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("a") as stream:
@@ -429,7 +434,7 @@ class MultiRun:
                 f"{now()} verdict={verdict} "
                 f"mode={shlex.quote(self.args[0] if self.args else '?')} "
                 f"testcase={shlex.quote(testcase or '?')} "
-                f"hash={digest} runs={self.runs} crashes={self.crashes} execs={self.executions} "
+                f"hash={digest} runs={self.runs} crashes={self.crashes} execs={self.executions} timeouts={self.timeouts} "
                 f"hypothesis={shlex.quote(os.environ.get('HYPOTHESIS_ID', '?'))} "
                 f"target={shlex.quote(os.environ.get('TARGET', '?'))} "
                 f"closest={shlex.quote(os.environ.get('CLOSEST_FRAME', '<none>'))} "
@@ -445,6 +450,14 @@ class MultiRun:
         if self.crashes:
             self.emit(f"[run-sanitizer-multi] CRASHES FOUND: {self.crashes}/{self.runs} runs crashed")
             return 1
+        # Exit 124 is reserved by lib/timeout.py and cannot be configured as a
+        # managed-runner success code. Preserve it across repetition so probe
+        # can distinguish a target that consumed its wall from one that never
+        # executed. Any timeout makes a mixed confirmation inconclusive rather
+        # than laundering it through the clean runs.
+        if self.timeouts:
+            self.emit(f"[run-sanitizer-multi] TIMEOUTS: {self.timeouts}/{self.runs} runs reached the deadline")
+            return 124
         if not self.executions:
             self.emit("[run-sanitizer-multi] WARNING: testcase may not have executed in any run")
             return 2
