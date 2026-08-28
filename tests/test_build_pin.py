@@ -181,6 +181,16 @@ class VerifyOnlyCellTests(unittest.TestCase):
             any("build-asan is stale" in item for item in problems), problems,
         )
 
+    def test_an_unrouted_stray_build_tree_does_not_refuse_the_run(self) -> None:
+        """A managed runner is not blocked by a tree it never executes."""
+        self._build()
+        (self.target / ".audit" / "build.sh").unlink()
+        self.config.build_system = "swift"
+        self.config.sanitizer_bin = lambda name: ""
+        (self.target / "main.c").write_text("int main(void){return 1;}\n")
+
+        self.assertEqual([], build_preflight.build_problems(self.target, self.config))
+
     def test_language_target_can_use_an_unmanaged_prebuilt_binary(self) -> None:
         """No recipe or harness stamp means existence is the whole contract."""
         (self.target / ".audit" / "build.sh").unlink()
