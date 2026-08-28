@@ -1,8 +1,34 @@
 # Changelog
 
-## 1.5.2 - 2026-08-27
+## 1.5.2 - 2026-08-28
+
+Mostly about where an audit's time and attention go: which lane each agent
+works, how much of the wall the fleet spends investigating rather than waiting,
+and what a run that produced no diagnostic is actually telling the agent to
+fix. The language, identity, detection and scoring sections behind those close
+the gaps that made those answers wrong on particular targets.
 
 ### Strategy lanes and the work queue
+
+- **The opening lane is picked by measured yield, not by a table that answers a
+  different question.** `expected_yield_rank` took its order from the
+  reason-to-strategy classification table, which decides which angle claims a
+  file that signals several — not which lane pays. That ranked S3 fourth, so
+  agent 1, the slot that always launches, opened every fresh audit behind three
+  other lanes. Measured over 162 audit trees across 29 targets as productive
+  hypotheses per hypothesis, S3 leads pooled (0.43), leads the pinned
+  per-strategy runs (0.38) and the unpinned ones (0.47), and is the best lane on
+  7 of the 16 targets with three comparable lanes. Only S3 moves: S7 measures
+  0.41 unpinned but 0.12 pinned, and that gap is confounded by agents
+  self-selecting into adversarial input once they already hold a lead, so it
+  waits for a pinned multi-target comparison. Both tables now say which question
+  they answer and point at the other.
+
+- **Ranking scans the promoted corpus once, not once per source file.** Every
+  ranked file re-read every `COVER-*/metadata.md` looking for a seed, so the
+  scan cost files times corpus entries and grew as an audit promoted more.
+  Selection is unchanged; over 2000 lookups on a synthetic corpus it drops from
+  11.2s to 0.1s at 40 entries, and from a projected ~84s to 1.0s at 300.
 
 - **`--strategy S<N>` pins the queue, not just the labels on cards.** The pin
   never reached `bin/rank-work`, so a pinned lane drew the shared mixed queue:
@@ -67,6 +93,26 @@
   own card cannot execute, not that a source-review angle on the same
   compilation unit is dead.
 
+### Agent time and housekeeping
+
+- **A finished agent slot no longer idles out the rest of the iteration.**
+  Refills stopped when the last initial session ended, so a measured 5h cell
+  left two of three slots idle for the final 90 minutes of an iteration while a
+  peer held the barrier open anyway — one of them holding a live
+  NEEDS_TESTCASE lead. Each slot now takes one overtime session, and only
+  beside a cohort-era peer, so a cohort that drains early cannot grow an extra
+  session per slot. The finding gate and cluster expansion also ran back to back
+  with no agent running, for 13-29% of the wall; they touch disjoint trees and
+  now share one span, each keeping its own reported duration.
+
+- **The orphan-testcase budget is spent across the fleet, not on agent 1.**
+  Housekeeping probes testcases an agent wrote but never ran, up to three an
+  iteration — and it drained agent 1's queue before reaching agent 2. On three
+  measured 5h cells 17 of 18, 5 of 6 and 3 of 5 enforcements went to agent 1, so
+  the other agents' unexecuted testcases were never probed and their next
+  session never saw the results that name them. The budget is taken round-robin
+  now, and a spent budget or wall returns before scanning any scratch tree.
+
 ### Multi-language execution
 
 - **A probe cannot report CLEAN against code that was never audited.**
@@ -121,6 +167,23 @@
   NO_EXEC. The new `[runner] success_codes` declares which exits mean a
   completed invocation, bounded to 0–123 so a timeout, a signal, or a sanitizer
   diagnostic can never be declared success.
+
+- **`NO_EXEC` stopped meaning three different things.** It was recorded for a
+  run that never started, a run the target rejected, and a run the sanitizer
+  budget refused to start — and its advice sends the agent to repair the
+  harness, which is the wrong repair for two of the three. Over three measured
+  5h cells 133 of 150 `NO_EXEC` rows (oss: 49 of 49) had in fact run:
+  `run-sanitizer-multi` and `bin/scratch-status` already called that
+  `EXEC_FAIL`, and `bin/probe` and orphan enforcement now share the same rule.
+  The split claims only that the command returned — the execution rate counts an
+  inconclusive repetition, which is printed for a rejected input and a
+  non-executable binary alike — so the hint sends the agent to read the output
+  instead of naming a repair for it. A run the per-iteration budget refused now
+  carries its own diagnosis, and only when it accounts for every run in the
+  scope; one refused run beside genuine failures keeps the setup repair and says
+  how much the budget covers. No gate moves: the card-discard floor counts CLEAN
+  only, and across 1631 saved sanitizer outputs no CLEAN or CRASH
+  classification changes.
 
 - **A trusted execution marker starts on its own line.** A runner whose output
   ended without a newline had `EXECUTION VERIFIED` concatenated onto it, and
