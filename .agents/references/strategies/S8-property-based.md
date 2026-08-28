@@ -65,9 +65,11 @@ table is the up-front filter so you *generate* security-relevant work instead of
 with `bin/state update-card --card-id <id> --status blocked --note <proof>`;
 the queue keeps one card per strategy angle, so this closes only the S8 angle.
 
-When the S8 card floor is complete, discard the card. Then end the model
-session instead of claiming the next card. The worker pool relaunches from compact state, avoiding a growing
-multi-card context without reducing investigation depth.
+When the S8 card floor is complete, discard the card and end the model session
+instead of claiming the next card. A concrete card retires; a broad whole-file
+card records the dry pass and may be reoffered with its history for a different
+property or security consumer. The worker pool relaunches from compact state,
+avoiding a growing multi-card context without reducing investigation depth.
 
 ## The six property categories
 

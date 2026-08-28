@@ -228,7 +228,10 @@ filing/discard evidence.
 
 `update-card --status discarded` requires the configured evidence floor
 (default: three card-linked CLEAN runs across two distinct hypothesis shapes
-that were actually probed. MISSED, NO_EXEC, and CRASH rows do not count.
+that were actually probed. MISSED, NO_EXEC, and CRASH rows do not count. This
+retires a concrete patch/site card; for a broad whole-file card it records a
+dry pass and yields to fresher work, but the card remains reofferable with its
+history because finite probes cannot prove unexamined functions exhausted.
 If the configured target cannot execute a surface, do not manufacture CLEAN
 evidence: after checking sibling builds/modes, mark its hypothesis ENV-BLOCKED
 (which soft-blocks the owning card) or mark a proven mode-incompatible,

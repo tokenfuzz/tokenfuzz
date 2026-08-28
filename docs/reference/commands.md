@@ -268,10 +268,13 @@ with an ID for one full compact record. Run `bin/state --help` and
 `bin/state <subcommand> --help` for filters and state-mutating commands used by
 agents.
 
-An agent cannot retire a piece of work on an opinion: closing a card as
+An agent cannot conclude a piece of work on an opinion: marking a card
 uninteresting requires probe runs on disk that actually executed the code and
-came back clean. That is why `list-cards` can show cards still open after an
-agent has looked at them.
+came back clean. That retires a concrete patch/site card. A broad whole-file
+card instead records the dry pass and yields to fresher work; it may be
+reoffered with its history because finite probes cannot prove its unexamined
+functions exhausted. That is why `list-cards` can show cards still open after
+an agent has looked at them.
 
 ## Review results
 

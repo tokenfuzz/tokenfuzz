@@ -352,9 +352,9 @@ with tempfile.TemporaryDirectory() as td:
 
 
 # Broad ranked-source cards cover a whole file, whose bugs live across
-# functions never yet hypothesised — so re-discovery must NOT close them
-# (that would abandon the file after one bug). They retire on the file-level
-# dry signal instead.
+# functions never yet hypothesised. Neither re-discovery nor a finite dry
+# streak proves those functions exhausted; ranking and campaign limits bound
+# further work instead.
 with tempfile.TemporaryDirectory() as td:
     rdir = Path(td) / "results"
     rdir.mkdir()
@@ -370,20 +370,14 @@ with tempfile.TemporaryDirectory() as td:
     reason_hot = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
     assert_eq("eligible", reason_hot,
               "broad closure: re-discovery alone does NOT close a whole-file card")
-    # The card's own file, not the directory it sits in. Both read the same
-    # counter store, but a directory bucket holds hundreds of other sources,
-    # so aging this card on it would retire it over sibling files it never
-    # covered — and keep it alive whenever any of them stayed productive.
-    _set_dry_streak(rdir, "src", workqueue._PRODUCTIVE_DECAY_AFTER_ITERS)
-    assert_eq("eligible", workqueue.explain_queue(ctx, ["generic"])[0].get("reason"),
-              "broad closure: a sibling file's dry streak does not retire this card")
-    _set_dry_streak(
-        rdir, workqueue.card_dry_scope(_card("WORK-broad", kind="ranked-source")),
-        workqueue._PRODUCTIVE_DECAY_AFTER_ITERS,
-    )
+    _set_dry_streak(rdir, "src", 20)
     reason_dry = workqueue.explain_queue(ctx, ["generic"])[0].get("reason")
-    assert_eq("terminal:crash", reason_dry,
-              "broad closure: retires once its own file's dry streak crosses the threshold")
+    assert_eq("eligible", reason_dry,
+              "broad closure: dry work does not prove unseen functions exhausted")
+    for status in ("done", "discarded"):
+        assert_eq(False, workqueue.card_closed_for_run(ctx, _card(
+            "WORK-broad", kind="ranked-source"), status),
+            f"broad closure: {status} does not prove unseen functions exhausted")
 
 
 # Expired-lease mask: a re-claimed card whose lease later expires reads back as

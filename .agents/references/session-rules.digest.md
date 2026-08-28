@@ -135,8 +135,10 @@ recent probe artifacts. It is not filing or discard evidence.
 
 Card discard uses the configured floor (default: three card-linked CLEAN rows
 across two actually-probed hypothesis shapes). MISSED, NO_EXEC, and CRASH do
-not count. In a pinned run, pass `--strategy S<N>` so only that strategy angle
-closes. A surface unavailable in every configured sibling
+not count. A concrete patch/site card then retires; a broad whole-file card
+records a dry pass, yields to fresher work, and remains reofferable with its
+history until campaign dry/wall limits. In a pinned run, pass `--strategy S<N>`
+so the conclusion stays on that strategy angle. A surface unavailable in every configured sibling
 build/mode exits through ENV-BLOCKED (which soft-blocks its owning card), or a
 proven mode-incompatible, stale, or non-public card may be marked `blocked`
 with a precise note. The queue keeps one card per strategy angle, so

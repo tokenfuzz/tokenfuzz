@@ -16,9 +16,18 @@ a fuzzer under S7.
 HIT/NEEDS_TESTCASE lead, rotate strategy. Do not stop while an input is
 reaching closer to the intended parser/decoder path.
 
-When the S7 card floor is complete, discard with `--strategy S7`; the harness
-closes only the S7 angle. Then end the model session instead of claiming the
-next card so the worker pool resumes from compact state.
+`DISCARDED` closes one named input shape or effect, not every effect at that
+function. When an executed deserialization, reflection, or mutation route is
+rejected because the report named only the sink, spend the next hypothesis on
+one concrete encoded size/count, loaded type or magic hook, native consequence,
+or security consumer at that function. Move elsewhere only after testing one
+or recording source/runtime proof that none exists; never refile the sink-only
+claim.
+
+When the S7 card floor is complete, discard the card and end the model session
+instead of claiming the next card. A concrete card retires; a broad whole-file
+card records the dry pass and may be reoffered with its history for a different
+trigger or concrete effect until campaign limits.
 
 **Scratch hygiene:** create only the final H-prefixed testcase in `scratch-N`.
 Copy or generate a valid seed straight into that path, then mutate it in place;

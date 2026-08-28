@@ -105,8 +105,10 @@ Each agent works on **one hypothesis at a time**:
 Investigation depth follows evidence. A deterministic bug can be dismissed
 after one clean probe that hit its exact trigger, but timing-, race-, GC-, and
 state-dependent triggers need repetition or different inputs before the harness
-will discard a work card — so a flaky bug is not written off on a single quiet
-run. A surface that no configured build or mode can even execute is marked
+will accept a card's dry conclusion — so a flaky bug is not written off on a
+single quiet run. The conclusion retires a concrete patch/site card; a broad
+whole-file card yields to fresher work but remains reofferable for unexamined
+functions until campaign limits. A surface that no configured build or mode can even execute is marked
 blocked rather than counted as clean evidence.
 
 Work cards are leased so two agents don't step on each other; after a context

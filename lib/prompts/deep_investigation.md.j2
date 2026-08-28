@@ -88,7 +88,10 @@ proof. Record the `bin/probe` verdict and one untried shape when a probe ran.
 {{ card_discard_min_hypotheses }} distinct hypothesis shapes that were actually
 probed. This is a card floor, not a tax on every hypothesis. Use the runs on
 genuinely different angles (for example S2 invariant, S3 spec/fast-path, and
-S5 lifetime/state), and deepen any angle that shows signal.
+S5 lifetime/state), and deepen any angle that shows signal. This retires a
+concrete patch/site card. For a broad whole-file card it records this dry pass
+and yields to fresher work, but the queue may reoffer it with its history for
+an unexamined trigger or concrete effect until campaign dry/wall limits.
 
 **Unreachable-card exit:** never manufacture CLEAN evidence for a surface the
 configured target cannot execute. After checking sibling builds/modes, mark

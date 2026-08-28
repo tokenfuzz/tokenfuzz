@@ -442,34 +442,43 @@ class WorkQueueTests(unittest.TestCase):
 
         self.assertEqual(resumed["id"], "WORK-S1-FILL")
 
-    def test_a_productive_card_retires_on_its_own_file_going_dry(self) -> None:
-        """A broad card covers one file, so only that file can exhaust it.
-
-        Its subsystem is a directory holding hundreds of other sources; aging
-        the card on that counter retires it on evidence from siblings it never
-        covered, and keeps it alive whenever any of them is productive.
-        """
+    def test_dry_hypotheses_do_not_retire_a_productive_broad_card(self) -> None:
+        """Dry work cannot prove unexamined functions in a file exhausted."""
         card = self.card("WORK-A", "lib/foo.c", strategy="S7")
         card["subsystem"] = "lib"
-        self.assertEqual(workqueue.card_dry_scope(card), "file::lib/foo.c")
         closed = lambda: workqueue.card_closed_for_run(  # noqa: E731
             self.ctx, card, "crash", conclusion_counts={"WORK-A": 1},
         )
 
-        # Dry passes over sibling files age the directory the card sits in.
-        for _ in range(4):
+        for _ in range(20):
             workqueue.record_subsystem_iteration(self.ctx, "lib", False)
-        self.assertGreaterEqual(workqueue.subsystem_dry_streak(self.ctx, "lib"), 2)
-        self.assertFalse(
-            closed(), "a sibling's dry pass must not retire this file's card",
+        self.assertFalse(closed())
+        self.assertFalse(workqueue.card_closed_for_run(self.ctx, card, "done"))
+        self.assertFalse(workqueue.card_closed_for_run(self.ctx, card, "discarded"))
+        self.assertTrue(workqueue.card_closed_for_run(self.ctx, card, "blocked"))
+
+    def test_dry_broad_card_yields_to_fresh_work_without_closing(self) -> None:
+        self.write_cards([
+            self.card("WORK-A", "src/a.c", score=20),
+            self.card("WORK-B", "lib/b.c", score=10),
+        ])
+        self.add_hypothesis(
+            hyp_id="H-DRY", status="DISCARDED", file="src/a.c:parse:10",
+        )
+        workqueue.append_jsonl(
+            self.results / "state" / "claims.jsonl",
+            {"card_id": "WORK-A", "agent": "1", "status": "discarded"},
         )
 
-        # The card's own file going dry is what retires it.
-        for _ in range(4):
-            workqueue.record_subsystem_iteration(
-                self.ctx, workqueue.card_dry_scope(card), False,
-            )
-        self.assertTrue(closed())
+        reasons = {
+            row["id"]: row["reason"]
+            for row in workqueue.explain_queue(self.ctx, ["generic"])
+        }
+        self.assertEqual(reasons["WORK-A"], "eligible")
+        chosen = workqueue.claim_next_card(
+            self.ctx, "2", mode="generic", claim=False,
+        )
+        self.assertEqual(chosen["id"], "WORK-B")
 
     def test_window_rotation_never_promotes_unbuilt_work_over_built(self) -> None:
         """Strategy spread is a preference among comparable work only.

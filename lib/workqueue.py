@@ -2965,10 +2965,10 @@ def work_cards_path(ctx: Context) -> Path:
     return ctx.results_dir / "work-cards.jsonl"
 
 
-# Card statuses that are permanently terminal: the work is done (or
-# explicitly discarded) and there is nothing for a future probe to learn.
-# The rotator's claim-eligibility check uses THIS set so cards in these
-# states are never re-picked.
+# Card statuses that are terminal for a concrete card. Broad ranked-source
+# cards may record done/discarded after satisfying the evidence floor, but
+# those attempts cannot prove unexamined functions absent; card_closed_for_run
+# reopens them with their history and lets campaign limits bound revisits.
 PERMANENT_TERMINAL_CARD_STATUSES = {"done", "discarded", "crash", "find"}
 
 # Soft-terminal: env_blocked is a "current environment couldn't build /
@@ -2994,12 +2994,12 @@ TERMINAL_CARD_STATUSES = PERMANENT_TERMINAL_CARD_STATUSES | SOFT_TERMINAL_CARD_S
 # bin/audit:reset_subsystem_dry_streak).
 _PRODUCTIVE_DECAY_AFTER_ITERS = 2
 
-# crash/find are *productive* terminal conclusions, not dead ends: a
-# verified bug means the surface may hold more (a large file:strategy card
-# often spans many bugs, each a different hypothesis). These stay claimable
-# while the surface keeps yielding new distinct hypotheses (see
-# card_closed_for_run); done/discarded/blocked are hard-closed for the run.
-# Keep this a strict subset of PERMANENT_TERMINAL_CARD_STATUSES.
+# For a concrete card, crash/find are productive conclusions rather than an
+# immediate dead end: the card stays claimable while it yields new distinct
+# hypotheses. Done/discarded retire that concrete site and blocked retires any
+# card for the run; broad ranked-source cards use the separate scope rule in
+# card_closed_for_run. Keep this a strict subset of
+# PERMANENT_TERMINAL_CARD_STATUSES.
 _PRODUCTIVE_TERMINAL_CARD_STATUSES = {"crash", "find"}
 
 # Which closures update_card_status makes carry evidence. Derived from the
@@ -3369,13 +3369,11 @@ def card_closed_for_run(
     *,
     conclusion_counts: dict[str, int] | None = None,
     distinct_counts: dict[str, int] | None = None,
-    dry_streaks: dict[str, int] | None = None,
 ) -> bool:
     """Is a card at ``status`` closed for the *current* run (not re-offerable)?
 
-    ``done``/``discarded``/``blocked`` are hard-closed. ``crash``/``find`` are
-    productive conclusions whose retirement is **scope-aware**, because the
-    right exhaustion signal depends on what the card covers:
+    ``blocked`` is hard-closed. Other conclusions are **scope-aware**, because
+    the right exhaustion signal depends on what the card covers:
 
     * **Concrete cards** (patch cards) name one specific
       site, so the hypotheses opened against them *are* their search space.
@@ -3384,22 +3382,21 @@ def card_closed_for_run(
       — the surplus conclusions are re-discoveries of an already-recorded bug.
 
     * **Broad ranked-source cards** cover a whole file/strategy, whose search
-      space is far larger than the hypotheses tried so far. ``conclusions -
-      distinct`` is NOT a valid exhaustion proof there: one bug plus a
-      duplicate crash would close the whole file before its other functions
-      are explored. These keep the file-level signal — retire once the
-      subsystem has gone dry for ``_PRODUCTIVE_DECAY_AFTER_ITERS`` iterations
-      (``subsystem_dry_streak``, reset only by triage-promoted artifacts on
-      disk, so a fabricated crash cannot keep a dry file alive).
+      space is far larger than the hypotheses tried so far. Neither a finite
+      hypothesis count, a few dry iterations, nor an agent's ``done`` or
+      ``discarded`` conclusion proves its unexamined functions exhausted, so
+      the card remains claimable. Existing diminishing-return ranking puts it
+      behind fresher cards, while the campaign's dry-session and wall limits
+      bound the final revisit loop. ``blocked`` remains terminal because its
+      required source/configuration proof applies to the whole surface.
 
-    An expired ``claimed`` lease can mask a prior productive conclusion by
-    reading back as ``unclaimed``. When the card
-    has a recorded productive conclusion, it is treated as productive-terminal
-    so neither mask reopens a mined card. A *live* claim (status ``claimed``)
-    is left open — the owner is still investigating. The anti-camp guarantee
-    stays separate: ``card_conclusion_counts`` demotes an already-cracked card
-    below fresher siblings so a still-open surface is revisited least-mined-
-    first.
+    For a concrete card, an expired ``claimed`` lease can mask a prior
+    productive conclusion by reading back as ``unclaimed``. A recorded
+    productive conclusion restores that concrete-card state so the mask does
+    not reopen a mined site. A *live* claim (status ``claimed``) is left open —
+    the owner is still investigating. Broad cards remain open except when
+    blocked; ``card_conclusion_counts`` demotes already-worked cards below
+    fresher siblings so revisits remain least-mined-first.
 
     Reachability rejection is deliberately not a closure signal. Adjudication
     proves one filed trigger is outside the public boundary, not that every
@@ -3407,13 +3404,15 @@ def card_closed_for_run(
     unreachable. The claim ranker uses those rejections only to demote repeated
     dry work behind fresh cards.
 
-    ``conclusion_counts``/``distinct_counts``/``dry_streaks`` are optional
-    per-call memos so a candidate loop reads state at most once.
+    ``conclusion_counts``/``distinct_counts`` are optional per-call memos so a
+    candidate loop reads state at most once.
     """
     cid = card.get("id", "")
     if conclusion_counts is None:
         conclusion_counts = card_conclusion_counts(ctx)
     concluded = conclusion_counts.get(cid, 0) if cid else 0
+    if _is_broad_file_card(card):
+        return status == "blocked"
     # Resolve an expired-lease mask back to the conclusion it hides, but
     # leave a live "claimed" open — its owner is still investigating (docstring).
     is_productive = status in _PRODUCTIVE_TERMINAL_CARD_STATUSES or (
@@ -3424,18 +3423,6 @@ def card_closed_for_run(
         return status in TERMINAL_CARD_STATUSES
     if not cid:
         return True
-    if _is_broad_file_card(card):
-        scope = card_dry_scope(card)
-        if not scope or scope == "unknown":
-            return True
-        if dry_streaks is None:
-            streak = subsystem_dry_streak(ctx, scope)
-        else:
-            streak = dry_streaks.get(scope)
-            if streak is None:
-                streak = subsystem_dry_streak(ctx, scope)
-                dry_streaks[scope] = streak
-        return streak >= _PRODUCTIVE_DECAY_AFTER_ITERS
     if distinct_counts is None:
         distinct = card_distinct_hypothesis_count(ctx, cid)
     else:
@@ -3540,21 +3527,6 @@ def agent_current_scopes(ctx: Context, agent: str) -> tuple[str, str]:
 def agent_current_subsystem(ctx: Context, agent: str) -> str:
     """Return the subsystem represented by an agent's latest live/result row."""
     return agent_current_scopes(ctx, agent)[0]
-
-
-def card_dry_scope(card: dict) -> str:
-    """Dry-streak key for retiring a productive card.
-
-    A broad ranked-source card covers one file, so its exhaustion signal is
-    that file going dry — not its directory. Keyed apart from the subsystem
-    counter so the two cannot be confused: a directory bucket holds hundreds
-    of files, and reading it here retires a productive card on evidence from
-    siblings the card never covered.
-    """
-    file = normalized_relpath(str(card.get("file", "") or ""))
-    if file:
-        return f"file::{file}"
-    return str(card.get("subsystem", "") or "")
 
 
 # Card `mode` describes the execution surface needed by the testcase. The
@@ -3668,7 +3640,6 @@ def _queue_status_row(
     ctx: Context,
     conclusion_counts: dict[str, int],
     distinct_counts: dict[str, int],
-    dry_streaks: dict[str, int],
     latest: dict[str, dict],
     ttl: timedelta,
     now: datetime,
@@ -3688,13 +3659,10 @@ def _queue_status_row(
     elif card_closed_for_run(
         ctx, card, status,
         conclusion_counts=conclusion_counts, distinct_counts=distinct_counts,
-        dry_streaks=dry_streaks,
     ):
         # done/discarded/blocked; a concrete crash/find re-concluded past its
-        # distinct hypotheses; or a broad ranked-source crash/find whose
-        # subsystem has gone dry. A productive card still yielding (concrete)
-        # or on a still-hot file (broad) is NOT closed here — it stays
-        # eligible so the run keeps mining the surface for other bugs.
+        # distinct hypotheses. A broad ranked-source card is not closed by
+        # finite dry work — it stays eligible for unexamined functions.
         reason = f"terminal:{status}"
     elif strategy and not card_strategy_matches(card, strategy):
         reason = f"strategy-incompatible:{card.get('strategy') or 'none'}"
@@ -3745,7 +3713,6 @@ def explain_queue(
     owned_subsystems = active_subsystems | claimed_subsystems
     conclusion_counts = card_conclusion_counts(ctx)
     distinct_counts = card_distinct_hypothesis_counts(ctx)
-    dry_streaks: dict[str, int] = {}
     rows: list[dict] = []
     for card in cards:
         rows.append(
@@ -3754,7 +3721,6 @@ def explain_queue(
                 ctx=ctx,
                 conclusion_counts=conclusion_counts,
                 distinct_counts=distinct_counts,
-                dry_streaks=dry_streaks,
                 latest=latest,
                 ttl=ttl,
                 now=now,
@@ -3820,7 +3786,6 @@ def _claim_next_card_locked(
     conclusion_counts = card_conclusion_counts(ctx, claims=claim_rows)
     distinct_counts = card_distinct_hypothesis_counts(ctx, hypotheses=hyps)
     unreachable_counts = card_unreachable_rejection_counts(ctx, hypotheses=hyps)
-    dry_streaks: dict[str, int] = {}
     # Agents that have already produced a confirmed CRASH/FIND are
     # "productive" — they have working data-flow context for that
     # subsystem and bugs cluster, so the subsystem-ownership skip
@@ -3865,7 +3830,7 @@ def _claim_next_card_locked(
             latest_status = visible_card_status(latest_claim, ttl, now)
             blocks_card = claim_blocks_card(latest_claim, ttl, now)
             own_active_claim = bool(blocks_card and latest_claim and str(latest_claim.get("agent", "")) == str(agent))
-            if card_closed_for_run(ctx, card, latest_status, conclusion_counts=conclusion_counts, distinct_counts=distinct_counts, dry_streaks=dry_streaks) or cid in active_cards or (blocks_card and not own_active_claim):
+            if card_closed_for_run(ctx, card, latest_status, conclusion_counts=conclusion_counts, distinct_counts=distinct_counts) or cid in active_cards or (blocks_card and not own_active_claim):
                 continue
             surface = work_surface(card)
             if surface and surface in owned_surfaces and not own_active_claim:
@@ -3914,22 +3879,22 @@ def _claim_next_card_locked(
 
     preferred = _apply_diversity(_build_candidates())
 
-    # Diminishing-returns demotion: a card kept eligible after a verified
-    # crash/find or a reachability-rejected trigger sinks below every fresher
-    # candidate so the agent spreads out instead of re-hitting the same card
-    # sequentially. A rejection never removes the card: it proves only that
-    # concrete trigger, so the card resurfaces after less-mined work. Hot-file
-    # siblings naturally
+    # Diminishing-returns demotion: a card kept eligible after prior hypotheses
+    # sinks below every fresher candidate so the agent spreads out instead of
+    # re-hitting the same card sequentially. A dry or rejected attempt never
+    # removes a broad card: it proves only that concrete trigger, so the card
+    # resurfaces after less-mined work. Hot-file siblings naturally
     # sort ahead of unrelated cold work because they carry the file's
     # higher base rank (the stable sort preserves rank within a tier), so
     # this still mines the hot surface before rotating; a still-hot card
     # resurfaces once the less-mined work is exhausted, and no card is
     # dropped. An active same-agent lease is exempt — it keeps top priority
     # so the agent continues its own in-flight card instead of pivoting and
-    # stranding the lease until TTL. Skipped when nothing has been concluded
-    # yet (the common early-run case).
+    # stranding the lease until TTL. Skipped only while no card has been worked
+    # at all (the opening iteration), since a dry hypothesis is itself the
+    # diminishing-returns signal for a card no conclusion can close.
     if len(preferred) > 1:
-        if conclusion_counts or unreachable_counts:
+        if conclusion_counts or unreachable_counts or distinct_counts:
             def _demotion_key(c: dict) -> tuple[int, int]:
                 cid = c.get("id", "")
                 lc = latest.get(cid)
@@ -3938,9 +3903,10 @@ def _claim_next_card_locked(
                     and str(lc.get("agent", "")) == str(agent)
                     and claim_blocks_card(lc, ttl, now)
                 )
-                outcomes = (
+                outcomes = max(
                     conclusion_counts.get(cid, 0)
-                    + unreachable_counts.get(cid, 0)
+                    + unreachable_counts.get(cid, 0),
+                    distinct_counts.get(cid, 0),
                 )
                 return (0 if own_active_lease else 1, outcomes)
 
@@ -4858,16 +4824,17 @@ def update_card_status(
 ) -> dict:
     """Append a card-status row to claims.jsonl with evidence gates.
 
-    Evidence-free *terminal* closures drain a finite, one-shot card queue
-    before the wall budget, so the clean-close and crash conclusions must
-    carry harness-written evidence:
+    Evidence-free closures drain a finite card queue before the wall budget,
+    so clean-close and crash conclusions must carry harness-written evidence:
 
       * every clean-close status in _EVIDENCE_GATED_CARD_STATUSES (today
         `discarded` and `done`) requires ≥WORK_CARD_MIN_RUNS_BEFORE_DISCARD (default 3)
         CLEAN runs.jsonl rows referencing the card and a real hypothesis AND
         ≥WORK_CARD_MIN_HYPS_BEFORE_DISCARD (default 2) distinct hypothesis
         shapes among those runs: MISSED/NO_EXEC probes and unprobed rows cannot
-        retire a file/strategy surface. The set is derived from
+        retire a concrete surface. Broad ranked-source cards retain the
+        conclusion as dry-work history but remain re-offerable for unexamined
+        functions. The set is derived from
         PERMANENT_TERMINAL_CARD_STATUSES so a second spelling of "clean close"
         cannot reach the queue ungated — `done` did, and retired cards that had
         never been probed at all.
@@ -4900,10 +4867,8 @@ def update_card_status(
         env-block propagation writes its own claim rows directly and always
         carries a reason, so it is unaffected.
 
-    Note: `crash`/`find` are no longer *permanently* terminal for the
-    queue. See card_closed_for_run: a verified crash/find keeps its
-    surface claimable until the subsystem is mined out, so one bug no
-    longer retires a whole (possibly very large) file.
+    See card_closed_for_run: no finite agent conclusion retires a broad
+    whole-file card, while concrete cards retain evidence-based closure.
     """
     init_state(ctx)
     if status in _EVIDENCE_GATED_CARD_STATUSES:
@@ -5362,7 +5327,6 @@ def list_work_cards(
     contains_needles = [str(s).strip().lower() for s in (contains_filters or []) if str(s).strip()]
     conclusion_counts = card_conclusion_counts(ctx)
     distinct_counts = card_distinct_hypothesis_counts(ctx)
-    dry_streaks: dict[str, int] = {}
     rows: list[dict] = []
     for card in cards:
         if strategy_filter and not card_strategy_matches(card, strategy_filter):
@@ -5376,7 +5340,6 @@ def list_work_cards(
             ctx=ctx,
             conclusion_counts=conclusion_counts,
             distinct_counts=distinct_counts,
-            dry_streaks=dry_streaks,
             latest=latest,
             ttl=ttl,
             now=now,

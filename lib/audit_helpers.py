@@ -1572,7 +1572,6 @@ def _cmd_effective_work_cards(args: argparse.Namespace) -> int:
     except Exception:
         return 0
     out: list[str] = []
-    dry_streaks: dict[str, int] = {}
     for card in cards:
         updated = dict(card)
         cid = card.get("id", "")
@@ -1582,16 +1581,14 @@ def _cmd_effective_work_cards(args: argparse.Namespace) -> int:
             # Single source of truth for "is this card still claimable?":
             # card_closed_for_run keeps the claim path, the explain view, and
             # this audit-facing overlay in agreement. A still-yielding concrete
-            # crash/find, a broad crash/find on a still-hot subsystem, and a
-            # released lease collapse to "unclaimed" so strategy rotation,
-            # queue counts, and diversity recovery see the same reopened cards
-            # the claimer does; done/discarded/blocked, mined-out (re-
-            # discovered) concrete cards, and dry broad cards stay terminal.
+            # crash/find, any broad crash/find, and a released lease collapse
+            # to "unclaimed" so strategy rotation, queue counts, and diversity
+            # recovery see the same reopened cards the claimer does;
+            # done/discarded/blocked and mined-out concrete cards stay terminal.
             if status != "claimed":
                 if not card_closed_for_run(
                     ctx, card, status,
                     conclusion_counts=conclusion_counts, distinct_counts=distinct_counts,
-                    dry_streaks=dry_streaks,
                 ):
                     status = "unclaimed"
                 elif status in ("released", "unclaimed"):
