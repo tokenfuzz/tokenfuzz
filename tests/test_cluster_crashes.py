@@ -381,6 +381,36 @@ The parser writes past `{object_name}`.
             self.cluster_id(collapsed / "REPORT.md"),
         )
 
+        # A confirmation transcript concatenates every repetition, and frame
+        # parsing stops at the first SUMMARY. A first report cut short before
+        # its SUMMARY therefore paired its class with the NEXT run's stack --
+        # a crash no run produced, which no longer clusters with the real one.
+        repeated = self.root / "repeated-runs"
+        complete_run = (
+            "==2==ERROR: AddressSanitizer: double-free\n"
+            "#0 0x40 in release_pool src/pool.c:12\n"
+            "#1 0x50 in shutdown src/main.c:120\n"
+            "SUMMARY: AddressSanitizer: double-free src/pool.c:12 in release_pool"
+        )
+        truncated = self.make_simple_crash(
+            repeated, "CRASH-RUNS-A",
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
+            "#0 0x10 in parse_value src/parse.c:40\n"
+            "#1 0x20 in parse_object src/parse.c:70\n" + complete_run,
+            "# Killed mid-report, then a different fault\nSurface: library-api",
+        )
+        whole = self.make_simple_crash(
+            repeated, "CRASH-RUNS-B", complete_run,
+            "# The same first fault, reported whole\nSurface: library-api",
+        )
+        self.assertEqual(self.run_cluster(repeated).returncode, 0)
+        rows = (repeated / "crashes" / "CRASH-CLUSTERS.md").read_text()
+        self.assertIn("parse_value", rows)
+        self.assertNotEqual(
+            self.cluster_id(truncated / "REPORT.md"),
+            self.cluster_id(whole / "REPORT.md"),
+        )
+
         fuzzy = self.root / "fuzzy"
         fuzz_a = self.make_simple_crash(
             fuzzy, "CRASH-FUZZ-A",

@@ -539,9 +539,18 @@ def _signature(crash_dir: Path) -> dict:
     report = _find_report(crash_dir)
     report_text = _read_text(report) if report else ""
 
-    frames = _extract_top_frames(asan_text)
+    # One report supplies the whole signature: frame parsing stops at the first
+    # SUMMARY, so a first report cut short before its own paired its class with
+    # the next run's stack. bin/severity and the benchmark scorer read the same
+    # first diagnostic. A diagnostic carrying no stack is not that report, so
+    # those signatures stay on the whole text.
+    diagnostic = stack_frames.first_sanitizer_diagnostic(asan_text) or ""
+    if not stack_frames.interesting_frames(diagnostic, want=1):
+        diagnostic = asan_text
+
+    frames = _extract_top_frames(diagnostic)
     top_func = frames[0][0] if frames else ""
-    inline_group = stack_frames.leading_inline_group(asan_text)
+    inline_group = stack_frames.leading_inline_group(diagnostic)
     top_funcs = sorted({
         frame.state_function
         for frame in inline_group
@@ -551,14 +560,14 @@ def _signature(crash_dir: Path) -> dict:
         top_funcs = [top_func]
     top_chain = " -> ".join(_frame_display(frame) for frame in frames[:3])
     top_frame_set = _frame_set_signature(frames, want=3)
-    cf_state = _cf_crash_state(asan_text)
+    cf_state = _cf_crash_state(diagnostic)
     # Preserve the same three logical frames when symbolization expands one
     # faulting instruction into several inline names. Pairwise comparison
     # supplies the common name and compares the next two callers.
-    cf_tail_state = _cf_crash_state(asan_text, skip=len(inline_group), want=2)
+    cf_tail_state = _cf_crash_state(diagnostic, skip=len(inline_group), want=2)
     if not cf_state:
         cf_state = _fallback_crash_state(asan_text, report_text, crash_dir.name)
-    primitive = _extract_primitive(asan_text)
+    primitive = _extract_primitive(diagnostic)
     sev_level, sev_rank, sev_score = _extract_severity(report_text)
     status = "OK"
     missing = promotion_pending_reasons(crash_dir)
