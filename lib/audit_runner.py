@@ -1910,7 +1910,7 @@ def enforce_orphan_testcases(runtime: Runtime, *, deadline: float | None = None)
                 label = "CLEAN"
             elif completed.returncode == 124:
                 label = "TIMEOUT"
-            elif output.is_file() and output.stat().st_size:
+            elif output.is_file() and verdict.file_execution_attempted(output):
                 label = "EXEC_FAIL"
             else:
                 label = "NO_EXEC"

@@ -59,6 +59,14 @@ _RUNNER_UNAVAILABLE_RE = re.compile(
 )
 _RUNNER_ASSERTION_RE = re.compile(r"^AssertionError(?::|$)")
 _PYTHON_FRAME_RE = re.compile(r'^\s*File "([^"]+)"')
+#: The runner started the configured command and it returned, in at least one
+#: repetition. This is an execution *attempt*, not proof the target's entry
+#: point ran: the rate counts an "EXECUTION INCONCLUSIVE" repetition, which
+#: run-<san> prints for any non-success status — a rejected input (rc=69) and a
+#: non-executable binary (rc=126) alike.
+_EXECUTION_ATTEMPTED_RE = re.compile(
+    r"^\[run-sanitizer-multi\] EXECUTION_RATE: [1-9][0-9]*/[0-9]+$"
+)
 
 
 def _file_matches(path: str | Path, pattern: re.Pattern) -> bool:
@@ -76,6 +84,21 @@ def file_has_crash(path: str | Path, extra_patterns: tuple[str, ...] = ()) -> bo
 
 def file_is_clean(path: str | Path) -> bool:
     return _file_matches(path, _CLEAN_RE)
+
+
+def file_execution_attempted(path: str | Path) -> bool:
+    """Did the runner start the configured command and get a status back?
+
+    Separates ``EXEC_FAIL`` (the command ran and returned without completing
+    cleanly) from ``NO_EXEC`` (no execution evidence at all). It deliberately
+    claims no more than that: the marker cannot tell an input the target
+    rejected from an argv, loader, dependency, or runner failure, so a caller
+    must read the output before naming the repair. Both are non-evidence
+    verdicts, so neither can accept or discard anything; the split only
+    narrows where the agent looks. Shared with bin/probe, bin/scratch-status
+    and orphan enforcement so one rule answers for all three.
+    """
+    return _file_matches(path, _EXECUTION_ATTEMPTED_RE)
 
 
 def runner_testcase_failure(path: str | Path, testcase: str | Path) -> str:

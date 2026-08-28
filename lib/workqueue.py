@@ -6243,6 +6243,15 @@ def _runtime_feedback_decision(
             "clean-no-diagnostic",
             "CLEAN-only evidence; revise input shape or guard gap with seed, allocator, or state variants before discard",
         )
+    # Last before the fallback, so every more specific diagnosis above still
+    # wins — format-reject in particular, which has the evidence to say the
+    # input itself was rejected. EXEC_FAIL alone does not: it means the command
+    # returned without completing cleanly, and the cause is in the output.
+    if verdicts.get("EXEC_FAIL", 0) >= max(1, total // 2):
+        return (
+            "execution-incomplete",
+            "the configured command ran and returned without completing cleanly; read the saved output to tell an input the target rejected from an argv, loader, dependency, runner, or target-runtime failure, then repair whichever it names",
+        )
     return (
         "mixed-signal",
         "mixed runtime signal; compare testcase shapes and continue the highest-signal variant",

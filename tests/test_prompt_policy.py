@@ -235,7 +235,7 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
             with self.subTest(prompt=rendered.splitlines()[3:5]):
                 self.assertIn("FIRST-PROBE CHECKPOINT", rendered)
                 self.assertIn("before turn 20", rendered)
-                self.assertIn("NO_EXEC does not satisfy", rendered)
+                self.assertIn("NO_EXEC and EXEC_FAIL do not satisfy", rendered)
                 self.assertIn("--hypothesis-id H-...", rendered)
 
         cold = prompt.cold_start_prompt(context, 1)

@@ -1290,6 +1290,15 @@ class Probe:
                 return "PROPERTY"
             if verdict_lib.file_is_clean(self.output):
                 return "CLEAN"
+            # The command ran and returned without completing cleanly. That is
+            # EXEC_FAIL, the verdict run-sanitizer-multi and bin/scratch-status
+            # already record for it; bin/probe was the only producer collapsing
+            # it into NO_EXEC, which sends the agent to repair a harness that
+            # may be working. On measured 5h cells 133 of 150 NO_EXEC rows had
+            # in fact reached this point. Which repair it needs is in the
+            # output, not in the marker.
+            if verdict_lib.file_execution_attempted(self.output):
+                return "EXEC_FAIL"
             return "NO_EXEC"
         if returncode == 124:
             return "TIMEOUT"

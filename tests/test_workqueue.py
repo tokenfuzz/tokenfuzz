@@ -1824,6 +1824,27 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual([], workqueue.corpus_index(Path(self.results) / "missing"))
 
+    def test_exec_fail_advice_does_not_assert_a_working_harness(self) -> None:
+        """EXEC_FAIL says the command returned uncleanly, and no more.
+
+        The execution-rate marker counts an inconclusive repetition, which
+        run-<san> prints for any non-success status, so it cannot tell an input
+        the target rejected from a non-executable binary. Advice that names the
+        input would strand a real harness failure.
+        """
+        diagnosis, feedback = workqueue._runtime_feedback_decision(
+            {"EXEC_FAIL": 2}, 2, {},
+        )
+        self.assertEqual("execution-incomplete", diagnosis)
+        self.assertIn("loader", feedback)
+        # Every more specific diagnosis above it still wins.
+        self.assertEqual(
+            "artifact-recorded",
+            workqueue._runtime_feedback_decision(
+                {"EXEC_FAIL": 2}, 2, {"filed-artifact": 1},
+            )[0],
+        )
+
     def test_s7_resume_checks_the_configured_input_route_before_a_hypothesis(self) -> None:
         self.write_cards([
             self.card("S7-PARSER-1", "src/parser.c", strategy="S7"),

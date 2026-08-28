@@ -40,8 +40,7 @@ def verdict_for(testcase: Path) -> str:
         return "CRASH"
     if verdict_lib.file_is_clean(output):
         return "CLEAN"
-    text = output.read_text(encoding="utf-8", errors="replace")
-    if re.search(r"EXECUTION_RATE: [1-9][0-9]*/[0-9]+", text):
+    if verdict_lib.file_execution_attempted(output):
         return "EXEC_FAIL"
     return "NO_EXEC"
 

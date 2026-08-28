@@ -134,7 +134,7 @@ explain-queue [--mode MODE] [--strategy S] [--top N] [--all]
 recent probe artifacts. It is not filing or discard evidence.
 
 Card discard uses the configured floor (default: three card-linked CLEAN rows
-across two actually-probed hypothesis shapes). MISSED, NO_EXEC, and CRASH do
+across two actually-probed hypothesis shapes). MISSED, NO_EXEC, EXEC_FAIL, and CRASH do
 not count. A concrete patch/site card then retires; a broad whole-file card
 records a dry pass, yields to fresher work, and remains reofferable with its
 history until campaign dry/wall limits. In a pinned run, pass `--strategy S<N>`

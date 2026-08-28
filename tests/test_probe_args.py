@@ -59,6 +59,61 @@ class ProbeArgumentTests(unittest.TestCase):
             )
             self.assertEqual(instance._classify(0), "PROPERTY")
 
+    def test_a_run_that_returned_is_exec_fail_not_a_dead_harness(self) -> None:
+        """A command that ran and returned uncleanly is EXEC_FAIL, not NO_EXEC.
+
+        NO_EXEC sends the agent to repair the harness or testcase header, so
+        collapsing the two spends sessions on a harness that works: on measured
+        5h cells 133 of 150 NO_EXEC rows had in fact got this far. The marker
+        proves only that the command returned, so a loader failure lands here
+        too and the verdict alone never names the repair.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            instance = object.__new__(probe.Probe)
+            instance.output = Path(directory) / "run.txt"
+            instance.exec_testcase = Path(directory) / "testcase.mp4"
+            instance.config = SimpleNamespace(runner_crash_patterns=[])
+            instance.sanitizer = "asan"
+            instance.hypothesis_strategy = "S7"
+            instance.header = {"property": ""}
+
+            reached = (
+                "ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic\n"
+                "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=69)\n"
+                "[run-sanitizer-multi] EXECUTION_RATE: 1/1\n"
+                "[run-sanitizer-multi] SUCCESS_RATE: 0/1\n"
+            )
+            instance.output.write_text(reached, encoding="utf-8")
+            self.assertEqual(instance._classify(69), "EXEC_FAIL")
+
+            # No repetition reached the target: still a harness problem.
+            instance.output.write_text(
+                "ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic\n"
+                "[run-sanitizer-multi] EXECUTION_RATE: 0/1\n"
+                "[run-sanitizer-multi] SUCCESS_RATE: 0/1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(2), "NO_EXEC")
+
+            # A loader failure reaches the same verdict: the marker records an
+            # execution attempt, not that the target's entry point ran, so
+            # EXEC_FAIL must not be read as "the input was rejected".
+            instance.output.write_text(
+                "ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic\n"
+                "Permission denied\n"
+                "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=126)\n"
+                "[run-sanitizer-multi] EXECUTION_RATE: 1/1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(126), "EXEC_FAIL")
+
+            # A crash still outranks both.
+            instance.output.write_text(
+                reached + "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(1), "CRASH")
+
     def test_timeout_uses_reserved_returncode_not_testcase_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             instance = object.__new__(probe.Probe)

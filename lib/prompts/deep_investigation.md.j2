@@ -40,7 +40,10 @@ the FIND is preserved whether or not the reproducer lands.
 
 **NEVER write a second testcase before running `bin/probe` on the first.** The strict loop is:
 1. Write ONE testcase → 2. Run {{ asan_loop_cmd }} immediately → 3. Evaluate result →
-4. If MISSED, revise the input until it reaches the target path. If NO_EXEC,
+4. If MISSED, revise the input until it reaches the target path. If EXEC_FAIL,
+   the command ran and returned without completing cleanly — read the saved
+   output to tell a rejected input from an argv, loader, dependency, or runner
+   failure, and repair whichever it names. If NO_EXEC, nothing executed:
    fix the testcase when it is wrong. The session target configuration is
    pinned: never edit `target.toml` or the results `.target.toml`; record proven
    runner/build metadata failures as ENV-BLOCKED for operator repair. Neither

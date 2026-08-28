@@ -564,7 +564,7 @@ def first_probe_checkpoint(context: PromptContext, agent: int) -> str:
         "run a trigger-aimed `bin/probe` before turn 20. Put its required TARGET / "
         "HYPOTHESIS-ID / CATEGORY headers in the testcase so the run reaches structured "
         "state; for raw byte inputs, preserve the bytes and pass `--hypothesis-id H-...` "
-        "instead. NO_EXEC does not satisfy this checkpoint. Use the best existing seed plus "
+        "instead. NO_EXEC and EXEC_FAIL do not satisfy this checkpoint. Use the best existing seed plus "
         "the smallest useful mutation instead of postponing execution for exhaustive review."
     )
 
@@ -582,7 +582,7 @@ def enforcement_results_directive(context: PromptContext, agent: int) -> str:
         action = "The harness found a diagnostic while probing an unexecuted testcase. Inspect it and run `bin/probe --confirm` before starting new work."
     else:
         heading = "## ORPHAN TESTCASE RESULTS"
-        action = "The harness probed testcases left unexecuted in the prior session. Fix every NO_EXEC/TIMEOUT before writing another testcase."
+        action = "The harness probed testcases left unexecuted in the prior session. Fix every NO_EXEC/EXEC_FAIL/TIMEOUT before writing another testcase."
     return f"{heading}\n\n{action}\n\n{body}"
 
 
