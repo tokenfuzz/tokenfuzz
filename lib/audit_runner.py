@@ -1549,11 +1549,17 @@ def progress(runtime: Runtime) -> ProgressSnapshot:
 
 def agent_progress(runtime: Runtime, agent: int, snapshot: ProgressSnapshot) -> AgentProgress:
     counts = structured_state.agent_counts(str(agent), runtime.results) or {}
-    roots = {
-        snapshot.artifact_roots[status]
-        for row in structured_state.agent_rows(str(agent), runtime.results)
-        if (status := str(row.get("status", ""))) in snapshot.artifact_roots
-    }
+    roots_by_status: dict[str, set[str]] = {}
+    for artifact, root in snapshot.artifact_roots.items():
+        status_id = workqueue._artifact_status_id(artifact)
+        roots_by_status.setdefault(status_id, set()).add(root)
+    roots: set[str] = set()
+    for row in structured_state.agent_rows(str(agent), runtime.results):
+        status = str(row.get("status", ""))
+        if status in snapshot.artifact_roots:
+            roots.add(snapshot.artifact_roots[status])
+            continue
+        roots.update(roots_by_status.get(workqueue._artifact_status_id(status), ()))
     return AgentProgress(
         counts.get("active", 0), counts.get("env_blocked", 0), frozenset(roots)
     )
@@ -1626,11 +1632,12 @@ def post_iteration(runtime: Runtime, *, deadline: float | None = None) -> None:
                 runtime.results, runtime.target_root, runtime.target_slug,
                 runtime.config.attacker_controls, workers=runtime.num_agents,
                 findings_only=runtime.config.sanitizers_explicitly_disabled,
-                deadline=deadline,
+                deadline=deadline, target_root_is_product=True,
             )
         with _phase_span(spans, "finding_gate"):
             finding_counts = triage.validate_find_gate(
                 runtime.results, workers=runtime.num_agents, deadline=deadline,
+                target_root_is_product=True,
             )
         if deadline is not None and time.monotonic() >= deadline:
             index_log(

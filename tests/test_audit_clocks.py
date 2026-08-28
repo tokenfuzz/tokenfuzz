@@ -80,9 +80,9 @@ class AuditClockTests(unittest.TestCase):
         finding_counts = {"accepted": 0, "rejected": 0, "pending": 0}
         with mock.patch.object(
             audit_runner.triage, "triage_crash_dirs", return_value=crash_counts,
-        ), mock.patch.object(
+        ) as crash_gate, mock.patch.object(
             audit_runner.triage, "validate_find_gate", return_value=finding_counts,
-        ), mock.patch.object(
+        ) as finding_gate, mock.patch.object(
             audit_runner, "expand_new_crash_clusters", return_value={"added": 0},
         ), mock.patch.object(audit_runner, "maintain_local_indexes"), \
                 mock.patch.object(audit_runner, "maintain_aggregate_indexes"), \
@@ -95,6 +95,9 @@ class AuditClockTests(unittest.TestCase):
                 ):
             audit_runner.post_iteration(runtime)
 
+        self.assertIs(crash_gate.call_args.kwargs["target_root_is_product"], True)
+        self.assertIs(finding_gate.call_args.kwargs["target_root_is_product"], True)
+
         phase_line = index_log.call_args_list[-1].args[1]
         self.assertEqual(
             phase_line,
@@ -102,6 +105,26 @@ class AuditClockTests(unittest.TestCase):
             "cluster_expand=1.0s indexes=1.0s orphan_enforce=1.0s "
             "corpus_promote=1.0s",
         )
+
+    def test_agent_progress_matches_bare_status_to_suffixed_artifact(self) -> None:
+        runtime = SimpleNamespace(results=self.root / "results")
+        snapshot = audit_runner.ProgressSnapshot(
+            findings=1, crashes=0, finding_roots=1, crash_roots=0,
+            active=0, env_blocked=0,
+            artifact_roots={
+                "FIND-005-plugin-timer": "finding:FCL-TIMER",
+            },
+        )
+        with mock.patch.object(
+            audit_runner.structured_state, "agent_counts",
+            return_value={"active": 0, "env_blocked": 0},
+        ), mock.patch.object(
+            audit_runner.structured_state, "agent_rows",
+            return_value=[{"status": "FIND-005"}],
+        ):
+            progress = audit_runner.agent_progress(runtime, 2, snapshot)
+
+        self.assertEqual(progress.roots, frozenset({"finding:FCL-TIMER"}))
 
     def test_phase_failure_is_recorded_without_masking_the_failure(self) -> None:
         runtime = SimpleNamespace(
