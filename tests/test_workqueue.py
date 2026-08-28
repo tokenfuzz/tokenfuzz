@@ -1824,6 +1824,50 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual([], workqueue.corpus_index(Path(self.results) / "missing"))
 
+    def test_no_exec_causes_are_diagnosed_apart_from_a_broken_harness(self) -> None:
+        """NO_EXEC has three causes with three different repairs.
+
+        Collapsing them sent the agent to fix a working harness: on measured 5h
+        cells 133 of 150 NO_EXEC rows had reached the target (EXEC_FAIL), and a
+        claude cell recorded 8 runs the sanitizer budget refused to start.
+        """
+        budget = (
+            "[run-sanitizer-multi] BUDGET: CLAMPED requested=1 actual=0 remaining_before=0\n"
+            "[run-sanitizer-multi] BUDGET: EXHAUSTED - no sanitizer run started\n"
+        )
+        output = Path(self.results) / "scratch-1" / "budget.asan.txt"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(budget, encoding="utf-8")
+        self.assertEqual(
+            ["budget-exhausted"],
+            workqueue._runtime_row_signals(self.ctx, {"asan_output": str(output)}),
+        )
+        self.assertEqual(
+            "budget-exhausted",
+            workqueue._runtime_feedback_decision(
+                {"NO_EXEC": 2}, 2, {"budget-exhausted": 2},
+            )[0],
+        )
+        # A genuinely dead harness still reaches the setup diagnosis.
+        self.assertEqual(
+            "harness-setup",
+            workqueue._runtime_feedback_decision({"NO_EXEC": 2}, 2, {})[0],
+        )
+        # One refused run among genuine failures is mixed evidence: keep the
+        # setup repair and say how much the budget accounts for.
+        mixed_diagnosis, mixed_feedback = workqueue._runtime_feedback_decision(
+            {"NO_EXEC": 3}, 3, {"budget-exhausted": 1},
+        )
+        self.assertEqual("harness-setup", mixed_diagnosis)
+        self.assertIn("1 of 3", mixed_feedback)
+        # One refused run beside real evidence must not hijack the diagnosis.
+        self.assertEqual(
+            "clean-no-diagnostic",
+            workqueue._runtime_feedback_decision(
+                {"CLEAN": 4}, 4, {"budget-exhausted": 1},
+            )[0],
+        )
+
     def test_exec_fail_advice_does_not_assert_a_working_harness(self) -> None:
         """EXEC_FAIL says the command returned uncleanly, and no more.
 

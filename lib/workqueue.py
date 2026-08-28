@@ -271,8 +271,8 @@ def patch_audit_boost(desc: str) -> int:
 
 # Most of what the next-action hint needs — crash, no-exec, coverage miss,
 # timeout, clean — is already in the structured `verdict`, so we route on that
-# instead of re-grepping it out of text. Only two text signals add information
-# the verdict cannot, so only these two are scanned:
+# instead of re-grepping it out of text. Only these text signals add
+# information the verdict cannot, so only these are scanned:
 #   - crash-signal: a known crash/sanitizer banner is present although the
 #     verdict is not a crash (a possible missed crash — inspect before
 #     discarding). The banners are the shared per-language crash_patterns from
@@ -294,6 +294,13 @@ RUNTIME_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             r"(?:error|fail|invalid|mismatch|rejected?)\b",
             re.IGNORECASE,
         ),
+    ),
+    # The runner refused to start because this iteration's sanitizer budget is
+    # spent. It records NO_EXEC like a broken harness does, and without this
+    # signal the advice below sends the agent to repair one that works.
+    (
+        "budget-exhausted",
+        re.compile(r"^\[run-sanitizer-multi\] BUDGET: EXHAUSTED", re.MULTILINE),
     ),
 )
 # Coverage near-miss: the probe's coverage gate prints the closest reached frame
@@ -6209,9 +6216,24 @@ def _runtime_feedback_decision(
     # a broken harness, and this advice would send the agent to re-debug a
     # working one.
     if total and verdicts.get("NO_EXEC", 0) == total:
+        # A spent budget is the one cause of NO_EXEC whose repair is to wait.
+        # It refines this branch rather than preceding it, so a scope carrying
+        # real evidence keeps its own diagnosis; and it answers for the scope
+        # only when it accounts for *every* run, because one refused run beside
+        # genuine failures would otherwise report a working harness.
+        refused = signals.get("budget-exhausted", 0)
+        if refused >= total:
+            return (
+                "budget-exhausted",
+                "the per-iteration sanitizer budget is spent, so these runs never started; the harness is working — reason from source and existing output, and keep the next iteration's runs for the shapes that most need execution",
+            )
         return (
             "harness-setup",
-            "runs are not executing; fix the testcase header or scratch harness, or record proven pinned runner/build metadata as ENV-BLOCKED before mutating inputs",
+            "runs are not executing; fix the testcase header or scratch harness, or record proven pinned runner/build metadata as ENV-BLOCKED before mutating inputs"
+            + (
+                f" ({refused} of {total} were refused for a spent sanitizer budget and need no repair; the rest are not explained by it)"
+                if refused else ""
+            ),
         )
     if signals.get("coverage-near-miss", 0):
         return (
