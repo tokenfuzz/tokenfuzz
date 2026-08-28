@@ -138,9 +138,10 @@ def verify_source_anchors(value: object, target_root: Path) -> list[dict]:
         symbol_candidates = {symbol}
         for separator in ("::", ".", "#"):
             symbol_candidates.update(
-                candidate.rsplit(separator, 1)[-1]
+                leaf
                 for candidate in tuple(symbol_candidates)
                 if separator in candidate
+                and (leaf := candidate.rsplit(separator, 1)[-1])
             )
         source_text = "\n".join(source_lines)
         if (

@@ -192,6 +192,8 @@ for path, func, line in (
     ("lib/ReportKit.pm", "run_export", "55"),
     ("reportkit.kts", "parseManifest", "32"),
     ("R/reportkit.R", "read_asset", "61"),
+    ("src/ReportKit.kt", "Parser.parseManifest", "32"),
+    ("lib/report_kit.rb", "Parser#read_asset", "61"),
 ):
     body = (
         f"Location: {path}:{func}:{line}\n"

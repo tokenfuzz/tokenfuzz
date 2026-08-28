@@ -316,10 +316,13 @@ def normalize_path(path: str, target_root: str = "") -> str:
 # regex engine doesn't shortcut `foo.cc` to `foo.c` + leftover `c`.
 _SRC_EXT = rf"(?:{languages.source_reference_ext_pattern()})"
 _PATH_FRAG = rf"[A-Za-z0-9_./\-]+\.{_SRC_EXT}"
-# Functions can include namespaces (foo::bar), destructors (~Foo), template
-# brackets (Foo<T>), but never a colon followed by digits — that's the line
-# number, which we strip aggressively.
-_FUNC_FRAG = r"[A-Za-z_~][\w~]*(?:::[A-Za-z_~][\w~]*)*(?:<[^>]*>)?"
+# Functions can include language-qualified components (``Type::method``,
+# ``Type.method``, ``Type#method``), destructors, and template brackets, but
+# never a colon followed by digits — that is the source line. Keeping the
+# whole qualified label is what lets the following ``:line`` bind; accepting
+# only its first component silently degraded those reports to line-less keys.
+_FUNC_COMPONENT = r"[A-Za-z_~][\w~]*(?:<[^>]*>)?"
+_FUNC_FRAG = rf"{_FUNC_COMPONENT}(?:(?:::|[.#]){_FUNC_COMPONENT})*"
 
 _LOCATION_HEADER_RE = re.compile(
     r"(?:^|\n)\s*(?:#{1,6}\s+Location|-\s+\*\*Location\*\*|-?\s*Location)\s*:?\s*\n?\s*`?"
