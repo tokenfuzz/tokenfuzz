@@ -325,5 +325,51 @@ class SharedPolicyAgreementTests(unittest.TestCase):
                 self.assertIn("application-supplied", self.read(*parts))
 
 
+    def test_unassigned_cold_worker_does_not_duplicate_a_leased_card(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            results = root / "results"
+            target = root / "target"
+            references = root / "references"
+            target.mkdir()
+            references.mkdir()
+            queue_context = workqueue.Context(
+                ROOT, target, "sampleproj", results, "none",
+            )
+            workqueue.init_state(queue_context)
+            card = {
+                "id": "WORK-ONLY", "kind": "ranked-source",
+                "file": "src/parser.c", "subsystem": "src",
+                "strategy": "S7", "mode": "generic", "score": 10,
+                "reason": "parser boundary", "auditable": True,
+            }
+            workqueue.write_cards(results / "work-cards.jsonl", [card])
+            claimed = workqueue.claim_next_card(
+                queue_context, "3", "generic", "analysis", strategy="S7",
+            )
+            self.assertEqual(claimed["id"], "WORK-ONLY")
+            context = prompt.PromptContext(
+                results_dir=results, target_root=target,
+                target_slug="sampleproj", reference_dir=references,
+                num_agents=3, fixed_strategy="S7",
+            )
+
+            rendered = prompt.cold_start_prompt(context, 1)
+
+            # audit_runner.should_skip_launch launches a cardless worker when a
+            # fuzz lead is waiting, and launches agent 1 on nothing at all.
+            # Exiting without reading those sources would drop the very work
+            # those launches exist for.
+            (results / "fuzz-leads.md").write_text(
+                "# Fuzz leads\n\n- crash-000 reached app_parse\n", encoding="utf-8",
+            )
+            with_lead = prompt.cold_start_prompt(context, 1)
+
+        self.assertIn("No work card is assigned", rendered)
+        self.assertIn("Do not inspect the target", rendered)
+        self.assertNotIn("fill the same-subsystem queue to 3-5 hypotheses", rendered)
+        self.assertNotIn("No work card is assigned", with_lead)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

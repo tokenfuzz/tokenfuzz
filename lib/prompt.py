@@ -586,6 +586,22 @@ def enforcement_results_directive(context: PromptContext, agent: int) -> str:
     return f"{heading}\n\n{action}\n\n{body}"
 
 
+def fuzz_leads_empty(results_dir: Path) -> bool:
+    """Does fuzz-leads.md hold no lead? Shared with audit_runner's launch gate.
+
+    The launch decision and the cold-start prompt must read the same work
+    sources, or the pool spends a session on an agent the prompt then tells
+    to quit.
+    """
+    try:
+        lines = (results_dir / "fuzz-leads.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return True
+    return not any(
+        line.strip() and not line.lstrip().startswith(("#", "_")) for line in lines
+    )
+
+
 def handoff_rows(context: PromptContext, agent: int) -> list[dict]:
     """Assign analysis NEEDS_TESTCASE rows stably across reproduce workers."""
     if context.role(agent) != "reproduce":
@@ -637,6 +653,9 @@ def handoff_directive(context: PromptContext, agent: int) -> str:
 def cold_start_prompt(context: PromptContext, agent: int) -> str:
     mode = context.mode(agent)
     strategy = context.strategy(agent)
+    card_directive = work_card_directive(context, agent)
+    cards_path = context.results_dir / "work-cards.jsonl"
+    queue_has_cards = cards_path.is_file() and cards_path.stat().st_size > 0
     strategy_block = f"## ASSIGNED STRATEGY - {strategy}\n\n{strategy_brief(strategy, context.reference_dir)}"
     # The pin says which strategy, never how to work it — step 4 below owns
     # the procedure, so restating it here only paraphrases the same rule.
@@ -644,7 +663,25 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
         f"Every hypothesis on this run must be Strategy {context.fixed_strategy}."
         if context.fixed_strategy else ""
     )
-    if strategy == "S6":
+    # A cold slot with no card, no handoff, and no fuzz lead has nothing this
+    # session can work: the queue's cards are all leased or ineligible, so
+    # unassigned source review would duplicate their owners. The other two
+    # sources are checked because audit_runner.should_skip_launch launches on
+    # them, and agent 1 launches on nothing at all -- exiting without asking
+    # would silently drop the work those launches exist for.
+    if (
+        queue_has_cards and not card_directive
+        and not handoff_rows(context, agent)
+        and fuzz_leads_empty(context.results_dir)
+    ):
+        workflow = (
+            "No work card is assigned: the eligible queue is already leased by "
+            "another worker, and no handoff row or fuzz lead is waiting. Do not "
+            "inspect the target or create an unassigned hypothesis; end this "
+            "model session so the worker pool can reuse the slot after "
+            "structured state changes."
+        )
+    elif strategy == "S6":
         workflow = (
             "Distill the peer fix's repaired invariant and verify a target analogue. "
             "Only when the same input reaches the same operation without the peer's "
@@ -671,7 +708,7 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
             "reference_dir": str(context.reference_dir), "strategy_a_block": strategy_block,
             "role_guidance": _role_guidance(context, agent),
             "first_probe_checkpoint": first_probe_checkpoint(context, agent),
-            "work_card_directive": work_card_directive(context, agent),
+            "work_card_directive": card_directive,
             "targets": _targets(context, mode),
             "asan_build_directive": agent_build_directive(context, agent),
             "harness_build_failures_directive": harness_build_failures_directive(context),
