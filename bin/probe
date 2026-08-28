@@ -559,8 +559,16 @@ class HarnessBuilder:
             f"path = {quote(self.probe.config.target_root)} }}"
         ]
         dev_dependencies = raw.get("dev-dependencies", {})
-        if isinstance(dev_dependencies, dict):
+        if isinstance(dev_dependencies, dict) and dev_dependencies:
+            named = self._rust_named_crates()
             for name, spec in dev_dependencies.items():
+                # Carry only what this testcase names. Cargo builds a normal
+                # dependency whether or not it is used, so an unused one that
+                # needs a network fetch, a system library, or a build script
+                # this host cannot run would fail every probe against a crate
+                # whose own library builds fine.
+                if named is not None and str(name).replace("-", "_") not in named:
+                    continue
                 rendered = self._cargo_dependency(str(name), spec, raw, package_name)
                 if rendered is not None:
                     dependencies.append(f"{quote(str(name))} = {rendered}")
@@ -597,6 +605,21 @@ class HarnessBuilder:
             shutil.copy2(built, binary)
             binary.chmod(binary.stat().st_mode | 0o111)
         return completed
+
+    def _rust_named_crates(self) -> "set[str] | None":
+        """Crate identifiers the testcase names, or None when it cannot be read.
+
+        A Rust testcase must name every crate it uses — `use x`, `extern crate
+        x`, or a `x::` path — so this is the set of dev-dependencies it could
+        possibly need. Unreadable source carries them all, as before.
+        """
+        try:
+            text = self.source.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        named = set(re.findall(r"\b(?:use|extern\s+crate)\s+([A-Za-z_]\w*)", text))
+        named.update(re.findall(r"\b([A-Za-z_]\w*)\s*::", text))
+        return named
 
     def _cargo_dependency(
         self, name: str, value: object, manifest: dict, package_name: str,
