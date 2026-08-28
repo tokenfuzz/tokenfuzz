@@ -1519,6 +1519,14 @@ try:
               "seed_toml: API-only CMake build does not persist its test driver")
     assert_eq("build-asan/libcmakeapiartifacts.a", _api_seed.get("asan_lib"),
               "seed_toml: API-only CMake build persists its core archive")
+    # CMake writes this script even for a project that declares no install()
+    # rule, and that publishes nothing rather than declaring a library-only
+    # product. Reading it as one deleted the sole route of an uninstalled CLI.
+    (cmake_api_root / "build-asan" / "cmake_install.cmake").write_text(
+        "if(CMAKE_INSTALL_COMPONENT)\nendif()\n", encoding="utf-8",
+    )
+    assert_eq(["build-asan/c-test"], tc.cli_candidates(cmake_api_root, "asan", 8),
+              "cli_candidates: a project with no install() rule keeps its route")
     _api_cli = cmake_api_root / "build-asan" / "wtool"
     _api_cli.write_bytes(b"\x7fELF"); os.chmod(_api_cli, 0o755)
     (cmake_api_root / "build-asan" / "cmake_install.cmake").write_text(

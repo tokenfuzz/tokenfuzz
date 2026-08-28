@@ -1490,11 +1490,17 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
 def _cmake_installed_build_executables(san_dir: Path) -> "list[Path] | None":
     """Executables CMake's generated install plan publishes from this build.
 
-    ``None`` means no generated install metadata exists, so callers may use
-    source-manifest heuristics. An empty list is an authoritative result: the
-    project installs no executable. Generated metadata has resolved CMake
-    variables and target types, so it distinguishes product CLIs from test and
-    benchmark executables without project-specific filename rules.
+    ``None`` means the build publishes no install plan to read, so callers may
+    use source-manifest heuristics. An empty list is an authoritative result:
+    the project installs other products but no executable. Generated metadata
+    has resolved CMake variables and target types, so it distinguishes product
+    CLIs from test and benchmark executables without project-specific filename
+    rules.
+
+    CMake generates this script even for a project that declares no
+    ``install()`` rule at all, and that script publishes nothing rather than
+    declaring a library-only product. Reading it as one would delete the sole
+    execution route of every uninstalled CLI, so it answers ``None`` too.
     """
     scripts = _find_under(san_dir, name="cmake_install.cmake")
     if not scripts:
@@ -1507,15 +1513,16 @@ def _cmake_installed_build_executables(san_dir: Path) -> "list[Path] | None":
         r"(?P<files>(?:\"[^\"\r\n]+\"\s*)+)",
         re.IGNORECASE,
     )
+    published = re.compile(r'\bTYPE\s+[A-Z_]+\b[^\n]*?\bFILES\s+"', re.IGNORECASE)
     found: list[Path] = []
     seen: set[str] = set()
-    read_any = False
+    installs_anything = False
     for script in scripts:
         try:
             text = script.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        read_any = True
+        installs_anything = installs_anything or bool(published.search(text))
         for match in installed_files.finditer(text):
             for value in re.findall(r'"([^"\r\n]+)"', match.group("files")):
                 if "$" in value:
@@ -1539,7 +1546,7 @@ def _cmake_installed_build_executables(san_dir: Path) -> "list[Path] | None":
                 if key not in seen:
                     seen.add(key)
                     found.append(candidate)
-    return found if read_any else None
+    return found if installs_anything else None
 
 
 def _cli_candidates(san_dir: Path, root: Path, build_system: str,
