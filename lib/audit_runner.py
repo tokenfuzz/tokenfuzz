@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--refill-workers", action=argparse.BooleanOptionalAction, default=True,
-        help="relaunch a finished worker slot while an initial session is still running",
+        help="relaunch a finished worker slot while a peer session is still running",
     )
     return parser
 
@@ -1594,8 +1594,14 @@ def benchmark_count_crashes(path: Path):
     return benchmark.count_confirmed_crashes(path)
 
 
+def _timed(call, *args, **kwargs):
+    """Run a call and report what it spent, for a span it shares with another."""
+    started = time.monotonic()
+    return call(*args, **kwargs), time.monotonic() - started
+
+
 @contextlib.contextmanager
-def _phase_span(spans: list[str], name: str):
+def _phase_span(spans: list[str], name: str, *, detail: list[str] | None = None):
     """Record one post_iteration phase's duration.
 
     Housekeeping has been a single aggregate number, so a barrier that costs a
@@ -1603,12 +1609,16 @@ def _phase_span(spans: list[str], name: str):
     estimate had to be inferred from decision timestamps. Timing is advisory:
     a span never changes a disposition, and a phase that raises still records
     what it spent before failing.
+
+    `detail` carries the sub-phases of a span whose work overlaps, so the top
+    level still sums to the housekeeping wall without losing attribution.
     """
     started = time.monotonic()
     try:
         yield
     finally:
-        spans.append(f"{name}={time.monotonic() - started:.1f}s")
+        suffix = f"({' '.join(detail)})" if detail else ""
+        spans.append(f"{name}={time.monotonic() - started:.1f}s{suffix}")
 
 
 def _log_phase_spans(runtime: Runtime, spans: list[str]) -> None:
@@ -1634,24 +1644,29 @@ def post_iteration(runtime: Runtime, *, deadline: float | None = None) -> None:
                 findings_only=runtime.config.sanitizers_explicitly_disabled,
                 deadline=deadline, target_root_is_product=True,
             )
-        with _phase_span(spans, "finding_gate"):
-            finding_counts = triage.validate_find_gate(
-                runtime.results, workers=runtime.num_agents, deadline=deadline,
-                target_root_is_product=True,
-            )
+        # Both gates are provider-latency bound and touch disjoint trees —
+        # findings/ against crashes/ plus the flock-serialized work queue — so
+        # running them together takes the shorter of the two off the audit
+        # wall. Crash triage keeps its place in front of both: it demotes
+        # crashes into findings/ and settles the crash set expansion reads.
+        gate_detail: list[str] = []
+        with _phase_span(spans, "result_gates", detail=gate_detail):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                expansion = pool.submit(
+                    _timed, expand_new_crash_clusters, runtime, deadline=deadline,
+                )
+                finding_counts, gate_seconds = _timed(
+                    triage.validate_find_gate, runtime.results,
+                    workers=runtime.num_agents, deadline=deadline,
+                    target_root_is_product=True,
+                )
+                gate_detail.append(f"finding_gate={gate_seconds:.1f}s")
+                cluster_counts, expand_seconds = expansion.result()
+                gate_detail.append(f"cluster_expand={expand_seconds:.1f}s")
         if deadline is not None and time.monotonic() >= deadline:
             index_log(
                 runtime,
                 "Housekeeping: productive wall budget reached during result triage; "
-                "remaining index work deferred",
-            )
-            return
-        with _phase_span(spans, "cluster_expand"):
-            cluster_counts = expand_new_crash_clusters(runtime, deadline=deadline)
-        if deadline is not None and time.monotonic() >= deadline:
-            index_log(
-                runtime,
-                "Housekeeping: productive wall budget reached during cluster expansion; "
                 "remaining index work deferred",
             )
             return
@@ -2538,8 +2553,7 @@ def run_agent_pool(
     AGENT_TIMEOUT and push post-iteration triage arbitrarily far out.
 
     What this deliberately does NOT do is keep refilling until the epoch closes.
-    The `initial` sentinel is load-bearing twice over, and both reasons have to
-    be retired before it can go:
+    The `initial` sentinel is load-bearing twice over:
 
     - It is the clock for iteration-counted control loops. Refilling to the
       epoch stretches an iteration from about one session to AGENT_TIMEOUT,
@@ -2548,14 +2562,30 @@ def run_agent_pool(
       would stop firing at all.
     - It bounds stale-signal spin. should_skip_launch reports work from sticky
       sources: a PENDING hypothesis that never resolves, or any line in
-      fuzz-leads.md. Capped at one generation those cost a few sessions;
+      fuzz-leads.md. Capped at a generation those cost a few sessions;
       uncapped they justify clean sessions for the whole epoch.
 
-    So a slot does still idle once the last initial session ends while a peer's
-    refill runs. Closing that window needs triage to stop being stop-the-world
-    and per-session progress receipts, not a looser sentinel. A one-slot cohort
-    likewise chains nothing — its only session is also the last initial one, and
-    continuation comes from the next iteration.
+    Once the cohort has drained the sentinel is spent, and on a target whose
+    sessions run long a fast slot lost hours to the barrier — a measured 5h
+    audit idled two of three slots for the last 90 minutes of its first
+    iteration, one of them holding a live NEEDS_TESTCASE lead. So each slot
+    gets one overtime session, and only while a *cohort-era* peer is in flight:
+    an initial session, or a refill launched while one was still running. Both
+    halves of that are load-bearing. The barrier is already committed to that
+    peer, so the overtime rides a wait the iteration was paying anyway; and
+    refusing to let one overtime justify the next is what stops a cohort that
+    drains early from growing an extra session per slot, one slot at a time.
+
+    What remains is that an overtime session can outlive the peer that
+    justified it, so an iteration can still end up one session longer than it
+    was. On a backend whose sessions run to the epoch that is exactly zero; on
+    one whose cohorts drain early it is real, and it trades iterations — the
+    clock for strategy rotation — for agent-seconds. The idle capacity is
+    measured; that trade is not. Re-measure it on a fresh cell per backend
+    before treating this default as settled.
+
+    A one-slot cohort chains nothing either way: with no peer in flight there
+    is no overtime, and continuation comes from the next iteration.
     """
     runtime = state.runtime
     context = state.context
@@ -2573,17 +2603,19 @@ def run_agent_pool(
 
     # One retry per slot per cohort after an ambiguous process failure.
     retried: set[int] = set()
+    # One session per slot after the initial cohort has drained.
+    overtime: set[int] = set()
     # Provider trouble reported by any slot stops launches in all of them.
     halted = ""
     with concurrent.futures.ThreadPoolExecutor(max_workers=runtime.num_agents) as pool:
-        futures: dict[concurrent.futures.Future, tuple[int, bool]] = {}
+        futures: dict[concurrent.futures.Future, tuple[bool, bool]] = {}
 
-        def launch(agent: int, initial: bool) -> None:
+        def launch(agent: int, initial: bool, cohort_era: bool = True) -> None:
             future = pool.submit(
                 run_agent_guarded, runtime, context, agent, state.iteration,
                 cold and initial, epoch_remaining(),
             )
-            futures[future] = (agent, initial)
+            futures[future] = (initial, cohort_era)
 
         for agent in agents:
             launch(agent, True)
@@ -2606,9 +2638,31 @@ def run_agent_pool(
                     )
             if halted or not getattr(runtime, "refill_workers", True):
                 continue
-            if not any(initial for _agent, initial in futures.values()):
+            # Nothing in flight means the barrier is here: the iteration ends
+            # whatever this slot would do next.
+            if not futures:
                 continue
+            in_flight = list(futures.values())
+            cohort_running = any(initial for initial, _era in in_flight)
+            # Only a cohort-era peer justifies overtime. Letting one overtime
+            # session justify the next is what turns a slot filling an idle gap
+            # into an iteration that outlives its cohort by a session per slot.
+            cohort_era_running = any(era for _initial, era in in_flight)
             for result in finished:
+                if not cohort_running and result.agent in overtime:
+                    index_log(
+                        runtime,
+                        f"Worker-pool refill: agent={result.agent} slot left idle; "
+                        "its one overtime session is spent",
+                    )
+                    continue
+                if not cohort_running and not cohort_era_running:
+                    index_log(
+                        runtime,
+                        f"Worker-pool refill: agent={result.agent} slot left idle; "
+                        "every peer still running is itself overtime",
+                    )
+                    continue
                 outcome = _refill_outcome(result)
                 if outcome in ("provider", "deadline"):
                     index_log(
@@ -2656,12 +2710,15 @@ def run_agent_pool(
                 if outcome == "failed":
                     # Spend the allowance only on a launch that actually happens.
                     retried.add(result.agent)
+                if not cohort_running:
+                    overtime.add(result.agent)
                 index_log(
                     runtime,
-                    f"Worker-pool refill: agent={result.agent} slot free; "
-                    f"launching another session with {remaining}s left in the epoch",
+                    f"Worker-pool refill: agent={result.agent} slot free; launching "
+                    f"{'an overtime' if not cohort_running else 'another'} session "
+                    f"with {remaining}s left in the epoch",
                 )
-                launch(result.agent, False)
+                launch(result.agent, False, cohort_running)
     return results
 
 

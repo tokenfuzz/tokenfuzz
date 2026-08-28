@@ -2791,10 +2791,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "a closed pool epoch defers the slot to post-iteration triage",
         repr(epoch_calls),
     )
-    # Refills stop with the last initial session on purpose: that sentinel is
-    # the clock for iteration-counted strategy rotation and the bound on
-    # sticky-signal spin. A one-slot cohort therefore chains nothing, and
-    # continuation of a turn-capped session comes from the next iteration.
+    # A slot with no peer in flight has nothing to keep pace with, so the
+    # cohort's end is also the iteration's: a one-slot cohort chains nothing
+    # and continuation of a turn-capped session comes from the next iteration.
     solo_calls = []
     def _solo_agent(_runtime, _context, agent, _iteration, cold, _limit):
         solo_calls.append((agent, cold))
@@ -2806,6 +2805,66 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         solo_calls == [(1, True)],
         "a one-slot cohort runs one session and defers continuation to triage",
         repr(solo_calls),
+    )
+    # While a peer is still running the barrier is already waiting on it, so a
+    # slot freed after the cohort drained takes one more session rather than
+    # idling to the barrier -- and exactly one, so the chain stays bounded.
+    overtime_calls = []
+    overtime_lock = threading.Lock()
+    peer_refill_running = threading.Event()
+    def _overtime_agent(_runtime, _context, agent, _iteration, cold, _limit):
+        with overtime_lock:
+            overtime_calls.append((agent, cold))
+        if agent == 2 and not cold:
+            # The peer that holds the barrier open past the cohort. It outlives
+            # slot 1's overtime session, so the pool has to decide about slot 1
+            # a second time.
+            peer_refill_running.set()
+            time.sleep(0.3)
+        elif agent == 1 and cold:
+            peer_refill_running.wait(1)
+        return _pool_result(agent, turn_capped=True)
+    with mock.patch.object(
+        audit_runner, "run_agent_guarded", side_effect=_overtime_agent,
+    ), mock.patch.object(audit_runner, "should_skip_launch", return_value=False):
+        audit_runner.run_agent_pool(pool_state, [1, 2], True)
+    check(
+        sorted(overtime_calls) == [(1, False), (1, True), (2, False), (2, True)],
+        "a slot freed after the cohort drained takes exactly one more session",
+        repr(overtime_calls),
+    )
+    # ...and only beside a *cohort-era* peer. Slot 2's refill (launched while
+    # slot 1's initial ran) justifies slot 1's overtime; when that refill then
+    # ends, the only peer left is slot 1's overtime, which must not justify a
+    # second one for slot 2. Letting it is what grows an iteration by a session
+    # per slot on a cohort that drains early -- the shape a recorded codex cell
+    # would have hit at 10:44:38.
+    chain_calls = []
+    chain_lock = threading.Lock()
+    cohort_refill_running = threading.Event()
+    slot1_overtime_running = threading.Event()
+    def _chain_agent(_runtime, _context, agent, _iteration, cold, _limit):
+        with chain_lock:
+            chain_calls.append((agent, cold))
+        if agent == 2 and not cold:
+            # The cohort-era refill: frees slot 1, then outlives its overtime
+            # launch so the pool has to rule on slot 2 with only overtime left.
+            cohort_refill_running.set()
+            slot1_overtime_running.wait(1)
+        elif agent == 1 and cold:
+            cohort_refill_running.wait(1)
+        elif agent == 1:
+            slot1_overtime_running.set()
+            time.sleep(0.3)
+        return _pool_result(agent, turn_capped=True)
+    with mock.patch.object(
+        audit_runner, "run_agent_guarded", side_effect=_chain_agent,
+    ), mock.patch.object(audit_runner, "should_skip_launch", return_value=False):
+        audit_runner.run_agent_pool(pool_state, [1, 2], True)
+    check(
+        sorted(chain_calls) == [(1, False), (1, True), (2, False), (2, True)],
+        "an overtime session cannot justify another slot's overtime",
+        repr(chain_calls),
     )
     pool_runtime.refill_workers = False
     no_refill_calls = []

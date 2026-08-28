@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,22 +89,64 @@ class AuditClockTests(unittest.TestCase):
                 mock.patch.object(audit_runner, "maintain_aggregate_indexes"), \
                 mock.patch.object(audit_runner, "enforce_orphan_testcases", return_value=0), \
                 mock.patch.object(audit_runner, "promote_corpus", return_value=0), \
-                mock.patch.object(audit_runner, "index_log") as index_log, \
-                mock.patch.object(
-                    audit_runner.time, "monotonic",
-                    side_effect=[float(value) for value in range(12)],
-                ):
+                mock.patch.object(audit_runner, "index_log") as index_log:
             audit_runner.post_iteration(runtime)
 
         self.assertIs(crash_gate.call_args.kwargs["target_root_is_product"], True)
         self.assertIs(finding_gate.call_args.kwargs["target_root_is_product"], True)
 
+        # The finding gate and cluster expansion share one wall, so they report
+        # as the single span they cost, keeping each component's own duration so
+        # a regression in either is still attributable.
         phase_line = index_log.call_args_list[-1].args[1]
-        self.assertEqual(
+        self.assertRegex(
             phase_line,
-            "Housekeeping phases: crash_triage=1.0s finding_gate=1.0s "
-            "cluster_expand=1.0s indexes=1.0s orphan_enforce=1.0s "
-            "corpus_promote=1.0s",
+            r"^Housekeeping phases: crash_triage=[\d.]+s "
+            r"result_gates=[\d.]+s\(finding_gate=[\d.]+s cluster_expand=[\d.]+s\) "
+            r"indexes=[\d.]+s orphan_enforce=[\d.]+s corpus_promote=[\d.]+s$",
+        )
+
+    def test_the_two_result_gates_actually_run_at_the_same_time(self) -> None:
+        """The span name is not the claim; overlap is. Each gate blocks until it
+        sees the other running, so a sequential implementation deadlocks out."""
+        runtime = SimpleNamespace(
+            results=self.root / "results", target_root=self.root / "target",
+            target_slug="sampleproj", num_agents=2, index=self.runtime.index,
+            config=SimpleNamespace(
+                attacker_controls=["bytes"],
+                sanitizers_explicitly_disabled=False,
+            ),
+        )
+        gate_running = threading.Event()
+        expand_running = threading.Event()
+        saw = {}
+
+        def _gate(*_args, **_kwargs):
+            gate_running.set()
+            saw["gate_saw_expand"] = expand_running.wait(5)
+            return {"accepted": 0, "rejected": 0, "pending": 0}
+
+        def _expand(*_args, **_kwargs):
+            expand_running.set()
+            saw["expand_saw_gate"] = gate_running.wait(5)
+            return {"added": 0}
+
+        with mock.patch.object(
+            audit_runner.triage, "triage_crash_dirs",
+            return_value={"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0},
+        ), mock.patch.object(
+            audit_runner.triage, "validate_find_gate", side_effect=_gate,
+        ), mock.patch.object(
+            audit_runner, "expand_new_crash_clusters", side_effect=_expand,
+        ), mock.patch.object(audit_runner, "maintain_local_indexes"), \
+                mock.patch.object(audit_runner, "maintain_aggregate_indexes"), \
+                mock.patch.object(audit_runner, "enforce_orphan_testcases", return_value=0), \
+                mock.patch.object(audit_runner, "promote_corpus", return_value=0), \
+                mock.patch.object(audit_runner, "index_log"):
+            audit_runner.post_iteration(runtime)
+
+        self.assertEqual(
+            saw, {"gate_saw_expand": True, "expand_saw_gate": True},
         )
 
     def test_agent_progress_matches_bare_status_to_suffixed_artifact(self) -> None:

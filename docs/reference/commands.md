@@ -97,7 +97,7 @@ Common flags:
 | --- | --- |
 | `--model <name>` | Override the backend's configured model. Required for `oss`. |
 | `--strategy S1|S2|S3|S4|S5|S6|S7|S8` | Pin one investigation strategy and suspend rotation. |
-| `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer's initial session is still running. |
+| `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer is still running. |
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
 | `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. Each backend defaults to the strongest mode it can run under; see [Agent security modes](../guides/backends.md#agent-security-modes). |
 | `--new-target <slug>` | Generate starter config and exit without starting an audit. |
