@@ -1710,6 +1710,30 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIn("unfiled-artifact-run=1", filed_and_candidate)
         self.assertIn("artifact-candidate", filed_and_candidate)
 
+    def test_reoffered_s7_card_shows_another_agents_closed_shape(self) -> None:
+        self.write_cards([
+            self.card("WORK-HOT", "src/parser.c", strategy="S7"),
+        ])
+        self.add_hypothesis(
+            hyp_id="H-PRIOR", card_id="WORK-HOT", agent="3",
+            status="FIND-001", hypothesis="external entity at parse_manifest",
+        )
+        workqueue.update_card_status(
+            self.ctx, "WORK-HOT", "find", agent="3",
+        )
+
+        resume = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S7",
+        )
+
+        self.assertIn("H-PRIOR", resume)
+        self.assertIn("choose a distinct boundary", resume)
+        self.assertIn("does not repeat a closed hypothesis", resume)
+        self.assertIn("DISCARDED` as closing only the named shape", resume)
+        self.assertIn("the next hypothesis must either name and test", resume)
+        self.assertIn("different encoded size/count", resume)
+        self.assertIn("Do not file the sink-only claim again", resume)
+
     def test_resume_does_not_hide_other_active_hypotheses(self) -> None:
         self.write_cards([
             self.card("WORK-A", "src/a.c", strategy="S7"),

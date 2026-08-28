@@ -5155,6 +5155,18 @@ def card_next_action(
     strategy = assigned_strategy.strip().upper() or str(
         card.get("strategy", "")
     ).strip().upper()
+    distinct_angle = (
+        "Review the card-linked history below and choose a distinct boundary "
+        "or concrete effect that does not repeat a closed hypothesis. Treat "
+        "`DISCARDED` as closing only the named shape or effect, never the whole "
+        "function or route. After an executed sink-only deserialization, "
+        "reflection, or mutation claim is rejected, the next hypothesis must "
+        "either name and test a different encoded size/count, loaded type or "
+        "magic hook, native consequence, or security consumer at that function, "
+        "or record source/runtime proof that none exists before moving to "
+        "another function. Do not file the sink-only claim again. "
+        if has_prior_hypotheses else ""
+    )
     if str(card.get("kind", "")) == "s6-peer-fix":
         return (
             "Resolve and distill the exact peer fix, then search the target "
@@ -5166,7 +5178,8 @@ def card_next_action(
         )
     if strategy == "S7":
         return (
-            "First verify that the configured runner or a minimal deterministic "
+            distinct_angle
+            + "First verify that the configured runner or a minimal deterministic "
             "public-API harness can deliver testcase bytes to this exact parse "
             "or decode surface. If not, run `bin/state update-card --card-id "
             "<id> --status blocked --note <configuration-and-source-proof>`. Otherwise use `bin/find-seed`, "
@@ -5184,7 +5197,8 @@ def card_next_action(
         )
     if strategy == "S8":
         return (
-            "First identify a documented property whose output reaches a concrete "
+            distinct_angle
+            + "First identify a documented property whose output reaches a concrete "
             "security consumer and verify the configured probe can exercise both. "
             "Quote the callee-specific input contract and show the tested value is "
             "controlled through the configured caller-controlled boundary; do not call a "
@@ -5796,6 +5810,11 @@ def state_resume(
     # siblings. Card scoping is for the re-offered-card case this guard fixes.
     history_card_id = card_id if card is not None else ""
     history_limit = max(resume_limit, 15) if history_card_id else resume_limit
+    # A re-offered card may move to a different worker. Its history is card
+    # state, not agent memory: filtering by the new owner hid the prior finding
+    # and sent that worker back to the same location. Active-hypothesis resumes
+    # remain agent-scoped so they do not absorb a sibling's unrelated work.
+    history_agent = "" if history_card_id else agent
     include_tried = os.environ.get("STATE_RESUME_INCLUDE_TRIED", "0") == "1"
     runs = read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl")
     notes = read_jsonl(state_dir(ctx.results_dir) / "notes.jsonl")
@@ -5804,16 +5823,16 @@ def state_resume(
             "",
             "## Recent Hypotheses",
             recent_hypotheses(
-                ctx, limit=history_limit, agent=agent,
+                ctx, limit=history_limit, agent=history_agent,
                 card_id=history_card_id, rows=hyps,
             ).strip(),
             "",
             "## Recent Runs",
-            recent_runs(ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id, card_id=card_id, rows=runs).strip(),
+            recent_runs(ctx, limit=resume_limit, agent=history_agent, hypothesis_id=hyp_id, card_id=card_id, rows=runs).strip(),
             "",
             "## Runtime Feedback",
             runtime_feedback(
-                ctx, limit=resume_limit, agent=agent, hypothesis_id=hyp_id,
+                ctx, limit=resume_limit, agent=history_agent, hypothesis_id=hyp_id,
                 card_id=card_id, rows=runs, hypotheses=hyps,
             ).strip(),
         ]
