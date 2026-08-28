@@ -2110,6 +2110,77 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         repr((other_tools, rank_command)),
     )
     refresh_runtime.fixed_strategy = ""
+
+    # Supply, not claimability. A broad ranked-source card stays claimable
+    # after its dry conclusion, so reading "some card is claimable" as "the
+    # window is busy" froze the queue at RANK_WORK_LIMIT files forever and
+    # reported every worked lane starved (which rotates the fleet onto S1).
+    supply_results = root / "supply-results"
+    (supply_results / "state").mkdir(parents=True)
+    supply_runtime = SimpleNamespace(
+        root=ROOT, target_root=generic_target, target_slug="demo",
+        target_rev="rev1", repo_type="none", results=supply_results,
+        logs=refresh_logs, backend="codex", model="fixture-model",
+        config=generic_config, index=refresh_logs / "index.log",
+        decision_timeout=0, agent_security="sandboxed", fixed_strategy="",
+        num_agents=1,
+        prompt_context=lambda _backend: SimpleNamespace(
+            mode=lambda _agent: "generic",
+            role=lambda _agent: "reproduce",
+            strategy=lambda _agent: "S7",
+        ),
+    )
+    supply_ctx = audit_runner._queue_context(supply_runtime)
+    audit_runner.workqueue.init_state(supply_ctx)
+    worked_card = {"id": "WORK-worked", "kind": "ranked-source", "strategy": "S7",
+                   "file": "src/parser.c", "mode": "auto", "subsystem": "src"}
+    audit_runner.workqueue.write_cards(
+        supply_results / "work-cards.jsonl", [worked_card],
+    )
+    check(
+        audit_runner._eligible_strategy_counts(supply_runtime)["S7"] == 1,
+        "an unworked ranked card is S7 supply",
+    )
+    audit_runner.workqueue.append_jsonl(
+        supply_results / "state" / "hypotheses.jsonl",
+        {"id": "H-DRY", "agent": "1", "card_id": "WORK-worked",
+         "status": "DISCARDED", "hypothesis": "length guard at parse_header",
+         "strategy": "S7"},
+    )
+    audit_runner.workqueue.append_jsonl(
+        supply_results / "state" / "claims.jsonl",
+        {"card_id": "WORK-worked", "agent": "1", "status": "discarded",
+         "ts": audit_runner.workqueue.now_iso()},
+    )
+    check(
+        audit_runner.workqueue.claim_next_card(
+            supply_ctx, "1", mode="generic", claim=False, strategy="S7",
+        ) is not None,
+        "a dry broad card stays claimable",
+    )
+    check(
+        audit_runner._eligible_strategy_counts(supply_runtime)["S7"] == 1,
+        "a reofferable broad card still counts as its lane's supply",
+    )
+    with mock.patch.object(audit_runner, "_rank_window", return_value=(120, 120)), \
+         mock.patch.object(audit_runner, "refresh_work_cards") as worked_expansion:
+        expanded = audit_runner.expand_work_cards_if_exhausted(supply_runtime)
+    check(
+        expanded and worked_expansion.called,
+        "a window whose only claimable card is already worked still grows",
+    )
+    audit_runner.workqueue.write_cards(
+        supply_results / "work-cards.jsonl",
+        [worked_card, {"id": "WORK-fresh", "kind": "ranked-source", "strategy": "S7",
+                       "file": "src/lexer.c", "mode": "auto", "subsystem": "src"}],
+    )
+    with mock.patch.object(audit_runner, "_rank_window", return_value=(120, 120)), \
+         mock.patch.object(audit_runner, "refresh_work_cards") as fresh_expansion:
+        held = audit_runner.expand_work_cards_if_exhausted(supply_runtime)
+    check(
+        not held and not fresh_expansion.called,
+        "one unworked card still holds the window at its current size",
+    )
     (refresh_results / "s6-peer-cards.jsonl").write_text(
         json.dumps({"id": "S6-stale", "kind": "s6-peer-fix"}) + "\n",
         encoding="utf-8",

@@ -902,17 +902,28 @@ def refresh_work_cards(
 
 
 def expand_work_cards_if_exhausted(runtime: Runtime) -> bool:
-    """Grow a fully-consumed ranked batch until the source itself is exhausted."""
+    """Grow a fully-consumed ranked batch until the source itself is exhausted.
+
+    "Consumed" means no *unworked* card is left, not that nothing is
+    claimable: a broad ranked-source card stays claimable after its dry
+    conclusion (workqueue.card_closed_for_run), so reading claimability alone
+    would report the window busy forever and freeze the queue at
+    RANK_WORK_LIMIT files. Cross-file supply is the run's main breadth, so
+    this leans toward one extra ranking pass over a silent recall ceiling.
+    """
     if str(getattr(runtime, "fixed_strategy", "")).upper() in _UNRANKED_LANE_STRATEGIES:
         return False
     if hasattr(runtime, "prompt_context") and hasattr(runtime, "num_agents"):
         context = runtime.prompt_context("")
         try:
+            ctx = _queue_context(runtime)
+            worked = workqueue.card_distinct_hypothesis_counts(ctx)
             for agent in range(1, runtime.num_agents + 1):
-                if workqueue.claim_next_card(
-                    _queue_context(runtime), str(agent), context.mode(agent),
+                offer = workqueue.claim_next_card(
+                    ctx, str(agent), context.mode(agent),
                     context.role(agent), claim=False, strategy=context.strategy(agent),
-                ) is not None:
+                )
+                if offer is not None and not worked.get(str(offer.get("id", "")), 0):
                     return False
         except (OSError, ValueError):
             return False
@@ -938,13 +949,31 @@ def expand_work_cards_if_exhausted(runtime: Runtime) -> bool:
 
 
 def _eligible_strategy_counts(runtime: Runtime) -> dict[str, int]:
+    """Per-strategy count of cards an agent could still be handed.
+
+    Supply is what the claimer would offer, so it reads the same
+    card_closed_for_run rule rather than the raw claim status. A card keeps
+    its recorded conclusion as that status while staying claimable — a broad
+    ranked-source card always, a still-yielding concrete one until its
+    distinct hypotheses run out — and counting only literal "unclaimed"
+    reported those lanes starved. initialize_agent_strategies then rotated
+    every agent onto the ["S1"] fallback while the queue was still offering
+    their own strategy's cards. A live lease still hides a card: its owner
+    is working it.
+    """
     ctx = _queue_context(runtime)
     cards = workqueue.apply_latest_claim_status(
         ctx, workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
     )
+    conclusion_counts = workqueue.card_conclusion_counts(ctx)
+    distinct_counts = workqueue.card_distinct_hypothesis_counts(ctx)
     counts = {strategy: 0 for strategy in STRATEGIES}
     for card in cards:
-        if card.get("status", "unclaimed") != "unclaimed":
+        status = str(card.get("status", "unclaimed"))
+        if status == "claimed" or workqueue.card_closed_for_run(
+            ctx, card, status,
+            conclusion_counts=conclusion_counts, distinct_counts=distinct_counts,
+        ):
             continue
         strategies = {str(card.get("strategy", "")).upper()}
         allowed = card.get("allowed_strategies") or []
@@ -1176,16 +1205,10 @@ def update_subsystem_dry_streaks(
     ctx = _queue_context(runtime)
     outcomes: dict[str, bool] = {}
     for agent in range(1, runtime.num_agents + 1):
-        subsystem, file = workqueue.agent_current_scopes(ctx, str(agent))
+        subsystem = workqueue.agent_current_scopes(ctx, str(agent))[0]
         productive = agent in productive_agents
-        # Two keys, two questions: the subsystem ages an area for the
-        # productive-relaxation decay, the file ages the one ranked source a
-        # broad card actually covers. Sharing one key made a sibling's dry
-        # pass retire a productive card on a file nobody had touched.
-        for scope in (subsystem, workqueue.card_dry_scope({"file": file}) if file else ""):
-            if not scope:
-                continue
-            outcomes[scope] = outcomes.get(scope, False) or productive
+        if subsystem:
+            outcomes[subsystem] = outcomes.get(subsystem, False) or productive
     for subsystem, productive in outcomes.items():
         if not workqueue.record_subsystem_iteration(ctx, subsystem, productive):
             index_log(runtime, f"WARN: could not update dry streak for subsystem {subsystem}")
@@ -1883,14 +1906,6 @@ def _cold(runtime: Runtime) -> bool:
     )
 
 
-def _fuzz_leads_empty(results: Path) -> bool:
-    try:
-        lines = (results / "fuzz-leads.md").read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return True
-    return not any(line.strip() and not line.lstrip().startswith(("#", "_")) for line in lines)
-
-
 def should_skip_launch(
     runtime: Runtime, context: prompt.PromptContext, agent: int,
     *, primary_always_launches: bool = True,
@@ -1920,7 +1935,7 @@ def should_skip_launch(
             return False
         if card is not None:
             return False
-    return _fuzz_leads_empty(runtime.results)
+    return prompt.fuzz_leads_empty(runtime.results)
 
 
 def _s6_peers_configured(runtime: Runtime) -> bool:
@@ -2063,13 +2078,11 @@ def fixed_lane_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
         return iteration > 1
     conclusion_counts = workqueue.card_conclusion_counts(ctx)
     distinct_counts = workqueue.card_distinct_hypothesis_counts(ctx)
-    dry_streaks: dict[str, int] = {}
     return all(
         workqueue.card_closed_for_run(
             ctx, card, str(card.get("status", "unclaimed")),
             conclusion_counts=conclusion_counts,
             distinct_counts=distinct_counts,
-            dry_streaks=dry_streaks,
         )
         for card in supplied
     )
