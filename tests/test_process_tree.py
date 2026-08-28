@@ -114,6 +114,15 @@ def _cleanup(*items) -> None:
                 pass
 
 
+def _script_pids(script: Path) -> list[int]:
+    """PIDs running ``script``, read from the process table rather than the
+    marker. A supervisor the probe cannot attribute is invisible to
+    _pids_with_token after the reap as well as before it, so asking the marker
+    whether one survived would answer no however the reap went."""
+    listing = subprocess.check_output(["ps", "-ax", "-o", "pid=,command="], text=True)
+    return [int(row.split()[0]) for row in listing.splitlines() if str(script) in row]
+
+
 # ── reap + isolation ──────────────────────────────────────────────────
 print("reap / isolation")
 cell = pt.new_marker()
@@ -240,21 +249,27 @@ ok(completed.returncode == 0 and completed.stdout.startswith("[]|"),
    f"rc={completed.returncode} out={completed.stdout.strip()!r} err={completed.stderr.strip()!r}")
 
 
-# ── opaque supervisor: env unreadable, parent link readable ──────────
+# ── opaque supervisor: marker unreadable, parent link readable ───────
 print("\nopaque supervisor")
 # macOS refuses to disclose a platform binary's environment to a non-root
 # caller, so a leaked `/bin/sh` supervisor is invisible to the environment
 # probe while the driver it respawns is not. One pass then killed the child
 # and left the supervisor to spawn another: the shape that outlived a real
 # benchmark cell and wrote over the scratch tree the runner was reclaiming.
+#
+# The supervisors here are launched without the marker rather than waiting for
+# a host to hide an inherited one. The probe reads an environment and finds no
+# marker either way, so the reaper gets the same input — but by construction,
+# on every host, instead of only where the platform happens to refuse.
 opaque = pt.new_marker()
 with tempfile.TemporaryDirectory() as tmp:
     supervisor = Path(tmp) / "respawn.sh"
     supervisor.write_text("while true; do sleep 60 & wait $!; done\n")
     launcher = Path(tmp) / "launch.py"
     launcher.write_text(
-        "import subprocess, sys, time\n"
-        "[subprocess.Popen(['/bin/sh', sys.argv[1]]) for _ in range(2)]\n"
+        "import os, subprocess, sys, time\n"
+        f"env = {{k: v for k, v in os.environ.items() if k != {pt.REAP_MARKER_VAR!r}}}\n"
+        "[subprocess.Popen(['/bin/sh', sys.argv[1]], env=env) for _ in range(2)]\n"
         "time.sleep(120)\n"
     )
     parent = subprocess.Popen(
@@ -270,12 +285,23 @@ with tempfile.TemporaryDirectory() as tmp:
     ok(len(closed) > len(env_only),
        "parent closure recovers descendants the environment probe cannot read",
        f"env_only={env_only} closed={closed}")
-    reaped = pt.kill_marked(opaque, grace=0.5)
-    time.sleep(0.5)
-    survivors = [pid for pid in pt._pids_with_token(token) if pid != os.getpid()]
-    ok(not survivors, "a respawning opaque supervisor is fully reaped",
-       f"reaped={reaped} survivors={survivors}")
-    _cleanup(parent)
+    try:
+        reaped = pt.kill_marked(opaque, grace=0.5)
+        time.sleep(0.5)
+        # The launcher names the script on its own command line, and is marked,
+        # so the token list already covers it.
+        survivors = ([pid for pid in pt._pids_with_token(token) if pid != os.getpid()]
+                     + [pid for pid in _script_pids(supervisor) if pid != parent.pid])
+        ok(not survivors, "a respawning opaque supervisor is fully reaped",
+           f"reaped={reaped} survivors={survivors}")
+    finally:
+        # A regressed reap leaves `while true` shells behind, and kill_marked
+        # raises on a blind probe before the check above ever runs. Either way
+        # they outlive this file and the suite running beside it, so take the
+        # survivors the process table still shows rather than the pre-reap
+        # closure, whose pids a respawn may already have recycled.
+        _cleanup(parent, *(pid for pid in _script_pids(supervisor)
+                           if pid != parent.pid))
 
 
 # ── orphaned opaque supervisor: no readable marked relative above it ─
@@ -286,30 +312,30 @@ print("\norphaned opaque supervisor")
 # unreadable, with nothing marked above it — and it respawns the driver as
 # fast as the reap kills it. Only the process group still ties the two
 # together.
+#
+# As above, the supervisor simply never receives the marker; it exports one
+# for each driver it spawns. That is the same input the platform's refusal
+# produces, and it holds on every host.
 orphaned = pt.new_marker()
 with tempfile.TemporaryDirectory() as tmp:
     supervisor = Path(tmp) / "supervise.sh"
     supervisor.write_text(
-        f"while true; do {sys.executable} -c 'import time; time.sleep(5)'; done\n"
+        f"while true; do {pt.REAP_MARKER_VAR}={orphaned} "
+        f"{sys.executable} -c 'import time; time.sleep(5)'; done\n"
     )
     subprocess.run(
         ["/bin/sh", "-c", f"nohup /bin/sh {supervisor} >/dev/null 2>&1 & exit 0"],
-        env=_marked_env(orphaned), start_new_session=True, check=False,
+        start_new_session=True, check=False,
     )
     time.sleep(2.5)
-
-    def _supervisor_pids() -> list[int]:
-        listing = subprocess.check_output(["ps", "-ax", "-o", "pid=,command="], text=True)
-        return [int(row.split()[0]) for row in listing.splitlines()
-                if str(supervisor) in row]
 
     token = f"{pt.REAP_MARKER_VAR}={orphaned}"
     readable = pt._pids_with_token_env(token)
     widened = pt._pids_with_token(token)
-    running = _supervisor_pids()
+    running = _script_pids(supervisor)
     ok(bool(running), "orphaned supervisor is running", f"pids={running}")
     ok(all(pid not in readable for pid in running),
-       "the supervisor's environment is unreadable, as the failure requires",
+       "the probe cannot attribute the supervisor, as the failure requires",
        f"readable={readable} supervisor={running}")
     ok(all(pid in widened for pid in running),
        "process-group widening claims a supervisor with no marked relative above it",
@@ -320,7 +346,7 @@ with tempfile.TemporaryDirectory() as tmp:
     except pt.ProcessLeakError as leak:  # pragma: no cover - the bug this fixes
         reaped, raised = [], str(leak)
     time.sleep(1.0)
-    survivors = _supervisor_pids()
+    survivors = _script_pids(supervisor)
     ok(not raised and not survivors,
        "an orphaned opaque supervisor is reaped instead of respawning forever",
        f"reaped={reaped} raised={raised!r} survivors={survivors}")

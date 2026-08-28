@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import compileall
-import os
 import re
 import unittest
 from pathlib import Path
@@ -40,10 +39,14 @@ class PortabilityLintTests(unittest.TestCase):
                 self.assertEqual(hits, [])
 
     def test_executable_production_entrypoints_are_not_bash(self) -> None:
+        # The mode bits, not os.access: that asks whether *this caller* may
+        # execute the file, and root over a bind mount is told yes for a 0644
+        # one. The suite then failed in a local `--image` run on a file CI
+        # reads as non-executable.
         hits = []
         for base in (ROOT / "bin", ROOT / "lib", ROOT / ".agents"):
             for path in base.rglob("*"):
-                if not path.is_file() or not os.access(str(path), os.X_OK):
+                if not path.is_file() or not path.stat().st_mode & 0o111:
                     continue
                 try:
                     lines = path.read_text(encoding="utf-8").splitlines()

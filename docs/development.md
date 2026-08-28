@@ -137,7 +137,14 @@ that reads correctly but was never checked.
      or any unreleased bug detail.
    - Use neutral placeholders (`child_free child.c:91`, `app_parse`,
      `sampleproj`), consistent within a file. The same rule applies to docs.
-5. **Suite time is spawn count.** Every `bin/` entry point costs 120–260ms of
+5. **Construct the host property a test needs; never assert it.** A setup line
+   that samples a host policy — process-environment disclosure, uid, a sandbox
+   — passes only where that policy happens to match, and where it does not
+   hold the behaviour it guards goes unexercised, so the green hosts prove
+   nothing either. Build the input that policy would produce rather than
+   waiting for a host that produces it. `tests/run-tests.sh --image
+   ubuntu:24.04` runs the Linux CI jobs locally.
+6. **Suite time is spawn count.** Every `bin/` entry point costs 120–260ms of
    interpreter and import, so count spawns before optimising anything else,
    and fix the harness rather than thinning the test — the same chain runs in
    an audit. Never spawn a Python entry point from Python that could import
