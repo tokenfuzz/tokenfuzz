@@ -353,6 +353,34 @@ The parser writes past `{object_name}`.
             self.cluster_id(second / "REPORT.md"),
         )
 
+        # One faulting instruction may be rendered as an inline expansion by
+        # one symbolizer and only its outer name by another. The shared outer
+        # name still identifies the same leaf instruction; requiring frame #0
+        # text exactly would split one crash by symbolizer choice.
+        inlined = self.root / "inlined-leaf"
+        expanded = self.make_simple_crash(
+            inlined, "CRASH-INLINE-A",
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
+            "#0 0x10 in inline_inner src/parse.c:40\n"
+            "#1 0x10 in shared_leaf src/parse.c:42\n"
+            "#2 0x20 in caller_a src/driver.c:70\n"
+            "#3 0x30 in shared_tail src/main.c:90",
+            "# Expanded\nSurface: library-api",
+        )
+        collapsed = self.make_simple_crash(
+            inlined, "CRASH-INLINE-B",
+            "==2==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
+            "#0 0x40 in shared_leaf src/parse.c:42\n"
+            "#1 0x50 in caller_b src/driver.c:74\n"
+            "#2 0x60 in shared_tail src/main.c:90",
+            "# Collapsed\nSurface: library-api",
+        )
+        self.assertEqual(self.run_cluster(inlined).returncode, 0)
+        self.assertEqual(
+            self.cluster_id(expanded / "REPORT.md"),
+            self.cluster_id(collapsed / "REPORT.md"),
+        )
+
         fuzzy = self.root / "fuzzy"
         fuzz_a = self.make_simple_crash(
             fuzzy, "CRASH-FUZZ-A",

@@ -200,15 +200,23 @@ def _frame_set_signature(frames: list[tuple[str, str]], want: int = 3) -> str:
     return "+".join(tokens)
 
 
-def _cf_crash_state(asan_text: str) -> str:
+def _cf_crash_state(asan_text: str, *, skip: int = 0, want: int = 3) -> str:
     # ClusterFuzz crash state: top interesting frames, each name normalized
     # (filter_function_name) then address/number-scrubbed. Both helpers live
     # in lib/clusterfuzz_stacktrace.py with upstream attribution.
     lines = []
-    for frame in stack_frames.interesting_frames(asan_text, want=3):
+    skipped = 0
+    for frame in stack_frames.iter_asan_frames(asan_text):
+        if stack_frames.is_ignored_frame(frame):
+            continue
+        if skipped < skip:
+            skipped += 1
+            continue
         filtered = cf_stack.filter_function_name(frame.function)
         if filtered:
             lines.append(cf_stack.filter_addresses_and_numbers(filtered))
+        if len(lines) >= want:
+            break
     return "\n".join(lines) + ("\n" if lines else "")
 
 
@@ -533,9 +541,21 @@ def _signature(crash_dir: Path) -> dict:
 
     frames = _extract_top_frames(asan_text)
     top_func = frames[0][0] if frames else ""
+    inline_group = stack_frames.leading_inline_group(asan_text)
+    top_funcs = sorted({
+        frame.state_function
+        for frame in inline_group
+        if frame.state_function
+    })
+    if not top_funcs and top_func:
+        top_funcs = [top_func]
     top_chain = " -> ".join(_frame_display(frame) for frame in frames[:3])
     top_frame_set = _frame_set_signature(frames, want=3)
     cf_state = _cf_crash_state(asan_text)
+    # Preserve the same three logical frames when symbolization expands one
+    # faulting instruction into several inline names. Pairwise comparison
+    # supplies the common name and compares the next two callers.
+    cf_tail_state = _cf_crash_state(asan_text, skip=len(inline_group), want=2)
     if not cf_state:
         cf_state = _fallback_crash_state(asan_text, report_text, crash_dir.name)
     primitive = _extract_primitive(asan_text)
@@ -556,9 +576,11 @@ def _signature(crash_dir: Path) -> dict:
         "path": str(crash_dir),
         "report": str(report) if report else "",
         "top_func": top_func,
+        "top_funcs": top_funcs,
         "top_chain": top_chain,
         "top_frame_set": top_frame_set,
         "cf_state": cf_state,
+        "cf_tail_state": cf_tail_state,
         "primitive": primitive,
         "severity_level": sev_level,
         "severity_rank": sev_rank,
@@ -586,12 +608,19 @@ def _same_cf_cluster(a: dict, b: dict) -> bool:
             _cf_is_similar(a.get("primitive", ""), b.get("primitive", ""))
             and state_a == state_b
         )
-    # A shared dispatcher and entry point are common across sibling bugs. LCS
-    # alone merged distinct faulting handlers whenever those two tail frames
-    # matched. The leaf stays stable when one bug is reached through different
-    # callers, so require it before applying ClusterFuzz's tolerant tail match.
-    if a.get("top_func", "") != b.get("top_func", ""):
+    # A shared dispatcher and entry point are common across sibling bugs, so a
+    # tolerant tail match also needs the faulting instruction. One instruction
+    # may carry an inline expansion under one symbolizer and only the outer name
+    # under another; compare the whole leading inline group rather than frame
+    # #0 text, which is not stable across those representations.
+    top_a = set(a.get("top_funcs") or ([a.get("top_func")] if a.get("top_func") else []))
+    top_b = set(b.get("top_funcs") or ([b.get("top_func")] if b.get("top_func") else []))
+    if (top_a or top_b) and not top_a.intersection(top_b):
         return False
+    if top_a and top_b:
+        common_leaf = sorted(top_a.intersection(top_b))[0]
+        state_a = common_leaf + "\n" + a.get("cf_tail_state", "")
+        state_b = common_leaf + "\n" + b.get("cf_tail_state", "")
     return (
         _cf_is_similar(a.get("primitive", ""), b.get("primitive", ""))
         and _cf_is_similar(state_a, state_b)
