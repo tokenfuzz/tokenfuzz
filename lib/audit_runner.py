@@ -1874,17 +1874,35 @@ def enforce_orphan_testcases(runtime: Runtime, *, deadline: float | None = None)
     enforced = 0
     for agent in range(1, runtime.num_agents + 1):
         (runtime.results / f".enforcement_results_{agent}").write_text("", encoding="utf-8")
+    # Nothing below can run without budget or wall, and scanning every agent's
+    # scratch tree to discover that is the one cost this function pays before
+    # its own cap applies.
+    if maximum <= 0 or (deadline is not None and time.monotonic() >= deadline):
+        return 0
+    # One budget shared by every agent, spent round-robin. Draining agent 1's
+    # orphans first spent all of it on the lowest-numbered agent: on measured
+    # 3-agent runs 17 of 18 enforcements went to agent 1, so the other agents'
+    # unexecuted testcases were never probed and their next session never saw
+    # the enforcement feedback that names them.
+    queues: list[tuple[int, list[str]]] = []
     for agent in range(1, runtime.num_agents + 1):
-        results_file = runtime.results / f".enforcement_results_{agent}"
         _runs, _testcases, orphans = quality.scan_scratch(
             str(runtime.results / f"scratch-{agent}")
         )
+        runnable = []
         for testcase in orphans:
             try:
-                if Path(testcase).stat().st_size == 0:
-                    continue
+                if Path(testcase).stat().st_size:
+                    runnable.append(testcase)
             except OSError:
                 continue
+        queues.append((agent, runnable))
+    for index in range(max((len(runnable) for _agent, runnable in queues), default=0)):
+        for agent, runnable in queues:
+            if index >= len(runnable):
+                continue
+            testcase = runnable[index]
+            results_file = runtime.results / f".enforcement_results_{agent}"
             if enforced >= maximum:
                 return enforced
             remaining = None if deadline is None else int(deadline - time.monotonic())

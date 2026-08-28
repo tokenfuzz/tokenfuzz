@@ -2507,12 +2507,73 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         (launch_results / ".enforcement_results_1").read_text(encoding="utf-8"),
         "post-iteration housekeeping probes runnable orphan testcases once",
     )
+    # The budget is shared by every agent, so a busy agent 1 must not consume
+    # it all: measured 3-agent runs spent 17 of 18 enforcements on agent 1 and
+    # never probed the other agents' unexecuted testcases.
+    for busy_agent, orphan_count in ((1, 4), (2, 1), (3, 1)):
+        busy_scratch = launch_results / f"scratch-{busy_agent}"
+        busy_scratch.mkdir(parents=True, exist_ok=True)
+        for index in range(orphan_count):
+            (busy_scratch / f"share-{busy_agent}-{index}.html").write_text(
+                f"<!-- TARGET: src/parser.c -->\n<!-- HYPOTHESIS-ID: H8{busy_agent}{index} -->\n<html/>\n"
+            )
+    launch_runtime.num_agents = 3
+    with mock.patch.object(audit_runner, "run_timeout", side_effect=_enforce_probe):
+        shared = audit_runner.enforce_orphan_testcases(launch_runtime)
+    enforced_agents = {
+        agent for agent in (1, 2, 3)
+        if (launch_results / f".enforcement_results_{agent}").read_text(encoding="utf-8").strip()
+    }
+    check(
+        shared == 3 and enforced_agents == {1, 2, 3},
+        "the shared orphan-enforcement budget is spent round-robin across agents",
+        f"enforced={shared} agents={sorted(enforced_agents)}",
+    )
+    launch_runtime.num_agents = 1
+
+    # Enforcement labels through the same rule bin/probe and bin/scratch-status
+    # use. Non-empty output alone was enough for EXEC_FAIL, so an output that
+    # says nothing executed was reported as a run that did.
+    def _enforce_probe_no_exec(command, _seconds, **_kwargs):
+        Path(command[-1]).with_suffix(".asan.txt").write_text(
+            "[run-sanitizer-multi] EXECUTION_RATE: 0/1\n"
+            "[run-sanitizer-multi] SUCCESS_RATE: 0/1\n",
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=2)
+    dead = launch_scratch / "dead.html"
+    dead.write_text("<!-- TARGET: src/parser.c -->\n<!-- HYPOTHESIS-ID: H79 -->\n<html/>\n")
+    (launch_scratch / "orphan.asan.txt").unlink(missing_ok=True)
+    for stale in launch_scratch.glob("share-1-*.html"):
+        stale.unlink()
+    with mock.patch.object(audit_runner, "run_timeout", side_effect=_enforce_probe_no_exec):
+        audit_runner.enforce_orphan_testcases(launch_runtime)
+    enforcement_body = (launch_results / ".enforcement_results_1").read_text(encoding="utf-8")
+    check(
+        "NO_EXEC" in enforcement_body and "EXEC_FAIL" not in enforcement_body,
+        "orphan enforcement reads execution evidence, not output size",
+        enforcement_body.strip(),
+    )
+
+
     enforcement_context = prompt.PromptContext(
         launch_results, generic_target, "demo", references, 1,
     )
     check(
         "ORPHAN TESTCASE RESULTS" in prompt.enforcement_results_directive(enforcement_context, 1),
         "the next agent prompt receives orphan enforcement results",
+    )
+
+    # No budget means no scratch scan at all, let alone a probe.
+    with mock.patch.dict(os.environ, {"ASAN_AUTOENFORCE_MAX": "0"}, clear=False), \
+         mock.patch.object(
+             audit_runner.quality, "scan_scratch", return_value=(0, [], []),
+         ) as unscanned:
+        zero = audit_runner.enforce_orphan_testcases(launch_runtime)
+    check(
+        zero == 0 and not unscanned.called,
+        "a zero orphan-enforcement budget returns before scanning any scratch tree",
+        f"enforced={zero} scans={unscanned.call_count}",
     )
 
     audit_logs = root / "audit-logs"
