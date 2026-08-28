@@ -44,6 +44,13 @@ rule on a reachable path.
 | deserialization sink | which types and constructors input may select | Does the allow/deny resolver run before construction on the exact loader instance? Can aliases, containers, or nested values select a different type? |
 | external-entity surface | what an XML/parser instance may fetch or expand | Are DTD/entity/external-resource controls mandatory and set on the exact parser, reader, transformer, or factory used by the sink? |
 
+Before closing a path-taking sink, establish its actual grammar: determine
+whether it is filesystem-only or a multiprotocol stream API. Some
+path-taking language APIs also recognize URI schemes, mode prefixes, or
+command channels;
+when caller input selects one, audit the resulting network or interpreter
+effect rather than treating it as ordinary traversal.
+
 Work high-impact controls before secondary hygiene. Missing headers, weak cookie
 flags, generic crypto configuration, or a bare credential field do not outrank
 a reachable authorization bypass, injection, cross-host credential leak,

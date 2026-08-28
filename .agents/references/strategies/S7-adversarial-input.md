@@ -160,7 +160,12 @@ Inputs to construct:
 
 ### Technique 5: Resource exhaustion boundaries
 
-Not OOM (which is noise) but controlled allocation that hits implementation limits.
+Do not file ordinary allocation failure or an OOM reached only with a
+comparably large input. A compact input is substantive when an encoded
+size/count produces quantified memory or CPU amplification, the demand
+survives the target's own size ceiling (or none exists), and the resulting
+resource loss crosses the configured availability boundary. Record all three;
+without them it is allocation noise, not a finding.
 
 ```
 Inputs to construct:

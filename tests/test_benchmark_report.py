@@ -181,7 +181,7 @@ class BenchmarkReportTests(unittest.TestCase):
             self.assertIn(required, body)
         for forbidden in (
             "unsupported claim", "falsification attempt", "symlink facade",
-            "writable facade of", "deserialization", "info-leak",
+            "writable facade of", "info-leak",
             "protocol-state", "denial-of-service",
             "Mode switch after ~5 FINDs", "roughly five plausible candidates",
             # No pace or count target: it is satisfied by whichever bug shape

@@ -319,8 +319,57 @@ ok("known value" in fq,
    "quality gate exempts disclosure of an already-named value")
 ok("Managed-runtime exception mismatch" in fq and "per-request" in fq,
    "quality gate rejects exception-type drift without boundary impact")
+ok("does not cover a native fault signal" in fq
+   and "concrete deserialization" in fq
+   and "effectful-deserialization evidence" in fq,
+   "quality gate does not misclassify native faults as managed exceptions")
 ok("pre-existing symlink" in fq and "relative to the current directory" in fq,
    "quality gate rejects trusted-filesystem path claims without containment")
+ok("SAME untrusted input chooses both the base/root" in fq
+   and "server-side network request" in fq
+   and "interprets the value as a command channel" in fq,
+   "quality gate rejects attacker-selected roots without hiding distinct effects")
+ok("trusted party must first place attacker code" in fq
+   and "existing effectful module/file" in fq
+   and "testcase-created fixture" in fq,
+   "quality gate requires a real external-file execution route")
+ok("concrete reachable gadget" in fq and "deployment-dependent hopes" in fq,
+   "quality gate rejects primitive-only object reconstruction")
+ok("Prototype pollution" in fq
+   and "concrete reachable consumer" in fq
+   and "embedding application" in fq,
+   "quality gate rejects prototype mutation without a security consumer")
+ok("proves only that ESC" in fq
+   and "Raw-output CLIs" in fq
+   and "concrete terminal" in fq,
+   "quality gate rejects terminal-byte presence without a concrete boundary effect")
+ok("do not make a value trusted" in fq
+   and "traced entrypoint and target threat model" in fq
+   and "implementation calls it a hook" in fq
+   and "trusted deployment configuration remains trusted" in fq,
+   "quality gate derives hook trust from the real boundary, not its name")
+ok("authored labels" in fq
+   and "do not override" in fq
+   and "same public input supplying" in fq,
+   "quality gate gives traced control evidence priority over report labels")
+
+rc, contract = render_named("audit_bug_contract.md.j2", {})
+ok(rc == 0, "shared bug contract renders")
+ok("attacker-selected filesystem namespace" in contract
+   and "interpreter command" in contract
+   and "trace base/root control separately" in contract
+   and "precision-trap proof" in contract
+   and "primitive-only object reconstruction" in contract
+   and "primitive-only prototype mutation" in contract
+   and "raw terminal bytes alone" in contract,
+   "emit contract mirrors the new finding-quality exclusions")
+
+rc, prose = render_named("report_prose.md.j2", {})
+ok(rc == 0, "report prose contract renders")
+ok("exactly one bare" in prose
+   and "Location: path/to/file.ext:function:line" in prose
+   and "finding clustering consumes this field" in prose,
+   "report contract requires one root-cause location for deterministic dedup")
 
 rc, reach = render_named("triage_reachability_fields.md.j2", {"body": "sample report"})
 ok(rc == 0, "reach-field prompt renders for disclosure classification")

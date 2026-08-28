@@ -28,6 +28,24 @@ or similar (any bug class, not just memory-safety):
 - **trusted-caller / caller-contract misuse** — a NULL-deref or crash
   reachable only because a trusted caller passed NULL or out-of-contract
   arguments to an API that documents valid ones;
+- **attacker-selected filesystem namespace** — path escape when the same
+  untrusted input chooses both base/root and child/name, unless an independent
+  trusted policy constrains the base or the path form gains a distinct
+  capability such as a server-side network request or an interpreter command
+  channel;
+- **external-file-dependent execution** — loading or sourcing code the
+  attacker cannot place or modify, unless a concrete existing effectful module
+  in the shipped target is named; a testcase-created outside file does not
+  count;
+- **primitive-only object reconstruction** — deserialization or reflection
+  with no concrete gadget, magic hook, native-memory consequence, auth effect,
+  or other impact in the target's actual loaded environment;
+- **primitive-only prototype mutation** — changing a shared or inherited
+  property without a concrete reachable consumer that turns it into an auth,
+  code-execution, disclosure, isolation, or other security effect;
+- **raw terminal bytes alone** — a CLI forwarding ESC or another control byte
+  to stdout/stderr, unless the product promises terminal-safe display or a
+  concrete terminal capability or deceptive security effect is demonstrated;
 - **OOM / allocation-failure only** — a NULL crash, leaked allocation, or
   stale error flag when a single allocation fails;
 - **resource exhaustion you cannot size** — an allocation or loop driven by
@@ -41,6 +59,11 @@ or similar (any bug class, not just memory-safety):
   compiles out;
 - **non-product surface** — code that does not ship in the product: test or
   fuzz drivers, examples, demos, build or codegen scripts.
+
+Before opening any filesystem hypothesis, trace base/root control separately
+from child/name control. When the same input controls both and the API adds no
+network, interpreter, authorization, or other distinct capability, record the
+precision-trap proof instead of filing a path finding.
 
 Recall-safe: if you cannot tell whether input reaches it, whether the file
 ships, or whether a real attacker gain follows, report it — a missed bug

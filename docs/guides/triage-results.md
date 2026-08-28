@@ -85,6 +85,15 @@ Most operators arrive on this page because something landed in
 | Harness-only misuse | The testcase violates a contract no real caller can violate. |
 | Missing files | No testcase, no sanitizer output, or an incomplete report. |
 
+For non-crashing findings, a dangerous API name is not enough. The substance
+gate rejects a path escape when the same untrusted input chooses both root and
+child and no independent policy is crossed; external-file execution without
+attacker placement or a named existing effectful module; and native-object
+reconstruction without a concrete reachable hook, gadget, memory consequence,
+authorization effect, or other demonstrated impact. A changed capability—such
+as a URL wrapper causing a server-side request or a path API interpreting a
+command channel—remains reportable.
+
 **Not reportable — keep the engineering defect, do not security-report it.** A
 reproducing sanitizer crash whose `Trigger source` falls outside the target's
 `attacker_controls` (for example a `call-sequence`, `env`, or `race` trigger on

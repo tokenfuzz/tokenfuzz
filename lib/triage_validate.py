@@ -14,11 +14,11 @@ from typing import Iterable
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v9-fixed-fallback-setup"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v11-product-root"
 # A resolver reads the cached reviews as evidence and answers their exact open
 # question. It has a separate identity so changing that policy never invalidates
 # the independent first-pass votes it is meant to adjudicate.
-TRIGGER_RESOLUTION_DECISION_VERSION = "trigger-resolution-v1"
+TRIGGER_RESOLUTION_DECISION_VERSION = "trigger-resolution-v3"
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.

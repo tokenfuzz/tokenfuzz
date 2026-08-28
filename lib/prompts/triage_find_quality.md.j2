@@ -52,6 +52,18 @@ call chain is not enough by itself. If the report cannot name a source,
 control/sink, and product boundary, reject unless it gives a concrete native
 memory-safety code walk-through that makes the security impact obvious.
 
+Names such as `hook`, `plugin`, `template`, `callback`, or `command` do not
+make a value trusted. Determine control from the traced entrypoint and target
+threat model. When a public input boundary supplies the value and the report
+shows it reaching shell or interpreter grammar, treat it as untrusted even if
+the implementation calls it a hook. Conversely, a hook supplied only by
+trusted deployment configuration remains trusted.
+
+Apply the same evidence priority to authored labels: `Boundary`, `Caller
+controls`, and phrases such as "application-selected" do not override the
+report's testcase or Data Flow. If those show the same public input supplying
+both root and child, apply the attacker-selected-root rule below.
+
 ACCEPT when the source/control/sink/boundary chain holds and none of the
 explicit reject buckets below apply. A thin-but-real security case still
 ACCEPTS — the buckets target non-security substance, not weak writing — but an
@@ -70,6 +82,10 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     not availability impact by itself. Keep only when the report proves that
     it terminates a process or worker beyond the current operation, bypasses a
     security boundary, or causes another concrete security impact.
+    This bucket does not cover a native fault signal or runtime memory-safety
+    diagnostic reached through caller input, nor a concrete deserialization
+    magic hook selected by the input; evaluate those as native-memory or
+    effectful-deserialization evidence even when the CLI process terminates.
   - File disclosure or path escape that requires a pre-existing symlink,
     junction, mount, hard link, or alias created by a trusted party inside the
     served root. Choosing the name of a trusted filesystem entry is not
@@ -77,6 +93,38 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     create or control that filesystem state, or cites an explicit product
     contract requiring resolution to remain beneath the root or refusing
     links; "relative to the current directory" alone is not that contract.
+  - Path escape where the SAME untrusted input chooses both the base/root and
+    the child/name, and no independent trusted configuration, authorization,
+    or product policy constrains the base. Escaping a namespace the attacker
+    already chose adds no file capability. Keep when the report proves a
+    distinct effect despite that control — for example a URL scheme turns a
+    local read into a server-side network request, or a path-taking language API
+    interprets the value as a command channel — or proves the base is
+    independently trusted.
+  - Code execution by loading or sourcing an outside file that the attacker
+    cannot create or modify. Naming a path is not code injection when a trusted
+    party must first place attacker code there. Keep when the report names an
+    existing effectful module/file or proves the attacker controls filesystem
+    placement through the target's threat model. A testcase-created fixture or
+    a file outside the shipped target is not an existing product module.
+  - Deserialization, reflection, or arbitrary-class reconstruction that proves
+    only that a dangerous API accepts attacker data. Keep when the target's
+    actual loaded environment supplies a concrete reachable gadget, magic
+    hook, native-memory consequence, authorization effect, or other security
+    impact; reject deployment-dependent hopes that some embedding application
+    might add one.
+  - Prototype pollution or shared-object mutation that proves only that an
+    inherited/global property changed. Keep when a concrete reachable consumer
+    in the target turns that property into authorization bypass, code
+    execution, disclosure, cross-principal state, isolation failure, or another
+    demonstrated security effect; reject hopes that an embedding application
+    might later supply a gadget.
+  - Terminal-control output that proves only that ESC or another control byte
+    reaches stdout/stderr, then speculates about terminal-dependent effects.
+    Raw-output CLIs may intentionally preserve caller bytes. Keep when the
+    product promises terminal-safe presentation, presents untrusted data as a
+    trusted interactive UI, or the report demonstrates a concrete terminal
+    capability or deceptive security effect under a supported configuration.
   - Missing-feature, API-shape, or documentation complaint.
   - Speculative ("looks suspicious", "could be unsafe", "may be
     exploitable") with no concrete impact described.

@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 
-FIND_QUALITY_DECISION_VERSION = "v14-sourced-disclosure"
+FIND_QUALITY_DECISION_VERSION = "v18-effectful-primitives"
 REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md")
 PLACEHOLDER_FIELD_VALUES = frozenset(
     {"", "-", "—", "?", "tbd", "unknown / not assessed"}
