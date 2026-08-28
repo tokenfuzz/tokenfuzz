@@ -375,10 +375,26 @@ The parser writes past `{object_name}`.
             "#2 0x60 in shared_tail src/main.c:90",
             "# Collapsed\nSurface: library-api",
         )
+        # Two helpers inlined into one function share that outer name without
+        # sharing an instruction. An expansion names its own innermost frame,
+        # so two expansions that disagree there are two bugs.
+        sibling = self.make_simple_crash(
+            inlined, "CRASH-INLINE-C",
+            "==3==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
+            "#0 0x70 in other_inner src/parse.c:44\n"
+            "#1 0x70 in shared_leaf src/parse.c:42\n"
+            "#2 0x80 in caller_c src/driver.c:78\n"
+            "#3 0x30 in shared_tail src/main.c:90",
+            "# Sibling inline\nSurface: library-api",
+        )
         self.assertEqual(self.run_cluster(inlined).returncode, 0)
         self.assertEqual(
             self.cluster_id(expanded / "REPORT.md"),
             self.cluster_id(collapsed / "REPORT.md"),
+        )
+        self.assertNotEqual(
+            self.cluster_id(expanded / "REPORT.md"),
+            self.cluster_id(sibling / "REPORT.md"),
         )
 
         # A confirmation transcript concatenates every repetition, and frame

@@ -551,11 +551,12 @@ def _signature(crash_dir: Path) -> dict:
     frames = _extract_top_frames(diagnostic)
     top_func = frames[0][0] if frames else ""
     inline_group = stack_frames.leading_inline_group(diagnostic)
-    top_funcs = sorted({
-        frame.state_function
-        for frame in inline_group
-        if frame.state_function
-    })
+    # Innermost first, as printed: the order is what tells an expanded
+    # rendering's own leaf from an outer name it shares with a sibling bug.
+    top_funcs: list[str] = []
+    for frame in inline_group:
+        if frame.state_function and frame.state_function not in top_funcs:
+            top_funcs.append(frame.state_function)
     if not top_funcs and top_func:
         top_funcs = [top_func]
     top_chain = " -> ".join(_frame_display(frame) for frame in frames[:3])
@@ -605,6 +606,23 @@ def _cluster_id(key: tuple[str, str, str]) -> str:
     return f"CL-{h}"
 
 
+def _shared_inline_leaf(a: list[str], b: list[str]) -> str:
+    """The name two reports give one faulting instruction, or "".
+
+    A symbolizer renders an inlined instruction either as one frame per inlined
+    name or as the outer name alone, so a collapsed rendering is contained in
+    the expanded one. Two *expanded* groups each name their own innermost
+    frame: sharing only an outer name there means two distinct instructions
+    inlined into one function, which is two bugs.
+    """
+    if not a or not b:
+        return ""
+    if len(a) > 1 and len(b) > 1:
+        return a[0] if a[0] == b[0] else ""
+    shared = sorted(set(a) & set(b))
+    return shared[0] if shared else ""
+
+
 def _same_cf_cluster(a: dict, b: dict) -> bool:
     state_a = a.get("cf_state", "")
     state_b = b.get("cf_state", "")
@@ -620,14 +638,14 @@ def _same_cf_cluster(a: dict, b: dict) -> bool:
     # A shared dispatcher and entry point are common across sibling bugs, so a
     # tolerant tail match also needs the faulting instruction. One instruction
     # may carry an inline expansion under one symbolizer and only the outer name
-    # under another; compare the whole leading inline group rather than frame
-    # #0 text, which is not stable across those representations.
-    top_a = set(a.get("top_funcs") or ([a.get("top_func")] if a.get("top_func") else []))
-    top_b = set(b.get("top_funcs") or ([b.get("top_func")] if b.get("top_func") else []))
-    if (top_a or top_b) and not top_a.intersection(top_b):
+    # under another, so compare the leading inline groups rather than frame #0
+    # text, which is not stable across those representations.
+    top_a = list(a.get("top_funcs") or ([a.get("top_func")] if a.get("top_func") else []))
+    top_b = list(b.get("top_funcs") or ([b.get("top_func")] if b.get("top_func") else []))
+    common_leaf = _shared_inline_leaf(top_a, top_b)
+    if (top_a or top_b) and not common_leaf:
         return False
-    if top_a and top_b:
-        common_leaf = sorted(top_a.intersection(top_b))[0]
+    if common_leaf:
         state_a = common_leaf + "\n" + a.get("cf_tail_state", "")
         state_b = common_leaf + "\n" + b.get("cf_tail_state", "")
     return (
