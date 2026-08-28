@@ -21,6 +21,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from itertools import zip_longest
 from pathlib import Path
 
@@ -34,6 +35,16 @@ sys.path.insert(0, str(ROOT / "lib"))
 import peer_sources  # noqa: E402
 import target_config as tc  # noqa: E402
 import workqueue  # noqa: E402
+
+
+# One refresh may mine `--limit` peers x `--max-per-peer` fixes, and each OSV
+# excerpt is a network read with its own 15s timeout, so an endpoint that
+# blackholes rather than refuses can cost that product every time cards
+# refresh. Only `--limit` cards survive the interleave below, and a card
+# without an excerpt stays a lead the discovery route already covers, so the
+# fetching stops here rather than holding the lane. Cached excerpts cost
+# microseconds, so a warm run never reaches this.
+EXCERPT_FETCH_BUDGET_SECONDS = 120
 
 
 def build_s6_card(
@@ -201,6 +212,7 @@ def main(argv: list[str]) -> int:
     # `limit` peers can contribute one — the rest are not worth mining.
     peer_cards: list[list[dict]] = []
     seen_ids: set[str] = set()
+    excerpt_deadline = time.monotonic() + EXCERPT_FETCH_BUDGET_SECONDS
     for peer in cfg.s6_peers[:args.limit]:
         source_error = ""
         source_errors: list[str] = []
@@ -254,7 +266,10 @@ def main(argv: list[str]) -> int:
             diff_excerpt = ""
             if fix.get("source") == "vcs" and clone is not None and fix.get("fix_hash"):
                 diff_excerpt = peer_sources.fetch_fix_diff(clone, fix["fix_hash"])
-            elif fix.get("source") == "osv" and fix.get("evidence_url"):
+            elif (
+                fix.get("source") == "osv" and fix.get("evidence_url")
+                and time.monotonic() < excerpt_deadline
+            ):
                 diff_excerpt = peer_sources.fetch_patch_excerpt(
                     str(fix["evidence_url"]), cache_dir=cache_dir,
                     cache_ttl_seconds=args.cache_ttl_days * 24 * 3600,

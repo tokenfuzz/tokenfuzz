@@ -67,6 +67,13 @@ class PeerFixCardTests(unittest.TestCase):
             "    peer_sources.gather_peer_fixes = lambda peer, **kwargs: "
             "([{'source':'vcs','id':f'{peer}-commit{i}','fix_hash':(peer+'vcs'+str(i)).encode().hex().ljust(40, '0')[:40],"
             "'summary':'fix use-after-free in '+peer,'url':'','modified':'2099-01-02T00:00:00Z'} for i in range(_n)] if peer == 'libxml' else []) + fake_osv_query(peer)\n"
+            "if os.environ.get('S6_TEST_SLOW_EXCERPTS'):\n"
+            "    import time\n"
+            "    _real_monotonic, _tick = time.monotonic, [0]\n"
+            "    def _flying_clock():\n"
+            "        _tick[0] += 1\n"
+            "        return _real_monotonic() + 10 ** 6 * _tick[0]\n"
+            "    time.monotonic = _flying_clock\n"
             "sys.argv = ['peer-fix-cards', '--target-slug', 'myxml', '--quiet']\n"
             "runpy.run_path(root + '/bin/peer-fix-cards', run_name='__main__')\n",
             encoding="utf-8",
@@ -93,10 +100,32 @@ class PeerFixCardTests(unittest.TestCase):
             env["LLM_DECIDE_LOG"] = str(log)
         return env
 
-    def run_shim(self, **kwargs):
+    def run_shim(self, extra_env=None, **kwargs):
+        environment = self.environment(**kwargs)
+        environment.update(extra_env or {})
         return subprocess.run(
-            [sys.executable, str(self.shim)], env=self.environment(**kwargs),
+            [sys.executable, str(self.shim)], env=environment,
             capture_output=True, text=True,
+        )
+
+    def test_excerpt_fetching_stops_at_its_budget(self) -> None:
+        """Patch excerpts are network reads; a stalled endpoint must not hold
+        the lane. Cards still arrive, as leads behind a discovery route."""
+        self.write_config(peers=["expat"])
+        proc = self.run_shim(extra_env={"S6_TEST_SLOW_EXCERPTS": "1"}, fixes=3)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        rows = [
+            json.loads(line)
+            for line in self.card_file.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertTrue(rows)
+        self.assertEqual(
+            [""] * len([r for r in rows if r.get("peer_fix_id")]),
+            [r["peer_fix_diff_excerpt"] for r in rows if r.get("peer_fix_id")],
+        )
+        self.assertTrue(
+            any(r.get("peer_fix_source") == "discovery" for r in rows),
+            [r.get("peer_fix_source") for r in rows],
         )
 
     def test_empty_peer_configuration_writes_empty_jsonl(self) -> None:
