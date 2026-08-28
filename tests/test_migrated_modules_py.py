@@ -356,6 +356,24 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     darwin.atos.convert = lambda line: line
     _keeps_provenance("symbolizer echoes the address back")
 
+    # Function parentheses are structure, not disposable decoration: a broad
+    # removal corrupted anonymous namespaces and left half a C++ parameter
+    # list behind. Preserve atos's answer; the shared crash-state normalizer
+    # strips parameters and anonymous-namespace markers structurally later.
+    darwin.atos.convert = lambda line: (
+        "rbundle::(anonymous namespace)::handle_host("
+        "rbundle::(anonymous namespace)::Context&, unsigned short) "
+        "(in rbundle) (rbundle.cpp:91)"
+    )
+    frame = darwin.symbolize("0x1000", "/nonexistent/sample-bin", "0x20")
+    check(
+        bool(frame)
+        and "rbundle::(anonymous namespace)::handle_host(" in frame[0]
+        and "Context&, unsigned short)" in frame[0],
+        "atos preserves C++ anonymous namespaces and parameter lists",
+        repr(frame),
+    )
+
     # ASan's dladdr fallback names the function but not the file. Those frames
     # went unrecognized, so a report full of them was declared nothing-to-do.
     dladdr = "    #0 0x1036d4f30 in xmlBufGetChildContent+0x4a0 (/t/libxml2.dylib:arm64+0x84f30)\n"

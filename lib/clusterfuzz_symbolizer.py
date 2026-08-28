@@ -398,7 +398,6 @@ class DarwinSymbolizer(Symbolizer):
       match = re.match(r'^(.*) \(in (.*)\) \((.*:\d*)\)$', atos_line)
       if match:
         function_name = match.group(1)
-        function_name = re.sub(r'\(.*?\)', '', function_name)
         file_name = match.group(3)
         return [get_stack_frame(binary, addr, function_name, file_name)]
       else:

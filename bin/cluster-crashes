@@ -586,6 +586,12 @@ def _same_cf_cluster(a: dict, b: dict) -> bool:
             _cf_is_similar(a.get("primitive", ""), b.get("primitive", ""))
             and state_a == state_b
         )
+    # A shared dispatcher and entry point are common across sibling bugs. LCS
+    # alone merged distinct faulting handlers whenever those two tail frames
+    # matched. The leaf stays stable when one bug is reached through different
+    # callers, so require it before applying ClusterFuzz's tolerant tail match.
+    if a.get("top_func", "") != b.get("top_func", ""):
+        return False
     return (
         _cf_is_similar(a.get("primitive", ""), b.get("primitive", ""))
         and _cf_is_similar(state_a, state_b)

@@ -112,7 +112,7 @@ The parser writes past `{object_name}`.
                 "shared_dispatch", "shared_tail", severity=("High", "8.7"),
             ),
             "A2": self.make_crash(
-                "CRASH-A2-1", "heap-buffer-overflow", "scan_helper",
+                "CRASH-A2-1", "heap-buffer-overflow", "resolve_helper",
                 "`decode_blob` allows `code_start` outside the allocation.",
                 "shared_dispatch", "shared_tail", severity=("Medium", "6.5"),
             ),
@@ -214,12 +214,12 @@ The parser writes past `{object_name}`.
     def test_highest_severity_member_is_canonical(self) -> None:
         parent = self.root / "severity" / "crashes"
         low = self.make_crash(
-            "CRASH-AAA-1", "heap-buffer-overflow", "unique_low", "Low path.",
-            "shared_mid", "shared_tail", parent=parent, severity=("Low", "1.2"),
+            "CRASH-AAA-1", "heap-buffer-overflow", "shared_leaf", "Low path.",
+            "caller_low", "shared_tail", parent=parent, severity=("Low", "1.2"),
         )
         high = self.make_crash(
-            "CRASH-ZZZ-1", "heap-buffer-overflow", "unique_high", "High path.",
-            "shared_mid", "shared_tail", parent=parent, severity=("High", "8.7"),
+            "CRASH-ZZZ-1", "heap-buffer-overflow", "shared_leaf", "High path.",
+            "caller_high", "shared_tail", parent=parent, severity=("High", "8.7"),
         )
         process = self.run_cluster(parent.parent)
         self.assertEqual(process.returncode, 0, process.stderr)
@@ -309,18 +309,20 @@ The parser writes past `{object_name}`.
         self.assertTrue(self.cluster_id(fallback / "REPORT.md"))
         self.assertTrue(self.cluster_id(overlap / "REPORT.md"))
 
-    def make_lcs_pair(self, parent: Path, prefix: str = "LCS") -> tuple[Path, Path]:
+    def make_lcs_pair(
+        self, parent: Path, prefix: str = "LCS", *, second_top: str = "shared_leaf",
+    ) -> tuple[Path, Path]:
         first = self.make_simple_crash(
             parent, f"CRASH-{prefix}-A",
             "==1==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
-            "#0 0x1 in unique_top_a src/a.c:42\n#1 0x2 in shared_mid src/shared.c:99\n"
+            "#0 0x1 in shared_leaf src/a.c:42\n#1 0x2 in caller_a src/a.c:99\n"
             "#2 0x3 in shared_tail src/shared.c:123",
             "# A\nSurface: library-api",
         )
         second = self.make_simple_crash(
             parent, f"CRASH-{prefix}-B",
             "==2==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
-            "#0 0x4 in unique_top_b src/b.c:88\n#1 0x5 in shared_mid src/shared.c:99\n"
+            f"#0 0x4 in {second_top} src/b.c:88\n#1 0x5 in caller_b src/b.c:101\n"
             "#2 0x6 in shared_tail src/shared.c:123",
             "# B\nSurface: library-api",
         )
@@ -340,6 +342,16 @@ The parser writes past `{object_name}`.
         env = os.environ | {"CLUSTER_LCS_THRESHOLD": "3"}
         self.assertEqual(self.run_cluster(lcs, environment=env).returncode, 0)
         self.assertNotEqual(self.cluster_id(first / "REPORT.md"), self.cluster_id(second / "REPORT.md"))
+
+        siblings = self.root / "sibling-leaves"
+        first, second = self.make_lcs_pair(
+            siblings, "SIBLING", second_top="other_leaf",
+        )
+        self.assertEqual(self.run_cluster(siblings).returncode, 0)
+        self.assertNotEqual(
+            self.cluster_id(first / "REPORT.md"),
+            self.cluster_id(second / "REPORT.md"),
+        )
 
         fuzzy = self.root / "fuzzy"
         fuzz_a = self.make_simple_crash(
