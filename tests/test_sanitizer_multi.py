@@ -135,6 +135,59 @@ else:
         self.assertIn("verdict=TIMEOUT", tried.read_text())
         self.assertIn("timeouts=2", tried.read_text())
 
+        # A clean sibling does not resolve the deadline: the repetition is
+        # unresolved, not a clean confirmation.
+        counter = self.root / "mixed-timeout-count"
+        self.write_runner(
+            "counter = pathlib.Path(os.environ['MIXED_TIMEOUT_COUNT'])\n"
+            "count = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+            "counter.write_text(str(count))\n"
+            "if count == 1:\n"
+            "    print('[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)')\n"
+            "else:\n"
+            "    print('[run-asan] generic runner timed out after 15s')\n"
+            "    raise SystemExit(124)\n"
+        )
+        mixed_tried = self.root / "mixed-timeout-tried.log"
+        mixed = self.run_multi("generic", runs=2, environment={
+            "MIXED_TIMEOUT_COUNT": str(counter),
+            "TRIED_INPUTS_LOG": str(mixed_tried),
+        })
+        self.assertEqual(mixed.returncode, 124, self.output(mixed))
+        self.assertIn("SUCCESS_RATE: 1/2", self.output(mixed))
+        self.assertIn("verdict=TIMEOUT", mixed_tried.read_text())
+
+        # A sanitizer diagnostic is positive evidence a sibling deadline cannot
+        # retract, whether the two land in one run or in different ones. The
+        # repetition rate stays on the artifact, which is what triage reads.
+        self.write_runner(
+            "print('==1==ERROR: AddressSanitizer: heap-buffer-overflow')\n"
+            "raise SystemExit(124)\n"
+        )
+        diagnosed = self.run_multi("generic", runs=2)
+        self.assertEqual(diagnosed.returncode, 1, self.output(diagnosed))
+        self.assertIn("CRASH_RATE: 2/2", self.output(diagnosed))
+        crash_counter = self.root / "crash-timeout-count"
+        self.write_runner(
+            "counter = pathlib.Path(os.environ['CRASH_TIMEOUT_COUNT'])\n"
+            "count = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+            "counter.write_text(str(count))\n"
+            "if count == 1:\n"
+            "    print('==1==ERROR: AddressSanitizer: heap-buffer-overflow')\n"
+            "else:\n"
+            "    print('[run-asan] generic runner timed out after 15s')\n"
+            "    raise SystemExit(124)\n"
+        )
+        crash_tried = self.root / "crash-timeout-tried.log"
+        crash_timeout = self.run_multi("generic", runs=2, environment={
+            "CRASH_TIMEOUT_COUNT": str(crash_counter),
+            "TRIED_INPUTS_LOG": str(crash_tried),
+        })
+        self.assertEqual(crash_timeout.returncode, 1, self.output(crash_timeout))
+        self.assertIn("CRASH_RATE: 1/2", self.output(crash_timeout))
+        self.assertIn("verdict=CRASH", crash_tried.read_text())
+        self.assertIn("timeouts=1", crash_tried.read_text())
+
         # A testcase can print the human-readable marker, but only the reserved
         # child return code is authoritative.
         self.write_runner(

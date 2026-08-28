@@ -89,6 +89,17 @@ class ProbeArgumentTests(unittest.TestCase):
             )
             self.assertEqual(instance._classify(124), "CRASH")
 
+            # Repetition reports the deadline it reached alongside the runs that
+            # crashed. The diagnostic is what a later probe can reproduce, so it
+            # still decides the verdict; the rate stays on the artifact.
+            instance.output.write_text(
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+                "CRASH_RATE: 1/2\n"
+                "[run-sanitizer-multi] TIMEOUTS: 1/2 runs reached the deadline\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(124), "CRASH")
+
             instance.output.unlink()
             self.assertEqual(instance._classify(124), "TIMEOUT")
 
