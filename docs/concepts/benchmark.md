@@ -298,7 +298,7 @@ replicates; an em dash means unrecorded, never zero.
 | --- | --- |
 | `Occupancy` | Occupied agent-seconds over seats × effective wall. A `†` marks a cell that predates recorded session spans, where the number comes from the prompt-render and transcript file clocks instead. |
 | `Blocked housekeeping` | Share of the effective wall the worker pool sat empty at the iteration barrier while crash triage, the result gates, indexes, orphan enforcement and corpus promotion ran. Still charged to the wall either way. |
-| `Review s/artifact` | Crash-triage plus result-gate seconds per artifact those gates judged. |
+| `Review s/artifact` | In-wall and post-cell crash-triage plus result-gate seconds per artifact those gates judged. Post-cell time is measurement and remains excluded from `Wall (h)`, but it is real review cost. |
 | `First filed` / `First crash confirmed` / `First admitted` | Minutes from the run's first clock (its first backend call) to the first artifact filed, the first sanitizer-confirmed crash, and the first receipt claiming `reportable`. |
 | `EXEC_FAIL share` | Fraction of probes the target rejected before executing the input — a sanitizer launch that taught nothing. |
 | `Duplicate roots` | Share of artifact signatures filed by more than one agent: convergence, not yield. |

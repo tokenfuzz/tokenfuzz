@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -61,6 +62,7 @@ else:
     def run_multi(
         self, mode: str | None = "browser", testcase: Path | None = None,
         *, runs: int = 1, environment: dict[str, str] | None = None,
+        extra_args: list[str] | None = None,
     ) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         for key in (
@@ -81,6 +83,7 @@ else:
             command.append(mode)
         if testcase is not None or mode is not None:
             command.append(str(testcase or self.testcase))
+        command.extend(extra_args or [])
         return subprocess.run(
             command, env=env, capture_output=True, text=True, timeout=60, check=False,
         )
@@ -219,6 +222,36 @@ else:
                 self.assertIn(f"COVERAGE GATE: {marker}", output)
                 self.assertEqual("TESTCASE_EXECUTED" in output, executed)
                 self.assertIn(f"COVERAGE_GATE: {marker}", output_file.read_text())
+
+    def test_generic_coverage_keeps_hits_options_out_of_target_argv(self) -> None:
+        capture = self.root / "hits-args.json"
+        hits_log = self.root / "hits.log"
+        self.write_hits(
+            """import argparse, json, os, pathlib
+parser = argparse.ArgumentParser()
+for option in ("--testcase", "--want", "--mode", "--timeout", "--route-binary", "--log"):
+    parser.add_argument(option)
+parser.add_argument("--generic-skip-testcase", action="store_true")
+parser.add_argument("extra", nargs=argparse.REMAINDER)
+args = parser.parse_args()
+pathlib.Path(os.environ["MOCK_HITS_ARGS"]).write_text(json.dumps({"log": args.log, "extra": args.extra}))
+print("HIT: sample_function")
+"""
+        )
+        process = self.run_multi(
+            "generic",
+            environment={
+                "WANT": "sample_target", "HITS_LOG_PATH": str(hits_log),
+                "MOCK_HITS_ARGS": str(capture),
+            },
+            extra_args=["--strict-target-option", "sample-value"],
+        )
+        self.assertEqual(process.returncode, 0, self.output(process))
+        parsed = json.loads(capture.read_text(encoding="utf-8"))
+        self.assertEqual(parsed["log"], str(hits_log))
+        self.assertEqual(
+            parsed["extra"], ["--", "--strict-target-option", "sample-value"],
+        )
 
     def test_output_headers_derivation_budget_validation_and_tried_log(self) -> None:
         output_file = self.root / "recorded.txt"

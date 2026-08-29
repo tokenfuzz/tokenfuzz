@@ -1999,7 +1999,6 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
         evidence_id = evidence.get("evidence_id") if evidence else None
         if evidence_id != payload.get("evidence_id"):
             return None
-        revision_moved = False
         for key, environment_name in (
             ("target_revision", "TARGET_REV"),
             ("target_config_sha256", "TARGET_CONFIG_SHA256"),
@@ -2009,16 +2008,6 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
                 or os.environ.get(environment_name, ""),
             )
             if str(payload.get(key) or "") != current_scope:
-                # A disproof is keyed by the source it cites, not by the
-                # revision number: a Reject whose verified anchors still match
-                # the pinned tree byte for byte says the same thing at the new
-                # pin, and re-asking it spent a review per rejection on every
-                # pin change — with the retraction of its route advice in
-                # between. A Promote is still re-earned per revision, and the
-                # anchor check below is what carries the Reject or drops it.
-                if vote == "Reject" and key == "target_revision":
-                    revision_moved = True
-                    continue
                 return None
         if vote in {"Promote", "Reject"}:
             anchors = payload.get("anchors")
@@ -2036,11 +2025,6 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
                 )
                 if verified != anchors:
                     return None
-            elif revision_moved:
-                # Carrying a Reject across revisions is only sound when the
-                # cited lines were just re-read; with no tree to read there
-                # is no content key, so the verdict goes back for review.
-                return None
         return vote
     # Legacy verdicts predate controls binding: reuse only their non-negative
     # decisions (fail-open keep), never a Reject that could hide a real issue.
@@ -3895,38 +3879,58 @@ def record_artifact_events(results_dir: str | os.PathLike[str]) -> int:
     one for the moment a receipt first claimed a terminal state
     (``artifact_admitted`` for reportable, ``artifact_rejected`` for rejected),
     so time-to-first-admitted can be read without replaying the gates. Rows are
-    keyed by artifact id and written once; a later re-review does not move them.
+    keyed by artifact id and schema version; a later re-review does not move a
+    current stamp, while a newer schema may append corrected legacy evidence.
 
-    Crash rows carry an empty signature: the runtime-frame cluster key is
-    settled by clustering, which runs after this stamp.
+    Crash rows carry the same address-stable top-frame signature used to match
+    confirmation runs. Empty means the saved diagnostic had no parseable
+    target frame; those rows remain valid timeline events but cannot contribute
+    to duplicate-root telemetry.
     """
     results = Path(results_dir)
     events = results / "state" / "events.jsonl"
     existing = workqueue.read_jsonl(events)
+
+    def event_key(row: dict) -> tuple:
+        base = (row.get("type"), row.get("id"))
+        if row.get("type") == "crash_created":
+            try:
+                version = int(row.get("event_version") or 1)
+            except (TypeError, ValueError):
+                version = 1
+            return (*base, version)
+        return base
+
     seen = {
-        (row.get("type"), row.get("id")) for row in existing
+        event_key(row) for row in existing
         if row.get("type") in ("crash_created", "artifact_admitted", "artifact_rejected")
     }
     now = datetime.now(timezone.utc).isoformat()
     rows: list[dict] = []
 
     def stamp(event: str, directory: Path, **extra: object) -> None:
-        key = (event, directory.name)
+        payload = {"type": event, "id": directory.name, **extra}
+        key = event_key(payload)
         if key in seen:
             return
         seen.add(key)
-        rows.append({"type": event, "id": directory.name, "first_seen": now, **extra})
+        rows.append({**payload, "first_seen": now})
 
     for root in (results / "crashes", results / "crashes-rejected"):
         if not root.is_dir():
             continue
         for directory in sorted(root.glob("CRASH-*")):
-            if directory.is_dir():
+            if directory.is_dir() and ("crash_created", directory.name, 2) not in seen:
+                filed = crash_artifacts.filing_time(directory)
+                if filed is None:
+                    continue
+                sanitizer_file = _sanitizer_file(directory)
+                signature = stack_frames.crash_signature(
+                    _read(sanitizer_file) if sanitizer_file else "",
+                )
                 stamp(
-                    "crash_created", directory, signature=[],
-                    mtime=datetime.fromtimestamp(
-                        directory.stat().st_mtime, timezone.utc,
-                    ).isoformat(),
+                    "crash_created", directory, event_version=2, signature=signature,
+                    mtime=datetime.fromtimestamp(filed, timezone.utc).isoformat(),
                 )
     lanes = (
         ("findings", "FIND-*", "finding"), ("crashes", "CRASH-*", "crash"),
@@ -3948,9 +3952,9 @@ def record_artifact_events(results_dir: str | os.PathLike[str]) -> int:
         return 0
     with workqueue.jsonl_lock(events):
         known = {
-            (row.get("type"), row.get("id")) for row in workqueue.read_jsonl(events)
+            event_key(row) for row in workqueue.read_jsonl(events)
         }
-        fresh = [row for row in rows if (row["type"], row["id"]) not in known]
+        fresh = [row for row in rows if event_key(row) not in known]
         workqueue._append_jsonl_many_unlocked(events, fresh)
     return len(fresh)
 

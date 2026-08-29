@@ -50,7 +50,7 @@ from native_symbols import defined_symbols  # noqa: E402
 BROKEN_TREE_SITTER = ("0.26",)
 
 # Mirrors lib/callgraph.SCHEMA_VERSION; the reader refuses any other value.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # A rendered route longer than this is not a recipe an agent can act on, and
 # the block is a summary, not a trace.
@@ -337,11 +337,17 @@ def build(args) -> dict:
                     "file": file_of[unit],
                     "line": line_of[unit],
                 })
+        ranked_callers = inbound.most_common()
         files[source] = {
             "functions": len(functions),
             "reachable": sum(1 for node in functions if node in paths),
-            "callers": inbound.most_common(args.neighbour_files),
+            "callers": ranked_callers[:args.neighbour_files],
             "callees": outbound.most_common(args.neighbour_files),
+            # Prompt context is deliberately short, but delta scope is a
+            # correctness boundary: preserve only the overflow needed to
+            # reconstruct every resolved inbound file without duplicating the
+            # common prompt rows in the artifact.
+            "caller_overflow": ranked_callers[args.neighbour_files:],
             "paths": entries,
             "excerpts": excerpts,
         }

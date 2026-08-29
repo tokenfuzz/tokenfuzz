@@ -1241,13 +1241,23 @@ def is_auditable_work_card(card: dict) -> bool:
     return True
 
 
-def dedupe_work_cards(cards: list[dict]) -> list[dict]:
+def dedupe_work_cards(
+    cards: list[dict], *, preserve_s1_commits: bool = False,
+) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
     for card in cards:
         if not is_auditable_work_card(card):
             continue
-        key = work_surface(card)
+        # A delta's S1 contract is one card per qualifying commit. Two fixes
+        # to the same file are separate evidence and must survive both the
+        # patch-card writer and the rank-work loader. Normal audits still
+        # collapse old same-surface history to keep their bounded queue small.
+        key = (
+            str(card.get("id", "")).lower()
+            if preserve_s1_commits and card.get("kind") == "s1-patch"
+            else work_surface(card)
+        )
         if not key or key in seen:
             continue
         seen.add(key)
@@ -1686,7 +1696,9 @@ def load_patch_cards(path: Path, limit: int | None = 40, ctx: Context | None = N
     if ctx is not None:
         out = annotate_card_buildability(ctx, out)
     out.sort(key=lambda c: (_built_first(c), -int(c["score"]), c["id"]))
-    return dedupe_work_cards(out)[:limit]
+    return dedupe_work_cards(
+        out, preserve_s1_commits=limit is None,
+    )[:limit]
 
 
 def code_feature_reasons(text: str) -> tuple[int, list[str]]:
@@ -2300,14 +2312,15 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
     # content signature (revision plus tracked working-tree content, the
     # same "code changed" key the callgraph cache uses — not detect_rev,
     # whose truthy `norev` sentinel would pin a VCS-less tree to its first
-    # verdict forever), the candidate ids, how the answer is applied, and
-    # who answers. The refresh runs every iteration and each miss costs a
-    # ~10-20s round-trip at the iteration boundary; scores and reasons
-    # drift between refreshes as coverage and claims move, but the verdict
-    # is about the code. A target with no VCS has no cheap content
-    # identity, so its identity is the rendered prompt. The active mock
-    # value (tests) keys the cache too, so swapping a mock verdict always
-    # re-decides instead of replaying the previous mock's boosts.
+    # verdict forever), the candidate evidence, how the answer is applied, and
+    # who answers. Numeric score drift and reordering remain the live tiebreak
+    # without buying another 10–20s model call; verdicts name stable card IDs,
+    # so candidate evidence is canonicalized below rather than keyed by order.
+    # Reasons are evidence the model was explicitly asked to use, so a changed
+    # reason invalidates the verdict instead of replaying a judgment made from
+    # stale coverage or corpus facts. A target with no VCS has no cheap content
+    # identity, so its identity is the rendered prompt. The active mock value
+    # (tests) keys the cache too, so swapping a mock verdict always re-decides.
     mock_key = os.environ.get("LLM_DECIDE_MOCK_WORK_RERANK") or os.environ.get("LLM_DECIDE_MOCK") or ""
     resolved_model = os.environ.get("MODEL", "")
     if not resolved_model:
@@ -2318,10 +2331,17 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
             resolved_model = ""
     decider_key = f"{backend}\x00{resolved_model}\x00{mock_key}"
     source = target_config.vcs_source_signature(ctx.target_root, include_untracked=False)
+    candidate_evidence = "\n".join(sorted(
+        json.dumps({
+            key: card.get(key, "")
+            for key in ("id", "kind", "file", "subsystem", "strategy", "reason")
+        }, sort_keys=True)
+        for card in top
+    ))
     identity = "\x00".join([
         f"source={source}" if source else f"prompt={prompt}",
         f"mode={mode}", f"max_boost={max_boost}",
-        "ids=" + ",".join(sorted(surface_lead.values())),
+        f"candidates={candidate_evidence}",
         decider_key,
     ])
     cache_path = state_dir(ctx.results_dir) / ".work-rerank-cache.json"
@@ -2663,6 +2683,16 @@ def delta_scope(ctx: Context, since: str) -> DeltaScope:
             ) from exc
         head = _vcs_lines(["git", "-C", str(root), "rev-parse", "HEAD"],
                           f"--since {rev}: HEAD")[0]
+        dirty = _vcs_lines(
+            ["git", "-C", str(root), "status", "--porcelain",
+             "--untracked-files=no"],
+            f"--since {rev}: working tree",
+        )
+        if dirty:
+            raise ValueError(
+                f"--since {rev}: tracked working tree differs from HEAD; "
+                "commit or revert those changes before measuring REV..HEAD"
+            )
         commits = _vcs_lines(
             ["git", "-C", str(root), "rev-list", f"{base}..{head}"],
             f"--since {rev}: rev-list",
@@ -2686,6 +2716,15 @@ def delta_scope(ctx: Context, since: str) -> DeltaScope:
             ["hg", "--cwd", str(root), "log", "-r", ".", "--template", "{node}\n"],
             f"--since {rev}: working parent",
         )[0]
+        dirty = _vcs_lines(
+            ["hg", "--cwd", str(root), "status", "-mard"],
+            f"--since {rev}: working tree",
+        )
+        if dirty:
+            raise ValueError(
+                f"--since {rev}: tracked working tree differs from the working parent; "
+                "commit or revert those changes before measuring REV..HEAD"
+            )
         commits = _vcs_lines(
             ["hg", "--cwd", str(root), "log", "-r", f"only(., {base})",
              "--template", "{node}\n"],
@@ -2899,7 +2938,10 @@ def build_patch_cards(
         if card.get("touched_files"):
             if not is_auditable_work_card(card):
                 continue
-            key = work_surface(card)
+            key = (
+                str(card.get("id", "")).lower()
+                if delta is not None else work_surface(card)
+            )
         else:
             key = str(card.get("id", ""))
         if not key or key in seen:

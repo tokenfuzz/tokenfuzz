@@ -46,6 +46,7 @@ import target_config
 import target_profile
 import triage
 import validation_receipt
+import workqueue
 from timeout import run_timeout
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +56,28 @@ _RESULT_SIGNATURES: dict[str, str] = {}
 
 def log(message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [benchmark] {message}", flush=True)
+
+
+@contextmanager
+def _finalization_phase(results: Path, pass_id: str, phase: str):
+    """Record off-wall adjudication cost without calling it blocked audit time."""
+    started = time.monotonic()
+    try:
+        yield
+    finally:
+        row = {
+            "type": "finalization_phase",
+            "pass": pass_id,
+            "phase": phase,
+            "seconds": round(max(0.0, time.monotonic() - started), 3),
+            "recorded": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            events = results / "state" / "events.jsonl"
+            events.parent.mkdir(parents=True, exist_ok=True)
+            workqueue.append_jsonl(events, row)
+        except Exception as exc:  # noqa: BLE001 - telemetry cannot change a verdict
+            log(f"WARN: finalization phase timing unavailable: {exc}")
 
 
 def format_duration(seconds: int) -> str:
@@ -3019,6 +3042,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 # boundary so the two can be told apart after the fact; the
                 # published totals stay combined.
                 _stamp_finalization_start(results)
+                finalization_pass = f"{os.getpid()}-{time.time_ns()}"
                 replay_build_ok = not build_drift
                 if (
                     not args.dry_run
@@ -3039,12 +3063,15 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             target_revision=revision,
                             target_config_sha256=config_digest,
                         ):
-                            crash_counts = triage_cell_crashes(
-                                results, target_root, args.target,
-                                workers=finalize_workers,
-                                deadline=_finalize_deadline(finalize_wall),
-                                require_replay=condition == "model-direct",
-                            )
+                            with _finalization_phase(
+                                results, finalization_pass, "crash_triage",
+                            ):
+                                crash_counts = triage_cell_crashes(
+                                    results, target_root, args.target,
+                                    workers=finalize_workers,
+                                    deadline=_finalize_deadline(finalize_wall),
+                                    require_replay=condition == "model-direct",
+                                )
                         log(
                             f"Cell {name} crash triage: promoted={crash_counts.get('promoted', 0)} "
                             f"rejected={crash_counts.get('rejected', 0)} "
@@ -3061,12 +3088,15 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     # benchmark cell with fully adjudicated metrics.
                     log(f"Cell {name}: draining find-gate before metrics")
                     try:
-                        counts = drain_find_gate(
-                            results, args.backend, model,
-                            (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
-                            deadline=_finalize_deadline(finalize_wall),
-                            workers=finalize_workers,
-                        )
+                        with _finalization_phase(
+                            results, finalization_pass, "result_gates",
+                        ):
+                            counts = drain_find_gate(
+                                results, args.backend, model,
+                                (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
+                                deadline=_finalize_deadline(finalize_wall),
+                                workers=finalize_workers,
+                            )
                         # A pause inside the drain sits in the untimed
                         # measurement phase, so it is not subtracted from the
                         # cell's wall — only the audit's own pauses are.
@@ -3081,6 +3111,12 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 elif not args.dry_run and condition == "model-direct" and not args.validate_findings:
                     log(f"Cell {name} validation: DISABLED (--no-validate-findings)")
                 if results.is_dir():
+                    # Finalization can create both filing and disposition
+                    # events after the audit's last post_iteration pass.
+                    try:
+                        triage.record_artifact_events(results)
+                    except Exception as exc:  # noqa: BLE001 - telemetry is advisory
+                        log(f"WARN: final artifact event stamps unavailable for {name}: {exc}")
                     summary = metrics.harvest(
                         results, args.backend, model,
                         require_trigger_confirmation=require_trigger_confirmation,
@@ -3182,6 +3218,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 finalizers_ok = True
                 finalize_wall = getattr(args, "finalize_wall", 0)
                 finalize_workers = getattr(args, "finalize_workers", 4)
+                finalization_pass = f"{os.getpid()}-{time.time_ns()}"
                 replay_build_ok = True
                 if (results / "crashes").is_dir():
                     replay_build_ok, reason = _replay_build_status(
@@ -3226,28 +3263,41 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             target_revision=revision,
                             target_config_sha256=config_digest,
                         ):
-                            triage_cell_crashes(
-                                results, target_root, args.target,
-                                workers=finalize_workers,
-                                deadline=_finalize_deadline(finalize_wall),
-                                require_replay=cell.get("condition") == "model-direct",
-                                age_pending=False,
-                            )
+                            with _finalization_phase(
+                                results, finalization_pass, "crash_triage",
+                            ):
+                                triage_cell_crashes(
+                                    results, target_root, args.target,
+                                    workers=finalize_workers,
+                                    deadline=_finalize_deadline(finalize_wall),
+                                    require_replay=cell.get("condition") == "model-direct",
+                                    age_pending=False,
+                                )
                     except Exception as exc:
                         log(f"WARN: crash triage failed for {cell_dir.name}: {exc}")
                         finalizers_ok = False
                 if args.validate_findings and (results / "findings").is_dir():
                     log(f"Regenerate: draining find-gate for {cell_dir.name} ({cell.get('condition', '?')})")
                     try:
-                        drain_find_gate(
-                            results, args.backend, model,
-                            (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
-                            deadline=_finalize_deadline(finalize_wall),
-                            workers=finalize_workers,
-                        )
+                        with _finalization_phase(
+                            results, finalization_pass, "result_gates",
+                        ):
+                            drain_find_gate(
+                                results, args.backend, model,
+                                (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
+                                deadline=_finalize_deadline(finalize_wall),
+                                workers=finalize_workers,
+                            )
                     except Exception as exc:
                         log(f"WARN: find-gate drain failed for {cell_dir.name}: {exc}")
                         finalizers_ok = False
+                try:
+                    triage.record_artifact_events(results)
+                except Exception as exc:  # noqa: BLE001 - telemetry is advisory
+                    log(
+                        f"WARN: final artifact event stamps unavailable for "
+                        f"{cell_dir.name}: {exc}"
+                    )
                 summary = metrics.harvest(
                     results, args.backend, model,
                     require_trigger_confirmation=require_trigger_confirmation,

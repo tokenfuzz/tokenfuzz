@@ -110,6 +110,19 @@ class BlockRenderingTests(unittest.TestCase):
         self.assertIn("`src/buf.c`(2 fn)", block)
         self.assertIn("no direct parsed edge observed", block)
 
+    def test_delta_scope_uses_every_certain_caller_not_the_prompt_cap(self) -> None:
+        artifact = json.loads(json.dumps(ARTIFACT))
+        callers = [[f"src/caller-{index}.c", 1] for index in range(7)]
+        artifact["files"]["src/parse.c"]["callers"] = callers[:6]
+        artifact["files"]["src/parse.c"]["caller_overflow"] = callers[6:]
+        self.write(artifact)
+        self.assertEqual(
+            callgraph.callers_of(self.results, ["src/parse.c"]),
+            {name for name, _count in callers},
+        )
+        self.assertNotIn("caller-6.c", self.render("src/parse.c"),
+                         "the complete delta edge set must not inflate prompts")
+
     def test_a_boundary_that_routed_nowhere_is_not_announced(self) -> None:
         # Naming a boundary that reached nothing states a conclusion the
         # analysis did not reach.
@@ -759,6 +772,9 @@ class SymbolTableTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.sidecar = _sidecar()
+
+    def test_reader_and_sidecar_share_the_artifact_schema(self) -> None:
+        self.assertEqual(self.sidecar.SCHEMA_VERSION, callgraph.SCHEMA_VERSION)
 
     def test_macho_underscore_is_stripped_once_for_the_whole_artifact(self) -> None:
         names = native_symbols.normalise({"_app_parse", "_app_open", "_asan.module_ctor"})

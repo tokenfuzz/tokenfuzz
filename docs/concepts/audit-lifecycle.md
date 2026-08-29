@@ -95,9 +95,12 @@ hop over the call-neighbourhood graph's certain edges — with no graph,
 the run says so and covers the changed files alone), and one S1 card
 per commit in the range. The window is the delta: no diversity floor,
 no expansion. The tree records the base revision and changed-file set
-in `state/run-config.json`, and a resumed run must pass the same
+in `state/run-config.json`, and a resumed run must keep the same `HEAD` and pass the same
 `--since`; a revision the checkout cannot resolve — a shallow clone, a
-typo — stops the run rather than silently widening it to a full audit.
+typo — stops the run rather than silently widening it to a full audit. The
+tracked working tree must match `HEAD`, because uncommitted code is outside the
+recorded `<rev>..HEAD` range. An empty or exhausted delta stops instead of
+opening the primary agent's ordinary whole-tree discovery slot.
 
 ## 4. Agents investigate
 

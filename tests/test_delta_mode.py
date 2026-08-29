@@ -120,6 +120,13 @@ class DeltaScopeTests(DeltaFixture):
         with self.assertRaises(ValueError):
             workqueue.delta_scope(plain, self.base)
 
+    def test_delta_scope_refuses_tracked_worktree_changes(self) -> None:
+        (self.target / "src" / "main.c").write_text(
+            "int main(void) { return 1; }\n", encoding="utf-8",
+        )
+        with self.assertRaisesRegex(ValueError, "tracked working tree"):
+            workqueue.delta_scope(self.ctx, self.base)
+
     def test_a_shallow_clone_degrades_loudly_not_to_a_full_audit(self) -> None:
         shallow = self.root / "shallow"
         subprocess.run(
@@ -239,6 +246,36 @@ class DeltaCardTests(DeltaFixture):
             workqueue.build_patch_cards(self.ctx, 10, 10, delta=empty), [],
         )
 
+    def test_distinct_same_file_fix_commits_survive_both_delta_stages(self) -> None:
+        self._write(
+            "src/parse.c",
+            "void app_parse(char *dst, const char *src, unsigned n) {\n"
+            "  if (n < 4096) memcpy(dst, src, n);\n"
+            "}\n",
+        )
+        later = _commit_all(self.target, "Fix integer overflow in parser length")
+        scope = workqueue.delta_scope(self.ctx, self.base)
+        patch_cards = workqueue.build_patch_cards(self.ctx, 10, 10, delta=scope)
+        hashes = {
+            fix_hash
+            for card in patch_cards
+            for fix_hash in card.get("fix_hashes", [])
+        }
+        self.assertEqual(hashes, {self.head, later})
+
+        patch_path = self.results / "patch-cards.jsonl"
+        workqueue.write_cards(patch_path, patch_cards)
+        ranked = workqueue.rank_target(
+            self.ctx, 1, patch_path,
+            delta_files={rel: "changed in delta" for rel in scope.files},
+        )
+        ranked_hashes = {
+            fix_hash
+            for card in ranked if card.get("kind") == "s1-patch"
+            for fix_hash in card.get("fix_hashes", [])
+        }
+        self.assertEqual(ranked_hashes, {self.head, later})
+
     def test_rank_work_cli_restricts_the_queue_and_names_the_delta(self) -> None:
         for command in (
             [sys.executable, str(ROOT / "bin" / "patch-cards"),
@@ -322,6 +359,18 @@ class DeltaRuntimeTests(DeltaFixture):
             "the window is the delta; nothing wider may be ranked",
         )
 
+    def test_empty_delta_has_no_unconstrained_primary_discovery_slot(self) -> None:
+        runtime = self._runtime(workqueue.delta_scope(self.ctx, self.head))
+        runtime.num_agents = 1
+        context = SimpleNamespace()
+        with mock.patch.object(
+            audit_runner, "should_skip_launch", return_value=True,
+        ) as skip:
+            self.assertTrue(audit_runner.delta_queue_exhausted(runtime, context))
+        skip.assert_called_once_with(
+            runtime, context, 1, primary_always_launches=False,
+        )
+
     def test_a_resumed_tree_refuses_a_changed_since(self) -> None:
         root = self.root / "harness-root"
         (root / "targets").mkdir(parents=True)
@@ -362,6 +411,26 @@ class DeltaRuntimeTests(DeltaFixture):
                     root, full_target, "full", "full", "codex", "", "", 1,
                     None, True, "sandboxed", self.base,
                 )
+
+    def test_a_resumed_delta_refuses_a_new_head_under_the_same_since(self) -> None:
+        root = self.root / "moving-head-root"
+        (root / "targets").mkdir(parents=True)
+
+        def prepare() -> audit_runner.Runtime:
+            return audit_runner.prepare_runtime(
+                root, self.target, "sample", "sample", "codex", "", "", 1,
+                None, True, "sandboxed", self.base,
+            )
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NUM_AGENTS", None)
+            first = prepare()
+            self.assertEqual(first.delta.head_rev, self.head)
+            self._write("src/later.c", "int later;\n")
+            later = _commit_all(self.target, "Later change")
+            self.assertNotEqual(later, self.head)
+            with self.assertRaisesRegex(ValueError, "delta scope changed"):
+                prepare()
 
     def test_since_refuses_the_unranked_campaign_and_peer_lanes(self) -> None:
         root = self.root / "lane-root"

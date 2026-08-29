@@ -145,17 +145,22 @@ class GenericCoverageTests(unittest.TestCase):
         if built.returncode:
             self.skipTest(f"cannot build instrumented fixture: {built.stderr[-200:]}")
 
-    def _run_hits(self, want: str) -> subprocess.CompletedProcess:
+    def _run_hits(
+        self, want: str, *, environment: dict[str, str] | None = None,
+        extra: list[str] | None = None,
+    ) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env.update(
             SCRIPT_ROOT=str(ROOT), TARGET_SLUG="sampleproj",
             RESULTS_DIR=str(self.results),
         )
+        if environment:
+            env.update(environment)
         return subprocess.run(
             [sys.executable, str(HITS), "--testcase", str(self.testcase),
              "--want", want, "--mode", "generic", "--agent", "1",
              "--slug", "sampleproj",
-             "--log", str(self.results / "hits-1.log")],
+             "--log", str(self.results / "hits-1.log"), *(extra or [])],
             env=env, capture_output=True, text=True, timeout=120, check=False)
 
     def test_generic_coverage_writes_hit_rows_and_edges(self) -> None:
@@ -210,6 +215,28 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertIn("COVERAGE_UNAVAILABLE", output)
         self.assertIn("__sancov_guards", output)
         self.assertNotIn("MISSED", output)
+
+    def test_route_override_is_unavailable_instead_of_gating_the_wrong_binary(self) -> None:
+        harness = self.results / "scratch-1" / "harness"
+        harness.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        harness.chmod(0o755)
+        result = self._run_hits(
+            "app_parse", environment={"ASAN_GENERIC_BIN": str(harness)},
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 4, output)
+        self.assertIn("COVERAGE_UNAVAILABLE", output)
+        self.assertIn("active sanitizer route", output)
+        self.assertNotIn("HIT:", output)
+
+    def test_exact_preexpanded_arguments_do_not_pass_the_option_separator(self) -> None:
+        result = self._run_hits(
+            "app_parse",
+            extra=["--generic-skip-testcase", "--", str(self.testcase)],
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("HIT: app_parse", output)
 
 
 if __name__ == "__main__":

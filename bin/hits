@@ -61,6 +61,15 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--timeout", type=int, default=20)
     result.add_argument("--save")
     result.add_argument("--log")
+    result.add_argument(
+        "--route-binary", default="",
+        help="generic-mode binary selected by the caller; coverage falls open "
+             "when it is not the configured ASan CLI",
+    )
+    result.add_argument(
+        "--generic-skip-testcase", action="store_true",
+        help="generic-mode argv already contains the testcase",
+    )
     result.add_argument("--slug", default=os.environ.get("TARGET_SLUG", ""))
     result.add_argument("--agent", default=os.environ.get("AUDIT_AGENT_NUM", os.environ.get("AGENT_NUM", "0")))
     result.add_argument("extra", nargs=argparse.REMAINDER)
@@ -184,6 +193,18 @@ class Hits:
         if not raw:
             return None, None, "target.toml has no asan_bin to instrument for coverage"
         plain = Path(self.config.resolve_path(raw))
+        route_text = self.args.route_binary or os.environ.get("ASAN_GENERIC_BIN", "")
+        if route_text:
+            route = Path(route_text)
+            try:
+                same_route = os.path.samefile(route, plain)
+            except OSError:
+                same_route = os.path.realpath(route) == os.path.realpath(plain)
+            if not same_route:
+                return None, None, (
+                    f"active sanitizer route {route} is not the configured ASan CLI "
+                    f"{plain}; no route-equivalent coverage sibling is available"
+                )
         plain_tree = self.asan_build.name
         present_without_guards: list[str] = []
         for suffix in GENERIC_COVERAGE_SUFFIXES:
@@ -278,10 +299,20 @@ class Hits:
         environment["ASAN_OPTIONS"] = option_string
         output = coverage_dir / "target-output.raw"
         if self.args.mode == "generic":
+            if self.config:
+                for entry in self.config.runner_env:
+                    expanded = sanitizer_run.expand_runner_value(
+                        entry, self.config, "asan", testcase=str(self.testcase),
+                    )
+                    key, value = expanded.split("=", 1)
+                    environment[key] = value
             with output.open("wb") as stream:
                 run_timeout(
                     [str(self.generic_binary), *self._generic_command_args()],
                     self.args.timeout, env=environment,
+                    cwd=sanitizer_run.configured_runner_cwd(
+                        self.config, self.generic_binary, "asan",
+                    ),
                     stdout=stream, stderr=subprocess.STDOUT,
                 )
             return output, None
@@ -354,6 +385,14 @@ class Hits:
         bin/probe replays it.
         """
         runner_args = list(self.config.runner_args) if self.config else []
+        if self.args.extra:
+            extra = list(self.args.extra)
+            if extra[:1] == ["--"]:
+                extra = extra[1:]
+            skip = self.args.generic_skip_testcase or sanitizer.generic_skips_testcase(
+                "asan"
+            )
+            return [*(() if skip else (str(self.testcase),)), *extra]
         if any("{TESTCASE}" in value for value in runner_args):
             expanded = [
                 sanitizer_run.expand_runner_value(

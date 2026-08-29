@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 
 import benchmark  # noqa: E402
 import telemetry  # noqa: E402
+import workqueue  # noqa: E402
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -137,8 +138,12 @@ class TelemetryTests(unittest.TestCase):
         ])
         _write_jsonl(self.results / "state" / "runs.jsonl", [
             {"id": "RUN-1", "verdict": "CLEAN", "created_at": "2026-08-28T10:05:00Z"},
-            {"id": "RUN-2", "verdict": "CRASH", "created_at": "2026-08-28T10:30:00Z"},
-            {"id": "RUN-3", "verdict": "crash", "created_at": "2026-08-28T10:20:00Z"},
+            {"id": "RUN-2", "verdict": "CRASH", "sanitizer": "asan",
+             "sanitizer_runs": 1, "created_at": "2026-08-28T10:10:00Z"},
+            {"id": "RUN-3", "verdict": "crash", "sanitizer": "asan",
+             "sanitizer_runs": 5, "created_at": "2026-08-28T10:20:00Z"},
+            {"id": "RUN-4", "verdict": "CRASH", "sanitizer": "runner",
+             "sanitizer_runs": 5, "created_at": "2026-08-28T10:15:00Z"},
         ])
         _write_jsonl(self.results / "state" / "events.jsonl", [
             {"type": "finding_created", "id": "FIND-001", "signature": ["x"],
@@ -155,6 +160,22 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(ttf["filed_seconds"], 180.0)
         self.assertEqual(ttf["crash_confirmed_seconds"], 1200.0)
         self.assertEqual(ttf["admitted_seconds"], 7200.0)
+
+    def test_time_to_first_uses_session_start_not_its_completion_row(self) -> None:
+        self._index([{
+            "role": "analysis", "agent": 1,
+            "started": "2026-08-28T10:00:00+00:00",
+            "ended": "2026-08-28T10:20:00+00:00",
+            "timestamp": "2026-08-28T10:20:00+00:00",
+        }])
+        _write_jsonl(self.results / "state" / "events.jsonl", [{
+            "type": "finding_created", "id": "FIND-001", "signature": ["x"],
+            "mtime": "2026-08-28T10:08:00+00:00",
+            "first_seen": "2026-08-28T10:21:00+00:00",
+        }])
+        ttf = telemetry.time_to_first(self.results)
+        self.assertEqual(ttf["run_start"], "2026-08-28T10:00:00+00:00")
+        self.assertEqual(ttf["filed_seconds"], 480.0)
 
     def test_time_to_first_is_none_without_a_start_or_an_event(self) -> None:
         ttf = telemetry.time_to_first(self.results)
@@ -194,15 +215,21 @@ class TelemetryTests(unittest.TestCase):
             {"id": "H-1", "strategy": "S3", "status": "FIND-001", "agent": "1"},
             {"id": "H-2", "strategy": "S3", "status": "FIND-002", "agent": "2"},
             {"id": "H-3", "strategy": "S5", "status": "FIND-003", "agent": "2"},
+            {"id": "H-4", "strategy": "S7", "status": "CRASH-001-1", "agent": "1"},
+            {"id": "H-5", "strategy": "S7", "status": "CRASH-002-2", "agent": "2"},
         ])
         _write_jsonl(self.results / "state" / "events.jsonl", [
             {"type": "finding_created", "id": "FIND-001", "signature": ["k", "a.c", "1"]},
             {"type": "finding_created", "id": "FIND-002", "signature": ["k", "a.c", "1"]},
             {"type": "finding_created", "id": "FIND-003", "signature": ["k", "b.c", "9"]},
             {"type": "finding_created", "id": "FIND-004", "signature": []},
+            {"type": "crash_created", "id": "CRASH-001-1",
+             "signature": ["app_parse sample.c:91"]},
+            {"type": "crash_created", "id": "CRASH-002-2",
+             "signature": ["app_parse sample.c:91"]},
         ])
         self.assertEqual(telemetry.duplicate_roots(self.results), {
-            "signatures": 2, "multi_agent": 1, "rate": 0.5,
+            "signatures": 3, "multi_agent": 2, "rate": 0.6667,
         })
 
     def test_lineage_joins_card_hypothesis_testcase_and_artifact(self) -> None:
@@ -238,8 +265,8 @@ class TelemetryTests(unittest.TestCase):
         summary = telemetry.summary(self.results)
         self.assertEqual(
             set(summary),
-            {"occupancy", "housekeeping", "time_to_first", "lanes", "execution",
-             "duplicate_roots", "lineage_rows"},
+            {"occupancy", "housekeeping", "finalization", "time_to_first",
+             "lanes", "execution", "duplicate_roots", "lineage_rows"},
         )
         self.assertEqual(summary["lineage_rows"], 0)
 
@@ -284,12 +311,49 @@ class StampTests(unittest.TestCase):
         )
         self.assertEqual(telemetry.housekeeping(self.results)["blocked_seconds"], 2.5)
 
+    def test_benchmark_finalization_is_timed_separately_from_blocked_wall(self) -> None:
+        import benchmark_runner
+        from unittest import mock
+
+        with mock.patch.object(
+            benchmark_runner.time, "monotonic", side_effect=[10.0, 70.0],
+        ):
+            with benchmark_runner._finalization_phase(
+                self.results, "pass-1", "result_gates",
+            ):
+                pass
+        final = telemetry.finalization(self.results)
+        self.assertEqual(final["phases"], {"result_gates": 60.0})
+        self.assertEqual(final["total_seconds"], 60.0)
+        self.assertEqual(final["phase_count"], 1)
+        workqueue.append_jsonl(
+            self.results / "state" / "events.jsonl",
+            {"type": "finalization_phase", "pass": "pass-2",
+             "phase": "result_gates", "seconds": 5.0},
+        )
+        self.assertEqual(
+            telemetry.finalization(self.results)["phases"],
+            {"result_gates": 5.0},
+            "regeneration replaces a phase measurement instead of inflating it",
+        )
+        self.assertIsNone(
+            telemetry.housekeeping(self.results)["blocked_seconds"],
+            "off-wall adjudication is review cost, not a blocked audit barrier",
+        )
+
     def test_artifact_events_stamp_crashes_and_terminal_receipts_once(self) -> None:
         import triage
 
         def artifact(lane: str, name: str, state: str | None) -> None:
             directory = self.results / lane / name
             directory.mkdir(parents=True)
+            if name.startswith("CRASH-"):
+                (directory / "sanitizer.txt").write_text(
+                    "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+                    "    #0 0x1 in app_parse sample.c:91\n"
+                    "SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:91 in app_parse\n",
+                    encoding="utf-8",
+                )
             if state is not None:
                 (directory / "validation.json").write_text(
                     json.dumps({"state": state}), encoding="utf-8",
@@ -301,6 +365,10 @@ class StampTests(unittest.TestCase):
         artifact("findings", "FIND-002", None)
         artifact("findings-rejected", "FIND-003", "rejected")
         artifact("crashes-rejected", "CRASH-003-1", "rejected")
+        filed = "2026-08-28T09:15:00+00:00"
+        (self.results / "crashes" / "CRASH-001-1" / ".crash-created-at").write_text(
+            filed + "\n", encoding="utf-8",
+        )
         self.assertEqual(triage.record_artifact_events(self.results), 7)
         rows = [
             json.loads(line) for line in
@@ -311,8 +379,18 @@ class StampTests(unittest.TestCase):
             by_kind.setdefault(row["type"], []).append(row["id"])
         self.assertEqual(sorted(by_kind["crash_created"]),
                          ["CRASH-001-1", "CRASH-002-1", "CRASH-003-1"])
+        crash_rows = [row for row in rows if row["type"] == "crash_created"]
+        self.assertTrue(all(row["signature"] for row in crash_rows))
         self.assertEqual(sorted(by_kind["artifact_admitted"]), ["CRASH-001-1", "FIND-001"])
         self.assertEqual(sorted(by_kind["artifact_rejected"]), ["CRASH-003-1", "FIND-003"])
+        crash_created = next(
+            row for row in rows
+            if row["type"] == "crash_created" and row["id"] == "CRASH-001-1"
+        )
+        self.assertEqual(
+            crash_created["mtime"], filed,
+            "triage receipts must not move the immutable crash filing clock",
+        )
         # A second pass is idempotent; a later state change gets its own row
         # while the first stamp stays where it was.
         self.assertEqual(triage.record_artifact_events(self.results), 0)
@@ -328,6 +406,34 @@ class StampTests(unittest.TestCase):
         ttf = telemetry.time_to_first(self.results)
         self.assertIsNotNone(ttf["filed_seconds"])
         self.assertIsNotNone(ttf["admitted_seconds"])
+
+    def test_legacy_crash_event_is_backfilled_with_stable_time_and_signature(self) -> None:
+        import triage
+
+        crash = self.results / "crashes" / "CRASH-001-1"
+        crash.mkdir(parents=True)
+        filed = "2026-08-28T09:15:00+00:00"
+        (crash / ".crash-created-at").write_text(filed + "\n", encoding="utf-8")
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "    #0 0x1 in app_parse sample.c:91\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:91 in app_parse\n",
+            encoding="utf-8",
+        )
+        _write_jsonl(self.results / "state" / "events.jsonl", [{
+            "type": "crash_created", "id": crash.name,
+            "first_seen": "2026-08-28T10:00:00+00:00", "signature": [],
+        }])
+        self.assertEqual(triage.record_artifact_events(self.results), 1)
+        rows = [
+            row for row in workqueue.read_jsonl(self.results / "state" / "events.jsonl")
+            if row.get("type") == "crash_created"
+        ]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1]["event_version"], 2)
+        self.assertEqual(rows[-1]["mtime"], filed)
+        self.assertTrue(rows[-1]["signature"])
+        self.assertEqual(triage.record_artifact_events(self.results), 0)
 
 
 class EfficiencyAggregationTests(unittest.TestCase):
@@ -351,6 +457,7 @@ class EfficiencyAggregationTests(unittest.TestCase):
                 occupancy={"occupied_seconds": 1500.0, "source": "recorded"},
                 housekeeping={"blocked_seconds": 100.0, "source": "events",
                               "phases": {"crash_triage": 10.0, "result_gates": 40.0}},
+                finalization={"source": "events", "phases": {"result_gates": 60.0}},
                 time_to_first={"filed_seconds": 60.0, "crash_confirmed_seconds": None,
                                "admitted_seconds": 600.0},
                 execution={"exec_fail_share": 0.25},
@@ -362,7 +469,7 @@ class EfficiencyAggregationTests(unittest.TestCase):
         self.assertEqual(summary["worker_occupancy_median"], 0.75)
         self.assertEqual(summary["worker_occupancy_source"], "recorded")
         self.assertEqual(summary["housekeeping_blocked_fraction_median"], 0.1)
-        self.assertEqual(summary["review_seconds_per_artifact_median"], 10.0)
+        self.assertEqual(summary["review_seconds_per_artifact_median"], 22.0)
         self.assertEqual(summary["time_to_first_filed_median"], 60.0)
         self.assertIsNone(summary["time_to_first_crash_confirmed_median"])
         self.assertEqual(summary["time_to_first_admitted_median"], 600.0)
@@ -403,6 +510,30 @@ class EfficiencyAggregationTests(unittest.TestCase):
             line for line in lines if "| — | — | — | — | — | — | — | — | — | — |" in line
         )
         self.assertIn("direct", direct.lower())
+
+    def test_confirmed_per_seat_hour_uses_all_replicates_capacity(self) -> None:
+        recorded = [{
+            "condition": "harness", "worker_occupancy_median": 0.7,
+            "unique_finding_clusters": 3, "unique_crash_clusters": 1,
+            "worker_wall_median": 36000.0, "worker_wall_total": 108000.0,
+            "cost_usd_total": 120.0,
+        }]
+        row = next(
+            line for line in benchmark._render_efficiency(recorded, "codex")
+            if "| 70% |" in line
+        )
+        self.assertIn("| 0.13 | $30 |", row)
+
+    def test_estimated_cost_does_not_render_as_measured_cost_per_cluster(self) -> None:
+        row = next(
+            line for line in benchmark._render_efficiency([{
+                "condition": "harness", "unique_finding_clusters": 1,
+                "worker_wall_total": 3600.0, "cost_usd_total": 25.0,
+                "cost_estimated": True, "worker_occupancy_median": 0.5,
+            }], "codex")
+            if "| 50% |" in line
+        )
+        self.assertIn("| 1.00 | — |", row)
 
 
 if __name__ == "__main__":

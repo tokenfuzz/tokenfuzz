@@ -3721,12 +3721,11 @@ class ValidatorScratchPlacementTests(unittest.TestCase):
         self.assertEqual(cwd, results / ".validator-cwd")
 
 
-class ContentCarriedTriggerVerdictTests(unittest.TestCase):
-    """Negative route knowledge is keyed by cited source content, not by pin.
+class RevisionBoundTriggerVerdictTests(unittest.TestCase):
+    """Reachability decisions are re-earned whenever the target pin changes.
 
-    A Reject whose verified anchors still match the tree byte for byte keeps
-    saying what it said at a new revision; a Promote is still re-earned per
-    revision, and a moved anchor sends either back through review.
+    Matching cited lines are necessary but not sufficient for a negative
+    verdict: a new revision can add another caller or route outside them.
     """
 
     def setUp(self) -> None:
@@ -3751,7 +3750,7 @@ class ContentCarriedTriggerVerdictTests(unittest.TestCase):
         values.update(extra)
         return mock.patch.dict(os.environ, values, clear=False)
 
-    def test_a_reject_survives_a_pin_change_while_its_anchors_match(self) -> None:
+    def test_a_pin_change_invalidates_reject_and_promote_votes(self) -> None:
         cache = self.finding / ".trigger-gate.json"
         promote = self.finding / ".trigger-gate-2.json"
         with self.env():
@@ -3770,32 +3769,13 @@ class ContentCarriedTriggerVerdictTests(unittest.TestCase):
                 triage._cached_trigger_vote(self.report, promote), "Promote",
             )
             with self.env(TARGET_REV="revision-b"):
-                # The disproof still reads: the rejection stands at the new pin.
-                self.assertEqual(
-                    triage._cached_trigger_vote(self.report, cache), "Reject",
-                )
-                self.assertEqual(
-                    triage._trigger_vote(
-                        self.report, cache, "codex", "x", self.root,
-                    ),
-                    1,
-                )
-                # A Promote is re-earned per revision even with live anchors.
-                self.assertIsNone(
-                    triage._cached_trigger_vote(self.report, promote),
-                )
-                # No tree to re-read the citation against: no content key.
-                with self.env(TARGET_REV="revision-b"):
-                    os.environ.pop("TARGET_ROOT", None)
-                    self.assertIsNone(
-                        triage._cached_trigger_vote(self.report, cache),
-                    )
-                # A moved anchor sends the Reject back for review.
-                (self.root / "sample.c").write_text(
-                    "int app_parse(void) { return 1; }\n", encoding="utf-8",
-                )
+                # Either verdict can be invalidated by source outside its cited
+                # lines (for example, a new public caller), so both are stale.
                 self.assertIsNone(
                     triage._cached_trigger_vote(self.report, cache),
+                )
+                self.assertIsNone(
+                    triage._cached_trigger_vote(self.report, promote),
                 )
 
     def _rejected(self) -> Path:
@@ -3820,31 +3800,15 @@ class ContentCarriedTriggerVerdictTests(unittest.TestCase):
             self.root / "state" / "unreachable-routes.jsonl",
         )
 
-    def test_reconciliation_keeps_a_rejection_and_its_route_across_a_pin(self) -> None:
+    def test_reconciliation_requeues_a_rejection_and_its_route_across_a_pin(self) -> None:
         with self.env():
             os.environ.pop("TARGET_CONFIG_SHA256", None)
             destination = self._rejected()
             self.assertEqual(len(self.routes()), 1)
             with self.env(TARGET_REV="revision-b"):
                 self.assertEqual(
-                    triage.restore_stale_trigger_rejections(self.root), 0,
-                    "a pin change alone must not requeue a rejection whose "
-                    "disproof still reads",
-                )
-                self.assertTrue(destination.is_dir())
-                self.assertEqual(len(self.routes()), 1)
-                # The receipt-drift rule stayed authoritative: the stale
-                # receipt was rebound to the new revision, not trusted as-is.
-                receipt = validation_receipt.read_current(destination)
-                self.assertIsNotNone(receipt)
-                self.assertEqual(receipt.get("state"), "rejected")
-                # Once an anchored line moves the artifact is requeued and
-                # its advice goes with it.
-                (self.root / "sample.c").write_text(
-                    "int app_parse(void) { return 1; }\n", encoding="utf-8",
-                )
-                self.assertEqual(
                     triage.restore_stale_trigger_rejections(self.root), 1,
+                    "a new caller outside the old anchors could invalidate the disproof",
                 )
                 self.assertFalse(destination.is_dir())
                 self.assertEqual(self.routes(), [])

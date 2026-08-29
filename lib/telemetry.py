@@ -215,9 +215,49 @@ def housekeeping(results_dir: Path) -> dict:
     }
 
 
+def finalization(results_dir: Path) -> dict:
+    """Off-audit-wall crash/find adjudication time recorded by the benchmark."""
+    candidates = [
+        row for row in _rows(Path(results_dir) / "state" / "events.jsonl")
+        if row.get("type") == "finalization_phase"
+    ]
+    # Regeneration can adjudicate a cell again, and a missing replay build can
+    # skip only crash triage. Keep the newest measurement of each phase rather
+    # than accumulating operator maintenance or dropping an unrerun phase.
+    latest: dict[str, dict] = {}
+    for row in candidates:
+        name = str(row.get("phase") or "")
+        if name:
+            latest[name] = row
+    totals: dict[str, float] = {}
+    rows = 0
+    for name, row in latest.items():
+        try:
+            seconds = float(row.get("seconds"))
+        except (TypeError, ValueError):
+            continue
+        if not name or seconds < 0:
+            continue
+        totals[name] = totals.get(name, 0.0) + seconds
+        rows += 1
+    return {
+        "phases": {name: round(seconds, 3) for name, seconds in sorted(totals.items())},
+        "total_seconds": round(sum(totals.values()), 3) if rows else None,
+        "phase_count": rows,
+        "source": "events" if rows else None,
+    }
+
+
 def run_start(results_dir: Path) -> float | None:
     """The run's first clock: the earliest index row, else the earliest state row."""
-    stamps = [_parse_ts(row.get("timestamp")) for row in index_rows(results_dir)]
+    # Agent index rows are appended when a session ends. Their ``timestamp``
+    # therefore measures completion, while ``started`` is the run clock the
+    # occupancy recorder already captured. Prefer it when present so an
+    # artifact filed during the first session does not clamp to time zero.
+    stamps = [
+        _parse_ts(row.get("started") or row.get("timestamp"))
+        for row in index_rows(results_dir)
+    ]
     stamps = [stamp for stamp in stamps if stamp is not None]
     if stamps:
         return min(stamps)
@@ -235,6 +275,18 @@ def _min_stamp(values: list[float | None]) -> float | None:
     return min(present) if present else None
 
 
+def _confirmed_crash_run(row: dict) -> bool:
+    try:
+        repetitions = int(row.get("sanitizer_runs") or 1)
+    except (TypeError, ValueError):
+        return False
+    return (
+        str(row.get("verdict") or "").upper() == "CRASH"
+        and str(row.get("sanitizer") or "").lower() != "runner"
+        and repetitions >= 2
+    )
+
+
 def time_to_first(results_dir: Path) -> dict:
     """Seconds from run start to the first filed, confirmed, and admitted artifact."""
     results = Path(results_dir)
@@ -247,7 +299,7 @@ def time_to_first(results_dir: Path) -> dict:
     ])
     confirmed = _min_stamp([
         _parse_ts(row.get("created_at"))
-        for row in runs if str(row.get("verdict") or "").upper() == "CRASH"
+        for row in runs if _confirmed_crash_run(row)
     ])
     admitted = _min_stamp([
         _parse_ts(row.get("first_seen"))
@@ -383,6 +435,7 @@ def summary(results_dir: Path) -> dict:
     return {
         "occupancy": occupancy(results),
         "housekeeping": housekeeping(results),
+        "finalization": finalization(results),
         "time_to_first": time_to_first(results),
         "lanes": lane_stats(results),
         "execution": execution_verdicts(results),

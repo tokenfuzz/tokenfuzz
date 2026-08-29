@@ -181,8 +181,23 @@ class MultiRun:
             str(hits), "--testcase", testcase, "--want", os.environ["WANT"],
             "--mode", mode, "--timeout", os.environ.get("HITS_TIMEOUT", os.environ.get("COV_TIMEOUT", "20")),
         ]
+        if mode == "generic":
+            route_name = (
+                "ASAN_GENERIC_BIN"
+                if self.sanitizer in {"asan", "race", "runner"}
+                else f"{self.sanitizer.upper()}_GENERIC_BIN"
+            )
+            route = os.environ.get(route_name, "")
+            if route:
+                command.extend(("--route-binary", route))
+            if sanitizer.generic_skips_testcase(self.sanitizer):
+                command.append("--generic-skip-testcase")
         if os.environ.get("HITS_LOG_PATH"):
             command.extend(("--log", os.environ["HITS_LOG_PATH"]))
+        if mode == "generic" and len(self.args) > 2:
+            # argparse.REMAINDER owns everything after this separator. Keep
+            # hits' own options in front of it or they become target argv.
+            command.extend(("--", *self.args[2:]))
         with capture_command(command, merge_stderr=True) as completed:
             try:
                 sys.stdout.buffer.write(cap_output_file(completed.stdout, "coverage-gate"))

@@ -24,6 +24,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import crash_artifacts
 import finding_dedup
 import finding_signature
 import stack_frames
@@ -114,39 +115,8 @@ def _cell_start(cell_dir: Path) -> float | None:
 
 
 def _artifact_time(directory: Path) -> float | None:
-    """Earliest clock inside an artifact directory.
-
-    New crash bundles carry a write-once filing timestamp because their
-    testcase and sanitizer evidence are copied with preserved source mtimes.
-    Prefer that clock when present. Historical artifacts fall back to the
-    earliest filesystem timestamp as before.
-
-    A directory's own mtime moves whenever an entry is added or rewritten, so
-    re-triage drags it to "now" and destroys the discovery signal. The earliest
-    file inside it — written when the agent first filed the artifact — survives
-    that, so prefer whichever is older.
-    """
-    for created_at in (
-        directory / ".crash-created-at",
-        directory / ".audit" / ".crash-created-at",
-    ):
-        try:
-            return datetime.fromisoformat(
-                created_at.read_text(encoding="utf-8").strip().replace("Z", "+00:00")
-            ).timestamp()
-        except (OSError, ValueError):
-            pass
-    stamps = []
-    try:
-        stamps.append(directory.stat().st_mtime)
-        for child in directory.iterdir():
-            try:
-                stamps.append(child.stat().st_mtime)
-            except OSError:
-                continue
-    except OSError:
-        return None
-    return min(stamps) if stamps else None
+    """Compatibility name for the shared artifact filing clock."""
+    return crash_artifacts.filing_time(directory)
 
 
 def _discovery_index(cells: list[Path]) -> dict[tuple, dict[tuple, float]]:

@@ -2311,10 +2311,9 @@ class WorkQueueTests(unittest.TestCase):
             workqueue.llm_rerank_cards(ctx, rescored, top_n=1, timeout=5)
             self.assertEqual(decisions(), 2, "same ids, new scores: the prompt identity re-asks")
 
-    def test_llm_rerank_cache_is_keyed_by_source_identity_and_card_ids(self) -> None:
-        """Scores and reasons drift every refresh; the verdict is about the
-        code, so only a source change, a new candidate set, or a new mode
-        re-asks."""
+    def test_llm_rerank_cache_is_keyed_by_source_identity_and_candidate_evidence(self) -> None:
+        """Numeric score drift uses the deterministic tiebreak without another
+        model call, but changed evidence text must be shown to the model."""
         shutil.rmtree(self.target / ".git")
         git = ["git", "-C", str(self.target)]
         env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
@@ -2336,7 +2335,9 @@ class WorkQueueTests(unittest.TestCase):
             return decision_log.read_text(encoding="utf-8").count("work_rerank MOCK")
 
         first = [self.card("WORK-A", "src/a.c", score=30), self.card("WORK-B", "src/b.c", score=10)]
-        rescored = [
+        rescored = [self.card("WORK-A", "src/a.c", score=90),
+                    self.card("WORK-B", "src/b.c", score=12)]
+        new_evidence = [
             self.card("WORK-A", "src/a.c", score=90, reason="coverage gap"),
             self.card("WORK-B", "src/b.c", score=12, reason="corpus seed"),
         ]
@@ -2346,16 +2347,25 @@ class WorkQueueTests(unittest.TestCase):
             out = workqueue.llm_rerank_cards(self.ctx, rescored, top_n=2, timeout=5)
             self.assertEqual(decisions(), 1, "same revision and ids: served from the cache")
             self.assertEqual({row["id"]: row["score"] for row in out}, {"WORK-A": 90, "WORK-B": 32})
-            workqueue.llm_rerank_cards(self.ctx, rescored, top_n=2, timeout=5, mode="primary")
-            self.assertEqual(decisions(), 2, "a mode change re-asks")
-            workqueue.llm_rerank_cards(
-                self.ctx, rescored + [self.card("WORK-C", "src/c.c")], top_n=3, timeout=5,
+            reordered = [self.card("WORK-B", "src/b.c", score=100),
+                         self.card("WORK-A", "src/a.c", score=90)]
+            workqueue.llm_rerank_cards(self.ctx, reordered, top_n=2, timeout=5)
+            self.assertEqual(
+                decisions(), 1,
+                "score-only reordering keeps stable card IDs and must not spend another model call",
             )
-            self.assertEqual(decisions(), 3, "a new candidate re-asks")
+            workqueue.llm_rerank_cards(self.ctx, new_evidence, top_n=2, timeout=5)
+            self.assertEqual(decisions(), 2, "changed candidate evidence re-asks")
+            workqueue.llm_rerank_cards(self.ctx, new_evidence, top_n=2, timeout=5, mode="primary")
+            self.assertEqual(decisions(), 3, "a mode change re-asks")
+            workqueue.llm_rerank_cards(
+                self.ctx, new_evidence + [self.card("WORK-C", "src/c.c")], top_n=3, timeout=5,
+            )
+            self.assertEqual(decisions(), 4, "a new candidate re-asks")
             (self.target / "a.c").write_text("int a, b;\n", encoding="utf-8")
             subprocess.run(git + ["commit", "-q", "-am", "two"], check=True, env=env)
-            workqueue.llm_rerank_cards(self.ctx, rescored, top_n=2, timeout=5)
-            self.assertEqual(decisions(), 4, "a new revision re-asks")
+            workqueue.llm_rerank_cards(self.ctx, new_evidence, top_n=2, timeout=5)
+            self.assertEqual(decisions(), 5, "a new revision re-asks")
 
     def test_rank_work_cli_refuses_an_unknown_rerank_mode(self) -> None:
         command = [

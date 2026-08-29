@@ -3537,15 +3537,18 @@ def _efficiency_summary(done: list[dict]) -> dict:
         if value is not None:
             blocked.append(value)
         phases = house.get("phases") or {}
+        final_phases = (block.get("finalization") or {}).get("phases") or {}
         waterfall = ((cell.get("metrics") or {}).get("validation_waterfall") or {})
         judged = sum(
             _as_int((waterfall.get(kind) or {}).get("candidates"))
             for kind in ("crashes", "findings")
         )
         review_seconds = sum(
-            float(phases.get(name) or 0.0) for name in ("crash_triage", "result_gates")
+            float(phases.get(name) or 0.0) + float(final_phases.get(name) or 0.0)
+            for name in ("crash_triage", "result_gates")
         )
-        value = _ratio(review_seconds, judged) if house.get("source") else None
+        measured_review = house.get("source") or (block.get("finalization") or {}).get("source")
+        value = _ratio(review_seconds, judged) if measured_review else None
         if value is not None:
             review.append(value)
         ttf = block.get("time_to_first") or {}
@@ -3625,10 +3628,17 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
         confirmed_total = (
             _as_int(c.get("unique_finding_clusters")) + _as_int(c.get("unique_crash_clusters"))
         )
-        per_seat_hour = _ratio(
-            confirmed_total, (c.get("worker_wall_median") or 0) / 3600.0,
+        # Yield is pooled across every completed replicate, so charge it the
+        # matching total seat capacity. Dividing a pooled numerator by one
+        # replicate's median made the displayed rate grow with replicate count.
+        worker_wall = c.get("worker_wall_total")
+        if worker_wall is None:
+            worker_wall = c.get("worker_wall_median")  # old aggregate reports
+        per_seat_hour = _ratio(confirmed_total, (worker_wall or 0) / 3600.0)
+        per_dollar = (
+            None if c.get("cost_estimated")
+            else _ratio(c.get("cost_usd_total"), confirmed_total)
         )
-        per_dollar = _ratio(c.get("cost_usd_total"), confirmed_total)
         lines.append(
             "| {cond} | {occ} | {blocked} | {review} | {filed} | {confirmed} "
             "| {admitted} | {exec_fail} | {dup} | {seat} | {dollar} |".format(
@@ -4157,6 +4167,10 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 # `_fmt_hours` gives an unparseable value, never as "0.00h".
                 "worker_wall_median": (
                     _median([float(x) for x in worker_walls])
+                    if worker_walls else None
+                ),
+                "worker_wall_total": (
+                    sum(float(x) for x in worker_walls)
                     if worker_walls else None
                 ),
                 **_efficiency_summary(done),

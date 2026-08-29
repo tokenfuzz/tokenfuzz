@@ -614,11 +614,15 @@ def _refuse_changed_delta(
             f"{path} is unreadable; cannot confirm the delta scope: {exc}"
         ) from exc
     recorded = previous.get("delta") if isinstance(previous, dict) else None
-    recorded_base = (
-        str(recorded.get("base_rev") or "") if isinstance(recorded, dict) else ""
-    )
-    requested_base = delta.base_rev if delta is not None else ""
-    if recorded_base == requested_base:
+    recorded_scope = (
+        str(recorded.get("base_rev") or ""),
+        str(recorded.get("head_rev") or ""),
+        tuple(str(item) for item in (recorded.get("changed_files") or [])),
+    ) if isinstance(recorded, dict) else ("", "", ())
+    requested_scope = (
+        delta.base_rev, delta.head_rev, tuple(delta.files)
+    ) if delta is not None else ("", "", ())
+    if recorded_scope == requested_scope:
         return
 
     def describe(base: str, since: str) -> str:
@@ -628,10 +632,13 @@ def _refuse_changed_delta(
         str(recorded.get("since") or "") if isinstance(recorded, dict) else ""
     )
     raise ValueError(
-        "this results tree was started with "
-        f"{describe(recorded_base, recorded_since)} and cannot resume with "
-        f"{describe(requested_base, delta.since if delta else '')}; pass "
-        "the same --since, or --experiment <name> for a separate tree"
+        "this results tree's delta scope changed: it was started with "
+        f"{describe(recorded_scope[0], recorded_since)} at "
+        f"{recorded_scope[1][:12] or '<no head>'} and cannot resume with "
+        f"{describe(requested_scope[0], delta.since if delta else '')} at "
+        f"{requested_scope[1][:12] or '<no head>'}; restore the recorded "
+        "checkout and pass the same --since, or use --experiment <name> for "
+        "a separate tree"
     )
 
 
@@ -1821,21 +1828,6 @@ def _log_phase_spans(
         )
 
 
-def _result_gates_background() -> bool:
-    """Whether the find gate and cluster expansion run beside the next cohort.
-
-    Off by default: the gates run at the barrier exactly as before. On, they
-    are launched at the end of one iteration and joined at the start of the
-    next, so the wall the pool used to sit idle at the barrier is spent on
-    discovery. The lag is at most one iteration; crash triage stays serial in
-    front so a crash-productive iteration still reads productive immediately,
-    and only a finding-only iteration's productivity shifts by one.
-    """
-    return os.environ.get("RESULT_GATES_BACKGROUND", "").strip().lower() in (
-        "1", "true", "yes",
-    )
-
-
 def _result_gate_pass(
     runtime: Runtime, *, deadline: float | None, detail: list[str] | None = None,
 ) -> tuple[dict, dict]:
@@ -1843,8 +1835,7 @@ def _result_gate_pass(
 
     The two touch disjoint trees — findings/ against crashes/ plus the
     flock-serialized work queue — so overlapping them takes the shorter off
-    the wall. This is the unit the background mode defers; on the serial path
-    it is the body of the result_gates phase.
+    the wall. It is the body of the result_gates phase, run as a single serial pass.
     """
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         expansion = pool.submit(
@@ -2210,6 +2201,27 @@ def should_skip_launch(
     return prompt.fuzz_leads_empty(runtime.results)
 
 
+def delta_queue_exhausted(
+    runtime: Runtime, context: prompt.PromptContext,
+) -> bool:
+    """Whether a delta has no scoped work left for any agent.
+
+    A normal audit keeps agent 1 as an unconditional discovery slot when the
+    queue is dry. Delta mode cannot: that session has no card to constrain it
+    and would turn an empty ``REV..HEAD`` into a whole-tree audit recorded as a
+    delta. Ask every slot through the ordinary work-source predicate without
+    the primary exception; unreadable state still falls open there.
+    """
+    if getattr(runtime, "delta", None) is None:
+        return False
+    return all(
+        should_skip_launch(
+            runtime, context, agent, primary_always_launches=False,
+        )
+        for agent in range(1, runtime.num_agents + 1)
+    )
+
+
 def _s6_peers_configured(runtime: Runtime) -> bool:
     return bool(getattr(getattr(runtime, "config", None), "s6_peers", []))
 
@@ -2435,12 +2447,6 @@ class BackendState:
     transient_streak: int = 0
     started_at: float = 0.0
     stopped: bool = False
-    # Background result-gate pass (RESULT_GATES_BACKGROUND): the find gate and
-    # cluster expansion launched at the end of one iteration and joined at the
-    # start of the next, so they run beside the next cohort instead of blocking
-    # the barrier. None unless the mode is on and a pass is in flight.
-    pending_gate: concurrent.futures.Future | None = None
-    gate_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
 
 def _max_dry_sessions() -> int:
@@ -2738,147 +2744,19 @@ def _productive_wall_deadline(state: BackendState) -> float | None:
     return state.started_at + budget + state.paused_seconds
 
 
-def _deferred_result_gate(runtime: Runtime) -> tuple[dict, dict, float]:
-    """Run the gate on the executor thread, timing its own compute.
-
-    The compute figure is returned rather than logged here so the row is
-    written at the barrier (single-threaded), where it can be split into the
-    part that overlapped the cohort and the part that blocked the join.
-    """
-    started = time.monotonic()
-    finding_counts, cluster_counts = _result_gate_pass(runtime, deadline=None)
-    return finding_counts, cluster_counts, time.monotonic() - started
-
-
-def _join_pending_gate(state: BackendState, *, records: list[dict] | None = None) -> None:
-    """Block on the previous iteration's background gate, if one is in flight.
-
-    Time spent here is real barrier time — the gate did not finish during the
-    cohort — so it is recorded as a blocked ``result_gates`` phase. A gate that
-    already finished joins instantly and blocks nothing.
-    """
-    future = state.pending_gate
-    if future is None:
-        return
-    state.pending_gate = None
-    started = time.monotonic()
-    try:
-        finding_counts, cluster_counts, compute = future.result()
-    except Exception as exc:  # noqa: BLE001 - a gate failure must not kill the run
-        index_log(state.runtime, f"WARN: deferred result gate failed: {exc}")
-        return
-    waited = time.monotonic() - started
-    if records is not None:
-        # The gate ran `compute` seconds total: the part that overlapped the
-        # cohort cost the wall nothing at the barrier (blocked=False), and the
-        # part still running when the barrier arrived is the wait (blocked=True).
-        # They sum to `compute` so housekeeping_total carries the real gate cost
-        # while blocked_seconds counts only barrier time.
-        blocked = round(min(waited, compute), 3)
-        overlapped = round(max(0.0, compute - blocked), 3)
-        if overlapped > 0.001:
-            records.append({"phase": "result_gates", "seconds": overlapped,
-                            "blocked": False})
-        records.append({"phase": "result_gates", "seconds": blocked,
-                        "blocked": True})
-    index_log(
-        state.runtime,
-        "Housekeeping (deferred gate): "
-        f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
-        f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']}",
-    )
-
-
-def _post_iteration_background(state: BackendState) -> None:
-    """Barrier housekeeping with the result gates deferred to the next cohort.
-
-    Everything that mutates findings/ stays serial here — crash triage, index
-    render, orphan enforcement, corpus promotion — and only the find gate and
-    cluster expansion are launched to run alone while the next cohort works.
-    The previous iteration's gate is joined first so a gate never overlaps
-    another gate, and its admits are what this iteration's indexes render.
-    """
-    runtime = state.runtime
-    deadline = _productive_wall_deadline(state)
-    spans: list[str] = []
-    records: list[dict] = []
-    try:
-        _join_pending_gate(state, records=records)
-        with _phase_span(spans, "crash_triage", records=records):
-            crash_counts = triage.triage_crash_dirs(
-                runtime.results, runtime.target_root, runtime.target_slug,
-                runtime.config.attacker_controls, workers=runtime.num_agents,
-                findings_only=runtime.config.sanitizers_explicitly_disabled,
-                deadline=deadline, target_root_is_product=True,
-            )
-        if deadline is not None and time.monotonic() >= deadline:
-            # No budget to launch a gate that could not finish; join it now
-            # instead so the wall that pays for it is this one.
-            index_log(runtime, "Housekeeping: productive wall reached; running gates inline")
-            with _phase_span(spans, "result_gates", records=records):
-                _result_gate_pass(runtime, deadline=deadline)
-            return
-        with _phase_span(spans, "indexes", records=records):
-            maintain_local_indexes(runtime)
-            maintain_aggregate_indexes(runtime)
-            try:
-                triage.record_artifact_events(runtime.results)
-            except Exception as exc:  # noqa: BLE001 - telemetry is never worth a gate
-                print(
-                    f"WARN: artifact event stamps unavailable ({exc}); "
-                    "timeline may be incomplete", file=sys.stderr,
-                )
-        with _phase_span(spans, "orphan_enforce", records=records):
-            enforced = enforce_orphan_testcases(runtime, deadline=deadline)
-        with _phase_span(spans, "corpus_promote", records=records):
-            promoted = promote_corpus(runtime)
-        if state.gate_executor is None:
-            state.gate_executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="result-gate",
-            )
-        state.pending_gate = state.gate_executor.submit(_deferred_result_gate, runtime)
-        index_log(
-            runtime,
-            f"Housekeeping: crashes promoted={crash_counts['promoted']} "
-            f"rejected={crash_counts['rejected']} pending={crash_counts['pending']} "
-            f"demoted={crash_counts['demoted']} orphans_enforced={enforced} "
-            f"corpus_promoted={promoted}; result gates deferred to next cohort",
-        )
-    finally:
-        _log_phase_spans(runtime, spans, records=records, iteration=state.iteration)
-
-
 def _run_post_iteration(state: BackendState) -> None:
     """Run housekeeping within the audit wall and record its cost."""
     started = time.monotonic()
     try:
-        if _result_gates_background():
-            _post_iteration_background(state)
-        else:
-            post_iteration(
-                state.runtime, deadline=_productive_wall_deadline(state),
-                iteration=state.iteration,
-            )
+        post_iteration(
+            state.runtime, deadline=_productive_wall_deadline(state),
+            iteration=state.iteration,
+        )
     finally:
         state.housekeeping_seconds += max(0.0, time.monotonic() - started)
         (state.runtime.logs / ".housekeeping_secs").write_text(
             f"{state.housekeeping_seconds:.6f}\n", encoding="utf-8"
         )
-
-
-def drain_pending_gate(state: BackendState) -> None:
-    """Finish any deferred gate and release its executor at run end.
-
-    Called once after the iteration loop so the last iteration's gate reaches
-    a recorded disposition before finalization freezes the artifact set.
-    """
-    if getattr(state, "pending_gate", None) is not None:
-        _join_pending_gate(state)
-    executor = getattr(state, "gate_executor", None)
-    if executor is not None:
-        executor.shutdown(wait=True)
-        state.gate_executor = None
-
 
 def _refill_outcome(result: AgentResult) -> str:
     """Classify a finished session by how its slot may be reused.
@@ -3160,6 +3038,15 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
             )
         state.stopped = True
         return "stalled", []
+    if delta_queue_exhausted(runtime, context):
+        index_log(
+            runtime,
+            "DELTA_EXHAUSTED: no scoped card, active hypothesis, handoff, or "
+            "fuzz lead remains; stopping instead of opening a whole-tree "
+            "primary discovery slot",
+        )
+        state.stopped = True
+        return "stalled", []
     if _productive_wall_exhausted(state):
         return "budget", []
     assign_build_configs(runtime, context, state.iteration)
@@ -3287,43 +3174,38 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         validate_model(runtime)
         preflight_build(runtime)
         state = initialize_backend(runtime, args, guide, started_at=time.monotonic())
-        # drain_pending_gate on every exit: a deferred result gate must reach a
-        # recorded disposition before finalization, and its executor released.
-        try:
-            while args.max_iterations == 0 or state.iteration < args.max_iterations:
-                status, results = run_iteration(state)
-                if status in ("budget", "stalled"):
-                    break
-                if _productive_wall_exhausted(state):
-                    break
-                if status == "rejected":
-                    # No recovery: the provider refused the request itself, so a
-                    # pause buys nothing and would be subtracted from the wall as
-                    # if the provider had withheld capacity it was going to return.
+        while args.max_iterations == 0 or state.iteration < args.max_iterations:
+            status, results = run_iteration(state)
+            if status in ("budget", "stalled"):
+                break
+            if _productive_wall_exhausted(state):
+                break
+            if status == "rejected":
+                # No recovery: the provider refused the request itself, so a
+                # pause buys nothing and would be subtracted from the wall as
+                # if the provider had withheld capacity it was going to return.
+                (runtime.logs / ".backend-unavailable").touch()
+                (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                index_log(runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
+                return 2
+            if status == "capacity":
+                can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
+                if not can_retry or not _recover_capacity(state, results):
                     (runtime.logs / ".backend-unavailable").touch()
                     (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                    index_log(runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
+                    index_log(runtime, "BACKEND_UNAVAILABLE: provider did not recover within the pause budget")
                     return 2
-                if status == "capacity":
-                    can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
-                    if not can_retry or not _recover_capacity(state, results):
-                        (runtime.logs / ".backend-unavailable").touch()
-                        (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                        index_log(runtime, "BACKEND_UNAVAILABLE: provider did not recover within the pause budget")
-                        return 2
-                if status == "transient":
-                    can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
-                    if not can_retry or not _recover_transient(state):
-                        (runtime.logs / ".backend-unavailable").touch()
-                        (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                        index_log(runtime, "BACKEND_UNAVAILABLE: transient provider failures did not clear")
-                        return 2
-                cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
-                if cooldown and (args.max_iterations == 0 or state.iteration < args.max_iterations):
-                    time.sleep(cooldown)
-            return 0
-        finally:
-            drain_pending_gate(state)
+            if status == "transient":
+                can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
+                if not can_retry or not _recover_transient(state):
+                    (runtime.logs / ".backend-unavailable").touch()
+                    (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                    index_log(runtime, "BACKEND_UNAVAILABLE: transient provider failures did not clear")
+                    return 2
+            cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
+            if cooldown and (args.max_iterations == 0 or state.iteration < args.max_iterations):
+                time.sleep(cooldown)
+        return 0
 
 
 def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
@@ -3401,8 +3283,6 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
             cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
             if cooldown and any(not state.stopped for state in states):
                 time.sleep(cooldown)
-        for state in states:
-            drain_pending_gate(state)
         return 2 if failures == len(states) else 0
 
 

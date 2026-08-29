@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -185,6 +186,37 @@ _UBSAN_FATAL_RE = re.compile(
     _FATAL_ERROR_LINE % "UndefinedBehaviorSanitizer", re.MULTILINE
 )
 _TSAN_FATAL_RE = re.compile(_FATAL_ERROR_LINE % "ThreadSanitizer", re.MULTILINE)
+
+
+def filing_time(directory: Path) -> float | None:
+    """The artifact's immutable filing clock, with a legacy filesystem fallback.
+
+    Crash evidence is copied with preserved source mtimes, and the directory
+    mtime moves whenever triage adds a receipt. New bundles therefore carry a
+    write-once clock; exported bundles retain it under ``.audit``. Historical
+    bundles fall back to the earliest clock inside the directory.
+    """
+    for created_at in (
+        directory / ".crash-created-at",
+        directory / ".audit" / ".crash-created-at",
+    ):
+        try:
+            return datetime.fromisoformat(
+                created_at.read_text(encoding="utf-8").strip().replace("Z", "+00:00")
+            ).timestamp()
+        except (OSError, ValueError):
+            pass
+    stamps = []
+    try:
+        stamps.append(directory.stat().st_mtime)
+        for child in directory.iterdir():
+            try:
+                stamps.append(child.stat().st_mtime)
+            except OSError:
+                pass
+    except OSError:
+        return None
+    return min(stamps) if stamps else None
 
 
 def _fatal_signal_kind(pattern: "re.Pattern[str]", text: str) -> Optional[str]:
