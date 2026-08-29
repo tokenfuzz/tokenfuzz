@@ -4,163 +4,138 @@
 
 Mostly about where an audit's time and attention go: which lane each agent
 works, how much of the wall the fleet spends investigating rather than waiting,
-and what a run that produced no diagnostic is actually telling the agent to
-fix. The language, identity, detection and scoring sections behind those close
-the gaps that made those answers wrong on particular targets.
+and what a run that produced no diagnostic is telling the agent to fix. The
+language, identity, detection and scoring work behind those closes the gaps
+that made the answers wrong on particular targets.
 
 ### Strategy lanes and the work queue
 
-- **The opening lane is picked by measured yield, not by a table that answers a
-  different question.** `expected_yield_rank` took its order from the
-  reason-to-strategy classification table, which decides which angle claims a
-  file that signals several — not which lane pays. That ranked S3 fourth, so
-  agent 1, the slot that always launches, opened every fresh audit behind three
-  other lanes. Measured over 162 audit trees across 29 targets as productive
-  hypotheses per hypothesis, S3 leads pooled (0.43), leads the pinned
-  per-strategy runs (0.38) and the unpinned ones (0.47), and is the best lane on
-  7 of the 16 targets with three comparable lanes. Only S3 moves: S7 measures
-  0.41 unpinned but 0.12 pinned, and that gap is confounded by agents
-  self-selecting into adversarial input once they already hold a lead, so it
-  waits for a pinned multi-target comparison. Both tables now say which question
-  they answer and point at the other.
-
-- **Ranking scans the promoted corpus once, not once per source file.** Every
-  ranked file re-read every `COVER-*/metadata.md` looking for a seed, so the
-  scan cost files times corpus entries and grew as an audit promoted more.
-  Selection is unchanged; over 2000 lookups on a synthetic corpus it drops from
-  11.2s to 0.1s at 40 entries, and from a projected ~84s to 1.0s at 300.
+- **The opening lane is picked by measured yield.** `expected_yield_rank` read
+  its order from the reason-to-strategy table, which answers a different
+  question — which angle claims a file that signals several — and ranked S3
+  fourth, so agent 1, the slot that always launches, opened every audit behind
+  three other lanes. Measured over 162 audit trees on 29 targets, S3 leads on
+  productive hypotheses per hypothesis whether pooled, pinned or unpinned. Only
+  S3 moves; both tables now say which question they answer.
 
 - **`--strategy S<N>` pins the queue, not just the labels on cards.** The pin
   never reached `bin/rank-work`, so a pinned lane drew the shared mixed queue:
   S2 on angular claimed 24 of 309 cards, and now claims 120 of 120. A lane with
-  its own card source builds from that source alone — S1 from patch cards
-  rather than the ranked window, where the diversity floor labels every unscored
-  source file S1 and its cold prompt never named the S1 playbook; S4 from its
-  own campaign card, with an admission gate that stops reading `nPage`-style
-  handle parameters as byte lengths. An empty card source now stops the run
-  instead of skipping agents for the whole wall, and lanes that can never claim
-  another source's output stop paying to generate it.
+  its own card source builds from that source alone — S1 from patch cards, S4
+  from its own campaign card, behind an admission gate that stops reading
+  `nPage`-style handle parameters as byte lengths. An empty card source stops
+  the run instead of skipping agents for the whole wall.
 
-- **A pin the target cannot host stops before preflight.** Availability is read
-  from the config first, so a findings-only target under S4, or an S6 pin with
-  no `[s6_peers]`, no longer pays for a cold Swift or Cargo build before
-  stopping. OSV returns `[]` for an outage exactly as it does for "no
-  advisories", so an unreachable peer set no longer reads as a finished
-  campaign.
+- **A pin the target cannot host stops before preflight.** A findings-only
+  target under S4, or an S6 pin with no `[s6_peers]`, no longer pays for a cold
+  Swift or Cargo build before stopping. OSV returns `[]` for an outage exactly
+  as it does for "no advisories", so an unreachable peer set no longer reads as
+  a finished campaign.
 
 - **S6 cards carry the peer's real fix, keyed by its advisory id.** Card
-  generation asked the model to distill each peer fix and map it onto a file
-  from a 200-file listing: 46 sequential calls, ~389s of startup, invented
-  mappings, and cards silently dropped when the guess failed. Cards now carry
-  the peer's revision and summary, and the agent maps it across the tree behind
-  a source gate. Keying an advisory on the end of its affected range also merged
-  unrelated bugs — ClusterFuzz bisects distinct ones to the same first-good
-  commit — and dropped 15–58% of a peer's advisories (7 of 12 onto one
-  endpoint). Excerpt fetching now stops at a budget instead of paying peers ×
-  max-per-peer 15-second network reads on every refresh.
+  generation asked the model to map each peer fix onto a file from a 200-file
+  listing: 46 sequential calls, ~389s of startup, and invented mappings. Cards
+  now carry the peer's revision and summary, and the agent maps it behind a
+  source gate. Keying on the end of an affected range also merged unrelated
+  bugs, and excerpt fetching now stops at a budget rather than paying peers ×
+  15-second network reads on every refresh.
 
 - **S8 declares the property it tests.** It filed exception shapes as denial of
   service and ranked ordinary hashers as injectivity surfaces, where a collision
-  is the contract. Ranking is now explicit identity/key generators only, a
-  testcase must declare `PROPERTY:` from a fixed set (`bin/probe --property`
-  for an opaque input), and a real `PROPERTY VIOLATION:` records a `PROPERTY`
-  verdict instead of NO_EXEC — it files no crash bundle, and the finding gates
-  still decide.
+  is the contract. Ranking is explicit identity and key generators only, a
+  testcase must declare `PROPERTY:` from a fixed set, and a real `PROPERTY
+  VIOLATION:` records a `PROPERTY` verdict instead of NO_EXEC.
 
-- **Each strategy angle on a file is its own card.** A file's companions were
-  collapsed onto one card carrying `allowed_strategies`, so clean S5 work closed
-  the card and discarded the still-untried S3, S7 and S8 angles on that file.
-  Splitting them costs no extra source scan or model call.
+- **Each angle on a file is its own card, and a dry conclusion cannot retire a
+  broad one.** Companions collapsed onto a single card, so clean S5 work closed
+  it and discarded the untried S3, S7 and S8 angles; separately, three CLEAN
+  probes retired a whole-file card and left every other function untested. Only
+  `blocked` is terminal on a whole-file card now; other conclusions record dry
+  work that ranking demotes behind fresher cards.
 
-- **A dry conclusion cannot retire a broad whole-file card.** Three CLEAN probes
-  across two hypothesis shapes retired one, leaving every other function on the
-  file untested. Only `blocked` is terminal there; other conclusions record dry
-  work that ranking demotes behind fresher cards, while concrete patch and site
-  cards keep their existing closure rule.
+- **Workers stop repeating each other.** A reoffered card carries every worker's
+  history, so a new owner no longer re-derives the prior finding and re-probes
+  the same location. A cold worker that lost the claim race started unassigned
+  source review and duplicated the owner's work — it ends its session instead.
 
 - **The rank window grows again, and worked lanes stop reporting starved.** Both
-  consumers read raw claim status as fresh work: expansion never grew past
-  `RANK_WORK_LIMIT` files, and `_eligible_strategy_counts` rotated the whole
-  fleet onto its `["S1"]` fallback while the queue was still offering those
-  agents their own cards. Both now ask the claimer for an unworked card.
-
-- **Workers stop repeating each other.** A card resumed by a different worker
-  showed only that worker's rows, so the new owner re-derived the prior finding
-  and re-probed the same location — a reoffered card now carries every worker's
-  history. A cold worker that lost the claim race started unassigned source
-  review and duplicated the card owner's work, every iteration for agent 1; it
-  ends its session instead. And an ENV-BLOCKED hypothesis proves only that its
-  own card cannot execute, not that a source-review angle on the same
-  compilation unit is dead.
+  consumers read raw claim status as fresh work, so expansion never grew past
+  `RANK_WORK_LIMIT` and the fleet rotated onto its `["S1"]` fallback while the
+  queue was still offering those agents cards; both ask the claimer for an
+  unworked card now. Ranking also scans the promoted corpus once per pass
+  instead of once per file: 2000 lookups drop from 11.2s to 0.1s at 40 corpus
+  entries.
 
 ### Agent time and housekeeping
 
 - **A finished agent slot no longer idles out the rest of the iteration.**
   Refills stopped when the last initial session ended, so a measured 5h cell
-  left two of three slots idle for the final 90 minutes of an iteration while a
-  peer held the barrier open anyway — one of them holding a live
-  NEEDS_TESTCASE lead. Each slot now takes one overtime session, and only
-  beside a cohort-era peer, so a cohort that drains early cannot grow an extra
-  session per slot. The finding gate and cluster expansion also ran back to back
-  with no agent running, for 13-29% of the wall; they touch disjoint trees and
-  now share one span, each keeping its own reported duration.
+  left two of three slots idle for 90 minutes while a peer held the barrier
+  open. Each slot now takes one overtime session, and only beside a cohort-era
+  peer. The finding gate and cluster expansion also ran back to back with no
+  agent running, for 13–29% of the wall; they touch disjoint trees and now share
+  one span.
 
 - **The orphan-testcase budget is spent across the fleet, not on agent 1.**
-  Housekeeping probes testcases an agent wrote but never ran, up to three an
-  iteration — and it drained agent 1's queue before reaching agent 2. On three
-  measured 5h cells 17 of 18, 5 of 6 and 3 of 5 enforcements went to agent 1, so
-  the other agents' unexecuted testcases were never probed and their next
-  session never saw the results that name them. The budget is taken round-robin
-  now, and a spent budget or wall returns before scanning any scratch tree.
+  Housekeeping probes up to three testcases an agent wrote but never ran, and it
+  drained agent 1's queue first: on three measured 5h cells, 17 of 18, 5 of 6
+  and 3 of 5 enforcements went to agent 1. The budget is taken round-robin now.
 
 ### Multi-language execution
 
-- **A probe cannot report CLEAN against code that was never audited.**
-  Preflight ran the interpreter's `--version`, which proves a runtime starts,
-  not that a testcase reaches the target — plain `perl` resolved a module from
-  the system library instead of the synced checkout. Each language now carries
-  a canary asserting the runner executed in `TARGET_ROOT`, searched imports
-  inside it, and was counted; `setup-target --build`, `bin/audit` and
-  `bin/benchmark` hard-fail on an unreachable runner (13 pass, 3 skip across 16
-  language targets).
+- **A probe cannot report CLEAN against code that was never audited.** Preflight
+  ran the interpreter's `--version`, which proves a runtime starts, not that a
+  testcase reaches the target — plain `perl` resolved a module from the system
+  library instead of the synced checkout. Each language now carries a canary
+  asserting the runner executed in `TARGET_ROOT`, searched imports inside it,
+  and was counted, and an unreachable runner hard-fails setup, audits and
+  benchmark cells (13 pass, 3 skip across 16 language targets).
 
 - **Go, Ruby, Perl and R load the audited checkout.** Testcases live under
   `output/`, so a configured runner ran outside the audited module.
-  `[runner].bin` and a compiled Go `HARNESS` now run with `TARGET_ROOT` as
-  their cwd, `PERL5LIB` and `RUBYLIB` point at the checkout, and an R package
-  installs into `.audit/r-library` so its compiled component is built.
+  `[runner].bin` and a compiled Go `HARNESS` now run with `TARGET_ROOT` as their
+  cwd, `PERL5LIB` and `RUBYLIB` point at the checkout, and an R package installs
+  into `.audit/r-library`.
+
+- **A Go target's bootstrap primes the build cache the runner uses.** Go ships
+  no precompiled standard library, so on a cold host the first `go run` — the
+  runner canary itself — compiled std inside the 15-second per-run deadline and
+  the route read as unreachable. `go build std` now runs first; the -race build
+  caches separately and never covered it, and because `-race` needs cgo, a host
+  with no C compiler falls back to the plain release build rather than failing
+  setup outright.
 
 - **Rust testcases build against the audited crate.** A library-only crate has
   no `cargo run` route, and a raw-rustc `.rs` testcase could not import the
   target at all. A direct `.rs` testcase or `HARNESS: <name>.rs` driver now
   builds as a detached Cargo package path-depending on the crate, in release
-  mode, carrying only the dev-dependencies it names; `src/bin/<name>/main.rs`
-  counts as a binary target.
+  mode, carrying only the dev-dependencies it names.
 
 - **Swift builds its sanitized product once, in preflight.** `swift --version`
   passed while the package did not build, and every testcase then re-entered
   SwiftPM planning inside its 15-second budget with all sanitizers overwriting
   one product. Each enabled sanitizer gets `.audit/swift-build-<san>`, and the
-  product name comes from `[runner].args` rather than the slug, which never
-  matches under a nested slug.
+  product name comes from `[runner].args` rather than the slug.
 
 - **macOS keeps the launcher's PATH order.** `path_helper` runs from
   `/etc/zprofile` in a login shell and could move `/usr/bin` ahead of the
   configured Java or Kotlin toolchain. The login shim restores launcher order
   and keeps genuinely new `/etc/paths.d` entries at the tail.
 
+- **A cached harness binary cannot outlive its target revision.** The cache
+  identity carries `TARGET_REV`, so a harness under `results/` no longer
+  survives the checkout moving underneath it and judges the previous revision.
+
 ### Probe and runner verdicts
 
 - **A timeout is its own outcome, never a clean run.** `run-sanitizer-multi`
   collapsed a timed-out run into "may not have executed", so a target that
-  consumed its wall looked like one that never ran. It now reports
-  `verdict=TIMEOUT` and exits 124 — reserved by `lib/timeout.py`, and not
-  configurable as a runner success — and any timeout makes a mixed confirmation
-  inconclusive. `bin/probe` classifies that 124 ahead of the agent's own
-  markers, so an S8 oracle that printed its property marker and then hung is no
-  longer credited with a counterexample, and a timed-out runner with clean
-  output is no longer recorded CLEAN against the card-discard floor. A concrete
-  sanitizer diagnostic still wins: a sibling deadline cannot retract it.
+  consumed its wall looked like one that never ran. It reports `verdict=TIMEOUT`
+  and exits 124, reserved by `lib/timeout.py` and not configurable as a runner
+  success, and `bin/probe` classifies that 124 ahead of the agent's own markers
+  — an S8 oracle that printed its property marker and then hung is no longer
+  credited with a counterexample. A concrete sanitizer diagnostic still wins: a
+  sibling deadline cannot retract it.
 
 - **A rejected input is not a broken harness.** A parser CLI that correctly
   rejects malformed input exits nonzero, and every such probe was recorded
@@ -168,22 +143,14 @@ the gaps that made those answers wrong on particular targets.
   completed invocation, bounded to 0–123 so a timeout, a signal, or a sanitizer
   diagnostic can never be declared success.
 
-- **`NO_EXEC` stopped meaning three different things.** It was recorded for a
-  run that never started, a run the target rejected, and a run the sanitizer
-  budget refused to start — and its advice sends the agent to repair the
-  harness, which is the wrong repair for two of the three. Over three measured
-  5h cells 133 of 150 `NO_EXEC` rows (oss: 49 of 49) had in fact run:
-  `run-sanitizer-multi` and `bin/scratch-status` already called that
-  `EXEC_FAIL`, and `bin/probe` and orphan enforcement now share the same rule.
-  The split claims only that the command returned — the execution rate counts an
-  inconclusive repetition, which is printed for a rejected input and a
-  non-executable binary alike — so the hint sends the agent to read the output
-  instead of naming a repair for it. A run the per-iteration budget refused now
-  carries its own diagnosis, and only when it accounts for every run in the
-  scope; one refused run beside genuine failures keeps the setup repair and says
-  how much the budget covers. No gate moves: the card-discard floor counts CLEAN
-  only, and across 1631 saved sanitizer outputs no CLEAN or CRASH
-  classification changes.
+- **`NO_EXEC` stopped meaning three different things.** It covered a run that
+  never started, a run the target rejected, and a run the sanitizer budget
+  refused — and its advice sends the agent to repair the harness, the wrong
+  repair for two of the three. Over three measured 5h cells, 133 of 150
+  `NO_EXEC` rows had in fact run. `bin/probe` and orphan enforcement now use the
+  `EXEC_FAIL` split the runners already used, a refused run carries its own
+  diagnosis, and the hint sends the agent to read the output. No gate moves:
+  across 1631 saved sanitizer outputs, no CLEAN or CRASH classification changes.
 
 - **A trusted execution marker starts on its own line.** A runner whose output
   ended without a newline had `EXECUTION VERIFIED` concatenated onto it, and
@@ -191,54 +158,42 @@ the gaps that made those answers wrong on particular targets.
   `EXECUTION_RATE: 0/1` and repeated attempts marked the card
   environment-blocked.
 
-- **A cached harness binary cannot outlive its target revision.** The cache
-  identity now carries `TARGET_REV`, so a harness under `results/` no longer
-  survives the checkout moving underneath it and judges the previous revision.
-
 ### Crash and finding identity
 
 - **One report supplies the whole crash signature.** A confirmation transcript
   concatenates every repetition, so attribution read the access line from the
-  first report and the crash site from the last — a fault pair no run produced
-  — and a report cut short at the deadline paired its class with the next run's
-  stack. Primitive, access, crash site, signature and the replay comparison now
-  bind to the first complete diagnostic.
+  first report and the crash site from the last — a fault pair no run produced.
+  Primitive, access, crash site, signature and the replay comparison now bind to
+  the first complete diagnostic.
 
 - **Inline expansion stops splitting and merging clusters.** ASan expands an
   inlined instruction into a frame per name while an offline `atos` pass over a
   `-g1` binary prints only the outermost, so requiring frame #0 to match split
-  one crash by symbolizer. Clustering now intersects the ordered leading inline
+  one crash by symbolizer. Clustering intersects the ordered leading inline
   group, and tolerant tail matching requires the same `top_func` so two faults
-  behind a shared dispatcher stay apart. Darwin symbols also keep their text:
-  the symbolizer stripped every parenthesised span from an `atos` answer,
-  deleting C++ parameter lists and `(anonymous namespace)` markers that the
-  shared normalizer removes structurally later anyway.
+  behind a shared dispatcher stay apart. The symbolizer also stopped stripping
+  parenthesised spans from an `atos` answer, which deleted C++ parameter lists.
 
 - **A report opens with one bare `Location:` line.** Finding clustering keys on
   it, but the prose contract never asked for one and the two parsers carried
-  separate hand-maintained extension lists — Kotlin, R, uppercase extensions
-  and qualified method names degraded to duplicate-prone, line-less keys. Both
-  now read `languages.source_reference_ext_pattern()`, match case-insensitively,
-  and span `::`, `.` and `#` in a function fragment.
+  separate extension lists — Kotlin, R, uppercase extensions and qualified
+  method names degraded to duplicate-prone, line-less keys. Both read
+  `languages.source_reference_ext_pattern()` now and match case-insensitively.
 
 ### Triage precision and cost
 
 - **A dangerous API alone is not a security finding.** Seven shapes with no
-  crossed boundary were being accepted: a path escape where the same input
-  picks base and child, execution of a file the attacker cannot place,
-  gadget-free deserialization or reflection, consumer-free prototype mutation,
-  a managed exception that only fails the current call, an escape needing a
-  symlink a trusted party placed, and control bytes on stdout. Each now has an
-  explicit reject bucket with a named escape, and the emit contract mirrors
-  them so agents do not file what the gate will drop. Control also comes from
-  the traced entrypoint rather than from a name: `hook`, `plugin` and an
-  authored `Boundary` label were read as evidence of trust, and a native fault
-  reached through caller input was classified as a managed exception.
+  crossed boundary were being accepted, among them a path escape where the same
+  input picks base and child, gadget-free deserialization, and a managed
+  exception that only fails the current call. Each has an explicit reject bucket
+  with a named escape, and the emit contract mirrors them. Control also comes
+  from the traced entrypoint rather than a name: `hook`, `plugin` and an
+  authored `Boundary` label were read as evidence of trust.
 
 - **Fixed fallback setup is application setup, not an attacker call sequence.**
-  Contract-obeying resource shaping before input consumption — filling a
-  bounded cache, pool, or descriptor allowance — read as attacker-required, so
-  a byte-decided fault reached through it landed outside a bytes threat model.
+  Contract-obeying resource shaping before input consumption — filling a bounded
+  cache, pool, or descriptor allowance — read as attacker-required, so a
+  byte-decided fault reached through it landed outside a bytes threat model.
   Shaping the attacker must control or repeat per attempt is still a real
   trigger component.
 
@@ -246,27 +201,21 @@ the gaps that made those answers wrong on particular targets.
   any directory holding a report, and clusters took severity from the report, so
   a retained not-reportable defect kept a stale High and could outrank a
   reportable duplicate. Status now comes from the content-addressed validation
-  receipt, and no-credit rows rank below every credited member. The same
-  confusion reached the agent's own view, where any FIND/CRASH status on a scope
-  reported "an accepted artifact exists" and a run whose every filing triage had
-  rejected still read as productive; it is called recorded now, and an
-  artifact-scoped triage rejection is surfaced with its reason — which lives
-  nowhere else the agent reads.
+  receipt, no-credit rows rank below every credited member, and the agent's own
+  view calls a filing recorded and surfaces a triage rejection with its reason.
 
 - **The review gates cost a bounded share of the wall.** One trigger reviewer
   spent ~1339s of an audit wall on a single finding; that gate now states a
-  12 tool-call budget, refuses subagents, and stops at a hard cap above it so
-  the verdict turn survives, while the finding-quality gate stays unbounded as a
-  full second opinion. Cluster expansion and the crash trigger rounds spend one
-  session per group instead of one per artifact, and an id a batch omitted stays
-  pending rather than publishing on an incomplete vote —
-  `_batch_finding_trigger_votes` also ignored `LLM_DECIDE_DISABLE`, filing a
-  pending receipt for a review that never ran.
+  12 tool-call budget, refuses subagents, and stops at a hard cap above it,
+  while the finding-quality gate stays unbounded as a full second opinion.
+  Cluster expansion and the crash trigger rounds spend one session per group
+  instead of one per artifact, and an id a batch omitted stays pending rather
+  than publishing on an incomplete vote.
 
-- **A bumped decision version reaches an already-adjudicated crash.** A receipt
-  binds its own report and gate files, so it cannot notice
-  `TRIGGER_GATE_DECISION_VERSION` moving under an unchanged vote — and the
-  crash lane short-circuited on the receipt alone.
+- **An adjudicated crash notices a bumped decision version.** A receipt binds
+  its own report and gate files, so it could not see
+  `TRIGGER_GATE_DECISION_VERSION` move under an unchanged vote — and the crash
+  lane short-circuited on the receipt alone.
 
 - **Live triage uses the identities finalization uses.** `post_iteration` ran
   both gates without the product-root identity, so a live run could reject a
@@ -278,45 +227,62 @@ the gaps that made those answers wrong on particular targets.
 
 - **Detection picks the product, not whatever sorted first.** A library-only
   CMake build could not say it had no CLI, so the free scan handed `asan_bin` a
-  unit test, fuzzer driver or examples client and the harness drove a library as
-  a byte-input CLI; an installed executable is the product CLI now, while a
-  project declaring no `install()` rule publishes nothing and keeps its scanned
-  route (across 20 built targets: three fake CLIs dropped, two reordered, none
-  added). Sanitizer archives rank by the project's own identity for the same
-  reason — depth-then-alphabetical selection handed one target's harness the C
-  wrapper archive instead of the core library, hiding the API under audit.
+  unit test, fuzzer driver or examples client. An installed executable is the
+  product CLI now, while a project declaring no `install()` rule keeps its
+  scanned route — across 20 built targets, three fake CLIs dropped, two
+  reordered, none added. Sanitizer archives rank by the project's own identity
+  for the same reason.
 
 - **Build freshness reads the configured build system.** A Swift or Cargo
   package shipping an incidental `CMakeLists.txt` reported `build-asan` missing
   and preflight tried to converge a tree the target never uses. Freshness now
   covers a stamped tree this configuration still routes a sanitizer artifact
-  through, so a stray `build-asan` from an earlier native attempt cannot refuse
-  runs and benchmark cells over a tree nothing executes.
+  through, so a stray build directory cannot refuse runs over a tree nothing
+  executes.
 
-- **The C-harness build route repairs and resolves itself.** `link_libs`
-  archive and source entries reached the compiler verbatim while every sibling
-  input was target-root resolved, so a probe or campaign build launched from
-  another cwd failed to link; `Config.resolved_link_libs()` now serves probe,
-  campaign builds, build identities and the model-direct prompt. `setup-target`
-  also merges the detected public headers into a broken `includes` set when they
-  agree with the configured library, instead of only warning and leaving the
-  route unusable.
+- **The C-harness build route repairs and resolves itself.** `link_libs` archive
+  and source entries reached the compiler verbatim while every sibling input was
+  target-root resolved, so a probe or campaign build launched from another cwd
+  failed to link; `Config.resolved_link_libs()` now serves every consumer.
+  `setup-target` also merges detected public headers into a broken `includes`
+  set when they agree with the configured library, instead of only warning.
 
 ### Benchmark scoring
 
 - **A bug's alternate runtime shapes score as one bug.** A missing pointer
-  invalidation reads as use-after-free or double-free depending on order, and
-  an optimizer inlines a Swift READ and WRITE into one wrapper. Manifests may
-  now list `alternate_signatures` as aliases for one bug id; validation rejects
-  an alias that overlaps another bug's key.
+  invalidation reads as use-after-free or double-free depending on order, and an
+  optimizer inlines a Swift READ and WRITE into one wrapper. Manifests may list
+  `alternate_signatures` as aliases for one bug id; validation rejects an alias
+  that overlaps another bug's key.
 
 - **Two answer keys were scoring the wrong thing.** `sample-cpp` named bare
   `handle_table` where the crash-state symbol is `rbundle::handle_table`, so
-  none of its five bugs could ever match; and every sample counted lexical path
+  none of its five bugs could ever match, and every sample counted lexical path
   traversal as a planted bug when the same job file supplies both the root and
-  the child name. Those are precision traps now, alongside gadget-free
-  deserialization and effect-free reflection. All 16 committed manifests
+  the child name. Those are precision traps now. All 16 committed manifests
   validate.
+
+### Test lanes
+
+- **A test constructs the host property it needs.** Two suites sampled the host
+  instead: one waited for a supervisor whose environment the process probe
+  cannot read, and the Go route probed an unbootstrapped module, which passes on
+  a warm developer machine and times out on a fresh CI runner. Both build the
+  condition now.
+
+- **The container lane runs the compiled routes it used to skip.**
+  `--install-container-deps` installed no Go toolchain, so every container run
+  reported green while skipping the Go probe route entirely; the entry command
+  also went through a login shell, whose `/etc/profile` rebuilds PATH and drops
+  what the image itself put on it. Go is installed and verified with the rest,
+  and the image's PATH order is restored ahead of the profile's additions.
+
+- **A container run leaves no bytecode in the checkout.** The tree is
+  bind-mounted, so a run wrote `__pycache__` entries that the next run — a
+  different image, a different Python — read as its own, and a partial write
+  failed a suite with `EOFError` before a single test ran. The container caches
+  bytecode under its own prefix now. The release checklist runs both lanes
+  before notes are written.
 
 ## 1.5.1 - 2026-08-23
 
