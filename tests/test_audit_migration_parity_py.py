@@ -729,7 +729,8 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         and len(overlay_args) >= 4
         and overlay_args[1] == chromium_source
         and overlay_args[2:4] == ("chromium/src", "chromium/src")
-        and overlay_args[-1] == "sandboxed",
+        # agent security then the delta base: no --since means "".
+        and overlay_args[-2:] == ("sandboxed", ""),
         "audit target overlay resolves source and output identity before runtime setup",
     )
 

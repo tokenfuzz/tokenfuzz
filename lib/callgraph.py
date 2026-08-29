@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 
 import languages
@@ -522,6 +523,38 @@ def block_for(results_dir: Path, file: str, target_root: Path | None = None) -> 
         "grounds to discard the card or downgrade a finding."
     )
     return lines
+
+
+def callers_of(results_dir: Path, files: Iterable[str]) -> set[str] | None:
+    """Audited files with a resolved call into any of `files`, or None.
+
+    One hop, inbound only, over the edges the artifact holds — those are the
+    CERTAIN ones `bin/callgraph` kept, so an unresolved receiver never pulls
+    a file into a delta. Each file's neighbour list is capped, so the same
+    edge is also read from the caller's side, where it appears uncapped from
+    the other end. None means there is no graph to ask; a caller reports
+    that and proceeds, because an absent analysis narrows a delta run to the
+    changed files rather than stopping it. The `block_for` contract applies
+    to the answer too: unobserved is not unreachable, so the set only ever
+    adds scope.
+    """
+    data = load(results_dir)
+    if data is None or data.get("skipped"):
+        return None
+    graph = data.get("files") or {}
+    wanted = {
+        rel for rel in (workqueue.normalized_relpath(f) for f in files) if rel
+    }
+    found: set[str] = set()
+    for rel in wanted:
+        for name, count in (graph.get(rel) or {}).get("callers") or []:
+            if count > 0:
+                found.add(workqueue.normalized_relpath(name))
+    for source, entry in graph.items():
+        for name, count in entry.get("callees") or []:
+            if count > 0 and workqueue.normalized_relpath(name) in wanted:
+                found.add(workqueue.normalized_relpath(source))
+    return found - wanted
 
 
 def explain(results_dir: Path, file: str) -> str:

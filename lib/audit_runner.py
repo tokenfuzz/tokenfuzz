@@ -126,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="")
     parser.add_argument("--experiment", default="")
     parser.add_argument("--strategy", choices=STRATEGIES, default="")
+    parser.add_argument(
+        "--since", metavar="REV", default="",
+        help=(
+            "delta mode: audit only the files changed in REV..HEAD, their one-hop callers, and S1 cards for exactly those commits. The results tree records the delta; a resumed run must pass the same REV."
+        ),
+    )
     parser.add_argument("--claude-bin")
     parser.add_argument("--codex-bin")
     parser.add_argument("--gemini-bin")
@@ -242,6 +248,7 @@ class Runtime:
     decision_timeout: int  # operator's explicit ceiling; 0 when they set none
     refill_workers: bool = True
     agent_security: str = llm_invoke.DEFAULT_AGENT_SECURITY
+    delta: workqueue.DeltaScope | None = None
     cluster_expansion_attempted: set[Path] = field(default_factory=set, repr=False)
 
     def prompt_context(self, guide: str) -> prompt.PromptContext:
@@ -320,12 +327,32 @@ def prepare_runtime(
     max_iterations: int, decision_timeout_override: str | None = None,
     refill_workers: bool = True,
     agent_security: str = llm_invoke.DEFAULT_AGENT_SECURITY,
+    since: str = "",
 ) -> Runtime:
     output_root = root / "output" / output_slug
     config = _load_config(root, target_root, output_root, target_slug)
     results = output_root / backend / "results"
     logs = output_root / backend / "logs"
     raw = logs / ".raw"
+    target_rev = target_config.detect_rev(target_root)
+    repo_type = target_config.detect_repo_type(target_root)
+    # Resolved and checked before any run state is written, so a delta
+    # the tree cannot take leaves no half-started run behind it.
+    delta = workqueue.delta_scope(
+        workqueue.Context(root, target_root, target_slug, results, repo_type),
+        since,
+    ) if since else None
+    if delta is not None \
+            and fixed_strategy.upper() in _UNRANKED_LANE_STRATEGIES:
+        # S4 (whole-target fuzz campaign) and S6 (other projects' fixes)
+        # draw their cards from a source that is not this range, so their
+        # queue cannot be the delta. Refuse rather than file a non-delta
+        # queue under the delta's recorded settings.
+        raise ValueError(
+            f"--since cannot be combined with --strategy {fixed_strategy.upper()}: "
+            "its cards do not come from the changed range"
+        )
+    _refuse_changed_delta(results / "state" / "run-config.json", delta)
     for directory in (
         results, logs, raw, results / "crashes", results / "crashes-rejected",
         results / "findings", results / "findings-rejected", results / "state",
@@ -344,12 +371,10 @@ def prepare_runtime(
         fixed_strategy_path.write_text(fixed_strategy + "\n", encoding="utf-8")
     else:
         fixed_strategy_path.unlink(missing_ok=True)
-    target_rev = target_config.detect_rev(target_root)
-    repo_type = target_config.detect_repo_type(target_root)
     target_config.write_session_env(results, str(results), str(target_root), target_slug, target_rev, str(logs))
     _write_run_config(
         results / "state" / "run-config.json", total, browser, shell,
-        backend, model, target_slug, agent_security,
+        backend, model, target_slug, agent_security, delta=delta,
     )
     _log_tour(logs)
     runtime = Runtime(
@@ -358,7 +383,7 @@ def prepare_runtime(
         results, logs, raw, logs / "index.log", logs / "index.jsonl",
         total, browser, shell, roles, fixed_strategy,
         _operator_decision_timeout(decision_timeout_override),
-        refill_workers, agent_security,
+        refill_workers, agent_security, delta,
     )
     _activate_runtime(runtime)
     return runtime
@@ -551,8 +576,68 @@ def validate_model(runtime: Runtime) -> None:
     raise RuntimeError(message)
 
 
+def _delta_record(delta: workqueue.DeltaScope | None) -> dict | None:
+    if delta is None:
+        return None
+    return {
+        "since": delta.since, "base_rev": delta.base_rev,
+        "head_rev": delta.head_rev, "commits": len(delta.commits),
+        "changed_files": list(delta.files),
+    }
+
+
+def _refuse_changed_delta(
+    path: Path, delta: workqueue.DeltaScope | None,
+) -> None:
+    """A results tree keeps the delta scope it was started with.
+
+    Cards, claims, and dry conclusions in the tree were derived under that
+    scope, so a run under another base — or under none — would mix a
+    delta's evidence into a full audit's. Refused the way a benchmark
+    cell refuses an unusable pinned build; `--experiment` names a fresh
+    tree when both scopes are wanted.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return  # a fresh tree has no recorded scope to contradict
+    except OSError as exc:
+        raise ValueError(
+            f"cannot read {path} to confirm the delta scope: {exc}"
+        ) from exc
+    try:
+        previous = json.loads(text)
+    except ValueError as exc:
+        # The write is atomic, so a present file parses or is corrupt;
+        # a corrupt one cannot prove the scope, so it stops the run.
+        raise ValueError(
+            f"{path} is unreadable; cannot confirm the delta scope: {exc}"
+        ) from exc
+    recorded = previous.get("delta") if isinstance(previous, dict) else None
+    recorded_base = (
+        str(recorded.get("base_rev") or "") if isinstance(recorded, dict) else ""
+    )
+    requested_base = delta.base_rev if delta is not None else ""
+    if recorded_base == requested_base:
+        return
+
+    def describe(base: str, since: str) -> str:
+        return f"--since {since} ({base[:12]})" if base else "no --since"
+
+    recorded_since = (
+        str(recorded.get("since") or "") if isinstance(recorded, dict) else ""
+    )
+    raise ValueError(
+        "this results tree was started with "
+        f"{describe(recorded_base, recorded_since)} and cannot resume with "
+        f"{describe(requested_base, delta.since if delta else '')}; pass "
+        "the same --since, or --experiment <name> for a separate tree"
+    )
+
+
 def _write_run_config(
     path, total, browser, shell, backend, model, slug, agent_security,
+    delta: workqueue.DeltaScope | None = None,
 ) -> None:
     payload = {
         "num_agents": total, "browser_agents": browser, "shell_agents": shell,
@@ -560,6 +645,7 @@ def _write_run_config(
         "resolved_effort": llm_invoke.default_effort(backend), "target_slug": slug,
         "agent_security": agent_security,
         "agent_count_overridden": bool(os.environ.get("NUM_AGENTS")),
+        "delta": _delta_record(delta),
     }
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -711,6 +797,9 @@ def _work_card_signature(
             "s6_domain": getattr(config, "s6_domain", ""),
             "s6_peers": getattr(config, "s6_peers", []),
             "fixed_strategy": str(getattr(runtime, "fixed_strategy", "")).upper(),
+            "delta_base": getattr(
+                getattr(runtime, "delta", None), "base_rev", "",
+            ),
             "peer_mining_disabled":
                 os.environ.get("AUDIT_DISABLE_PEER_FIX_CARDS", "") == "1",
         },
@@ -802,6 +891,7 @@ def refresh_work_cards(
     pinned_s1 = pinned_strategy == "S1"
     pinned_s4 = pinned_strategy == "S4"
     pinned_s6 = pinned_strategy == "S6"
+    delta = getattr(runtime, "delta", None)
     patch_generator = runtime.root / "bin" / "patch-cards"
     if pinned_s4:
         # The campaign card has no generator and is not ranked source, so a
@@ -821,10 +911,15 @@ def refresh_work_cards(
     if pinned_strategy and not pinned_s1:
         patch_cards.unlink(missing_ok=True)
     elif patch_generator.is_file():
+        command = [
+            str(patch_generator), "--target-path", str(runtime.target_root),
+            "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
+            "--limit", str(rank_limit), "--output", str(patch_cards), "--quiet",
+        ]
+        if delta is not None:
+            command += ["--since", delta.base_rev]
         completed = subprocess.run(
-            [str(patch_generator), "--target-path", str(runtime.target_root),
-             "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
-             "--limit", str(rank_limit), "--output", str(patch_cards), "--quiet"],
+            command,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
         if completed.returncode:
@@ -843,10 +938,13 @@ def refresh_work_cards(
             index_log(runtime, "WARN: patch-cards is missing; pinned S1 queue cannot be generated")
     peer_cards = runtime.root / "bin" / "peer-fix-cards"
     peer_mining_disabled = os.environ.get("AUDIT_DISABLE_PEER_FIX_CARDS") == "1"
-    if (pinned_strategy and not pinned_s6) or peer_mining_disabled:
+    if (pinned_strategy and not pinned_s6) or peer_mining_disabled \
+            or delta is not None:
         # Peer mining is S6's card source alone; another pinned lane can never
         # claim what it produces, and an operator disable must remove prior
-        # output before rank-work can merge it back into the queue.
+        # output before rank-work can merge it back into the queue. A delta
+        # run emits nothing outside the delta, and peer cards come from
+        # other projects' histories, not this range.
         (runtime.results / "s6-peer-cards.jsonl").unlink(missing_ok=True)
     elif peer_cards.is_file():
         completed = subprocess.run(
@@ -874,7 +972,7 @@ def refresh_work_cards(
         ctx = _queue_context(runtime)
         callgraph.refresh(ctx)
         s1_cards = workqueue.load_patch_cards(
-            patch_cards, rank_limit, ctx=ctx,
+            patch_cards, None if delta is not None else rank_limit, ctx=ctx,
         )
         workqueue.write_cards(
             runtime.results / "work-cards.jsonl",
@@ -902,6 +1000,8 @@ def refresh_work_cards(
         ]
         if pinned_strategy:
             command += ["--strategy", pinned_strategy]
+        if delta is not None:
+            command += ["--since", delta.base_rev]
         completed = subprocess.run(
             command,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
@@ -910,6 +1010,8 @@ def refresh_work_cards(
             (runtime.results / "work-cards.jsonl").unlink(missing_ok=True)
             refresh_ok = False
             index_log(runtime, f"WARN: rank-work refresh failed rc={completed.returncode}; stale cards removed")
+        elif delta is not None:
+            _log_delta_queue(runtime, delta)
     elif not pinned_s6:
         refresh_ok = False
         index_log(runtime, "WARN: rank-work is missing; work-card refresh remains dirty")
@@ -920,6 +1022,32 @@ def refresh_work_cards(
         # decision signature also keeps the source scan to one per refresh.
         housekeeping.mark_clean("work-cards-refresh", signature)
     return True
+
+
+def _log_delta_queue(runtime: Runtime, delta: workqueue.DeltaScope) -> None:
+    """Say once per refresh what the delta bought, including a missing graph.
+
+    Caller expansion falls open by design, so an operator reading only the
+    card count cannot tell a small delta from an absent analysis; the run
+    log says which it was.
+    """
+    cards = workqueue.read_jsonl(runtime.results / "work-cards.jsonl")
+    ranked = {
+        workqueue.normalized_relpath(card.get("file", ""))
+        for card in cards if card.get("kind") == "ranked-source"
+    }
+    graph = callgraph.load(runtime.results)
+    expansion = (
+        f"callers={len(ranked - set(delta.files))}"
+        if graph is not None and not graph.get("skipped")
+        else "no caller expansion (call-neighbourhood graph unavailable)"
+    )
+    index_log(
+        runtime,
+        f"DELTA: since={delta.since} base={delta.base_rev[:12]}"
+        f" head={delta.head_rev[:12]} commits={len(delta.commits)}"
+        f" changed_files={len(delta.files)} {expansion} cards={len(cards)}",
+    )
 
 
 def expand_work_cards_if_exhausted(runtime: Runtime) -> bool:
@@ -933,6 +1061,9 @@ def expand_work_cards_if_exhausted(runtime: Runtime) -> bool:
     this leans toward one extra ranking pass over a silent recall ceiling.
     """
     if str(getattr(runtime, "fixed_strategy", "")).upper() in _UNRANKED_LANE_STRATEGIES:
+        return False
+    if getattr(runtime, "delta", None) is not None:
+        # The window is the delta; there is nothing wider to rank.
         return False
     if hasattr(runtime, "prompt_context") and hasattr(runtime, "num_agents"):
         context = runtime.prompt_context("")
@@ -3351,6 +3482,7 @@ def main(argv: list[str] | None = None) -> int:
                 decision_timeout_override,
                 args.refill_workers,
                 args.agent_security,
+                args.since,
             )
             for backend in backends
         ]

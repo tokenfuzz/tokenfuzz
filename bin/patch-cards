@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
-from workqueue import add_common_args, build_patch_cards, context_from_args, write_cards
+from workqueue import add_common_args, build_patch_cards, context_from_args, delta_scope, write_cards
 
 
 def main(argv: list[str]) -> int:
@@ -33,13 +33,24 @@ def main(argv: list[str]) -> int:
                         "A wider window surfaces fixes buried under sync-bot / "
                         "test churn; the scan is a single git/hg log call so it "
                         "stays cheap.")
+    parser.add_argument("--since", metavar="REV", default="",
+                        help="Delta mode: emit a card per commit in "
+                        "REV..HEAD, all of them inspected, nothing "
+                        "outside the range and no output cap")
     parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/patch-cards.jsonl")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args(argv)
 
     ctx = context_from_args(args)
+    delta = None
+    if args.since:
+        try:
+            delta = delta_scope(ctx, args.since)
+        except ValueError as exc:
+            print(f"patch-cards: {exc}", file=sys.stderr)
+            return 2
     out = Path(args.output).expanduser().resolve() if args.output else ctx.results_dir / "patch-cards.jsonl"
-    cards = build_patch_cards(ctx, args.limit, args.inspect_commits, args.scan_window)
+    cards = build_patch_cards(ctx, args.limit, args.inspect_commits, args.scan_window, delta=delta)
     write_cards(out, cards)
     if not args.quiet:
         for card in cards:

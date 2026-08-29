@@ -31,6 +31,7 @@ import target_config  # noqa: E402
 import triage  # noqa: E402
 import triage_validate  # noqa: E402
 import validation_receipt  # noqa: E402
+import workqueue  # noqa: E402
 
 
 def quality_vote(item_id: str, accept: bool = True) -> dict:
@@ -3718,6 +3719,176 @@ class ValidatorScratchPlacementTests(unittest.TestCase):
         report = self._report(results)
         cwd = self.validator_cwd(report, self.target)
         self.assertEqual(cwd, results / ".validator-cwd")
+
+
+class ContentCarriedTriggerVerdictTests(unittest.TestCase):
+    """Negative route knowledge is keyed by cited source content, not by pin.
+
+    A Reject whose verified anchors still match the tree byte for byte keeps
+    saying what it said at a new revision; a Promote is still re-earned per
+    revision, and a moved anchor sends either back through review.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="triage-delta-pin-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.finding = self.root / "findings" / "FIND-001"
+        self.finding.mkdir(parents=True)
+        self.report = self.finding / "report.md"
+        self.report.write_text(
+            "# State issue\n\nA caller-controlled request crosses an "
+            "authorization boundary.\n",
+            encoding="utf-8",
+        )
+
+    def env(self, **extra: str):
+        values = {
+            "LLM_DECIDE_DISABLE": "1",
+            "TARGET_ROOT": str(self.root),
+            "TARGET_REV": "revision-a",
+        }
+        values.update(extra)
+        return mock.patch.dict(os.environ, values, clear=False)
+
+    def test_a_reject_survives_a_pin_change_while_its_anchors_match(self) -> None:
+        cache = self.finding / ".trigger-gate.json"
+        promote = self.finding / ".trigger-gate-2.json"
+        with self.env():
+            os.environ.pop("TARGET_CONFIG_SHA256", None)
+            # Both votes are cast at revision-a; the pin then moves under them.
+            cache.write_text(json.dumps(trigger_vote(
+                self.report, self.root, "Reject",
+            )), encoding="utf-8")
+            promote.write_text(json.dumps(trigger_vote(
+                self.report, self.root, "Promote",
+            )), encoding="utf-8")
+            self.assertEqual(
+                triage._cached_trigger_vote(self.report, cache), "Reject",
+            )
+            self.assertEqual(
+                triage._cached_trigger_vote(self.report, promote), "Promote",
+            )
+            with self.env(TARGET_REV="revision-b"):
+                # The disproof still reads: the rejection stands at the new pin.
+                self.assertEqual(
+                    triage._cached_trigger_vote(self.report, cache), "Reject",
+                )
+                self.assertEqual(
+                    triage._trigger_vote(
+                        self.report, cache, "codex", "x", self.root,
+                    ),
+                    1,
+                )
+                # A Promote is re-earned per revision even with live anchors.
+                self.assertIsNone(
+                    triage._cached_trigger_vote(self.report, promote),
+                )
+                # No tree to re-read the citation against: no content key.
+                with self.env(TARGET_REV="revision-b"):
+                    os.environ.pop("TARGET_ROOT", None)
+                    self.assertIsNone(
+                        triage._cached_trigger_vote(self.report, cache),
+                    )
+                # A moved anchor sends the Reject back for review.
+                (self.root / "sample.c").write_text(
+                    "int app_parse(void) { return 1; }\n", encoding="utf-8",
+                )
+                self.assertIsNone(
+                    triage._cached_trigger_vote(self.report, cache),
+                )
+
+    def _rejected(self) -> Path:
+        """A dispositive two-vote trigger rejection with recorded route advice."""
+        for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+            payload = trigger_vote(self.report, self.root, "Reject")
+            payload["disproof"] = (
+                "Clause (c). Blocking invariant: sampleproj clears the "
+                "borrowed pointer on every path that set it."
+            )
+            (self.finding / name).write_text(
+                json.dumps(payload), encoding="utf-8",
+            )
+        return triage._reject(
+            self.finding, self.root / "findings-rejected",
+            "trigger-provenance: triggering state not attacker-reachable",
+            category=workqueue.UNREACHABLE_REJECTION_CATEGORY,
+        )
+
+    def routes(self) -> list[dict]:
+        return workqueue.read_jsonl(
+            self.root / "state" / "unreachable-routes.jsonl",
+        )
+
+    def test_reconciliation_keeps_a_rejection_and_its_route_across_a_pin(self) -> None:
+        with self.env():
+            os.environ.pop("TARGET_CONFIG_SHA256", None)
+            destination = self._rejected()
+            self.assertEqual(len(self.routes()), 1)
+            with self.env(TARGET_REV="revision-b"):
+                self.assertEqual(
+                    triage.restore_stale_trigger_rejections(self.root), 0,
+                    "a pin change alone must not requeue a rejection whose "
+                    "disproof still reads",
+                )
+                self.assertTrue(destination.is_dir())
+                self.assertEqual(len(self.routes()), 1)
+                # The receipt-drift rule stayed authoritative: the stale
+                # receipt was rebound to the new revision, not trusted as-is.
+                receipt = validation_receipt.read_current(destination)
+                self.assertIsNotNone(receipt)
+                self.assertEqual(receipt.get("state"), "rejected")
+                # Once an anchored line moves the artifact is requeued and
+                # its advice goes with it.
+                (self.root / "sample.c").write_text(
+                    "int app_parse(void) { return 1; }\n", encoding="utf-8",
+                )
+                self.assertEqual(
+                    triage.restore_stale_trigger_rejections(self.root), 1,
+                )
+                self.assertFalse(destination.is_dir())
+                self.assertEqual(self.routes(), [])
+
+    def test_an_accepted_finding_whose_anchor_moved_is_revalidated(self) -> None:
+        report_text = triage.read_report_bounded(self.report)
+        accept = quality_vote(self.finding.name)["items"][0]
+        (self.finding / ".llm-find-quality.json").write_text(json.dumps(
+            triage._quality_payload(
+                report_text, [accept, accept], 2, 2,
+                report_identity.content_sha1(self.report),
+            )
+        ), encoding="utf-8")
+        with self.env():
+            os.environ.pop("TARGET_CONFIG_SHA256", None)
+            (self.finding / ".trigger-gate.json").write_text(json.dumps(
+                trigger_vote(self.report, self.root, "Promote"),
+            ), encoding="utf-8")
+            self.assertTrue(
+                triage._cached_trigger_resolution(self.finding, self.report),
+            )
+            with self.env(TARGET_REV="revision-b"):
+                (self.root / "sample.c").write_text(
+                    "int app_parse(void) { return 2; }\n", encoding="utf-8",
+                )
+                self.assertFalse(
+                    triage._cached_trigger_resolution(self.finding, self.report),
+                    "a moved anchor may not finalize from cache",
+                )
+                with mock.patch.object(
+                    triage, "_prepare_accepted_finding",
+                    return_value=self.report,
+                ):
+                    self.assertEqual(
+                        triage.validate_one_finding(self.finding, self.root),
+                        "pending",
+                        "the finding goes back through trigger review",
+                    )
+                receipt = json.loads(
+                    (self.finding / "validation.json").read_text(
+                        encoding="utf-8",
+                    ),
+                )
+                self.assertEqual(receipt.get("state"), "pending")
 
 
 if __name__ == "__main__":

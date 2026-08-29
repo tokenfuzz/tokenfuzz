@@ -1999,6 +1999,7 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
         evidence_id = evidence.get("evidence_id") if evidence else None
         if evidence_id != payload.get("evidence_id"):
             return None
+        revision_moved = False
         for key, environment_name in (
             ("target_revision", "TARGET_REV"),
             ("target_config_sha256", "TARGET_CONFIG_SHA256"),
@@ -2008,6 +2009,16 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
                 or os.environ.get(environment_name, ""),
             )
             if str(payload.get(key) or "") != current_scope:
+                # A disproof is keyed by the source it cites, not by the
+                # revision number: a Reject whose verified anchors still match
+                # the pinned tree byte for byte says the same thing at the new
+                # pin, and re-asking it spent a review per rejection on every
+                # pin change — with the retraction of its route advice in
+                # between. A Promote is still re-earned per revision, and the
+                # anchor check below is what carries the Reject or drops it.
+                if vote == "Reject" and key == "target_revision":
+                    revision_moved = True
+                    continue
                 return None
         if vote in {"Promote", "Reject"}:
             anchors = payload.get("anchors")
@@ -2025,6 +2036,11 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
                 )
                 if verified != anchors:
                     return None
+            elif revision_moved:
+                # Carrying a Reject across revisions is only sound when the
+                # cited lines were just re-read; with no tree to read there
+                # is no content key, so the verdict goes back for review.
+                return None
         return vote
     # Legacy verdicts predate controls binding: reuse only their non-negative
     # decisions (fail-open keep), never a Reject that could hide a real issue.

@@ -97,6 +97,7 @@ Common flags:
 | --- | --- |
 | `--model <name>` | Override the backend's configured model. Required for `oss`. |
 | `--strategy S1|S2|S3|S4|S5|S6|S7|S8` | Pin one investigation strategy and suspend rotation. |
+| `--since <rev>` | Delta mode: audit only what changed in `<rev>..HEAD` — the changed files, their one-hop callers from the call-neighbourhood graph, and S1 cards for exactly those commits. The results tree records the delta, so a resumed run must pass the same `--since` (or use `--experiment` for a separate tree). A revision the checkout cannot resolve — a shallow clone, a typo — stops the run rather than widening it to a full audit. |
 | `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer is still running. |
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
 | `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. Each backend defaults to the strongest mode it can run under; see [Agent security modes](../guides/backends.md#agent-security-modes). |
@@ -372,8 +373,8 @@ command's source and its tests before depending on one.
 
 | Command | What it does |
 | --- | --- |
-| `bin/rank-work` | Builds the ranked work-card queue for an iteration. |
-| `bin/patch-cards` | Derives S1 prior-fix cards from the target's own history. |
+| `bin/rank-work` | Builds the ranked work-card queue for an iteration; `--since <rev>` restricts it to the delta's files and callers. |
+| `bin/patch-cards` | Derives S1 prior-fix cards from the target's own history; `--since <rev>` emits one per commit in the range. |
 | `bin/peer-fix-cards` | Derives S6 cards from the projects in `[s6_peers]`. |
 | `bin/callgraph` | Extracts the optional per-file call neighbourhood a card prompt quotes. |
 | `bin/auto-build-script` | Converges a sanitizer build recipe into `.audit/build*.sh`. |

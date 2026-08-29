@@ -1298,7 +1298,15 @@ def complementary_strategies(reasons: list[str], primary: str) -> list[str]:
     return out
 
 
-def iter_source_files(root: Path, max_files: int = 0) -> Iterable[Path]:
+def iter_source_files(
+    root: Path, max_files: int = 0, only: Iterable[str] | None = None,
+) -> Iterable[Path]:
+    # `only` names the target-relative paths to consider instead of walking
+    # the tree, each held to the same per-file rules (suffix, excluded-path,
+    # VCS-tracked). A delta run knows its file set before ranking starts,
+    # and a whole-tree walk costs minutes on a browser tree the delta never
+    # looks at. The delta's files come from a VCS diff, so the tracked-set
+    # filter already covers what the walk's directory prunes would.
     # max_files <= 0 means "no cap" — yield every source file in the tree
     # (rank-work ranks the whole repo; it must not go blind past a fixed
     # walk position). A positive value bounds the walk for callers that
@@ -1328,6 +1336,20 @@ def iter_source_files(root: Path, max_files: int = 0) -> Iterable[Path]:
     import target_config  # lazy: see import note at top of file
     tracked = target_config.vcs_tracked_files(root)
     seen = 0
+    if only is not None:
+        for rel in sorted({normalized_relpath(value) for value in only}):
+            path = root / rel
+            if not rel or not path.is_file() \
+                    or path.suffix.lower() not in SOURCE_EXTS:
+                continue
+            if is_excluded_work_path(rel) \
+                    or (tracked is not None and rel not in tracked):
+                continue
+            seen += 1
+            yield path
+            if max_files > 0 and seen >= max_files:
+                return
+        return
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
             d for d in dirnames
@@ -1601,7 +1623,9 @@ def _recent_touched_files_for(ctx: Context | None) -> set[str]:
     return out
 
 
-def load_patch_cards(path: Path, limit: int = 40, ctx: Context | None = None) -> list[dict]:
+def load_patch_cards(path: Path, limit: int | None = 40, ctx: Context | None = None) -> list[dict]:
+    # limit=None keeps every card: a delta run's patch file already holds
+    # exactly the commits in scope, so a cap here would drop range work.
     cards = read_jsonl(path)
     recent_files = _recent_touched_files_for(ctx)
     out = []
@@ -1801,8 +1825,16 @@ def structural_path_score(rel: str) -> tuple[int, list[str]]:
 
 def rank_target(
     ctx: Context, limit: int, patch_cards: Path | None = None,
-    strategy: str = "",
+    strategy: str = "", delta_files: dict[str, str] | None = None,
 ) -> list[dict]:
+    """Rank the target's auditable sources into work cards.
+
+    `delta_files` (relpath -> why it is in scope) switches to delta mode:
+    only those files are ranked, every one of them gets a card, the
+    diversity floor is off, and the bounded window does not apply — the
+    delta is the window. Callers resolve the set (changed files plus their
+    one-hop callers) so this stays a pure ranking pass.
+    """
     if not ctx.target_root.is_dir():
         raise SystemExit(f"[rank-work] target not found: {ctx.target_root}")
     patch_path = patch_cards or (ctx.results_dir / "patch-cards.jsonl")
@@ -1812,7 +1844,7 @@ def rank_target(
     # label. Header-only / monolithic targets get a deeper default; targets
     # with diverse depth-2 prefixes keep the historical depth=2 behavior.
     source_paths: list[tuple[Path, str]] = []
-    for path in iter_source_files(ctx.target_root):
+    for path in iter_source_files(ctx.target_root, only=delta_files):
         rel = relpath(path, ctx.target_root)
         if not is_auditable_source_path(rel):
             continue
@@ -1823,7 +1855,10 @@ def rank_target(
     )
     coverage_counts = coverage_subsystem_counts(ctx)
     seed_index = corpus_index(ctx.results_dir)
-    cards: list[dict] = load_patch_cards(patch_path, max(10, limit // 2), ctx=ctx)
+    cards: list[dict] = load_patch_cards(
+        patch_path, None if delta_files is not None else max(10, limit // 2),
+        ctx=ctx,
+    )
     floor_cards: list[dict] = []
     seen_ids = {c.get("id") for c in cards}
     seen_surfaces = {work_surface(c) for c in cards}
@@ -1851,6 +1886,12 @@ def rank_target(
             score += 16
             reasons.append("has clean HIT seed")
         primary_strategy = strategy_for(reasons)
+        if delta_files is not None:
+            # Every file in the delta is work by definition. A quiet one is
+            # offered on the fallback lane rather than dropped or floored.
+            reasons.append(delta_files.get(rel, "in delta"))
+            if score <= 0:
+                score, primary_strategy = 1, "S1"
         h = hashlib.sha1(f"{ctx.target_slug}:{rel}".encode()).hexdigest()[:12]
         card = {
             "id": f"WORK-{h}",
@@ -1942,6 +1983,9 @@ def rank_target(
     cards = annotate_card_buildability(ctx, cards)
     floor_cards = annotate_card_buildability(ctx, floor_cards)
     cards.sort(key=lambda card: (_built_first(card), work_card_sort_key(card)))
+    if delta_files is not None:
+        # The window is the delta: every card, no floor, no rotation.
+        return cards
     if diversity_floor <= 0 or not floor_cards or len(cards) >= limit and limit <= 1:
         return select_strategy_window(cards, limit)
     reserve = min(diversity_floor, max(1, limit // 5), len(floor_cards))
@@ -2562,15 +2606,129 @@ def _git_shallow_boundary(target_root: Path) -> set[str]:
         return set()
 
 
+
+@dataclass(frozen=True)
+class DeltaScope:
+    """What `--since REV` restricts a run to: the commits and files in REV..HEAD."""
+
+    since: str
+    base_rev: str
+    head_rev: str
+    commits: tuple[str, ...]
+    files: tuple[str, ...]
+
+
+def _vcs_lines(command: list[str], what: str) -> list[str]:
+    try:
+        out = subprocess.check_output(
+            command, stderr=subprocess.STDOUT, text=True,
+            timeout=_VCS_LOG_TIMEOUT,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = " ".join(str(exc.output or "").split())
+        raise ValueError(f"{what}: {detail or f'rc={exc.returncode}'}") from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ValueError(f"{what}: {exc}") from exc
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def delta_scope(ctx: Context, since: str) -> DeltaScope:
+    """Resolve `--since REV` against the checkout, or raise ValueError.
+
+    A delta run that cannot see REV must stop, never widen: a shallow clone
+    silently truncates history, and a full audit filed under a delta's
+    recorded settings would claim a scope it did not have. Both VCSes answer
+    the same three questions — the resolved base, the commits it does not
+    reach, and the files that differ — so the card set and the S1 commit
+    range come from one answer.
+    """
+    rev = str(since or "").strip()
+    if not rev:
+        raise ValueError("--since needs a revision")
+    root = ctx.target_root
+    if ctx.repo_type == "git":
+        try:
+            base = _vcs_lines(
+                ["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
+                 f"{rev}^{{commit}}"],
+                f"--since {rev}",
+            )[0]
+        except (ValueError, IndexError) as exc:
+            hint = (
+                " (shallow clone: run `git fetch --unshallow` first)"
+                if _git_is_shallow(root) else ""
+            )
+            raise ValueError(
+                f"--since {rev}: not a commit in the git checkout {root}{hint}"
+            ) from exc
+        head = _vcs_lines(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          f"--since {rev}: HEAD")[0]
+        commits = _vcs_lines(
+            ["git", "-C", str(root), "rev-list", f"{base}..{head}"],
+            f"--since {rev}: rev-list",
+        )
+        files = _vcs_lines(
+            ["git", "-C", str(root), "diff", "--name-only", base, head],
+            f"--since {rev}: diff",
+        )
+    elif ctx.repo_type == "hg":
+        try:
+            base = _vcs_lines(
+                ["hg", "--cwd", str(root), "log", "-r", rev,
+                 "--template", "{node}\n"],
+                f"--since {rev}",
+            )[0]
+        except (ValueError, IndexError) as exc:
+            raise ValueError(
+                f"--since {rev}: not a changeset in the hg checkout {root}"
+            ) from exc
+        head = _vcs_lines(
+            ["hg", "--cwd", str(root), "log", "-r", ".", "--template", "{node}\n"],
+            f"--since {rev}: working parent",
+        )[0]
+        commits = _vcs_lines(
+            ["hg", "--cwd", str(root), "log", "-r", f"only(., {base})",
+             "--template", "{node}\n"],
+            f"--since {rev}: range",
+        )
+        # --cwd, not -R: status prints paths relative to the working
+        # directory, and only a cwd at the repo root makes them root-relative.
+        files = _vcs_lines(
+            ["hg", "--cwd", str(root), "status", "-n", "--rev", base, "--rev", head],
+            f"--since {rev}: status",
+        )
+    else:
+        raise ValueError(
+            f"--since {rev}: {root} is not a git or hg checkout"
+        )
+    auditable = sorted({
+        rel for rel in (normalized_relpath(f) for f in files)
+        if rel and is_auditable_source_path(rel)
+    })
+    return DeltaScope(rev, base, head, tuple(commits), tuple(auditable))
+
+
 def build_patch_cards(
     ctx: Context, limit: int, inspect_commits: int,
-    scan_window: int | None = None,
+    scan_window: int | None = None, delta: DeltaScope | None = None,
 ) -> list[dict]:
-    if scan_window is not None and scan_window > 0:
+    rows: list[dict]
+    if delta is not None:
+        # The range is the scan: every commit in it and none outside, every
+        # one inspected, and no output cap — a card that cannot name its
+        # files is half a card, and the range already bounds the work.
+        rows = (
+            vcs_log_rows(ctx, len(delta.commits), since_rev=delta.base_rev)
+            if delta.commits else []
+        )
+        inspect_commits = limit = len(rows)
+        count, lookback_days = len(rows), None
+    elif scan_window is not None and scan_window > 0:
         count, lookback_days = scan_window, None   # explicit override: verbatim count
     else:
         count, lookback_days = _patch_scan_window()
-    rows: list[dict] = vcs_log_rows(ctx, count, lookback_days)
+    if delta is None:
+        rows = vcs_log_rows(ctx, count, lookback_days)
     if not rows and lookback_days:
         # Dormant target: its newest commit predates the lookback, so the
         # date-bounded scan came back empty. Fall back to a count-only scan so
@@ -2754,7 +2912,10 @@ def build_patch_cards(
 
 
 def vcs_log_rows(ctx: Context, limit: int,
-                 lookback_days: int | None = None) -> list[dict]:
+                 lookback_days: int | None = None,
+                 since_rev: str = "") -> list[dict]:
+    # since_rev bounds the scan to the commits REV does not reach
+    # (REV..HEAD / only(., REV)) — the delta run's exact S1 range.
     # A positive lookback bounds the scan to commits on or after `since`, so the
     # window is min(most-recent `limit`, commits within lookback) — this is what
     # normalizes recall across commit velocity. `since` is an absolute date so
@@ -2776,6 +2937,8 @@ def vcs_log_rows(ctx: Context, limit: int,
         ]
         if since:
             cmd += ["-d", f">{since}"]
+        if since_rev:
+            cmd += ["-r", f"only(., {since_rev})"]
         try:
             out = subprocess.check_output(
                 cmd,
@@ -2806,6 +2969,8 @@ def vcs_log_rows(ctx: Context, limit: int,
     ]
     if since:
         git_cmd.append(f"--since={since}")
+    if since_rev:
+        git_cmd.append(f"{since_rev}..HEAD")
     try:
         out = subprocess.check_output(
             git_cmd,

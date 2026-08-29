@@ -102,6 +102,11 @@ The one thing this costs is concurrency: two agents can no longer hold the same
 file under different strategies at once, because there is a single card to
 claim.
 
+A delta run (`bin/audit --since <rev>`) fills no window at all: every card
+on a file changed in `<rev>..HEAD`, or on a one-hop caller of one, is
+emitted, the diversity floor is off, and the queue never expands — the
+delta is the scope.
+
 ### Two card sources on top of the ranked list
 
 - **Patch cards** (always S1) — one per recent fix commit, with the

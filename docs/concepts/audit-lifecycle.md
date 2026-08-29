@@ -89,6 +89,16 @@ as append-only rows under `state/`. That structured state — not the
 agent's transcript — is the source of truth across resume, compaction,
 and crash recovery.
 
+`bin/audit --since <rev>` runs a **delta audit**: the work cards cover
+only the files changed in `<rev>..HEAD`, the files that call them (one
+hop over the call-neighbourhood graph's certain edges — with no graph,
+the run says so and covers the changed files alone), and one S1 card
+per commit in the range. The window is the delta: no diversity floor,
+no expansion. The tree records the base revision and changed-file set
+in `state/run-config.json`, and a resumed run must pass the same
+`--since`; a revision the checkout cannot resolve — a shallow clone, a
+typo — stops the run rather than silently widening it to a full audit.
+
 ## 4. Agents investigate
 
 Each agent works on **one hypothesis at a time**:
@@ -220,7 +230,12 @@ Two properties keep the note honest:
 - **It lives exactly as long as the rejection does.** A rejected artifact is
   the record of its own rejection, so when the gate requeues one whose verdict
   went stale, the directory leaves `findings-rejected/` and its route row is
-  retired before that path can be reused. Resumed runs reconcile stale trigger
+  retired before that path can be reused. A new source revision alone does
+  not make a rejection stale: the disproof is re-read against the lines it
+  cites and stands while they still match byte for byte, so a pin change
+  spends no review — and loses no advice — on a rejection the source still
+  supports. Once an anchored line moves, the artifact is requeued and the
+  note goes with it. Resumed runs reconcile stale trigger
   rejections before launching their first agents, so an obsolete note cannot
   survive even one cohort. No tombstone, and no second copy of the gate's
   validity rules to drift out of step.
