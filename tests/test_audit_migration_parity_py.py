@@ -215,6 +215,20 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         "filed_artifact_count sees an ungated candidate that admitted-only progress does not",
     )
 
+    label = audit_runner.iteration_outcome_label
+    check(
+        label(productive=True, filed=True, diagnostic=True) == "productive"
+        and label(productive=False, filed=True, diagnostic=False) == "filed-unadjudicated"
+        and label(productive=False, filed=False, diagnostic=True) == "env-blocked"
+        and label(productive=False, filed=False, diagnostic=False) == "dry",
+        "iteration labels name what actually happened",
+    )
+    check(
+        label(productive=False, filed=True, diagnostic=True)
+        == "filed-unadjudicated+env-blocked",
+        "filing does not hide an env-blocked closure the operator is looking for",
+    )
+
     queue_results = root / "queue-results"
     (queue_results / "state").mkdir(parents=True)
     queue_runtime = SimpleNamespace(

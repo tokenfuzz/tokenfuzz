@@ -1728,6 +1728,30 @@ def filed_artifact_count(runtime: Runtime) -> int:
     )
 
 
+def iteration_outcome_label(
+    *, productive: bool, filed: bool, diagnostic: bool,
+) -> str:
+    """The operator-facing name for an iteration's result.
+
+    A candidate filed this iteration but not yet admitted (the result gate
+    deferred past the deadline) is neither dry nor env-blocked, so it gets its
+    own name rather than being read as a blocked or empty iteration. Filing and
+    env-blocking are independent, though — an iteration can file one candidate
+    and close another hypothesis on the environment — so when both happened the
+    label carries both rather than letting the filing hide the block an
+    operator is looking for.
+
+    This names the log line only. Productivity (admitted findings and confirmed
+    crashes), dry_streak, and strategy rotation are decided by the caller and
+    are not affected by what this returns.
+    """
+    if productive:
+        return "productive"
+    if filed:
+        return "filed-unadjudicated+env-blocked" if diagnostic else "filed-unadjudicated"
+    return "env-blocked" if diagnostic else "dry"
+
+
 def agent_progress(runtime: Runtime, agent: int, snapshot: ProgressSnapshot) -> AgentProgress:
     counts = structured_state.agent_counts(str(agent), runtime.results) or {}
     roots_by_status: dict[str, set[str]] = {}
@@ -3128,16 +3152,10 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     update_strategy_rotation(
         runtime, context, after_agent_progress, productive_agents
     )
-    # A candidate filed this iteration but not yet admitted (the result gate
-    # deferred past the deadline) is neither dry nor env-blocked; label it
-    # honestly so an operator does not read a productive iteration as blocked.
-    # This is the log line only: admitted-only productivity, dry_streak, and
-    # rotation are unchanged.
-    filed = filed_artifact_count(runtime) > filed_before
-    outcome = (
-        "productive" if productive
-        else "filed-unadjudicated" if filed
-        else "env-blocked" if diagnostic else "dry"
+    outcome = iteration_outcome_label(
+        productive=productive,
+        filed=filed_artifact_count(runtime) > filed_before,
+        diagnostic=diagnostic,
     )
     index_log(
         runtime,
