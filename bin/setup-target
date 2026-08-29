@@ -505,12 +505,16 @@ class Setup:
             return
         config = target_config.Config(target_root=str(self.target_root))
         target_config.load_toml_into(config, self.toml)
+        raw_runner = target_config.parse_toml(self.toml).get("runner", {})
+        runner_is_calibrated = (
+            isinstance(raw_runner, dict) and "success_codes" in raw_runner
+        )
         if (
             str(config.is_browser).lower() in {"1", "true"}
             or config.build_system not in target_config.NATIVE_BUILD_SYSTEMS
             or config.runner_bin
             or (
-                config.runner_args
+                config.runner_args and runner_is_calibrated
                 and (not self.args.force or self.args.build)
             )
         ):

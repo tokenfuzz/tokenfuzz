@@ -138,8 +138,27 @@ class SuggestRunnerTests(unittest.TestCase):
             config.runner_args,
             ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"],
         )
+        self.assertEqual(config.runner_success_codes, [0])
         self.assertEqual(self.toml.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.run_command({}, "--apply").returncode, 4)
+
+    def test_calibrates_existing_args_without_reasking_for_an_argv(self) -> None:
+        self.toml.write_text(
+            self.toml.read_text(encoding="utf-8")
+            + '[runner]\nargs = ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"]\n',
+            encoding="utf-8",
+        )
+
+        result = self.run_command({}, "--apply")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = target_config.Config(target_root=str(self.target))
+        target_config.load_toml_into(config, self.toml)
+        self.assertEqual(
+            config.runner_args,
+            ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"],
+        )
+        self.assertEqual(config.runner_success_codes, [0])
 
     def test_uses_the_first_enabled_executable_sanitizer(self) -> None:
         ubsan_binary = self.target / "build-ubsan" / "sampleproj"
@@ -209,7 +228,7 @@ class SuggestRunnerTests(unittest.TestCase):
             " print('input does not exist')\n"
             " raise SystemExit(3)\n"
             "print('input has invalid data')\n"
-            "raise SystemExit(2)\n",
+            "raise SystemExit(42)\n",
             encoding="utf-8",
         )
         rejected = self.run_command(
@@ -234,6 +253,9 @@ class SuggestRunnerTests(unittest.TestCase):
             validation={"valid": True, "reasoning": "diagnostic came from input parsing"},
         )
         self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        config = target_config.Config(target_root=str(self.target))
+        target_config.load_toml_into(config, self.toml)
+        self.assertEqual(config.runner_success_codes, [0, 42])
 
     def test_zero_exit_launch_must_depend_on_the_testcase(self) -> None:
         self.binary.write_text(

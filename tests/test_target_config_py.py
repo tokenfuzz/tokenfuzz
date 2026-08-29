@@ -129,15 +129,30 @@ assert_eq(["bytes"], cfg.attacker_controls,
 cfg = tc.Config()
 write(
     "runner-success.toml",
-    'slug = "runner-success"\n[runner]\nsuccess_codes = [123, 1, 0, 1, -1, 124, 125, 137, 256, true]\n',
+    'slug = "runner-success"\n[runner]\nsuccess_codes = [255, 123, 1, 0, 1, -1, 124, 125, 126, 127, 137, 256, true]\n',
 )
 tc.load_toml_into(cfg, TEST_TMPDIR / "runner-success.toml")
 assert_eq([0, 1, 123], cfg.runner_success_codes,
-          "runner success_codes keeps unique non-signal process exit values")
+          "runner success_codes keeps unique application exits below the wrapper range")
 cfg = tc.Config()
 tc.load_toml_into(cfg, TEST_TMPDIR / "no-tm.toml")
 assert_eq([0], cfg.runner_success_codes,
           "runner success_codes defaults to zero")
+
+link_cfg = tc.Config(target_root="/checkout/sampleproj")
+link_cfg.link_libs = [
+    "-framework", "SystemKit", "-L", "build/lib", "support.c",
+    "build/libsample.a", "-lm", "bare-linker-operand",
+]
+assert_eq(
+    [
+        "-framework", "SystemKit", "-L", "/checkout/sampleproj/build/lib",
+        "/checkout/sampleproj/support.c",
+        "/checkout/sampleproj/build/libsample.a", "-lm", "bare-linker-operand",
+    ],
+    link_cfg.resolved_link_libs(),
+    "link_libs resolves only path-shaped inputs and split path-option values",
+)
 
 
 # ─── 3. Bad section headers are rejected ───────────────────────────

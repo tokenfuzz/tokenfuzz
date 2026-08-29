@@ -230,6 +230,7 @@ Inspect `logs/index.log` if startup stops before `work-cards.jsonl` appears.
 | Symptom | Check |
 | --- | --- |
 | The wrong program runs | Fix `asan_bin` or re-run `bin/suggest-runner <target> --apply --force`. |
+| Every probe reports `EXEC_FAIL` on input the CLI clearly read | Re-run `bin/setup-target <target>` (or `bin/suggest-runner <target> --apply`). It replays the configured argv and records the reviewed malformed-input exit in `[runner].success_codes`, without reselecting the CLI. |
 | Headers are missing | Add source or generated include directories to `includes`. |
 | Macros are missing | Add the required compiler arguments to `defines`. |
 | Harness linking fails | Check the selected sanitizer library and add required system, archive, or source inputs to `link_libs`. |

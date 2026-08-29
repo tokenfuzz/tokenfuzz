@@ -443,11 +443,11 @@ def emit_link_libs_with_resolves(link_libs: list[str], sanitizer: str) -> tuple[
     resolves: list[str] = []
     link_args: list[str] = []
     archive_idx = 0
-    for raw in link_libs:
+    for raw, is_link_path in target_config.link_arg_path_roles(link_libs):
         if not raw:
             continue
-        item = raw if (raw.startswith("-") or "$" in raw) else _strip_sanitizer_build_prefix(raw, sanitizer)
-        if raw.startswith("-") or "$" in raw:
+        item = raw if not is_link_path else _strip_sanitizer_build_prefix(raw, sanitizer)
+        if not is_link_path:
             link_args.append(shq(item))
             continue
         # Bare path: emit a resolver and reference the variable. Source files

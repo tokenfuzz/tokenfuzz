@@ -258,7 +258,7 @@ targets that want to plug in a custom driver script.
 | `args` | Literal argument list, with the runner tokens below substituted at run time. |
 | `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). The same tokens are substituted. |
 | `crash_patterns` | Additional regex strings the triager treats as crash signals beyond its built-in language-agnostic markers. Use sparingly. |
-| `success_codes` | Process exit codes from 0 through 123 that mean the runner completed normally. Defaults to `[0]`. Add a nonzero code only when the program documents it as the normal result of rejecting malformed input; timeout, signal, and sanitizer diagnostics are never accepted as success. |
+| `success_codes` | Process exit codes from 0 through 123 that mean the runner completed normally. Defaults to `[0]`. `bin/setup-target` records the exit observed while validating the configured input route, accepting a nonzero code only after review confirms malformed-input rejection rather than startup or argv failure. 124 and above is where the timeout wrapper's own status, exec failures, and signal deaths live, so it is never accepted; nor is a sanitizer diagnostic. |
 
 Before model preflight or benchmark cells start, `bin/audit` and
 `bin/benchmark` resolve any configured `bin` and verify that it is executable.

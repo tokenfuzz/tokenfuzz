@@ -3649,9 +3649,51 @@ class Config:
     def resolved_link_libs(self) -> list[str]:
         """Linker flags plus target-root-resolved archive/source inputs."""
         return [
-            value if value.startswith("-") else self.resolve_path(value)
-            for value in self.link_libs
+            self.resolve_path(value) if is_link_path else value
+            for value, is_link_path in link_arg_path_roles(self.link_libs)
         ]
+
+
+_LINK_PATH_VALUE_OPTIONS = frozenset({"-F", "-L", "-isysroot", "--sysroot"})
+_LINK_INPUT_SUFFIXES = frozenset({
+    ".a", ".asm", ".c", ".cc", ".cpp", ".cxx", ".dylib", ".lo", ".m",
+    ".mm", ".o", ".obj", ".s", ".so", ".tbd",
+})
+
+
+def _link_value_looks_like_path(value: str) -> bool:
+    """Whether one non-option linker token names a compile/link input.
+
+    ``link_libs`` is an argv list, not a path list. Bare framework and linker
+    operands such as ``SystemKit`` must survive verbatim, while source,
+    object, and archive inputs remain target-relative. Use syntax rather than
+    filesystem existence so a missing build output resolves the same way as a
+    present one and can fail at the compiler with its real path.
+    """
+    if not value or "$" in value:
+        return False
+    if value.startswith(("/", ".")) or "/" in value or "\\" in value:
+        return True
+    lower = value.lower()
+    return (
+        any(lower.endswith(suffix) for suffix in _LINK_INPUT_SUFFIXES)
+        or ".so." in lower
+    )
+
+
+def link_arg_path_roles(values: list[str]) -> list[tuple[str, bool]]:
+    """Pair each linker argv token with whether it is a target-relative path."""
+    roles: list[tuple[str, bool]] = []
+    path_operand = False
+    for value in values:
+        is_path = bool(value) and (
+            path_operand or (
+                not value.startswith("-") and _link_value_looks_like_path(value)
+            )
+        )
+        roles.append((value, is_path))
+        path_operand = value in _LINK_PATH_VALUE_OPTIONS
+    return roles
 
 
 def _apply_attacker_controls(cfg: Config, raw: list, source_path: str) -> None:
@@ -3775,10 +3817,23 @@ def _apply_runner_section(cfg: Config, raw: dict, source_path: str) -> None:
         codes = {
             x for x in raw["success_codes"]
             if isinstance(x, int) and not isinstance(x, bool)
-            and 0 <= x < 124
+            and runner_success_code_allowed(x)
         }
         codes.add(0)
         cfg.runner_success_codes = sorted(codes)
+
+
+def runner_success_code_allowed(code: int) -> bool:
+    """Whether a process exit can unambiguously mean normal completion.
+
+    The timeout wrapper returns the target's full 8-bit status, so 124 and
+    above is where its own timeout code, the shell's exec failures, and every
+    ``128 + signal`` death live. Which of those a host can name differs by
+    platform and Python version, so the boundary is the fixed 124 rather than
+    a per-host signal table: a target.toml calibrated on one machine must not
+    silently lose a code on another.
+    """
+    return 0 <= code < 124
 
 
 def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
@@ -3915,8 +3970,8 @@ def _strip_target_root_paths(cfg: Config) -> None:
     # auto-repair-target-toml dragged in. Don't touch `-l…` / `-L…` /
     # `-Wl,…` flag entries.
     cfg.link_libs = [
-        _rel(item) if not item.startswith("-") else item
-        for item in cfg.link_libs
+        _rel(item) if is_link_path else item
+        for item, is_link_path in link_arg_path_roles(cfg.link_libs)
     ]
 
 

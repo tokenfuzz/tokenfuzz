@@ -535,6 +535,15 @@ assert_in('"$link_lib_0"', args,
           "link_libs: link args reference resolver variable")
 assert_in('-lm', args, "link_libs: -lm flag passes through")
 assert_in('-lpthread', args, "link_libs: -lpthread flag passes through")
+framework_resolves, framework_args = er.emit_link_libs_with_resolves(
+    ["-framework", "SystemKit", "-L", "build-asan/lib"], "asan"
+)
+assert_in('-framework SystemKit', framework_args,
+          "link_libs: framework name remains an argv operand")
+assert_in('-L "$link_lib_0"', framework_args,
+          "link_libs: split -L path resolves through a link variable")
+assert_in('link_lib_0="$build"/lib', framework_resolves,
+          "link_libs: split -L path uses the build resolver")
 # Numbering increments for multiple archives.
 resolves2, args2 = er.emit_link_libs_with_resolves(
     ["build-asan/lib/libfoo.a", "build-asan/lib/libbar.a"], "asan"

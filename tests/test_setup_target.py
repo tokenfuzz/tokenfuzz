@@ -360,8 +360,10 @@ class SetupTargetTests(unittest.TestCase):
             "import os, pathlib\n"
             "root = pathlib.Path(os.environ['SCRIPT_ROOT'])\n"
             "path = root / 'output' / 'demo' / 'target.toml'\n"
-            "path.write_text(path.read_text() + "
-            "'\\n[runner]\\nargs = [\"--input\", \"{TESTCASE}\"]\\n')\n",
+            "text = path.read_text()\n"
+            "addition = ('success_codes = [0]\\n' if '[runner]' in text else "
+            "'\\n[runner]\\nargs = [\"--input\", \"{TESTCASE}\"]\\n')\n"
+            "path.write_text(text + addition)\n",
             encoding="utf-8",
         )
         helper.chmod(0o755)
@@ -374,6 +376,16 @@ class SetupTargetTests(unittest.TestCase):
         config = target_config.Config(target_root=str(target))
         target_config.load_toml_into(config, self.config("demo"))
         self.assertEqual(config.runner_args, ["--input", "{TESTCASE}"])
+
+        calibrated = self.setup(
+            "demo", "--no-update",
+            environment={"ACTIVE_BACKEND": "codex", "LLM_DECIDE_DISABLE": "0"},
+        )
+        self.assertEqual(
+            calibrated.returncode, 0, calibrated.stdout + calibrated.stderr,
+        )
+        self.assertIn("suggest-runner succeeded", calibrated.stdout)
+        self.assertIn("success_codes = [0]", self.config("demo").read_text())
 
     def test_plain_local_sources_nested_slugs_and_reserved_components(self) -> None:
         self.git("init", str(self.harness))

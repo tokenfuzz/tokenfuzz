@@ -272,18 +272,25 @@ class RunAsanTests(unittest.TestCase):
 
     def test_generic_accepts_only_configured_success_codes(self) -> None:
         binary = self.executable("rejecting-parser", "raise SystemExit(1)\n")
-        config = run_asan.target_config.Config(runner_success_codes=[0, 1])
-        with mock.patch.object(run_asan, "CONFIG", config), \
-             mock.patch.dict(
-                 run_asan.BASE_ENV, {"ASAN_GENERIC_BIN": str(binary)}, clear=True,
-             ), \
-             mock.patch.object(
-                 run_asan, "run_symbolized",
-                 return_value=SimpleNamespace(returncode=1),
-             ):
-            self.assertEqual(run_asan.run_generic("", 1, ["input.bin"]), 0)
+        for code in (1, 42):
+            with self.subTest(code=code):
+                config = run_asan.target_config.Config(
+                    runner_success_codes=[0, code],
+                )
+                with mock.patch.object(run_asan, "CONFIG", config), \
+                     mock.patch.dict(
+                         run_asan.BASE_ENV,
+                         {"ASAN_GENERIC_BIN": str(binary)}, clear=True,
+                     ), \
+                     mock.patch.object(
+                         run_asan, "run_symbolized",
+                         return_value=SimpleNamespace(returncode=code),
+                     ):
+                    self.assertEqual(
+                        run_asan.run_generic("", 1, ["input.bin"]), 0,
+                    )
 
-        config.runner_success_codes = [0]
+        config = run_asan.target_config.Config(runner_success_codes=[0])
         with mock.patch.object(run_asan, "CONFIG", config), \
              mock.patch.dict(
                  run_asan.BASE_ENV, {"ASAN_GENERIC_BIN": str(binary)}, clear=True,

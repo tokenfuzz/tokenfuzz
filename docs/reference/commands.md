@@ -68,7 +68,13 @@ sanitizer builds are retargeted at the same time so the shared runner arguments
 keep their meaning; if a configured sibling build has no such program, the
 helper refuses the update instead of applying arguments to a different CLI.
 Nothing is written until the proposed invocation passes input-dependence
-validation with a disposable testcase.
+validation with a disposable testcase. That same validation records
+`[runner].success_codes`: a zero exit is accepted deterministically, while a
+nonzero exit is added only when the bounded review confirms the program opened
+and rejected the disposable input rather than failing in argument parsing or
+startup. `bin/setup-target` also calibrates an older `[runner].args` block once
+when it has no explicit `success_codes`; it keeps the existing argv and does
+not ask the model to choose it again.
 
 See [Add a target](../getting-started/add-a-target.md) for the workflow and
 [Target config reference](target-toml.md) for field definitions.

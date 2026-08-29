@@ -239,11 +239,39 @@ def set_runner_args(text: str, args: list[str], reasoning: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def set_runner_success_codes(text: str, codes: list[int]) -> str:
+    """Set the validated normal exits beside [runner].args."""
+    lines = text.splitlines()
+    section = next(
+        (i for i, line in enumerate(lines) if line.strip() == "[runner]"), None
+    )
+    if section is None:
+        raise ValueError("[runner] section disappeared after setting args")
+    end = next(
+        (i for i in range(section + 1, len(lines))
+         if lines[i].lstrip().startswith("[")
+         and not lines[i].lstrip().startswith("#")),
+        len(lines),
+    )
+    rendered = "success_codes = [" + ", ".join(str(code) for code in codes) + "]"
+    assignment = next(
+        (i for i in range(section + 1, end)
+         if re.match(r"^\s*success_codes\s*=", lines[i])),
+        None,
+    )
+    if assignment is None:
+        lines[end:end] = [rendered]
+    else:
+        finish = _assignment_end(lines, assignment, end)
+        lines[assignment:finish] = [rendered]
+    return "\n".join(lines) + "\n"
+
+
 def validate_launch(
     binary: Path, args: list[str], help_text: str, timeout: int,
     env: dict | None = None,
-) -> tuple[bool, str]:
-    """Reject unsafe launches and commands whose behavior ignores the input."""
+) -> tuple[bool, str, int | None]:
+    """Reject unsafe launches and return the accepted input-parser exit."""
     with tempfile.TemporaryDirectory(prefix="suggest-runner-") as directory:
         testcase = Path(directory) / "input.bin"
         missing = Path(directory) / "missing-input.bin"
@@ -263,18 +291,18 @@ def validate_launch(
                 [str(binary), *expand(testcase)], 10, directory, 65536, env,
             )
         except OSError as exc:
-            return False, str(exc)
+            return False, str(exc), None
         if completed.returncode == 124:
-            return False, "derived invocation timed out after 10 seconds"
+            return False, "derived invocation timed out after 10 seconds", None
         try:
             unchanged = testcase.read_bytes() == original
         except OSError:
             unchanged = False
         if not unchanged:
-            return False, "derived invocation modified or removed its testcase"
+            return False, "derived invocation modified or removed its testcase", None
         created = [path.name for path in Path(directory).iterdir() if path != testcase]
         if created:
-            return False, f"derived invocation created output: {created[0]}"
+            return False, f"derived invocation created output: {created[0]}", None
         # The check below concludes "it read the testcase" from the program
         # answering differently with and without one. That inference only holds
         # if the program answers the same way when nothing changed, so establish
@@ -287,9 +315,9 @@ def validate_launch(
                 [str(binary), *expand(testcase)], 10, directory, 65536, env,
             )
         except OSError as exc:
-            return False, str(exc)
+            return False, str(exc), None
         if repeated.returncode == 124:
-            return False, "derived invocation timed out after 10 seconds"
+            return False, "derived invocation timed out after 10 seconds", None
         if runner_preflight.probe_signature(
             completed, completed_output, testcase
         ) != runner_preflight.probe_signature(
@@ -299,20 +327,20 @@ def validate_launch(
                 "derived invocation did not behave the same way twice on one "
                 "input, so nothing can be concluded from how it behaves without"
                 " one"
-            )
+            ), None
         try:
             absent, absent_output = runner_preflight.capture_probe(
                 [str(binary), *expand(missing)], 10, directory, 65536, env,
             )
         except OSError as exc:
-            return False, str(exc)
+            return False, str(exc), None
         if absent.returncode == 124:
-            return False, "derived invocation timed out after 10 seconds"
+            return False, "derived invocation timed out after 10 seconds", None
         created = [path.name for path in Path(directory).iterdir() if path != testcase]
         if missing.exists():
-            return False, "derived invocation treated the testcase path as output"
+            return False, "derived invocation treated the testcase path as output", None
         if created:
-            return False, f"derived invocation created output: {created[0]}"
+            return False, f"derived invocation created output: {created[0]}", None
 
         def signature(
             result: subprocess.CompletedProcess, output: bytes, path: Path,
@@ -325,7 +353,7 @@ def validate_launch(
             signature(completed, completed_output, testcase)
             == signature(absent, absent_output, missing)
         ):
-            return False, "derived invocation did not depend on testcase contents or existence"
+            return False, "derived invocation did not depend on testcase contents or existence", None
         if completed.returncode:
             prompt = render_template("validate_runner.md.j2", {
                 "binary": str(binary),
@@ -345,8 +373,8 @@ def validate_launch(
                     str((decision or {}).get("reasoning") or "").strip()
                     or "nonzero launch did not prove the testcase was consumed as input"
                 )
-                return False, reason
-    return True, ""
+                return False, reason, None
+    return True, "", completed.returncode
 
 
 def main(argv: list[str]) -> int:
@@ -364,7 +392,11 @@ def main(argv: list[str]) -> int:
         return 1
     cfg = tc.Config(target_root=str(target))
     tc.load_toml_into(cfg, target_toml)
-    if cfg.runner_args and not args.force:
+    raw_runner = tc.parse_toml(target_toml).get("runner", {})
+    if (
+        cfg.runner_args and not args.force
+        and isinstance(raw_runner, dict) and "success_codes" in raw_runner
+    ):
         return 4
     selected = cfg.first_executable_sanitizer()
     if selected is None:
@@ -385,54 +417,100 @@ def main(argv: list[str]) -> int:
     runner_args: list[str] = []
     reasoning = ""
     chosen_binary = binary
-    for attempt in range(1, _MAX_SUGGESTIONS + 1):
-        prompt = render_template("suggest_runner.md.j2", {
-            "slug": args.slug,
-            "readme": tc.read_readme_excerpt(target) or "(no README found)",
-            "candidates": render_candidates(programs),
-            "feedback_block": feedback,
-        })
-        result = llm_decide(
-            "runner-suggest", "binary,args,reasoning", prompt, args.timeout
-        )
-        if result is None:
-            return 2
-        chosen = next(
-            (p for p in programs if p["id"] == str(result.get("binary", ""))),
-            None,
-        )
-        runner_args = normalize_args(result.get("args"))
-        reasoning = str(result.get("reasoning", "")).strip()
+    validated_exit: int | None = None
+    calibrating = bool(cfg.runner_args and not args.force)
+    if calibrating:
+        chosen = next((program for program in programs if program["configured"]), None)
         if chosen is None:
-            reason = f"candidate id {result.get('binary', '')!r} was not offered"
-        elif not runner_args:
-            reason = "argv template was invalid"
-        else:
-            chosen_binary = target / chosen["path"]
-            valid, reason = validate_launch(
-                chosen_binary, runner_args, chosen["help"], args.timeout,
-                environment,
+            print(
+                "[suggest-runner] configured sanitizer CLI has no readable help; "
+                "cannot calibrate its normal exit codes",
+                file=sys.stderr,
             )
-            if valid:
-                break
-        if attempt == _MAX_SUGGESTIONS:
-            print(f"[suggest-runner] refusing argv template: {reason}",
-                  file=sys.stderr)
             return 3
-        print(
-            f"[suggest-runner] candidate rejected ({reason}); asking for revision",
-            file=sys.stderr,
+        runner_args = list(cfg.runner_args)
+        reasoning = "existing runner argv retained after launch calibration"
+        valid, reason, validated_exit = validate_launch(
+            chosen_binary, runner_args, chosen["help"], args.timeout,
+            environment,
         )
-        feedback = (
-            "\nThe previous proposal was rejected by launch validation:\n"
-            f"proposal = {result!r}\n"
-            f"reason = {reason}\n"
-            "Choose again from the same candidate ids and revise the argv.\n"
-        )[:3000]
+        if not valid:
+            print(
+                f"[suggest-runner] refusing existing argv calibration: {reason}",
+                file=sys.stderr,
+            )
+            return 3
+        if validated_exit is None or not tc.runner_success_code_allowed(validated_exit):
+            print(
+                f"[suggest-runner] refusing exit-code calibration: exit "
+                f"{validated_exit!r} is in the range the timeout wrapper uses "
+                f"for its own status, exec failures, and signal deaths",
+                file=sys.stderr,
+            )
+            return 3
+    else:
+        for attempt in range(1, _MAX_SUGGESTIONS + 1):
+            prompt = render_template("suggest_runner.md.j2", {
+                "slug": args.slug,
+                "readme": tc.read_readme_excerpt(target) or "(no README found)",
+                "candidates": render_candidates(programs),
+                "feedback_block": feedback,
+            })
+            result = llm_decide(
+                "runner-suggest", "binary,args,reasoning", prompt, args.timeout
+            )
+            if result is None:
+                return 2
+            chosen = next(
+                (p for p in programs if p["id"] == str(result.get("binary", ""))),
+                None,
+            )
+            runner_args = normalize_args(result.get("args"))
+            reasoning = str(result.get("reasoning", "")).strip()
+            if chosen is None:
+                reason = f"candidate id {result.get('binary', '')!r} was not offered"
+            elif not runner_args:
+                reason = "argv template was invalid"
+            else:
+                chosen_binary = target / chosen["path"]
+                valid, reason, validated_exit = validate_launch(
+                    chosen_binary, runner_args, chosen["help"], args.timeout,
+                    environment,
+                )
+                if valid:
+                    if (
+                        validated_exit is None
+                        or not tc.runner_success_code_allowed(validated_exit)
+                    ):
+                        reason = (
+                            f"exit {validated_exit!r} is in the range reserved "
+                            "for the timeout wrapper, exec failures, and signals"
+                        )
+                        valid = False
+                    else:
+                        break
+            if attempt == _MAX_SUGGESTIONS:
+                print(f"[suggest-runner] refusing argv template: {reason}",
+                      file=sys.stderr)
+                return 3
+            print(
+                f"[suggest-runner] candidate rejected ({reason}); asking for revision",
+                file=sys.stderr,
+            )
+            feedback = (
+                "\nThe previous proposal was rejected by launch validation:\n"
+                f"proposal = {result!r}\n"
+                f"reason = {reason}\n"
+                "Choose again from the same candidate ids and revise the argv.\n"
+            )[:3000]
     assert chosen is not None
 
     current = target_toml.read_text(encoding="utf-8")
-    candidate = set_runner_args(current, runner_args, reasoning)
+    candidate = current if calibrating else set_runner_args(
+        current, runner_args, reasoning,
+    )
+    success_codes = sorted({0, validated_exit or 0})
+    candidate = set_runner_success_codes(candidate, success_codes)
     try:
         bin_updates = matching_sanitizer_bins(
             cfg, target, sanitizer, chosen_binary
@@ -469,8 +547,9 @@ def main(argv: list[str]) -> int:
         if (
             os.path.realpath(parsed_binary) != os.path.realpath(chosen_binary)
             or parsed.runner_args != runner_args
+            or parsed.runner_success_codes != success_codes
         ):
-            raise ValueError("validated binary/argv did not round-trip")
+            raise ValueError("validated binary/argv/exit codes did not round-trip")
         for update_sanitizer, update_path in bin_updates.items():
             if os.path.realpath(
                 parsed.resolve_path(parsed.sanitizer_bin(update_sanitizer))
@@ -484,7 +563,11 @@ def main(argv: list[str]) -> int:
         return 3
     if args.apply:
         os.replace(temporary, target_toml)
-        print(f"[suggest-runner] configured native CLI argv in {target_toml}", file=sys.stderr)
+        print(
+            f"[suggest-runner] configured native CLI argv and normal exits in "
+            f"{target_toml}",
+            file=sys.stderr,
+        )
     else:
         temporary.unlink(missing_ok=True)
         if "asan" in changed_bins:
@@ -499,6 +582,11 @@ def main(argv: list[str]) -> int:
                 print(f"{name}_bin = {tc.toml_basic_string(changed_bins[name])}")
         print("[runner]")
         print("args = [" + ", ".join(tc.toml_basic_string(v) for v in runner_args) + "]")
+        print(
+            "success_codes = ["
+            + ", ".join(str(code) for code in success_codes)
+            + "]"
+        )
     return 0
 
 
