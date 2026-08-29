@@ -233,11 +233,13 @@ retires a concrete patch/site card; for a broad whole-file card it records a
 dry pass and yields to fresher work, but the card remains reofferable with its
 history because finite probes cannot prove unexamined functions exhausted.
 If the configured target cannot execute a surface, do not manufacture CLEAN
-evidence: after checking sibling builds/modes, mark its hypothesis ENV-BLOCKED
-(which soft-blocks the owning card) or mark a proven mode-incompatible,
-stale, or non-public card `blocked` with a precise note. MISSED alone is not
-proof of unreachability. The ranked queue keeps one card per strategy
-angle, so blocking the card you were handed closes only that angle.
+evidence: after checking sibling builds/modes, mark its hypothesis ENV-BLOCKED.
+That closes a concrete site card, but records only the failed route on a broad
+ranked-source card; use `update-card --status blocked --note <proof>` for a
+proven whole-card mode incompatibility, stale surface, or non-public boundary.
+MISSED alone is not proof of unreachability. The ranked queue keeps one card
+per strategy angle, so blocking the card you were handed closes only that
+angle.
 
 Search & diff helpers:
 

@@ -98,10 +98,12 @@ an unexamined trigger or concrete effect until campaign dry/wall limits.
 
 **Unreachable-card exit:** never manufacture CLEAN evidence for a surface the
 configured target cannot execute. After checking sibling builds/modes, mark
-the hypothesis `ENV-BLOCKED`; that soft-blocks its owning card for this result
-set. For a mode-incompatible or stale/non-public card proven unreachable from
-the target boundary, use `update-card --status blocked --note <proof>`. A
-MISSED verdict alone is not proof of unreachability.
+the hypothesis `ENV-BLOCKED`; that closes a concrete site card, while a broad
+ranked-source card records only the failed route and remains available for a
+different public boundary. To close the whole broad card, use `update-card
+--status blocked --note <proof>` only with source/configuration proof
+that the card is mode-incompatible, stale, or unreachable from the public
+target boundary. A MISSED verdict alone is not proof of unreachability.
 
 ## Auto-memory: record what was tried, never "skip future sweeps"
 

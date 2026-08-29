@@ -882,7 +882,7 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(updated["agent"], "2")
         self.assertEqual(updated["status"], "DISCARDED")
 
-    def test_environment_block_closes_only_its_own_card(self) -> None:
+    def test_environment_block_demotes_only_its_own_broad_card_route(self) -> None:
         cards = [
             self.card("WORK-C", "yaml/_yaml.c"),
             self.card("WORK-H", "yaml/_yaml.h"),
@@ -895,7 +895,8 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual(updated["status"], "ENV-BLOCKED")
         latest = workqueue.latest_claims_by_card(self.ctx)
-        self.assertEqual(latest["WORK-C"]["status"], "blocked")
+        self.assertEqual(latest["WORK-C"]["status"], "discarded")
+        self.assertEqual(latest["WORK-C"]["source"], "env-block-route")
         self.assertNotIn("WORK-H", latest)
         self.assertNotIn("WORK-OTHER", latest)
 
@@ -1283,7 +1284,10 @@ class WorkQueueTests(unittest.TestCase):
         )
 
     def test_env_blocked_is_the_non_discard_exit_for_unreachable_card(self) -> None:
-        self.write_cards([self.card("WORK-A", "src/app.c")])
+        self.write_cards([
+            self.card("WORK-A", "src/app.c", kind="prior-fix"),
+            self.card("WORK-B", "src/other.c"),
+        ])
         self.add_hypothesis()
         self.add_run(verdict="MISSED")
 
@@ -1297,6 +1301,21 @@ class WorkQueueTests(unittest.TestCase):
         blocked = workqueue.latest_claims_by_card(self.ctx)["WORK-A"]
         self.assertEqual(blocked["status"], "blocked")
         self.assertEqual(blocked["source"], "env-block-own-card")
+
+        self.add_hypothesis(
+            hyp_id="H-2", card_id="WORK-B", file="src/other.c:app_open:20",
+        )
+        workqueue.update_hypothesis(
+            self.ctx, "H-2", "ENV-BLOCKED",
+            "one optional decoder is unavailable in every sibling build",
+            agent="1",
+        )
+        route = workqueue.latest_claims_by_card(self.ctx)["WORK-B"]
+        self.assertEqual(route["status"], "discarded")
+        self.assertEqual(route["source"], "env-block-route")
+        self.assertFalse(workqueue.card_closed_for_run(
+            self.ctx, self.card("WORK-B", "src/other.c"), route["status"],
+        ))
 
     def test_artifact_rejection_updates_only_its_originating_hypothesis(self) -> None:
         self.write_cards([

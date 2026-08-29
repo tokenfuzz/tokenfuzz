@@ -4492,21 +4492,21 @@ def add_cluster_hypotheses(
     return {"agent": agent, "added": added, "skipped": skipped}
 
 
-def _block_card_unconditional(
+def _record_env_blocked_card(
     ctx: Context,
     card_id: str,
     agent: str,
     note: str,
     source: str,
 ) -> bool:
-    """Mark a specific work card terminal `blocked`, regardless of fingerprint.
+    """Close a concrete card, or demote one blocked route on a broad card.
 
-    Used when a hypothesis transitions to ``ENV-BLOCKED``: the card the
-    hypothesis is associated with is *known* unreachable in the current
-    environment (the agent just proved it). Re-offering it to a sibling
-    agent in the same run just burns turns re-proving the same wall.
-    Returns ``True`` if a new blocked claim row was appended, ``False``
-    if the card was already terminal or the input was empty.
+    A concrete patch/site card names the route the hypothesis just disproved,
+    so re-offering it only repeats the same environmental wall. A ranked-source
+    card covers other functions and public routes in the file; its failed
+    hypothesis is diminishing-return evidence, not proof the whole surface is
+    blocked. Manual ``update-card --status blocked`` remains the explicit
+    whole-card exit for source/configuration proof.
     """
     if not card_id:
         return False
@@ -4514,6 +4514,14 @@ def _block_card_unconditional(
     cur = latest.get(card_id)
     if cur and cur.get("status", "") in TERMINAL_CARD_STATUSES:
         return False
+    card = next(
+        (
+            row for row in read_jsonl(work_cards_path(ctx))
+            if str(row.get("id", "")) == card_id
+        ),
+        {},
+    )
+    broad = _is_broad_file_card(card)
     claims_path = state_dir(ctx.results_dir) / "claims.jsonl"
     with jsonl_lock(claims_path):
         _append_jsonl_unlocked(
@@ -4521,10 +4529,10 @@ def _block_card_unconditional(
             {
                 "card_id": card_id,
                 "agent": agent or "",
-                "status": "blocked",
+                "status": "discarded" if broad else "blocked",
                 "updated_at": now_iso(),
-                "source": source,
-                "note": note or "env-blocked hypothesis on this card",
+                "source": "env-block-route" if broad else source,
+                "note": note or "env-blocked hypothesis on this card route",
             },
         )
     return True
@@ -4574,7 +4582,7 @@ def update_hypothesis(
         # The hypothesis proves only its own card cannot execute. Other cards
         # on the same file may carry independent source-review strategies, so
         # inferring that they are blocked would discard work without proof.
-        _block_card_unconditional(
+        _record_env_blocked_card(
             ctx,
             card_id=str(found.get("card_id", "") or ""),
             agent=str(found.get("agent", "") or ""),
