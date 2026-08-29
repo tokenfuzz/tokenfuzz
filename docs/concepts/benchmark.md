@@ -302,6 +302,8 @@ replicates; an em dash means unrecorded, never zero.
 | `First filed` / `First crash confirmed` / `First admitted` | Minutes from the run's first clock (its first backend call) to the first artifact filed, the first sanitizer-confirmed crash, and the first receipt claiming `reportable`. |
 | `EXEC_FAIL share` | Fraction of probes the target rejected before executing the input — a sanitizer launch that taught nothing. |
 | `Duplicate roots` | Share of artifact signatures filed by more than one agent: convergence, not yield. |
+| `Confirmed / seat-h` | Reportable finding and crash clusters per worker-hour (`Worker-h`), so a condition with more concurrent seats is charged for them. |
+| `$ / confirmed` | Measured cost per reportable cluster; absent when cost was estimated or nothing was confirmed. |
 
 The same numbers sit in each cell's `metrics.json` under `telemetry`, and a
 `lineage.jsonl` beside it joins card → hypothesis → testcase → artifact →

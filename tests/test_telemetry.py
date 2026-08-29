@@ -393,11 +393,15 @@ class EfficiencyAggregationTests(unittest.TestCase):
             "time_to_first_crash_confirmed_median": None,
             "time_to_first_admitted_median": None,
             "exec_fail_share_median": 0.4321, "duplicate_root_rate_median": 0.0,
+            "unique_finding_clusters": 3, "unique_crash_clusters": 1,
+            "worker_wall_median": 36000.0, "cost_usd_total": 136.8,
         }, {"condition": "model-direct"}]
         lines = benchmark._render_efficiency(recorded, "codex")
         row = next(line for line in lines if "70%†" in line)
-        self.assertIn("| 14% | 52s | 5m | — | — | 43% | 0% |", row)
-        direct = next(line for line in lines if "| — | — | — | — | — | — | — | — |" in line)
+        self.assertIn("| 14% | 52s | 5m | — | — | 43% | 0% | 0.40 | $34 |", row)
+        direct = next(
+            line for line in lines if "| — | — | — | — | — | — | — | — | — | — |" in line
+        )
         self.assertIn("direct", direct.lower())
 
 

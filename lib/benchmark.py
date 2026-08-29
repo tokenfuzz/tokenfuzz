@@ -3615,16 +3615,23 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
     lines = [
         "| Condition | Occupancy | Blocked housekeeping | Review s/artifact "
         "| First filed | First crash confirmed | First admitted "
-        "| EXEC_FAIL share | Duplicate roots |",
-        "| --- | --: | --: | --: | --: | --: | --: | --: | --: |",
+        "| EXEC_FAIL share | Duplicate roots | Confirmed / seat-h | $ / confirmed |",
+        "| --- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |",
     ]
     for c in sorted(conditions, key=lambda item: item["condition"]):
         occupancy = _fmt_fraction(c.get("worker_occupancy_median"))
         if c.get("worker_occupancy_source") == "file_mtime" and occupancy != "—":
             occupancy += "†"
+        confirmed_total = (
+            _as_int(c.get("unique_finding_clusters")) + _as_int(c.get("unique_crash_clusters"))
+        )
+        per_seat_hour = _ratio(
+            confirmed_total, (c.get("worker_wall_median") or 0) / 3600.0,
+        )
+        per_dollar = _ratio(c.get("cost_usd_total"), confirmed_total)
         lines.append(
             "| {cond} | {occ} | {blocked} | {review} | {filed} | {confirmed} "
-            "| {admitted} | {exec_fail} | {dup} |".format(
+            "| {admitted} | {exec_fail} | {dup} | {seat} | {dollar} |".format(
                 cond=_condition_cell(c["condition"], backend),
                 occ=occupancy,
                 blocked=_fmt_fraction(c.get("housekeeping_blocked_fraction_median")),
@@ -3634,6 +3641,8 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
                 admitted=_fmt_minutes(c.get("time_to_first_admitted_median")),
                 exec_fail=_fmt_fraction(c.get("exec_fail_share_median")),
                 dup=_fmt_fraction(c.get("duplicate_root_rate_median")),
+                seat=("—" if per_seat_hour is None else f"{per_seat_hour:.2f}"),
+                dollar=("—" if per_dollar is None else f"${per_dollar:.0f}"),
             )
         )
     lines.append("")
@@ -3648,8 +3657,10 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
         "receipt claiming reportable; **EXEC_FAIL share** is the fraction of "
         "probes the target rejected before executing the input; **Duplicate "
         "roots** is the share of artifact signatures filed by more than one "
-        "agent. Medians over completed replicates; an em dash is unrecorded, "
-        "never zero."
+        "agent; **Confirmed / seat-h** is reportable clusters per worker-hour "
+        "(so a wider pool is charged for its seats) and **$ / confirmed** is "
+        "measured cost per reportable cluster. Medians over completed "
+        "replicates; an em dash is unrecorded, never zero."
     )
     lines.append("")
     return lines

@@ -2930,6 +2930,50 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "an overtime session cannot justify another slot's overtime",
         repr(chain_calls),
     )
+    # POOL_OVERTIME=any-peer: the same chain that cohort-era stops now lets
+    # slot 2 take its one overtime beside slot 1's overtime -- the idle gap the
+    # default leaves as "every peer still running is itself overtime" -- while
+    # the per-slot cap still stops either slot from a third session.
+    any_peer_calls = []
+    any_peer_lock = threading.Lock()
+    any_peer_refill_running = threading.Event()
+    any_peer_slot1_overtime = threading.Event()
+    def _any_peer_agent(_runtime, _context, agent, _iteration, cold, _limit):
+        with any_peer_lock:
+            first_slot2_refill = (agent, cold) == (2, False) and \
+                (2, False) not in any_peer_calls
+            any_peer_calls.append((agent, cold))
+        if first_slot2_refill:
+            any_peer_refill_running.set()
+            any_peer_slot1_overtime.wait(1)
+        elif agent == 1 and cold:
+            any_peer_refill_running.wait(1)
+        elif agent == 1 and not cold:
+            any_peer_slot1_overtime.set()
+            time.sleep(0.3)
+        return _pool_result(agent, turn_capped=True)
+    with mock.patch.object(
+        audit_runner, "run_agent_guarded", side_effect=_any_peer_agent,
+    ), mock.patch.object(
+        audit_runner, "should_skip_launch", return_value=False,
+    ), mock.patch.dict(os.environ, {"POOL_OVERTIME": "any-peer"}, clear=False):
+        audit_runner.run_agent_pool(pool_state, [1, 2], True)
+    check(
+        sorted(any_peer_calls) == [(1, False), (1, True), (2, False), (2, False), (2, True)],
+        "any-peer lets a drained slot take one overtime beside an overtime peer, never two",
+        repr(any_peer_calls),
+    )
+    with mock.patch.dict(os.environ, {"POOL_OVERTIME": "sometimes"}, clear=False):
+        try:
+            audit_runner.run_agent_pool(pool_state, [1, 2], True)
+            bad_policy = "no error"
+        except ValueError as exc:
+            bad_policy = str(exc)
+    check(
+        "POOL_OVERTIME" in bad_policy and "sometimes" in bad_policy,
+        "an unknown POOL_OVERTIME value is refused, never defaulted",
+        bad_policy,
+    )
     pool_runtime.refill_workers = False
     no_refill_calls = []
     def _no_refill_agent(_runtime, _context, agent, _iteration, cold, _limit):

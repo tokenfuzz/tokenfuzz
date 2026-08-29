@@ -64,6 +64,27 @@ def _agent_timeout() -> int:
     return max(1, int(os.environ.get("AGENT_TIMEOUT", "7200")))
 
 
+_POOL_OVERTIME_POLICIES = ("cohort-era", "any-peer")
+
+
+def _pool_overtime_policy() -> str:
+    """Which in-flight peer lets a drained slot take its one overtime session.
+
+    ``cohort-era`` (default): only an initial session or a refill launched
+    beside one. ``any-peer``: any peer, including another slot's overtime. The
+    one-session-per-slot cap and the epoch clamp hold under both; the policy
+    only decides whether a slot may fill a gap that an overtime peer holds
+    open. A value outside the set is a configuration error, not a default.
+    """
+    value = os.environ.get("POOL_OVERTIME", "").strip() or _POOL_OVERTIME_POLICIES[0]
+    if value not in _POOL_OVERTIME_POLICIES:
+        raise ValueError(
+            "POOL_OVERTIME must be one of "
+            f"{', '.join(_POOL_OVERTIME_POLICIES)}, not {value!r}"
+        )
+    return value
+
+
 def log(message: str) -> str:
     line = f"[{time.strftime('%H:%M:%S')}] {message}"
     print(line, flush=True)
@@ -2655,10 +2676,17 @@ def run_agent_pool(
 
     A one-slot cohort chains nothing either way: with no peer in flight there
     is no overtime, and continuation comes from the next iteration.
+
+    ``POOL_OVERTIME=any-peer`` relaxes the cohort-era half only: a drained slot
+    may take its one overtime session beside an overtime peer too. The cap
+    per slot still bounds the iteration at one extra session per slot; what
+    it buys back is the idle a measured cell spent with "every peer still
+    running is itself overtime" as its most common refill refusal.
     """
     runtime = state.runtime
     context = state.context
     results: list[AgentResult] = []
+    policy = _pool_overtime_policy()
     epoch_budget = _agent_timeout()
     wall = _productive_wall_remaining(state)
     if wall is not None:
@@ -2725,7 +2753,10 @@ def run_agent_pool(
                         "its one overtime session is spent",
                     )
                     continue
-                if not cohort_running and not cohort_era_running:
+                if (
+                    not cohort_running and not cohort_era_running
+                    and policy == "cohort-era"
+                ):
                     index_log(
                         runtime,
                         f"Worker-pool refill: agent={result.agent} slot left idle; "
