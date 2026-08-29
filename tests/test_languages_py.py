@@ -356,12 +356,20 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap: R install stays target-local")
     (tmp_root / "DESCRIPTION").unlink()
 
-    # go.mod -> go bootstrap with -race (Go's maintained sanitizer).
+    # go.mod -> go primes the default cache, so no probe compiles std inside
+    # its run deadline, then builds with -race (Go's maintained sanitizer).
     (tmp_root / "go.mod").write_text("module x\n")
     cmds = languages.bootstrap_for_target(tmp_root, "go")
-    assert_eq(1, len(cmds), "bootstrap: go with go.mod -> 1 command")
-    assert_in("-race", cmds[0],
+    assert_eq(2, len(cmds), "bootstrap: go with go.mod -> 2 commands")
+    assert_in("std", cmds[0],
+              "bootstrap: go primes the default standard-library cache")
+    assert_in("-race", cmds[1],
               "bootstrap: go enables -race data-race detector")
+    go_plan = languages.bootstrap_plan_for_target(tmp_root, "go")
+    assert_eq(1, len(go_plan["alternatives"]),
+              "bootstrap: go keeps a build for a host without cgo")
+    assert_not_in("-race", go_plan["alternatives"][0],
+                  "bootstrap: the go fallback drops the cgo-only detector")
     (tmp_root / "go.mod").unlink()
 
     # package.json -> npm bootstrap, primary is `npm ci`.

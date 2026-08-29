@@ -207,4 +207,56 @@ fi
 assert_eq "test_probe_harness_cpp.py" "${TEST_FILES[0]##*/}" \
   "runner: the heaviest suite is scheduled first"
 
+# ── container lane: the image's own PATH survives the login shell ──
+# A login shell re-runs /etc/profile, which rebuilds PATH from scratch. When
+# that dropped the toolchain directory the image put on PATH, every test that
+# needs a toolchain skipped inside the container and the lane proved less than
+# its green result claimed.
+container_root="$TEST_TMPDIR/container"
+mkdir -p "$container_root"/{bin,toolchain,home,work/tests}
+cat > "$container_root/toolchain/imagetool" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$container_root/toolchain/imagetool"
+# What a Debian image's /etc/profile does to PATH, reproduced where a test can
+# construct it: a login shell rebuilds the variable rather than extending it.
+printf 'PATH=/usr/bin:/bin\nexport PATH\n' > "$container_root/home/.bash_profile"
+cat > "$container_root/work/tests/run-tests.sh" <<'EOF'
+#!/usr/bin/env bash
+if command -v imagetool >/dev/null 2>&1; then
+  echo "SUITE: image toolchain reachable"
+else
+  echo "SUITE: image toolchain lost"
+fi
+case "${PYTHONPYCACHEPREFIX:-}" in
+  ""|/work*) echo "SUITE: bytecode cached in the mounted tree" ;;
+  *) echo "SUITE: bytecode cached outside the mounted tree" ;;
+esac
+EOF
+chmod +x "$container_root/work/tests/run-tests.sh"
+# Stand-in runtime: answers the reachability probe, then runs the entry
+# command the way the image would — its own PATH, its own login profile.
+cat > "$container_root/bin/docker" <<EOF
+#!/usr/bin/env bash
+[ "\$1" = info ] && exit 0
+passed=()
+while [ "\$#" -gt 0 ] && [ "\$1" != stub-image ]; do
+  [ "\$1" = -e ] && passed+=("\$2")
+  shift
+done
+shift
+cd "$container_root/work" || exit 1
+exec env -i HOME="$container_root/home" \
+  PATH="$container_root/toolchain:/usr/bin:/bin" "\${passed[@]}" "\$@"
+EOF
+chmod +x "$container_root/bin/docker"
+
+output=$(PATH="$container_root/bin:$PATH" bash "$RUNNER" \
+  --image stub-image --no-install-deps --jobs 1 2>&1)
+assert_match "SUITE: image toolchain reachable" "$output" \
+  "runner: the container entry keeps the image toolchain on PATH"
+assert_match "SUITE: bytecode cached outside the mounted tree" "$output" \
+  "runner: the container writes no bytecode into the mounted checkout"
+
 summary

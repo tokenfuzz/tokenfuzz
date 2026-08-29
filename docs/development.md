@@ -143,8 +143,14 @@ that reads correctly but was never checked.
    — passes only where that policy happens to match, and where it does not
    hold the behaviour it guards goes unexercised, so the green hosts prove
    nothing either. Build the input that policy would produce rather than
-   waiting for a host that produces it. `tests/run-tests.sh --image
-   ubuntu:24.04` runs the Linux CI jobs locally.
+   waiting for a host that produces it. A toolchain cache is a host property
+   too: `go run` compiles the standard library on first use, so a probe that
+   pays for it inside a per-run execution deadline passes on a warm developer
+   machine and times out on a fresh runner — bootstrap the target the way
+   `bin/setup-target` does instead. `tests/run-tests.sh --image ubuntu:24.04`
+   runs the Linux CI container job locally, on caches as cold as CI's. A
+   container covers only the toolchains `--install-container-deps` installs,
+   and a skipped test is not a passing one — read the skips.
 6. **Suite time is spawn count.** Every `bin/` entry point costs 120–260ms of
    interpreter and import, so count spawns before optimising anything else,
    and fix the harness rather than thinning the test — the same chain runs in
@@ -273,6 +279,17 @@ opening a docs PR.
 
 `CHANGELOG.md` is the release log. When a release is asked for:
 
+- **Green the lanes before writing a line.** Notes written over a red CI
+  describe a release that does not exist. Run both lanes the workflow runs —
+  the host suite and the container, whose caches start as cold as CI's:
+
+  ```bash
+  bash tests/run-tests.sh
+  bash tests/run-tests.sh --image ubuntu:24.04 --jobs 4
+  ```
+
+  Read the skips as well as the failures: a test whose toolchain is missing
+  reports as neither.
 - **Pick the bump first** from commits since the last tagged section: patch
   (`x.y.Z`) is fixes, quality gates, and internal cleanup with no contract
   change; minor (`x.Y.0`) adds a capability or changes the audit contract or

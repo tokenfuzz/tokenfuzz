@@ -28,7 +28,8 @@ Options:
   --category NAME       Run one category: decision, integration, python, static, unit, wrapper.
   --suite-timeout N     Kill a test file and its process tree after N seconds (default: 900).
   --list                List matched tests with categories, then exit.
-  --image IMAGE          Run the suite inside a Linux container image.
+  --image IMAGE          Run the suite inside a Linux container image; the
+                         CI container job runs ubuntu:24.04.
   --runtime NAME         Container runtime: docker (default).
   --no-install-deps      Skip dependency installation inside the image.
   -h, --help            Show this help.
@@ -93,34 +94,37 @@ while [ "$#" -gt 0 ]; do
         set -e
         # nodejs is required: bin/audit:gemini_cli_check_bundled_ripgrep uses
         # node for realpath/platform detection and audit-runner checks assert
-        # its WARN path. CA certificates support HTTPS fixture traffic in
-        # minimal images. Backend and strategy CLIs are not test prerequisites.
+        # its WARN path. go carries the compiled-language probe route; with
+        # no toolchain those tests skip and the lane reports green for a route
+        # it never ran. CA certificates support HTTPS fixture traffic in
+        # minimal images. Backend and strategy CLIs are not test
+        # prerequisites.
         if command -v apt-get >/dev/null 2>&1; then
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
           apt-get install -y --no-install-recommends \
-            bash binutils ca-certificates clang file git libclang-rt-dev llvm \
-            nodejs procps python3 python3-venv ripgrep
+            bash binutils ca-certificates clang file git golang-go \
+            libclang-rt-dev llvm nodejs procps python3 python3-venv ripgrep
         elif command -v dnf >/dev/null 2>&1; then
           dnf install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git golang \
             grep llvm nodejs procps-ng python3 python3-pip ripgrep sed \
             || dnf install -y \
-              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git golang \
               grep llvm nodejs procps-ng python3 python3-pip sed
         elif command -v microdnf >/dev/null 2>&1; then
           microdnf install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git golang \
             grep llvm nodejs procps-ng python3 python3-pip sed
         elif command -v yum >/dev/null 2>&1; then
           yum install -y \
-            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+            bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git golang \
             grep llvm nodejs procps-ng python3 python3-pip ripgrep sed \
             || yum install -y \
-              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git \
+              bash binutils ca-certificates clang compiler-rt coreutils diffutils file findutils gawk git golang \
               grep llvm nodejs procps-ng python3 python3-pip sed
         else
-          echo "tests/run-tests.sh: no supported package manager found; install bash python3 file git clang llvm binutils nodejs ripgrep ca-certificates" >&2
+          echo "tests/run-tests.sh: no supported package manager found; install bash python3 file git clang llvm binutils nodejs go ripgrep ca-certificates" >&2
           exit 2
         fi
       ) || {
@@ -133,7 +137,7 @@ while [ "$#" -gt 0 ]; do
       # error message points at the install step, not at bin/audit later.
       # sancov is not checked: the Debian/Ubuntu llvm package does not ship it.
       missing=()
-      for tool in bash python3 file git clang clang++ nm ar node rg llvm-symbolizer; do
+      for tool in bash python3 file git clang clang++ nm ar node go rg llvm-symbolizer; do
         command -v "$tool" >/dev/null 2>&1 || missing+=("$tool")
       done
       venv_probe="$(mktemp -d "${TMPDIR:-/tmp}/tokenfuzz-venv-check.XXXXXX" 2>/dev/null || true)"
@@ -192,12 +196,23 @@ if [ -n "$RUN_IMAGE" ]; then
   if [ "${#inner_args[@]}" -gt 0 ]; then
     printf -v inner_cmd '%q ' "${inner_args[@]}"
   fi
+  suite_cmd="if [ $INSTALL_DEPS -eq 1 ]; then tests/run-tests.sh --install-container-deps; fi; bash tests/run-tests.sh ${inner_cmd}"
+  # A login shell re-runs the image's /etc/profile, which rebuilds PATH from
+  # scratch and drops whatever the image itself put on it, so a toolchain the
+  # image ships rather than installs disappears and its tests skip. Record the
+  # image's own order first and keep the profile's additions behind it.
+  printf -v login_cmd '%q' "PATH=\"\$TOKENFUZZ_IMAGE_PATH\${PATH:+:\$PATH}\"; $suite_cmd"
+  # The checkout is bind-mounted, so bytecode the container writes lands in the
+  # developer's tree and the next run — a different image, a different Python,
+  # or a concurrent job — reads a cache it did not write. Keep the container's
+  # bytecode inside the container.
   "$CONTAINER_RUNTIME" run --rm \
     -v "$SCRIPT_ROOT:/work" \
     -w /work \
     -e LLM_DECIDE_DISABLE="${LLM_DECIDE_DISABLE:-1}" \
+    -e PYTHONPYCACHEPREFIX=/tmp/tokenfuzz-pycache \
     "$RUN_IMAGE" \
-    bash -lc "if [ $INSTALL_DEPS -eq 1 ]; then tests/run-tests.sh --install-container-deps; fi; bash tests/run-tests.sh ${inner_cmd}"
+    bash -c "TOKENFUZZ_IMAGE_PATH=\"\$PATH\" exec bash -lc $login_cmd"
   exit $?
 fi
 

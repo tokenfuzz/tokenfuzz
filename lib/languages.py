@@ -361,7 +361,20 @@ func main() {
         # to cgo and degrade silently on pure-Go trees, so we leave
         # them out of the default and rely on -race + the release
         # build (assertions are not a Go concept).
-        bootstrap_cmds=(("go", "build", "-race", "-trimpath", "./..."),),
+        # `go build std` primes the default build cache and runs first:
+        # Go ships no precompiled standard library, so without it the first
+        # `go run` — the runner canary — compiles std inside the per-run
+        # execution deadline and a cold host reads as an unreachable route.
+        # The -race build caches separately and does not cover it, and it
+        # needs cgo, so a host with no C compiler falls back to the plain
+        # release build rather than losing the target entirely.
+        bootstrap_cmds=(
+            ("go", "build", "std"),
+            ("go", "build", "-race", "-trimpath", "./..."),
+        ),
+        bootstrap_alternatives=(
+            ("go", "build", "-trimpath", "./..."),
+        ),
         bootstrap_manifests=("go.mod",),
         fuzz_backends=("native-fuzz", "race"),
     ),

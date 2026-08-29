@@ -122,7 +122,8 @@ The suite uses stubbed backend invocations; it does not spend model tokens or
 require backend authentication. It exercises config parsing, state, triage,
 runner dispatch, reporting, and shell/Python portability.
 
-Optional Linux image checks run the same suite in a clean Docker container:
+Optional Linux image checks run the same suite in a clean Docker container;
+`ubuntu:24.04` is the image the CI container job runs:
 
 ```bash
 bash tests/run-tests.sh --image ubuntu:24.04

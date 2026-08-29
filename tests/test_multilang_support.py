@@ -42,6 +42,22 @@ class MultiLanguageSupportTests(unittest.TestCase):
         path.chmod(0o755)
         return path
 
+    def bootstrap(self, build_system: str) -> None:
+        """Prepare the target the way `bin/setup-target --build` does.
+
+        A toolchain that compiles on run builds inside the per-run execution
+        deadline unless setup primed its caches first. A test that probes an
+        unbootstrapped tree is measuring how warm the host happens to be.
+        """
+        plan = languages.bootstrap_plan_for_target(self.target, build_system)
+        status = languages.execute_bootstrap_plan(
+            self.target, plan,
+            self.root / "bootstrap.log", self.root / "bootstrap.sh",
+        )
+        self.assertEqual(
+            status, 0, (self.root / "bootstrap.log").read_text(encoding="utf-8"),
+        )
+
     def tree(self, name: str, config: str) -> Path:
         root = self.root / name
         results = root / "output" / "multilang" / "codex" / "results"
@@ -199,6 +215,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
             '  target "example.com/probetarget"\n)\n\n'
             'func main() { fmt.Println(target.Marker()) }\n',
         )
+        self.bootstrap("go")
 
         result = self.run_probe(testcase)
 
