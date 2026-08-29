@@ -291,6 +291,8 @@ class BenchmarkReportTests(unittest.TestCase):
             # framing produced crash-free passes. The evidence bar (a real
             # trace) must survive that reframing unchanged.
             "both first-class ways to find bugs",
+            "do not start another broad source scan until you either run its smallest",
+            "one clean run settles only a fully instantiated",
             "File a CRASH only when a real sanitizer trace reproduces",
             "--input /abs/out/crashes/CRASH-N/input --sink " + os.devnull,
             # The bundle contract has to name the compiled driver: the replay

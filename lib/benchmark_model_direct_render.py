@@ -219,7 +219,12 @@ _CRASH_LANE = (
     "File every source-proven FINDING as you go. Source review and execution\n"
     "are both first-class ways to find bugs here — {vehicle} is\n"
     "not only for confirming what review already suspects, so budget real\n"
-    "time for driving it. File a CRASH only when a real {trace} reproduces.\n"
+    "time for driving it. After filing a source-backed memory-safety FIND,\n"
+    "do not start another broad source scan until you either run its smallest\n"
+    "faithful sanitizer probe or record why no public execution route can test\n"
+    "it. Repeat allocator-, state-, race-, and timing-dependent probes with a\n"
+    "distinct shape; one clean run settles only a fully instantiated\n"
+    "deterministic trigger. File a CRASH only when a real {trace} reproduces.\n"
 )
 
 
