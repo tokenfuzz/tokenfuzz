@@ -27,8 +27,6 @@ different evidence:
 They are independent: nothing in the findings path can change crash
 bucketing, and vice versa.
 
----
-
 ## Crash deduplication
 
 A crash always comes with a sanitizer stack trace, so crashes dedup the

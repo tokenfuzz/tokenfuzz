@@ -8,6 +8,14 @@ issues at [tokenfuzz/tokenfuzz/issues](https://github.com/tokenfuzz/tokenfuzz/is
 
 ## Start here
 
+A normal contributor loop is deliberately short:
+
+1. Establish a green baseline.
+2. Trace the behavior through the command, shared code, callers, and tests.
+3. Make the smallest complete change and add behavior-focused coverage.
+4. Run the relevant checks, inspect the diff, then run the full suite.
+5. Have the final diff reviewed in a fresh context before handoff.
+
 From a fresh checkout, establish the verification baseline before changing
 code:
 

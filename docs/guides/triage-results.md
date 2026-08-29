@@ -1,204 +1,200 @@
-# Triage Results
+# Triage and Review
 
-Triage keeps the output of a run useful to a maintainer. The rule is
-simple:
+TokenFuzz preserves evidence in four result lanes. Triage decides which lane an
+artifact belongs in and records the decision beside the files it judged. It
+does not replace a security team's review or the upstream project's disclosure
+process.
 
-- **Record every concrete security issue.**
-- **Be strict about what stays in `crashes/`.**
+Start with the generated HTML indexes:
 
-A reproducible crash is the strongest kind of prioritisation evidence
-there is. A non-crashing issue, or a security issue without a
-sanitizer reproducer, belongs in `findings/` with a clear report.
+```text
+output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
+output/<target>/<backend>/results/crashes/CRASH-CLUSTERS.html
+output/<target>/<backend>/results/findings-rejected/REJECTED-FINDINGS.html
+output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
+```
+
+Do not begin with a raw model transcript. The indexes join the report, current
+review state, severity, evidence signature, and canonical cluster member.
 
 ## The four result lanes
 
-| Lane | Directory | An artifact lands here when |
+| Lane | Directory | Contract |
 | --- | --- | --- |
-| Crash | `crashes/CRASH-NNN-N/` | A testcase produces sanitizer evidence, or an accepted security-boundary violation. |
-| Finding | `findings/FIND-NNN/` | It is any concrete security issue — see below. |
-| Rejected crash | `crashes-rejected/` | A crash candidate is low value, out of scope, or incomplete. |
-| Rejected finding | `findings-rejected/` | A FIND lost at quorum — the substance gate, an unreachable trigger, or a source-disproved consequence. |
+| Finding | `findings/FIND-*/` | A concrete security report with a location, issue class, and actionable rationale. A testcase is optional. |
+| Crash | `crashes/CRASH-*/` | A reproducible sanitizer or runtime-race diagnostic with saved input and output. |
+| Rejected finding | `findings-rejected/` | A FIND whose evidence lost at the substance or source-review gates. |
+| Rejected crash | `crashes-rejected/` | A crash candidate that was incomplete, low-value, contradicted by source, or rooted in harness-only misuse. |
 
-`findings/` accepts any concrete security class — memory safety,
-logic, auth, injection, info disclosure, crypto, race, boundary
-violation, and so on. A sanitizer reproducer is *not* required.
+Nothing is silently deleted. Rejected directories move with their evidence and
+gain an index entry explaining why. A crash may also stay under `crashes/` as
+`not-reportable`: review accepted the engineering defect but found that its
+trigger crosses no configured security boundary.
 
-Nothing is deleted. Both rejected trees keep the full artifact and a
-generated index naming the reason, which is what stops the harness
-refiling the same low-value result next session and lets you audit a
-bad rejection:
+## A practical review order
 
-```text
-<RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.html
-<RESULTS_DIR>/findings-rejected/REJECTED-FINDINGS.html
-```
+For each canonical row in a cluster index:
 
-Between "filed" and "rejected" sits a third state. Findings have a
-substance gate that drops one of two markers in the FIND directory
-while the report waits for content or a second review:
+1. Read the Status or publication state.
+2. Open `REPORT.html` for a crash or `report.html` for a finding.
+3. Check the root `Location`, boundary, caller controls, trigger source, and
+   caller contract against the source.
+4. For a crash, run `reproduce.sh` in an isolated build environment and compare
+   the new diagnostic with `sanitizer.txt`.
+5. Read the severity rationale only after the technical claim holds.
+6. Skim duplicate members only when they provide a better input, another
+   carrier, or useful variant evidence.
 
-- `.needs-content` — the FIND directory has no `report.md` or
-  `description.md` yet.
-- `.pending-drop` — a review pass ended with at least one Reject but did
-  not reach reject quorum. Cleared on the next accept; once quorum is
-  reached the FIND moves to `findings-rejected/` rather than being deleted.
+The generated CVSS v4.0 score is advisory. It derives from report and review
+fields; it does not know deployment-specific privileges, asset value, or the
+upstream maintainer's threat model.
 
-Either address the underlying issue (add the report, sharpen the
-rationale) and rerun triage, or `touch .reviewed` (or `.keep`) in the FIND
-directory to pin the current state as-is.
-[The finding Status column](#the-finding-status-column) shows how each
-marker appears in `findings/FINDING-CLUSTERS.html`.
+## How automated review works
 
-## How the gates decide
+Crashes and findings start from different evidence, so they do not use the same
+first gate.
 
-Both artifact types pass a mechanical stage and then a source-reading stage.
-The two stages differ because the evidence differs.
-
-| | Crashes | Findings |
+| Stage | Crash | Finding |
 | --- | --- | --- |
-| **Mechanical stage** | Sanitizer class, artifact completeness, harness-rooted stacks, caller-contract fields, and the configured threat model decide the normal disposition. Deterministic. | A substance gate: two independent readers, each with none of the filing agent's context, vote accept or reject. Two accepts confirm; two rejects move the FIND to `findings-rejected/`. |
-| **Source-reading stage** | A *trigger reviewer* reads the code and can throw out a sanitizer-confirmed crash — but only on two Reject votes that each carry a concrete disproof. | The same review, applied to the finding's trigger *and* its exact claimed consequence. One Reject opens an independent second review; two anchored Rejects can quarantine. |
+| Mechanical or substance gate | Checks diagnostic class, reproduction files, report fields, caller contract, and auto-rejection classes. | Independent readers judge whether the report names a concrete security issue. Two accepts admit it; two rejects quarantine it. |
+| Source review | Reads the trigger and caller contract. Two source-anchored Reject votes are required to quarantine sanitizer-confirmed evidence. | Reads both the trigger and the exact claimed consequence. Two source-anchored Reject votes are required to quarantine an admitted FIND. |
+| Final state | `reportable`, `not-reportable`, `pending`, or `rejected`. | The same four states. |
 
-Three rules apply to the source-reading stage on both sides:
+Both source-review paths fail open: missing, malformed, or inconclusive model
+output cannot destroy an artifact. Fail-open means *preserved and unsettled*,
+not confirmed. A first `Uncertain` vote or a split review gets one focused
+resolver that sees the prior rationales. If the resolver still cannot settle
+the question, the artifact remains pending.
 
-- **It fails open.** Missing, ambiguous, or inconclusive reviewer output keeps
-  the artifact. Silence is never a rejection.
-- **Deadlock gets one resolver, not another coin flip.** A first `Uncertain`
-  vote, or a split between two reviews, opens one focused resolution review
-  that receives the prior rationales and answers their exact open question. If
-  that review also cannot settle the claim, the artifact stays unjudged rather
-  than being guessed into a lane.
-- **The receipt is content-addressed.** Editing a report's substance forces a
-  fresh review; generated severity, patch, and cluster annotations do not.
+Review receipts are content-addressed. Changing the authored report, testcase,
+harness, diagnostic, invocation evidence, target revision, config, or threat
+model invalidates the old decision and reopens review. Generated cluster,
+severity, patch-rendering, and enrichment annotations do not.
 
-## Common rejection reasons
+## Publication state
 
-Most operators arrive on this page because something landed in
-`crashes-rejected/`. Start here.
+Open `validation.json` when the index is not enough:
 
-| Reason | Why it is rejected |
-| --- | --- |
-| Null dereference only | Usually no memory-safety impact unless a boundary violation is also shown. |
-| OOM | Resource exhaustion alone is not the evidence this harness promotes. |
-| Assertion-only abort | Debug assertion failures need a security boundary or sanitizer diagnostic. |
-| Timeout-only behaviour | A hang needs a stronger impact story and reproduction discipline. |
-| Harness-only misuse | The testcase violates a contract no real caller can violate. |
-| Missing files | No testcase, no sanitizer output, or an incomplete report. |
+| State | Final? | Meaning |
+| --- | --- | --- |
+| `reportable` | yes | Review found real security impact inside the declared attacker surface. This is the only state with a numeric severity or security-yield credit. |
+| `not-reportable` | yes | A real engineering defect needs a control outside the threat model or violates an admitted caller contract. It stays visible and unscored. |
+| `pending` | no | Review did not settle the claim. It is neither credited nor written off. |
+| `rejected` | yes | The evidence did not hold. The artifact is preserved in a rejected tree. |
 
-For non-crashing findings, naming a dangerous API is not enough. The substance
-gate rejects a report whose only evidence is that the API accepted attacker
-data. These are the shapes it turns away most often, and what would have kept
-each one:
-
-| Rejected shape | What would keep it |
-| --- | --- |
-| Correctness, robustness, or spec-deviation bugs that cross no security boundary. | Name the boundary. "An application that trusted this could be confused" is not one — enforcing the invariant has to be the library's job. |
-| Path escape where the same untrusted input picks both the base and the child, or where the escape needs a symlink a trusted party planted. | A capability that changes despite that control — a URL scheme turning a local read into a server-side request, a path API interpreting the value as a command channel — or proof the attacker controls the filesystem state. |
-| Code execution by loading an outside file the attacker cannot place there. | An existing effectful module in the shipped target, or attacker-controlled placement inside the threat model. A fixture the testcase created is neither. |
-| Deserialization, reflection, or prototype pollution showing only that a dangerous sink accepted the value. | A reachable gadget, magic hook, memory consequence, or authorization effect in the environment the target actually loads. |
-| Resource exhaustion driven by an attacker-controlled count or length. | Quantified amplification (attacker bytes in versus bytes or CPU consumed) *and* the demand surviving the project's own size ceiling. |
-| Residual-memory disclosure that never says where the leaked bytes came from. | Name the allocation — the call, buffer, or field the bytes live in. An agent that established the leak can always say what leaked. |
-| Caller-contract misuse: a bogus length for the caller's own pointer, use after handing an object to the API, racing cleanup against the library. | Untrusted bytes driving the parameter into that state through a public entry. Then it is the library's job, and the "caller misuse" label in the report is wrong. |
-
-A thin but real security case is kept: the buckets target missing substance,
-not weak writing.
-
-**Not reportable — keep the engineering defect, do not security-report it.** A
-reproducing sanitizer crash whose `Trigger source` falls outside the target's
-`attacker_controls` (for example a `call-sequence`, `env`, or `race` trigger on
-a bytes-only target) is **not** moved to `crashes-rejected/`. Triage keeps it in
-`crashes/` with the final `not-reportable` decision: no numeric CVSS score, no
-security yield. Agents still file the reproducible crash.
-
-That scope call is not the report's to make. `Trigger source` is written by
-whoever found the bug and is wrong in both directions — a driver exercising
-documented entry points reads as caller-driven even when attacker bytes decide
-the fault, and an unreproduced claim reads as byte-driven even when only a
-caller can reach it. The trigger-provenance reviewer reads the source and
-answers `trigger_controls_fit` (`within` / `outside` / `unclear`); where the two
-disagree, the reviewer decides. An admitted caller-contract violation or
-`harness-only` parameter control is the report's own words, so no reviewer
-opinion promotes it.
-
-Before filing a similar crash, check
-`<RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.html` — this run has already
-answered some of these questions.
+“Filed,” “admitted,” and “reportable” are deliberately different. An agent can
+file a FIND; the substance gate can admit it; only a current final receipt says
+whether it is a security result to report.
 
 ### The finding Status column
 
-For findings, scan `<RESULTS_DIR>/findings/FINDING-CLUSTERS.html` and read
-the `Status` column:
+`findings/FINDING-CLUSTERS.html` presents common working states in a compact
+column:
 
 | Status | Meaning |
 | --- | --- |
-| `OK` | The FIND has a report and cleared the gates. |
-| `NEEDS CONTENT` | No `report.md` / `description.md` yet (`.needs-content`). |
-| `NEEDS REVIEW` | Scored `Needs review`: the report's issue class is too vague for a trustworthy CVSS vector. |
-| `NEEDS ATTENTION` | You (or another reviewer) dropped a `.needs-attention` file in the FIND directory. The harness only reads that marker; it never writes one. |
-| `OK (override)` | A `.reviewed` or `.keep` file pins the FIND past the gates. |
+| `OK` | A report is present and no content, attention, or severity marker is active. Check `validation.json` for publication state. |
+| `NOT-REPORTABLE (no security credit)` | A current receipt retains the engineering evidence outside the security total. |
+| `NEEDS CONTENT` | No `report.md` or `description.md` exists (`.needs-content`). |
+| `NEEDS REVIEW` | The issue class is too vague for a trustworthy severity vector. |
+| `NEEDS ATTENTION` | A human-created `.needs-attention` marker requests review. |
+| `OK (override)` | A `.reviewed` or `.keep` marker requests a human override. |
 
-`.pending-drop` — a review pass that ended below reject quorum — is an
-internal marker and does not appear in this column.
+`.pending-drop` is working state: at least one finding-quality Reject exists,
+but reject quorum has not been reached. Fix the report and let it receive fresh
+votes. A human override can pin an intentionally terse report past the quality
+gate, but complete boundary and trigger fields are still required before a
+final receipt is written.
 
-### Publication state
+## Common rejection reasons
 
-When a report's status is unclear, open its `validation.json`. One of four
-states is recorded there:
+### Crash candidates
 
-| State | Final? | What it means |
+Three non-reportable outcomes require different operator action:
+
+| Disposition | Typical reason | What happens |
 | --- | --- | --- |
-| `reportable` | yes | Real security impact inside the declared attacker surface. The only state that receives a numeric CVSS score and counts toward security yield. |
-| `not-reportable` | yes | A review established a real engineering defect that crosses no security boundary — an admitted contract violation, or reviewers agreeing the trigger needs something `attacker_controls` does not list. Stays visible on disk, unscored, outside the security total. |
-| `pending` | no | No review settled the claim. Neither credited nor written off; counted in the unadjudicated remainder. |
-| `rejected` | yes | The evidence did not hold up. Preserved in the rejected tree with its reason. |
+| Hard rejection | Near-null dereference, OOM or timeout only, assertion or panic only, plain stack overflow, a fault rooted in the audit harness, or two source-anchored reviews disproving the route | The directory moves to `crashes-rejected/` with the reason. |
+| Promotion pending | The testcase, saved diagnostic, report, required fields, or exported invocation is incomplete; source review may also remain unsettled | The directory stays under `crashes/` with a pending receipt. Repeatedly incomplete promotion work eventually ages into rejection. |
+| Retained `not-reportable` defect | The report admits a caller-contract violation or harness-only parameter, or source review places the required trigger outside `attacker_controls` | The reproducible engineering evidence stays under `crashes/`, final and unscored. |
 
-The receipt binds the state to the report, its saved evidence, the target
-revision and config, and the threat model — so a stale decision cannot survive
-a change to any of them.
+An out-of-model trigger is not itself a hard rejection. Keep a retained defect
+where it is rather than filing the same mechanism again as a security issue.
 
-## What a strong crash looks like
+### Finding candidates
 
-A strong crash artifact has:
+A FIND needs a security boundary and a concrete consequence, not merely a
+dangerous-looking API. Common rejected shapes include:
 
-- a runnable testcase;
-- saved sanitizer output;
-- a confirmation run when applicable;
-- a report explaining the boundary and caller controls;
-- a clearly documented trigger source; `target.toml` fit affects severity;
-- a root cause in target code, not in harness-only misuse.
+| Rejected shape | Evidence that would make it substantive |
+| --- | --- |
+| Correctness or spec deviation | The independent security boundary the target is responsible for enforcing. |
+| Path escape where one untrusted value chooses both base and child | A separately trusted root, authorization decision, or different capability reached by the escape. |
+| Loading an outside file the attacker cannot place | A shipped effectful module or attacker-controlled placement inside the threat model. |
+| Deserialization or reflection reaches only a sink | A reachable gadget, hook, authorization effect, or memory consequence in the actual environment. |
+| Resource exhaustion from a caller-controlled count | Quantified amplification that survives the product's own input ceiling. |
+| Residual-memory disclosure with no source allocation | The buffer, field, allocation, or prior operation the bytes came from. |
+| Caller-owned pointer or lifetime misuse | A public product path through which untrusted input drives the parameter into that state. |
 
-The crash path is intentionally stricter than the finding path.
-`crashes/` should help maintainers prioritise issues they can rerun
-quickly. If the underlying concern is real but the crash evidence is
-weak, keep the report as a FIND instead of forcing it through crash
-triage.
+A thin but concrete security case should remain visible. These gates reject
+missing substance, not imperfect writing.
 
-Sanitizer classes that typically belong in `crashes/`:
+## Review a crash
 
-- out-of-range read or write;
-- container-overflow;
-- stack-buffer-overflow;
-- heap-buffer-overflow;
-- heap-use-after-free;
-- alloc-dealloc-mismatch;
-- similar memory-safety diagnostics.
-
-## Crash report fields
-
-Every crash report is written in two formats side by side:
-
-- `REPORT.md` — the source of truth.
-- `REPORT.html` — auto-generated sibling, easiest to read in a
-  browser (same content with the field table aligned, severity
-  badge, and external links resolved).
-
-Open either. Hand-edit `REPORT.md` only.
-
-Crash reports include the human explanation and a `## Fields` table.
-The rows are also emitted as bare-label lines. Triage reads the
-bare-label form, and `REPORT.html` renders the table. The fields:
+A strong crash contains:
 
 ```text
+CRASH-*/
+  REPORT.md
+  REPORT.html
+  reproduce.sh
+  input.<ext>
+  harness.*             # when an API harness is required
+  sanitizer.txt
+  validation.json
+  severity.json         # only for a currently reportable artifact
+  patch.diff             # optional candidate fix
+  .audit/                # audit-side originals
+```
+
+Check that the saved output names a sanitizer class and faults in target code,
+that the bundled input or harness can be rerun, and that the report explains
+how a normal product entry reaches the fault. A confirmation rate is useful,
+but it does not turn harness-only state into attacker reachability.
+
+The maintainer-side procedure is in
+[Reproduce a crash](reproduce-a-crash.md). Treat `reproduce.sh` and the target's
+build system as untrusted code: inspect them and run them in an isolated
+environment without credentials.
+
+## Review a finding
+
+A FIND needs a Markdown report at its root (`report.md` or `description.md`).
+The minimum useful report contains:
+
+- exactly one bare `Location:` naming the root-cause operation, endpoint,
+  config key, or protocol step;
+- an explicit security issue class;
+- the boundary, caller-controlled input, trusted setup, caller contract, and
+  trigger source;
+- a short explanation of what is wrong and what capability or data is lost;
+- the strategy that produced it.
+
+A reproducer, captured output, `affected-files.txt`, or a small generator is
+welcome but optional. Do not use symlinks inside a FIND bundle.
+
+The shared report narrative is Summary, Root Cause, Data Flow, Impact, and Fix
+Direction. The exact order and word budgets are in
+[Artifact layout](../reference/artifacts.md#report-narrative). Generated
+`report.html` is the easiest reading view; edit the Markdown source only.
+
+## Structured report fields
+
+Triage parses bare-label fields from crash and finding reports. Important ones
+include:
+
+```text
+Location: path/to/file.ext:function:line
 Surface: network|library-api|file-format|cli|dev-tool|internal|unknown
 Reproducer carrier: network|library-api|file-format|cli|harness|runner|unknown
 Trigger source: bytes|both|call-sequence|timing|race|protocol-state|env|fs-state
@@ -210,395 +206,61 @@ Parameter control: direct|indirect|application-supplied|trusted|harness-only
 Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
 ```
 
-Notes:
+`Surface` names the vulnerable product boundary; `Reproducer carrier` names
+the program or harness used to reach it. `Trigger source` records what actually
+decides the fault, not every setup call the driver makes. `Parameter control`
+matters when a compiled harness supplies a value the external input does not
+directly choose.
 
-- `Surface` describes the vulnerable boundary, not the program used to carry
-  the testcase to it. Agents write
-  a short label, optionally followed by prose (`library-api — C
-  harness calls app_read_memory`); export normalises it to one of the
-  tokens above, and `bin/severity` classifies it into a surface tier
-  (e.g. `cli` → `cli_production`) from the surface *kind* alone before
-  computing severity. `Reproducer carrier` is optional metadata for cases
-  where those differ. Triage never infers `file-format` merely from
-  `cli + bytes`; the boundary must come from configured or source-reviewed
-  evidence. An unset `Surface` defaults to `unknown` and
-  under-scores real findings, so always set it.
-- `Trigger source` is compared against `attacker_controls` to open the security
-  reportability question: a trigger fully within the configured controls can be
-  reportable; one with an outside component the source reviewer confirms stays
-  in `crashes/` as `not-reportable`, with no numeric CVSS or security credit.
-  Write what actually decides the fault, not everything the driver calls.
-- `Parameter control` is especially important for C harnesses. It
-  tells triage whether a value is externally controlled or only
-  invented by the harness.
-- `Strategy` records which investigation method produced the report so
-  cluster and benchmark summaries can attribute yield consistently.
-
-A typical exported `REPORT.md` looks like this. `bin/export-repro`
-emits the `## Fields` table first, then the bare-label lines triage
-parses, then the auto-Severity bullet, then the agent's narrative,
-then `## Expected sanitizer output`, then the reproduce pointer.
-(The project, symbols, and line numbers below are invented for
-illustration.)
-
-````markdown
-# CRASH-001-1: heap-buffer-overflow READ in app_next_char
-
-## Fields
-
-| Field                 | Value |
-|:----------------------|:------|
-| Primitive             | heap-buffer-overflow READ of size 4 |
-| Severity              | Medium (CVSS-BTE 4.0: 5.5) |
-| Surface               | library-api (C harness calls app_read_memory) |
-| Trigger source        | bytes |
-| Caller contract       | obeyed |
-| Boundary              | Untrusted document bytes parsed by the library. |
-| Caller controls       | Document contents and length. |
-| Parameter control     | direct |
-| Trusted caller actions| none |
-| Cluster               | CL-4b21c7de (singleton) |
-| Dedup frames          | app_next_char → app_parse_char_ref → app_parse_reference |
-| Reproduction rate     | 5/5 |
-| Strategy              | S7 |
-
-Surface: library-api
-Trigger source: bytes
-Caller contract: obeyed
-Dedup frames: app_next_char → app_parse_char_ref → app_parse_reference
-Boundary: Untrusted document bytes parsed by the library.
-Caller controls: Document contents and length.
-Parameter control: direct
-Strategy: S7
-- **Severity**: Medium (CVSS-BTE 4.0: 5.5 Medium; CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N/E:P; primitive=heap READ of 4 byte(s); surface=library)
-
-Out-of-bounds 4-byte read in `app_next_char` reached from
-`app_parse_char_ref` while consuming a malformed numeric character
-reference. The length check on the entity buffer occurs after the
-read, not before. Reachable from any caller passing attacker-supplied
-documents through `app_read_memory` / `app_read_file`.
-
-## Expected sanitizer output
-
-```
-==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address …
-    #0 0x… in app_next_char parser.c:225
-    #1 0x… in app_parse_char_ref parser.c:2403
-    #2 0x… in app_parse_reference parser.c:7611
-…
-```
-
-Full original output: `sanitizer.txt`.
-
-## Reproduce
-
-Run `./reproduce.sh /path/to/clean/sampleproj`.
-````
-
-Three rows in that table are written by the harness, not the agent:
-
-- `Cluster` is filled in by `bin/cluster-crashes` after triage; agents leave it
-  blank or use the generated marker.
-- `Dedup frames` is the top-3 ClusterFuzz-style frame chain used for duplicate
-  detection.
-- `Advisory: yes` is added above `Surface` when no `patch.diff` is attached and
-  the fix is described in prose instead — either a non-surgical (ABI- or
-  API-impacting) change, or simply no clean diff captured. The `Fix Direction`
-  section in the narrative carries the reasoning.
-
-### How severity is computed
-
-Severity is a **CVSS v4.0 score**, computed offline by the vendored FIRST
-reference scorer. There is no house metric, and no model opinion in the number.
-
-The vector is derived mechanically from the report's own fields: attack vector
-and user interaction from the surface, the impact metrics from the primitive
-class, exploit maturity from the reproducer evidence, and the Environmental
-metrics from caller control, contract concerns, and whether the code ships. The
-label says which metric groups were populated — `CVSS-BT` (base + threat)
-normally, `CVSS-BTE` once a verified Environmental prerequisite applies, such
-as an alternate-build requirement.
-
-Two defaults are deliberately worst-case, because the harness cannot know
-better:
-
-- privileges required stays `PR:N`, since the harness has no authentication
-  signal;
-- the requirement metrics (`CR`/`IR`/`AR`) stay Not Defined, since only a
-  deployer knows what the asset is worth.
-
-That is why the generated `## Severity rationale` section spells out the full
-vector and the reasoning line by line. **Read those lines against your real
-deployment before filing an advisory** — each one is a claim you are entitled
-to disagree with.
-
-Two mechanical notes: the auto-Severity bullet (`- **Severity**: …`) is
-rewritten by `bin/severity` on every triage pass, so hand-edits there are lost;
-and cluster size is not part of the score — it is reported separately, as a
-verification fact and a triage-priority signal.
-
-## Finding requirements
-
-Findings live under:
-
-```text
-<RESULTS_DIR>/findings/FIND-NNN/
-```
-
-What every FIND needs:
-
-- A report file at the FIND root: `report.md` or `description.md`.
-- Exactly one bare `Location:` naming the root-cause operation —
-  `file:function:line`, an endpoint, a config key, ….
-- The security issue class — memory safety, auth bypass, injection,
-  info disclosure, crypto, race, boundary violation, logic flaw, ….
-- A rationale a reviewer can act on (impact, caller control, what
-  is wrong).
-- The standard bare-label fields used by triage, including `Boundary`,
-  `Caller controls`, `Trusted caller actions`, `Caller contract`, `Trigger
-  source`, and `Strategy`.
-
-A typical non-crashing FIND `report.md` looks like:
-
-````markdown
-# FIND-007
-
-## Fields
-
-| Field          | Value                                                  |
-|:---------------|:-------------------------------------------------------|
-| Class          | logic / authorization bypass                           |
-| Severity       | Medium (CVSS-BTE 4.0: 4.5)                              |
-| Surface        | library-api                                            |
-| Location       | src/policy.c:check_acl:142                             |
-| Caller control | request bytes                                          |
-| Cluster        | FCL-8c19a032 (singleton)                               |
-
-Class: authorization bypass
-Surface: library-api
-Boundary: Requests crossing the public service boundary.
-Caller controls: request bytes
-Trusted caller actions: Creates the handle before policy loading completes.
-Caller contract: obeyed
-Trigger source: bytes
-Strategy: S5
-Location: src/policy.c:check_acl:142
-
-## Issue
-
-`check_acl` short-circuits to ALLOW when `policy_count == 0`, which is the
-default for an uninitialised handle. A caller that obtains a handle without
-calling `policy_load()` first will pass any ACL check.
-
-## Impact
-
-Untrusted clients can reach privileged operations before policy is loaded.
-
-## How to verify
-
-Trace `check_acl` callers; no testcase needed.
-````
-
-Findings do not need a runnable reproducer — the report is the
-evidence. If you do have a testcase or saved sanitizer output,
-include it alongside.
-
-`report.html` is generated automatically as a sibling of `report.md`
-and is usually the easiest way to read a finding — open it in a
-browser. Do not hand-write it.
-
-Optional but encouraged:
-
-- `affected-files.txt`;
-- a testcase;
-- captured sanitizer output;
-- screenshots;
-- any other supporting artifact.
-
-What does not belong:
-
-- vague suspicion;
-- "looks suspicious" without a nameable location;
-- provably unreachable code.
-
-Triage asks an LLM to filter out vacuous reports. Substantive
-findings without a reproducer are kept.
-
-When a substance-gate pass ends with Reject votes below quorum, the
-directory stays put with `.pending-drop`. A later accept clears that
-marker. If reject quorum is reached, the directory moves to
-`findings-rejected/` and is listed with its reason in
-`findings-rejected/REJECTED-FINDINGS.html` — so you can audit a false reject
-and recover anything worth keeping. Add `.reviewed` or `.keep` when a human
-has confirmed the report is intentionally terse.
-
-## Exported crash bundle
-
-Accepted crashes are converted into:
-
-```text
-CRASH-001-1/
-  REPORT.md
-  REPORT.html
-  reproduce.sh
-  input.<ext>
-  harness.{c,cc,cpp,cxx} # when applicable
-  sanitizer.txt
-  patch.diff             # optional: candidate fix that passes `git apply --check`
-  validation.json        # the publication decision, bound to this evidence
-  severity.json          # the published score, bound to the report it came from
-  .audit/
-```
-
-The audit-side originals move under `.audit/` for provenance. The
-root files are the maintainer-facing interface. As above, hand-edit
-`REPORT.md` only — `REPORT.html` is regenerated on every triage pass.
-
-### Run a bundle
-
-A maintainer can reproduce a bundle against their own clean
-checkout:
-
-```bash
-cd path/to/CRASH-001-1
-./reproduce.sh /path/to/clean/source
-```
-
-`reproduce.sh` is self-contained. It compiles or launches the right
-ASan runner against the input next to it, prints the running
-command, and exits with the ASan exit code. The final line of a
-completed run is `[repro] exit=<n>` on stderr (a failed build step under
-`set -eu` exits earlier, without it). For a crashing bundle, a non-zero
-exit accompanied by ASan output in stderr is a successful reproduction.
-
-The script needs:
-
-- a clean source checkout at the revision recorded in `REPORT.md`
-  (or a close-enough revision — small drift is usually fine);
-- a working `clang` / `clang++` with ASan support on `PATH`;
-- whatever build-system dependencies the target needs (CMake,
-  Mercurial, …). The script may rebuild the ASan target on first
-  run.
-
-For browser targets, `reproduce.sh` launches the configured ASan
-browser binary against a `file://` URL pointing at the bundled
-`input.html`. For C harness bundles, it compiles `harness.c` against
-the target's static library before invoking it against
-`input.<ext>`. Header-only C++ libraries omit the static-library
-link automatically (see
-[Target config reference](../reference/target-toml.md#header-only-libraries)).
+`Cluster`, `Dedup frames`, severity text, and patch rendering are written by
+the harness. Do not hand-author those generated sections.
 
 ## Clusters and duplicates
 
-Crashes and findings are clustered after triage. A maintainer
-looking at the result tree sees families rather than a wall of
-independent entries.
+The two accepted lanes use different deterministic signatures:
 
-```text
-crashes/
-  CRASH-CLUSTERS.md
-  CRASH-CLUSTERS.html
-  CRASH-001-1/REPORT.md          ← Cluster: CL-7e2d10ab (2 reports: CRASH-001-2)
-  CRASH-001-1/REPORT.html
-  CRASH-001-2/REPORT.md          ← same cluster + .dup-of -> CRASH-001-1
-  CRASH-002-1/REPORT.md          ← Cluster: CL-9a03f118 (singleton)
-findings/
-  FINDING-CLUSTERS.md
-  FINDING-CLUSTERS.html
-  FIND-001/report.md             ← Cluster: FCL-8c19a032 (2 reports: FIND-007) (canonical)
-                                   Dedup key: [loc] src/policy.c:142
-  FIND-001/report.html
-  FIND-007/report.md             ← same cluster + .dup-of -> FIND-001
-```
+- crashes cluster by sanitizer primitive and normalized top stack frames;
+- findings cluster by an exact normalized `(class, file, line)` site or a
+  matching crash state.
 
-How the cluster files and markers work:
+Each cluster has a canonical member. Non-canonical members remain on disk with
+a `.dup-of` marker because they may carry a useful input or route variant. A
+cluster is a review aid, not proof that every member shares one fix.
 
-- `CRASH-CLUSTERS.html` and `FINDING-CLUSTERS.html` are the browser
-  review pages — one row per cluster, with severity, member count, and
-  the canonical member. The `.md` siblings are generated source files.
-- Each report carries a `Cluster:` line naming its cluster and its siblings.
-  The id is a hash of the cluster's signature — `CL-<8 hex>` for crashes,
-  `FCL-<8 hex>` for findings — so it stays the same across reruns and does not
-  renumber when a new cluster appears. FINDs also get a `Dedup key: [loc]
-  <file>:<line>` line recording the source site the key was built from. A
-  siteless finding gets a `[title]` display key but is never merged on title
-  alone; findings can also merge on an identical normalized crash stack. See
-  [Deduplication](../concepts/deduplication.md) for the exact rules.
-- Non-canonical members carry a `.dup-of` file naming the canonical
-  member. They are **not** deleted — a duplicate may still carry a
-  useful variant or a clearer reproducer. Treat the canonical member
-  as the primary report.
-- A finding marked `Needs review` passed finding validation, but its class is
-  not specific enough for a trustworthy CVSS vector. Keep it in the review
-  set; it is unscored and does not count as Medium+. `Pending` instead means
-  validation has not reached a verdict. `Unknown` is reserved for incomplete
-  crash classification.
-
-Review a cluster top-down:
-
-1. Open `CRASH-CLUSTERS.html` or `FINDING-CLUSTERS.html`.
-2. Follow the canonical member.
-3. Skim the `.dup-of` siblings only if you need additional
-   reproducers or variant inputs.
-
-Use the backend-local HTML tables when reviewing one run:
+Use backend-local indexes for one run and target-root indexes to compare all
+backends:
 
 ```text
 output/<target>/<backend>/results/crashes/CRASH-CLUSTERS.html
 output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
-```
-
-Use the target-root HTML tables when comparing every backend for a
-target:
-
-```text
 output/<target>/CRASH-CLUSTERS.html
 output/<target>/FINDING-CLUSTERS.html
 ```
 
+[Deduplication](../concepts/deduplication.md) documents the exact signatures
+and canonical-member rules.
+
 ## Maintenance commands
 
-These are maintenance commands for regenerating or enriching artifacts
-after manual edits. They are not needed for normal review; read the
-generated HTML pages first.
+Normal triage performs validation, export, severity, rendering, and clustering
+automatically. After a deliberate manual edit, these commands regenerate the
+derived views:
 
 ```bash
 export RESULTS=output/<target>/<backend>/results
+
+bin/export-repro CRASH-001-1 --slug <target>
+bin/severity --report "$RESULTS/crashes/CRASH-001-1"
+bin/severity --batch "$RESULTS"
 bin/cluster-crashes "$RESULTS"
 bin/cluster-findings "$RESULTS"
-bin/cluster-crashes output/<target>
-bin/cluster-findings output/<target>
 bin/show-exclusions "$RESULTS"
-bin/export-repro CRASH-001-1 --slug <target>
-bin/severity --report "$RESULTS/crashes/CRASH-001-1/"
-bin/severity --batch "$RESULTS"
 ```
 
-What each command does:
+`bin/severity --batch` scores reportable crashes and findings. Pending and
+not-reportable artifacts remain unscored. Re-run clustering after changing a
+root location or other identity field.
 
-- `bin/export-repro` — builds the handoff bundle.
-- `bin/severity` — recomputes CVSS severity from canonical sanitizer evidence,
-  verified review facts, and `target.toml`, offline; `--batch` covers final
-  crashes and findings together. Pending or stale artifacts remain unrated
-  until triage refreshes `validation.json`.
-- `bin/cluster-crashes` and `bin/cluster-findings` — group reports
-  that share a root cause, write the cluster summaries, and stamp
-  `Cluster:` and `Dedup key:` lines into each report. Both run
-  automatically during triage. Rerun them by hand after manually
-  editing reports or moving artifacts.
-
-## Triage mindset
-
-**Promote evidence, not ideas.**
-
-- A crash should be easy for a maintainer to rerun, understand, and
-  map back to a real input boundary.
-- A finding should be concrete enough that a reviewer knows what
-  code or behaviour to inspect.
-- Everything else belongs in state, scratch, or rejected indexes
-  until it becomes real evidence.
-
-Ready to hand a crash to the upstream project? See
-[Reproduce a crash](reproduce-a-crash.md) — it is written for the
-maintainer receiving the bundle, and it is the page to send along
-with one.
+When the evidence is ready for upstream, send the report and bundle through the
+project's coordinated-disclosure process. TokenFuzz never publishes or files
+an upstream advisory automatically.

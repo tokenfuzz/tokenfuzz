@@ -1,300 +1,240 @@
-# Configure a Target
+# Target Configuration
 
-Use this guide after `bin/setup-target` or `bin/audit --target <target>`
-has generated `output/<target>/target.toml`.
+Use this guide after `bin/setup-target` or `bin/audit --target <target>` creates
+`output/<target>/target.toml`. Most targets need review, not a config written
+from scratch.
 
-Most of the work is review, not hand-authoring. The harness infers a
-reasonable default config. Your job is to keep the values that are
-correct and edit only the ones that are unresolved or specific to this
-target.
+The file answers three operational questions:
 
-## What the config has to answer
+1. What executable, library, or language runner carries a testcase into the
+   target?
+2. Which diagnostics can that route actually observe?
+3. Which parts of the trigger may an external actor control?
 
-`output/<target>/target.toml` should answer these questions clearly:
+Those answers affect both execution and later reportability. Review them before
+a long run.
 
-- Where is the ASan executable?
-- Are optional sanitizer binaries or suppressions configured for the
-  runners you intend to use?
-- Can the harness compile C harnesses for this target?
-- Is this a generic target or a browser target?
-- What can external input legitimately control?
-- How should exported reproduction bundles rebuild or rerun the target?
+!!! warning "Edit only between runs"
+    Audit preflight copies the reviewed config to
+    `output/<target>/<backend>/results/.target.toml` and records its digest in
+    `.session-env`. The session reads that immutable snapshot. Change the
+    shared `output/<target>/target.toml` for the next run; never edit the pinned
+    copy.
 
-These answers drive testcase execution at run time and triage at
-result time. They decide:
+## Start with the target shape
 
-- which sanitizer binary to launch;
-- which library to link against;
-- whether a crash trigger fits the declared attacker surface.
+### Native CLI or library
 
-## A minimal generic config
+A minimal native config identifies the executable and, when API harnesses are
+useful, the library and compile inputs:
 
 ```toml
-target       = "libxml2"
-upstream_url = "https://gitlab.gnome.org/GNOME/libxml2.git"
-build_system = "cmake"
+target         = "sampleproj"
+upstream_url   = "https://example.org/sampleproj.git"
+build_system   = "cmake"
+build_widening = true
 
-asan_bin     = "build-asan/xmllint"
-asan_lib     = "build-asan/libxml2.a"
-includes     = ["include", "build-asan/include"]
-link_libs    = ["-lz", "-llzma", "-lm"]
+asan_bin = "build-asan/bin/sample"
+asan_lib = "build-asan/lib/libsample.a"
+includes = ["include", "build-asan/include"]
+defines  = []
+link_libs = ["-lm"]
 
-is_browser   = "0"
+is_browser = "0"
 
 [threat_model]
 attacker_controls = ["bytes"]
 ```
 
-Relative paths resolve under `targets/<target>/`.
+Relative paths resolve under `targets/<target>/`. A CLI-only audit can proceed
+with a correct `asan_bin`; the library fields matter only when `bin/probe`
+compiles an API harness.
 
-## A minimal findings-only config (Python, Ruby, Go, Node, …)
+### Findings-only language target
 
-For interpreted or managed-runtime targets that have no sanitizer
-build, seed an explicit empty `[sanitizer].enabled` list. Then let the
-harness drive testcases through a language-specific `[runner]` block:
+When there is no sanitizer build, declare that explicitly and provide the
+runner that executes a testcase:
 
 ```toml
-target       = "my-py-tool"
-upstream_url = "https://example.org/my-py-tool.git"
+target       = "samplepy"
 build_system = "python"
-
 is_browser   = "0"
 
-[threat_model]
-attacker_controls = ["bytes"]
-
 [sanitizer]
-enabled = []           # findings-only mode
+enabled = []
 
 [runner]
-bin            = "python3"
-args           = ["{TESTCASE}"]
-env            = [
+bin  = "python3"
+args = ["{TESTCASE}"]
+env  = [
   "PYTHONDEVMODE=1",
   "PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src:{TARGET_ROOT}/lib",
 ]
-crash_patterns = []    # optional: triage already knows Python tracebacks
+crash_patterns = []
+
+[threat_model]
+attacker_controls = ["bytes"]
 ```
 
-`bin/setup-target` seeds a starter `crash_patterns` list from the language
-registry; an empty list is equally valid, because triage recognises the
-common runtime markers on its own. Add entries only for a banner specific to
-your project.
+Runtime tracebacks and panics from a findings-only target are routed to
+`findings/`, not treated as sanitizer proof under `crashes/`. The
+[language-runner guide](multi-language.md) lists the generated defaults for
+each ecosystem.
 
-The harness runs `python3 <testcase>` against the interpreter on
-`PATH`. Runtime tracebacks land under `findings/` rather than
-`crashes/`. See [Auditing non-C/C++ targets](multi-language.md) for
-the full per-language matrix.
+## Review the execution route
 
-## Review checklist
+Run setup after the relevant build exists so detection sees the final
+artifacts:
 
-1. Build the default ASan target.
-2. Refresh the generated config before making local edits:
+```bash
+bin/setup-target <target>
+```
 
-   ```bash
-   bin/setup-target <target>
-   ```
+Then check:
 
-   `setup-target` refreshes generated fields from the current
-   checkout and build outputs without touching values you have
-   already reviewed.
+- `asan_bin` starts the intended product, not a test helper or fuzzer binary;
+- `[runner].bin` and `args` load code from `targets/<target>/`, not an installed
+  copy elsewhere on the host;
+- `{TESTCASE}` appears where the program expects input (when omitted, TokenFuzz
+  appends it);
+- any documented normal nonzero exit is listed in `[runner].success_codes`;
+- browser page routes include `{PROFILE}` and `{TESTCASE}`;
+- optional sanitizer binaries belong to the matching build.
 
-3. Confirm `asan_bin` points to the ASan executable you want generic
-   or browser runs to start.
-4. If agents will compile C harnesses, confirm `asan_lib`, `includes`,
-   `defines`, and `link_libs`. You can leave these unresolved if you
-   do not plan to use C harness testcases yet.
-5. Confirm `is_browser = "0"` for generic libraries and CLIs, or
-   `is_browser = "1"` for browser or JS-runtime targets.
-6. Confirm `attacker_controls` matches the real external input
-   boundary.
-7. If you intend to run UBSan, MSan, or TSan, add those slugs and
-   binary paths under `[sanitizer]`.
-8. Start one bounded session:
+For registered language runners, `bin/setup-target --build` and audit
+preflight run a canary when the registry can prove target ownership. A runner
+that starts but imports only an installed package is rejected rather than
+silently auditing the wrong code.
 
-   ```bash
-   bin/audit --target <target> --backend <backend> 1
-   ```
+Use `bin/suggest-runner <target> --apply --force` only when the generated native
+CLI route is wrong. The helper selects from instrumented executables declared
+by the build, validates input-dependent behavior, and updates matching enabled
+sanitizer routes together.
 
-Both `bin/setup-target` and `bin/audit` validate `target.toml`
-themselves before continuing.
+## C harness readiness
 
-## Threat-model choices
+A compiled `HARNESS:` testcase uses:
 
-`attacker_controls` is read by triage. **Keep it conservative.**
+- the selected sanitizer library (`asan_lib`, or the matching
+  `[sanitizer].<name>_lib`);
+- `includes` and `defines`;
+- `link_libs`, including target-relative archives or source files;
+- the target source root.
 
-This field does not decide whether a report is *interesting*. It
-decides whether a crash trigger is reachable through a normal input
-boundary for this target. Other concrete security issues can still be
-recorded in `findings/` even when they are not sanitizer crashes.
+After repeated C/C++ harness build failures, the audit may propose a
+conservative additive repair to `includes`, `defines`, or `link_libs`. It saves
+a timestamped config backup and logs the change. Review the proposal; an
+automatic compile fix is not evidence that the harness is faithful to a public
+API contract.
 
-| Token | Use when external input controls |
+Harnesses may also be written in the other compiled or interpreted languages
+registered by `lib/languages.py`. Run `python3 lib/languages.py list` for the
+authoritative extension table.
+
+## Sanitizer policy
+
+`[sanitizer].enabled` is ordered. `bin/probe` selects the first enabled entry by
+default; a one-off `PROBE_SANITIZER=<name>` override can select another without
+changing persistent policy.
+
+| Slug | Use it when | Main cost |
+| --- | --- | --- |
+| `asan` | Native memory-safety work; the default. | Moderate runtime and memory overhead. |
+| `ubsan` | Undefined-behavior classes relevant to the target, such as bounds, vptr, object size, or shifts. | Mature projects may intentionally use patterns that need triage or suppressions. |
+| `msan` | A self-contained native library whose dependencies can all be instrumented. | Uninstrumented dependencies create noise; browser-scale use is usually impractical. |
+| `tsan` | Native concurrency work with a maintained suppression policy. | High overhead and frequent benign reports. |
+| `race` | A Go runner or binary built with `-race`. | Routes through `[runner]`; there is no `race_bin`, `race_lib`, or suppression key. |
+
+Example:
+
+```toml
+asan_bin = "build-asan/bin/sample"
+
+[sanitizer]
+enabled = ["asan", "ubsan"]
+asan_suppressions  = "build-asan/asan-suppressions.txt"
+ubsan_bin          = "build-ubsan/bin/sample"
+ubsan_lib          = "build-ubsan/lib/libsample.a"
+ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"
+```
+
+Ordinary non-browser C/C++ preflight converges every enabled native sanitizer.
+ASan is required for that route; optional sanitizer failures warn without
+destroying the canonical ASan build. Ecosystem bootstraps and Go `race` remain
+explicit `bin/setup-target <target> --build` work.
+
+The exact keys, defaults, suffix-aware path rules, and runtime-option fields are
+in the [target config schema](../reference/target-toml.md#sanitizers).
+
+## Review the threat model
+
+`[threat_model].attacker_controls` describes what an external actor may supply
+through a normal product boundary:
+
+| Token | External control |
 | --- | --- |
-| `bytes` | File, stream, packet, archive, media, regex, or other input bytes. |
-| `call-sequence` | Ordered public API calls, script calls, plugin calls, or Web API calls. |
+| `bytes` | Files, streams, packets, archives, media, regexes, or other input bytes. |
+| `call-sequence` | Ordered public API, script, plugin, or Web API calls. |
 | `timing` | Event-loop scheduling, GC timing, JIT tier-up, or similar timing. |
 | `race` | Thread or process interleaving. |
-| `protocol-state` | Multi-message protocol state. |
+| `protocol-state` | State accumulated across several protocol messages. |
 | `env` | Process environment variables. |
 | `fs-state` | Filesystem paths, presence, permissions, or layout. |
 
-A few examples:
+Typical shapes:
 
 ```toml
-# Parser, decoder, archive, codec, regex engine.
+# File parser or decoder.
 [threat_model]
 attacker_controls = ["bytes"]
 
-# Browser engine or scriptable runtime.
+# Scriptable browser/runtime surface.
 [threat_model]
 attacker_controls = ["bytes", "call-sequence", "timing"]
 
-# Network protocol implementation.
+# Stateful network protocol.
 [threat_model]
 attacker_controls = ["bytes", "call-sequence", "protocol-state"]
 ```
 
-Do not reach for broad controls to make harness-only behaviour look in
-scope. If a harness reads an input value and then calls a target API
-with an offset or index no real product path would pass, that is
-caller-contract misuse — not attacker control. Fix the testcase, or
-keep the result outside `crashes/`. Do not widen the threat model to
-push the artifact through triage.
+Keep the list narrow. A harness can choose arbitrary offsets, lengths, object
+states, or cleanup order; that does not make those choices attacker-controlled
+in the product. When a reproducible crash needs a control outside the list,
+triage keeps the engineering evidence but can classify it `not-reportable`.
+Do not widen the config merely to change that decision.
 
-## C harness readiness
+## Browser mode
 
-If you expect agents to exercise the target through a small C/C++
-harness program (rather than only the CLI binary), the harness
-compilation pulls its inputs from `target.toml`:
+Set `is_browser = "1"` for a browser or browser-like runtime. A `{PROFILE}`
+token in `[runner].args` declares a page-capable browser route. Without it, the
+target is treated as a script engine: generic execution, shell agents, and no
+invented browser profile.
 
-- the selected sanitizer's library (`asan_lib` for ASan; `[sanitizer]`
-  entries for UBSan / MSan / TSan);
-- `includes`;
-- `defines`;
-- `link_libs`;
-- the target source root.
+Verify the product executable, temporary-profile argument, testcase position,
+and the controls the web or script surface really exposes. The
+[browser guide](browser-targets.md) covers `mach`, GN, Chromium, coverage, and
+product reachability.
 
-If C harness compilation fails, those are the fields to check.
+## Validate the reviewed config
 
-After repeated C/C++ harness build failures, the audit may make a
-conservative additive repair to `includes`, `defines`, or `link_libs`.
-It writes a `target.toml.bak.<timestamp>` backup and logs the action
-under the run's `logs/` directory.
-
-Harnesses are not limited to C. Sibling
-`.cc/.cpp/.cxx/.C/.rs/.go/.swift/.kt` harnesses compile, and
-`.py/.rb/.pl/.php/.js/.mjs/.ts/.tsx/.java/.kts/.r/.R/.sh/.bash`
-harnesses run through their interpreter.
-
-## Browser mode readiness
-
-For browser targets:
-
-```toml
-is_browser = "1"
+```bash
+bin/audit --target <target> --backend <backend> 1
 ```
 
-Confirm:
+Both setup and audit parse and validate `target.toml`. A successful smoke test
+also proves that the selected backend can create state under the result tree.
+Inspect `logs/index.log` if startup stops before `work-cards.jsonl` appears.
 
-- `asan_bin` points to the browser executable.
-- `[runner].args` contains the browser profile argument with `{PROFILE}` and
-  its input position with `{TESTCASE}`.
-- Browser ASan runtime dependencies are present.
-- JS shell or browser wrappers work for the target.
-- Expected controls include `bytes`, `call-sequence`, and only the
-  timing or state dimensions the product actually exposes.
+## Common failures
 
-See [Browser targets](browser-targets.md) for the longer walkthrough.
-
-## Sanitizer policy
-
-The harness runs ASan by default. Other supported sanitizer runners
-are opt-in per target through the `[sanitizer]` block in
-`target.toml`. The valid slugs are `asan`, `ubsan`, `msan`, `tsan`,
-and `race`.
-
-```toml
-[sanitizer]
-enabled = ["asan"]
-asan_suppressions  = "build-asan/asan-suppressions.txt"
-# ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"
-# msan_suppressions  = "build-msan/msan-suppressions.txt"
-# tsan_suppressions  = "build-tsan/tsan-suppressions.txt"
-# ubsan_bin = "build-ubsan/xmllint"
-# msan_bin  = "build-msan/xmllint"
-# tsan_bin  = "build-tsan/xmllint"
-# ubsan_lib = "build-ubsan/libtarget.a"
-# msan_lib  = "build-msan/libtarget.a"
-# tsan_lib  = "build-tsan/libtarget.a"
-```
-
-Recommended posture for each:
-
-- **ASan** — enabled by default. Highest signal, lowest noise.
-- **MSan** — recommended for self-contained libraries (parsers,
-  codecs, archives). Catches uninitialized reads, but every dependency
-  must be MSan-instrumented. That makes it impractical at browser
-  scale.
-- **UBSan** — optional. Useful subset: `vptr`, `object-size`, `shift`,
-  `bounds`, `signed-integer-overflow`. Expect to triage false
-  positives from `pointer-overflow`, `unsigned-integer-overflow`, and
-  `alignment` — mature C/C++ projects often rely on these patterns
-  intentionally.
-- **TSan** — optional and demanding. Plan to maintain a suppressions
-  file for the project's threading model. Benign atomics and racy
-  counters fire frequently. Only enable when you can invest in the
-  triage.
-- **race** — Go's runtime race detector. Enable for Go targets built
-  or run with `-race`. Reports containing `WARNING: DATA RACE` are
-  treated like TSan-class evidence. Unlike the C/C++ sanitizers, `race`
-  is valid only inside `enabled`: it routes through `[runner]` and has no
-  `race_bin` / `race_lib` / `race_suppressions` keys.
-
-See
-[Target config reference](../reference/target-toml.md#sanitizers)
-for the full field list and per-sanitizer binary overrides.
-
-For ordinary non-browser C/C++ targets, `bin/audit` builds every sanitizer in
-`enabled`, not just ASan, on its first run (or use
-`bin/setup-target <target> --build` to do it up front):
-it converges a per-sanitizer recipe (`.audit/build-<san>.sh`), compiles
-`build-<san>/`, and fills the detected `<san>_bin` / `<san>_lib` paths.
-ASan is required; the others are best-effort and a failed one only warns.
-(`race` builds through the Go toolchain, not this step.) The end-to-end
-walkthrough is in
-[Auditing with UBSan, MSan, or TSan](../getting-started/first-audit.md#auditing-with-ubsan-msan-or-tsan).
-
-Even when another sanitizer is enabled, ASan remains the usual first
-pass for crash prioritisation. It produces the clearest reproduction
-bundles, and the triage rules are tuned around that workflow.
-
-## When the generated values need review
-
-Local edits should be small and easy to explain. Common cases:
-
-- the ASan executable has a project-specific name the generator could
-  not infer;
-- the useful static library is not the first archive under
-  `build-asan/`;
-- generated headers live outside the default include directories;
-- C harnesses need extra system libraries;
-- the target exposes controls beyond raw bytes, such as API call
-  sequence or protocol state.
-
-Do not pre-fill fields for features you are not using. A CLI-only
-first audit can proceed with a correct `asan_bin` while C harness
-fields are refined later.
-
-## Common misconfigurations
-
-| Symptom | Likely fix |
+| Symptom | Check |
 | --- | --- |
-| `bin/audit` cannot find target config | Seed it with `bin/audit --target <target> --backend <backend> 1` or `bin/setup-target <target>`. Confirm `--target` matches the directory name. |
-| Generic testcase runs the wrong binary | Fix `asan_bin`, or rerun `bin/suggest-runner <target> --apply --force` to reselect from the build's own CLIs. Paths are relative to `targets/<target>/`; an executable in the matching ASan build survives later `bin/setup-target` runs. |
-| C harness compile fails on missing headers | Add source or build include directories to `includes`. |
-| C harness compile fails on missing macros | Add required compiler flags to `defines`. |
-| Link fails during harness compile | Add the ASan library to `asan_lib`; add required system libraries, target-relative archives, or target-relative source files to `link_libs`. |
-| Triage marks a defect not reportable | Recheck `attacker_controls` and the report's `Trigger source` — it names what decides the fault, not every call the driver makes. Do not widen the model unless the product actually exposes that control. |
+| The wrong program runs | Fix `asan_bin` or re-run `bin/suggest-runner <target> --apply --force`. |
+| Headers are missing | Add source or generated include directories to `includes`. |
+| Macros are missing | Add the required compiler arguments to `defines`. |
+| Harness linking fails | Check the selected sanitizer library and add required system, archive, or source inputs to `link_libs`. |
+| Every language probe misses the audited package | Fix `[runner]` cwd/import paths; do not accept a globally installed copy. |
+| A real crash is `not-reportable` | Compare its actual trigger with `attacker_controls`; do not broaden the threat model unless the product exposes that control. |
 
-For field-by-field details, see
-[Target config reference](../reference/target-toml.md).
+For field-by-field syntax, continue to the
+[target config schema](../reference/target-toml.md).

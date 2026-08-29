@@ -1,12 +1,22 @@
-# Backends and Ensembling
+# Backends and Isolation
 
 TokenFuzz keeps the audit contract independent of the model CLI. Target config,
 work state, testcase execution, triage, and artifact layout remain the same
 whether an audit uses one hosted backend, rotates several, or runs a local
 model.
 
-Use one backend for reproducible and cost-controlled work. Use hosted ensemble
-mode when operational diversity matters more than a single fixed model.
+Choose the data path and execution boundary before choosing a model:
+
+| Need | Practical route |
+| --- | --- |
+| Reproducible run or benchmark | One explicit backend and model. |
+| Source must remain on the audit host | `oss` against a local OpenAI-compatible endpoint. |
+| Broad hosted-model coverage | `--backend all`, after checking which backends the selected security mode can launch. |
+| Backend has no usable native sandbox | `external-bypass` inside a container or VM you administer. |
+
+The model backend changes who reasons about the source. It does not change the
+target config, work-state format, probe contract, triage gates, or artifact
+layout.
 
 ## Choose a backend
 
@@ -24,11 +34,12 @@ Each launch runs under an execution boundary chosen by
 | `codex` | Codex CLI (`codex`) | Uses `config/models.toml` unless `--model` is passed. |
 | `gemini` | Antigravity CLI (`agy`) by default | A config model slug is mapped to an `agy models` label. Set `USE_GEMINI_CLI=1` to use Google Gemini CLI instead. |
 | `grok` | Grok Build (`grok`) | Uses `config/models.toml` unless `--model` is passed. |
-| `oss` | OpenCode (`opencode`) | `--model` is required. Use an `opencode/<id>` catalog entry or the exact id served by a local endpoint. |
+| `oss` | OpenCode (`opencode`) | `--model` is required. Use an `opencode/<id>` catalog entry or the exact id served by a local OpenAI-compatible endpoint. |
 | `all` | Installed hosted CLIs | Cycles `claude → codex → gemini → grok`; excludes `oss`, and skips any backend the selected [security mode](#agent-security-modes) cannot launch. |
 
-Use an explicit `--backend` and `--model` in any reproduction or benchmark
-record. Omitting `--backend` is the same as `--backend all`.
+Use an explicit `--backend` and `--model` in any experiment or reproducibility
+record. Omitting `--backend` is the same as `--backend all` and is convenient
+for exploration, not for holding model choice constant.
 
 ### Models and reasoning effort
 
@@ -66,11 +77,9 @@ the CLI; do not put keys in `target.toml` or reports.
 
 ## Agent security modes
 
-Every agent launch runs under one of two modes. A backend defaults to the
-strongest one it can actually run under: `sandboxed` everywhere except `oss`,
-because OpenCode's permissions are an approval policy rather than an OS
-sandbox — it ships no sandbox to run inside, so `sandboxed` refuses it and
-`external-bypass` is its only usable mode.
+Every agent launch runs under one of two modes. Hosted backends default to
+`sandboxed`. OpenCode defaults to `external-bypass` because its permissions are
+an approval policy, not an OS sandbox; `sandboxed` therefore refuses `oss`.
 
 `IS_SANDBOX=1` is how an outer container or VM announces itself. It is an
 assertion, not something TokenFuzz can measure, so its absence prints one
@@ -82,7 +91,13 @@ audit, which no flag can grant it.
 | Mode | What enforces the boundary | When to use it |
 | --- | --- | --- |
 | `sandboxed` (hosted default) | The backend CLI's own OS sandbox — Seatbelt on macOS, Landlock/seccomp or bubblewrap on Linux. Approval prompts are turned off, because a headless run cannot answer one and an approval the model can request is not a boundary. | Normal runs on a machine you also use for other things. |
-| `external-bypass` (`oss` default inside an asserted outer sandbox) | Nothing in the CLI. You are asserting that an outer container or VM enforces filesystem, process, credential, and egress policy. | Inside a container or VM you administer, and for the backends `sandboxed` refuses. |
+| `external-bypass` (`oss` default) | Nothing in the CLI. `IS_SANDBOX=1` asserts that an outer container or VM enforces filesystem, process, credential, and egress policy; without it, TokenFuzz warns but cannot create that boundary for you. | Inside a container or VM you administer, and for backends `sandboxed` refuses. |
+
+!!! warning "A default is not a boundary"
+    `oss` selects `external-bypass` even on a plain host because that is the
+    only mode OpenCode can run. The warning is deliberate: enter a hardened
+    container or VM before launching it if the target or generated testcases
+    must be contained.
 
 A third, classifier-reviewed `auto` mode is deliberately absent: it would add
 provider calls, latency, and variable decisions to the audit and benchmark
@@ -229,7 +244,7 @@ state tree; the target-level summaries cluster results after the fact.
 
 ## OpenCode provider and local models
 
-The `oss` backend can use a model from OpenCode's built-in provider. Refresh
+The `oss` backend can use a model from OpenCode's catalog provider. Refresh
 the catalog and verify the exact provider-qualified id directly before the
 audit:
 
@@ -242,9 +257,9 @@ bin/audit --target <target> --backend oss \
 ```
 
 TokenFuzz passes the `opencode/` model reference through to the installed CLI,
-which retains OpenCode's normal credential and provider handling. No security
-flag is needed; see [Agent security modes](#agent-security-modes) for the
-boundary `oss` runs under and why.
+which retains OpenCode's credential and provider handling. No security flag is
+needed to select its default, but that default is `external-bypass`; see
+[Agent security modes](#agent-security-modes) before running it on a host.
 
 ### Local OpenAI-compatible models
 
@@ -293,7 +308,9 @@ bin/audit --target <target> --backend oss --model <model-tag> 1
 Pass the exact tag reported by Ollama's OpenAI-compatible models endpoint. Set
 `AUDIT_LOCAL_API_KEY` only when the local server requires authentication.
 
-Local operation keeps model data flow on the selected machine, but the model
+Local operation keeps model data flow on the selected machine only when the
+endpoint is actually local and OpenCode is not configured to call another
+provider. The model
 still receives the source excerpts, prompts, state, and reports required for
 the audit. Small models may need narrower target scopes and more human review.
 

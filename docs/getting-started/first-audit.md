@@ -9,7 +9,8 @@ Complete [Prerequisites](prerequisites.md) and
 isolated host without long-lived credentials; target builds and agent-driven
 testcases execute code from the audited tree.
 
-Set short shell variables for the commands on this page:
+Set short shell variables for the commands on this page. Use an explicit
+backend so the output path is predictable:
 
 ```bash
 export TARGET=<target>
@@ -34,11 +35,17 @@ Choose a model explicitly with `--model <name>` when reproducibility matters.
 Otherwise the hosted backend default and reasoning effort come from
 `config/models.toml`; per-shell model overrides are listed under
 [Model selection](../reference/environment.md#model-selection). The `oss`
-backend always requires `--model` with the exact id served by the local model
-endpoint.
+backend always requires `--model`: use a provider-qualified OpenCode catalog
+id or the exact id served by a local endpoint.
 
 For a focused plumbing test, add `--strategy S1` (or S2–S8). This pins the
 strategy and suspends normal rotation for the run.
+
+!!! warning "Do not edit the live session snapshot"
+    Preflight copies the reviewed config to `$RESULTS/.target.toml` and binds
+    it to `$RESULTS/.session-env`. Every probe in that session reads the pinned
+    copy. Edit `output/$TARGET/target.toml` only between runs; never edit or
+    remove the backend-local snapshot.
 
 ### What success looks like
 
@@ -89,7 +96,9 @@ Then check the generated review pages:
 | `output/$TARGET/FINDING-CLUSTERS.html` | Cross-backend finding summary. |
 | `output/$TARGET/CRASH-CLUSTERS.html` | Cross-backend crash summary. |
 
-An empty `findings/` or `crashes/` after one iteration is normal. To distinguish
+An empty `findings/` or `crashes/` after one iteration is normal. A filed FIND
+is also not automatically a confirmed security result: read its Status and
+`validation.json`. To distinguish
 an uneventful iteration from a failed one, inspect in this order:
 
 1. `$LOGS/index.log` for preflight or backend failures.
@@ -133,7 +142,8 @@ delete source under `targets/`.
 
 ## Auditing with UBSan, MSan, or TSan
 
-ASan is the default native sanitizer. To focus another enabled sanitizer:
+ASan is the default native sanitizer. To make another sanitizer part of the
+target's persistent execution contract:
 
 1. Add it to `[sanitizer].enabled` in `output/<target>/target.toml`.
 2. Put it first in the list, because `bin/probe` selects the first enabled
@@ -161,7 +171,9 @@ For one deliberate probe without changing list order:
 PROBE_SANITIZER=ubsan bin/probe "$RESULTS/scratch-1/testcase"
 ```
 
-See [Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for
+The environment override affects that probe only; it does not change the
+session snapshot or future runs. See
+[Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for
 tradeoffs and [Target config](../reference/target-toml.md#sanitizers) for exact
 fields. Go's `race` detector uses the configured language runner rather than a
 `race_bin` or `race_lib`.

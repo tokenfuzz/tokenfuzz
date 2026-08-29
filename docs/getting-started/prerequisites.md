@@ -1,7 +1,9 @@
 # Prerequisites
 
 Before an audit, prepare the host, one model backend, and the target's own
-build dependencies. TokenFuzz supports macOS and Linux.
+build dependencies. TokenFuzz supports macOS and Linux. If you only want to
+prove the orchestration works, start with the pure-Python sample; it avoids a
+native target build while you verify the backend and result paths.
 
 Hosted backends receive the prompts, source excerpts, state, and reports needed
 for the run. Use `--backend oss` with a local model server when policy requires
@@ -76,7 +78,7 @@ Install and authenticate at least one supported CLI:
 | Codex | `codex` | Install and authenticate Codex CLI. |
 | Gemini | `agy` by default | Install Antigravity CLI and authenticate. Google Gemini CLI is available with `USE_GEMINI_CLI=1`. |
 | Grok | `grok` | Install Grok Build and configure its credentials. |
-| OpenCode / local model | `opencode` | Pass an OpenCode catalog id as `--backend oss --model opencode/<id>`, or serve an OpenAI-compatible model through vLLM, Ollama, or another compatible server and pass its exact served id. |
+| OpenCode | `opencode` | Use an OpenCode catalog id (`opencode/<id>`) or the exact id served by a local OpenAI-compatible endpoint. Both routes use `--backend oss`. |
 
 Verify the chosen CLI directly before asking TokenFuzz to launch it. Exact
 installation links, authentication checks, model selection, local vLLM/Ollama
@@ -198,89 +200,31 @@ backend failures.
 
 ## Experimental: call-neighbourhood context
 
-This is optional. Skip it on a first install; the audit is unchanged without
-it.
-
-With [trailmark](https://github.com/trailofbits/trailmark) installed, every
-work-card prompt gains a static call map for the card's file: which files call
-into it, which files it calls, and the shortest call path from the binary named
-in `target.toml`. The map ends with a bounded unit pack — a few source lines
-at the definition of each routed function's key caller and callee, capped at
-600 estimated tokens, so the card carries the definitions an agent would
-otherwise spend its first tool calls opening. Both render only for a file with
-resolved cross-file neighbours; both are context the agent may act on, never a
-filter. trailmark is a tree-sitter code-graph library from
-[Trail of Bits](https://www.trailofbits.com/), Apache-2.0 licensed, and
-TokenFuzz treats it as an optional dependency you install yourself.
+This dependency is optional; skip it for a first install. With
+[trailmark](https://github.com/trailofbits/trailmark) available to Python
+3.12+, work cards can include a static caller/callee neighbourhood and a small
+source pack for resolved functions:
 
 ```bash
-pip install trailmark
+python3 -m pip install trailmark
+python3 bin/callgraph --probe
 ```
 
-That is the whole setup. TokenFuzz is stdlib-only and does not run in a
-virtualenv, so install trailmark wherever your `python3` already is. If that
-Python is externally managed — Homebrew, or a distro `python3` — `pip` answers
-`error: externally-managed-environment`; add `--break-system-packages`. A
-virtualenv works too, but then TokenFuzz has to be run from it.
+The generated `<results>/state/callgraph.json` is context for an agent, never
+reachability proof or a filter. Indirect calls, callback tables, macro-generated
+names, and some exported declarations are invisible to the parser. If exported
+symbol coverage is below 75%, TokenFuzz withholds the inferred entry boundary
+rather than presenting a partial graph as complete. Trees above 5,000 auditable
+files are skipped.
 
-`bin/rank-work` asks the interpreter running the harness, then `python3.15`
-down to `python3.12` and plain `python3` on `PATH`, whether each can run the
-analysis (`bin/callgraph --probe`), and uses the first that answers. Every run
-records the outcome in `logs/index.log`, so a run without the context says so
-rather than looking like one that found nothing:
-
-```text
-Source call-graph context: enabled via python3.14 (trailmark=0.5.0 tree-sitter=0.25.2)
-WARN: source call-graph context unavailable — trailmark is not importable ...
-```
-
-Verify in three steps:
+`bin/rank-work` caches both successful graphs and failures against their source,
+build, and parser fingerprint. The run log says whether call-neighbourhood
+context was enabled or unavailable. To inspect the exact block for one file:
 
 ```bash
-python3 bin/callgraph --probe                       # installed and usable?
-bin/rank-work --target <target>                     # appends "(call neighbourhood: built)"
-python3 lib/callgraph.py --target <target> <file>   # print one file's block
+python3 lib/callgraph.py --target <target> <target-relative-file>
 ```
 
-`bin/rank-work` reports only states worth acting on, so a later run that
-rebuilt nothing stays quiet — an unchanged graph is `fresh`, and an absent
-trailmark is the default rather than a fault. `lib/callgraph.py` prints the
-exact text a work card carries for that file, and on failure names the check
-that stopped it: not installed, artifact not built yet, file absent from the
-parsed graph, or nothing resolved to report.
-
-### What the map will not tell you
-
-The map is context an agent may act on, never a verdict the harness acts on.
-Two limits are stated in the block itself, because both would otherwise read as
-findings:
-
-- **Indirect dispatch is invisible** — callback tables, function pointers,
-  macro-generated names. A missing path is reported as a missing path, and
-  nothing ranks, filters, discards, or downgrades on it.
-- **Export-macro declarations are not extracted**, and those are often a C
-  library's public entry points. `bin/callgraph` measures itself against the
-  symbol table of the build in `target.toml`; below 75% coverage it withholds
-  the entry boundary and its paths, keeping only the caller and callee lists a
-  partial parse can still state truthfully.
-
-Only syntactically resolved calls are counted, so the block is densest on
-native targets and thins out where dispatch goes through a receiver the parser
-cannot type — most calls in a method-dispatch language. A card whose file has
-no resolved caller, callee, or route gets no block at all rather than an empty
-one.
-
-### Cost and caching
-
-The artifact is `<results>/state/callgraph.json`, rebuilt only when something
-the graph depends on changes: source content, the configured sanitizer route,
-the built artifact, or the parser version. Only the files `bin/rank-work`
-considers auditable are parsed, and any repo-local `.trailmark/` configuration
-in the target is ignored — the audited tree does not get to declare its own
-call edges.
-
-Parsing five measured native targets took 0.1–12s each. Trees over 5,000
-auditable files — browser checkouts — are declined outright, because staging
-and parsing one costs minutes and has never produced a block. A refusal or a
-parse failure is recorded against the same fingerprint so it is not retried
-every iteration; delete `<results>/state/callgraph.json` to force one.
+Delete `<results>/state/callgraph.json` only when you deliberately want to
+force a rebuild. Any `.trailmark/` configuration inside the audited target is
+ignored because the target is untrusted input.

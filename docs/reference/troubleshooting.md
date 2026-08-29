@@ -47,12 +47,11 @@ Common fixes:
 
 ## Sanitizer binary does not run
 
-Run the configured binary by hand from the target root. For the
-default ASan path:
+Run the configured binary by hand from the repository root. For a typical
+ASan path:
 
 ```bash
-cd targets/<target>
-./build-asan/path/to/binary
+targets/<target>/build-asan/path/to/binary
 ```
 
 Common fixes:
@@ -115,10 +114,9 @@ defects, without security credit or numeric CVSS. See
 Fix the evidence if the result is genuinely in scope. Otherwise
 leave it rejected so future sessions do not repeat it.
 
-If the underlying issue is real but the crash is rejected for
-caller-contract or trigger-source reasons, keep a substantive
-report in `findings/` instead of trying to force the crash
-through `crashes/`.
+Do not copy the same rejected mechanism into `findings/`. A separate FIND is
+appropriate only when source review establishes a distinct security-boundary
+violation that does not depend on the rejected trigger.
 
 ## FIND is marked needs-content or pending-drop
 

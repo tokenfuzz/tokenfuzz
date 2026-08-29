@@ -1,10 +1,9 @@
-# Boundary-directed fuzzing
+# Directed Fuzzing
 
-Strategy S4 is the only part of TokenFuzz that runs a fuzzer. It exists to
-answer a narrow question well: *which published API can an attacker reach
-directly, and does one exist that no harness already drives?* Everything else
-about it — the campaign scheduler, the health verdicts, the build isolation —
-follows from keeping that answer honest and cheap.
+Strategy S4 is the only TokenFuzz strategy that runs a fuzzer. Use it when a
+published API accepts a shape the threat model exposes and no existing harness
+drives that API. Use S7 instead for hand-written parser or decoder boundary
+inputs; it never builds a fuzz harness or campaign.
 
 For the agent-facing playbook see
 `.agents/references/strategies/S4-directed-fuzzing.md`. This page is for
@@ -14,16 +13,19 @@ coverage feedback.
 ## The workflow
 
 ```bash
-RESULTS=output/<slug>/<backend>/results
+export RESULTS_DIR=output/<slug>/<backend>/results
 
 bin/fuzz inventory        # what the target already ships
 bin/fuzz candidates       # what earns a new harness
-bin/fuzz template <sym>   # skeleton in $RESULTS/fuzz/src/
+bin/fuzz template <sym>   # skeleton in $RESULTS_DIR/fuzz/src/
 bin/fuzz build            # out-of-tree compile
 bin/fuzz run              # one bounded campaign
 ```
 
-Everything lands under `$RESULTS/fuzz/`:
+The command reads the active session from `RESULTS_DIR`. During an audit that
+variable is already set for the agent; an operator invoking `bin/fuzz` directly
+must export it as above or pass `--results-dir`. Everything lands under
+`$RESULTS_DIR/fuzz/`:
 
 | Path | Contents |
 | --- | --- |

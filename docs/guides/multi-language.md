@@ -1,7 +1,9 @@
-# Auditing Non-C/C++ Targets
+# Language Runners
 
 TokenFuzz supports C/C++, Rust, Go, Python, Java, and other ecosystems behind
-one probe and triage contract. This page focuses on everything after C/C++:
+one probe and triage contract. This page explains the part that changes outside
+ordinary C/C++: how a testcase reaches the audited package and which runtime
+diagnostics count as crash evidence.
 
 - Rust, Go, Swift;
 - Java, Kotlin;
@@ -10,9 +12,7 @@ one probe and triage contract. This page focuses on everything after C/C++:
 - Perl, R;
 - any other ecosystem with an explicit `[runner]` command.
 
-This guide collects the moving parts in one place.
-
-## Decision tree
+## Choose the runtime posture
 
 ```text
 Does the target have a sanitizer build?
@@ -21,7 +21,8 @@ Does the target have a sanitizer build?
 │         findings/ keeps non-crash security issues
 │
 └── No   → [sanitizer] enabled = []
-          crashes/ is unused; runtime crashes auto-demoted to findings/
+          ordinary runtime panics/tracebacks route to findings/
+          genuine sanitizer/race output still routes to crashes/
           findings/ also keeps non-crash security issues
 ```
 
@@ -33,8 +34,9 @@ detected, that default is findings-only:
 - `[sanitizer] enabled = []`;
 - a starter `[runner]`.
 
-Opt into `race` or another sanitizer by editing
-`output/<target>/target.toml`.
+Opt into `race` or another sanitizer by editing the shared
+`output/<target>/target.toml` between runs, then start a new session. A running
+session reads its pinned `.target.toml` snapshot.
 
 ## What sanitizers exist per language
 
@@ -49,15 +51,15 @@ Opt into `race` or another sanitizer by editing
 | Node / V8 | `--abort-on-uncaught-exception`; native modules can link ASan | optional `asan` for native add-ons |
 | Everything else | None; findings-only mode is the right choice | n/a |
 
-When a sanitizer is available, treat it like ASan: set the
-appropriate `<name>_bin` and enable the slug.
+When a sanitizer is available, enable the slug and configure its execution
+route. Swift selects its sanitizer through runner tokens, and Go `race` uses
+the runner; neither follows the ordinary native `<name>_bin` rule.
 
 ## What `target.toml` looks like for each ecosystem
 
-`bin/setup-target` seeds these automatically. Every findings-only
-target has the same shape — `[sanitizer] enabled = []` plus a
-`[runner]` block naming the interpreter or driver. A Python target,
-fully annotated:
+`bin/setup-target` seeds these automatically. Every findings-only target has
+the same outer shape — `[sanitizer] enabled = []` plus a `[runner]` block naming
+the interpreter or driver. A Python target, fully annotated:
 
 ```toml
 target       = "demo"
@@ -122,7 +124,7 @@ library for the canary to depend on, a changed `[runner].bin` or `args`, or
 configured `[sanitizer]` binaries that own every enabled testcase route —
 because the registry's generated source is then no longer proof of what runs.
 
-To print the registry's own answer for any build system:
+To print the registry's current answer for any build system:
 
 ```bash
 python3 lib/languages.py runner-block <build_system> --pretty
@@ -171,31 +173,32 @@ A few ecosystem notes:
   built rather than skipped; the seeded runner points `R_LIBS_USER` at that
   target-local library.
 
-## Crash vs finding routing
+## Crash and finding routing
 
 Once the runtime is wired up, the triager decides where each artifact
 lands:
 
 | Signal in `asan.txt` | Sanitizer enabled? | Destination |
 | --- | --- | --- |
-| `ERROR: AddressSanitizer: ...` | yes / no | `crashes/CRASH-*` |
+| `ERROR: AddressSanitizer: ...` | yes or emitted by the route | `crashes/CRASH-*` |
 | `WARNING: ThreadSanitizer: data race` | yes (`tsan`) | `crashes/CRASH-*` |
 | `WARNING: MemorySanitizer: ...` | yes (`msan`) | `crashes/CRASH-*` |
 | `WARNING: DATA RACE` (Go runtime) | yes (`race`) | `crashes/CRASH-*` |
-| Python traceback | no | demoted to `findings/FIND-*` |
-| Go `panic: runtime error:` | no | demoted to `findings/FIND-*` |
-| Java `Exception in thread "main"` | no | demoted to `findings/FIND-*` |
-| Node allocation fatal error | no | demoted to `findings/FIND-*` |
-| Rust `thread 'main' panicked at` | no | demoted to `findings/FIND-*` |
-| PHP `PHP Fatal error:` | no | demoted to `findings/FIND-*` |
-| None of the above | n/a | `crashes-rejected/` |
+| Python traceback | no | routed to `findings/FIND-*` |
+| Go `panic: runtime error:` | no | routed to `findings/FIND-*` |
+| Java `Exception in thread "main"` | no | routed to `findings/FIND-*` |
+| Node allocation fatal error | no | routed to `findings/FIND-*` |
+| Rust `thread 'main' panicked at` | no | routed to `findings/FIND-*` |
+| PHP `PHP Fatal error:` | no | routed to `findings/FIND-*` |
+| No recognized diagnostic | n/a | No crash promotion; a candidate crash directory is rejected. |
 
 When a target has a sanitizer enabled
 (`[sanitizer] enabled = ["asan", …]`) but a particular crash
 directory does **not** have a sanitizer signal, it goes to
-`crashes-rejected/`. Demote-to-findings is reserved for the
+`crashes-rejected/`. Findings routing for runtime diagnostics is reserved for the
 `[sanitizer] enabled = []` case, where the lack of an ASan trace is
-*expected*.
+expected. A genuine sanitizer-class signal is never re-labelled as a managed
+runtime exception merely because the config was incomplete.
 
 ## Writing harnesses in non-C/C++ languages
 
@@ -245,11 +248,12 @@ your project.
 
 ## `reproduce.sh` templates
 
-`bin/export-repro` emits a runnable `reproduce.sh` for every
-language with a `build_system` entry. The maintainer runs
+`bin/export-repro` emits a runnable `reproduce.sh` for supported language
+routes. The maintainer runs
 `./reproduce.sh /path/to/upstream-src` and the script:
 
-1. Clones or checks out upstream at the pinned revision.
+1. Selects the supplied checkout, or clones a recorded upstream when that route
+   supports automatic cloning.
 2. Runs the language's canonical build step (`cargo build`,
    `go build`, `npm install`, `mvn package`, …).
 3. Invokes the captured testcase via the recorded runner.

@@ -6,14 +6,18 @@ This page follows a run from "I have source I'm allowed to audit" to
 "a reviewer is looking at a finding". Every other page in the handbook
 expands on one piece of it.
 
-A run has two successful endings:
+A useful run can end in either evidence lane:
 
-- **A written finding.** Any concrete security issue lands in
-  `findings/` as a substantive report a reviewer must manually
-  verify. With or without a reproducer. This is the primary surface.
+- **A written finding.** A concrete security issue that does not depend on a
+  sanitizer-class crash lands in `findings/` as a substantive report for
+  independent review. A reproducer is useful, but optional.
 - **A runnable crash.** When the testcase reproduces under a
-  sanitizer, the same issue also lands in `crashes/` with the trace,
-  the input, and a ready-to-run `reproduce.sh`.
+  configured sanitizer or race detector, it lands in `crashes/` with the
+  trace, input, and a ready-to-run `reproduce.sh`.
+
+These are parallel lanes, not two copies of every issue. Managed-runtime
+panics and tracebacks normally become findings; sanitizer-class diagnostics
+and enabled race-detector reports become crashes.
 
 Every accepted crash is automatically converted to a maintainer bundle
 (`REPORT.md` + `reproduce.sh` + sanitizer output + the input) as part
@@ -53,14 +57,11 @@ See
 [Configure a target](../guides/configure-target.md#sanitizer-policy)
 for the recommended posture.
 
-Targets with `[sanitizer].enabled = []` (typical for interpreted
-runtimes like Python, Ruby, Node, Java, PHP, but valid for anything
-without an ASan build) skip the sanitizer entirely and run in
-findings-only mode — runtime panics and tracebacks land under
-`findings/` instead of `crashes/`. Go is a hybrid: when
-`[sanitizer].enabled = ["race"]` and `[runner].args` includes
-`-race`, the runtime race detector still routes data-race reports
-into `crashes/`.
+Targets with `[sanitizer].enabled = []` (typical for interpreted or managed
+runtimes) skip sanitizer execution and ordinarily use the findings lane.
+Runtime panics and tracebacks are report evidence, not sanitizer crashes. Go
+is a hybrid: when `[sanitizer].enabled = ["race"]` and the configured command
+emits `WARNING: DATA RACE`, the race report goes to `crashes/`.
 
 Audit preflight can create or refresh ordinary non-browser native sanitizer
 builds. Browser builds use their project tooling; registered language package
@@ -81,6 +82,11 @@ reads `target.toml`, detects the source revision, creates per-backend
 result and log directories, and launches one or more agents. The
 optional iteration count limits the run; omit it (or pass `0`) to run
 continuously.
+
+At preflight, the session copies the reviewed target configuration into its
+result tree. That snapshot is immutable for the run: change the source config
+for a future session rather than retargeting live agents underneath their
+recorded evidence.
 
 Each agent is assigned a role and a strategy. Subsystem and starting
 point come from the work queue when the agent claims its first piece
@@ -149,12 +155,15 @@ Common outcomes:
 | Outcome | Meaning | Action |
 | --- | --- | --- |
 | Did not execute | Syntax error, missing binary, runner refused. | Fix the testcase. This doesn't count against the sanitizer budget. |
-| Missed the target code (browser/JS only) | A coverage-gated probe didn't reach the named function. | Revise the input. |
+| Missed the target code | A supported coverage-gated probe did not reach the named function. | Revise the input. |
 | Clean hit | The code ran but the sanitizer was quiet. | Mutate input shape, state, timing, or allocator layout. |
 | Sanitizer diagnostic | The input might be a crash candidate. | Confirm by re-running, minimise, and file under `crashes/`. |
 
-Coverage gating only fires in browser and JS modes. Generic CLI
-targets always run the sanitizer directly.
+Browser and JS modes use their configured coverage artifacts. A generic native
+target can also gate coverage when a route-equivalent
+SanitizerCoverage-instrumented sibling is available. If that sibling is absent,
+coverage is reported unavailable and the sanitizer run proceeds ungated; it is
+never counted as a miss.
 
 Probe output is a contract, not a log: crash promotion requires saved
 sanitizer output on disk. Report-only FINDs go through FIND validation
@@ -207,8 +216,9 @@ What happens to each artifact:
 - Accepted crashes stay under `crashes/`.
 - Hard rejections move to `crashes-rejected/` with a reason rendered in
   `REJECTED-CRASHES.html`.
-- Runtime-diagnostic crashes from findings-only targets are demoted
-  to `findings/` rather than promoted as sanitizer crashes.
+- Runtime panics and tracebacks from findings-only targets remain report
+  evidence under `findings/`; they are not sanitizer crashes in the first
+  place.
 - Findings with no report get a `.needs-content` marker and surface
   as `NEEDS CONTENT` in `findings/FINDING-CLUSTERS.html`.
 - Findings rejected twice by the substance gate are quarantined to
@@ -260,7 +270,7 @@ harness.{c,cc,cpp,cxx} only when the bug uses a C/C++ harness
 sanitizer.txt      full sanitizer output
 patch.diff         optional candidate fix
 validation.json    the publication decision, bound to this evidence
-severity.json      the published score, bound to the report it came from
+severity.json      only when a current reportable score exists
 .audit/            original agent-authored files, kept for provenance
 ```
 

@@ -1,46 +1,33 @@
 # TokenFuzz
 
 TokenFuzz is an open-source harness for evidence-driven, LLM-assisted security
-auditing. It coordinates agents that inspect source, form concrete hypotheses,
-run testcases, and turn validated results into reports a maintainer can review.
-It works with C/C++, Rust, Go, Python, Java, and other supported languages,
-from native libraries and command-line tools to browsers and JavaScript
-runtimes.
+auditing. It turns model-led source review into a shared queue of concrete
+hypotheses, runs every testcase through one execution contract, and preserves
+the result as evidence a security team or upstream maintainer can inspect.
 
-The harness supplies the parts a long audit needs beyond a prompt:
+The important distinction is between discovery and proof. Agents can suggest
+where a bug may be; TokenFuzz records what was actually tested, keeps review
+decisions attached to the evidence they judged, and separates four outcomes:
 
-- **Source-to-testcase investigation.** Deterministic ranking builds a shared
-  work queue; eight review strategies guide deeper analysis without requiring a
-  known bug or crashing seed.
-- **Evidence-gated results.** Testcases run through one probe contract.
-  Sanitizer diagnostics are confirmed before promotion, while concrete
-  non-crashing security issues remain first-class findings.
-- **Fleet coordination.** Work leases, structured state, and clustering let
-  parallel agents resume investigations and avoid rediscovering the same root
-  cause.
-- **Reviewable triage.** Independent validation, reachability and caller-control
-  fields, rejected-result indexes, and severity annotation make model claims
-  traceable rather than self-authenticating.
-- **Maintainer handoff.** Accepted crashes become self-contained bundles with a
-  report, input, sanitizer output, and a one-command reproduction script for a
-  clean checkout.
-- **Comparable evaluation.** A built-in benchmark runs TokenFuzz and a direct
-  vulnerability prompt under matched target, model, and wall-clock budgets,
-  then compares validated, deduplicated evidence instead of prose volume.
+| Outcome | What it means |
+| --- | --- |
+| Finding | A concrete security claim with a source location and an actionable report. A reproducer is optional. |
+| Crash | A reproducible sanitizer or runtime-race diagnostic with its testcase and saved output. |
+| Not reportable | A real engineering defect that review found outside the configured security boundary. It stays visible but receives no security score. |
+| Rejected | Evidence that did not meet the relevant gate. It is preserved with the reason. |
 
-It drives Claude Code, Codex CLI, Gemini through Antigravity or the Google
-Gemini CLI, Grok Build, and local models through OpenCode; `--backend all`
-rotates the hosted ones across iterations. Hosted and local model backends use
-the same audit contract. Bounded source reads, prompt reuse, execution budgets,
-and resumable state keep long runs operationally manageable. Final security
-judgment remains with the operator and the upstream maintainer.
+TokenFuzz supports native libraries and CLIs, browsers and JavaScript engines,
+and language-runner targets including Rust, Go, Python, Java, Kotlin, Swift,
+Ruby, PHP, JavaScript/TypeScript, Perl, and R. It can drive Claude Code, Codex
+CLI, Gemini through Antigravity or Google Gemini CLI, Grok Build, and OpenCode
+with either a catalog provider or a local OpenAI-compatible endpoint.
 
 ## Quick start
 
 TokenFuzz supports macOS and Linux. Install Python 3.10+, Git, ripgrep, `file`,
-an LLVM toolchain for native sanitizer targets, and one supported backend —
-`claude`, `codex`, `gemini`, `grok`, or `oss` for a local model.
-[Prerequisites](getting-started/prerequisites.md) has platform-specific setup.
+an LLVM toolchain for native sanitizer targets, and one supported model CLI.
+[Prerequisites](getting-started/prerequisites.md) has the platform commands and
+backend links.
 
 ```bash
 git clone https://github.com/tokenfuzz/tokenfuzz
@@ -48,7 +35,7 @@ cd tokenfuzz
 
 bash tests/run-tests.sh
 
-# A shipped synthetic target — configured already, nothing to clone.
+# Fastest smoke test: a configured synthetic Python target.
 bin/audit --target samples/sample-python --backend <backend> 1
 
 # Or your own project.
@@ -56,34 +43,29 @@ bin/setup-target <target> <repo-url>
 bin/audit --target <target> --backend <backend> 1
 ```
 
-The final `1` runs one bounded iteration. Its purpose is to prove that target
-setup, the backend, state, and result directories work together — not to find
-a vulnerability. [Sample targets](getting-started/sample-targets.md) lists the
-sixteen ready-made targets that come with the repository. When the smoke test
-is healthy, omit the count for a continuous run:
+The final `1` runs a single-worker smoke test. It proves that setup, backend
+launch, structured state, and result paths work together; it is not a useful
+security budget. [Sample targets](getting-started/sample-targets.md) lists the
+sixteen synthetic targets shipped with the repository. After a healthy smoke
+test, run a bounded working session or omit the count for a continuous run:
 
 ```bash
+bin/audit --target <target> --backend <backend> 10
 bin/audit --target <target> --backend <backend>
 ```
 
 The complete walkthrough is in [First audit](getting-started/first-audit.md).
 
-## Supported targets
+## Choose your path
 
-Anything with a source tree and a testable input boundary can work:
-
-- C/C++ libraries, parsers, codecs, protocol implementations, and CLIs;
-- Rust and Go projects with native sanitizer or race diagnostics;
-- Python and Java projects, plus Ruby, PHP, Node, Kotlin, and other
-  runtimes driven through a configured language runner;
-- browsers, JavaScript engines, WebAssembly runtimes, Swift projects, and
-  mixed-language code driven through the appropriate sanitizer or
-  configured language runner.
-
-ASan is the default for native targets. UBSan, MSan, TSan, and Go `race` are
-opt-in. Projects without a sanitizer run in findings-only mode: their runtime
-diagnostics and source-backed security issues go to `findings/`, not
-`crashes/`. See [Non-C/C++ targets](guides/multi-language.md).
+| You are… | Start with |
+| --- | --- |
+| Trying TokenFuzz for the first time | [Getting started](getting-started/index.md) and a [sample target](getting-started/sample-targets.md) |
+| Adding an internal or upstream project | [Add a target](getting-started/add-a-target.md), then [review its config](guides/configure-target.md) |
+| Operating a longer audit | [Backends and isolation](guides/backends.md) and [First audit](getting-started/first-audit.md) |
+| Reviewing a security-team handoff | [Triage and review](guides/triage-results.md) |
+| Receiving a crash as an upstream maintainer | [Reproduce a crash](guides/reproduce-a-crash.md) |
+| Changing TokenFuzz itself | [Development](development.md) |
 
 ## Where results go
 
@@ -96,7 +78,7 @@ output/<target>/<backend>/results/        findings, crashes, state, and scratch 
 output/<target>/<backend>/logs/           run and backend diagnostics
 ```
 
-Start review with these generated pages:
+Start review with the generated HTML indexes, not model transcripts:
 
 | Path | Purpose |
 | --- | --- |
@@ -112,23 +94,21 @@ are written directly under `output/<target>/`.
 Read [Artifact layout](reference/artifacts.md) for every generated path and
 [Triage results](guides/triage-results.md) for the review standard.
 
-## How the pieces fit
+## The operating model
 
 1. `bin/setup-target` creates or updates the checkout and generates
    `output/<target>/target.toml`.
-2. `bin/audit` validates the config, refreshes stale native sanitizer artifacts
-   when supported, surveys and ranks the source, and launches agents.
+2. `bin/audit` validates the target, pins a session-local config snapshot,
+   ranks work, and launches agents.
 3. Agents claim work, record hypotheses in structured state, and run testcases
    through `bin/probe`.
-4. Triage validates reports, quarantines low-value results, clusters duplicate
-   root causes, and exports accepted crashes for maintainers.
+4. Triage validates reports, preserves rejections, clusters matching evidence,
+   and exports accepted crashes as maintainer-facing bundles.
 
 See [Audit lifecycle](concepts/audit-lifecycle.md) for the detailed flow and
 [System architecture](concepts/system-architecture.md) for component boundaries.
 
-## What TokenFuzz does not do
-
-Worth knowing before you plan around it:
+## Boundaries and expectations
 
 - **It does not replace fuzzing, code review, or maintainer judgment.** It is
   another way to spend an audit budget, and the
@@ -140,27 +120,11 @@ Worth knowing before you plan around it:
   computed offline from the report's own fields — but two metrics are
   worst-case defaults the harness cannot know, and only you know what the asset
   is worth. Read the generated `## Severity rationale` before citing a number.
-- **A finding is a claim until a human checks it.** The gates are built to keep
-  unverified model prose out of `findings/`, and the reviewers fail *open* by
-  design: an artifact nobody could disprove is kept, not confirmed. A crash
-  reproduces; a finding is an argument.
+- **A finding is still a claim until a human checks it.** Automated review can
+  admit, reject, or leave it unsettled. A fail-open gate preserves uncertain
+  evidence; it does not certify it.
 - **Clusters are a review aid, not a root-cause proof.** One defect can split
   across sinks, and two defects can share one.
-
-## Choose what to read next
-
-| Goal | Start here |
-| --- | --- |
-| Install TokenFuzz and run one safe iteration | [Getting started](getting-started/index.md) |
-| Try it immediately on a shipped target | [Sample targets](getting-started/sample-targets.md) |
-| Add or configure a target | [Add a target](getting-started/add-a-target.md) |
-| Choose a hosted or local model backend | [Backends and ensembling](guides/backends.md) |
-| Review findings and crash bundles | [Triage results](guides/triage-results.md) |
-| Reproduce a reported crash | [Reproduce a crash](guides/reproduce-a-crash.md) |
-| Compare the harness with a direct model prompt | [Benchmarking](concepts/benchmark.md) |
-| Look up exact commands or config fields | [Reference](reference/index.md) |
-| Diagnose a failed run | [Troubleshooting](reference/troubleshooting.md) |
-| Change TokenFuzz itself | [Development](development.md) |
 
 ## Responsible use
 
@@ -172,9 +136,9 @@ worth settling before the first long run:
   disposable container or an isolated host without long-lived credentials —
   see [Container runtime](getting-started/prerequisites.md#container-runtime-recommended).
 - **Hosted backends see the target.** Prompts, source excerpts, state, and
-  reports go to the provider by design. Use `--backend oss` with a local model
-  when source must stay on the machine. The agent sandbox contains writes and
-  network, not what the model reads —
+  reports go to the provider by design. Use the `oss` backend against a local
+  endpoint when source must stay on the machine. The agent sandbox contains
+  writes and network, not what the model reads —
   [Agent security modes](guides/backends.md#agent-security-modes) is explicit
   about the difference.
 - **Disclosure stays yours.** Report target findings through the upstream

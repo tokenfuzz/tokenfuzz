@@ -1,8 +1,7 @@
 # Concepts
 
-Design and architecture pages. Read these when you want to understand
-*why* the harness is shaped the way it is, or when you are about to
-extend it.
+These pages explain why TokenFuzz is shaped the way it is. They describe the
+system rather than walking through an operator task.
 
 If you are reading them in order, [Audit lifecycle](audit-lifecycle.md) is the
 one that makes the rest make sense — every other page here expands on one step
@@ -15,4 +14,4 @@ of it.
 | [Strategy model](strategy-model.md) | The eight investigation methods, how cards get a strategy, and how rotation is effort-gated. |
 | [Cost model](cost-model.md) | What scales with cost on long runs, and the levers the harness gives you. |
 | [Deduplication](deduplication.md) | How crashes (stack-state bucketing) and findings (evidence clustering) group matching report signatures for review. |
-| [Benchmarking](benchmark.md) | How `bin/benchmark` compares TokenFuzz against a direct prompt with reproducible evidence, cost, and severity rollups. |
+| [Benchmark design](benchmark.md) | How `bin/benchmark` compares TokenFuzz against a direct prompt without hiding orchestration or review cost. |

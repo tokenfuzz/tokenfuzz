@@ -56,7 +56,8 @@ sanitizer, and records `state/runs.jsonl`.
 
 **Coverage gate.** A pre-run on a sancov-instrumented build that
 confirms the testcase reaches the named target code before
-spending a sanitizer-run budget.
+spending a sanitizer-run budget. When no route-equivalent coverage artifact
+exists, the sanitizer run proceeds ungated rather than being labelled a miss.
 
 **Probe verdicts.** The execution result recorded in `state/runs.jsonl`.
 
@@ -90,10 +91,10 @@ boundary violation — not attacker reachability, which decides *reportability*
 instead: a crash whose trigger needs a control outside `attacker_controls`
 stays here as `not-reportable`.
 
-**Finding (`findings/FIND-*`).** A concrete security issue with
-a written report naming `file:function:line`, an issue class,
-and a reviewer-actionable rationale. May or may not have a
-reproducer.
+**Finding (`findings/FIND-*`).** A filed security report naming a concrete
+location, issue class, and reviewer-actionable rationale. It may or may not
+have a reproducer; validation determines whether the filed report becomes a
+reportable result.
 
 **Rejected crash (`crashes-rejected/`).** A crash candidate that failed
 triage, kept on disk and indexed in `REJECTED-CRASHES.html` with a reason, so
@@ -149,6 +150,12 @@ counted as yield.
 **Pending.** No review settled the artifact. Neither credited nor written off;
 it is reported as part of the unjudged remainder.
 
+**Filed.** An agent wrote the required artifact to disk. This says nothing yet
+about independent review.
+
+**Admitted.** The artifact cleared its first evidence or substance gate and can
+proceed to source review. Admission is not publication.
+
 ## Configuration
 
 **`target.toml`.** Per-target generated config: source metadata,
@@ -179,9 +186,9 @@ hand.
 
 ## Backends
 
-**Backend.** The LLM CLI driving the agent loop — `claude`,
-`codex`, `gemini`, `grok`, or `oss` (OpenCode against a local vLLM or Ollama
-server).
+**Backend.** The LLM CLI driving the agent loop — `claude`, `codex`, `gemini`,
+`grok`, or `oss`. The `oss` route uses OpenCode with either a configured
+provider or an OpenAI-compatible local endpoint such as vLLM or Ollama.
 
 **Ensemble mode.** `--backend all` (or omitted) — cycles
 installed hosted backends across iterations, writing

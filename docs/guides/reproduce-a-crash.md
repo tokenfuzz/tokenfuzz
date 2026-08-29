@@ -1,34 +1,21 @@
 # Reproduce a Crash
 
-This page is for the **upstream maintainer** who received a TokenFuzz
-crash artifact. It walks through:
-
-- confirming the issue against your own checkout;
-- reading the sanitizer output;
-- verifying a fix.
+This page is for an upstream maintainer or security engineer who received a
+TokenFuzz crash bundle. The shortest path is: read `REPORT.md`, inspect
+`reproduce.sh`, run it against a disposable checkout, and compare the new
+diagnostic with `sanitizer.txt`.
 
 If you are the operator running TokenFuzz, see
 [Triage results](triage-results.md) instead.
 
-## What you may have received
-
-You can be handed two shapes of artifact:
-
-- **A raw crash directory** copied out of
-  `output/.../crashes/CRASH-*`. Every accepted crash includes
-  `reproduce.sh`, the input, and `sanitizer.txt`, so this is enough to
-  reproduce on its own.
-- **An export bundle** produced by `bin/export-repro`. This packages
-  the same files into a self-contained directory with a generated
-  `REPORT.md` on top.
-
-Both shapes use the same `reproduce.sh` contract. The instructions
-below apply to either.
+Accepted crashes are exported in place during triage. The directory under
+`output/.../crashes/CRASH-*` is therefore the same self-contained shape an
+operator sends upstream. Older or interrupted runs may still contain the
+audit-side `report.md`; the operator can finish those with `bin/export-repro`.
 
 ## Bundle layout
 
-If you were handed an export bundle, the directory is named after the
-crash id. After unpacking you get:
+The directory is named after the crash id. After unpacking you normally get:
 
 ```
 CRASH-001-1/
@@ -40,17 +27,17 @@ CRASH-001-1/
 ├── sanitizer.txt      # full sanitizer output captured during discovery
 ├── patch.diff         # optional: candidate fix, verified to apply cleanly
 ├── validation.json    # the publication decision, bound to this evidence
-├── severity.json      # the published score, bound to the report it came from
+├── severity.json      # only when a current reportable score exists
 └── .audit/            # audit-side originals, kept for provenance
 ```
 
-`validation.json` and `severity.json` are the audit's own record of *why* this
-was filed and how it was scored. Neither is needed to reproduce; both are there
-so a disputed report can be traced back to the decision that published it.
+`validation.json` records the publication decision. `severity.json` exists
+only for a reportable result with a current score. Neither file is needed to
+reproduce; both let a reviewer trace generated claims back to the evidence
+that produced them.
 
-`REPORT.md` is what to read first. For an even easier read, open
-`REPORT.html` in a browser — same content with the field table
-aligned, severity badge, and external links resolved.
+Read `REPORT.md` first. `REPORT.html` presents the same content with its field
+table and severity annotation rendered for a browser.
 
 It opens with a **Reviewer TL;DR** — two lines giving the bug and its trigger —
 then the severity badge, a `## Summary` paragraph, and a `## Fields` table of
@@ -64,6 +51,14 @@ the structured claims triage parsed. Between them they name:
 It is normalized from the agent-authored report, sanitizer output, and
 structured fields gathered during triage. Hand-edit `REPORT.md` only —
 `REPORT.html` is regenerated automatically.
+
+## Before you run it
+
+Treat the bundle and target checkout as untrusted code. Read `reproduce.sh`,
+then run it in a disposable VM or container without credentials. Depending on
+the target, it can clone source, fetch submodules, install project-local
+dependencies, and execute the target's build system. Review those network and
+build steps under your own policy.
 
 ## Reproduce in one command
 
@@ -108,8 +103,12 @@ You need:
 - an LLVM that supports `-fsanitize=<name>` for the sanitizer
   recorded in the bundle (ASan, UBSan, MSan, TSan, or Go's `race`).
 
-The script does **not** install anything system-wide and does **not**
-modify your environment.
+Generated recipes do not provision operating-system packages for you. They may
+invoke package managers such as npm, pip, Bundler, Composer, Maven, Gradle, R,
+or cpanm; those tools use their normal configured cache and install locations.
+Use a disposable account or container if those locations are not already
+isolated. An offline or proxied environment may need its normal
+project-specific preparation first.
 
 ### Common one-off overrides
 
@@ -154,7 +153,7 @@ trace is in `sanitizer.txt` if you want the rest.
 
 ## Verifying your fix
 
-After landing your patch:
+After applying your patch:
 
 1. Re-run `./reproduce.sh /path/to/checkout`.
 2. Confirm the build step succeeds.
@@ -164,9 +163,10 @@ A clean run typically looks like the binary or harness running
 silently to exit code 0 — or, for a parser, emitting its normal
 output.
 
-If the sanitizer is still firing on a different stack, that is a new
-finding adjacent to the original one. Please respond to the reporter
-rather than closing the issue.
+If the sanitizer still fires at a materially different root operation, keep
+the new trace and send it back to the reporter. Similar top frames can still
+belong to the original mechanism, so compare the full allocation/free and
+fault stacks before treating it as a separate issue.
 
 If you cannot reproduce against your checkout but the bundle's
 recorded revision *is* affected, the most common causes are:
@@ -197,14 +197,11 @@ recorded revision *is* affected, the most common causes are:
 
 The bundle is self-contained:
 
-- It contains no TokenFuzz telemetry. The script may use the network to clone
-  the recorded upstream source or install the project's build dependencies.
-- It does not contain audit-internal vocabulary.
-- It does not embed model transcripts.
-
-The audit-side originals — operator's `report.md`, `reproduce.sh`,
-H-prefixed scratch artifacts — live in `.audit/` inside the bundle
-for provenance. They are not needed to reproduce.
+- It contains no model transcript or TokenFuzz telemetry.
+- The script may use the network to clone the recorded upstream source, fetch
+  submodules, or install project dependencies.
+- `.audit/` retains audit-side source artifacts for provenance; it is not
+  needed for reproduction.
 
 If you would like to credit TokenFuzz in your advisory or commit
 message, a neutral attribution is:

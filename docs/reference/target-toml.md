@@ -1,6 +1,6 @@
 # Target Config Reference
 
-Each target has one static configuration file:
+Each target has one reviewed source configuration file:
 
 ```text
 output/<target>/target.toml
@@ -31,6 +31,19 @@ layer.** The tooling infers:
 
 Your job is to edit only values that remain unresolved or are
 wrong for this target.
+
+At audit preflight this file is copied to
+`output/<target>/<backend>/results/.target.toml`. That session snapshot is
+immutable. Edit the shared file only for a future run; never change the
+snapshot to retarget probes whose evidence is already being recorded.
+
+| Target shape | Minimum execution fields to verify |
+| --- | --- |
+| Native CLI | `is_browser = "0"`, enabled sanitizer, matching `<san>_bin` |
+| Native public API | Native CLI fields plus `<san>_lib`, `includes`, `defines`, and `link_libs` as needed |
+| Managed/interpreted runner | `[sanitizer] enabled = []` plus `[runner].bin` and `args` |
+| Go race run | `[sanitizer] enabled = ["race"]` plus a runner command built or invoked with `-race` |
+| Browser or JS engine | `is_browser = "1"`, the product executable, and route-appropriate runner arguments |
 
 The config is also part of triage:
 
@@ -178,10 +191,9 @@ With `enabled = []`:
   expecting an ASan binary.
 - `bin/run-asan generic` skips `ASAN_OPTIONS` injection so the
   language runtime sees a clean environment.
-- The triager auto-demotes runtime-diagnostic crashes (Python
-  tracebacks, Go panics, Ruby exceptions, Java stack traces, Node
-  fatal errors, Rust panics, …) from `crashes/` to `findings/`
-  instead of rejecting them. Genuine sanitizer-class
+- Runtime diagnostics (Python tracebacks, Go panics, Ruby exceptions, Java
+  stack traces, Node fatal errors, Rust panics, …) route to `findings/`
+  instead of being published as sanitizer crashes. Genuine sanitizer-class
   memory-safety signals (ASan, TSan, MSan, Go race detector)
   still stay in `crashes/`.
 

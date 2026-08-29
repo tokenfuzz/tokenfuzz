@@ -123,11 +123,11 @@ one. A row written by a caller that supplies no duration counts as untimed
 rather than as a free probe. The timing spans sibling-build routing, because
 the recorded verdict can come from a routed candidate.
 
-For API-level testcases, the runner can compile a sibling harness
-source file, cache the compiled binary, and link it against the
-configured sanitizer library. For browser and JS targets, a coverage
-check runs first so a testcase that doesn't reach the named function
-does not burn a full sanitizer run.
+For API-level testcases, the runner can compile a sibling harness source file,
+cache the compiled binary, and link it against the configured sanitizer
+library. Browser and JS targets use their configured coverage artifacts.
+Generic native targets can use a route-equivalent SanitizerCoverage sibling;
+when none exists, the run proceeds ungated rather than reporting a false miss.
 
 `bin/probe` discovers the active audit by walking upward from the
 testcase to `.session-env` in the result tree, so agents do not need
@@ -237,5 +237,6 @@ The mechanisms that keep the loop honest:
 - effort-gated strategy rotation;
 - report fields that triage can parse mechanically.
 
-The architecture is intentionally opinionated: **model reasoning is
-useful only when it ends in reproducible evidence.**
+The architecture is intentionally opinionated: model reasoning becomes useful
+when it ends in reviewable evidence—a reproducible diagnostic or a concrete,
+source-anchored security report.

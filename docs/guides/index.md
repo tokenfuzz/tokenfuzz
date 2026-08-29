@@ -1,44 +1,26 @@
 # Guides
 
-Task-oriented pages for the operator running an audit and for the
-maintainer receiving its output. Pick the one that matches what you
-are about to do. If you have not set up a target and run a first
-iteration yet, start with
-[Getting started](../getting-started/index.md) — these pages assume
-that baseline.
+These are task-oriented pages for audit operators, security reviewers, and
+upstream maintainers. If you have not completed a one-iteration smoke test,
+start with [Getting started](../getting-started/index.md).
 
-## Read these in order for a first run
+Two rules apply throughout the handbook:
 
-1. [Configure a target](configure-target.md) — review the generated
-   `target.toml` and make sure the runner or sanitizer build is real.
-2. [Backends and ensembling](backends.md) — pick one backend for a
-   reproducible run, or cycle hosted backends when you want broader
-   coverage.
-3. [Non-C/C++ targets](multi-language.md) or
-   [Browser targets](browser-targets.md) — only if your target needs
-   ecosystem-specific runner setup.
-4. [Triage results](triage-results.md) — review crashes, findings,
-   rejected candidates, and duplicate clusters.
+- `findings/` holds concrete security reports, with or without a reproducer.
+- `crashes/` holds reproducible sanitizer or runtime-race evidence. A crash can
+  later be classified `not-reportable` without being thrown away.
 
-## Two rules every guide assumes
-
-- `findings/` is for concrete security issues, with or without a
-  runnable reproducer.
-- `crashes/` is stricter: it is for sanitizer-backed reproductions,
-  runtime-race diagnostics, or accepted security-boundary violations
-  that can be clustered and exported.
-
-Rejected results are kept, not deleted, in `findings-rejected/` and
-`crashes-rejected/` — each with its own HTML index naming the reason.
+Rejected artifacts are preserved under `findings-rejected/` and
+`crashes-rejected/`, with an HTML index explaining each decision.
 
 ## All guide pages
 
 | Page | Use it when |
 | --- | --- |
-| [Configure a target](configure-target.md) | Review `target.toml` after `bin/setup-target` generates it. |
-| [Backends and ensembling](backends.md) | Run a single backend, cycle multiple hosted backends, or compare them. |
-| [Non-C/C++ targets](multi-language.md) | Configure language runners, findings-only targets, or non-ASan sanitizers such as Go `race`. |
+| [Target configuration](configure-target.md) | Review `target.toml` after `bin/setup-target` generates it. |
+| [Backends and isolation](backends.md) | Choose a model backend and the execution boundary around it. |
+| [Language runners](multi-language.md) | Configure non-C/C++ targets, findings-only mode, or Go `race`. |
 | [Browser targets](browser-targets.md) | Audit Firefox, Chromium, or a JS/Wasm runtime. |
-| [Boundary-directed fuzzing](directed-fuzzing.md) | Give agents coverage-guided fuzzing on the APIs untrusted input actually reaches, without disturbing a shared build. |
-| [Triage results](triage-results.md) | Decide which crashes and findings to promote, reject, or refine. |
-| [Reproduce a crash](reproduce-a-crash.md) | Re-run an exported TokenFuzz crash bundle against a clean upstream checkout. |
+| [Directed fuzzing](directed-fuzzing.md) | Run S4 against published, reachable, undriven APIs without changing the shared build. |
+| [Triage and review](triage-results.md) | Decide which results are ready for human or upstream review. |
+| [Maintainer crash reproduction](reproduce-a-crash.md) | Re-run an exported crash bundle against an upstream checkout. |

@@ -1,300 +1,203 @@
 # Add a Target
 
-Adding a target gives the harness three things:
+A TokenFuzz target has three parts:
 
-- source code under `targets/<target>/`;
-- an executable test path: sanitizer artifacts or a language runner;
-- an `output/<target>/target.toml` that describes how to run and triage
-  the target.
+```text
+targets/<target>/                   source checkout and build artifacts
+output/<target>/target.toml         reviewed execution and threat-model config
+output/<target>/<backend>/results/  evidence produced by an audit
+```
 
-Once those are in place, TokenFuzz can build a ranked work queue,
-launch agents, and write all audit evidence under
-`output/<target>/<backend>/results/`.
+This guide gets those pieces to a one-iteration smoke test. The
+[target config schema](../reference/target-toml.md) documents every field;
+the [configuration guide](../guides/configure-target.md) explains the review
+decisions.
 
-## What makes a good first target
+## Choose a useful target
 
-Pick something with:
+A good first real target has:
 
-- a source checkout you are authorised to audit;
-- a reproducible default ASan build;
-- a command-line binary or public C API the harness can drive;
-- existing tests, samples, or corpus files that agents can mutate;
-- a clear external input boundary — bytes, protocol state, script
-  calls, filesystem state;
-- enough source structure for the ranker to find real implementation
-  files (not just tests, generated code, or build glue).
+- a source tree you are authorised to audit;
+- a documented file, byte, protocol, CLI, or public-API boundary;
+- a reproducible build or interpreter route;
+- tests, sample files, or corpus inputs agents can mutate;
+- enough implementation source for the ranker to work with.
 
-Get one target clean and finishing healthy runs before adding more.
+If you are still validating the installation, use a
+[sample target](sample-targets.md) first. It separates TokenFuzz setup from the
+project-specific work of making a build reproducible.
 
-If you only want to see the harness work end to end, skip the hunt: the
-repository ships sixteen configured synthetic targets. See
-[Sample targets](sample-targets.md).
+## 1. Add or inspect the source
 
-## 1. Sync the source
-
-Create or update the checkout and seed the config:
+For a remote Git repository:
 
 ```bash
 bin/setup-target <target> <repo-url>
 ```
 
-A few real examples:
-
-```bash
-bin/setup-target libxml2 https://gitlab.gnome.org/GNOME/libxml2.git
-bin/setup-target zlib    https://github.com/madler/zlib.git
-bin/setup-target firefox https://github.com/mozilla-firefox/firefox.git
-bin/setup-target samples/sample-python /path/to/local/source
-```
-
-`<target>` may include path components. For example,
-`samples/sample-python` creates `targets/samples/sample-python/` and
+The target slug may contain path components. For example,
+`samples/sample-python` maps to `targets/samples/sample-python/` and
 `output/samples/sample-python/target.toml`.
 
-Four useful variants:
+Other supported source forms:
 
 ```bash
-bin/setup-target <target>                                   # re-inspect existing checkout
-bin/setup-target <target> <repo-url> --ref <branch-or-rev>  # clone + pin to a revision
-bin/setup-target <target> --ref <branch-or-rev>             # switch the existing checkout
-bin/setup-target <target> /path/to/local/source             # use a local source directory
+# Pin a Git or Mercurial checkout.
+bin/setup-target <target> <repo-url> --ref <branch-or-revision>
+
+# Re-inspect an existing checkout without fetching it.
+bin/setup-target <target> --no-update
+
+# Update an existing VCS checkout without repeating its URL.
+bin/setup-target <target> --pull
+
+# Use a local checkout or plain source directory.
+bin/setup-target <target> /path/to/local/source
 ```
 
-Notes:
+A local Git or Mercurial tree is cloned into `targets/`. A plain directory is
+symlinked and audited in place; it is never copied, pulled, or fetched. Its
+generated config keeps `upstream_url = "FILL_ME"`, and exported reproducers ask
+the maintainer for a checkout path instead of inventing a clone URL.
 
-- The source argument can be a local directory instead of a URL. A local
-  git/hg checkout is cloned as usual. A plain directory with no VCS
-  metadata is symlinked into `targets/<target>/` (never copied, pulled, or
-  fetched) and audited in place as a local-only "no VCS" target — its
-  `target.toml` records `upstream_url = "FILL_ME"`, and the generated
-  `reproduce.sh` asks for a checkout path
-  instead of trying to clone.
-- If a checkout already exists under `targets/<target>/`, the no-URL
-  form normally seeds or refreshes the generated config without touching
-  source. It can still force a build when it detects stale ABI-tagged
-  extension modules.
-- Re-running `setup-target` refreshes generated config fields from the
-  current checkout and build outputs. (`--no-llm-config` skips the
-  LLM-backed threat-model and peer suggestions if you must stay
-  offline.)
-- The full list of advanced flags is in
-  [Commands](../reference/commands.md). The normal setup flow does not
-  need them.
+Re-running `bin/setup-target` preserves reviewed values unless generated
+placeholders remain. `--no-llm-config` skips the best-effort threat-model and
+peer suggestions when setup must stay offline. See the
+[command reference](../reference/commands.md#set-up-a-target) before using
+`--force`, because its behavior intentionally differs with and without
+`--build`.
 
 ### Chromium and Chrome checkouts
 
-These two slugs follow the upstream `depot_tools`/`gclient` layout, so the
-first setup needs `depot_tools` on `PATH`. `bin/setup-target chromium` creates
-`targets/chromium/src` and registers the effective target as `chromium/src`;
-`bin/audit --target chromium` resolves that nested source. An ordinary target
-already registered at `output/chromium/target.toml` keeps its own identity
-instead.
+Chromium-family checkouts use the upstream `depot_tools` and `gclient` layout.
+Put `depot_tools` on `PATH` before the first setup:
 
-The sanitizer build and browser probes use the full Chromium product. Probes
-pass three flags that are worth knowing about:
+```bash
+bin/setup-target chromium --browser --build
+```
 
-- `--enable-logging=stderr`, because execution evidence comes from the
-  product's own tagged console record;
-- `--no-sandbox`, so the dedicated sanitizer `log_path` stays writable by
-  renderer children — browser output is page-influenced and cannot be trusted
-  as crash evidence on its own;
-- on macOS, Chromium's mock Keychain, which stops temporary profiles asking for
-  the user's Safe Storage credential.
+The helper creates `targets/chromium/src` and registers the effective nested
+target as `chromium/src`. An ordinary target already configured at
+`output/chromium/target.toml` keeps its existing identity.
 
-Coverage (`bin/hits`) speaks only the Firefox command line, so Chromium has no
-coverage-gating route yet.
+Chromium probes enable stderr logging, use a temporary profile, and pass
+`--no-sandbox` so child sanitizer logs remain writable inside the audit's own
+isolation boundary. On macOS they also use the mock Keychain. Chromium does not
+currently have a `bin/hits` coverage-gating route; its probes run the sanitizer
+directly.
 
-## 2. Establish the build or runner
+## 2. Establish an execution route
 
-Build behavior depends on the target:
+What happens next depends on the target:
 
-- **Native C/C++ sanitizer targets.** Built for you. On audit startup,
-  TokenFuzz checks the configured non-browser sanitizer trees; if one is
-  missing or stale, `bin/audit` calls `bin/setup-target --build`, which
-  converges and runs a reusable recipe under `targets/<target>/.audit/`. The
-  details are in [What the auto-build guarantees](#what-the-auto-build-guarantees)
-  below.
-- **Rust, Go, Swift, Python, Node, PHP, Ruby, and other registered language
-  builds.** Run `bin/setup-target <target> --build` when the runner depends on
-  compiled code or installed packages. Audit preflight does not automatically
-  run these ecosystem bootstrap commands. Such a target opts into a sanitizer
-  build by shipping a committed `targets/<target>/.audit/build.sh` that emits an
-  instrumented binary into `build-<san>/`; `--build` materializes it alongside
-  the ecosystem bootstrap (the `samples/sample-rust` and
-  `samples/sample-python-native` benchmark targets do this for an ASan build, and
-  `samples/sample-go` enables the race detector through its `go build -race`
-  bootstrap).
-- **Browser targets.** Browser-specific `mach` drivers and explicitly selected
-  GN browser builds use the same setup contract as other native targets and
-  get deterministic release sanitizer recipes without a target-slug branch.
-  Pass `--browser` for GN because it also builds non-browser projects and
-  JavaScript shells. For another browser build system, pass
-  `--browser`, provide a reusable `targets/<target>/.audit/build.sh`, and point
-  `target.toml` at the product executable.
-- **Findings-only scripts.** No build is needed when the configured interpreter
-  can execute the testcase directly and the target has no dependencies to
-  install.
+| Target shape | What to do |
+| --- | --- |
+| Ordinary native C/C++ | Nothing is required up front. Audit preflight refreshes missing or stale enabled sanitizer builds. Use `bin/setup-target <target> --build` when you want to prove the build before launching a model. |
+| Rust, Go, Swift, Python extensions, or another registered ecosystem build | Run `bin/setup-target <target> --build` when the runner needs compiled code, installed packages, or a primed toolchain cache. Audit preflight does not run these ecosystem bootstraps automatically. |
+| Findings-only script or managed runtime | No sanitizer build is needed. Setup writes `[sanitizer] enabled = []` and a language runner when it can identify one. |
+| Browser | `mach` is detected as browser-specific. Pass `--browser` for GN, which also builds non-browser programs. Other browser build systems need a reusable `.audit/build.sh`. |
 
-For a native build, the generated `.audit/build.sh` (and
-`.audit/build-<san>.sh` for enabled secondary sanitizers) is also reused by
-`bin/export-repro` when it creates a maintainer bundle.
-
-### What the auto-build guarantees
-
-For ordinary native C/C++ targets, the build that audit preflight runs is not
-best-effort improvisation. It holds to five rules:
-
-- **Failure is loud but not fatal.** A failed build is visible in the log, and
-  source analysis continues while sanitizer-dependent work is unavailable.
-- **A refresh is always a clean build.** It starts from an empty canonical
-  build directory, and restores the previous tree if the build fails.
-- **A broken recipe is repaired, not trusted.** If the existing recipe fails
-  that clean build, setup gives the model at most three revised-recipe
-  attempts, and installs a revision only after it builds successfully.
-  Compiling is not by itself success: a sanitizer executable that dies in the
-  dynamic loader before `main()` cannot run a testcase, so it counts as a
-  build failure and the loader's own diagnostic is what the repair reads.
-- **Freshness is content-based.** Source changes and recipe changes both
-  invalidate the stamp.
-- **`build-asan` stays the control.** By default setup also prepares one cached
-  widened ASan sibling when the project advertises compatible optional in-tree
-  features. One minority reproducer slot explores ready alternates while
-  another stays on the control.
-
-### Building up front (optional)
-
-If you would rather pay the build cost at setup time — for example to
-verify the target compiles before launching a long audit — run:
+The normal up-front check is:
 
 ```bash
 bin/setup-target <target> --build
 ```
 
-For native targets, this performs the same refresh audit preflight would do.
-That includes configured ASan alternates, so initial setup can take one or more
-additional builds; later runs reuse them until the source or exact recipe
-changes. Set `build_widening = false` in `target.toml` if widening is unsuitable.
-For registered non-native build systems, it runs the language bootstrap plan.
-It skips when there is no applicable manifest or build plan.
+For a custom native build, put a reusable script at
+`targets/<target>/.audit/build.sh`. Its argument contract is:
 
-### Targets with no sanitizer build
+```text
+build.sh <source-root> <build-directory>
+```
 
-Pure-Python / pure-Ruby / pure-JS scripts with no native extensions or
-vendored dependencies, and other targets that run testcases through a language
-runtime without sanitizer instrumentation, need no sanitizer build.
-`bin/setup-target` writes a runner-only config
-(`[sanitizer] enabled = []`) for those — diagnostics land under
-`findings/` instead of `crashes/`. See
-[Auditing non-C/C++ targets](../guides/multi-language.md) for the
-per-language matrix.
+`bin/auto-build-script` is the supported generator for ordinary native
+projects. The same recipe is later embedded into exported crash bundles, so it
+must converge from a clean build directory rather than depend on unstated host
+state.
 
-### Inside `bin/audit-container-shell`
+### What native auto-build guarantees
 
-The container helper sets `AUDIT_BUILD_SUFFIX` so build directories
-are isolated per image (`build-asan-<image-id>/`). Harness path
-resolution applies it to relative `build-asan/`, `build-ubsan/`,
-`build-msan/`, and `build-tsan/` paths automatically; outside the
-container the suffix is empty.
+The native builder:
 
-### Writing the build recipe by hand
+- refreshes into a clean canonical build directory and restores the previous
+  tree if the replacement fails;
+- treats a binary that dies in the dynamic loader as a failed build;
+- may revise a broken generated recipe up to three times, installing only a
+  revision that builds and starts;
+- invalidates freshness when source content or the recipe changes;
+- keeps the canonical `build-asan` as the control and, by default, prepares one
+  compatible widened ASan sibling for optional in-tree features.
 
-`bin/auto-build-script` is the supported path for ordinary native projects. If
-you need to override it — an exotic build system or required local patches —
-drop a shell script with the contract `argv = <src> <build>` at
-`targets/<target>/.audit/build.sh` and `bin/export-repro` will inline
-it the same way.
+A failed build is loud but does not erase source-review work. Disable alternate
+build exploration with `build_widening = false` in `target.toml` when it is not
+appropriate for the project.
 
-## 3. Refresh and review the generated config
+Inside `bin/audit-container-shell`, relative `build-asan/`, `build-ubsan/`,
+`build-msan/`, and `build-tsan/` paths resolve to image-specific directories
+through `AUDIT_BUILD_SUFFIX`. Do not set that internal value yourself.
 
-With the ASan build in place, ask the harness to look again:
+## 3. Review `target.toml`
+
+After the build or runner exists, refresh detection once:
 
 ```bash
 bin/setup-target <target>
 ```
 
-This re-inspects `build-asan${AUDIT_BUILD_SUFFIX:-}/` and updates
-`output/<target>/target.toml` when generated placeholders remain.
-Then open the file and edit only:
+Open `output/<target>/target.toml` and verify:
 
-- placeholder values such as `FILL_ME`;
-- artifact paths the generator guessed incorrectly;
-- target-specific `defines`;
-- target-specific `link_libs`;
-- `attacker_controls`, when the default input boundary is too narrow
-  or too broad. Valid tokens are `bytes`, `call-sequence`, `timing`,
-  `race`, `env`, `protocol-state`, and `fs-state`.
+1. `asan_bin`, or `[runner].bin` and `args`, starts the intended product.
+2. `asan_lib`, `includes`, `defines`, and `link_libs` are correct if agents
+   will compile API harnesses.
+3. `is_browser` matches the execution model.
+4. `[sanitizer].enabled` describes the diagnostics the target can really emit.
+5. `[threat_model].attacker_controls` describes the external boundary without
+   widening it to accommodate a harness-only action.
+6. `upstream_url` and `build_system` are useful enough for a maintainer bundle.
 
-For the review checklist, see
-[Configure a target](../guides/configure-target.md). For complete
-field definitions, see
-[Target config reference](../reference/target-toml.md).
+Valid attacker-control tokens are `bytes`, `call-sequence`, `timing`, `race`,
+`protocol-state`, `env`, and `fs-state`. The
+[configuration guide](../guides/configure-target.md#review-the-threat-model)
+has examples and the boundary test to apply.
 
-### The shared agent contract
+The root [`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md)
+is the shared runtime contract for every audit agent. Target-specific paths,
+build flags, and threat-model choices belong in `target.toml` or a target
+overlay, not in that global file.
 
-When `bin/audit` launches an agent, it injects the shared runtime guide
-[`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md).
-It defines testcase headers, evidence requirements, strategy discipline, and
-the crash quality bar for every target. Target-specific choices belong in
-`target.toml` or the target source/build — not in the shared guide. Change
-`AGENTS.md` only when changing the audit contract for all targets.
-
-## 4. Validate before long runs
-
-Run one iteration:
+## 4. Run one iteration
 
 ```bash
 bin/audit --target <target> --backend <backend> 1
 ```
 
-Both `bin/setup-target` and `bin/audit` validate `target.toml`
-themselves. If startup succeeds, you should see:
+Startup validates the target and pins the post-preflight config to:
 
 ```text
+output/<target>/<backend>/results/.target.toml
 output/<target>/<backend>/results/.session-env
-output/<target>/<backend>/results/
-output/<target>/<backend>/logs/
 ```
 
-Also check that the first run produced `work-cards.jsonl` and
-`state/`. Those two files show whether the target is schedulable, even
-when the bounded run did not make it as far as a crash.
+Do not edit either file during the session. Change the shared
+`output/<target>/target.toml` between runs; the next invocation will pin the new
+version.
 
-## 5. Keep it updated
-
-To refresh source while preserving configuration:
-
-```bash
-bin/setup-target <target> <repo-url>
-bin/audit --target <target> --backend <backend> 1
-```
-
-If ASan paths change after an upstream update, run
-`bin/setup-target <target>` again after rebuilding, then review only
-the affected artifact fields. Reviewed config is preserved unless
-generated placeholders remain.
+A schedulable smoke test creates `work-cards.jsonl`, `state/`, the result lanes,
+and a per-agent scratch directory even if it finds nothing. Continue with
+[First audit](first-audit.md) to inspect them.
 
 ## Ready checklist
 
-A target is ready when:
+The target is ready for a longer run when:
 
-- `targets/<target>/` is a Git or Mercurial checkout, or a symlink to a
-  local source tree;
-- the default ASan artifacts exist and start cleanly outside the
-  harness;
-- `output/<target>/target.toml` exists. `bin/audit --target <target>`
-  creates it if it is missing. `bin/setup-target` can refresh it from
-  source;
-- the fields you actually need have no placeholder values;
-- `asan_bin` is correct for CLI or browser runs;
-- `asan_lib`, `includes`, `defines`, and `link_libs` are correct if
-  ASan C harnesses will be used. UBSan / MSan / TSan harnesses use
-  their own optional `[sanitizer].*_lib` entries;
-- `is_browser` matches the target's execution model;
-- `attacker_controls` matches the real external input boundary;
-- `bin/audit --target <target> --backend <backend> 1` finishes
-  startup and writes state under
-  `output/<target>/<backend>/results/`;
-- `work-cards.jsonl` exists and points at implementation files worth
-  auditing;
-- `findings/` and `crashes/` both exist — either may be empty after a
-  smoke run.
+- the source tree resolves to the project and revision you intended;
+- the configured sanitizer binary or language runner starts outside the audit;
+- a runner canary, when supported, proves imports resolve inside
+  `targets/<target>/` rather than to an installed copy;
+- enabled sanitizer artifacts match their configured routes;
+- public-API harness fields are correct for any compiled harnesses you expect;
+- the threat model matches the real external boundary;
+- one audit iteration writes state and work cards without a preflight error.
+
+An empty result lane is not a setup failure. A missing work queue, unusable
+runner, or failed preflight is.

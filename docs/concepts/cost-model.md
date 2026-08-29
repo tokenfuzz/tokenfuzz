@@ -1,9 +1,9 @@
 # Cost Model
 
-Long, useful LLM-based audit runs are mostly a **context-economy
-problem.** Every assistant turn re-reads the entire prior
-conversation as cached input. Anything that grows the conversation
-grows the per-turn cost.
+Long, useful LLM-based audit runs are mostly a **context-economy problem**.
+Backends account for context differently, but later turns generally carry an
+accumulated prompt or compacted summary. More source, logs, and narration in
+that context means more latency and usually more input-token cost.
 
 A naive agent that dumps raw logs into context turns a $20 session
 into a $200 session without finding anything extra. TokenFuzz treats
@@ -38,11 +38,11 @@ of those — the columns of the table above map onto these two rules.
 
 ## Cache-friendly prompt prefix
 
-Every agent's prompt begins with an identical fixed prefix (the shared
-rules and safety framing). Because it never changes turn to turn, the
-backend's prompt cache absorbs it and the harness pays the cache-hit
-price — a fraction of the normal input price — instead of re-sending it
-in full each turn.
+Every agent's prompt begins with an identical fixed prefix (the shared rules
+and safety framing). Hosted backends that expose prompt caching can reuse that
+stable prefix; other transports still benefit from keeping the changing tail
+small. Cache availability and price are provider-specific, so run logs record
+what the backend actually reports rather than assuming a discount.
 
 Only the parts that genuinely differ per agent — coverage-gap
 suggestions, cross-agent summaries, the agent's own state — come after

@@ -3,6 +3,16 @@
 Run commands from the repository root. This page documents the public operator
 workflow; each command's `--help` output is the source for rarely used flags.
 
+| Task | Start with |
+| --- | --- |
+| Add or refresh a target | `bin/setup-target` |
+| Run or resume an audit | `bin/audit` |
+| Execute one testcase | `bin/probe` |
+| Inspect structured progress | `bin/state` |
+| Review results | Generated cluster HTML |
+| Rebuild derived reports | `bin/export-repro`, `bin/severity`, and cluster commands |
+| Test TokenFuzz itself | `bash tests/run-tests.sh` and `bin/docs build` |
+
 For examples below:
 
 ```bash
@@ -248,7 +258,8 @@ bin/fuzz doctor                       # prove the shared build is unaffected
 See [Boundary-directed fuzzing](../guides/directed-fuzzing.md) for the workflow
 and the build-isolation rules.
 
-Coverage diagnostics for browser, JS, and generic CLI builds. `--mode generic`
+`bin/hits` provides coverage diagnostics for browser, JS, and generic CLI
+builds. `--mode generic`
 replays a native testcase against the configured ASan CLI in an instrumented sibling
 tree (`build-asan+fuzz` or `build-asan+cov`) and reports the source files it
 reached. The sibling is used only when the sanitizer selected that configured

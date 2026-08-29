@@ -20,15 +20,12 @@ $RESULTS/crashes/CRASH-CLUSTERS.html
 $RESULTS/findings/FINDING-CLUSTERS.html
 $RESULTS/crashes-rejected/REJECTED-CRASHES.html
 $RESULTS/findings-rejected/REJECTED-FINDINGS.html
-$RESULTS/crashes/CRASH-*/REPORT.html   # report.html before export-repro runs
+$RESULTS/crashes/CRASH-*/REPORT.html
 $RESULTS/findings/FIND-*/report.html
 ```
 
-Where to look for what:
-
-- `results/` — audit evidence and progress.
-- `logs/` — debugging orchestration, backend authentication, or
-  wrapper failures.
+Use `results/` for evidence and progress. Use `logs/` only to debug
+orchestration, backend authentication, or wrapper failures.
 
 The result tree is designed to surface which security results are
 ready for review, even when they are not sanitizer crashes.
@@ -163,7 +160,7 @@ CRASH-001-1/
   sanitizer.txt         # original sanitizer output
   patch.diff            # optional: candidate fix
   validation.json       # current publication state + evidence identity
-  severity.json         # the published score, bound to the report it came from
+  severity.json         # only when a current reportable score exists
   .audit/
   .dup-of               # only on non-canonical cluster members
 ```
@@ -203,7 +200,7 @@ FIND-001/
   report.md              # the narrative; hand-edit this (description.md also accepted)
   report.html            # auto-generated sibling of report.md (open in browser)
   validation.json        # current publication state + evidence identity
-  severity.json          # the published score, bound to the report it came from
+  severity.json          # only when a current reportable score exists
   affected-files.txt     # optional, operator-authored — the harness does not generate it
   .dup-of                # only on non-canonical cluster members
   .needs-content         # marker added when report.md is missing
