@@ -849,6 +849,38 @@ def seed_candidates(target_root: "str | os.PathLike") -> "list[Path]":
     return found
 
 
+#: Env var naming a local directory of extra corpus inputs (an OSS-Fuzz or
+#: ClusterFuzz corpus the operator staged). Operator-provided and local only —
+#: the harness never fetches a corpus over the network.
+SEED_CORPUS_DIR_ENV = "FUZZ_SEED_CORPUS_DIR"
+
+
+def operator_seed_candidates(directory: "str | os.PathLike") -> "list[Path]":
+    """Input files from an operator-provided local corpus directory.
+
+    Unlike ``seed_candidates`` this is not filtered by the ``_SEED_DIR_NAMES``
+    layout: the operator named the directory explicitly, so every file under it
+    is a candidate, bounded by the same size and count limits that keep seeding
+    a speed-up rather than a new cost. Source and build files are still skipped.
+    """
+    base = Path(directory)
+    if not base.is_dir():
+        return []
+    found: "list[Path]" = []
+    for path in sorted(base.rglob("*")):
+        if len(found) >= MAX_SEED_FILES:
+            break
+        if not path.is_file() or path.suffix.lower() in _NON_INPUT_SUFFIXES:
+            continue
+        try:
+            if not 0 < path.stat().st_size <= MAX_SEED_BYTES:
+                continue
+        except OSError:
+            continue
+        found.append(path)
+    return found
+
+
 # Code and build scaffolding: present in every test directory, and never the
 # input a harness parses.
 _NON_INPUT_SUFFIXES = frozenset({

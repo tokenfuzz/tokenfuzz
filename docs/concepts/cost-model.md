@@ -97,9 +97,10 @@ commands, and continued with fresh context. Carrying hundreds of tool
 calls forward costs more every turn and buys nothing that structured
 state does not already hold.
 
-## Coverage gate before sanitizer (browser/JS only)
+## Coverage gate before sanitizer
 
-For browser and JS-shell targets with sancov-instrumented builds:
+For browser, JS-shell, and generic CLI targets with a sancov-instrumented
+build:
 
 1. `bin/probe` first runs the testcase against the coverage build.
 2. Only testcases that reach the named target code spend a
@@ -107,10 +108,16 @@ For browser and JS-shell targets with sancov-instrumented builds:
 3. Testcases that miss never spend the more expensive budget — the
    agent revises the input instead.
 
-For generic CLI targets (most non-browser audits) the coverage gate
-is **not** used: every probe runs the sanitizer directly. The savings
-on those targets come from the per-agent budget and from rejected
-indexes, not from a coverage pre-check.
+A generic CLI target reaches its coverage build through a sibling tree —
+`build-<san>+fuzz` or a `build-<san>+cov` tree built with
+`-fsanitize-coverage=trace-pc-guard` — that never replaces the shared
+`build-<san>`. When a testcase names a `WANT` symbol and that sibling exists,
+`bin/hits --mode generic` replays it there, maps the covered PCs to source
+files, and writes the same HIT rows and edge journal browser mode does. When
+no instrumented sibling exists the gate reports coverage **unavailable** and
+proceeds ungated — an unmeasurable input still runs the sanitizer and is never
+counted as a miss. On those ungated runs the savings come from the per-agent
+budget and rejected indexes, not from a coverage pre-check.
 
 ## Work-card leases prevent duplicate spend
 

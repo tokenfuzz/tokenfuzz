@@ -137,6 +137,19 @@ only on hosts with several installations:
 LLVM_PREFIX=/opt/homebrew/opt/llvm bin/audit --target <target> --backend <backend> 1
 ```
 
+## Directed fuzzing
+
+| Variable | Default | Use it for |
+| --- | --- | --- |
+| `FUZZ_SEED_CORPUS_DIR` | unset | A local directory of extra seed inputs (an OSS-Fuzz or ClusterFuzz corpus you staged) to fill an empty S4 corpus alongside the target's own test data. Local only — nothing is fetched over the network. |
+
+The path is read only when a harness's corpus is empty, and its inputs are
+bounded by the same size and count limits as the in-tree seeds.
+
+```bash
+FUZZ_SEED_CORPUS_DIR=/data/oss-fuzz-corpora/<project> bin/audit --target <target> --backend <backend>
+```
+
 ## Container runtime
 
 `bin/audit-container-shell` has flags for its normal choices, and flags are

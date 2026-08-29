@@ -247,11 +247,17 @@ bin/fuzz doctor                       # prove the shared build is unaffected
 See [Boundary-directed fuzzing](../guides/directed-fuzzing.md) for the workflow
 and the build-isolation rules.
 
-Coverage diagnostics for supported browser and JS builds:
+Coverage diagnostics for browser, JS, and generic CLI builds. `--mode generic`
+replays a native testcase against the target's binary in an instrumented sibling
+tree (`build-<san>+fuzz` or `build-<san>+cov`) and reports the source files it
+reached; with no such sibling it prints `COVERAGE_UNAVAILABLE` and exits 4 so the
+caller proceeds ungated.
 
 ```bash
 bin/hits --testcase "$RESULTS/scratch-1/testcase.js" \
   --want <symbol-regex> --mode js
+bin/hits --testcase "$RESULTS/scratch-1/input.dat" \
+  --want <symbol-regex> --mode generic
 bin/coverage-summary --results-dir "$RESULTS"
 ```
 

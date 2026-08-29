@@ -204,8 +204,12 @@ is what makes many short slices as good as one long run.
 
 An empty corpus is seeded automatically from the target's own test data before
 the first slice — on libxml2 that is the difference between ~1900 edges and
-318 in the first slice. A corpus the fuzzer has already built is left alone,
-and the project's own `.dict` is attached when one matches the harness name.
+318 in the first slice. Point
+[`FUZZ_SEED_CORPUS_DIR`](../reference/environment.md#directed-fuzzing) at a
+locally staged OSS-Fuzz or ClusterFuzz corpus to seed from it too; the harness
+never fetches one over the network. A corpus the fuzzer has already built is
+left alone, and the project's own `.dict` is attached when one matches the
+harness name.
 
 Progress counts libFuzzer's `ft` as well as `cov`. Value profiling — switched
 on once a harness goes dry, which is when a magic-byte comparison is the

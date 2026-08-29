@@ -171,7 +171,7 @@ class MultiRun:
 
     def coverage_gate(self) -> int | None:
         mode = self.args[0] if self.args else "browser"
-        if not os.environ.get("WANT") or os.environ.get("SKIP_COVERAGE_GATE") or mode not in {"browser", "js"}:
+        if not os.environ.get("WANT") or os.environ.get("SKIP_COVERAGE_GATE") or mode not in {"browser", "js", "generic"}:
             return None
         hits = SCRIPT_DIR / "hits"
         testcase = self.args[1] if len(self.args) > 1 else ""
@@ -192,6 +192,7 @@ class MultiRun:
                     shutil.copyfileobj(source, sys.stdout.buffer, 1024 * 1024)
             closest = ""
             hit_frame = ""
+            unavailable = ""
             with completed.stdout.open(encoding="utf-8", errors="replace") as stream:
                 for line in stream:
                     match = re.match(r"^(?:MISSED . closest reached: |EXEC_FAIL|NO_COVERAGE:? ?)(.*)$", line)
@@ -200,12 +201,24 @@ class MultiRun:
                     match = re.match(r"^HIT: (.*)$", line)
                     if match and not hit_frame:
                         hit_frame = match.group(1).strip()[:200]
+                    match = re.match(r"^COVERAGE_UNAVAILABLE: (.*)$", line)
+                    if match and not unavailable:
+                        unavailable = match.group(1).strip()[:200]
             closest = closest or f"hits exited {completed.returncode}"
             if completed.returncode == 1:
                 self.emit(f"COVERAGE_GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
                 self._record_coverage_miss(testcase, mode, closest)
                 print(f"[run-sanitizer-multi] COVERAGE GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
                 return 1
+            if completed.returncode == 4:
+                # No instrumented tree to measure against. Never a miss: an
+                # unmeasurable input must run the sanitizer, and the reason is
+                # recorded so it is not mistaken for reached-nothing.
+                reason = unavailable or "no instrumented sibling build"
+                os.environ["HITS_VERDICT"] = "COVERAGE_UNAVAILABLE"
+                self.emit(f"COVERAGE_GATE: COVERAGE_UNAVAILABLE - ASan proceeding ungated (coverage unavailable: {reason})")
+                print(f"[run-sanitizer-multi] COVERAGE GATE: COVERAGE_UNAVAILABLE - proceeding to ASan ungated (coverage unavailable: {reason})")
+                return None
             if completed.returncode:
                 label = "COVERAGE_EXEC_FAIL" if completed.returncode == 3 else "COVERAGE_ENV_FAIL"
                 os.environ["HITS_VERDICT"] = label

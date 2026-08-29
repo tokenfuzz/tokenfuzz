@@ -391,16 +391,29 @@ print("[run-asan] CRASH DETECTED: ASan error found")
         self.assertIn("small body line 1", self.output(short))
         self.assertIn("small body line 2", self.output(short))
 
-    def test_generic_coverage_skip_and_crash_signature_dedup(self) -> None:
+    def test_generic_coverage_unavailable_falls_open_and_crash_signature_dedup(self) -> None:
+        # Generic coverage is gated when an instrumented sibling exists; with
+        # none, hits exits 4 and the gate must proceed to the sanitizer,
+        # recording the reason rather than counting the run as a miss.
         self.write_hits(
-            "if 'generic' in sys.argv: print('hits should not be called', file=sys.stderr); raise SystemExit(99)\n"
+            "if 'generic' in sys.argv:\n"
+            "    print('COVERAGE_UNAVAILABLE: no instrumented sibling build (build-asan+cov)')\n"
+            "    raise SystemExit(4)\n"
             "print('HIT: sample_function')\n"
         )
         generic_case = self.root / "input.dat"
         generic_case.write_text("sample\n")
-        generic = self.run_multi("generic", generic_case, environment={"WANT": "some_symbol"})
-        self.assertIn("CRASH_RATE: 0/1", self.output(generic))
-        self.assertNotIn("hits should not be called", self.output(generic))
+        gate_output = self.root / "gate.txt"
+        generic = self.run_multi("generic", generic_case, environment={
+            "WANT": "some_symbol", "ASAN_OUTPUT_FILE": str(gate_output),
+        })
+        output = self.output(generic)
+        self.assertIn("COVERAGE_GATE: COVERAGE_UNAVAILABLE", output)
+        self.assertIn("no instrumented sibling build", output)
+        self.assertNotIn("COVERAGE_GATE: MISSED", output)
+        # The sanitizer still ran: an unmeasurable input is never skipped.
+        self.assertIn("CRASH_RATE: 0/1", output)
+        self.assertIn("COVERAGE_GATE: COVERAGE_UNAVAILABLE", gate_output.read_text())
 
         counter = self.root / "dedup-counter"
         counter.write_text("0")

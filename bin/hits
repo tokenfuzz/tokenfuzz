@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import os
+import platform
 import re
 import shutil
 import signal
@@ -20,9 +22,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import edges
+import fuzz_harness
 import sanitizer
+import sanitizer_run
 import target_config
 from timeout import run_timeout
+
+# Sibling build trees a native testcase can be replayed against for coverage.
+# `+fuzz` is the libFuzzer sibling `bin/fuzz build` links; `+cov` is a whole-tree
+# rebuild carrying `-fsanitize-coverage=trace-pc-guard`. ASan's `coverage=1`
+# .sancov dump needs the trace-pc-guard __sancov_guards section, so a sibling
+# without it is rejected loudly by probe_sancov rather than read as empty.
+GENERIC_COVERAGE_SUFFIXES = (fuzz_harness.COVERAGE_TREE_SUFFIX, "+cov")
 
 NOISE_RE = re.compile(
     r"ne_context_new|cubeb_|nrappkit|nspr|nss_init|sqlite3|^ld-|^dyld_|gmp_|"
@@ -43,7 +54,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--testcase", required=True)
     result.add_argument("--want", required=True)
-    result.add_argument("--mode", choices=("browser", "js"), default="browser")
+    result.add_argument("--mode", choices=("browser", "js", "generic"), default="browser")
     result.add_argument("--timeout", type=int, default=20)
     result.add_argument("--save")
     result.add_argument("--log")
@@ -125,6 +136,40 @@ class Hits:
         self.symbolizer = Path(llvm_tool("llvm-symbolizer", os.environ.get("SYMBOLIZER", "")))
         self.edge_count = 0
         self.new_edges = 0
+        self.generic_binary: Path | None = None
+        self.generic_tree: Path | None = None
+        self.generic_reason = ""
+        if args.mode == "generic":
+            self.generic_binary, self.generic_tree, self.generic_reason = (
+                self._resolve_generic()
+            )
+
+    def _resolve_generic(self) -> tuple[Path | None, Path | None, str]:
+        """The target's configured binary inside an instrumented sibling tree.
+
+        The audit drives a native testcase through the plain ``build-<san>``
+        binary; coverage needs the same binary rebuilt with SanitizerCoverage,
+        which lives in a sibling tree pruned from build freshness. Returns the
+        binary, its sibling tree root, and — when neither sibling carries it —
+        the reason, so coverage can be reported unavailable rather than as a
+        miss.
+        """
+        raw = self.config.sanitizer_bin("asan") if self.config else ""
+        if not raw:
+            return None, None, "target.toml has no asan_bin to instrument for coverage"
+        plain = Path(self.config.resolve_path(raw))
+        plain_tree = self.asan_build.name
+        for suffix in GENERIC_COVERAGE_SUFFIXES:
+            sibling_tree = plain_tree + suffix
+            candidate = Path(
+                str(plain).replace(f"/{plain_tree}/", f"/{sibling_tree}/", 1)
+            )
+            if str(candidate) != str(plain) and os.access(candidate, os.X_OK):
+                return candidate, self.target_root / sibling_tree, ""
+        wanted = " or ".join(plain_tree + s for s in GENERIC_COVERAGE_SUFFIXES)
+        return None, None, (
+            f"no instrumented sibling build ({wanted}) carrying {Path(raw).name}"
+        )
 
     def _browser_from_config(self) -> Path:
         if self.config and self.config.asan_bin:
@@ -153,13 +198,24 @@ class Hits:
                     "build-asan-cov tree first"
                 )
             probe_sancov("XUL", self.xul)
-        else:
+        elif self.args.mode == "js":
             if not os.access(self.js, os.X_OK):
                 raise RuntimeError(f"coverage js shell missing: {self.js}")
             probe_sancov("coverage js shell", self.js)
+        else:  # generic
+            probe_sancov("coverage binary", self.generic_binary)
         if not os.access(self.sancov, os.X_OK):
             raise RuntimeError(f"sancov not found at {self.sancov} - install LLVM tools or set LLVM_PREFIX")
-        if not os.access(self.symbolizer, os.X_OK):
+        if self.args.mode == "generic":
+            # PCs map to files through the harness's offline symbolizer, which
+            # prefers debug-map-aware atos on macOS; llvm-symbolizer alone is
+            # not required there.
+            if not sanitizer.symbolize_available():
+                raise RuntimeError(
+                    "no offline symbolizer available (need atos, llvm-symbolizer, "
+                    "or addr2line) - install LLVM tools or set LLVM_PREFIX"
+                )
+        elif not os.access(self.symbolizer, os.X_OK):
             raise RuntimeError(f"llvm-symbolizer not found at {self.symbolizer} - install LLVM tools or set LLVM_PREFIX")
 
     def append_verdict(self, verdict: str, frame: str = "") -> None:
@@ -179,6 +235,14 @@ class Hits:
         environment = sanitizer.prepare_runtime_env("asan")
         environment["ASAN_OPTIONS"] = option_string
         output = coverage_dir / "target-output.raw"
+        if self.args.mode == "generic":
+            with output.open("wb") as stream:
+                run_timeout(
+                    [str(self.generic_binary), *self._generic_command_args()],
+                    self.args.timeout, env=environment,
+                    stdout=stream, stderr=subprocess.STDOUT,
+                )
+            return output, None
         if self.args.mode == "js":
             flags: list[str] = []
             script_args: list[str] = []
@@ -239,8 +303,34 @@ class Hits:
             time.sleep(0.5)
             return output, parent_pid
 
+    def _generic_command_args(self) -> list[str]:
+        """The testcase and any extra args the configured binary is driven with.
+
+        A native CLI usually takes the testcase positionally; a `[runner].args`
+        template that names `{TESTCASE}` is expanded instead, so a target whose
+        input arrives through a flag or sink argument is replayed the same way
+        bin/probe replays it.
+        """
+        runner_args = list(self.config.runner_args) if self.config else []
+        if any("{TESTCASE}" in value for value in runner_args):
+            expanded = [
+                sanitizer_run.expand_runner_value(
+                    value, self.config, "asan", testcase=str(self.testcase),
+                )
+                for value in runner_args
+            ]
+            return [*expanded, *self.args.extra]
+        return [str(self.testcase), *self.args.extra]
+
     def binary_map(self) -> tuple[list[Path], Path]:
         dist = self.build / "dist/bin"
+        if self.args.mode == "generic":
+            # The binary plus any instrumented DSO it loaded from the sibling
+            # tree; a .sancov file is named for the module it came from, so
+            # symbolize resolves each against the right one.
+            tree = self.generic_tree or self.generic_binary.parent
+            dsos = [*tree.rglob("*.dylib"), *tree.rglob("*.so")]
+            return [self.generic_binary, *dsos], self.generic_binary
         if self.args.mode == "js":
             return [self.js, *dist.glob("*.dylib"), *dist.glob("*.so")], self.js
         if sys.platform == "darwin":
@@ -248,7 +338,60 @@ class Hits:
             return [self.browser, self.xul, mac / "plugin-container", *mac.glob("*.dylib")], self.xul
         return [self.browser, self.xul, dist / "plugin-container", *dist.glob("*.so")], self.xul
 
+    def symbolize_generic(self, coverage_dir: Path) -> tuple[list[str], list[str]]:
+        """Map sancov PCs to source through the offline symbolizer.
+
+        `sancov -print` yields raw module offsets; the offline symbolizer reads
+        the `#N 0x0 (module+0xoffset)` frame shape, so each PC is rendered as a
+        synthetic frame and resolved in one pass (atos on macOS, else
+        llvm-symbolizer/addr2line). Resolved frames are emitted as the
+        function/`file:line` line pairs `edges.extract` already parses. Generic
+        mode has no parent/child split, so content is the full list.
+        """
+        binaries, fallback = self.binary_map()
+        by_name = {path.name: path for path in binaries if path.is_file()}
+        arch = platform.machine() if sys.platform == "darwin" else ""
+        frames: list[str] = []
+        for coverage in sorted(coverage_dir.glob("*.sancov")):
+            stem = coverage.name.removesuffix(".sancov")
+            base, _, _pid = stem.rpartition(".")
+            target = by_name.get(base, fallback)
+            module = f"{target}:{arch}" if arch else str(target)
+            printed = subprocess.run(
+                [str(self.sancov), "-print", str(coverage)],
+                capture_output=True, text=True, check=False,
+            ).stdout
+            for token in printed.split():
+                if token.startswith("0x"):
+                    frames.append(f"    #0 0x0 ({module}+{token})")
+        if not frames:
+            return [], []
+        lines = self._offline_symbolize(frames)
+        return lines, lines
+
+    @staticmethod
+    def _offline_symbolize(frames: list[str]) -> list[str]:
+        with tempfile.TemporaryDirectory(prefix="hits-symbolize-") as tmp:
+            report = Path(tmp) / "frames.txt"
+            report.write_text("\n".join(frames) + "\n", encoding="utf-8")
+            sanitizer.symbolize_file(report)
+            resolved = report.read_text(encoding="utf-8", errors="replace")
+        lines: list[str] = []
+        for raw in resolved.splitlines():
+            match = re.match(r"^\s*#\d+\s+\S+\s+in\s+(.*)$", raw)
+            if not match:
+                continue
+            rest = match.group(1).strip()
+            location = re.search(r"(\S+:\d+)$", rest)
+            if location:
+                function = rest[: location.start()].strip() or "??"
+                lines.append(function)
+                lines.append(location.group(1))
+        return lines
+
     def symbolize(self, coverage_dir: Path, parent_pid: int | None) -> tuple[list[str], list[str]]:
+        if self.args.mode == "generic":
+            return self.symbolize_generic(coverage_dir)
         binaries, fallback = self.binary_map()
         by_name = {path.name: path for path in binaries if path.is_file()}
         all_lines: list[str] = []
@@ -343,9 +486,35 @@ class Hits:
         line = next((line for line in content if not NOISE_RE.search(line)), "")
         return f"{line} [pool=content (denoised head)]" if line else ""
 
+    def _coverage_context(self):
+        """Where the run drops its .sancov files.
+
+        Generic mode writes under RESULTS_DIR/coverage/ so the path stays inside
+        the directories a sandboxed audit may write, and is per-agent so
+        parallel workers never share it; a fresh directory each run keeps stale
+        PCs from an earlier testcase out. Browser/JS keep the private temp dir.
+        """
+        if self.args.mode == "generic":
+            base = (
+                self.config.results_dir if self.config and self.config.results_dir
+                else os.environ.get("RESULTS_DIR", "")
+            )
+            if base:
+                directory = Path(base) / "coverage" / f"sancov-{self.args.agent}"
+                shutil.rmtree(directory, ignore_errors=True)
+                directory.mkdir(parents=True, exist_ok=True)
+                return contextlib.nullcontext(str(directory))
+        return tempfile.TemporaryDirectory(prefix="hits-cov-")
+
     def run(self) -> int:
+        if self.args.mode == "generic" and self.generic_binary is None:
+            # No instrumented tree to measure against. Report it plainly so the
+            # caller can proceed ungated; this is never a coverage miss.
+            print(f"COVERAGE_UNAVAILABLE: {self.generic_reason}")
+            self.append_verdict("COVERAGE_UNAVAILABLE:", self.generic_reason)
+            return 4
         self.validate()
-        with tempfile.TemporaryDirectory(prefix="hits-cov-") as coverage_name:
+        with self._coverage_context() as coverage_name:
             coverage_dir = Path(coverage_name)
             output, parent_pid = self.run_target(coverage_dir)
             if self.args.mode == "browser" and output.stat().st_size == 0:

@@ -628,13 +628,21 @@ class Campaign:
         more than anything copied in, and re-seeding one would undo the
         minimisation that keeps slices fast. Copying, never linking, because
         libFuzzer rewrites and prunes what it is given.
+
+        An operator can point ``FUZZ_SEED_CORPUS_DIR`` at a locally staged
+        OSS-Fuzz/ClusterFuzz corpus; its inputs seed the empty corpus alongside
+        the target's own test data. Local only — nothing is fetched.
         """
         corpus = fuzz_harness.corpus_dir(self.results, state.name)
         if self.corpus_size(state.name):
             return 0
         corpus.mkdir(parents=True, exist_ok=True)
+        sources = list(fuzz_harness.seed_candidates(self.config.target_root))
+        operator_dir = os.environ.get(fuzz_harness.SEED_CORPUS_DIR_ENV, "")
+        if operator_dir:
+            sources += fuzz_harness.operator_seed_candidates(operator_dir)
         copied = 0
-        for source in fuzz_harness.seed_candidates(self.config.target_root):
+        for source in sources:
             # Content-addressed, so two test files with the same name from
             # different directories both survive.
             digest = hashlib.sha1(source.read_bytes()).hexdigest()[:16]
