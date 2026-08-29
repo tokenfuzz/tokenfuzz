@@ -198,6 +198,19 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertIn("COVERAGE_UNAVAILABLE", output)
         self.assertNotIn("MISSED", output)
 
+    def test_sibling_without_guards_is_unavailable_not_an_env_error(self) -> None:
+        # A sibling that exists but carries no __sancov_guards (e.g. a plain
+        # +fuzz build predating the recipe fix) must be skipped at selection so
+        # coverage reports UNAVAILABLE (rc 4, gate falls open cleanly) rather
+        # than being chosen and raising in validate() (rc 2, read as env-fail).
+        self._compile(self.target / "src.c", self.sibling / "app", instrumented=False)
+        result = self._run_hits("app_parse")
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 4, output)
+        self.assertIn("COVERAGE_UNAVAILABLE", output)
+        self.assertIn("__sancov_guards", output)
+        self.assertNotIn("MISSED", output)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

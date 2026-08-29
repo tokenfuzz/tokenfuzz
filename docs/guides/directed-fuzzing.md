@@ -133,10 +133,17 @@ Do not rebuild the shared tree to fix that. Build a **sibling**:
 cmake -S targets/<slug>/src -B targets/<slug>/src/build-asan+fuzz \
   -DCMAKE_C_COMPILER=/path/to/llvm/bin/clang \
   -DCMAKE_CXX_COMPILER=/path/to/llvm/bin/clang++ \
-  -DCMAKE_C_FLAGS="-fsanitize=address,fuzzer-no-link -g -O1" \
-  -DCMAKE_CXX_FLAGS="-fsanitize=address,fuzzer-no-link -g -O1"
+  -DCMAKE_C_FLAGS="-fsanitize=address,fuzzer-no-link -fsanitize-coverage=trace-pc-guard -g -O1" \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,fuzzer-no-link -fsanitize-coverage=trace-pc-guard -g -O1"
 cmake --build targets/<slug>/src/build-asan+fuzz
 ```
+
+`trace-pc-guard` rides alongside `fuzzer-no-link` on purpose: libFuzzer guides
+itself on the counters `fuzzer-no-link` emits, and the `__sancov_guards`
+section `trace-pc-guard` adds is what lets `bin/hits --mode generic` dump
+`.sancov` coverage for a native CLI testcase (see the coverage gate in
+[the audit lifecycle](../concepts/audit-lifecycle.md)). One sibling then serves
+both.
 
 Use that compiler and not the target's usual one — `bin/fuzz build` prints its
 exact path when it needs it. A sanitizer runtime is version-locked to the code

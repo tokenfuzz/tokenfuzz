@@ -29,10 +29,13 @@ import target_config
 from timeout import run_timeout
 
 # Sibling build trees a native testcase can be replayed against for coverage.
-# `+fuzz` is the libFuzzer sibling `bin/fuzz build` links; `+cov` is a whole-tree
-# rebuild carrying `-fsanitize-coverage=trace-pc-guard`. ASan's `coverage=1`
-# .sancov dump needs the trace-pc-guard __sancov_guards section, so a sibling
-# without it is rejected loudly by probe_sancov rather than read as empty.
+# `+fuzz` is the SanitizerCoverage sibling the directed-fuzzing recipe builds;
+# `+cov` is an accepted alias for a hand-built one. ASan's `coverage=1` .sancov
+# dump needs the trace-pc-guard __sancov_guards section, which the recipe now
+# emits, so the same sibling serves both libFuzzer's campaign and this probe.
+# A sibling that exists but lacks the section is skipped at selection time so
+# coverage reports unavailable (never a miss, never a hard error), rather than
+# being chosen and then rejected by probe_sancov.
 GENERIC_COVERAGE_SUFFIXES = (fuzz_harness.COVERAGE_TREE_SUFFIX, "+cov")
 
 NOISE_RE = re.compile(
@@ -83,6 +86,44 @@ def cache_dir() -> Path:
     return result
 
 
+def _sancov_section_present(binary: Path) -> tuple[bool, str]:
+    """Whether a binary carries the trace-pc-guard __sancov_guards section.
+
+    Returns (present, diagnostic). A tool failure is (False, why) so callers
+    can either raise (validate) or simply not select the sibling (resolution).
+    """
+    if sys.platform == "darwin":
+        command = ["otool", "-l", str(binary)]
+        needle = "sectname __sancov_guards"
+    else:
+        tool = shutil.which("readelf") or shutil.which("llvm-readelf") or shutil.which("objdump")
+        if not tool:
+            return False, f"cannot inspect ELF sections ({binary}): install binutils or LLVM tools"
+        command = [tool, "-WS" if Path(tool).name == "readelf" else "-S" if Path(tool).name == "llvm-readelf" else "-h", str(binary)]
+        needle = "__sancov_guards"
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    output = completed.stdout + completed.stderr
+    if completed.returncode:
+        return False, f"{Path(command[0]).name} failed on {binary}: {output or '<no output>'}"
+    if needle not in output:
+        return False, (
+            f"__sancov_guards section not present in {binary} - rebuild the "
+            f"coverage sibling with -fsanitize-coverage=trace-pc-guard"
+        )
+    return True, ""
+
+
+def has_sancov_section(binary: Path) -> bool:
+    """Guard check for selecting a coverage sibling; never raises."""
+    if os.environ.get("HITS_SKIP_SANCOV_PROBE") == "1":
+        return True
+    try:
+        present, _ = _sancov_section_present(Path(binary))
+    except OSError:
+        return False
+    return present
+
+
 def probe_sancov(label: str, binary: Path) -> None:
     if os.environ.get("HITS_SKIP_SANCOV_PROBE") == "1":
         return
@@ -90,24 +131,9 @@ def probe_sancov(label: str, binary: Path) -> None:
     cache = cache_dir() / f"sancov-{hashlib.sha1(key_text.encode()).hexdigest()}.ok"
     if cache.is_file() and cache.stat().st_size:
         return
-    if sys.platform == "darwin":
-        command = ["otool", "-l", str(binary)]
-        needle = "sectname __sancov_guards"
-    else:
-        tool = shutil.which("readelf") or shutil.which("llvm-readelf") or shutil.which("objdump")
-        if not tool:
-            raise RuntimeError(f"cannot inspect ELF sections for {label} ({binary}): install binutils or LLVM tools")
-        command = [tool, "-WS" if Path(tool).name == "readelf" else "-S" if Path(tool).name == "llvm-readelf" else "-h", str(binary)]
-        needle = "__sancov_guards"
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    output = completed.stdout + completed.stderr
-    if completed.returncode:
-        raise RuntimeError(f"{Path(command[0]).name} failed on {label} ({binary}): {output or '<no output>'}")
-    if needle not in output:
-        raise RuntimeError(
-            f"{label} lacks sancov instrumentation (__sancov_guards section "
-            f"not present in {binary}) - rebuild the configured coverage tree"
-        )
+    present, diagnostic = _sancov_section_present(binary)
+    if not present:
+        raise RuntimeError(f"{label}: {diagnostic}")
     cache.write_text(key_text + "\n")
 
 
@@ -159,16 +185,32 @@ class Hits:
             return None, None, "target.toml has no asan_bin to instrument for coverage"
         plain = Path(self.config.resolve_path(raw))
         plain_tree = self.asan_build.name
+        present_without_guards: list[str] = []
         for suffix in GENERIC_COVERAGE_SUFFIXES:
             sibling_tree = plain_tree + suffix
             candidate = Path(
                 str(plain).replace(f"/{plain_tree}/", f"/{sibling_tree}/", 1)
             )
-            if str(candidate) != str(plain) and os.access(candidate, os.X_OK):
+            if str(candidate) == str(plain) or not os.access(candidate, os.X_OK):
+                continue
+            # A sibling without __sancov_guards would dump no .sancov; skip it
+            # here so coverage reports unavailable cleanly instead of being
+            # picked and then raising in validate() (which the gate would read
+            # as an env failure, not as coverage-unavailable).
+            if has_sancov_section(candidate):
                 return candidate, self.target_root / sibling_tree, ""
+            present_without_guards.append(sibling_tree)
+        if present_without_guards:
+            return None, None, (
+                f"sibling build {' and '.join(present_without_guards)} carries no "
+                f"__sancov_guards - rebuild it with -fsanitize-coverage=trace-pc-guard "
+                f"(see `bin/fuzz build` / the directed-fuzzing guide)"
+            )
         wanted = " or ".join(plain_tree + s for s in GENERIC_COVERAGE_SUFFIXES)
         return None, None, (
-            f"no instrumented sibling build ({wanted}) carrying {Path(raw).name}"
+            f"no instrumented sibling build ({wanted}) carrying {Path(raw).name} - "
+            f"build one with -fsanitize-coverage=trace-pc-guard "
+            f"(see `bin/fuzz build` / the directed-fuzzing guide)"
         )
 
     def _browser_from_config(self) -> Path:

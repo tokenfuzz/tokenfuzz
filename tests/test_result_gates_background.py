@@ -172,6 +172,24 @@ class BackgroundGateTests(unittest.TestCase):
         self.assertIn("find_gate:end", self.events)
         self.assertIsNone(self.state.pending_gate)
 
+    def test_deferred_gate_compute_counts_as_total_not_blocked(self) -> None:
+        # The gate that overlapped the cohort must show up in housekeeping
+        # total (so Review s/artifact is comparable across the flag) while only
+        # the barrier wait counts as blocked.
+        import telemetry
+        self.state.iteration = 1
+        self._run_background_iteration(gate_hold=0.25)  # gate still running at return
+        self.state.iteration = 2
+        self._run_background_iteration(gate_hold=0.0)   # joins iter 1's gate
+        audit_runner.drain_pending_gate(self.state)
+        house = telemetry.housekeeping(self.results)
+        gate_total = house["phases"].get("result_gates", 0.0)
+        self.assertGreater(gate_total, 0.2, "the deferred gate's compute is in total")
+        self.assertLess(
+            house["blocked_seconds"], gate_total + 0.2,
+            "blocked time must not include the whole overlapped gate compute",
+        )
+
     def test_default_mode_leaves_post_iteration_serial(self) -> None:
         # Flag off: _run_post_iteration calls the serial post_iteration, and no
         # gate is ever deferred.

@@ -2738,6 +2738,18 @@ def _productive_wall_deadline(state: BackendState) -> float | None:
     return state.started_at + budget + state.paused_seconds
 
 
+def _deferred_result_gate(runtime: Runtime) -> tuple[dict, dict, float]:
+    """Run the gate on the executor thread, timing its own compute.
+
+    The compute figure is returned rather than logged here so the row is
+    written at the barrier (single-threaded), where it can be split into the
+    part that overlapped the cohort and the part that blocked the join.
+    """
+    started = time.monotonic()
+    finding_counts, cluster_counts = _result_gate_pass(runtime, deadline=None)
+    return finding_counts, cluster_counts, time.monotonic() - started
+
+
 def _join_pending_gate(state: BackendState, *, records: list[dict] | None = None) -> None:
     """Block on the previous iteration's background gate, if one is in flight.
 
@@ -2751,14 +2763,24 @@ def _join_pending_gate(state: BackendState, *, records: list[dict] | None = None
     state.pending_gate = None
     started = time.monotonic()
     try:
-        finding_counts, cluster_counts = future.result()
+        finding_counts, cluster_counts, compute = future.result()
     except Exception as exc:  # noqa: BLE001 - a gate failure must not kill the run
         index_log(state.runtime, f"WARN: deferred result gate failed: {exc}")
         return
     waited = time.monotonic() - started
     if records is not None:
-        records.append({"phase": "result_gates", "seconds": round(waited, 3),
-                        "blocked": waited > 0.05})
+        # The gate ran `compute` seconds total: the part that overlapped the
+        # cohort cost the wall nothing at the barrier (blocked=False), and the
+        # part still running when the barrier arrived is the wait (blocked=True).
+        # They sum to `compute` so housekeeping_total carries the real gate cost
+        # while blocked_seconds counts only barrier time.
+        blocked = round(min(waited, compute), 3)
+        overlapped = round(max(0.0, compute - blocked), 3)
+        if overlapped > 0.001:
+            records.append({"phase": "result_gates", "seconds": overlapped,
+                            "blocked": False})
+        records.append({"phase": "result_gates", "seconds": blocked,
+                        "blocked": True})
     index_log(
         state.runtime,
         "Housekeeping (deferred gate): "
@@ -2814,9 +2836,7 @@ def _post_iteration_background(state: BackendState) -> None:
             state.gate_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="result-gate",
             )
-        state.pending_gate = state.gate_executor.submit(
-            _result_gate_pass, runtime, deadline=None,
-        )
+        state.pending_gate = state.gate_executor.submit(_deferred_result_gate, runtime)
         index_log(
             runtime,
             f"Housekeeping: crashes promoted={crash_counts['promoted']} "
