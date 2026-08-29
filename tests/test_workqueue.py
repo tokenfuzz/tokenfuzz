@@ -513,6 +513,15 @@ class WorkQueueTests(unittest.TestCase):
     def test_run_state_preserves_zero_sanitizer_executions(self) -> None:
         self.assertEqual(self.add_run(sanitizer_runs=0)["sanitizer_runs"], 0)
 
+    def test_run_reason_is_recorded_only_when_present(self) -> None:
+        # An EXEC_FAIL carries the child exit code so telemetry can split a
+        # rejected input from a broken environment; a clean run adds no noise.
+        self.assertEqual(
+            self.add_run(verdict="EXEC_FAIL", reason="child-rc=69")["reason"],
+            "child-rc=69",
+        )
+        self.assertNotIn("reason", self.add_run(index=2))
+
     def test_patch_descriptions_and_deduplication_reject_noise(self) -> None:
         self.assertTrue(workqueue.is_version_only_file_set(["VERSION", "CHANGELOG.md"]))
         self.assertFalse(workqueue.is_version_only_file_set(["VERSION", "src/app.c"]))

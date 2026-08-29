@@ -1385,6 +1385,15 @@ class Probe:
         hypothesis = self.header["hypothesis"]
         if not hypothesis:
             return
+        # EXEC_FAIL and NO_EXEC are otherwise indistinguishable in the ledger: a
+        # target that rejected a malformed input and a loader that could not
+        # start read the same. The post-run marker carries the child's exit
+        # code, so record it here so telemetry can split the two without
+        # reopening the output file.
+        reason = (
+            verdict_lib.execution_exit_reason(self.output)
+            if probe_verdict in {"EXEC_FAIL", "NO_EXEC"} else ""
+        )
         self._state_command(
             "add-run", "--agent", self.agent, "--hypothesis-id", hypothesis, "--card-id", self.card,
             "--mode", self.mode, "--testcase", str(self.testcase),
@@ -1392,6 +1401,7 @@ class Probe:
             "--asan-output", str(self.output), "--verdict", probe_verdict,
             "--sanitizer", self.sanitizer,
             "--sanitizer-runs", self.environment["SANITIZER_RUNS"],
+            *(["--reason", reason] if reason else []),
             *(
                 ["--duration-seconds", f"{self.elapsed_seconds:.3f}"]
                 if self.elapsed_seconds is not None else []

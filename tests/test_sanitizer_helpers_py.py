@@ -119,6 +119,41 @@ with tempfile.TemporaryDirectory() as directory:
     check(output == ["target_alpha", "target_beta"],
           "fuzz target listing sorts, deduplicates, and prunes build trees")
 
+with tempfile.TemporaryDirectory() as directory:
+    root = Path(directory)
+    rejected = root / "rejected.log"
+    rejected.write_text(
+        "Conversion failed!\n"
+        "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=69)\n"
+        "[run-sanitizer-multi] EXECUTION_RATE: 1/1\n",
+        encoding="utf-8",
+    )
+    check(verdict.execution_exit_reason(rejected) == "child-rc=69",
+          "EXEC_FAIL reason carries the child exit code from the post-run marker")
+
+    verified = root / "verified.log"
+    verified.write_text(
+        "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n"
+        "[run-sanitizer-multi] SUCCESS_RATE: 1/1\n",
+        encoding="utf-8",
+    )
+    check(verdict.execution_exit_reason(verified) == "child-rc=0",
+          "a clean post-run marker still reports its exit code")
+
+    no_marker = root / "no-marker.log"
+    no_marker.write_text("target never produced a post-run marker\n", encoding="utf-8")
+    check(verdict.execution_exit_reason(no_marker) == "",
+          "no post-run marker yields no reason rather than a guess")
+
+    multi = root / "multi.log"
+    multi.write_text(
+        "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n"
+        "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=69)\n",
+        encoding="utf-8",
+    )
+    check(verdict.execution_exit_reason(multi) == "child-rc=69",
+          "the last post-run marker wins for a multi-run confirmation")
+
 value = "detect_leaks=1:note=two words"
 encoded = run("encode-options", value).stdout.strip()
 check(base64.b64decode(encoded).decode() == value, "option encoding round-trips")

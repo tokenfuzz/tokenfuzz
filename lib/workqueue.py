@@ -5282,6 +5282,9 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
     }
     if duration_seconds is not None:
         row["duration_seconds"] = duration_seconds
+    reason = str(getattr(args, "reason", "") or "").strip()
+    if reason:
+        row["reason"] = reason
     append_jsonl(state_dir(ctx.results_dir) / "runs.jsonl", row)
     return row
 

@@ -67,6 +67,10 @@ _PYTHON_FRAME_RE = re.compile(r'^\s*File "([^"]+)"')
 _EXECUTION_ATTEMPTED_RE = re.compile(
     r"^\[run-sanitizer-multi\] EXECUTION_RATE: [1-9][0-9]*/[0-9]+$"
 )
+#: The child's exit code, carried by every post-run marker run-<san> prints.
+_POSTRUN_RC_RE = re.compile(
+    r"EXECUTION (?:INCONCLUSIVE|VERIFIED) \(post-run, rc=(-?[0-9]+)\)"
+)
 
 
 def _file_matches(path: str | Path, pattern: re.Pattern) -> bool:
@@ -99,6 +103,30 @@ def file_execution_attempted(path: str | Path) -> bool:
     and orphan enforcement so one rule answers for all three.
     """
     return _file_matches(path, _EXECUTION_ATTEMPTED_RE)
+
+
+def execution_exit_reason(path: str | Path) -> str:
+    """The child's exit code from the last post-run marker, as a compact reason.
+
+    ``EXEC_FAIL``/``NO_EXEC`` are otherwise opaque in runs.jsonl: a target that
+    cleanly rejected a malformed input (rc=69) and a loader that could not start
+    the binary (rc=126) both record only the bare verdict. The marker already
+    carries the child's exit code, so surfacing it lets a reader split
+    input-quality failures from environment failures without opening the output
+    file. Empty when no post-run marker was written (no execution evidence, or a
+    runner that does not emit one). The last marker wins so a multi-run
+    confirmation reports the outcome it settled on.
+    """
+    last = ""
+    try:
+        with Path(path).open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                match = _POSTRUN_RC_RE.search(line)
+                if match:
+                    last = f"child-rc={match.group(1)}"
+    except OSError:
+        return ""
+    return last
 
 
 def runner_testcase_failure(path: str | Path, testcase: str | Path) -> str:
