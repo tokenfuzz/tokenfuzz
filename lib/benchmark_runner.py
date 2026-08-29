@@ -1133,10 +1133,13 @@ def _reap_cell_processes(marker: str, cell_dir: Path) -> None:
     session, so a leak there survives the outer group kill. Every cell process
     inherits this cell's reap marker, so reaping by marker catches those
     regardless of session, parent, or command line, and can never touch a
-    concurrent sibling cell or an unrelated process.
+    concurrent sibling cell or an unrelated process. The cell directory goes
+    with it as a second claim: a marker is only visible while a process
+    carrying it is alive, and a campaign supervisor sleeps between the children
+    that carry it. Both are unique to this cell of this run.
     """
     try:
-        reaped = process_tree.kill_marked(marker)
+        reaped = process_tree.kill_marked(marker, owner_dir=str(cell_dir))
     except process_tree.ProcessLeakError as leak:
         # The cell's evidence is already on disk, so finish scoring it — but
         # its wall did not contain its work, and whatever is still running

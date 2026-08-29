@@ -357,6 +357,107 @@ with tempfile.TemporaryDirectory() as tmp:
             pass
 
 
+# ── opaque supervisor whose driver left the group ────────────────────
+print("\nopaque supervisor above a driver in its own group")
+# The shape that stopped a real benchmark run. The supervisor is opaque, and
+# the driver it respawns runs under `timeout`, which puts its child in a FRESH
+# process group — so the group link the previous case relied on is severed and
+# the only thing left tying the two together is the parent link upward.
+#
+# Opacity is constructed rather than waited for: the supervisor execs with an
+# empty environment, which reads back exactly like the environment macOS
+# withholds for a platform binary — present, and empty — on every host.
+severed = pt.new_marker()
+with tempfile.TemporaryDirectory() as tmp:
+    supervisor = Path(tmp) / "supervise-newgroup.sh"
+    supervisor.write_text(
+        f"while true; do {pt.REAP_MARKER_VAR}={severed} "
+        f"{sys.executable} -c 'import os, time; os.setpgrp(); time.sleep(5)'; done\n"
+    )
+    parent_proc = subprocess.Popen(
+        ["/bin/sh", str(supervisor)], env={},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    time.sleep(2.0)
+    token = f"{pt.REAP_MARKER_VAR}={severed}"
+    readable = pt._pids_with_token_env(token)
+    _, groups = pt._process_table()
+    ok(parent_proc.pid not in readable,
+       "the probe cannot attribute the supervisor, as the failure requires",
+       f"readable={readable} supervisor={parent_proc.pid}")
+    ok(all(groups.get(pid) != groups.get(parent_proc.pid) for pid in readable),
+       "the driver holds a process group of its own, as `timeout` gives it",
+       f"driver groups={[groups.get(pid) for pid in readable]} "
+       f"supervisor group={groups.get(parent_proc.pid)}")
+    ok(parent_proc.pid in pt._pids_with_token(token),
+       "parent widening claims a supervisor no group or child link reaches")
+    try:
+        reaped = pt.kill_marked(severed, grace=0.5)
+        raised = ""
+    except pt.ProcessLeakError as leak:  # pragma: no cover - the bug this fixes
+        reaped, raised = [], str(leak)
+    time.sleep(1.0)
+    survivors = _script_pids(supervisor)
+    ok(not raised and not survivors,
+       "the supervisor is reaped instead of outrunning the reap",
+       f"reaped={reaped} raised={raised!r} survivors={survivors}")
+    _cleanup(parent_proc, *survivors)
+
+
+# ── quiescent campaign: nothing marked is alive when the probe looks ──
+print("\nquiescent campaign")
+# The marker names a process only while one carrying it is alive. A campaign
+# supervisor spends most of its life asleep between the children that carry
+# it, so a reap can scan every round and see nothing: the cell above reported
+# a clean reap while three supervisor fleets slept through it and went on
+# fuzzing for hours. The cell's own directory is the second claim, and it is
+# readable whatever the platform will say about environments.
+quiet = pt.new_marker()
+with tempfile.TemporaryDirectory() as tmp:
+    cell = Path(tmp) / "cell"
+    cell.mkdir()
+    campaign = cell / "campaign.sh"
+    campaign.write_text(
+        f"while true; do {sys.executable} -c 'import time; time.sleep(30)'; done\n"
+    )
+    subprocess.Popen(
+        ["/bin/sh", str(campaign)], env={},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    time.sleep(1.5)
+    token = f"{pt.REAP_MARKER_VAR}={quiet}"
+    ok(pt._pids_with_token(token) == [],
+       "no marked process is alive to find, as the failure requires",
+       f"claimed={pt._pids_with_token(token)}")
+    ok(bool(_script_pids(campaign)), "the campaign is running",
+       f"pids={_script_pids(campaign)}")
+    try:
+        reaped = pt.kill_marked(quiet, grace=0.5, owner_dir=str(cell))
+        raised = ""
+    except pt.ProcessLeakError as leak:  # pragma: no cover - the bug this fixes
+        reaped, raised = [], str(leak)
+    time.sleep(0.5)
+    survivors = _script_pids(campaign)
+    ok(not raised and not survivors,
+       "a campaign running from the cell's own directory is reaped anyway",
+       f"reaped={reaped} raised={raised!r} survivors={survivors}")
+    _cleanup(*survivors)
+
+    # The claim is what a process runs from the directory, not any process
+    # that names it: an operator reading a file under the cell is not cell
+    # work, and `ps` gives one joined string rather than real argument bounds.
+    onlooker = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", f"{cell}/notes"],
+    )
+    time.sleep(0.5)
+    ok(onlooker.pid not in pt._pids_with_token(token, str(cell)),
+       "naming the directory inside an argument does not claim a process",
+       f"claimed={pt._pids_with_token(token, str(cell))} onlooker={onlooker.pid}")
+    _cleanup(onlooker)
+
+
 # ── safety: a cell left in our own group never widens onto the runner ─
 print("\nown-group safety")
 # A cell that was never put in a session of its own shares the runner's

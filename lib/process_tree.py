@@ -110,19 +110,22 @@ def _ps_commands(include_environment: bool) -> dict[int, str]:
     return commands
 
 
-def _pids_with_token(token: str) -> list[int]:
-    """PIDs whose environment contains ``token``.
+def _pids_with_token(token: str, owner_dir: str = "") -> list[int]:
+    """PIDs this launch owns: environment carries ``token``, or argv runs a
+    file from ``owner_dir``.
 
     Linux reads /proc/<pid>/environ directly; elsewhere ``ps -E`` prints each
     environment after the command (``-ww`` keeps it untruncated). A separate
     argv-only snapshot identifies that boundary: without it, marker-looking
     text in an unrelated process's arguments is indistinguishable from an
     environment entry. Both expose only processes this uid may inspect, so the
-    search is same-uid by construction. The result is then widened over process
-    groups and parent links, which recovers the processes those probes are not
-    permitted to read.
+    search is same-uid by construction. ``owner_dir`` adds the processes
+    running from a directory private to this launch, which is how a supervisor
+    with no marked child alive is seen at all. The result is then widened over
+    process groups and parent links, which recovers the processes those probes
+    are not permitted to read.
     """
-    return _widen_ownership(_pids_with_token_env(token))
+    return _widen_ownership(_pids_with_token_env(token) + _pids_under_path(owner_dir))
 
 
 def _process_table() -> tuple[dict[int, int], dict[int, int]]:
@@ -145,6 +148,66 @@ def _process_table() -> tuple[dict[int, int], dict[int, int]]:
     return parent, group
 
 
+def _proc_environ(pid: int) -> list[bytes]:
+    """*pid*'s environment entries from /proc, or [] when it cannot be read."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as stream:
+            return [entry for entry in stream.read().split(b"\0") if entry]
+    except OSError:
+        return []
+
+
+_LIBC = None
+
+
+def _darwin_environ(pid: int) -> list[bytes]:
+    """*pid*'s environment entries from KERN_PROCARGS2, or [] when withheld.
+
+    macOS hands back the argument vector of a process it will not disclose the
+    environment of — a platform binary such as /bin/sh read by a non-root
+    caller comes back with its argv intact and its environment blanked — so an
+    empty list here means "no answer", never "no environment".
+    """
+    global _LIBC
+    import ctypes
+    if _LIBC is None:
+        _LIBC = ctypes.CDLL(None)
+    CTL_KERN, KERN_PROCARGS2 = 1, 49
+    mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+    size = ctypes.c_size_t(0)
+    if _LIBC.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        return []
+    buf = ctypes.create_string_buffer(size.value)
+    if _LIBC.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        return []
+    data = buf.raw
+    if len(data) < 4:
+        return []
+    argc = int.from_bytes(data[:4], sys.byteorder)
+    idx = 4
+    while idx < len(data) and data[idx] != 0:
+        idx += 1
+    while idx < len(data) and data[idx] == 0:
+        idx += 1
+    return [entry for entry in data[idx:].split(b"\0")[argc:] if entry]
+
+
+def _env_withheld(pids: set[int]) -> set[int]:
+    """Of *pids*, those whose environment this host would not show us.
+
+    The distinction ownership turns on: a process whose environment we read
+    and that did not carry the marker is provably not ours, while one the
+    kernel refuses to describe is simply unknown. A host that discloses every
+    environment therefore never claims anything this way, and neither does one
+    we have no way to ask — both fail closed.
+    """
+    if os.path.isdir("/proc"):
+        return {pid for pid in pids if not _proc_environ(pid)}
+    if sys.platform == "darwin":
+        return {pid for pid in pids if not _darwin_environ(pid)}
+    return set()
+
+
 def _widen_ownership(pids: list[int]) -> list[int]:
     """Claim the processes the environment probe is not allowed to read.
 
@@ -155,17 +218,29 @@ def _widen_ownership(pids: list[int]) -> list[int]:
     real cell reaped that driver five times over while the supervisor calmly
     replaced it.
 
-    Two links the kernel does expose recover it, applied together to a fixed
-    point because each can reveal work the other then widens:
+    Three links the kernel does expose recover it, applied together to a fixed
+    point because each can reveal work the others then widen:
 
     * process group — inherited exactly like the marker, unaffected by the
       launcher exiting, and it outlives its own leader. This is what finds an
       opaque supervisor with no visible relative above it.
-    * parent — finds an opaque child of a visible marked process, the case a
+    * child — finds an opaque child of a visible marked process, the case a
       group cannot cover once something has called setsid.
+    * parent — finds an opaque supervisor *above* a marked process that left
+      its group. `timeout` puts its child in a fresh process group, so a
+      supervisor running the target through it has no group link to any
+      process the probe can read, and both links above stop at the driver.
 
-    Neither reaches a process that is opaque, reparented, *and* alone in a new
-    group. Nothing readable ties such a process to this run, which is why
+    Only an ancestor whose environment the host withheld is claimed. The
+    marker is inherited, so a marked process's parent either carried it too or
+    is the launcher that injected it — and the launcher is this process or one
+    of its ancestors, every one of them protected below. A parent we *could*
+    read and that did not carry the marker is proof of a boundary rather than
+    a hidden owner, so the walk stops there instead of escalating onto, say, a
+    subreaper that adopted an orphan.
+
+    What still escapes is a process that is opaque, reparented, *and* alone in
+    a new group. Nothing readable ties such a process to this run, which is why
     kill_marked reports rather than assumes when the marker will not clear.
     """
     if not pids:
@@ -200,6 +275,9 @@ def _widen_ownership(pids: list[int]) -> list[int]:
             if pgid not in own_groups:
                 widened.update(members.get(pgid, ()))
             widened.update(children.get(pid, ()))
+        widened |= _env_withheld(
+            {parent.get(pid, 0) for pid in claimed} - widened - protected
+        )
         widened -= protected
         if widened == claimed:
             return sorted(claimed)
@@ -215,50 +293,20 @@ def _pids_with_token_env(token: str) -> list[int]:
         except OSError:
             return []
         for entry in entries:
-            if not entry.isdigit():
-                continue
-            try:
-                with open(f"/proc/{entry}/environ", "rb") as stream:
-                    if raw in stream.read().split(b"\0"):
-                        pids.append(int(entry))
-            except (OSError, ValueError):
-                continue
+            if entry.isdigit() and raw in _proc_environ(int(entry)):
+                pids.append(int(entry))
         return pids
 
     if sys.platform == "darwin":
-        import ctypes
         raw = token.encode()
         try:
             output = subprocess.check_output(["ps", "-ax", "-o", "pid="], text=True)
         except (OSError, subprocess.SubprocessError):
             return []
-        CTL_KERN, KERN_PROCARGS2 = 1, 49
-        libc = ctypes.CDLL(None)
         for line in output.splitlines():
             pid_text = line.strip()
-            if not pid_text.isdigit():
-                continue
-            pid = int(pid_text)
-            mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
-            size = ctypes.c_size_t(0)
-            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
-                continue
-            buf = ctypes.create_string_buffer(size.value)
-            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
-                continue
-            data = buf.raw
-            if len(data) < 4:
-                continue
-            argc = int.from_bytes(data[:4], sys.byteorder)
-            idx = 4
-            while idx < len(data) and data[idx] != 0:
-                idx += 1
-            while idx < len(data) and data[idx] == 0:
-                idx += 1
-            strings = data[idx:].split(b"\0")
-            env_strings = strings[argc:]
-            if raw in env_strings:
-                pids.append(pid)
+            if pid_text.isdigit() and raw in _darwin_environ(int(pid_text)):
+                pids.append(int(pid_text))
         return pids
 
     # Environment snapshot first: a pid it holds that the later argv snapshot
@@ -277,6 +325,37 @@ def _pids_with_token_env(token: str) -> list[int]:
         if token in environment.split():
             pids.append(pid)
     return pids
+
+
+def _pids_under_path(root: str) -> list[int]:
+    """PIDs running a file from *root*, a directory private to one launch.
+
+    The marker names only a process that is alive when the probe runs, and a
+    leaked supervisor sleeps between the children that carry it: a reap of one
+    real cell reported clean while three supervisor fleets slept through every
+    round of it. Command lines are disclosed where environments are not —
+    macOS withholds a platform binary's environment but never its argv — so
+    this channel sees exactly what the marker cannot, and a directory
+    belonging to a single launch is not a path anything else runs from.
+
+    The claim is what a process *runs* — its program, or the script that
+    program was handed — never a path further along a command line. `ps`
+    reports one joined string rather than the real argument boundaries, so a
+    looser match would claim an operator reading a file under the directory.
+    """
+    if not root:
+        return []
+    # Both spellings: a launcher that passed the path with a symlink in it is
+    # what `ps` reports, and resolving only one of the two silently matches
+    # nothing on a host where the run directory sits under one.
+    prefixes = tuple(
+        f"{spelling.rstrip('/')}/"
+        for spelling in {root, os.path.realpath(root)}
+    )
+    return [
+        pid for pid, command in _ps_commands(include_environment=False).items()
+        if any(word.startswith(prefixes) for word in command.split()[:2])
+    ]
 
 
 # Enough rounds to outlast a supervisor that respawns one replacement per
@@ -316,19 +395,22 @@ def _probe_blind() -> bool:
     return False
 
 
-def kill_marked(marker: str, grace: float = 1.0) -> list[int]:
-    """TERM then KILL every process carrying ``marker`` in its environment.
+def kill_marked(marker: str, grace: float = 1.0, owner_dir: str = "") -> list[int]:
+    """TERM then KILL every process this launch owns.
 
     This is how a launcher reaps work that escaped its process group: the
     marker is inherited by every descendant, so a fuzzer that survived via
     setsid or reparenting is still identified, while an unrelated process can
-    never carry another launch's random id. Returns the reaped PIDs, ascending.
+    never carry another launch's random id. ``owner_dir`` adds the launch's
+    own directory as a second, always-readable claim, for the supervisor that
+    is asleep between marked children when the probe looks. Returns the reaped
+    PIDs, ascending.
 
     Refuses to act if this process itself carries the marker — that would mean
     reaping our own tree — so a caller that wrongly exported it into its own
     environment fails safe instead of killing the run.
 
-    Sweeps until the marker is clear. One pass only kills the processes alive
+    Sweeps until nothing owned is left alive. One pass only kills the processes alive
     when it took its snapshot, so a restart loop whose child is killed spawns a
     replacement the pass never sees: a model-direct cell reaped 31 processes
     and still had campaigns writing files ten minutes later, into a scratch
@@ -337,12 +419,17 @@ def kill_marked(marker: str, grace: float = 1.0) -> list[int]:
     """
     if not marker or os.environ.get(REAP_MARKER_VAR) == marker:
         return []
-    reaped: set[int] = set()
-    for _ in range(_REAP_ROUNDS):
-        pids = sorted(
-            pid for pid in _pids_with_token(f"{REAP_MARKER_VAR}={marker}")
+    token = f"{REAP_MARKER_VAR}={marker}"
+
+    def owned() -> list[int]:
+        return sorted(
+            pid for pid in _pids_with_token(token, owner_dir)
             if pid != os.getpid()
         )
+
+    reaped: set[int] = set()
+    for _ in range(_REAP_ROUNDS):
+        pids = owned()
         if not pids:
             if not reaped and _probe_blind():
                 raise ProcessLeakError(
@@ -359,12 +446,11 @@ def kill_marked(marker: str, grace: float = 1.0) -> list[int]:
                 break
             time.sleep(0.05)
         _kill([pid for pid in pids if _alive(pid)], signal.SIGKILL)
-    if [pid for pid in _pids_with_token(f"{REAP_MARKER_VAR}={marker}")
-            if pid != os.getpid()]:
+    if owned():
         raise ProcessLeakError(
             f"{len(reaped)} process(es) reaped over {_REAP_ROUNDS} rounds and "
-            f"the reap marker is still live; something is respawning faster "
-            f"than it can be killed"
+            f"this launch still owns live processes; something is respawning "
+            f"faster than it can be killed"
         )
     return sorted(reaped)
 
