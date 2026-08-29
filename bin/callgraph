@@ -50,7 +50,7 @@ from native_symbols import defined_symbols  # noqa: E402
 BROKEN_TREE_SITTER = ("0.26",)
 
 # Mirrors lib/callgraph.SCHEMA_VERSION; the reader refuses any other value.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # A rendered route longer than this is not a recipe an agent can act on, and
 # the block is a summary, not a trace.
@@ -157,6 +157,32 @@ def _qualified(node, name_of, file_of, ambiguous) -> str:
     return f"{file_of.get(node, '?')}:{name}" if name in ambiguous else name
 
 
+def _key_units(node: str, callers: dict[str, set[str]], callees: dict[str, set[str]],
+               file_of: dict[str, str], paths: dict[str, list[str]]) -> tuple[str | None, str | None]:
+    """The one caller and one callee of `node` worth excerpting, each in
+    another file: the caller nearest the entry boundary (the route's previous
+    hop, when that hop crosses a file), and the callee the most functions
+    share, which is where a file's allocation and length handling tends to
+    live. Same-file units are what the agent is already reading.
+    """
+    source = file_of.get(node)
+
+    def foreign(nodes) -> list[str]:
+        return [n for n in nodes if file_of.get(n) and file_of[n] != source]
+
+    caller = min(
+        foreign(callers.get(node, ())),
+        key=lambda n: (len(paths[n]) if n in paths else sys.maxsize, n),
+        default=None,
+    )
+    callee = min(
+        foreign(callees.get(node, ())),
+        key=lambda n: (-len(callers.get(n, ())), n),
+        default=None,
+    )
+    return caller, callee
+
+
 def _shortest_paths(roots: list[str], callees: dict[str, set[str]]) -> dict[str, list[str]]:
     """One BFS over the whole graph, not one per function of interest."""
     previous: dict[str, str | None] = {root: None for root in roots}
@@ -203,6 +229,7 @@ def build(args) -> dict:
 
     file_of: dict[str, str] = {}
     name_of: dict[str, str] = {}
+    line_of: dict[str, int] = {}
     file_functions: dict[str, list[str]] = defaultdict(list)
     for node_id, unit in graph.nodes.items():
         location = getattr(unit, "location", None)
@@ -211,6 +238,7 @@ def build(args) -> dict:
         source = _relative(location.file_path, root)
         file_of[node_id] = source
         name_of[node_id] = unit.name or ""
+        line_of[node_id] = int(getattr(location, "start_line", 0) or 0)
         if _function_kinds(unit):
             file_functions[source].append(node_id)
 
@@ -285,6 +313,8 @@ def build(args) -> dict:
             ),
         )
         entries = []
+        excerpts = []
+        seen_units: set[str] = set()
         for node in hottest[: args.path_functions]:
             chain = paths.get(node, [])
             route = [_qualified(step, name_of, file_of, ambiguous) for step in chain]
@@ -294,12 +324,26 @@ def build(args) -> dict:
                 "function": _qualified(node, name_of, file_of, ambiguous),
                 "path": route,
             })
+            # Definition sites the prompt may excerpt; one per unit, since
+            # two hot functions often share a caller.
+            for role, unit in zip(("caller", "callee"), _key_units(node, callers, callees, file_of, paths)):
+                if unit is None or unit in seen_units or not line_of.get(unit):
+                    continue
+                seen_units.add(unit)
+                excerpts.append({
+                    "role": role,
+                    "of": name_of.get(node, ""),
+                    "function": name_of.get(unit, ""),
+                    "file": file_of[unit],
+                    "line": line_of[unit],
+                })
         files[source] = {
             "functions": len(functions),
             "reachable": sum(1 for node in functions if node in paths),
             "callers": inbound.most_common(args.neighbour_files),
             "callees": outbound.most_common(args.neighbour_files),
             "paths": entries,
+            "excerpts": excerpts,
         }
 
     return {

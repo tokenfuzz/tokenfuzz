@@ -2210,6 +2210,164 @@ class WorkQueueTests(unittest.TestCase):
             )
         self.assertEqual(captured["command"][5], "150")
 
+    def test_llm_rerank_primary_mode_orders_the_window_by_model_score_within_tiers(self) -> None:
+        """The model's score is the key, the first stage breaks ties, and the
+        card set, its tiers and the diversity floor are untouched."""
+        cards = [
+            self.card("WORK-A", "src/a.c", score=50, buildability="built"),
+            self.card("WORK-B", "src/b.c", score=40, buildability="built"),
+            self.card("WORK-C", "src/c.c", score=30, buildability="built"),
+            self.card("WORK-D", "src/d.c", score=60, buildability="not-built"),
+            self.card("WORK-F", "vendor/floor.c", score=5, buildability="built"),
+        ]
+        verdict = {"cards": [
+            {"id": "WORK-C", "boost": 30, "reason": "decoder"},
+            {"id": "WORK-B", "boost": 10, "reason": "state machine"},
+            {"id": "WORK-D", "boost": 30, "reason": "optional unit"},
+            {"id": "WORK-INVENTED", "boost": 30, "reason": "made up"},
+        ]}
+        environment = {
+            "LLM_DECIDE_MOCK_WORK_RERANK": json.dumps(verdict), "ACTIVE_BACKEND": "",
+        }
+        with mock.patch.dict(os.environ, environment, clear=False):
+            out = workqueue.llm_rerank_cards(self.ctx, cards, top_n=5, timeout=5, mode="primary")
+        self.assertEqual(
+            [row["id"] for row in out], ["WORK-C", "WORK-B", "WORK-A", "WORK-F", "WORK-D"],
+        )
+        self.assertEqual(
+            {row["id"]: row["score"] for row in out},
+            {row["id"]: row["score"] for row in cards},
+            "primary mode leaves the deterministic score as the tiebreaker",
+        )
+        self.assertIn("llm-rerank: decoder", out[0]["reason"])
+        self.assertEqual(out[-1]["buildability"], "not-built", "a scored optional unit stays in its tier")
+
+        with mock.patch.dict(os.environ, environment, clear=False):
+            default = workqueue.llm_rerank_cards(self.ctx, cards, top_n=5, timeout=5)
+        self.assertEqual(default[0]["id"], "WORK-D", "the default is still the bounded boost")
+        with self.assertRaises(ValueError):
+            workqueue.llm_rerank_cards(self.ctx, cards, mode="ranked")
+
+    def test_llm_rerank_primary_mode_falls_open_on_timeout_and_malformed_output(self) -> None:
+        cards = [
+            self.card("WORK-A", "src/a.c", score=50),
+            self.card("WORK-B", "src/b.c", score=40),
+        ]
+        environment = {"ACTIVE_BACKEND": "", "LLM_DECIDE_MOCK_WORK_RERANK": '{"cards":[]}'}
+        asked: list[str] = []
+
+        def timed_out(command, **kwargs):
+            asked.append("timeout")
+            raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            workqueue.subprocess, "check_output", side_effect=timed_out,
+        ):
+            self.assertEqual(
+                workqueue.llm_rerank_cards(self.ctx, cards, top_n=2, timeout=5, mode="primary"),
+                cards,
+            )
+            # A timeout must not be cached as "no verdict".
+            self.assertEqual(
+                workqueue.llm_rerank_cards(self.ctx, cards, top_n=2, timeout=5, mode="primary"),
+                cards,
+            )
+        self.assertEqual(asked, ["timeout", "timeout"])
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "", "LLM_DECIDE_MOCK_WORK_RERANK": '{"cards":"not a list"}',
+        }, clear=False):
+            self.assertEqual(
+                workqueue.llm_rerank_cards(self.ctx, cards, top_n=2, timeout=5, mode="primary"),
+                cards,
+            )
+
+    def test_llm_rerank_cache_for_a_vcs_less_target_keys_on_the_prompt(self) -> None:
+        """A tree with no VCS has no cheap content identity. Keying its cache
+        on the `norev` revision sentinel would replay the first verdict for
+        the life of the results dir while the source drifts underneath it, so
+        the identity falls back to the rendered prompt."""
+        target = self.root / "no-vcs-target"
+        target.mkdir()
+        ctx = workqueue.Context(ROOT, target, "sample", self.results, "none")
+        decision_log = self.root / "novcs-decisions.log"
+        environment = {
+            "LLM_DECIDE_MOCK_WORK_RERANK": json.dumps({
+                "cards": [{"id": "WORK-A", "boost": 5, "reason": "fixture"}],
+            }),
+            "LLM_DECIDE_LOG": str(decision_log),
+            "ACTIVE_BACKEND": "",
+        }
+
+        def decisions() -> int:
+            return decision_log.read_text(encoding="utf-8").count("work_rerank MOCK")
+
+        cards = [self.card("WORK-A", "src/a.c", score=10)]
+        rescored = [self.card("WORK-A", "src/a.c", score=70, reason="coverage gap")]
+        with mock.patch.dict(os.environ, environment, clear=False):
+            workqueue.llm_rerank_cards(ctx, cards, top_n=1, timeout=5)
+            workqueue.llm_rerank_cards(ctx, cards, top_n=1, timeout=5)
+            self.assertEqual(decisions(), 1, "an identical prompt is served from the cache")
+            workqueue.llm_rerank_cards(ctx, rescored, top_n=1, timeout=5)
+            self.assertEqual(decisions(), 2, "same ids, new scores: the prompt identity re-asks")
+
+    def test_llm_rerank_cache_is_keyed_by_source_identity_and_card_ids(self) -> None:
+        """Scores and reasons drift every refresh; the verdict is about the
+        code, so only a source change, a new candidate set, or a new mode
+        re-asks."""
+        shutil.rmtree(self.target / ".git")
+        git = ["git", "-C", str(self.target)]
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        subprocess.run(git + ["init", "-q"], check=True, env=env)
+        (self.target / "a.c").write_text("int a;\n", encoding="utf-8")
+        subprocess.run(git + ["add", "."], check=True, env=env)
+        subprocess.run(git + ["commit", "-q", "-m", "one"], check=True, env=env)
+        decision_log = self.root / "decisions.log"
+        environment = {
+            "LLM_DECIDE_MOCK_WORK_RERANK": json.dumps({
+                "cards": [{"id": "WORK-B", "boost": 20, "reason": "parser boundary"}],
+            }),
+            "LLM_DECIDE_LOG": str(decision_log),
+            "ACTIVE_BACKEND": "",
+        }
+
+        def decisions() -> int:
+            return decision_log.read_text(encoding="utf-8").count("work_rerank MOCK")
+
+        first = [self.card("WORK-A", "src/a.c", score=30), self.card("WORK-B", "src/b.c", score=10)]
+        rescored = [
+            self.card("WORK-A", "src/a.c", score=90, reason="coverage gap"),
+            self.card("WORK-B", "src/b.c", score=12, reason="corpus seed"),
+        ]
+        with mock.patch.dict(os.environ, environment, clear=False):
+            workqueue.llm_rerank_cards(self.ctx, first, top_n=2, timeout=5)
+            self.assertEqual(decisions(), 1)
+            out = workqueue.llm_rerank_cards(self.ctx, rescored, top_n=2, timeout=5)
+            self.assertEqual(decisions(), 1, "same revision and ids: served from the cache")
+            self.assertEqual({row["id"]: row["score"] for row in out}, {"WORK-A": 90, "WORK-B": 32})
+            workqueue.llm_rerank_cards(self.ctx, rescored, top_n=2, timeout=5, mode="primary")
+            self.assertEqual(decisions(), 2, "a mode change re-asks")
+            workqueue.llm_rerank_cards(
+                self.ctx, rescored + [self.card("WORK-C", "src/c.c")], top_n=3, timeout=5,
+            )
+            self.assertEqual(decisions(), 3, "a new candidate re-asks")
+            (self.target / "a.c").write_text("int a, b;\n", encoding="utf-8")
+            subprocess.run(git + ["commit", "-q", "-am", "two"], check=True, env=env)
+            workqueue.llm_rerank_cards(self.ctx, rescored, top_n=2, timeout=5)
+            self.assertEqual(decisions(), 4, "a new revision re-asks")
+
+    def test_rank_work_cli_refuses_an_unknown_rerank_mode(self) -> None:
+        command = [
+            sys.executable, str(ROOT / "bin" / "rank-work"),
+            "--results-dir", str(self.results),
+            "--target-path", str(self.target),
+            "--target-slug", "sample",
+        ]
+        result = self.run_command(command, env={**os.environ, "RANK_WORK_LLM_MODE": "ranked"})
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("--llm-mode", result.stderr)
+
     def test_state_cli_recent_filters_explanations_and_bad_regexes(self) -> None:
         self.write_cards([self.card("WORK-A", "src/app.c")])
         self.add_hypothesis(hyp_id="H-PENDING", status="PENDING")

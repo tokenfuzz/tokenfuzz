@@ -17,6 +17,7 @@ a card, floor a severity, or feed a triage verdict.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import os
 import shutil
@@ -33,7 +34,19 @@ ARTIFACT_NAME = "callgraph.json"
 
 # Bump when the artifact's shape or the policy that fills it changes, so a
 # stale artifact is rebuilt rather than read under new rules.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# The unit pack is bounded in tokens, not units: it carries the definitions
+# an agent would otherwise spend its first tool calls opening, and at 600
+# tokens (the ~4 chars/token heuristic lib/llm_usage.py estimates with) it
+# costs less than one such read. An excerpt is whole or absent — a definition
+# cut mid-signature reads as a different function — and the per-line clip
+# keeps one generated line from spending the whole pack.
+PACK_TOKEN_CAP = 600
+PACK_CHAR_CAP = PACK_TOKEN_CAP * 4
+EXCERPT_LINES_BEFORE = 1
+EXCERPT_LINES_AFTER = 4
+EXCERPT_LINE_CHARS = 120
 
 # A C definition whose return type is wrapped in an export macro above the
 # name is not extracted, and those are disproportionately a library's public
@@ -369,11 +382,68 @@ def _coverage_note(data: dict) -> tuple[bool, str]:
     return True, f"{ratio:.0%} of the built target's symbols were parsed"
 
 
-def block_for(results_dir: Path, file: str) -> list[str]:
+def _definition_window(path: Path, line: int) -> list[tuple[int, str]]:
+    """Numbered lines around a definition, clipped; [] when unreadable.
+
+    Reads only up to the last wanted line rather than the file: the sources
+    this serves are the parsed tree's, and their large files are the ones
+    whose definitions sit deepest.
+    """
+    first = max(1, line - EXCERPT_LINES_BEFORE)
+    last = line + EXCERPT_LINES_AFTER
+    try:
+        with path.open("rb") as source:
+            rows = list(itertools.islice(source, first - 1, last))
+    except OSError:
+        return []
+    return [
+        (first + index, raw.decode("utf-8", "replace").rstrip("\r\n")[:EXCERPT_LINE_CHARS])
+        for index, raw in enumerate(rows)
+    ]
+
+
+def _unit_pack(entry: dict, target_root: Path) -> list[str]:
+    """Definition excerpts for the file's key callers and callees, bounded.
+
+    Whole excerpts are added in artifact order until the next would cross
+    PACK_CHAR_CAP; a file that yields none renders no pack at all.
+    """
+    lines = [
+        "- **Unit excerpts** (the definition lines of each routed function's "
+        "key caller and callee, static and bounded):",
+    ]
+    used = sum(len(text) + 1 for text in lines)
+    kept = 0
+    for row in entry.get("excerpts") or []:
+        rel = workqueue.normalized_relpath(row.get("file", ""))
+        line = int(row.get("line") or 0)
+        if not rel or line < 1 or ".." in rel.split("/"):
+            continue
+        window = _definition_window(Path(target_root) / rel, line)
+        if not window:
+            continue
+        relation = (
+            f"calls `{row.get('of', '')}`" if row.get("role") == "caller"
+            else f"called by `{row.get('of', '')}`"
+        )
+        chunk = [f"  - `{row.get('function', '')}` (`{rel}:{line}`) {relation}:"]
+        chunk += [f"        {number} | {text}" for number, text in window]
+        size = sum(len(text) + 1 for text in chunk)
+        if used + size > PACK_CHAR_CAP:
+            break
+        lines += chunk
+        used += size
+        kept += 1
+    return lines if kept else []
+
+
+def block_for(results_dir: Path, file: str, target_root: Path | None = None) -> list[str]:
     """Markdown lines describing who calls this file and how input reaches it.
 
     Returns [] whenever the answer would be partial or absent: the agent gets
-    the map it had before rather than a map with holes it cannot see.
+    the map it had before rather than a map with holes it cannot see. With a
+    `target_root`, the block also carries the unit pack — excerpts read from
+    that tree at the definition sites the artifact recorded.
     """
     rel = workqueue.normalized_relpath(file)
     if not rel:
@@ -441,6 +511,8 @@ def block_for(results_dir: Path, file: str) -> list[str]:
             else:
                 route = " -> ".join(chain)
             lines.append(f"    - `{row['function']}`: {route}")
+    if target_root is not None:
+        lines += _unit_pack(entry, target_root)
     lines.append(
         "  Scope: syntactically resolved calls between files rank-work "
         "considers auditable — test, example, doc and fuzz trees are outside "
@@ -488,7 +560,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("file", help="target-relative source path")
     args = parser.parse_args(argv)
     ctx = workqueue.context_from_args(args)
-    block = block_for(ctx.results_dir, args.file)
+    block = block_for(ctx.results_dir, args.file, ctx.target_root)
     if block:
         print("\n".join(block).strip())
         return 0

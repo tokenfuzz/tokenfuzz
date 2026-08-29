@@ -15,7 +15,7 @@ import callgraph
 from llm_decide import decision_timeout
 import strategies
 import target_config
-from workqueue import add_common_args, campaign_supported, annotate_card_buildability, apply_latest_claim_status, campaign_card, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
+from workqueue import RERANK_MODES, add_common_args, campaign_supported, annotate_card_buildability, apply_latest_claim_status, campaign_card, context_from_args, llm_rerank_cards, rank_target, read_jsonl, write_cards
 
 
 def _target_config_for(ctx):
@@ -51,11 +51,25 @@ def main(argv: list[str]) -> int:
             or decision_timeout("work_rerank")
         ),
     )
+    parser.add_argument(
+        "--llm-mode", choices=RERANK_MODES,
+        default=os.environ.get("RANK_WORK_LLM_MODE", "") or "boost",
+        help="how far the rerank verdict reaches: a bounded boost on the "
+             "deterministic score, or the primary key inside the window",
+    )
     parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/work-cards.jsonl")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--jsonl", action="store_true", help="print full card JSONL to stdout")
     parser.add_argument("--summary-limit", type=int, default=8, help="number of top cards to show in compact stdout")
     args = parser.parse_args(argv)
+    # argparse validates `choices` only for values given on the command line,
+    # so a typo in RANK_WORK_LLM_MODE would otherwise surface as a traceback
+    # after the ranking work is already done.
+    if args.llm_mode not in RERANK_MODES:
+        parser.error(
+            f"--llm-mode/RANK_WORK_LLM_MODE must be one of {RERANK_MODES} "
+            f"(got {args.llm_mode!r})"
+        )
 
     ctx = context_from_args(args)
     # Same cadence as the cards themselves: this is gated on the target's VCS
@@ -67,7 +81,7 @@ def main(argv: list[str]) -> int:
     patch_cards = Path(args.patch_cards).expanduser().resolve() if args.patch_cards else None
     out = Path(args.output).expanduser().resolve() if args.output else ctx.results_dir / "work-cards.jsonl"
     cards = rank_target(ctx, args.limit, patch_cards, strategy=args.strategy)
-    cards = llm_rerank_cards(ctx, cards, args.llm_top_n, args.llm_timeout)
+    cards = llm_rerank_cards(ctx, cards, args.llm_top_n, args.llm_timeout, args.llm_mode)
     # Merge S6 peer-fix cards. bin/peer-fix-cards writes these to a
     # separate s6-peer-cards.jsonl, refreshed each iteration alongside
     # patch-cards.jsonl — but rank_target only ever rebuilds patch +

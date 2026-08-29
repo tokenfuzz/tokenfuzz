@@ -103,6 +103,7 @@ used. Keep keys out of `target.toml`, reports, and committed shell files.
 | `AUDIT_LOCAL_API_KEY` | `EMPTY` | Token for a local endpoint that requires authentication. |
 | `LLM_DECISION_TIMEOUT` | `180` seconds for `oss`, `45` hosted | Ceiling on each audit-time ranking, peer-mapping, triage, and validation decision. Setting it applies to *every* decision, including the two below. Stage deadlines may shorten it. |
 | `RANK_WORK_LLM_TIMEOUT` | unset | Override `LLM_DECISION_TIMEOUT` for work-card reranking only. The `bin/rank-work --llm-timeout` flag takes precedence over both. |
+| `RANK_WORK_LLM_MODE` | `boost` | How far the rerank verdict reaches. `boost` adds a bounded increment to the deterministic score; `primary` sorts the ranked window by the model's score, with the deterministic score breaking ties, inside each buildability tier. In both modes the model reorders the cards it was shown — it cannot add or drop one — and in `primary` mode it cannot lift a card across a buildability tier; on timeout or malformed output the deterministic order stands. The `bin/rank-work --llm-mode` flag takes precedence. |
 
 Every decision launches a full agent CLI rather than a single chat completion,
 so its floor is a process launch plus a reasoning turn. A few decisions have

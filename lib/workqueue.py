@@ -28,10 +28,11 @@ from typing import Iterable
 import languages
 import report_identity
 from audit_scope import is_excluded_path_part
-# target_config (only detect_repo_type, below), llm_decide (only timeout
-# resolution), prompt_render.render_template (only the work_rerank gate), and
+# target_config (detect_repo_type below, vcs_source_signature in the
+# work_rerank gate), llm_decide (only timeout resolution),
+# prompt_render.render_template (only the work_rerank gate), and
 # validation_receipt (only the finding-listing status) are imported lazily
-# inside their single call sites:
+# inside their call sites:
 # workqueue backs bin/state, which agents invoke 30+ times per session, and each
 # of these modules adds ~3-4 ms of import (target_config pulls shutil; together
 # ~5 ms) that the common state ops (resume/add-hyp/update-hyp) never use —
@@ -2148,14 +2149,25 @@ def path_has_executable(name: str) -> bool:
     return False
 
 
+RERANK_MODES = ("boost", "primary")
+
+
 def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
-                     timeout: int | None = None) -> list[dict]:
+                     timeout: int | None = None, mode: str = "boost") -> list[dict]:
     """Second-stage optional ranking over deterministic candidates.
 
     The first stage stays authoritative on availability: if the one-shot LLM
     decision is disabled, unavailable, times out, or returns malformed JSON,
     this returns the original cards unchanged.
+
+    `mode` is how far the verdict reaches. `boost` adds a bounded increment
+    to the deterministic score. `primary` orders the window by the model's
+    score with the deterministic key breaking ties — inside each buildability
+    tier and over the same cards, so the model promotes what it scored and
+    nothing else.
     """
+    if mode not in RERANK_MODES:
+        raise ValueError(f"rerank mode must be one of {RERANK_MODES} (got {mode!r})")
     if timeout is None:
         from llm_decide import decision_timeout  # lazy: see import note at top
         timeout = decision_timeout("work_rerank")
@@ -2225,21 +2237,32 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
         )
 
     from prompt_render import render_template  # lazy: see import note at top
+    import target_config  # lazy: see import note at top of file
     max_boost = int(os.environ.get("RANK_WORK_LLM_MAX_BOOST", "30") or "30")
     prompt = render_template("work_rerank.md.j2", {
         "max_boost": str(max_boost),
+        "mode_rule": (
+            "Your boost is the order: the cards you list are sorted by it, "
+            "highest first, the first stage's score breaking ties only, and "
+            "every card you leave out keeps its first-stage order below "
+            "them. Spend the list on the cards you would open first."
+            if mode == "primary" else
+            "Your boost is added to the first stage's score."
+        ),
         "candidate_lines": "\n".join(candidate_lines),
     })
 
-    # Rerank verdicts are a function of the rendered prompt (the candidate
-    # set + max_boost) AND of who answers it. The queue refresh runs every
-    # iteration but the top-N candidate set is usually unchanged between
-    # refreshes, and each miss costs a ~10-20s LLM round-trip in the
-    # iteration boundary — so memoize the parsed boosts (including the
-    # "no boosts" outcome) keyed by sha1 over the prompt plus the decider
-    # identity. Any card mutation, re-scoring, reordering, backend swap,
-    # or model swap changes the key and re-asks. The active mock value
-    # (tests) keys the cache too, so swapping a mock verdict always
+    # Rerank verdicts are memoized by input identity: the target's VCS
+    # content signature (revision plus tracked working-tree content, the
+    # same "code changed" key the callgraph cache uses — not detect_rev,
+    # whose truthy `norev` sentinel would pin a VCS-less tree to its first
+    # verdict forever), the candidate ids, how the answer is applied, and
+    # who answers. The refresh runs every iteration and each miss costs a
+    # ~10-20s round-trip at the iteration boundary; scores and reasons
+    # drift between refreshes as coverage and claims move, but the verdict
+    # is about the code. A target with no VCS has no cheap content
+    # identity, so its identity is the rendered prompt. The active mock
+    # value (tests) keys the cache too, so swapping a mock verdict always
     # re-decides instead of replaying the previous mock's boosts.
     mock_key = os.environ.get("LLM_DECIDE_MOCK_WORK_RERANK") or os.environ.get("LLM_DECIDE_MOCK") or ""
     resolved_model = os.environ.get("MODEL", "")
@@ -2250,12 +2273,19 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
         except Exception:
             resolved_model = ""
     decider_key = f"{backend}\x00{resolved_model}\x00{mock_key}"
+    source = target_config.vcs_source_signature(ctx.target_root, include_untracked=False)
+    identity = "\x00".join([
+        f"source={source}" if source else f"prompt={prompt}",
+        f"mode={mode}", f"max_boost={max_boost}",
+        "ids=" + ",".join(sorted(surface_lead.values())),
+        decider_key,
+    ])
     cache_path = state_dir(ctx.results_dir) / ".work-rerank-cache.json"
-    prompt_sha = hashlib.sha1((prompt + "\x00" + decider_key).encode("utf-8", "replace")).hexdigest()
+    identity_sha = hashlib.sha1(identity.encode("utf-8", "replace")).hexdigest()
     boosts: dict[str, tuple[int, str]] | None = None
     try:
         cached = json.loads(cache_path.read_text(encoding="utf-8"))
-        if cached.get("prompt_sha1") == prompt_sha and isinstance(cached.get("boosts"), dict):
+        if cached.get("identity_sha1") == identity_sha and isinstance(cached.get("boosts"), dict):
             boosts = {
                 str(cid): (int(pair[0]), str(pair[1]))
                 for cid, pair in cached["boosts"].items()
@@ -2302,7 +2332,7 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
             # RESULTS_DIR must not interleave writes into one temp file.
             tmp = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.tmp")
             tmp.write_text(
-                json.dumps({"prompt_sha1": prompt_sha, "boosts": {k: list(v) for k, v in boosts.items()}}),
+                json.dumps({"identity_sha1": identity_sha, "boosts": {k: list(v) for k, v in boosts.items()}}),
                 encoding="utf-8",
             )
             tmp.replace(cache_path)
@@ -2312,18 +2342,32 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
     if not boosts:
         return cards
     out = []
+    model_score: dict[str, int] = {}
     for card in cards:
         card = dict(card)
         cid = card.get("id", "")
         entry = boosts.get(lead_of.get(cid, cid))
         if entry:
             boost, reason = entry
-            card["score"] = int(card.get("score", 0)) + boost
+            if mode == "primary":
+                model_score[cid] = boost
+            else:
+                card["score"] = int(card.get("score", 0)) + boost
             if reason:
                 existing = card.get("reason", "")
                 card["reason"] = (existing + "; " if existing else "") + "llm-rerank: " + reason
         out.append(card)
-    out.sort(key=work_card_sort_key)
+    if mode == "primary":
+        # Tier outermost: a scored optional unit must not climb over compiled
+        # work. The deterministic score is left as the first stage set it, so
+        # it stays the tiebreaker and the card still reports that number.
+        out.sort(key=lambda card: (
+            _built_first(card),
+            -model_score.get(card.get("id", ""), 0),
+            work_card_sort_key(card),
+        ))
+    else:
+        out.sort(key=work_card_sort_key)
     return out
 
 

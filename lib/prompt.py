@@ -340,7 +340,9 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
     lines += workqueue.peer_fix_markdown(card)
     lines += _ruled_out_routes(context, card.get("file", ""))
-    lines += callgraph.block_for(context.results_dir, card.get("file", ""))
+    lines += callgraph.block_for(
+        context.results_dir, card.get("file", ""), context.target_root,
+    )
     lines.extend([
         "",
         "Use this card first unless structured state already has a higher-priority active row.",

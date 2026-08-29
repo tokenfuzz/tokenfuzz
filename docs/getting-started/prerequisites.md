@@ -204,7 +204,12 @@ it.
 With [trailmark](https://github.com/trailofbits/trailmark) installed, every
 work-card prompt gains a static call map for the card's file: which files call
 into it, which files it calls, and the shortest call path from the binary named
-in `target.toml`. trailmark is a tree-sitter code-graph library from
+in `target.toml`. The map ends with a bounded unit pack — a few source lines
+at the definition of each routed function's key caller and callee, capped at
+600 estimated tokens, so the card carries the definitions an agent would
+otherwise spend its first tool calls opening. Both render only for a file with
+resolved cross-file neighbours; both are context the agent may act on, never a
+filter. trailmark is a tree-sitter code-graph library from
 [Trail of Bits](https://www.trailofbits.com/), Apache-2.0 licensed, and
 TokenFuzz treats it as an optional dependency you install yourself.
 

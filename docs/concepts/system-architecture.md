@@ -53,8 +53,12 @@ The ranked queue is built from a few signals:
 - peer projects that share the same code or specs, when configured.
 
 The ordering is deterministic first. An optional LLM rerank may
-boost cards, but if it is disabled, times out, or returns malformed
-JSON, the deterministic order stands. The harness never lets a model
+boost cards — or, in its `primary` experiment mode
+([`RANK_WORK_LLM_MODE`](../reference/environment.md#local-model-endpoint)),
+order the ranked window outright with the deterministic score as the
+tiebreaker — but if it is disabled, times out, or returns malformed
+JSON, the deterministic order stands, and in either mode the model
+only reorders the cards it was shown. The harness never lets a model
 decide what is *in scope*.
 
 Agents claim one entry from the queue at a time, so two agents do not

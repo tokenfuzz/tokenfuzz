@@ -171,6 +171,118 @@ class BlockRenderingTests(unittest.TestCase):
         self.assertNotEqual(self.render("./src/parse.c"), "")
 
 
+class UnitPackTests(unittest.TestCase):
+    """Definition excerpts ride on the block, bounded, and only where the
+    block itself has something to say."""
+
+    EXCERPTS = [
+        {"role": "caller", "of": "app_parse", "function": "run",
+         "file": "src/main.c", "line": 3},
+        {"role": "callee", "of": "app_parse", "function": "buf_grow",
+         "file": "src/buf.c", "line": 2},
+    ]
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.results = Path(self.tmp.name) / "results"
+        self.target = Path(self.tmp.name) / "target"
+        (self.target / "src").mkdir(parents=True)
+        (self.target / "src" / "main.c").write_text(
+            "#include \"app.h\"\n"
+            "\n"
+            "int run(struct app *a, const char *input) {\n"
+            "  return app_parse(a, input);\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.target / "src" / "buf.c").write_text(
+            "#include \"buf.h\"\n"
+            "int buf_grow(struct buf *b, size_t need) {\n"
+            "  return need > b->cap;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+    def write(self, artifact: dict) -> None:
+        path = callgraph.artifact_path(self.results)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    def artifact(self, excerpts: list[dict], **entry) -> dict:
+        artifact = json.loads(json.dumps(ARTIFACT))
+        artifact["files"]["src/parse.c"]["excerpts"] = excerpts
+        artifact["files"]["src/parse.c"].update(entry)
+        return artifact
+
+    def render(self, file: str = "src/parse.c") -> str:
+        return "\n".join(callgraph.block_for(self.results, file, self.target))
+
+    def test_renders_definition_lines_for_the_key_caller_and_callee(self) -> None:
+        self.write(self.artifact(self.EXCERPTS))
+        block = self.render()
+        self.assertIn("`run` (`src/main.c:3`) calls `app_parse`:", block)
+        self.assertIn("3 | int run(struct app *a, const char *input) {", block)
+        self.assertIn("        2 | ", block)  # one line of context before
+        self.assertIn("`buf_grow` (`src/buf.c:2`) called by `app_parse`:", block)
+        self.assertIn("3 |   return need > b->cap;", block)
+        # The pack is part of the block, ahead of the scope caveat.
+        self.assertLess(block.index("Unit excerpts"), block.index("Scope:"))
+
+    def test_without_a_target_root_the_block_is_unchanged(self) -> None:
+        self.write(self.artifact(self.EXCERPTS))
+        block = "\n".join(callgraph.block_for(self.results, "src/parse.c"))
+        self.assertIn("`src/main.c`(4 fn)", block)
+        self.assertNotIn("Unit excerpts", block)
+
+    def test_the_pack_holds_whole_excerpts_under_the_token_cap(self) -> None:
+        wide = self.target / "src" / "wide.c"
+        wide.write_text(
+            "\n".join(f"int f{n}(void) {{ return {'0' * 300}; }}" for n in range(200)) + "\n",
+            encoding="utf-8",
+        )
+        excerpts = [
+            {"role": "callee", "of": "app_parse", "function": f"f{n}",
+             "file": "src/wide.c", "line": n + 1}
+            for n in range(40)
+        ]
+        self.write(self.artifact(excerpts))
+        block = self.render()
+        pack = block[block.index("- **Unit excerpts**"):block.index("  Scope:")]
+        self.assertLessEqual(len(pack), callgraph.PACK_CHAR_CAP)
+        self.assertLessEqual(len(pack) // 4, callgraph.PACK_TOKEN_CAP)
+        headers = [line for line in pack.splitlines() if line.startswith("  - `f")]
+        self.assertGreater(len(headers), 1, "the clip must leave room for more than one excerpt")
+        self.assertLess(len(headers), 40, "the cap must drop excerpts")
+        # Every excerpt is whole: the last one carries its full window, and no
+        # line exceeds the clip.
+        window = callgraph.EXCERPT_LINES_BEFORE + callgraph.EXCERPT_LINES_AFTER + 1
+        tail = pack.splitlines()[pack.splitlines().index(headers[-1]):]
+        self.assertEqual(len(tail) - 1, window)
+        for line in tail[1:]:
+            self.assertLessEqual(len(line.split(" | ", 1)[1]), callgraph.EXCERPT_LINE_CHARS)
+
+    def test_no_neighbours_means_no_pack_either(self) -> None:
+        artifact = json.loads(json.dumps(ARTIFACT))
+        artifact["files"]["src/lonely.c"]["excerpts"] = self.EXCERPTS
+        self.write(artifact)
+        self.assertEqual(self.render("src/lonely.c"), "")
+
+    def test_unreadable_or_escaping_excerpts_fall_open(self) -> None:
+        self.write(self.artifact([
+            {"role": "caller", "of": "app_parse", "function": "gone",
+             "file": "src/removed.c", "line": 1},
+            {"role": "caller", "of": "app_parse", "function": "outside",
+             "file": "../etc/passwd", "line": 1},
+            {"role": "caller", "of": "app_parse", "function": "run",
+             "file": "src/main.c", "line": 0},
+        ]))
+        block = self.render()
+        self.assertIn("`src/main.c`(4 fn)", block)
+        self.assertNotIn("Unit excerpts", block)
+        self.assertNotIn("passwd", block)
+
+
 class ExplainTests(unittest.TestCase):
     """`no block` has to come with a reason; every branch above is silent."""
 
@@ -493,6 +605,34 @@ class RealTrailmarkTests(unittest.TestCase):
         self.assertEqual(routes.get("sink"), [])
         self.assertEqual(routes.get("helper"), ["main", "helper"])
 
+    def test_excerpts_record_the_definition_lines_the_parser_saw(self) -> None:
+        (self.root / "target" / "app.c").write_text(
+            "void core_work(const char *p);\n"
+            "int main(void) { core_work(\"x\"); return 0; }\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "core.c").write_text(
+            "#include <string.h>\n"
+            "\n"
+            "void core_work(const char *p) { (void)strlen(p); }\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(data["files"]["core.c"]["excerpts"], [{
+            "role": "caller", "of": "core_work", "function": "main",
+            "file": "app.c", "line": 2,
+        }])
+        self.assertEqual(data["files"]["app.c"]["excerpts"], [{
+            "role": "callee", "of": "main", "function": "core_work",
+            "file": "core.c", "line": 3,
+        }])
+        block = "\n".join(callgraph.block_for(
+            self.ctx.results_dir, "core.c", self.ctx.target_root,
+        ))
+        self.assertIn("`main` (`app.c:2`) calls `core_work`:", block)
+        self.assertIn("2 | int main(void) { core_work(\"x\"); return 0; }", block)
+
 
 class StatusLineTests(unittest.TestCase):
     """The run log has to say whether this contributed, either way."""
@@ -694,6 +834,42 @@ class EntryBoundaryTests(unittest.TestCase):
         store = self.FakeStore([], {})
         roots, _ = self.sidecar._entry_roots(store, name_of, set(), {"api", "main"})
         self.assertEqual(roots, ["lib:api"])
+
+
+class KeyUnitTests(unittest.TestCase):
+    """Which one caller and one callee a hot function's excerpts show."""
+
+    def setUp(self) -> None:
+        self.sidecar = _sidecar()
+        self.file_of = {
+            "main": "src/main.c", "run": "src/main.c", "late": "src/cli.c",
+            "parse": "src/parse.c", "reset": "src/parse.c",
+            "grow": "src/buf.c", "trim": "src/buf.c",
+        }
+        self.callers = {
+            "parse": {"run", "late", "reset"},
+            "grow": {"parse", "reset", "late"},
+            "trim": {"parse"},
+        }
+        self.callees = {"parse": {"grow", "trim", "reset"}}
+        self.paths = {"main": ["main"], "run": ["main", "run"],
+                      "late": ["main", "run", "late"], "parse": ["main", "run", "parse"]}
+
+    def test_the_caller_nearest_the_boundary_and_the_most_shared_callee(self) -> None:
+        caller, callee = self.sidecar._key_units(
+            "parse", self.callers, self.callees, self.file_of, self.paths,
+        )
+        # `reset` calls parse too but lives in the same file; `late` is a hop
+        # further from main than `run`.
+        self.assertEqual(caller, "run")
+        # `grow` is called by three functions, `trim` by one.
+        self.assertEqual(callee, "grow")
+
+    def test_a_function_with_no_foreign_neighbour_yields_none(self) -> None:
+        self.assertEqual(
+            self.sidecar._key_units("reset", self.callers, self.callees, self.file_of, self.paths),
+            (None, None),
+        )
 
 
 class ShortestPathTests(unittest.TestCase):
