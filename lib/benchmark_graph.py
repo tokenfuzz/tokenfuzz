@@ -24,6 +24,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import benchmark
 import crash_artifacts
 import finding_dedup
 import finding_signature
@@ -127,8 +128,8 @@ def _discovery_index(cells: list[Path]) -> dict[tuple, dict[tuple, float]]:
             meta = json.loads((cell / "cell.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        results = Path(meta.get("results_dir") or "")
-        if not results.is_dir():
+        results = benchmark.cell_results_dir(meta)
+        if results is None or not results.is_dir():
             continue
         stamps = _event_stamps(results)
         origin = _cell_start(cell)

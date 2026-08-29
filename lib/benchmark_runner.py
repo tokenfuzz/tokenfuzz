@@ -753,7 +753,7 @@ def _write_json(path: Path, payload: dict) -> None:
 
 def write_cell(
     path: Path, condition: str, replicate: int, experiment: str,
-    results_dir: Path, wall: int, status: str, requested_agents: int | None,
+    results_dir: Path | None, wall: int, status: str, requested_agents: int | None,
     paused: int = 0, started_at: str = "", housekeeping: int = 0,
     build_identity: dict | None = None,
 ) -> None:
@@ -766,7 +766,11 @@ def write_cell(
         pass
     payload = {
         "condition": condition, "replicate": replicate, "experiment": experiment,
-        "results_dir": str(results_dir), "wall_seconds": wall, "status": status,
+        # None for a cell that never started, recorded as "" rather than as a
+        # path: `str(Path())` is ".", which every reader resolves against its
+        # own working directory — see metrics.cell_results_dir.
+        "results_dir": str(results_dir) if results_dir is not None else "",
+        "wall_seconds": wall, "status": status,
         "run_quality": quality, "paused_seconds": paused,
         "housekeeping_seconds": housekeeping,
         "wall_effective_seconds": max(0, wall - paused),
@@ -789,7 +793,9 @@ def write_cell(
     if build_identity:
         payload["build_identity"] = build_identity
     try:
-        config = json.loads((results_dir / "state" / "run-config.json").read_text(encoding="utf-8"))
+        config = json.loads(
+            (results_dir / "state" / "run-config.json").read_text(encoding="utf-8")
+        ) if results_dir is not None else {}
         actual = config.get("num_agents")
         if isinstance(actual, int) and actual > 0:
             payload["actual_agents"] = actual
@@ -2908,7 +2914,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     cell_dir.mkdir(parents=True, exist_ok=True)
                     (cell_dir / ".backend-unavailable").touch()
                     (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                    write_cell(cell_json, condition, replicate, f"bench-{run_id}-{condition}-r{replicate}", Path(), 0, "incomplete", args.agents)
+                    write_cell(cell_json, condition, replicate, f"bench-{run_id}-{condition}-r{replicate}", None, 0, "incomplete", args.agents)
                     failed += 1
                     continue
                 shutil.rmtree(cell_dir, ignore_errors=True)
@@ -2935,7 +2941,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     )
                     write_cell(
                         cell_json, condition, replicate,
-                        f"bench-{run_id}-{condition}-r{replicate}", Path(), 0,
+                        f"bench-{run_id}-{condition}-r{replicate}", None, 0,
                         "incomplete", args.agents, build_identity=run_identity,
                     )
                     failed += 1
@@ -3188,8 +3194,10 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         for cell_dir in cells_dir.iterdir():
             try:
                 cell = json.loads((cell_dir / "cell.json").read_text(encoding="utf-8"))
-                results = Path(cell.get("results_dir", ""))
             except (OSError, ValueError):
+                continue
+            results = metrics.cell_results_dir(cell)
+            if results is None:
                 continue
             termination_recovered = (
                 cell.get("condition") == "model-direct"

@@ -310,6 +310,44 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertEqual(Path(stored).resolve(), relocated.resolve())
         self.assertEqual(benchmark.relocate_experiments(run), [])
 
+    def test_cell_that_never_started_names_no_results_tree(self) -> None:
+        # A cell refused before it started (an unavailable provider, a drifted
+        # build) records no results dir. Written as a path it was ".", and a
+        # reader resolved that against the working directory: relocate took
+        # its parent's parent — the checkout itself — and tried to move it
+        # into the run. Nothing may treat the absent tree as a real one.
+        run = self.root / "unstarted"
+        cell = run / "cells/harness-r1"
+        cell.mkdir(parents=True)
+        benchmark_runner.write_cell(
+            cell / "cell.json", "harness", 1, "fixture", None, 0,
+            "incomplete", None,
+        )
+        record = json.loads((cell / "cell.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["results_dir"], "")
+        self.assertIsNone(benchmark.cell_results_dir(record))
+        self.assertEqual(benchmark.relocate_experiments(run), [])
+
+        # The record the old writer left behind. Read from a working
+        # directory that is a real tree, relocate took "." for an experiment
+        # tree and copied the whole of it; the live run survived only because
+        # its destination sat inside the source, which shutil refuses. Run it
+        # from a throwaway directory so the assertion cannot reach the
+        # checkout on a build where the guard is gone.
+        (cell / "cell.json").write_text(
+            json.dumps(dict(record, results_dir=".")) + "\n", encoding="utf-8",
+        )
+        self.assertIsNone(benchmark.cell_results_dir({"results_dir": "."}))
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        previous = os.getcwd()
+        os.chdir(elsewhere)
+        try:
+            self.assertEqual(benchmark.relocate_experiments(run), [])
+        finally:
+            os.chdir(previous)
+        self.assertFalse((run / "experiments").exists())
+
     def test_shallow_warning_and_live_dashboard_failure_are_visible_and_safe(self) -> None:
         args = benchmark_runner.parser().parse_args([
             "--target", "samples/sample-python", "--backend", "codex"

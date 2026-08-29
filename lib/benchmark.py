@@ -85,6 +85,27 @@ NONCOMPARABLE_RUN_QUALITIES = frozenset({
 })
 
 
+def cell_results_dir(cell: dict) -> Path | None:
+    """A cell record's results tree, or None when it never named one.
+
+    A cell that was refused before it started records no results dir, and both
+    "" and "." read back through ``Path`` as the *current working directory* —
+    the repository root for every command here. A consumer that takes that at
+    face value treats the whole checkout as the cell's evidence: build_pool
+    would import it, and relocate_experiments computed its parent's parent and
+    called ``shutil.move`` on it, which a real run only survived because the
+    destination happened to sit inside the tree being moved.
+
+    Every writer of a started cell records an absolute path, so an absolute
+    path is the whole of what a results tree can look like.
+    """
+    value = str(cell.get("results_dir") or "").strip()
+    if not value:
+        return None
+    path = Path(value)
+    return path if path.is_absolute() else None
+
+
 def cell_run_quality(cell_dir: Path, status: str) -> str:
     """Resolve persistent cell-quality evidence with stable precedence."""
     quality = "clean"
@@ -4468,8 +4489,8 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
         if cell.get("status") != "done":
             continue
         cond = cell.get("condition") or "unknown"
-        rd = Path(cell.get("results_dir") or "")
-        if not rd.is_dir():
+        rd = cell_results_dir(cell)
+        if rd is None or not rd.is_dir():
             continue
         target_toml = _find_output_target_toml(rd)
         if target_toml is not None:
@@ -6016,10 +6037,10 @@ def relocate_experiments(bench_dir: Path) -> list[tuple[str, str]]:
             cell_data = json.loads(cj.read_text("utf-8"))
         except (OSError, ValueError):
             continue
-        rd = str(cell_data.get("results_dir") or "")
-        if not rd:
+        rd_path = cell_results_dir(cell_data)
+        if rd_path is None:
             continue
-        rd_path = Path(rd)
+        rd = str(cell_data.get("results_dir") or "")
         # results_dir already inside the run dir — nothing to move.
         try:
             rd_path.resolve().relative_to(bench_dir)
@@ -6907,8 +6928,8 @@ def main(argv: list[str]) -> int:
                 cell = json.loads(cell_json.read_text("utf-8"))
             except (OSError, ValueError):
                 continue
-            results_dir = Path(str(cell.get("results_dir") or ""))
-            if not results_dir.is_dir():
+            results_dir = cell_results_dir(cell)
+            if results_dir is None or not results_dir.is_dir():
                 continue
             _write_json(
                 cell_dir / "metrics.json",
