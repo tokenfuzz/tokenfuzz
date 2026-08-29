@@ -1690,6 +1690,47 @@ def _log_phase_spans(
         )
 
 
+def _result_gates_background() -> bool:
+    """Whether the find gate and cluster expansion run beside the next cohort.
+
+    Off by default: the gates run at the barrier exactly as before. On, they
+    are launched at the end of one iteration and joined at the start of the
+    next, so the wall the pool used to sit idle at the barrier is spent on
+    discovery. The lag is at most one iteration; crash triage stays serial in
+    front so a crash-productive iteration still reads productive immediately,
+    and only a finding-only iteration's productivity shifts by one.
+    """
+    return os.environ.get("RESULT_GATES_BACKGROUND", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+
+
+def _result_gate_pass(
+    runtime: Runtime, *, deadline: float | None, detail: list[str] | None = None,
+) -> tuple[dict, dict]:
+    """Run the find gate and cluster expansion together, returning their counts.
+
+    The two touch disjoint trees — findings/ against crashes/ plus the
+    flock-serialized work queue — so overlapping them takes the shorter off
+    the wall. This is the unit the background mode defers; on the serial path
+    it is the body of the result_gates phase.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        expansion = pool.submit(
+            _timed, expand_new_crash_clusters, runtime, deadline=deadline,
+        )
+        finding_counts, gate_seconds = _timed(
+            triage.validate_find_gate, runtime.results,
+            workers=runtime.num_agents, deadline=deadline,
+            target_root_is_product=True,
+        )
+        cluster_counts, expand_seconds = expansion.result()
+    if detail is not None:
+        detail.append(f"finding_gate={gate_seconds:.1f}s")
+        detail.append(f"cluster_expand={expand_seconds:.1f}s")
+    return finding_counts, cluster_counts
+
+
 def post_iteration(
     runtime: Runtime, *, deadline: float | None = None,
     iteration: int | None = None,
@@ -1711,18 +1752,9 @@ def post_iteration(
         # crashes into findings/ and settles the crash set expansion reads.
         gate_detail: list[str] = []
         with _phase_span(spans, "result_gates", detail=gate_detail, records=records):
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                expansion = pool.submit(
-                    _timed, expand_new_crash_clusters, runtime, deadline=deadline,
-                )
-                finding_counts, gate_seconds = _timed(
-                    triage.validate_find_gate, runtime.results,
-                    workers=runtime.num_agents, deadline=deadline,
-                    target_root_is_product=True,
-                )
-                gate_detail.append(f"finding_gate={gate_seconds:.1f}s")
-                cluster_counts, expand_seconds = expansion.result()
-                gate_detail.append(f"cluster_expand={expand_seconds:.1f}s")
+            finding_counts, cluster_counts = _result_gate_pass(
+                runtime, deadline=deadline, detail=gate_detail,
+            )
         if deadline is not None and time.monotonic() >= deadline:
             index_log(
                 runtime,
@@ -2272,6 +2304,12 @@ class BackendState:
     transient_streak: int = 0
     started_at: float = 0.0
     stopped: bool = False
+    # Background result-gate pass (RESULT_GATES_BACKGROUND): the find gate and
+    # cluster expansion launched at the end of one iteration and joined at the
+    # start of the next, so they run beside the next cohort instead of blocking
+    # the barrier. None unless the mode is on and a pass is in flight.
+    pending_gate: concurrent.futures.Future | None = None
+    gate_executor: concurrent.futures.ThreadPoolExecutor | None = None
 
 
 def _max_dry_sessions() -> int:
@@ -2569,19 +2607,126 @@ def _productive_wall_deadline(state: BackendState) -> float | None:
     return state.started_at + budget + state.paused_seconds
 
 
+def _join_pending_gate(state: BackendState, *, records: list[dict] | None = None) -> None:
+    """Block on the previous iteration's background gate, if one is in flight.
+
+    Time spent here is real barrier time — the gate did not finish during the
+    cohort — so it is recorded as a blocked ``result_gates`` phase. A gate that
+    already finished joins instantly and blocks nothing.
+    """
+    future = state.pending_gate
+    if future is None:
+        return
+    state.pending_gate = None
+    started = time.monotonic()
+    try:
+        finding_counts, cluster_counts = future.result()
+    except Exception as exc:  # noqa: BLE001 - a gate failure must not kill the run
+        index_log(state.runtime, f"WARN: deferred result gate failed: {exc}")
+        return
+    waited = time.monotonic() - started
+    if records is not None:
+        records.append({"phase": "result_gates", "seconds": round(waited, 3),
+                        "blocked": waited > 0.05})
+    index_log(
+        state.runtime,
+        "Housekeeping (deferred gate): "
+        f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
+        f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']}",
+    )
+
+
+def _post_iteration_background(state: BackendState) -> None:
+    """Barrier housekeeping with the result gates deferred to the next cohort.
+
+    Everything that mutates findings/ stays serial here — crash triage, index
+    render, orphan enforcement, corpus promotion — and only the find gate and
+    cluster expansion are launched to run alone while the next cohort works.
+    The previous iteration's gate is joined first so a gate never overlaps
+    another gate, and its admits are what this iteration's indexes render.
+    """
+    runtime = state.runtime
+    deadline = _productive_wall_deadline(state)
+    spans: list[str] = []
+    records: list[dict] = []
+    try:
+        _join_pending_gate(state, records=records)
+        with _phase_span(spans, "crash_triage", records=records):
+            crash_counts = triage.triage_crash_dirs(
+                runtime.results, runtime.target_root, runtime.target_slug,
+                runtime.config.attacker_controls, workers=runtime.num_agents,
+                findings_only=runtime.config.sanitizers_explicitly_disabled,
+                deadline=deadline, target_root_is_product=True,
+            )
+        if deadline is not None and time.monotonic() >= deadline:
+            # No budget to launch a gate that could not finish; join it now
+            # instead so the wall that pays for it is this one.
+            index_log(runtime, "Housekeeping: productive wall reached; running gates inline")
+            with _phase_span(spans, "result_gates", records=records):
+                _result_gate_pass(runtime, deadline=deadline)
+            return
+        with _phase_span(spans, "indexes", records=records):
+            maintain_local_indexes(runtime)
+            maintain_aggregate_indexes(runtime)
+            try:
+                triage.record_artifact_events(runtime.results)
+            except Exception as exc:  # noqa: BLE001 - telemetry is never worth a gate
+                print(
+                    f"WARN: artifact event stamps unavailable ({exc}); "
+                    "timeline may be incomplete", file=sys.stderr,
+                )
+        with _phase_span(spans, "orphan_enforce", records=records):
+            enforced = enforce_orphan_testcases(runtime, deadline=deadline)
+        with _phase_span(spans, "corpus_promote", records=records):
+            promoted = promote_corpus(runtime)
+        if state.gate_executor is None:
+            state.gate_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="result-gate",
+            )
+        state.pending_gate = state.gate_executor.submit(
+            _result_gate_pass, runtime, deadline=None,
+        )
+        index_log(
+            runtime,
+            f"Housekeeping: crashes promoted={crash_counts['promoted']} "
+            f"rejected={crash_counts['rejected']} pending={crash_counts['pending']} "
+            f"demoted={crash_counts['demoted']} orphans_enforced={enforced} "
+            f"corpus_promoted={promoted}; result gates deferred to next cohort",
+        )
+    finally:
+        _log_phase_spans(runtime, spans, records=records, iteration=state.iteration)
+
+
 def _run_post_iteration(state: BackendState) -> None:
     """Run housekeeping within the audit wall and record its cost."""
     started = time.monotonic()
     try:
-        post_iteration(
-            state.runtime, deadline=_productive_wall_deadline(state),
-            iteration=state.iteration,
-        )
+        if _result_gates_background():
+            _post_iteration_background(state)
+        else:
+            post_iteration(
+                state.runtime, deadline=_productive_wall_deadline(state),
+                iteration=state.iteration,
+            )
     finally:
         state.housekeeping_seconds += max(0.0, time.monotonic() - started)
         (state.runtime.logs / ".housekeeping_secs").write_text(
             f"{state.housekeeping_seconds:.6f}\n", encoding="utf-8"
         )
+
+
+def drain_pending_gate(state: BackendState) -> None:
+    """Finish any deferred gate and release its executor at run end.
+
+    Called once after the iteration loop so the last iteration's gate reaches
+    a recorded disposition before finalization freezes the artifact set.
+    """
+    if getattr(state, "pending_gate", None) is not None:
+        _join_pending_gate(state)
+    executor = getattr(state, "gate_executor", None)
+    if executor is not None:
+        executor.shutdown(wait=True)
+        state.gate_executor = None
 
 
 def _refill_outcome(result: AgentResult) -> str:
@@ -2991,38 +3136,43 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         validate_model(runtime)
         preflight_build(runtime)
         state = initialize_backend(runtime, args, guide, started_at=time.monotonic())
-        while args.max_iterations == 0 or state.iteration < args.max_iterations:
-            status, results = run_iteration(state)
-            if status in ("budget", "stalled"):
-                break
-            if _productive_wall_exhausted(state):
-                break
-            if status == "rejected":
-                # No recovery: the provider refused the request itself, so a
-                # pause buys nothing and would be subtracted from the wall as
-                # if the provider had withheld capacity it was going to return.
-                (runtime.logs / ".backend-unavailable").touch()
-                (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                index_log(runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
-                return 2
-            if status == "capacity":
-                can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
-                if not can_retry or not _recover_capacity(state, results):
+        # drain_pending_gate on every exit: a deferred result gate must reach a
+        # recorded disposition before finalization, and its executor released.
+        try:
+            while args.max_iterations == 0 or state.iteration < args.max_iterations:
+                status, results = run_iteration(state)
+                if status in ("budget", "stalled"):
+                    break
+                if _productive_wall_exhausted(state):
+                    break
+                if status == "rejected":
+                    # No recovery: the provider refused the request itself, so a
+                    # pause buys nothing and would be subtracted from the wall as
+                    # if the provider had withheld capacity it was going to return.
                     (runtime.logs / ".backend-unavailable").touch()
                     (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                    index_log(runtime, "BACKEND_UNAVAILABLE: provider did not recover within the pause budget")
+                    index_log(runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
                     return 2
-            if status == "transient":
-                can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
-                if not can_retry or not _recover_transient(state):
-                    (runtime.logs / ".backend-unavailable").touch()
-                    (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                    index_log(runtime, "BACKEND_UNAVAILABLE: transient provider failures did not clear")
-                    return 2
-            cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
-            if cooldown and (args.max_iterations == 0 or state.iteration < args.max_iterations):
-                time.sleep(cooldown)
-        return 0
+                if status == "capacity":
+                    can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
+                    if not can_retry or not _recover_capacity(state, results):
+                        (runtime.logs / ".backend-unavailable").touch()
+                        (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                        index_log(runtime, "BACKEND_UNAVAILABLE: provider did not recover within the pause budget")
+                        return 2
+                if status == "transient":
+                    can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
+                    if not can_retry or not _recover_transient(state):
+                        (runtime.logs / ".backend-unavailable").touch()
+                        (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                        index_log(runtime, "BACKEND_UNAVAILABLE: transient provider failures did not clear")
+                        return 2
+                cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
+                if cooldown and (args.max_iterations == 0 or state.iteration < args.max_iterations):
+                    time.sleep(cooldown)
+            return 0
+        finally:
+            drain_pending_gate(state)
 
 
 def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
@@ -3100,6 +3250,8 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
             cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
             if cooldown and any(not state.stopped for state in states):
                 time.sleep(cooldown)
+        for state in states:
+            drain_pending_gate(state)
         return 2 if failures == len(states) else 0
 
 
