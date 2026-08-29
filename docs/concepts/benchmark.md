@@ -290,6 +290,23 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Unique Security crashes to report` | Distinct reportable sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. The existing crash-cluster link includes reportable crashes at every numeric severity, including Low. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
 
+**Efficiency** follows the scoreboard whenever a cell recorded any of it, and
+says where each condition's wall went. Every value is a median over completed
+replicates; an em dash means unrecorded, never zero.
+
+| Column | Meaning |
+| --- | --- |
+| `Occupancy` | Occupied agent-seconds over seats × effective wall. A `†` marks a cell that predates recorded session spans, where the number comes from the prompt-render and transcript file clocks instead. |
+| `Blocked housekeeping` | Share of the effective wall the worker pool sat empty at the iteration barrier while crash triage, the result gates, indexes, orphan enforcement and corpus promotion ran. Still charged to the wall either way. |
+| `Review s/artifact` | Crash-triage plus result-gate seconds per artifact those gates judged. |
+| `First filed` / `First crash confirmed` / `First admitted` | Minutes from the run's first clock (its first backend call) to the first artifact filed, the first sanitizer-confirmed crash, and the first receipt claiming `reportable`. |
+| `EXEC_FAIL share` | Fraction of probes the target rejected before executing the input — a sanitizer launch that taught nothing. |
+| `Duplicate roots` | Share of artifact signatures filed by more than one agent: convergence, not yield. |
+
+The same numbers sit in each cell's `metrics.json` under `telemetry`, and a
+`lineage.jsonl` beside it joins card → hypothesis → testcase → artifact →
+signature, one row per hypothesis.
+
 A direct backend that exits nonzero after writing substantive finding or crash
 evidence becomes an early terminal outcome rather than losing the entire cell.
 It counts, so it carries a `(Nt)` marker in `Replicates` and its shorter actual

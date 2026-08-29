@@ -2910,6 +2910,14 @@ def _append_jsonl_many_unlocked(path: Path, rows: list[dict]) -> None:
         os.fsync(f.fileno())
 
 
+def append_jsonl_many(path: Path, rows: list[dict]) -> None:
+    """Append a batch under the ledger lock with one durability round-trip."""
+    if not rows:
+        return
+    with jsonl_lock(path):
+        _append_jsonl_many_unlocked(path, rows)
+
+
 def read_jsonl(path: Path) -> list[dict]:
     return _read_jsonl_unlocked(path)
 

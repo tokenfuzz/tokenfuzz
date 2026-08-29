@@ -1356,6 +1356,7 @@ def run_agent(
 ) -> AgentResult:
     role = context.role(agent)
     launch = "cold-start" if cold else "deep_investigation"
+    launched_at = datetime.now(timezone.utc)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     stem = f"session_{stamp}_{launch}-{agent}"
     raw_path = runtime.raw / f"{stem}.log.raw"
@@ -1448,8 +1449,13 @@ def run_agent(
     usage_complete = llm_usage.usage_is_complete(usage, rc)
     turn_capped = llm_invoke.session_turn_capped(raw_path)
     tools, events = _tally_transcript(raw_path)
+    ended_at = datetime.now(timezone.utc)
     event = {
-        "timestamp": datetime.now(timezone.utc).isoformat(), "iteration": iteration,
+        "timestamp": ended_at.isoformat(), "iteration": iteration,
+        # Session span: occupancy is occupied seconds over seats × wall, and a
+        # seat idle at the barrier is invisible without both ends recorded.
+        "started": launched_at.isoformat(), "ended": ended_at.isoformat(),
+        "seconds": round((ended_at - launched_at).total_seconds(), 3),
         "agent": agent, "role": role, "backend": runtime.backend, "model": runtime.model,
         "resolved_effort": llm_invoke.default_effort(runtime.backend),
         "usage_complete": usage_complete, "turn_capped": turn_capped,
@@ -1601,7 +1607,10 @@ def _timed(call, *args, **kwargs):
 
 
 @contextlib.contextmanager
-def _phase_span(spans: list[str], name: str, *, detail: list[str] | None = None):
+def _phase_span(
+    spans: list[str], name: str, *, detail: list[str] | None = None,
+    records: list[dict] | None = None,
+):
     """Record one post_iteration phase's duration.
 
     Housekeeping has been a single aggregate number, so a barrier that costs a
@@ -1617,11 +1626,19 @@ def _phase_span(spans: list[str], name: str, *, detail: list[str] | None = None)
     try:
         yield
     finally:
+        seconds = time.monotonic() - started
         suffix = f"({' '.join(detail)})" if detail else ""
-        spans.append(f"{name}={time.monotonic() - started:.1f}s{suffix}")
+        spans.append(f"{name}={seconds:.1f}s{suffix}")
+        # The structured twin of the log token, read by lib/telemetry.py:
+        # the log line is for the operator, the row is for the harvest.
+        if records is not None:
+            records.append({"phase": name, "seconds": round(seconds, 3)})
 
 
-def _log_phase_spans(runtime: Runtime, spans: list[str]) -> None:
+def _log_phase_spans(
+    runtime: Runtime, spans: list[str], *,
+    records: list[dict] | None = None, iteration: int | None = None,
+) -> None:
     """Publish advisory timing without changing housekeeping's outcome."""
     if not spans:
         return
@@ -1632,12 +1649,34 @@ def _log_phase_spans(runtime: Runtime, spans: list[str]) -> None:
             f"WARN: housekeeping phase timing could not be recorded: {exc}",
             file=sys.stderr,
         )
-
-
-def post_iteration(runtime: Runtime, *, deadline: float | None = None) -> None:
-    spans: list[str] = []
+    if not records:
+        return
+    # Every phase here ran while the pool was empty, so it blocked discovery.
+    # A phase that later overlaps a cohort writes blocked=False for its share.
+    rows = [
+        {"type": "housekeeping_phase", "iteration": iteration, "blocked": True,
+         "recorded": datetime.now(timezone.utc).isoformat(), **record}
+        for record in records
+    ]
     try:
-        with _phase_span(spans, "crash_triage"):
+        events = Path(runtime.results) / "state" / "events.jsonl"
+        events.parent.mkdir(parents=True, exist_ok=True)
+        workqueue.append_jsonl_many(events, rows)
+    except (OSError, AttributeError, TypeError) as exc:
+        print(
+            f"WARN: housekeeping phase rows could not be recorded: {exc}",
+            file=sys.stderr,
+        )
+
+
+def post_iteration(
+    runtime: Runtime, *, deadline: float | None = None,
+    iteration: int | None = None,
+) -> None:
+    spans: list[str] = []
+    records: list[dict] = []
+    try:
+        with _phase_span(spans, "crash_triage", records=records):
             crash_counts = triage.triage_crash_dirs(
                 runtime.results, runtime.target_root, runtime.target_slug,
                 runtime.config.attacker_controls, workers=runtime.num_agents,
@@ -1650,7 +1689,7 @@ def post_iteration(runtime: Runtime, *, deadline: float | None = None) -> None:
         # wall. Crash triage keeps its place in front of both: it demotes
         # crashes into findings/ and settles the crash set expansion reads.
         gate_detail: list[str] = []
-        with _phase_span(spans, "result_gates", detail=gate_detail):
+        with _phase_span(spans, "result_gates", detail=gate_detail, records=records):
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 expansion = pool.submit(
                     _timed, expand_new_crash_clusters, runtime, deadline=deadline,
@@ -1670,12 +1709,21 @@ def post_iteration(runtime: Runtime, *, deadline: float | None = None) -> None:
                 "remaining index work deferred",
             )
             return
-        with _phase_span(spans, "indexes"):
+        with _phase_span(spans, "indexes", records=records):
             maintain_local_indexes(runtime)
             maintain_aggregate_indexes(runtime)
-        with _phase_span(spans, "orphan_enforce"):
+            # Discovery and disposition stamps for the timeline; telemetry only,
+            # never able to fail the indexes it rides with.
+            try:
+                triage.record_artifact_events(runtime.results)
+            except Exception as exc:  # noqa: BLE001 - telemetry is never worth a gate
+                print(
+                    f"WARN: artifact event stamps unavailable ({exc}); "
+                    "timeline may be incomplete", file=sys.stderr,
+                )
+        with _phase_span(spans, "orphan_enforce", records=records):
             enforced = enforce_orphan_testcases(runtime, deadline=deadline)
-        with _phase_span(spans, "corpus_promote"):
+        with _phase_span(spans, "corpus_promote", records=records):
             promoted = promote_corpus(runtime)
         index_log(
             runtime,
@@ -1686,7 +1734,7 @@ def post_iteration(runtime: Runtime, *, deadline: float | None = None) -> None:
             f"orphans_enforced={enforced} corpus_promoted={promoted}",
         )
     finally:
-        _log_phase_spans(runtime, spans)
+        _log_phase_spans(runtime, spans, records=records, iteration=iteration)
 
 
 def _write_cluster_marker(path: Path) -> None:
@@ -2504,7 +2552,10 @@ def _run_post_iteration(state: BackendState) -> None:
     """Run housekeeping within the audit wall and record its cost."""
     started = time.monotonic()
     try:
-        post_iteration(state.runtime, deadline=_productive_wall_deadline(state))
+        post_iteration(
+            state.runtime, deadline=_productive_wall_deadline(state),
+            iteration=state.iteration,
+        )
     finally:
         state.housekeeping_seconds += max(0.0, time.monotonic() - started)
         (state.runtime.logs / ".housekeeping_secs").write_text(

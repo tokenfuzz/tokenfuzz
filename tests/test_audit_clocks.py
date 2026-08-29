@@ -64,7 +64,9 @@ class AuditClockTests(unittest.TestCase):
                 ):
             audit_runner._run_post_iteration(state)
 
-        post.assert_called_once_with(self.runtime, deadline=150.0)
+        # The iteration rides along so housekeeping_phase rows can say which
+        # barrier they cost; state.iteration starts at 0 before the first cohort.
+        post.assert_called_once_with(self.runtime, deadline=150.0, iteration=0)
         self.assertEqual(state.housekeeping_seconds, 12.5)
         self.assertEqual(float((self.logs / ".housekeeping_secs").read_text()), 12.5)
 

@@ -3871,6 +3871,74 @@ def record_finding_discovery(results_dir: str | os.PathLike[str]) -> int:
     return len(fresh)
 
 
+def record_artifact_events(results_dir: str | os.PathLike[str]) -> int:
+    """Stamp crash discovery and terminal dispositions into ``state/events.jsonl``.
+
+    The finding_created stream answers "when was it found" for findings; this
+    adds the same immutable first-seen row for crashes (``crash_created``) and
+    one for the moment a receipt first claimed a terminal state
+    (``artifact_admitted`` for reportable, ``artifact_rejected`` for rejected),
+    so time-to-first-admitted can be read without replaying the gates. Rows are
+    keyed by artifact id and written once; a later re-review does not move them.
+
+    Crash rows carry an empty signature: the runtime-frame cluster key is
+    settled by clustering, which runs after this stamp.
+    """
+    results = Path(results_dir)
+    events = results / "state" / "events.jsonl"
+    existing = workqueue.read_jsonl(events)
+    seen = {
+        (row.get("type"), row.get("id")) for row in existing
+        if row.get("type") in ("crash_created", "artifact_admitted", "artifact_rejected")
+    }
+    now = datetime.now(timezone.utc).isoformat()
+    rows: list[dict] = []
+
+    def stamp(event: str, directory: Path, **extra: object) -> None:
+        key = (event, directory.name)
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append({"type": event, "id": directory.name, "first_seen": now, **extra})
+
+    for root in (results / "crashes", results / "crashes-rejected"):
+        if not root.is_dir():
+            continue
+        for directory in sorted(root.glob("CRASH-*")):
+            if directory.is_dir():
+                stamp(
+                    "crash_created", directory, signature=[],
+                    mtime=datetime.fromtimestamp(
+                        directory.stat().st_mtime, timezone.utc,
+                    ).isoformat(),
+                )
+    lanes = (
+        ("findings", "FIND-*", "finding"), ("crashes", "CRASH-*", "crash"),
+        ("findings-rejected", "FIND-*", "finding"),
+        ("crashes-rejected", "CRASH-*", "crash"),
+    )
+    for lane, pattern, kind in lanes:
+        root = results / lane
+        if not root.is_dir():
+            continue
+        for directory in sorted(root.glob(pattern)):
+            if not directory.is_dir():
+                continue
+            if validation_receipt.claims_state(directory, validation_receipt.SECURITY_STATES):
+                stamp("artifact_admitted", directory, kind=kind)
+            elif validation_receipt.claims_state(directory, frozenset({"rejected"})):
+                stamp("artifact_rejected", directory, kind=kind)
+    if not rows:
+        return 0
+    with workqueue.jsonl_lock(events):
+        known = {
+            (row.get("type"), row.get("id")) for row in workqueue.read_jsonl(events)
+        }
+        fresh = [row for row in rows if (row["type"], row["id"]) not in known]
+        workqueue._append_jsonl_many_unlocked(events, fresh)
+    return len(fresh)
+
+
 # Enough of a report to reach its fields table. Ranking reads its own head
 # rather than read_report_bounded, whose oversize warning names a real
 # false-negative risk in a gate and must not also fire for a sort key.

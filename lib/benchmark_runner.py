@@ -35,6 +35,7 @@ import crash_bundle
 import llm_decide
 import llm_invoke
 import llm_usage
+import telemetry
 import process_tree
 import report_identity
 import runner_preflight
@@ -700,6 +701,18 @@ def _is_shallow_checkout(path: Path) -> bool:
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
     )
     return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _write_lineage(cell_dir: Path, results: Path) -> None:
+    """Write the cell's card→hypothesis→artifact lineage beside metrics.json.
+
+    Kept out of metrics.json because it is one row per hypothesis; a failure
+    here costs the lineage file only, never the cell's metrics.
+    """
+    try:
+        telemetry.write_lineage(results, cell_dir / "lineage.jsonl")
+    except OSError as exc:
+        log(f"WARN: lineage for {cell_dir.name} not written: {exc}")
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -3081,6 +3094,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     if args.validate_findings and unjudged:
                         log(_unadjudicated_warning(name, unjudged))
                     _write_json(cell_dir / "metrics.json", summary)
+                    _write_lineage(cell_dir, results)
                 else:
                     summary = {"exists": False}
                     _write_json(cell_dir / "metrics.json", summary)
@@ -3239,6 +3253,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     require_trigger_confirmation=require_trigger_confirmation,
                 )
                 _write_json(cell_dir / "metrics.json", summary)
+                _write_lineage(cell_dir, results)
                 remaining = summary.get("findings_unadjudicated", 0)
                 if args.validate_findings and remaining:
                     log(_unadjudicated_warning(cell_dir.name, remaining))

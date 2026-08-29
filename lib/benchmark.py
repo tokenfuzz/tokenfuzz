@@ -51,6 +51,7 @@ import crash_artifacts
 import crash_bundle
 import llm_usage
 import report_identity
+import telemetry
 import triage_validate
 import validation_receipt
 
@@ -2917,6 +2918,8 @@ def harvest(
         crash_signatures=crash_clusters,
         finding_signatures=finding_clusters,
     )
+    # Where the wall went: passive, fails open to None, never a disposition.
+    metrics["telemetry"] = telemetry.summary(results_dir)
     return metrics
 
 
@@ -3482,6 +3485,176 @@ def _cell_worker_seats(cell: dict) -> int | None:
     return 1 if cell.get("condition") == "model-direct" else None
 
 
+def _cell_telemetry(cell: dict) -> dict:
+    metrics = cell.get("metrics") or {}
+    block = metrics.get("telemetry") if isinstance(metrics, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def _ratio(numerator: object, denominator: object) -> float | None:
+    try:
+        top, bottom = float(numerator), float(denominator)
+    except (TypeError, ValueError):
+        return None
+    if bottom <= 0:
+        return None
+    return top / bottom
+
+
+def _efficiency_summary(done: list[dict]) -> dict:
+    """Medians of the per-cell efficiency telemetry for one condition.
+
+    Every value is None when no completed cell recorded it, so an old cell
+    renders as an em dash rather than as a measured zero. Occupancy is
+    occupied agent-seconds over seats × effective wall; blocked housekeeping
+    is the fraction of the effective wall the pool sat empty; review seconds
+    per artifact divides the crash-triage and result-gate spans by the
+    artifacts those gates judged (validation-waterfall candidates).
+    """
+    occupancy: list[float] = []
+    blocked: list[float] = []
+    review: list[float] = []
+    filed: list[float] = []
+    confirmed: list[float] = []
+    admitted: list[float] = []
+    exec_fail: list[float] = []
+    duplicates: list[float] = []
+    sources: set[str] = set()
+    for cell in done:
+        block = _cell_telemetry(cell)
+        if not block:
+            continue
+        wall = cell.get("wall_effective_seconds")
+        seats = _cell_worker_seats(cell)
+        occ = (block.get("occupancy") or {})
+        value = _ratio(occ.get("occupied_seconds"), (wall or 0) * (seats or 0))
+        if value is not None:
+            occupancy.append(min(1.0, value))
+            if occ.get("source"):
+                sources.add(str(occ["source"]))
+        house = block.get("housekeeping") or {}
+        value = _ratio(house.get("blocked_seconds"), wall)
+        if value is not None:
+            blocked.append(value)
+        phases = house.get("phases") or {}
+        waterfall = ((cell.get("metrics") or {}).get("validation_waterfall") or {})
+        judged = sum(
+            _as_int((waterfall.get(kind) or {}).get("candidates"))
+            for kind in ("crashes", "findings")
+        )
+        review_seconds = sum(
+            float(phases.get(name) or 0.0) for name in ("crash_triage", "result_gates")
+        )
+        value = _ratio(review_seconds, judged) if house.get("source") else None
+        if value is not None:
+            review.append(value)
+        ttf = block.get("time_to_first") or {}
+        for key, bucket in (
+            ("filed_seconds", filed), ("crash_confirmed_seconds", confirmed),
+            ("admitted_seconds", admitted),
+        ):
+            if isinstance(ttf.get(key), (int, float)):
+                bucket.append(float(ttf[key]))
+        share = (block.get("execution") or {}).get("exec_fail_share")
+        if isinstance(share, (int, float)):
+            exec_fail.append(float(share))
+        rate = (block.get("duplicate_roots") or {}).get("rate")
+        if isinstance(rate, (int, float)):
+            duplicates.append(float(rate))
+
+    def median(values: list[float]) -> float | None:
+        return _median(values) if values else None
+
+    return {
+        "worker_occupancy_median": median(occupancy),
+        "worker_occupancy_source": (
+            "recorded" if sources == {"recorded"} else "file_mtime" if sources else None
+        ),
+        "housekeeping_blocked_fraction_median": median(blocked),
+        "review_seconds_per_artifact_median": median(review),
+        "time_to_first_filed_median": median(filed),
+        "time_to_first_crash_confirmed_median": median(confirmed),
+        "time_to_first_admitted_median": median(admitted),
+        "exec_fail_share_median": median(exec_fail),
+        "duplicate_root_rate_median": median(duplicates),
+    }
+
+
+def _fmt_fraction(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{100 * float(value):.0f}%"
+
+
+def _fmt_minutes(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{float(value) / 60:.0f}m"
+
+
+def _fmt_seconds(value: object) -> str:
+    if not isinstance(value, (int, float)):
+        return "—"
+    return f"{float(value):.0f}s"
+
+
+def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
+    """The efficiency table: where each condition's wall went.
+
+    Rendered only when some condition recorded any of it, so a ledger of old
+    cells does not grow a table of dashes.
+    """
+    keys = (
+        "worker_occupancy_median", "housekeeping_blocked_fraction_median",
+        "review_seconds_per_artifact_median", "time_to_first_filed_median",
+        "time_to_first_crash_confirmed_median", "time_to_first_admitted_median",
+        "exec_fail_share_median", "duplicate_root_rate_median",
+    )
+    if not any(isinstance(c.get(key), (int, float)) for c in conditions for key in keys):
+        return []
+    lines = [
+        "| Condition | Occupancy | Blocked housekeeping | Review s/artifact "
+        "| First filed | First crash confirmed | First admitted "
+        "| EXEC_FAIL share | Duplicate roots |",
+        "| --- | --: | --: | --: | --: | --: | --: | --: | --: |",
+    ]
+    for c in sorted(conditions, key=lambda item: item["condition"]):
+        occupancy = _fmt_fraction(c.get("worker_occupancy_median"))
+        if c.get("worker_occupancy_source") == "file_mtime" and occupancy != "—":
+            occupancy += "†"
+        lines.append(
+            "| {cond} | {occ} | {blocked} | {review} | {filed} | {confirmed} "
+            "| {admitted} | {exec_fail} | {dup} |".format(
+                cond=_condition_cell(c["condition"], backend),
+                occ=occupancy,
+                blocked=_fmt_fraction(c.get("housekeeping_blocked_fraction_median")),
+                review=_fmt_seconds(c.get("review_seconds_per_artifact_median")),
+                filed=_fmt_minutes(c.get("time_to_first_filed_median")),
+                confirmed=_fmt_minutes(c.get("time_to_first_crash_confirmed_median")),
+                admitted=_fmt_minutes(c.get("time_to_first_admitted_median")),
+                exec_fail=_fmt_fraction(c.get("exec_fail_share_median")),
+                dup=_fmt_fraction(c.get("duplicate_root_rate_median")),
+            )
+        )
+    lines.append("")
+    lines.append(
+        "> **Efficiency.** **Occupancy** is occupied agent-seconds over seats × "
+        "effective wall († derived from session file clocks on a cell that "
+        "predates recorded spans); **Blocked housekeeping** is the share of the "
+        "wall the pool sat empty at the iteration barrier; **Review s/artifact** "
+        "is crash-triage plus result-gate seconds per artifact judged; the "
+        "**First** columns are minutes from the run's first clock to the first "
+        "artifact filed, the first sanitizer-confirmed crash, and the first "
+        "receipt claiming reportable; **EXEC_FAIL share** is the fraction of "
+        "probes the target rejected before executing the input; **Duplicate "
+        "roots** is the share of artifact signatures filed by more than one "
+        "agent. Medians over completed replicates; an em dash is unrecorded, "
+        "never zero."
+    )
+    lines.append("")
+    return lines
+
+
 def _effective_wall(cell: dict):
     """Active wall: elapsed minus confirmed provider-recovery pauses.
 
@@ -3975,6 +4148,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                     _median([float(x) for x in worker_walls])
                     if worker_walls else None
                 ),
+                **_efficiency_summary(done),
                 "input_tokens_total": sum(r["input_tokens"] for r in token_rows),
                 "cached_input_tokens_total": sum(
                     r["cached_input_tokens"] for r in token_rows
@@ -4958,6 +5132,7 @@ def render_section(report: dict) -> str:
             )
         )
     lines.append("")
+    lines.extend(_render_efficiency(conditions, backend))
     for c in sorted(conditions, key=lambda item: item["condition"]):
         for observed in c.get("incomplete_observed", []):
             lines.append(
