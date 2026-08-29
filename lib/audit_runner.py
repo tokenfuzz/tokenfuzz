@@ -1893,6 +1893,20 @@ def post_iteration(
             finding_counts, cluster_counts = _result_gate_pass(
                 runtime, deadline=deadline, detail=gate_detail,
             )
+        # Discovery and disposition stamps for the timeline, stamped before the
+        # deadline gate below. The find gate already stamps finding discovery
+        # inside the result-gate pass; crash stamps must land here too, or a
+        # wall-cut iteration returns having left its crashes off the timeline
+        # while its findings stayed on it. Telemetry only: loud but never able
+        # to fail the gates it rode in behind.
+        with _phase_span(spans, "artifact_events", records=records):
+            try:
+                triage.record_artifact_events(runtime.results)
+            except Exception as exc:  # noqa: BLE001 - telemetry is never worth a gate
+                print(
+                    f"WARN: artifact event stamps unavailable ({exc}); "
+                    "timeline may be incomplete", file=sys.stderr,
+                )
         if deadline is not None and time.monotonic() >= deadline:
             index_log(
                 runtime,
@@ -1903,15 +1917,6 @@ def post_iteration(
         with _phase_span(spans, "indexes", records=records):
             maintain_local_indexes(runtime)
             maintain_aggregate_indexes(runtime)
-            # Discovery and disposition stamps for the timeline; telemetry only,
-            # never able to fail the indexes it rides with.
-            try:
-                triage.record_artifact_events(runtime.results)
-            except Exception as exc:  # noqa: BLE001 - telemetry is never worth a gate
-                print(
-                    f"WARN: artifact event stamps unavailable ({exc}); "
-                    "timeline may be incomplete", file=sys.stderr,
-                )
         with _phase_span(spans, "orphan_enforce", records=records):
             enforced = enforce_orphan_testcases(runtime, deadline=deadline)
         with _phase_span(spans, "corpus_promote", records=records):

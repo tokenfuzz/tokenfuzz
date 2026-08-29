@@ -105,7 +105,57 @@ class AuditClockTests(unittest.TestCase):
             phase_line,
             r"^Housekeeping phases: crash_triage=[\d.]+s "
             r"result_gates=[\d.]+s\(finding_gate=[\d.]+s cluster_expand=[\d.]+s\) "
-            r"indexes=[\d.]+s orphan_enforce=[\d.]+s corpus_promote=[\d.]+s$",
+            r"artifact_events=[\d.]+s indexes=[\d.]+s "
+            r"orphan_enforce=[\d.]+s corpus_promote=[\d.]+s$",
+        )
+
+    def test_crash_discovery_is_stamped_when_the_wall_is_already_spent(self) -> None:
+        # A wall-cut iteration defers the index phase, but crash discovery must
+        # still land on the timeline the way finding discovery does — otherwise
+        # a crash filed on the last iteration has no first-seen stamp.
+        results = self.root / "wallcut"
+        (results / "state").mkdir(parents=True)
+        crash = results / "crashes" / "CRASH-9f9f9f-1"
+        crash.mkdir(parents=True)
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "    #0 0x1 in app_parse sample.c:91\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:91 in app_parse\n",
+            encoding="utf-8",
+        )
+        runtime = SimpleNamespace(
+            results=results, target_root=self.root / "target",
+            target_slug="sampleproj", num_agents=1, index=self.runtime.index,
+            config=SimpleNamespace(
+                attacker_controls=["bytes"],
+                sanitizers_explicitly_disabled=False,
+            ),
+        )
+        with mock.patch.object(
+            audit_runner.triage, "triage_crash_dirs",
+            return_value={"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0},
+        ), mock.patch.object(
+            audit_runner.triage, "validate_find_gate",
+            return_value={"accepted": 0, "rejected": 0, "pending": 0},
+        ), mock.patch.object(
+            audit_runner, "expand_new_crash_clusters", return_value={"added": 0},
+        ), mock.patch.object(
+            audit_runner, "maintain_local_indexes",
+        ) as indexes, mock.patch.object(
+            audit_runner, "maintain_aggregate_indexes",
+        ), mock.patch.object(audit_runner, "index_log"):
+            audit_runner.post_iteration(
+                runtime, deadline=audit_runner.time.monotonic() - 1,
+            )
+
+        indexes.assert_not_called()
+        rows = [
+            json.loads(line) for line in
+            (results / "state" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertTrue(
+            any(r["type"] == "crash_created" and r["id"] == "CRASH-9f9f9f-1" for r in rows),
+            "a deferred index phase must not drop the crash's first-seen stamp",
         )
 
     def test_the_two_result_gates_actually_run_at_the_same_time(self) -> None:
