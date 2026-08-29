@@ -202,6 +202,19 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         "progress snapshot carries diagnostic ENV-BLOCKED closures",
     )
 
+    # A candidate filed but not yet adjudicated is invisible to progress()
+    # (admitted-only) yet must show up in filed_artifact_count so the iteration
+    # label can say "filed-unadjudicated" instead of "env-blocked".
+    filed_before = audit_runner.filed_artifact_count(runtime)
+    bare = findings / "FIND-006"
+    bare.mkdir()
+    (bare / "report.md").write_text("# Ungated candidate\n", encoding="utf-8")
+    check(
+        audit_runner.filed_artifact_count(runtime) == filed_before + 1
+        and audit_runner.progress(runtime).findings == uncredited_progress.findings,
+        "filed_artifact_count sees an ungated candidate that admitted-only progress does not",
+    )
+
     queue_results = root / "queue-results"
     (queue_results / "state").mkdir(parents=True)
     queue_runtime = SimpleNamespace(

@@ -1712,6 +1712,22 @@ def progress(runtime: Runtime) -> ProgressSnapshot:
     )
 
 
+def filed_artifact_count(runtime: Runtime) -> int:
+    """Raw on-disk FIND-/CRASH- subdirs, admitted or not.
+
+    progress() counts only admitted findings and confirmed crashes, so a
+    candidate filed but not yet adjudicated is invisible to it. This raw total
+    lets the iteration label separate "filed, awaiting adjudication" from a
+    genuinely env-blocked or dry iteration — rejected artifacts have already
+    been moved to the *-rejected trees and so are not counted.
+    """
+    import benchmark
+    return (
+        benchmark.count_subdirs(runtime.results / "findings", "FIND-")
+        + benchmark.count_subdirs(runtime.results / "crashes", "CRASH-")
+    )
+
+
 def agent_progress(runtime: Runtime, agent: int, snapshot: ProgressSnapshot) -> AgentProgress:
     counts = structured_state.agent_counts(str(agent), runtime.results) or {}
     roots_by_status: dict[str, set[str]] = {}
@@ -3015,6 +3031,7 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     reset_sanitizer_run_counters(runtime)
     reset_llm_decision_counters(runtime)
     before = progress(runtime)
+    filed_before = filed_artifact_count(runtime)
     cold = _cold(runtime)
     refresh_work_cards(runtime)
     released = release_stale_card_claims(runtime)
@@ -3106,7 +3123,17 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     update_strategy_rotation(
         runtime, context, after_agent_progress, productive_agents
     )
-    outcome = "productive" if productive else "env-blocked" if diagnostic else "dry"
+    # A candidate filed this iteration but not yet admitted (the result gate
+    # deferred past the deadline) is neither dry nor env-blocked; label it
+    # honestly so an operator does not read a productive iteration as blocked.
+    # This is the log line only: admitted-only productivity, dry_streak, and
+    # rotation are unchanged.
+    filed = filed_artifact_count(runtime) > filed_before
+    outcome = (
+        "productive" if productive
+        else "filed-unadjudicated" if filed
+        else "env-blocked" if diagnostic else "dry"
+    )
     index_log(
         runtime,
         f"Iteration {state.iteration} result: {outcome} "
