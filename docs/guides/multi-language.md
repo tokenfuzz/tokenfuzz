@@ -178,7 +178,7 @@ A few ecosystem notes:
 Once the runtime is wired up, the triager decides where each artifact
 lands:
 
-| Signal in `asan.txt` | Sanitizer enabled? | Destination |
+| Signal in the probe's saved output | Sanitizer enabled? | Destination |
 | --- | --- | --- |
 | `ERROR: AddressSanitizer: ...` | yes or emitted by the route | `crashes/CRASH-*` |
 | `WARNING: ThreadSanitizer: data race` | yes (`tsan`) | `crashes/CRASH-*` |
@@ -265,7 +265,7 @@ no-op or a virtual-env / dependency install.
 
 - [Target config reference](../reference/target-toml.md) — the full
   `target.toml` schema.
-- [Configure a target](configure-target.md) — the operator review
+- [Target configuration](configure-target.md) — the operator review
   workflow.
 - [`AGENTS.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/AGENTS.md) (repository root) — the agent-facing audit workflow,
   covering both browser and generic targets.

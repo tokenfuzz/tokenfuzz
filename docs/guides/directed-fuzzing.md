@@ -1,4 +1,4 @@
-# Directed Fuzzing
+# Boundary-Directed Fuzzing
 
 Strategy S4 is the only TokenFuzz strategy that runs a fuzzer. Use it when a
 published API accepts a shape the threat model exposes and no existing harness

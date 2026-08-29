@@ -89,7 +89,7 @@ One related field is *not* seeded: `defines`, compiler define flags
 for C/C++ harness builds (such as `-DFOO=1`). Add it by hand when a
 harness build needs it — or let the audit's automatic repair propose
 it after repeated harness build failures (see
-[Configure a target](../guides/configure-target.md#c-harness-readiness)).
+[Target configuration](../guides/configure-target.md#c-harness-readiness)).
 
 Which fields you need depends on what the run will do:
 
@@ -172,7 +172,7 @@ valid only inside `enabled` — it routes through `[runner]` and takes
 none of the per-sanitizer `<name>_bin` / `<name>_lib` /
 `<name>_suppressions` keys below. For when to enable each one and the
 false-positive trade-offs, see
-[Configure a target](../guides/configure-target.md#sanitizer-policy).
+[Sanitizer policy](../guides/configure-target.md#sanitizer-policy).
 
 ### Findings-only mode (no sanitizer)
 

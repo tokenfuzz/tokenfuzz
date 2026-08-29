@@ -238,5 +238,5 @@ The mechanisms that keep the loop honest:
 - report fields that triage can parse mechanically.
 
 The architecture is intentionally opinionated: model reasoning becomes useful
-when it ends in reviewable evidence—a reproducible diagnostic or a concrete,
-source-anchored security report.
+when it ends in reviewable evidence — a reproducible diagnostic, or a concrete
+security report anchored in source.

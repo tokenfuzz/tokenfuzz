@@ -6,7 +6,7 @@ TokenFuzz crash bundle. The shortest path is: read `REPORT.md`, inspect
 diagnostic with `sanitizer.txt`.
 
 If you are the operator running TokenFuzz, see
-[Triage results](triage-results.md) instead.
+[Triage and review](triage-results.md) instead.
 
 Accepted crashes are exported in place during triage. The directory under
 `output/.../crashes/CRASH-*` is therefore the same self-contained shape an
@@ -39,9 +39,10 @@ that produced them.
 Read `REPORT.md` first. `REPORT.html` presents the same content with its field
 table and severity annotation rendered for a browser.
 
-It opens with a **Reviewer TL;DR** — two lines giving the bug and its trigger —
-then the severity badge, a `## Summary` paragraph, and a `## Fields` table of
-the structured claims triage parsed. Between them they name:
+It opens with a **Reviewer TL;DR** — one line each for the bug, its trigger,
+and the suggested fix — then the severity badge, a `## Summary` paragraph, and a
+`## Fields` table of the structured claims triage parsed. Between them they
+name:
 
 - the affected `file:function:line`;
 - the issue class (bounds / lifetime / type / size / uninit / state);

@@ -14,4 +14,4 @@ of it.
 | [Strategy model](strategy-model.md) | The eight investigation methods, how cards get a strategy, and how rotation is effort-gated. |
 | [Cost model](cost-model.md) | What scales with cost on long runs, and the levers the harness gives you. |
 | [Deduplication](deduplication.md) | How crashes (stack-state bucketing) and findings (evidence clustering) group matching report signatures for review. |
-| [Benchmark design](benchmark.md) | How `bin/benchmark` compares TokenFuzz against a direct prompt without hiding orchestration or review cost. |
+| [Benchmarking](benchmark.md) | How `bin/benchmark` compares TokenFuzz against a direct prompt without hiding orchestration or review cost. |

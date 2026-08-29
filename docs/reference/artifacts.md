@@ -173,7 +173,7 @@ harness internals — safe to ignore when reviewing.
 members also have a `.dup-of` file naming the canonical CRASH. The
 auto-generated `REPORT.html` is regenerated on every triage pass;
 edit `REPORT.md` only. See
-[Triage results](../guides/triage-results.md#clusters-and-duplicates)
+[Triage and review](../guides/triage-results.md#clusters-and-duplicates)
 for the cluster model.
 
 Audit-side originals (operator's `report.md`, intermediate scratch
@@ -217,7 +217,7 @@ a root cause. The cross-backend aggregate lives at
 `output/<target>/FINDING-CLUSTERS.html`.
 
 See
-[Triage results](../guides/triage-results.md#clusters-and-duplicates)
+[Triage and review](../guides/triage-results.md#clusters-and-duplicates)
 for how cluster membership and `.dup-of` markers are used during
 review.
 

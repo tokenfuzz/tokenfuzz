@@ -174,7 +174,8 @@ PROBE_SANITIZER=ubsan bin/probe "$RESULTS/scratch-1/testcase"
 The environment override affects that probe only; it does not change the
 session snapshot or future runs. See
 [Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for
-tradeoffs and [Target config](../reference/target-toml.md#sanitizers) for exact
+tradeoffs and
+[Target config reference](../reference/target-toml.md#sanitizers) for exact
 fields. Go's `race` detector uses the configured language runner rather than a
 `race_bin` or `race_lib`.
 
@@ -200,9 +201,9 @@ helper flags, run `bin/audit-container-shell --help`.
 
 ## What's next
 
-- [Triage results](../guides/triage-results.md) explains what is ready for
+- [Triage and review](../guides/triage-results.md) explains what is ready for
   maintainer review.
-- [Backends and ensembling](../guides/backends.md) covers hosted rotation and
+- [Backends and isolation](../guides/backends.md) covers hosted rotation and
   local models.
 - [Audit lifecycle](../concepts/audit-lifecycle.md) connects setup, agents,
   probing, triage, and export.

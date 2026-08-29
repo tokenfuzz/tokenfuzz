@@ -16,11 +16,35 @@ decisions attached to the evidence they judged, and separates four outcomes:
 | Not reportable | A real engineering defect that review found outside the configured security boundary. It stays visible but receives no security score. |
 | Rejected | Evidence that did not meet the relevant gate. It is preserved with the reason. |
 
-TokenFuzz supports native libraries and CLIs, browsers and JavaScript engines,
-and language-runner targets including Rust, Go, Python, Java, Kotlin, Swift,
-Ruby, PHP, JavaScript/TypeScript, Perl, and R. It can drive Claude Code, Codex
-CLI, Gemini through Antigravity or Google Gemini CLI, Grok Build, and OpenCode
-with either a catalog provider or a local OpenAI-compatible endpoint.
+Keeping that separation over a long run is what the harness is for:
+
+- **A shared work queue.** Deterministic ranking turns a source tree into
+  claimable cards, and eight review strategies direct the investigation without
+  needing a known bug or a crashing seed to start from.
+- **One execution contract.** Every testcase runs through `bin/probe`, which
+  picks the runner, gates on coverage where it can, and records the verdict in
+  structured state rather than in a transcript.
+- **Independent review.** Reports are judged by readers that never saw the
+  filing agent's context, and each decision is content-addressed to the evidence
+  it read, so editing a report reopens its review.
+- **Maintainer handoff.** An accepted crash becomes a self-contained bundle — a
+  report, the input, the sanitizer output, and a one-command `reproduce.sh` that
+  builds from a clean checkout.
+
+## Supported targets
+
+Native libraries and CLIs, browsers and JavaScript engines, and language-runner
+targets including Rust, Go, Python, Java, Kotlin, Swift, Ruby, PHP,
+JavaScript/TypeScript, Perl, and R. ASan is the default for native targets;
+UBSan, MSan, TSan, and Go's `race` are opt-in per target. A project with no
+sanitizer build runs in findings-only mode, where runtime diagnostics and
+source-backed security issues go to `findings/` rather than `crashes/` — see
+[Language runners](guides/multi-language.md).
+
+TokenFuzz can drive Claude Code, Codex CLI, Gemini through Antigravity or
+Google Gemini CLI, Grok Build, and OpenCode with either a catalog provider or a
+local OpenAI-compatible endpoint. Hosted and local backends run the same audit
+contract.
 
 ## Quick start
 
@@ -65,6 +89,9 @@ The complete walkthrough is in [First audit](getting-started/first-audit.md).
 | Operating a longer audit | [Backends and isolation](guides/backends.md) and [First audit](getting-started/first-audit.md) |
 | Reviewing a security-team handoff | [Triage and review](guides/triage-results.md) |
 | Receiving a crash as an upstream maintainer | [Reproduce a crash](guides/reproduce-a-crash.md) |
+| Deciding whether the harness earns its budget | [Benchmarking](concepts/benchmark.md) |
+| Looking up an exact command, field, or path | [Reference](reference/index.md) |
+| Diagnosing a run that failed | [Troubleshooting](reference/troubleshooting.md) |
 | Changing TokenFuzz itself | [Development](development.md) |
 
 ## Where results go
@@ -92,7 +119,7 @@ The backend-specific `results/` prefix is
 are written directly under `output/<target>/`.
 
 Read [Artifact layout](reference/artifacts.md) for every generated path and
-[Triage results](guides/triage-results.md) for the review standard.
+[Triage and review](guides/triage-results.md) for the review standard.
 
 ## The operating model
 

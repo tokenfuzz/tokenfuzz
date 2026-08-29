@@ -86,7 +86,7 @@ regenerates the config from scratch.
 sanitizer diagnostic routes to `crashes/` like a C target would.
 
 Results land in the usual place — `output/samples/sample-rust/<backend>/results/`
-— and are read exactly as [Triage results](../guides/triage-results.md)
+— and are read exactly as [Triage and review](../guides/triage-results.md)
 describes.
 
 ## The answer keys

@@ -71,7 +71,7 @@ Nothing is written until the proposed invocation passes input-dependence
 validation with a disposable testcase.
 
 See [Add a target](../getting-started/add-a-target.md) for the workflow and
-[Target config](target-toml.md) for field definitions.
+[Target config reference](target-toml.md) for field definitions.
 
 ### Prepare alternate build configurations
 
@@ -348,7 +348,7 @@ session for the same slug from supplying either the revision or build recipe.
 `bin/severity --batch` scores reportable crashes and findings together in one
 offline process; `not-reportable` artifacts remain unscored.
 
-See [Triage results](../guides/triage-results.md) before overriding or
+See [Triage and review](../guides/triage-results.md) before overriding or
 regenerating an artifact.
 
 ## Maintain TokenFuzz and local output

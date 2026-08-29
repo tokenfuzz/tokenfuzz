@@ -54,7 +54,7 @@ layout is used for browsers and generic CLI/library targets.
 - UBSan and TSan are useful but need triage of their false positives.
 
 See
-[Configure a target](../guides/configure-target.md#sanitizer-policy)
+[Sanitizer policy](../guides/configure-target.md#sanitizer-policy)
 for the recommended posture.
 
 Targets with `[sanitizer].enabled = []` (typical for interpreted or managed

@@ -109,7 +109,7 @@ state; do not delete or edit them.
 A trigger source outside `attacker_controls` is **not** a rejection
 reason — such crashes stay in `crashes/` as `not-reportable` engineering
 defects, without security credit or numeric CVSS. See
-[Triage results](../guides/triage-results.md#common-rejection-reasons).
+[Triage and review](../guides/triage-results.md#common-rejection-reasons).
 
 Fix the evidence if the result is genuinely in scope. Otherwise
 leave it rejected so future sessions do not repeat it.

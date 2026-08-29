@@ -83,7 +83,7 @@ Install and authenticate at least one supported CLI:
 Verify the chosen CLI directly before asking TokenFuzz to launch it. Exact
 installation links, authentication checks, model selection, local vLLM/Ollama
 setup, and ensemble behavior live in
-[Backends and ensembling](../guides/backends.md).
+[Backends and isolation](../guides/backends.md).
 
 ### Cyber access for security research
 
