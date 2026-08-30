@@ -325,6 +325,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         ("cannot open input.bin: No such file or directory\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "exit"),
         # A signal death reaches the marker as the runner's negative code.
         ("[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=-11)\n", "aborted"),
+        # A fault after a rejection word is still the fault.
+        ("warning: unsupported chunk\nSegmentation fault\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=139)\n", "aborted"),
+        ("note: cannot read trailer\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=-11)\n", "aborted"),
+        ("app_parse: Assertion `node->type != INVALID' failed\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)\n", "aborted"),
         # The header names the testcase; its name is not the target's verdict.
         ("ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic testcase=/r/scratch-1/invalid-utf8.xml\n"
          "cannot open input.bin: No such file or directory\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "exit"),
@@ -645,6 +649,15 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "WORK-prompt-card" in assigned and "ASSIGNED WORK CARD" in assigned,
         "prompt claims and renders a real work card through the queue API",
         assigned,
+    )
+    # A queue that cannot be read is not "no offer": the cold session falls
+    # open to discovery instead of being told to end.
+    with mock.patch.object(prompt.workqueue, "claim_next_card", side_effect=OSError("locked")):
+        unreadable = prompt.cold_start_prompt(context, 1)
+    check(
+        "could not be read" in unreadable and "end this model session" not in unreadable,
+        "an unreadable queue falls open to discovery rather than ending the session",
+        unreadable[:400],
     )
     static = prompt.write_static_prompt_file(context)
     check(static.is_file() and "DIGEST" in static.read_text(encoding="utf-8"), "prompt writes cached static rules atomically")

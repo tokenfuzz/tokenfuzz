@@ -109,6 +109,17 @@ class DeltaScopeTests(DeltaFixture):
         self.assertEqual(short.since, self.base[:10])
         self.assertEqual(short.base_rev, self.base)
 
+    def test_a_divergent_since_scopes_only_this_side_of_the_merge_base(self) -> None:
+        # A REV on another branch: the range is what rev-list returns, and the
+        # files are what those commits changed, not what REV's side touched.
+        _git(self.target, "checkout", "-q", "-b", "feature", self.base)
+        self._write("src/util.c", "int util_feature;\n")
+        feature = _commit_all(self.target, "Feature-side change")
+        _git(self.target, "checkout", "-q", "-")
+        scope = workqueue.delta_scope(self.ctx, feature)
+        self.assertEqual(scope.commits, (self.head, self.mid))
+        self.assertEqual(scope.files, ("src/new.c", "src/parse.c"))
+
     def test_an_unresolvable_revision_is_a_loud_error(self) -> None:
         with self.assertRaises(ValueError):
             workqueue.delta_scope(self.ctx, "no-such-rev")
@@ -357,6 +368,35 @@ class DeltaRuntimeTests(DeltaFixture):
         self.assertFalse(
             audit_runner.expand_work_cards_if_exhausted(runtime),
             "the window is the delta; nothing wider may be ranked",
+        )
+
+    def test_a_failed_refresh_stops_the_delta_and_keeps_its_queue(self) -> None:
+        # Outside a delta a failed rank-work drops the stale queue and the
+        # primary slot discovers over the whole tree; a delta must not widen.
+        scope = workqueue.delta_scope(self.ctx, self.base)
+        runtime = self._runtime(scope)
+        queue = self.results / "work-cards.jsonl"
+        queue.write_text('{"id": "WORK-1", "file": "src/parse.c"}\n', encoding="utf-8")
+        with mock.patch.object(
+            audit_runner.target_config, "vcs_source_signature",
+            return_value="tracked-source",
+        ), mock.patch.object(
+            audit_runner.callgraph, "cache_signature", return_value="",
+        ), mock.patch.object(
+            audit_runner.housekeeping, "should_run", return_value=True,
+        ), mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
+                mock.patch.object(
+                    audit_runner.subprocess, "run",
+                    return_value=SimpleNamespace(
+                        returncode=2, stderr="rank-work: tracked working tree differs",
+                    ),
+                ):
+            audit_runner.refresh_work_cards(runtime)
+        self.assertTrue(queue.is_file(), "the scoped queue survives the failure")
+        self.assertIn("tracked working tree differs", runtime.delta_refresh_failed)
+        self.assertIn(
+            "delta keeps its last queue",
+            (runtime.logs / "index.log").read_text(encoding="utf-8"),
         )
 
     def test_empty_delta_has_no_unconstrained_primary_discovery_slot(self) -> None:

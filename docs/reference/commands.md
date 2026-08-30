@@ -258,7 +258,7 @@ bin/fuzz doctor                       # prove the shared build is unaffected
 | `bin/fuzz template` | Write a dual-entry harness skeleton for one admitted symbol, with at most two target-local caller locations and a source-grounding receipt. |
 | `bin/fuzz build` | Compile a harness out of tree; refuses in-tree sources and unfaithful harnesses. |
 | `bin/fuzz run` | Spend a budget across harnesses, quarantine those that stop paying, replay artifacts through `bin/probe`. |
-| `bin/fuzz status` | Join the current build/grounding receipt with first-slice and campaign state; report what to resolve or try next. `--json` includes `build`, `receipt`, `receipt_warnings`, `first_slice`, and `next` per harness. |
+| `bin/fuzz status` | Join the current build/grounding receipt with first-slice and campaign state; report what to resolve or try next. `--json` includes `build`, `receipt`, `receipt_warnings`, `first_slice`, `coverage`, `compatible_apis`, and `next` per harness. |
 | `bin/fuzz doctor` | Report the linked build, coverage feedback, lease state, and isolation. |
 
 See [Boundary-directed fuzzing](../guides/directed-fuzzing.md) for the workflow
@@ -270,8 +270,11 @@ tree (`build-asan+fuzz`, built by `bin/setup-target --build` and audit
 preflight from the target's own recipe, or a hand-built `build-asan+cov`) and
 reports the source files it reached. The configured ASan CLI is replayed from
 the sibling directly; a `// HARNESS:` route is replayed through a coverage
-twin of that harness (`--harness-source`, which `bin/probe` supplies) linked
-against the sibling's `asan_lib`. Interpreter and wrapper routes have no
+twin of that harness (`--harness-source`, which `bin/run-sanitizer-multi`
+passes from the route `bin/probe` chose) linked against the sibling's
+`asan_lib`; `--route-binary` and `--generic-skip-testcase` carry that route's
+binary and argument shape the same way. A sibling built from other source
+than `build-asan` is reported unavailable rather than replayed. Interpreter and wrapper routes have no
 route-equivalent sibling, so they print `COVERAGE_UNAVAILABLE` and proceed
 instead of gating on the wrong program; a missing sibling behaves the same
 way. In generic mode a `MISSED` never withholds the sanitizer run.
@@ -401,7 +404,7 @@ command's source and its tests before depending on one.
 | --- | --- |
 | `bin/rank-work` | Builds the ranked work-card queue for an iteration; `--since <rev>` restricts it to the delta's files and callers. |
 | `bin/patch-cards` | Derives S1 prior-fix cards from the target's own history; `--since <rev>` emits one per commit in the range. |
-| `bin/peer-fix-cards` | Derives S6 cards from the projects in `[s6_peers]`. |
+| `bin/peer-fix-cards` | Derives S6 cards from the projects in `[s6_peers]`. Fetching patch excerpts is bounded to 120 s per refresh; a card whose excerpt did not arrive in time stays a discovery lead. |
 | `bin/callgraph` | Extracts the optional per-file call neighbourhood a card prompt quotes. |
 | `bin/auto-build-script` | Converges a sanitizer build recipe into `.audit/build*.sh`. |
 | `bin/auto-repair-target-toml` | Proposes an additive `target.toml` repair after repeated harness build failures. |

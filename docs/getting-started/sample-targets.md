@@ -18,7 +18,8 @@ to be findable; an upstream parser is not.
 ## What is shipped
 
 These sixteen trees are the only ones committed under `targets/`; everything
-else there, and everything under `output/`, is a gitignored working area.
+else there, and everything else under `output/` (beyond the committed `target.toml` and
+`.ground-truth.json` answer keys), is a gitignored working area.
 
 | Target | Language / build | Mode | Planted bugs | FP traps |
 | --- | --- | --- | --- | --- |

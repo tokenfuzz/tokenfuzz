@@ -14,16 +14,19 @@ skips loudly when no capable toolchain is present.
 
 from __future__ import annotations
 
+import importlib.machinery
 import os
 import shutil
 import subprocess
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
+import build_config  # noqa: E402
 import sanitizer  # noqa: E402
 import target_config  # noqa: E402
 
@@ -357,10 +360,49 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertIn("bin/setup-target", output)
         self.assertNotIn("MISSED", output)
 
+    def test_a_sibling_built_from_other_source_is_unavailable_not_a_miss(self) -> None:
+        # A sibling left behind by a failed rebuild carries guards for old
+        # code; replaying today's testcase against it would answer MISSED.
+        with build_config.selected_suffix("+cov"):
+            target_config.build_write_stamp(self.target, "asan")
+        stamp = self.sibling / ".audit-build-stamp"
+        lines = stamp.read_text().splitlines()
+        lines[1] = "walk:0000000000000000000000000000000000000000"
+        stamp.write_text("\n".join(lines) + "\n")
+        result = self._run_hits("app_parse")
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 4, output)
+        self.assertIn("COVERAGE_UNAVAILABLE", output)
+        self.assertIn("different source", output)
+        self.assertNotIn("MISSED", output)
+        # The same stamp, matching the primary's, is accepted.
+        target_config.build_write_stamp(self.target, "asan")
+        with build_config.selected_suffix("+cov"):
+            target_config.build_write_stamp(self.target, "asan")
+        self.assertEqual(self._run_hits("app_parse").returncode, 0)
+
+    def test_versioned_shared_objects_are_symbolized_against_themselves(self) -> None:
+        # sancov names its dump after the module's real file, which on Linux
+        # is the versioned name behind the `libx.so` symlink.
+        loader = importlib.machinery.SourceFileLoader("hits_module_map", str(HITS))
+        module = loader.load_module()
+        tree = self.sibling / "lib"
+        tree.mkdir()
+        for name in ("libapp.so.1.7.18", "libapp.dylib", "libother.so", "notes.so.txt"):
+            (tree / name).write_bytes(b"")
+        (tree / "libapp.so").symlink_to(tree / "libapp.so.1.7.18")
+        stub = SimpleNamespace(
+            build=self.sibling, generic_tree=self.sibling,
+            generic_binary=self.sibling / "app", args=SimpleNamespace(mode="generic"),
+        )
+        binaries, _ = module.Hits.binary_map(stub)
+        names = sorted(path.name for path in binaries)
+        self.assertEqual(
+            names, ["app", "libapp.dylib", "libapp.so", "libapp.so.1.7.18", "libother.so"],
+        )
+
     def test_an_internal_defect_is_an_environment_failure_not_a_miss(self) -> None:
         # Exit 1 means MISSED to the gate; a defect must not borrow it.
-        with mock.patch.dict(os.environ, {"HITS_SKIP_SANCOV_PROBE": "1"}):
-            pass
         result = subprocess.run(
             [sys.executable, "-c", (
                 "import runpy, sys, unittest.mock as m\n"

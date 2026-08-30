@@ -173,6 +173,41 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertIn("crashes not scored", rendered_only)
         self.assertIn("Ground truth — findings", rendered_only)
 
+    def test_a_manifest_level_findings_only_flag_scores_every_bug(self) -> None:
+        # Findings-only targets flag the manifest, not each bug; a trap in the
+        # same function as a real bug is named as one the oracle cannot fire.
+        manifest = {
+            "target": "sampleproj", "findings_only": True,
+            "planted_bugs": [
+                {"id": "shell-escape", "kind": "real", "primitive": "command-injection",
+                 "signature_symbol": "run_export"},
+                {"id": "amplification", "kind": "real", "primitive": "resource-exhaustion",
+                 "signature_symbol": "load_state"},
+            ],
+            "false_positive_traps": [
+                {"id": "inert-reconstruction", "kind": "fp", "expected_outcome": "clean",
+                 "signature_symbol": "load_state"},
+                {"id": "json-config", "kind": "fp", "expected_outcome": "clean",
+                 "signature_symbol": "parse_config"},
+            ],
+        }
+        path = self.root / "gt-top.json"
+        path.write_text(json.dumps(manifest))
+        run = self.root / "toprun"
+        self.make_finding(run, "FIND-0001-shell", "run_export")
+        self.make_finding(run, "FIND-0002-state", "load_state")
+        (run / "crashes").mkdir()
+        proc, score = self.score(run, manifest=path)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        findings = score["findings"]["overall"]
+        self.assertEqual(findings["real_total"], 2)
+        self.assertEqual(findings["detected"], ["amplification", "shell-escape"])
+        self.assertEqual(findings["false_positive_traps_fired"], [])
+        self.assertEqual(findings["traps_sharing_a_real_symbol"], ["inert-reconstruction"])
+        rendered = "\n".join(benchmark._render_ground_truth(
+            {"not_scored": "findings-only", "findings": score["findings"]}))
+        self.assertIn("`inert-reconstruction`", rendered)
+
     def test_prose_caller_and_allocation_frames_cannot_spoof_attribution(self) -> None:
         spoof = self.root / "spoof"
         crash = self.make_crash(spoof, "SPOOF-0001", "app_other_func", "heap-buffer-overflow")

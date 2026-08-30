@@ -113,7 +113,7 @@ next-card     --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1
 show-card     CARD_ID [--mode MODE]                     # compact JSON
 list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
 show-crash    CRASH-ID ;  list-crashes [--status OK|NEW] [--limit N]
-show-finding  FIND-ID ;  list-findings [--status OK|NEW] [--limit N]
+show-finding  FIND-ID ;  list-findings [--status OK|PENDING REVIEW|NOT REPORTABLE|REJECTED] [--limit N]
 add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \
               --input-shape 'shape' --guard-gap 'gap' \
               --diagnostic bounds|lifetime|type|size|uninit|state --strategy S1

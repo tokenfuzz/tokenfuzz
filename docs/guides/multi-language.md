@@ -171,7 +171,9 @@ A few ecosystem notes:
 - **R** — `bin/setup-target --build` installs a package with a
   `DESCRIPTION` manifest into `.audit/r-library`, so a compiled component is
   built rather than skipped; the seeded runner points `R_LIBS_USER` at that
-  target-local library.
+  target-local library. The install is a snapshot, so a later
+  `bin/setup-target` without `--build` reinstalls it when the checkout has
+  moved since.
 
 ## Crash and finding routing
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -121,11 +122,12 @@ def _pids_with_token(token: str, owner_dir: str = "") -> list[int]:
     environment entry. Both expose only processes this uid may inspect, so the
     search is same-uid by construction. ``owner_dir`` adds the processes
     running from a directory private to this launch, which is how a supervisor
-    with no marked child alive is seen at all. The result is then widened over
-    process groups and parent links, which recovers the processes those probes
-    are not permitted to read.
+    with no marked child alive is seen at all. The marked set is then widened
+    over process groups and parent links, which recovers the processes those
+    probes are not permitted to read; a path claim widens onto its own
+    descendants only.
     """
-    return _widen_ownership(_pids_with_token_env(token) + _pids_under_path(owner_dir))
+    return _widen_ownership(_pids_with_token_env(token), _pids_under_path(owner_dir))
 
 
 def _process_table() -> tuple[dict[int, int], dict[int, int]]:
@@ -199,7 +201,9 @@ def _env_withheld(pids: set[int]) -> set[int]:
     and that did not carry the marker is provably not ours, while one the
     kernel refuses to describe is simply unknown. A host that discloses every
     environment therefore never claims anything this way, and neither does one
-    we have no way to ask — both fail closed.
+    we have no way to ask — both fail closed. macOS withholds every platform
+    binary's environment (`/bin/sh`, a login shell, Terminal itself), which is
+    why the parent walk starts only from processes the marker proved.
     """
     if os.path.isdir("/proc"):
         return {pid for pid in pids if not _proc_environ(pid)}
@@ -208,7 +212,7 @@ def _env_withheld(pids: set[int]) -> set[int]:
     return set()
 
 
-def _widen_ownership(pids: list[int]) -> list[int]:
+def _widen_ownership(pids: list[int], anchored: list[int] = ()) -> list[int]:
     """Claim the processes the environment probe is not allowed to read.
 
     The marker is inherited by every descendant, so reading it is normally
@@ -242,12 +246,21 @@ def _widen_ownership(pids: list[int]) -> list[int]:
     What still escapes is a process that is opaque, reparented, *and* alone in
     a new group. Nothing readable ties such a process to this run, which is why
     kill_marked reports rather than assumes when the marker will not clear.
+
+    *anchored* pids were claimed by what they run, which says nothing about
+    who launched them: an operator's `python3 <cell>/x.py` sits under an
+    interactive shell whose environment macOS withholds, and the parent walk
+    would claim that shell and every job in its tab. An anchored claim
+    therefore widens onto its descendants only; an opaque `sh -c` loop that
+    respawns path-claimed drivers is what kill_marked then reports as a
+    leak rather than guesses at.
     """
-    if not pids:
-        return pids
+    anchored = [pid for pid in anchored if pid not in pids]
+    if not pids and not anchored:
+        return []
     parent, group = _process_table()
     if not parent:
-        return pids
+        return sorted(set(pids) | set(anchored))
     members: dict[int, list[int]] = {}
     children: dict[int, list[int]] = {}
     for pid, pgid in group.items():
@@ -280,8 +293,17 @@ def _widen_ownership(pids: list[int]) -> list[int]:
         )
         widened -= protected
         if widened == claimed:
-            return sorted(claimed)
+            break
         claimed = widened
+
+    frontier = [pid for pid in anchored if pid not in protected]
+    reach = set(frontier)
+    while frontier:
+        for child in children.get(frontier.pop(), ()):
+            if child not in reach and child not in protected:
+                reach.add(child)
+                frontier.append(child)
+    return sorted(claimed | reach)
 
 
 def _pids_with_token_env(token: str) -> list[int]:
@@ -327,6 +349,17 @@ def _pids_with_token_env(token: str) -> list[int]:
     return pids
 
 
+# Programs that execute the script named by their first operand. Inclusion
+# criterion: a shell or scripting-language interpreter whose plain invocation
+# is `<interpreter> <script>`; a program that merely reads its operand (cat,
+# less, an editor) does not belong here.
+_SCRIPT_INTERPRETER_RE = re.compile(
+    r"^(?:sh|bash|zsh|dash|ksh|fish|python[0-9.]*|perl[0-9.]*|ruby[0-9.]*"
+    r"|node|Rscript|php[0-9.]*|lua[0-9.]*)$",
+    re.IGNORECASE,  # macOS python3 re-execs as `.../MacOS/Python`
+)
+
+
 def _pids_under_path(root: str) -> list[int]:
     """PIDs running a file from *root*, a directory private to one launch.
 
@@ -338,10 +371,11 @@ def _pids_under_path(root: str) -> list[int]:
     this channel sees exactly what the marker cannot, and a directory
     belonging to a single launch is not a path anything else runs from.
 
-    The claim is what a process *runs* — its program, or the script that
-    program was handed — never a path further along a command line. `ps`
-    reports one joined string rather than the real argument boundaries, so a
-    looser match would claim an operator reading a file under the directory.
+    The claim is what a process *runs* — its program, or the script an
+    interpreter was handed as its first operand — never a path further along
+    a command line, and never a file an ordinary program was given to read.
+    `ps` reports one joined string rather than the real argument boundaries,
+    and `cat <cell>/audit.log` is an operator, not cell work.
     """
     if not root:
         return []
@@ -352,10 +386,20 @@ def _pids_under_path(root: str) -> list[int]:
         f"{spelling.rstrip('/')}/"
         for spelling in {root, os.path.realpath(root)}
     )
-    return [
-        pid for pid, command in _ps_commands(include_environment=False).items()
-        if any(word.startswith(prefixes) for word in command.split()[:2])
-    ]
+    claimed = []
+    for pid, command in _ps_commands(include_environment=False).items():
+        words = command.split()
+        if not words:
+            continue
+        if words[0].startswith(prefixes):
+            claimed.append(pid)
+        elif (
+            len(words) > 1
+            and words[1].startswith(prefixes)
+            and _SCRIPT_INTERPRETER_RE.match(os.path.basename(words[0]))
+        ):
+            claimed.append(pid)
+    return claimed
 
 
 # Enough rounds to outlast a supervisor that respawns one replacement per

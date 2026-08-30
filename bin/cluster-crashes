@@ -580,6 +580,12 @@ def _signature(crash_dir: Path) -> dict:
         # earned nothing. Name the state instead: same bundle, same evidence,
         # no security credit.
         status = "NOT-REPORTABLE (no security credit)"
+    elif validation_receipt.read_current(crash_dir) is None and (
+        validation_receipt.claims_state(crash_dir, validation_receipt.FINAL_STATES)
+    ):
+        # A concluded review whose report or scope changed underneath it is
+        # not OK either; bin/severity names the same case stale.
+        status = "STALE (validation no longer matches)"
 
     return {
         "id": crash_dir.name,
@@ -659,7 +665,16 @@ def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
     representatives: list[dict] = []
     for sig in sigs:
         for idx, rep in enumerate(representatives):
-            if _same_cf_cluster(sig, rep):
+            # A collapsed rendering is contained in every expansion of its
+            # instruction, so a group it opened would absorb two expansions
+            # that disagree on their leaf. An expanded report therefore has to
+            # agree with every expanded member, not only the representative.
+            if _same_cf_cluster(sig, rep) and all(
+                _same_cf_cluster(sig, member)
+                for member in groups[idx]
+                if len(member.get("top_funcs") or ()) > 1
+                and len(sig.get("top_funcs") or ()) > 1
+            ):
                 groups[idx].append(sig)
                 break
         else:

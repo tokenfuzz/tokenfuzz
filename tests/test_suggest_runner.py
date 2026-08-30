@@ -160,6 +160,35 @@ class SuggestRunnerTests(unittest.TestCase):
         )
         self.assertEqual(config.runner_success_codes, [0])
 
+    def test_calibration_refuses_an_exit_observed_with_a_sanitizer_diagnostic(self) -> None:
+        # ASan exits 1 by default, the code a CLI also uses for a rejected
+        # input; the diagnostic in the output says which this was.
+        self.binary.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, sys\n"
+            "if '-h' in sys.argv or '--help' in sys.argv:\n"
+            " print('usage: sampleproj --input FILE --sink FILE' * 4)\n"
+            " raise SystemExit(0)\n"
+            "path = pathlib.Path(sys.argv[sys.argv.index('--input') + 1])\n"
+            "if not path.is_file():\n"
+            " print('input does not exist')\n"
+            " raise SystemExit(3)\n"
+            "print('==7==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1')\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        self.toml.write_text(
+            self.toml.read_text(encoding="utf-8")
+            + '[runner]\nargs = ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"]\n',
+            encoding="utf-8",
+        )
+        result = self.run_command(
+            {}, "--apply", validation={"valid": True, "reasoning": "parsed the input"},
+        )
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("sanitizer diagnostic", result.stderr)
+        self.assertNotIn("success_codes", self.toml.read_text(encoding="utf-8"))
+
     def test_uses_the_first_enabled_executable_sanitizer(self) -> None:
         ubsan_binary = self.target / "build-ubsan" / "sampleproj"
         ubsan_binary.parent.mkdir()

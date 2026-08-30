@@ -396,6 +396,44 @@ The parser writes past `{object_name}`.
             self.cluster_id(expanded / "REPORT.md"),
             self.cluster_id(sibling / "REPORT.md"),
         )
+        # The same three with the collapsed rendering sorting first: a group
+        # it opens must not absorb both expansions through containment.
+        first = self.root / "inlined-leaf-collapsed-first"
+        collapsed_0 = self.make_simple_crash(
+            first, "CRASH-INLINE-0",
+            "==2==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
+            "#0 0x40 in shared_leaf src/parse.c:42\n"
+            "#1 0x50 in caller_b src/driver.c:74\n"
+            "#2 0x60 in shared_tail src/main.c:90",
+            "# Collapsed\nSurface: library-api",
+        )
+        expanded_a = self.make_simple_crash(
+            first, "CRASH-INLINE-A",
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
+            "#0 0x10 in inline_inner src/parse.c:40\n"
+            "#1 0x10 in shared_leaf src/parse.c:42\n"
+            "#2 0x20 in caller_a src/driver.c:70\n"
+            "#3 0x30 in shared_tail src/main.c:90",
+            "# Expanded\nSurface: library-api",
+        )
+        sibling_c = self.make_simple_crash(
+            first, "CRASH-INLINE-C",
+            "==3==ERROR: AddressSanitizer: heap-buffer-overflow\nREAD of size 4\n"
+            "#0 0x70 in other_inner src/parse.c:44\n"
+            "#1 0x70 in shared_leaf src/parse.c:42\n"
+            "#2 0x80 in caller_c src/driver.c:78\n"
+            "#3 0x30 in shared_tail src/main.c:90",
+            "# Sibling inline\nSurface: library-api",
+        )
+        self.assertEqual(self.run_cluster(first).returncode, 0)
+        self.assertEqual(
+            self.cluster_id(collapsed_0 / "REPORT.md"),
+            self.cluster_id(expanded_a / "REPORT.md"),
+        )
+        self.assertNotEqual(
+            self.cluster_id(expanded_a / "REPORT.md"),
+            self.cluster_id(sibling_c / "REPORT.md"),
+        )
 
         # A confirmation transcript concatenates every repetition, and frame
         # parsing stops at the first SUMMARY. A first report cut short before

@@ -108,14 +108,14 @@ def cache_dir() -> Path:
 
 def has_sancov_section(binary: Path) -> bool:
     """Guard check for selecting a coverage sibling; never raises."""
-    if os.environ.get("HITS_SKIP_SANCOV_PROBE") == "1":
-        return True
     try:
         present, _ = coverage_build.sancov_section_present(Path(binary))
     except OSError:
         return False
     return present
 
+
+_SHARED_OBJECT_RE = re.compile(r"\.(?:dylib|so)(?:\.\d+)*$")
 
 _DEFINITION_RE = re.compile(
     r"(?m)^[^\n;#]*?\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:const\s*)?\{")
@@ -131,8 +131,6 @@ def _defined_functions(source: Path) -> set[str]:
 
 
 def probe_sancov(label: str, binary: Path) -> None:
-    if os.environ.get("HITS_SKIP_SANCOV_PROBE") == "1":
-        return
     key_text = stat_key(binary)
     cache = cache_dir() / f"sancov-{hashlib.sha1(key_text.encode()).hexdigest()}.ok"
     if cache.is_file() and cache.stat().st_size:
@@ -218,6 +216,7 @@ class Hits:
             return None, None, "target.toml has no asan_bin to instrument for coverage"
         plain_tree = self.asan_build.name
         present_without_guards: list[str] = []
+        stale_reasons: list[str] = []
         for suffix in GENERIC_COVERAGE_SUFFIXES:
             sibling_tree = plain_tree + suffix
             candidate = Path(
@@ -230,8 +229,14 @@ class Hits:
             # picked and then raising in validate() (which the gate would read
             # as an env failure, not as coverage-unavailable).
             if has_sancov_section(candidate):
+                stale = coverage_build.stale_reason(self.target_root, "asan", suffix)
+                if stale:
+                    stale_reasons.append(stale)
+                    continue
                 return candidate, self.target_root / sibling_tree, ""
             present_without_guards.append(sibling_tree)
+        if stale_reasons:
+            return None, None, stale_reasons[0]
         if present_without_guards:
             return None, None, (
                 f"sibling build {' and '.join(present_without_guards)} carries no "
@@ -274,16 +279,23 @@ class Hits:
         library: Path | None = None
         tree: Path | None = None
         without: list[str] = []
+        stale_reasons: list[str] = []
         for suffix in GENERIC_COVERAGE_SUFFIXES:
             candidate = coverage_build.sibling_path(self.config, raw, "asan", suffix)
             if candidate is None or not candidate.is_file():
                 continue
             if (fuzz_harness.is_coverage_instrumented(candidate)
                     or has_sancov_section(candidate)):
+                stale = coverage_build.stale_reason(self.target_root, "asan", suffix)
+                if stale:
+                    stale_reasons.append(stale)
+                    continue
                 library, tree = candidate, self.target_root / (plain_tree + suffix)
                 break
             without.append(plain_tree + suffix)
         if library is None or tree is None:
+            if stale_reasons:
+                return None, None, f"{label}: {stale_reasons[0]}"
             if without:
                 return None, None, (
                     f"{label}: sibling build {' and '.join(without)} carries no "
@@ -494,19 +506,11 @@ class Hits:
         bin/probe replays it.
         """
         runner_args = list(self.config.runner_args) if self.config else []
-        if self.harness_twin:
-            # A harness takes what bin/probe handed the sanitizer run: the
-            # testcase (unless the route already carried it) and the trailing
-            # arguments. A [runner] template describes the configured CLI, not
-            # this program.
-            extra = list(self.args.extra)
-            if extra[:1] == ["--"]:
-                extra = extra[1:]
-            skip = self.args.generic_skip_testcase or sanitizer.generic_skips_testcase(
-                "asan"
-            )
-            return [*(() if skip else (str(self.testcase),)), *extra]
-        if self.args.extra:
+        # A harness takes what bin/probe handed the sanitizer run: the
+        # testcase (unless the route already carried it) and the trailing
+        # arguments. A [runner] template describes the configured CLI, not
+        # this program, so a twin never falls through to it.
+        if self.harness_twin or self.args.extra:
             extra = list(self.args.extra)
             if extra[:1] == ["--"]:
                 extra = extra[1:]
@@ -531,7 +535,9 @@ class Hits:
             # tree; a .sancov file is named for the module it came from, so
             # symbolize resolves each against the right one.
             tree = self.generic_tree or self.generic_binary.parent
-            dsos = [*tree.rglob("*.dylib"), *tree.rglob("*.so")]
+            # A .sancov is named for the module's real file, which on Linux
+            # is the versioned `libx.so.1.2` behind the `libx.so` symlink.
+            dsos = [path for path in tree.rglob("*") if _SHARED_OBJECT_RE.search(path.name)]
             return [self.generic_binary, *dsos], self.generic_binary
         if self.args.mode == "js":
             return [self.js, *dist.glob("*.dylib"), *dist.glob("*.so")], self.js

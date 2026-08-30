@@ -42,7 +42,9 @@ it. If no route exists, run `bin/state update-card --card-id <id> --status
 blocked --note <configuration-and-source-proof>`; do
 not create a hypothesis or replace the missing route with an undocumented
 wrapper, trusted setup, or source-only rule audit. A one-shot API harness is a
-valid route only when it faithfully calls a documented public library boundary.
+valid route only when it faithfully calls a documented public library boundary
+and no `[runner] bin` is configured: with a runner, `bin/probe` refuses an S7
+`HARNESS:` — probe through the runner, or hand an uncovered public API to S4.
 Startup or teardown code that executes identically for every testcase is not
 an input route: the testcase bytes must select or shape the named boundary,
 not merely cause the process to initialize it.

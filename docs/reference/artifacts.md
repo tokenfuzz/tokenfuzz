@@ -86,14 +86,18 @@ The paths an operator inspects after a run:
 | `findings/` | Security finding candidates — any class, with or without a reproducer. See note below. |
 | `findings-rejected/` | FIND directories triage rejected at quorum — substance gate, unreachable trigger, or source-disproved consequence — plus `REJECTED-FINDINGS.html` / `REJECTED-FINDINGS.md` listing them with reasons. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
-| `coverage/` | Per-agent edge journals (`edges-agent-N.journal`) written by `bin/hits`, keyed by target-relative path; `bin/coverage-summary` and `bin/rank-work` read them. `hits-N.log` beside them records one HIT/MISSED/COVERAGE_UNAVAILABLE row per coverage replay. |
+| `coverage/` | Per-agent edge journals (`edges-agent-N.journal`) written by `bin/hits`, keyed by target-relative path; `bin/coverage-summary` and `bin/rank-work` read them. |
+| `hits-N.log` | One HIT/MISSED/COVERAGE_UNAVAILABLE row per coverage replay by agent `N`, at the results root. |
 | `fuzz/` | S4 harness sources, binaries/manifests, persistent corpora, artifacts, slice logs, campaign journal, and resumable per-harness state. |
 | `scratch-N/` | Active testcase work for agent `N`. |
 | `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, `SESSION_STARTED`, and `TARGET_CONFIG_SHA256` values read by `bin/probe`. |
 | `.target.toml` | The post-preflight `target.toml` snapshot this session runs against, pinned by the `TARGET_CONFIG_SHA256` digest above. Every config consumer in the session reads it instead of the shared `output/<target>/target.toml`. Editing or removing it fails the run loud. |
 
 The tree also holds the work queue and structured state the harness
-manages itself. One file is worth knowing: `state/runs.jsonl` has one
+manages itself. `state/claims.jsonl` records every card claim with the
+`queue_rank`, `queue_size`, `score`, and `strategy` the card carried when it
+was offered, which is what `bin/state card-yield` replays. One file is worth
+knowing: `state/runs.jsonl` has one
 row per `bin/probe` invocation — verdict, sanitizer, duration, and when a
 coverage replay ran, `coverage` (`HIT`, `MISSED`, `UNAVAILABLE`, …) with the
 `closest` frame it reached, and for an `EXEC_FAIL` a `reason` naming the
@@ -329,6 +333,9 @@ For normal audit progress, prefer the generated HTML:
 For debugging a run, start with `logs/README.md`, then `index.log`.
 Open the matching `session_*.log` for the session named in the timeline.
 Use `index.jsonl` when you want the same session data in a scriptable
-form. Full backend transcripts and exact prompt dumps live under
+form; each session row also carries `probes`, `probe_seconds`,
+`probe_diagnostics`, and `first_probe_seconds` — how many `bin/probe` runs the
+session made, the wall they took, how many produced a diagnostic, and how long
+the session took to run its first. Full backend transcripts and exact prompt dumps live under
 `logs/.raw/`; they are intentionally out of the way because they can be
 large and are rarely the first artifact you need.

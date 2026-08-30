@@ -86,6 +86,21 @@ def file_has_crash(path: str | Path, extra_patterns: tuple[str, ...] = ()) -> bo
     return _file_matches(path, pattern)
 
 
+def text_has_crash(text: str) -> bool:
+    """Whether captured output carries a sanitizer or runtime diagnostic."""
+    return any(_CRASH_RE.search(line) for line in text.splitlines())
+
+
+#: A testcase or harness declaring that nothing executed: a managed
+#: prerequisite it checked for was absent. Agent-authored, so it can only
+#: withhold a verdict, never earn one.
+_NO_EXEC_DECLARED_RE = re.compile(r"^NO_EXEC: \S")
+
+
+def file_declares_no_exec(path: str | Path) -> bool:
+    return _file_matches(path, _NO_EXEC_DECLARED_RE)
+
+
 def file_is_clean(path: str | Path) -> bool:
     return _file_matches(path, _CLEAN_RE)
 
@@ -146,6 +161,20 @@ FORMAT_REJECT_RE = re.compile(
     r"|\bcannot (?:parse|decode|read)\b",
     re.IGNORECASE,
 )
+
+
+def strip_run_header(text: str) -> str:
+    """Drop the sanitizer runner's header lines from saved output.
+
+    The header names the testcase path; a file called `invalid-*.xml` must
+    not read as the target rejecting its input, in any consumer of the text.
+    """
+    return "\n".join(
+        line for line in text.splitlines()
+        if not line.startswith(("ASAN_RUN_HEADER:", "SANITIZER_RUN_HEADER:"))
+    )
+
+
 #: The dynamic loader or exec layer refused the program: nothing about the
 #: input was ever read.
 _LOADER_RE = re.compile(
@@ -194,15 +223,9 @@ def execution_failure_class(path: str | Path) -> tuple[str, str]:
     really EXEC_FAILs — never told them.
     """
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        text = strip_run_header(Path(path).read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return "", ""
-    # The run header names the testcase path; a file called `invalid-*.xml`
-    # must not read as the target rejecting it.
-    text = "\n".join(
-        line for line in text.splitlines()
-        if not line.startswith(("ASAN_RUN_HEADER:", "SANITIZER_RUN_HEADER:"))
-    )
     reason = execution_exit_reason(path)
     try:
         rc = int(reason.rpartition("=")[2]) if reason else None
@@ -212,15 +235,17 @@ def execution_failure_class(path: str | Path) -> tuple[str, str]:
         kind = "loader"
     elif _USAGE_RE.search(text) and (rc in (2, 64) or rc is None):
         kind = "usage"
-    elif FORMAT_REJECT_RE.search(text) or rc in (65, 66):
-        kind = "input-rejected"
     elif (
         rc is not None and (-32 < rc < 0 or 128 < rc < 160)
     ) or _ABORT_RE.search(text):
         # A signal death is a negative code from the runner's own wait, or
         # 129..159 through a shell; larger positive codes are a program's own
-        # and say nothing about how it died.
+        # and say nothing about how it died. Decided before the input class:
+        # a parser that warns "unsupported chunk" and then faults died on the
+        # fault, and the hint must not send the agent back to the seed.
         kind = "aborted"
+    elif FORMAT_REJECT_RE.search(text) or rc in (65, 66):
+        kind = "input-rejected"
     elif rc == 0:
         kind = "unverified-exit"
     else:

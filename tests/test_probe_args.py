@@ -86,6 +86,18 @@ class ProbeArgumentTests(unittest.TestCase):
             instance.output.write_text(reached, encoding="utf-8")
             self.assertEqual(instance._classify(69), "EXEC_FAIL")
 
+            # The testcase itself declared a missing prerequisite (the S7/S8
+            # contract): nothing ran, whatever the runner's marker says.
+            instance.output.write_text(
+                "ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic\n"
+                "NO_EXEC: optional decoder module is not built\n"
+                "[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=2)\n"
+                "[run-sanitizer-multi] EXECUTION_RATE: 1/1\n"
+                "[run-sanitizer-multi] SUCCESS_RATE: 0/1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(2), "NO_EXEC")
+
             # No repetition reached the target: still a harness problem.
             instance.output.write_text(
                 "ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic\n"

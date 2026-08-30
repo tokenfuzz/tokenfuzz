@@ -148,6 +148,12 @@ class Language:
     # means "the primary command must succeed or bootstrap aborts".
     bootstrap_alternatives: tuple[tuple[str, ...], ...] = ()
 
+    # True when bootstrap installs a *copy* of the source (an R package
+    # library, say) that nothing rebuilds on demand. Such a snapshot goes
+    # stale when the checkout moves, and bin/setup-target forces a build
+    # rather than letting every later probe audit the old copy.
+    bootstrap_snapshot: bool = False
+
     # Environment variables to export before running bootstrap_cmds
     # AND captured into .audit/bootstrap.sh so reruns are
     # bit-identical. Use this to inject release-mode sanitizer flags
@@ -764,6 +770,7 @@ print join("\n",
             ("R", "CMD", "INSTALL", "--library=.audit/r-library", "."),
         ),
         bootstrap_manifests=("DESCRIPTION",),
+        bootstrap_snapshot=True,
         sanitizer_env=(("R_LIBS_USER", ".audit/r-library"),),
     ),
 
@@ -1272,6 +1279,26 @@ def execute_bootstrap_plan(
 # We match the cpython/pypy + version prefix and stop — anything after
 # (e.g. `-darwin`, `-x86_64-linux-gnu`) is the platform tag and varies.
 _PY_EXT_ABI_RE = re.compile(r"^(cpython-\d+|pypy\d*-\d+)")
+
+
+BOOTSTRAP_STAMP = ".audit/bootstrap.stamp"
+
+
+def bootstrap_snapshot_stale(target_root: Path) -> bool:
+    """Whether the last bootstrap snapshot predates the current source."""
+    import target_config
+    try:
+        recorded = (Path(target_root) / BOOTSTRAP_STAMP).read_text(encoding="utf-8").strip()
+    except OSError:
+        return True
+    return recorded != target_config.source_signature(target_root)
+
+
+def write_bootstrap_stamp(target_root: Path) -> None:
+    import target_config
+    stamp = Path(target_root) / BOOTSTRAP_STAMP
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(target_config.source_signature(target_root) + "\n", encoding="utf-8")
 
 
 def stale_python_extensions(target_root: Path) -> list[Path]:

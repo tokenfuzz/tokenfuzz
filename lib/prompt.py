@@ -305,8 +305,13 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
             queue_context, str(agent), context.mode(agent), context.role(agent),
             claim=True, strategy=context.strategy(agent),
         )
-    except (OSError, ValueError):
-        return ""
+    except (OSError, ValueError) as exc:
+        # Not "no offer": the queue could not be read, so the session falls
+        # open to ordinary discovery instead of being told to end.
+        return (
+            "## ASSIGNED WORK CARD\n\nThe work queue could not be read when this "
+            f"session started ({exc}); proceed with the discovery workflow below."
+        )
     if card is None:
         return ""
     assigned_strategy = (

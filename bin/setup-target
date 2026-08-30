@@ -538,6 +538,13 @@ class Setup:
             if stale:
                 log(f"ABI mismatch: {len(stale)} Python extension(s) built for a non-active interpreter - forcing a build")
                 self.args.build = True
+        if (
+            not self.args.build and language and language.bootstrap_snapshot
+            and languages.bootstrap_plan_for_target(self.target_root, config.build_system).get("cmds")
+            and languages.bootstrap_snapshot_stale(self.target_root)
+        ):
+            log("bootstrap snapshot predates the source tree - forcing a build so probes audit the current checkout")
+            self.args.build = True
         if not self.args.build or not config.build_system:
             return
         if not language:
@@ -568,6 +575,7 @@ class Setup:
             )
         if status:
             raise RuntimeError(f"bootstrap failed for {self.name} (see {audit_dir / 'bootstrap.log'})")
+        languages.write_bootstrap_stamp(self.target_root)
 
     def require_launchable(
         self, config: target_config.Config, binary: Path, sanitizer_name: str,

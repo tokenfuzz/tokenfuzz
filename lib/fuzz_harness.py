@@ -754,6 +754,11 @@ def compatible_api_hints(boundary_declaration: str, candidates,
     """
     wanted = parameter_types(boundary_declaration)
     specific = wanted - _GENERIC_TYPES
+    if not specific:
+        # A byte-buffer boundary shares nothing but `char *`/`size_t` with the
+        # rest of the API; naming a path-taking call as compatible would hand
+        # the fuzz buffer to it as a filename.
+        return []
     scored: "list[tuple[int, int, str, dict]]" = []
     for candidate in candidates:
         if not getattr(candidate, "admitted", False):
@@ -762,12 +767,12 @@ def compatible_api_hints(boundary_declaration: str, candidates,
             continue
         theirs = parameter_types(candidate.declaration)
         shared_specific = len(specific & theirs)
-        shared_generic = len((wanted & theirs) - specific)
-        if not shared_specific and not (specific == set() and shared_generic):
+        if not shared_specific:
             continue
+        shared_generic = len((wanted & theirs) - specific)
         scored.append((-shared_specific, -shared_generic, candidate.symbol, {
             "symbol": candidate.symbol, "declaration": candidate.declaration,
-            "shared_types": sorted((specific & theirs) or (wanted & theirs)),
+            "shared_types": sorted(specific & theirs),
         }))
     scored.sort(key=lambda item: item[:3])
     return [item[3] for item in scored[:limit]]

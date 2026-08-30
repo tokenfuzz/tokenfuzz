@@ -2449,6 +2449,11 @@ def _manifest_symbols(entry: dict) -> set[str]:
     return {s for s in symbols if s}
 
 
+def _findings_only_bug(manifest: dict, bug: dict) -> bool:
+    """A manifest-level ``findings_only`` flags every bug it does not flag itself."""
+    return bool(bug.get("findings_only", manifest.get("findings_only")))
+
+
 def score_findings_ground_truth(
     findings_dir: Path,
     manifest: dict,
@@ -2476,11 +2481,19 @@ def score_findings_ground_truth(
     real = [
         b for b in manifest.get("planted_bugs", [])
         if isinstance(b, dict) and b.get("kind", "real") == "real"
-        and b.get("findings_only")
+        and _findings_only_bug(manifest, b)
     ]
     traps = [
         t for t in manifest.get("false_positive_traps", []) if isinstance(t, dict)
     ]
+    # A trap planted in the same function as a real bug cannot fire here: the
+    # oracle keys on the function alone, and a report's class vocabulary does
+    # not map onto the manifest's primitives. Say so rather than score it.
+    real_symbols = set().union(*(_manifest_symbols(b) for b in real)) if real else set()
+    ambiguous = sorted(
+        str(t.get("id", "")) for t in traps
+        if _manifest_symbols(t) & real_symbols
+    )
     _count, names = count_confirmed_findings(findings_dir)
     evidence: list[tuple[str, str]] = []
     for name in names:
@@ -2515,6 +2528,7 @@ def score_findings_ground_truth(
             "false_positive_traps_fired": sorted(traps_fired),
             "open_world_findings": sorted(open_world),
             "precision": round(tp / (tp + fp), 4) if (tp + fp) else None,
+            "traps_sharing_a_real_symbol": ambiguous,
         }
 
     result = {"overall": score_subset(evidence)}
@@ -2833,7 +2847,7 @@ def score_ground_truth(
     # so it is not stranded permanently "missed" in the crash-recall denominator.
     real = [
         b for b in manifest.get("planted_bugs", [])
-        if b.get("kind", "real") == "real" and not b.get("findings_only")
+        if b.get("kind", "real") == "real" and not _findings_only_bug(manifest, b)
     ]
     traps = manifest.get("false_positive_traps", [])
     # Rust symbol demangling is applied only to a Rust target's frames (a
@@ -4364,7 +4378,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         if (
             not errs and manifest is not None and pool_findings.is_dir()
             and any(
-                isinstance(b, dict) and b.get("findings_only")
+                isinstance(b, dict) and _findings_only_bug(manifest, b)
                 for b in manifest.get("planted_bugs", [])
             )
         ):
@@ -5129,6 +5143,15 @@ def _render_findings_ground_truth(scoring: dict | None) -> list[str]:
         "real code has bugs the answer key never planted — and is listed "
         "without being counted for or against."
     )
+    shared = overall.get("traps_sharing_a_real_symbol") or []
+    if shared:
+        lines.append("")
+        lines.append(
+            "> Traps planted in the same function as a real bug cannot fire "
+            "here — the oracle keys on the function alone — so a confirmed "
+            "finding there is credited to the bug: "
+            + ", ".join(f"`{t}`" for t in shared) + "."
+        )
     lines.append("")
     return lines
 

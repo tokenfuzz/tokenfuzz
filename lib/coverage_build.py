@@ -232,7 +232,11 @@ def _unavailable_marker(root: Path, san: str) -> Path:
 
 
 def _identity(root: Path, recipe: Path, shims: "tuple[Path, Path]") -> str:
-    """What a failed sibling build is bound to: source, recipe and toolchain."""
+    """What a failed sibling build is bound to: source, recipe and toolchain.
+
+    The toolchain is the compiler binary itself, not only the path the shim
+    names: an upgrade installed over the same path must retry the build.
+    """
     digest = hashlib.sha256()
     digest.update(target_config.source_signature(root).encode())
     for path in (recipe, *shims):
@@ -241,7 +245,36 @@ def _identity(root: Path, recipe: Path, shims: "tuple[Path, Path]") -> str:
         except OSError:
             digest.update(b"<missing>")
         digest.update(b"\0")
+    for real in (fuzz_harness.fuzzing_compiler(), fuzz_harness.fuzzing_compiler(cxx=True)):
+        try:
+            stat = os.stat(shutil.which(real) or real)
+            digest.update(f"{stat.st_mtime_ns}:{stat.st_size}".encode())
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
     return digest.hexdigest()
+
+
+def stale_reason(root: Path, san: str, suffix: str) -> str:
+    """Why the sibling cannot stand in for ``build-<san>``, or "".
+
+    A sibling left behind when its rebuild failed still carries guards, but
+    replaying today's testcases against yesterday's code answers MISSED for
+    every symbol the source added since. Both stamps record the source
+    signature they were built from; a sibling without a stamp is hand-built
+    and taken as offered.
+    """
+    primary = target_config.build_stamp_fields(root, san)
+    with build_config.selected_suffix(os.environ.get("AUDIT_BUILD_SUFFIX", "") + suffix):
+        sibling = target_config.build_stamp_fields(root, san)
+    if primary is None or sibling is None or not (primary[1] and sibling[1]):
+        return ""
+    if sibling[1] != primary[1]:
+        return (
+            f"sibling build-{san}{suffix} was built from different source than "
+            f"build-{san}; `bin/setup-target <slug> --build` rebuilds it"
+        )
+    return ""
 
 
 def materialize(

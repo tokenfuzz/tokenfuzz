@@ -585,9 +585,11 @@ class HarnessBuilder:
             f"path = {quote(str(self.source))}\n",
             encoding="utf-8",
         )
-        # One target directory for the whole cache: every testcase shares the
-        # audited crate's compiled dependencies instead of rebuilding them.
-        target_dir = binary.parent / "rust-target"
+        # One target directory per audited checkout: every agent and the
+        # runner canary share the crate's compiled dependencies instead of
+        # each paying a cold build (cargo serializes on its own lock). Under
+        # .audit/, which build freshness prunes.
+        target_dir = Path(self.probe.config.target_root) / ".audit" / "rust-target"
         command = [
             "cargo", "build", "--quiet", "--release",
             "--manifest-path", str(harness_manifest),
@@ -1298,6 +1300,10 @@ class Probe:
             # may be working. On measured 5h cells 133 of 150 NO_EXEC rows had
             # in fact reached this point. Which repair it needs is in the
             # output, not in the marker.
+            if verdict_lib.file_declares_no_exec(self.output):
+                # The testcase itself reported a missing prerequisite (the
+                # S7/S8 contract): nothing ran, whatever the runner's marker.
+                return "NO_EXEC"
             if verdict_lib.file_execution_attempted(self.output):
                 return "EXEC_FAIL"
             return "NO_EXEC"

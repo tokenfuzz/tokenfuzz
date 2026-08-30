@@ -249,6 +249,8 @@ class Runtime:
     refill_workers: bool = True
     agent_security: str = llm_invoke.DEFAULT_AGENT_SECURITY
     delta: workqueue.DeltaScope | None = None
+    # Why the last delta refresh failed; a stale scoped queue stops the run.
+    delta_refresh_failed: str = ""
     cluster_expansion_attempted: set[Path] = field(default_factory=set, repr=False)
 
     def prompt_context(self, guide: str) -> prompt.PromptContext:
@@ -1010,14 +1012,24 @@ def refresh_work_cards(
         if delta is not None:
             command += ["--since", delta.base_rev]
         completed = subprocess.run(
-            command,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, errors="replace", check=False,
         )
         if completed.returncode:
-            (runtime.results / "work-cards.jsonl").unlink(missing_ok=True)
             refresh_ok = False
-            index_log(runtime, f"WARN: rank-work refresh failed rc={completed.returncode}; stale cards removed")
+            cause = str(getattr(completed, "stderr", "") or "").strip().splitlines()
+            why = f"rc={completed.returncode}" + (f": {cause[-1][:200]}" if cause else "")
+            if delta is not None:
+                # A delta with no queue would launch the unconstrained
+                # discovery slot over the whole tree; keep the scoped cards
+                # and stop instead of widening.
+                runtime.delta_refresh_failed = why
+                index_log(runtime, f"WARN: rank-work refresh failed {why}; delta keeps its last queue")
+            else:
+                (runtime.results / "work-cards.jsonl").unlink(missing_ok=True)
+                index_log(runtime, f"WARN: rank-work refresh failed {why}; stale cards removed")
         elif delta is not None:
+            runtime.delta_refresh_failed = ""
             _log_delta_queue(runtime, delta)
     elif not pinned_s6:
         refresh_ok = False
@@ -1890,12 +1902,16 @@ def _result_gate_pass(
         expansion = pool.submit(
             _timed, expand_new_crash_clusters, runtime, deadline=deadline,
         )
-        finding_counts, gate_seconds = _timed(
-            triage.validate_find_gate, runtime.results,
-            workers=runtime.num_agents, deadline=deadline,
-            target_root_is_product=True,
-        )
-        cluster_counts, expand_seconds = expansion.result()
+        try:
+            finding_counts, gate_seconds = _timed(
+                triage.validate_find_gate, runtime.results,
+                workers=runtime.num_agents, deadline=deadline,
+                target_root_is_product=True,
+            )
+        finally:
+            # Collected even when the gate raised, so an expansion failure
+            # is not discarded behind the gate's.
+            cluster_counts, expand_seconds = expansion.result()
     if detail is not None:
         detail.append(f"finding_gate={gate_seconds:.1f}s")
         detail.append(f"cluster_expand={expand_seconds:.1f}s")
@@ -3091,6 +3107,15 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
                 "LANE_EXHAUSTED: no open "
                 f"{str(runtime.fixed_strategy).upper()} card or hypothesis remains",
             )
+        state.stopped = True
+        return "stalled", []
+    if getattr(runtime, "delta_refresh_failed", ""):
+        index_log(
+            runtime,
+            "DELTA_STOPPED: the scoped queue could not be refreshed "
+            f"({runtime.delta_refresh_failed}); stopping instead of auditing "
+            "outside the delta",
+        )
         state.stopped = True
         return "stalled", []
     if delta_queue_exhausted(runtime, context):

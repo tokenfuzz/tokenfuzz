@@ -114,6 +114,15 @@ def _cleanup(*items) -> None:
                 pass
 
 
+def _children_of(pid: int) -> list[int]:
+    """Direct children of ``pid`` from the process table."""
+    listing = subprocess.check_output(["ps", "-ax", "-o", "pid=,ppid="], text=True)
+    return [
+        int(row.split()[0]) for row in listing.splitlines()
+        if len(row.split()) == 2 and int(row.split()[1]) == pid
+    ]
+
+
 def _script_pids(script: Path) -> list[int]:
     """PIDs running ``script``, read from the process table rather than the
     marker. A supervisor the probe cannot attribute is invisible to
@@ -456,6 +465,23 @@ with tempfile.TemporaryDirectory() as tmp:
        "naming the directory inside an argument does not claim a process",
        f"claimed={pt._pids_with_token(token, str(cell))} onlooker={onlooker.pid}")
     _cleanup(onlooker)
+
+    # An operator reading a cell file from a shell whose environment the host
+    # withholds: the reader is not cell work, and neither the shell above it
+    # nor the unrelated job beside it may be claimed through it.
+    pipe = cell / "pipe"
+    os.mkfifo(pipe)
+    tab = subprocess.Popen(
+        ["/bin/sh", "-c", f"sleep 60 & /bin/cat {pipe}; wait"], env={},
+        start_new_session=True,
+    )
+    time.sleep(1.0)
+    tab_children = _children_of(tab.pid)
+    claimed = set(pt._pids_with_token(token, str(cell)))
+    ok(tab_children and not ({tab.pid} | set(tab_children)) & claimed,
+       "an operator's reader under an opaque shell claims nothing",
+       f"claimed={sorted(claimed)} tab={tab.pid} children={tab_children}")
+    _cleanup(tab, *tab_children)
 
 
 # ── safety: a cell left in our own group never widens onto the runner ─

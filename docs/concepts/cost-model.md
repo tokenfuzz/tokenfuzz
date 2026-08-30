@@ -152,7 +152,8 @@ does not cost a triage round on Tuesday and Wednesday too.
 ## What to monitor
 
 Each iteration's usage is recorded in `logs/index.jsonl`, one row per
-agent launch with a `tokens` object. Two numbers tell you most of what
+agent launch with a `tokens` object and the session's probe counts
+(`probes`, `probe_seconds`, `probe_diagnostics`, `first_probe_seconds`). Two numbers tell you most of what
 you need:
 
 - **`tokens.cached_input`** should be roughly stable per iteration.

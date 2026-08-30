@@ -209,7 +209,7 @@ bin/state list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subs
 bin/state show-crash    CRASH-ID                                # compact JSON
 bin/state list-crashes  [--status OK|NEW|...] [--limit N]
 bin/state show-finding  FIND-ID                                 # compact JSON
-bin/state list-findings [--status OK|NEW|...] [--limit N]
+bin/state list-findings [--status OK|PENDING REVIEW|NOT REPORTABLE|REJECTED] [--limit N]
 bin/state add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \
                         --input-shape 'shape' --guard-gap 'gap' \
                         --diagnostic {bounds|lifetime|type|size|uninit|state} --strategy S1

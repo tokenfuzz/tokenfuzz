@@ -700,6 +700,23 @@ for _lang in languages.LANGUAGES:
                       f"{_lang.name} {_key}: debug info is -g1 (line tables only)")
 
 
+# ─── Bootstrap snapshot staleness ──────────────────────────────────
+# An R package library is a copy of the source; the stamp says which source.
+import tempfile as _tempfile
+with _tempfile.TemporaryDirectory(prefix="bootstrap-stamp-") as _name:
+    _root = Path(_name)
+    (_root / "DESCRIPTION").write_text("Package: sampleproj\n")
+    (_root / "R").mkdir()
+    (_root / "R" / "parse.R").write_text("parse <- function(x) x\n")
+    assert_eq(True, languages.bootstrap_snapshot_stale(_root), "no stamp: stale")
+    languages.write_bootstrap_stamp(_root)
+    assert_eq(False, languages.bootstrap_snapshot_stale(_root), "stamped: fresh")
+    (_root / "R" / "parse.R").write_text("parse <- function(x) x + 1\n")
+    assert_eq(True, languages.bootstrap_snapshot_stale(_root), "source moved: stale")
+    assert_eq(True, next(l for l in languages.LANGUAGES if l.name == "r").bootstrap_snapshot,
+              "R bootstrap is a snapshot")
+
+
 # ─── Summary ───────────────────────────────────────────────────────
 
 print()

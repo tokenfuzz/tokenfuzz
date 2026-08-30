@@ -2691,8 +2691,11 @@ def delta_scope(ctx: Context, since: str) -> DeltaScope:
             ["git", "-C", str(root), "rev-list", f"{base}..{head}"],
             f"--since {rev}: rev-list",
         )
+        # Three dots: files changed by the commits rev-list returns, from the
+        # merge base. A two-dot diff against a REV that is not an ancestor
+        # would add files only REV's side touched, labelled as changed since it.
         files = _vcs_lines(
-            ["git", "-C", str(root), "diff", "--name-only", base, head],
+            ["git", "-C", str(root), "diff", "--name-only", f"{base}...{head}"],
             f"--since {rev}: diff",
         )
     elif ctx.repo_type == "hg":
@@ -2727,7 +2730,8 @@ def delta_scope(ctx: Context, since: str) -> DeltaScope:
         # --cwd, not -R: status prints paths relative to the working
         # directory, and only a cwd at the repo root makes them root-relative.
         files = _vcs_lines(
-            ["hg", "--cwd", str(root), "status", "-n", "--rev", base, "--rev", head],
+            ["hg", "--cwd", str(root), "status", "-n",
+             "--rev", f"ancestor({base}, {head})", "--rev", head],
             f"--since {rev}: status",
         )
     else:
@@ -4655,11 +4659,25 @@ def record_accepted_artifact_card(
         key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""),
     )
     claims_path = state_dir(results_dir) / "claims.jsonl"
+    origin_card = str(origin.get("card_id", ""))
+    origin_agent = str(origin.get("agent", ""))
     with jsonl_lock(claims_path):
+        rows = _read_jsonl_unlocked(claims_path)
         if any(
             row.get("source") == "accepted-artifact"
             and row.get("artifact") == artifact
-            for row in _read_jsonl_unlocked(claims_path)
+            for row in rows
+        ):
+            return False
+        # The agent's own `update-card --status find|crash` is this same
+        # conclusion already on record; a second row would count one bug as
+        # a rediscovery and retire a concrete card after its first finding.
+        if any(
+            row.get("source") != "accepted-artifact"
+            and str(row.get("card_id", "")) == origin_card
+            and str(row.get("agent", "")) == origin_agent
+            and str(row.get("status", "")) == terminal
+            for row in rows
         ):
             return False
         _append_jsonl_unlocked(
@@ -5342,7 +5360,10 @@ def card_yield(ctx: Context) -> str:
         return "unranked"
 
     buckets: dict[str, dict] = {}
-    seen: dict[str, set[str]] = {}
+    # A card's runs are attributed once, to the rank it was first offered at:
+    # the queue is rewritten every iteration, so a card reclaimed at another
+    # rank later would otherwise be counted in every bucket it passed through.
+    attributed: set[str] = set()
     queue_sizes: list[int] = []
     for claim in claims:
         cid = str(claim.get("card_id", "") or "")
@@ -5356,10 +5377,9 @@ def card_yield(ctx: Context) -> str:
             name, {"claims": 0, "cards": 0, "probed": 0, "runs": 0, "diagnostics": 0},
         )
         bucket["claims"] += 1
-        cards = seen.setdefault(name, set())
-        if cid in cards:
+        if cid in attributed:
             continue
-        cards.add(cid)
+        attributed.add(cid)
         bucket["cards"] += 1
         counts = by_card.get(cid)
         if counts:
@@ -5382,7 +5402,7 @@ def card_yield(ctx: Context) -> str:
     offered = max(queue_sizes) if queue_sizes else 0
     lines.append(
         f"# cards touched: {touched}"
-        + (f" of a queue of up to {offered} ({touched * 100 / offered:.1f}%)" if offered else "")
+        + (f" (queue of up to {offered} per iteration)" if offered else "")
     )
     return "\n".join(lines) + "\n"
 
@@ -5534,10 +5554,11 @@ def peer_revision_kind(source: str) -> str:
 def peer_fix_markdown(card: dict, *, include_diff: bool = True) -> list[str]:
     """Render the bounded evidence carried by an S6 peer-fix card.
 
-    `include_diff` is False where the same card is rendered again in a session
-    that already carried it: the assigned-card section supplies the patch when
-    the agent picks the card up, and repeating it on every `state resume`
-    would re-send the largest field on the card for no new information.
+    `include_diff` is False where the same card is rendered again to an agent
+    that already holds it: the render that hands the card over (the assigned
+    card section, or the resume that claims it mid-session) supplies the
+    patch, and repeating it on every later `state resume` would re-send the
+    largest field on the card for no new information.
     """
     if str(card.get("kind", "")) != "s6-peer-fix":
         return []
@@ -6127,7 +6148,16 @@ def state_resume(
     ]
     active.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
     pending_crashes = _pending_crashes_for_agent(ctx, agent)
+    # A card this agent already holds was rendered with its evidence when it
+    # was picked up (the session prompt, or an earlier resume); only a fresh
+    # pickup needs the unbounded peer diff again.
+    held_before = {
+        cid for cid, row in latest_claims_by_card(ctx).items()
+        if str(row.get("agent", "")) == str(agent)
+        and claim_blocks_card(row, work_card_claim_ttl(), datetime.now(timezone.utc))
+    }
     card = None if (pending_crashes or active) else claim_next_card(ctx, agent, mode, role, claim=claim, strategy=strategy)
+    fresh_pickup = claim and bool(card) and card.get("id", "") not in held_before
 
     lines = [
         "# Structured Resume",
@@ -6211,7 +6241,7 @@ def state_resume(
                 lines.append(f"- Invalid fix commits: {invalid_fix_text}")
             if patch_card_text:
                 lines.append(f"- Related patch cards: {patch_card_text}")
-            lines.extend(peer_fix_markdown(card, include_diff=False))
+            lines.extend(peer_fix_markdown(card, include_diff=fresh_pickup))
             if str(card.get("kind", "")) == "s1-patch" or str(card.get("strategy", "")).upper() == "S1":
                 lines.extend(
                     [
@@ -6543,7 +6573,7 @@ def _one_line(value: str, limit: int) -> str:
 
 
 def _runtime_row_signals(ctx: Context, row: dict) -> list[str]:
-    text = _runtime_artifact_text(ctx, row)
+    text = verdict.strip_run_header(_runtime_artifact_text(ctx, row))
     if not text:
         return []
     signals = [

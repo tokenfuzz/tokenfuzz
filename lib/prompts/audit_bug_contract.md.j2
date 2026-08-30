@@ -39,7 +39,8 @@ or similar (any bug class, not just memory-safety):
   count;
 - **primitive-only object reconstruction** — deserialization or reflection
   with no concrete gadget, magic hook, native-memory consequence, auth effect,
-  or other impact in the target's actual loaded environment;
+  or other impact in the target's actual loaded environment (a format that
+  itself invokes arbitrary callables is that hook, and stays in scope);
 - **primitive-only prototype mutation** — changing a shared or inherited
   property without a concrete reachable consumer that turns it into an auth,
   code-execution, disclosure, isolation, or other security effect;

@@ -1068,11 +1068,12 @@ class FirstSliceReceiptTests(unittest.TestCase):
         # bare-`char *` API never appear.
         self.assertEqual([h["symbol"] for h in hints], ["sample_add"])
         self.assertEqual(hints[0]["shared_types"], ["sample_ctx *"])
-        # A boundary with only generic types falls back to sharing them.
+        # A boundary with only generic types has no compatible API: sharing
+        # `char *` would offer a path-taking call the fuzz buffer as a name.
         generic = fuzz_harness.compatible_api_hints(
             "sample_ctx *sample_parse(const char *text)", candidates,
             exclude="sample_parse", limit=1)
-        self.assertEqual([h["symbol"] for h in generic], ["sample_scan"])
+        self.assertEqual(generic, [])
 
     def test_status_shows_compatible_apis_only_when_a_derivative_is_due(self) -> None:
         state = fuzz_campaign.HarnessState(

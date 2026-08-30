@@ -112,7 +112,9 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     actual loaded environment supplies a concrete reachable gadget, magic
     hook, native-memory consequence, authorization effect, or other security
     impact; reject deployment-dependent hopes that some embedding application
-    might add one.
+    might add one. A deserializer whose format itself selects and invokes
+    arbitrary importable callables or constructors is that hook — the report
+    then need only show untrusted bytes reaching it.
   - Prototype pollution or shared-object mutation that proves only that an
     inherited/global property changed. Keep when a concrete reachable consumer
     in the target turns that property into authorization bypass, code

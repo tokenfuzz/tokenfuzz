@@ -19,6 +19,7 @@ from llm_decide import llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 import runner_preflight  # noqa: E402
 import target_config as tc  # noqa: E402
+import verdict  # noqa: E402
 
 _MARKER = "# native CLI args set by bin/suggest-runner"
 _PLACEHOLDERS = {"TESTCASE", "NULL_DEVICE"}
@@ -64,13 +65,15 @@ def read_help(binary: Path, env: dict | None = None, max_bytes: int = 16384) -> 
 
 def candidate_programs(
     target: Path, sanitizer: str, configured: Path, env: dict | None = None,
+    *, keep_configured: bool = False,
 ) -> list[dict[str, str]]:
     """Selectable instrumented CLIs with their help, configured binary first.
 
     Programs that print no usable help are dropped: the model cannot derive
     an argv template from a program that does not describe itself. Both that
     and the candidate bound are reported, so a run never looks like it chose
-    from more than it saw."""
+    from more than it saw. ``keep_configured`` retains the configured program
+    without help: calibration keeps its argv and needs no template."""
     configured_real = os.path.realpath(configured)
     paths: list[Path] = []
     seen: set[str] = set()
@@ -97,9 +100,12 @@ def candidate_programs(
     for path in paths[:_MAX_CANDIDATES]:
         help_text = read_help(path, env)
         if not help_text:
-            print(f"[suggest-runner] no readable help, not offered: {path}",
-                  file=sys.stderr)
-            continue
+            if keep_configured and os.path.realpath(path) == configured_real:
+                help_text = "(no help output)"
+            else:
+                print(f"[suggest-runner] no readable help, not offered: {path}",
+                      file=sys.stderr)
+                continue
         programs.append({
             "path": str(path).removeprefix(str(target) + "/"),
             "help": help_text,
@@ -354,6 +360,13 @@ def validate_launch(
             == signature(absent, absent_output, missing)
         ):
             return False, "derived invocation did not depend on testcase contents or existence", None
+        # ASan exits 1 by default, the code most CLIs use for a rejected
+        # input; a diagnostic in the output is a crash, never a normal exit.
+        if verdict.text_has_crash(completed_output.decode("utf-8", errors="replace")):
+            return False, (
+                "derived invocation produced a sanitizer diagnostic on the "
+                "probe input; that exit is a crash, not a normal status"
+            ), None
         if completed.returncode:
             prompt = render_template("validate_runner.md.j2", {
                 "binary": str(binary),
@@ -408,7 +421,10 @@ def main(argv: list[str]) -> int:
     # that supplies its own library path in [runner].env would otherwise fail
     # in the loader here and look like a program with no readable help.
     environment = runner_preflight.runner_environment(cfg, sanitizer)
-    programs = candidate_programs(target, sanitizer, binary, environment)
+    calibrating = bool(cfg.runner_args and not args.force)
+    programs = candidate_programs(
+        target, sanitizer, binary, environment, keep_configured=calibrating,
+    )
     if not programs:
         print(f"[suggest-runner] could not read help from {binary}", file=sys.stderr)
         return 1
@@ -418,7 +434,6 @@ def main(argv: list[str]) -> int:
     reasoning = ""
     chosen_binary = binary
     validated_exit: int | None = None
-    calibrating = bool(cfg.runner_args and not args.force)
     if calibrating:
         chosen = next((program for program in programs if program["configured"]), None)
         if chosen is None:

@@ -976,7 +976,7 @@ class WorkQueueTests(unittest.TestCase):
         lines = table.strip().splitlines()
         self.assertEqual(lines[0], "rank|claims|cards|probed|runs|diagnostics|diagnostics_per_card")
         self.assertIn("1-5|2|2|1|2|1|0.50", lines[1])
-        self.assertIn("cards touched: 2 of a queue of up to 3 (66.7%)", lines[-1])
+        self.assertIn("cards touched: 2 (queue of up to 3 per iteration)", lines[-1])
 
     def test_claim_reports_requested_carried_strategy(self) -> None:
         self.write_cards([
@@ -1038,6 +1038,22 @@ class WorkQueueTests(unittest.TestCase):
             "repeated housekeeping is idempotent",
         )
         self.assertEqual(workqueue.card_conclusion_counts(self.ctx), {"WORK-A": 1})
+
+    def test_an_agent_recorded_finding_is_not_counted_twice_on_acceptance(self) -> None:
+        # The agent closed the hypothesis with the FIND id and recorded the
+        # card status itself; triage accepting that finding is the same
+        # conclusion, and a second row would retire a concrete card after
+        # its first bug.
+        self.write_cards([self.card("PATCH-1", "src/parse.c", kind="s1-patch", strategy="S1")])
+        self.add_hypothesis(hyp_id="H-one", card_id="PATCH-1")
+        workqueue.update_hypothesis(self.ctx, "H-one", "FIND-0001", agent="1")
+        workqueue.update_card_status(self.ctx, "PATCH-1", "find", agent="1")
+        self.assertFalse(
+            workqueue.record_accepted_artifact_card(self.results, "FIND-0001-x", "find"),
+        )
+        self.assertEqual(workqueue.card_conclusion_counts(self.ctx), {"PATCH-1": 1})
+        card = workqueue.read_jsonl(self.results / "work-cards.jsonl")[0]
+        self.assertFalse(workqueue.card_closed_for_run(self.ctx, card, "find"))
 
     def test_reproducers_prefer_built_units_without_hiding_source_review(self) -> None:
         (self.target / "src").mkdir()
@@ -1606,9 +1622,14 @@ class WorkQueueTests(unittest.TestCase):
             "def456", "https://example.test/peerlib/compare/def456...abc123.diff",
         ):
             self.assertIn(value, rendered)
-        # Resume runs every session and after every compaction; the patch is
-        # supplied once by the assigned-card section, not re-sent each time.
-        self.assertNotIn("+if (size > left) return ERR;", rendered)
+        # The resume that picks the card up carries the patch; a resume for a
+        # card the agent already holds (every compaction) does not re-send it.
+        self.assertIn("+if (size > left) return ERR;", rendered)
+        again = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S6",
+        )
+        self.assertIn("OSV range endpoint: abc123", again)
+        self.assertNotIn("+if (size > left) return ERR;", again)
         self.assertIn(
             "+if (size > left) return ERR;",
             "\n".join(workqueue.peer_fix_markdown(
@@ -1936,6 +1957,18 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(
             "harness-setup",
             workqueue._runtime_feedback_decision({"NO_EXEC": 2}, 2, {})[0],
+        )
+        # The run header names the testcase; a descriptive file name is not the
+        # target rejecting its input.
+        named = Path(self.results) / "scratch-1" / "named.asan.txt"
+        named.write_text(
+            "ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic "
+            "testcase=/r/scratch-1/malformed-header.bin\n"
+            "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            [], workqueue._runtime_row_signals(self.ctx, {"asan_output": str(named)}),
         )
         # One refused run among genuine failures is mixed evidence: keep the
         # setup repair and say how much the budget accounts for.
