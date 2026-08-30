@@ -2941,6 +2941,11 @@ def triage_crash_dirs(
             bypasses.add(directory)
             continue
         trigger_candidates.append(directory)
+    if os.environ.get("CRASH_TRIGGER_GATE", "1") == "0":
+        # The serial gate and the cached shortcut both honour the opt-out; a
+        # batch that ran anyway spent reviews and parked any crash whose keyed
+        # vote came back malformed.
+        trigger_candidates = []
 
     trigger_attempted = _batch_finding_trigger_votes(
         trigger_candidates, results, deadline, usage_index,
