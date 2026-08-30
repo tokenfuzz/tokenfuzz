@@ -39,6 +39,17 @@ COVERAGE_SUFFIX = fuzz_harness.COVERAGE_TREE_SUFFIX
 ACCEPTED_SUFFIXES = (COVERAGE_SUFFIX, "+cov")
 _SHIM_DIR = Path(".audit") / "coverage-toolchain"
 _FLAGS_CACHE: dict[str, list[str]] = {}
+#: Compiler names a build may invoke instead of honouring ``CC``/``CXX``.
+#: A hand-written configure is free to ignore the environment and pick its own
+#: default — ffmpeg's records `CC=gcc` even when `CC=clang` is exported — and
+#: an uninstrumented sibling is indistinguishable from a working one until
+#: `verify_tree` refuses it. Answering to the names as well as the variables
+#: costs nothing on a build that does honour them, because they resolve to the
+#: same shim. The shim `exec`s an absolute compiler path, so nothing recurses.
+_MASQUERADE_NAMES = (
+    ("cc", "gcc", "clang"),
+    ("c++", "g++", "clang++"),
+)
 
 
 def tree_name(san: str = "asan", *, suffix: "str | None" = None) -> str:
@@ -152,6 +163,17 @@ def toolchain_shims(root: Path) -> "tuple[Path, Path]":
         temporary.chmod(0o755)
         os.replace(temporary, path)
         shims.append(path)
+    # Same content under every name a build might reach for, so a recipe that
+    # ignores CC/CXX still compiles through the instrumentation when this
+    # directory leads PATH.
+    for shim, names in zip(shims, _MASQUERADE_NAMES):
+        body = shim.read_text(encoding="utf-8")
+        for name in names:
+            alias = directory / name
+            temporary = alias.with_name(f".{name}.{os.getpid()}.tmp")
+            temporary.write_text(body, encoding="utf-8")
+            temporary.chmod(0o755)
+            os.replace(temporary, alias)
     return shims[0], shims[1]
 
 
@@ -331,7 +353,18 @@ def materialize(
         os.environ.get("AUDIT_BUILD_SUFFIX", "") + COVERAGE_SUFFIX
     ):
         # Captured inside the suffix, so the recipe sees the tree it builds.
-        environment = dict(os.environ, CC=str(shims[0]), CXX=str(shims[1]))
+        # PATH leads with the shim directory as well as naming it in CC/CXX:
+        # the variables are the polite route, the directory is the one a build
+        # that ignores them still has to take. Scoped to this subprocess, so
+        # the primary build and everything else keep the real toolchain.
+        environment = dict(
+            os.environ,
+            CC=str(shims[0]),
+            CXX=str(shims[1]),
+            PATH=os.pathsep.join(
+                [str(shims[0].parent), os.environ.get("PATH", "")]
+            ).rstrip(os.pathsep),
+        )
         result = build_materialize.materialize(
             root, san, recipe, recipe,
             lambda tree: verify_tree(config, san, tree),

@@ -61,6 +61,17 @@ mkdir -p "$build"
 "${CC:-clang}" -g -O0 -fsanitize=address -o "$build/app" "$src/src.c"
 """
 
+# Ignores CC/CXX and reaches for a compiler by bare name, the way a
+# hand-written configure does when it defaults to `gcc`. The shim directory
+# leads PATH, so the name resolves to the instrumented compiler anyway.
+RECIPE_BARE_COMPILER_NAME = """\
+#!/bin/sh
+set -eu
+src="$1"; build="$2"
+mkdir -p "$build"
+cc -g -O0 -fsanitize=address -o "$build/app" "$src/src.c"
+"""
+
 RECIPE_IGNORING_CC = """\
 #!/bin/sh
 set -eu
@@ -185,6 +196,23 @@ class CoverageSiblingBuildTests(unittest.TestCase):
         target_config.build_write_stamp(self.target, "asan")
         repaired = coverage_build.materialize(self.target, self.config)
         self.assertEqual(repaired.status, "built", repaired)
+
+    def test_a_recipe_that_reaches_for_a_bare_compiler_name_is_instrumented(self) -> None:
+        """Honouring CC is the polite route, not the only one.
+
+        A hand-written configure may ignore the environment and pick its own
+        default: ffmpeg's records `CC=gcc` even when `CC=clang` is exported, so
+        the shim was never the compiler and the sibling came out with no
+        instrumentation at all — indistinguishable from a working one until
+        `verify_tree` refused it. The shim directory leads PATH under every
+        name a build might reach for, so the bare name resolves to it too.
+        """
+        self._write_recipe(RECIPE_BARE_COMPILER_NAME)
+        target_config.build_write_stamp(self.target, "asan")
+        result = coverage_build.materialize(self.target, self.config)
+        self.assertEqual(result.status, "built", result)
+        present, why = coverage_build.sancov_section_present(self.sibling / "app")
+        self.assertTrue(present, why)
 
     def test_nothing_to_instrument_is_skipped_not_built(self) -> None:
         browser = SimpleNamespace(
