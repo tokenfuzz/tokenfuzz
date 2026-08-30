@@ -290,6 +290,23 @@ class RunAsanTests(unittest.TestCase):
                         run_asan.run_generic("", 1, ["input.bin"]), 0,
                     )
 
+        # The calibration belongs to the configured CLI. A harness probe
+        # built from a testcase that exits 1 on its own setup failure must not
+        # read as a completed run, or a never-reached surface reads CLEAN.
+        config = run_asan.target_config.Config(runner_success_codes=[0, 1])
+        with mock.patch.object(run_asan, "CONFIG", config), \
+             mock.patch.dict(
+                 run_asan.BASE_ENV,
+                 {"ASAN_GENERIC_BIN": str(binary),
+                  "PROBE_HARNESS_SOURCE": "/scratch/harness.c"},
+                 clear=True,
+             ), \
+             mock.patch.object(
+                 run_asan, "run_symbolized",
+                 return_value=SimpleNamespace(returncode=1),
+             ):
+            self.assertEqual(run_asan.run_generic("", 1, ["input.bin"]), 1)
+
         config = run_asan.target_config.Config(runner_success_codes=[0])
         with mock.patch.object(run_asan, "CONFIG", config), \
              mock.patch.dict(

@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import sanitizer
 import sanitizer_helpers
@@ -15,7 +15,21 @@ from sanitizer_helpers import copy_file
 from timeout import capture_timeout, run_timeout
 
 
-def runner_exit_succeeded(config, returncode: int) -> bool:
+def runner_exit_succeeded(
+    config, returncode: int, env: Mapping[str, str] | None = None,
+) -> bool:
+    """Whether a generic execution's exit status counts as a completed run.
+
+    `[runner] success_codes` describes the configured program's normal exits.
+    A harness probe built from a testcase is not that program: its nonzero
+    exit is its own failure, and reading it through the CLI's calibration
+    turned a harness that never opened its input into a CLEAN run.
+    """
+    if returncode == 0:
+        return True
+    environment = os.environ if env is None else env
+    if environment.get("PROBE_HARNESS_SOURCE"):
+        return False
     return returncode in (config.runner_success_codes if config else [0])
 
 
@@ -232,7 +246,9 @@ class SanitizerRunner:
             cwd=configured_runner_cwd(self.config, binary, self.name),
         )
         end_child_output_line()
-        succeeded = runner_exit_succeeded(self.config, completed.returncode)
+        succeeded = runner_exit_succeeded(
+            self.config, completed.returncode, self.env,
+        )
         if completed.returncode == 124:
             print(f"[run-{self.name}] generic runner timed out after {timeout}s", file=sys.stderr)
         elif succeeded:
