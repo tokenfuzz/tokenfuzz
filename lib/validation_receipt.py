@@ -486,10 +486,18 @@ def evidence_record(
         )
     ):
         return None
-    source_checkout_matches = (
-        _source_context_matches(source_context, resolved_target_revision)
-        if source_context is not None else False
-    )
+    if source_context is None:
+        source_checkout_matches = False
+    elif not preserving_source:
+        # This context was just derived from the live checkout, so the
+        # checkout it describes is the one in hand. Re-deriving it would ask
+        # the VCS the same question a second time; each answer costs two
+        # subprocesses, and every receipt read pays for them.
+        source_checkout_matches = True
+    else:
+        source_checkout_matches = _source_context_matches(
+            source_context, resolved_target_revision,
+        )
     source_attestations = (
         _source_attestations(directory, artifacts)
         if source_checkout_matches else []
@@ -751,9 +759,13 @@ def read_current(directory: Path) -> dict | None:
             if isinstance(saved.get("review_facts"), dict) else {}
         ),
         allow_missing_report=payload.get("state") in {"pending", "rejected"},
+        # A read never mints a source claim. A receipt written before source
+        # attestations existed has none to preserve, and the block below
+        # discards whatever a fresh derivation would have produced, so asking
+        # the VCS for it is pure cost.
         _preserved_source_attestations=(
             saved.get("source_attestations")
-            if "source_attestations" in saved else None
+            if "source_attestations" in saved else []
         ),
         _preserved_source_context=(
             saved.get("source_context")

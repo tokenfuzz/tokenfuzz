@@ -656,6 +656,71 @@ class ValidationReceiptTests(unittest.TestCase):
 
         self.assertIsNotNone(validation_receipt.read_current(self.directory))
 
+    def test_reading_a_legacy_receipt_asks_the_vcs_nothing(self) -> None:
+        """A read discards a fresh source claim, so it must not derive one.
+
+        Deriving one runs `detect_rev`, and each call is two subprocesses on a
+        git checkout. `read_current` runs once per artifact across whole pool
+        trees, so a derivation whose result is thrown away is paid for on
+        every one of them.
+        """
+        # A pinned revision is what reaches `detect_rev`; an unpinned one
+        # short-circuits to the checkout-path identity before asking.
+        payload = validation_receipt.write(
+            self.directory, kind="finding", state="reportable",
+            target_revision="a" * 40,
+        )
+        evidence = payload["evidence"]
+        evidence.pop("source_attestations")
+        identity = {
+            key: value for key, value in evidence.items()
+            if key != "evidence_id"
+        }
+        evidence["evidence_id"] = hashlib.sha256(json.dumps(
+            identity, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        (self.directory / "validation.json").write_text(
+            json.dumps(payload), encoding="utf-8",
+        )
+        target = Path(self.temporary.name) / "src"
+        target.mkdir(parents=True, exist_ok=True)
+
+        with mock.patch.dict(os.environ, {"TARGET_ROOT": str(target)}):
+            with mock.patch.object(
+                validation_receipt.target_config, "detect_rev",
+                side_effect=AssertionError("read_current derived a revision"),
+            ):
+                self.assertIsNotNone(
+                    validation_receipt.read_current(self.directory),
+                )
+
+    def test_writing_a_receipt_derives_the_revision_once(self) -> None:
+        """The mint already proves which checkout it described.
+
+        `_new_source_context` returns a revision context only when the live
+        checkout is already at that revision, so asking again to confirm the
+        match repeats two subprocesses for an answer just computed.
+        """
+        target = Path(self.temporary.name) / "src"
+        target.mkdir(parents=True, exist_ok=True)
+        calls: list[str] = []
+
+        def counted(root: object) -> str:
+            calls.append(str(root))
+            return "a" * 40
+
+        with mock.patch.dict(os.environ, {"TARGET_ROOT": str(target)}):
+            with mock.patch.object(
+                validation_receipt.target_config, "detect_rev", counted,
+            ):
+                payload = validation_receipt.write(
+                    self.directory, kind="finding", state="reportable",
+                    target_revision="a" * 40,
+                )
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(len(calls), 1, calls)
+
 
 if __name__ == "__main__":
     unittest.main()
