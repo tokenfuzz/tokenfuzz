@@ -523,7 +523,10 @@ class Setup:
         if config.first_executable_sanitizer() is None:
             return
         helper_args = [self.name, "--apply"]
-        if self.args.force:
+        # --force re-selects a reviewed runner; beside --build it only
+        # rematerializes, and a runner that lacks its exit calibration is
+        # calibrated in place rather than replaced by a fresh selection.
+        if self.args.force and not self.args.build:
             helper_args.append("--force")
         self.run_config_helper("suggest-runner", helper_args)
 

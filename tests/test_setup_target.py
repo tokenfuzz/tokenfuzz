@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -340,6 +341,52 @@ class SetupTargetTests(unittest.TestCase):
         text = self.config("demo").read_text()
         self.assertIn("rapidjson", text)
         self.assertNotIn("oldjson", text)
+
+    def test_force_beside_build_calibrates_a_reviewed_runner_without_reselecting(self) -> None:
+        # --force --build rematerializes build output. A reviewed [runner] that
+        # only lacks its exit calibration is calibrated in place; handing the
+        # helper --force made it re-select the argv the operator had reviewed.
+        setup_target = _load_setup_target()
+        target = self.temp / "force-build-target"
+        binary = target / "build-asan" / "demo"
+        binary.parent.mkdir(parents=True)
+        binary.write_text(f"#!{sys.executable}\n", encoding="utf-8")
+        binary.chmod(0o755)
+        toml = self.temp / "force-build.toml"
+        reviewed = (
+            'target = "demo"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/demo"\n'
+            '[sanitizer]\nenabled = ["asan"]\n'
+            '[runner]\nargs = ["--input", "{TESTCASE}"]\n'
+        )
+        toml.write_text(reviewed, encoding="utf-8")
+        setup = setup_target.Setup.__new__(setup_target.Setup)
+        setup.name = "demo"
+        setup.target_root = target
+        setup.toml = toml
+        setup.run_config_helper = mock.Mock()
+        clean = {"AUDIT_NEW_TARGET_BOOTSTRAP": "1", "LLM_DECIDE_DISABLE": "0"}
+        for force, build, expected in (
+            (True, True, ["demo", "--apply"]),
+            (False, False, ["demo", "--apply"]),
+            (True, False, ["demo", "--apply", "--force"]),
+        ):
+            with self.subTest(force=force, build=build):
+                setup.args = SimpleNamespace(
+                    no_llm_config=False, force=force, build=build,
+                )
+                setup.run_config_helper.reset_mock()
+                with mock.patch.dict(os.environ, clean):
+                    setup.runner_bootstrap()
+                setup.run_config_helper.assert_called_once_with(
+                    "suggest-runner", expected,
+                )
+        toml.write_text(reviewed + "success_codes = [0, 1]\n", encoding="utf-8")
+        setup.args = SimpleNamespace(no_llm_config=False, force=True, build=True)
+        setup.run_config_helper.reset_mock()
+        with mock.patch.dict(os.environ, clean):
+            setup.runner_bootstrap()
+        setup.run_config_helper.assert_not_called()
 
     def test_native_cli_invocation_bootstraps_after_binary_detection(self) -> None:
         self.assertEqual(self.setup("demo", str(self.remote)).returncode, 0)
