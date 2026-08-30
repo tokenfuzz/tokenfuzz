@@ -229,12 +229,12 @@ else:
         self.write_hits(
             """import argparse, json, os, pathlib
 parser = argparse.ArgumentParser()
-for option in ("--testcase", "--want", "--mode", "--timeout", "--route-binary", "--log"):
+for option in ("--testcase", "--want", "--mode", "--timeout", "--route-binary", "--log", "--harness-source"):
     parser.add_argument(option)
 parser.add_argument("--generic-skip-testcase", action="store_true")
 parser.add_argument("extra", nargs=argparse.REMAINDER)
 args = parser.parse_args()
-pathlib.Path(os.environ["MOCK_HITS_ARGS"]).write_text(json.dumps({"log": args.log, "extra": args.extra}))
+pathlib.Path(os.environ["MOCK_HITS_ARGS"]).write_text(json.dumps({"log": args.log, "extra": args.extra, "harness_source": args.harness_source}))
 print("HIT: sample_function")
 """
         )
@@ -243,6 +243,7 @@ print("HIT: sample_function")
             environment={
                 "WANT": "sample_target", "HITS_LOG_PATH": str(hits_log),
                 "MOCK_HITS_ARGS": str(capture),
+                "PROBE_HARNESS_SOURCE": str(self.root / "harness.c"),
             },
             extra_args=["--strict-target-option", "sample-value"],
         )
@@ -252,6 +253,38 @@ print("HIT: sample_function")
         self.assertEqual(
             parsed["extra"], ["--", "--strict-target-option", "sample-value"],
         )
+        # bin/probe's harness route reaches hits so its coverage twin measures
+        # the same program the sanitizer ran.
+        self.assertEqual(parsed["harness_source"], str(self.root / "harness.c"))
+
+    def test_a_generic_coverage_miss_is_feedback_not_a_skipped_run(self) -> None:
+        # Browser gating skips the sanitizer on a miss because a launch is the
+        # expensive part. A native replay is not, and a miss can be the
+        # coverage twin's failure to reproduce a route, so generic mode
+        # records the miss and still runs the sanitizer.
+        self.write_hits(
+            "print('MISSED - closest reached: sample_near')\nraise SystemExit(1)\n"
+        )
+        generic_case = self.root / "input.dat"
+        generic_case.write_text("sample\n")
+        output_file = self.root / "miss.txt"
+        tried = self.root / "tried.log"
+        process = self.run_multi("generic", generic_case, environment={
+            "WANT": "sample_target", "ASAN_OUTPUT_FILE": str(output_file),
+            "TRIED_INPUTS_LOG": str(tried),
+        })
+        output = self.output(process)
+        self.assertEqual(process.returncode, 0, output)
+        self.assertIn("COVERAGE GATE: MISSED - proceeding to the sanitizer", output)
+        self.assertIn("TESTCASE_EXECUTED", output)
+        recorded = output_file.read_text()
+        self.assertIn("COVERAGE_GATE: MISSED", recorded)
+        self.assertIn("closest: sample_near", recorded)
+        rows = [line for line in tried.read_text().splitlines() if "verdict=" in line]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("hits_verdict=MISSED", rows[0])
+        self.assertIn("closest=sample_near", rows[0])
+        self.assertNotIn("verdict=NO_HIT", rows[0])
 
     def test_output_headers_derivation_budget_validation_and_tried_log(self) -> None:
         output_file = self.root / "recorded.txt"

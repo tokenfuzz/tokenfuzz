@@ -9,7 +9,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 import build_lease
 import target_config
@@ -37,6 +37,8 @@ def materialize(
     verify: Callable[[Path], bool],
     *,
     force: bool = False,
+    env: Mapping[str, str] | None = None,
+    log_label: str = "",
 ) -> MaterializeResult:
     """Build in a clean canonical tree, preserving the old tree on failure.
 
@@ -56,12 +58,16 @@ def materialize(
     ``verify`` returns False to reject the tree without explanation, or raises
     to reject it with one; either way the reason reaches both the caller and
     the log the recipe repair loop reads.
+
+    ``env`` is the recipe's environment (the caller's own when omitted), and
+    ``log_label`` names the log a sibling build writes so its output never
+    lands in the tail the primary's recipe repair reads.
     """
     target_root = Path(target_root)
     suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
     build_dir = target_root / f"build-{sanitizer}{suffix}"
     audit_dir = target_root / ".audit"
-    log_path = audit_dir / f"build-materialize-{sanitizer}.log"
+    log_path = audit_dir / f"build-materialize-{log_label or sanitizer}.log"
 
     # A peer builder is worth waiting for — its result may be the build we
     # wanted. A live consumer is not: rebuilding underneath a run swaps the
@@ -146,6 +152,7 @@ def materialize(
                     stdout=output,
                     stderr=subprocess.STDOUT,
                     check=False,
+                    env=None if env is None else dict(env),
                 )
             returncode = completed.returncode
             if returncode == 0 and verify(build_dir):

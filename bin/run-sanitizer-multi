@@ -190,6 +190,9 @@ class MultiRun:
             route = os.environ.get(route_name, "")
             if route:
                 command.extend(("--route-binary", route))
+            harness_source = os.environ.get("PROBE_HARNESS_SOURCE", "")
+            if harness_source:
+                command.extend(("--harness-source", harness_source))
             if sanitizer.generic_skips_testcase(self.sanitizer):
                 command.append("--generic-skip-testcase")
         if os.environ.get("HITS_LOG_PATH"):
@@ -220,6 +223,16 @@ class MultiRun:
                     if match and not unavailable:
                         unavailable = match.group(1).strip()[:200]
             closest = closest or f"hits exited {completed.returncode}"
+            if completed.returncode == 1 and mode == "generic":
+                # A native replay costs milliseconds, so a miss buys nothing by
+                # withholding the sanitizer and could hide a crash the coverage
+                # twin did not reproduce. The miss is feedback: recorded here
+                # and in the run's tried-inputs row, never a skipped run.
+                os.environ["CLOSEST_FRAME"] = closest
+                os.environ["HITS_VERDICT"] = "MISSED"
+                self.emit(f"COVERAGE_GATE: MISSED - the input did not reach WANT; sanitizer proceeding, revise the input (closest: {closest or '<none>'})")
+                print(f"[run-sanitizer-multi] COVERAGE GATE: MISSED - proceeding to the sanitizer; revise the input (closest: {closest or '<none>'})")
+                return None
             if completed.returncode == 1:
                 self.emit(f"COVERAGE_GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
                 self._record_coverage_miss(testcase, mode, closest)

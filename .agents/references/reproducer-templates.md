@@ -77,9 +77,11 @@ aid, not a prerequisite.
 Default workflow: `bin/probe <testcase>` chooses the right runner.
 For browser/js targets, `run-sanitizer-multi asan` runs `bin/hits` first (cheap, no launch
 lock) and only invokes ASan when the testcase reached the target. This prevents
-0/5 variants from burning browser launches per dead-end. Generic C/C++ targets
-do not support coverage gating; `bin/probe` uses `run-sanitizer-multi asan generic` and
-saves a sibling `.asan.txt`.
+0/5 variants from burning browser launches per dead-end. Native C/C++ targets
+are measured in the `build-asan+fuzz` coverage sibling (the configured CLI, or
+a twin of your `// HARNESS:` source): the HIT/MISSED verdict and closest frame
+are recorded, and the sanitizer runs either way, so a MISSED there is feedback
+to act on, never a skipped run.
 
 ```
 # Preferred wrapper — coverage-gated ASan in one call when supported.
@@ -94,7 +96,8 @@ bin/probe "${RESULTS_DIR}/scratch-1/tc_H3.html"
 bin/probe "${RESULTS_DIR}/scratch-1/tc_H3.xml" -- 8 100        # trailing args go to the harness
 
 # exit 0 → HIT + ASan ran cleanly, or generic run completed
-# exit 1 → MISSED — ASan SKIPPED. Revise input; don't discard; no budget spent.
+# exit 1 → browser/js MISSED — ASan SKIPPED. Revise input; don't discard; no budget spent.
+#          (native targets record MISSED in the .asan.txt and still run ASan)
 # exit 2 → tool/env problem, missing testcase, or no execution evidence
 ```
 

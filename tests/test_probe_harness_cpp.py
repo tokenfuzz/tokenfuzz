@@ -112,6 +112,9 @@ class ProbeCppHarnessTests(unittest.TestCase):
         output = first.stdout + first.stderr
         self.assertRegex(output, r"built harness: .*harness\.cpp\..*\.bin")
         self.assertIn("mode=generic", output)
+        # The source is handed to the coverage gate so bin/hits can build the
+        # route's coverage twin from the same file.
+        self.assertRegex(output, r"(?m)^\[probe\] harness_source=.*harness\.cpp$")
         second = self.run_probe()
         self.assertNotIn("built harness:", second.stdout + second.stderr)
         binaries = list((self.scratch / ".harness-cache").glob("harness.cpp.*.bin"))

@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import build_lease
+import coverage_build
 import runner_preflight
 import target_config
 from timeout import run_timeout
@@ -47,6 +48,26 @@ def _refresh_alternates(
             f"WARN: alternate build configurations {reason}; "
             f"the regular sanitizer build remains active | log={build_log}"
         )
+
+
+def _refresh_coverage(root: Path, target_root: Path, config, logger) -> None:
+    """Build the ASan coverage sibling beside fresh primaries, fail-open.
+
+    Native coverage feedback exists only when `build-asan+fuzz` does, and no
+    agent builds it: this is where an audit pays for it, once, before any
+    session starts. A tree outside targets/ is the operator's to build, the
+    same rule the primary follows.
+    """
+    try:
+        target_root.relative_to(root / "targets")
+    except ValueError:
+        return
+    try:
+        result = coverage_build.materialize(target_root, config)
+    except OSError as exc:
+        logger(f"WARN: coverage sibling preflight could not run; continuing: {exc}")
+        return
+    coverage_build.report(result, "asan", logger)
 
 
 def enabled_sanitizers(config) -> list[str]:
@@ -381,6 +402,9 @@ def hold_builds(target_root: Path, config, logger) -> list[str]:
         target_config.build_dir_name(name)
         for name in enabled_sanitizers(config)
     ]
+    # The coverage sibling is replayed by the same run, so it is held by the
+    # same rule; a run that has none simply has nothing to hold.
+    directories.append(coverage_build.tree_name("asan"))
     routes = _artifact_routes(target_root, config)
     if "runner-bin" in routes and \
             _target_owned(routes["runner-bin"][1], target_root):
@@ -507,6 +531,7 @@ def _converge(
         ACTIVE_BACKEND=backend, BACKEND=backend, MODEL=model,
     )
     if not pending:
+        _refresh_coverage(root, target_root, config, logger)
         if not include_alternates:
             return
         _refresh_alternates(
@@ -554,6 +579,7 @@ def _converge(
     remaining = [name for name, state in after.items() if state not in ("fresh", "skip")]
     if not remaining:
         logger(f"Sanitizer builds refreshed | log={build_log}")
+        _refresh_coverage(root, target_root, config, logger)
         if include_alternates:
             _refresh_alternates(
                 root, target_root, target_slug, config, environment, build_log, logger

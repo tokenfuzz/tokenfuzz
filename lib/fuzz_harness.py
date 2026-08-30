@@ -259,6 +259,97 @@ _HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx", ".h++"}
 # A header this large is a generated amalgamation, not an API surface.
 _MAX_HEADER_BYTES = 2 * 1024 * 1024
 
+# Local examples are construction evidence, not audit scope. Restricting the
+# lookup to the conventional directories projects use for runnable examples
+# keeps one template command from becoming another whole-tree source review.
+# Every name here must survive `_tree`'s prune, or the entry is dead: the walk
+# keeps `_FUZZ_DIR_NAMES | _SEED_DIR_NAMES` explicitly and drops everything
+# else `audit_scope` excludes — singular `example/` among them.
+_LOCAL_CALLER_DIR_NAMES = frozenset({
+    "examples", "sample", "samples", "test", "tests",
+    "fuzz", "fuzzer", "fuzzers", "fuzzing", "oss-fuzz",
+})
+_LOCAL_CALLER_SUFFIXES = frozenset({
+    ".c", ".cc", ".cpp", ".cxx", ".c++", ".m", ".mm",
+})
+_MAX_LOCAL_CALLER_BYTES = 512 * 1024
+# Which of those directories teaches the most, best first. An existing fuzz
+# harness already solves this exact problem for a neighbouring API; a runnable
+# example is the project's own demonstration; a test may be a data fixture that
+# happens to end in `.c`. Without this, walk order decides, and on a large tree
+# walk order is alphabetical noise. Ranking costs one pass over the pruned file
+# list instead of stopping at the first two matches — 3s on a million-file tree
+# whose walk already costs 8s, and milliseconds on every ordinary target.
+_LOCAL_CALLER_RANKS = (
+    frozenset({"fuzz", "fuzzer", "fuzzers", "fuzzing", "oss-fuzz"}),
+    frozenset({"examples", "sample", "samples"}),
+)
+
+
+@dataclass(frozen=True)
+class CallerExample:
+    path: str
+    line: int
+
+
+def _blank_comment(match: "re.Match[str]") -> str:
+    """Remove comment text without moving the source lines it occupied."""
+    return "".join("\n" if character == "\n" else " "
+                   for character in match.group(0))
+
+
+def local_caller_examples(target_root: "str | os.PathLike", symbol: str,
+                          limit: int = 2) -> "list[CallerExample]":
+    """At most ``limit`` exact-symbol calls in local tests/examples.
+
+    These locations teach a harness how ordinary callers construct arguments
+    and release state. They deliberately do not feed admission or ranking: a
+    test can use privileged setup, and no example is proof that an attacker
+    reaches the same route. Missing, unreadable, or unparsable source simply
+    yields no examples and leaves the existing declaration-first workflow.
+    """
+    if limit <= 0 or not re.fullmatch(r"[A-Za-z_]\w*", symbol):
+        return []
+    root = Path(target_root)
+    call = re.compile(rf"\b{re.escape(symbol)}\s*\(")
+    candidates: "list[tuple[int, str, Path]]" = []
+    for path in _tree(root):
+        if path.suffix.lower() not in _LOCAL_CALLER_SUFFIXES:
+            continue
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            continue
+        directories = {part.lower() for part in relative.parts[:-1]}
+        if not _LOCAL_CALLER_DIR_NAMES & directories:
+            continue
+        rank = next((index for index, names in enumerate(_LOCAL_CALLER_RANKS)
+                     if names & directories), len(_LOCAL_CALLER_RANKS))
+        candidates.append((rank, relative.as_posix(), path))
+    found: "list[CallerExample]" = []
+    for rank, relative_path, path in sorted(candidates):
+        try:
+            if path.stat().st_size > _MAX_LOCAL_CALLER_BYTES:
+                continue
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        # Blanking comments is the expensive step and only ever removes
+        # matches, so a file the symbol does not appear in at all is skipped
+        # before paying for it.
+        if call.search(text) is None:
+            continue
+        code = _COMMENT_RE.sub(_blank_comment, text)
+        match = call.search(code)
+        if match is None:
+            continue
+        found.append(CallerExample(
+            path=relative_path, line=code.count("\n", 0, match.start()) + 1,
+        ))
+        if len(found) >= limit:
+            break
+    return found
+
 
 def declaration_index(target_root: "str | os.PathLike",
                       include_dirs: "list[str] | None" = None) -> "dict[str, str]":
@@ -1067,8 +1158,10 @@ def coverage_library(config, sanitizer: str) -> LibraryChoice:
     instrumented = is_coverage_instrumented(plain)
     return LibraryChoice(plain, tree, instrumented, remedy="" if instrumented else (
         f"{Path(plain).name} carries no SanitizerCoverage, so libFuzzer will "
-        f"run blind — it cannot tell that an input reached new code. Build a "
-        f"sibling tree with coverage on and this is picked up automatically:\n"
+        f"run blind — it cannot tell that an input reached new code. "
+        f"`bin/setup-target --build` builds a sibling tree with coverage on "
+        f"(see .audit/build-materialize-{sanitizer}{COVERAGE_TREE_SUFFIX}.log "
+        f"when it could not); by hand, the same thing is:\n"
         + rebuild_recipe(Path(config.target_root) / sibling_tree)
         + f"That toolchain and not the target's usual one: a sanitizer "
         f"runtime is version-locked to the code it instrumented, and only it "
@@ -1125,6 +1218,126 @@ def fuzzing_compiler(cxx: bool = False) -> str:
 def compiler_for(source: Path) -> str:
     """The fuzzing compiler for one harness source, C or C++."""
     return fuzzing_compiler(source.suffix.lower() in _CXX_SUFFIXES)
+
+
+# ── Source-grounded harness receipt ─────────────────────────────────
+#
+# A declaration proves the boundary shape, but not how a real caller creates
+# state, relates arguments, or tears resources down. The generated harness
+# carries one small comment receipt so those facts survive compilation and
+# resume. It is context only: none of these fields participate in admission,
+# contract linting, scheduling, crash classification, or publication.
+
+_RECEIPT_FIELDS = {
+    "BOUNDARY": "boundary",
+    "CONTROLS": "controls",
+    "DECLARATION": "declaration",
+    "SOURCE-USAGE": "source_usage",
+    "CONSTRUCTOR": "constructor",
+    "ARG-RELATIONS": "argument_relations",
+    "RESOURCE-FLOW": "resource_flow",
+    "TEARDOWN": "teardown",
+}
+_RECEIPT_LINE = re.compile(
+    r"^\s*//\s*S4-RECEIPT\s+([A-Z][A-Z-]*):\s*(.*?)\s*$", re.M)
+# The fields an agent is expected to answer from source, and the token each
+# contributes to `unresolved` while it has not been. Derived rather than
+# trusted from the UNRESOLVED line, which otherwise goes stale the moment a
+# field is filled in and its name is not struck from the list.
+_RECEIPT_ANSWERABLE = (
+    ("source-usage", "source_usage"),
+    ("constructor", "constructor"),
+    ("argument-relations", "argument_relations"),
+    ("resource-flow", "resource_flow"),
+    ("teardown", "teardown"),
+)
+
+
+@dataclass
+class HarnessReceipt:
+    # Whether the source carried a receipt at all. A hand-written harness has
+    # none, and an all-blank receipt must not read as a grounded one.
+    recorded: bool = False
+    boundary: str = ""
+    controls: str = ""
+    declaration: str = ""
+    source_usage: str = ""
+    constructor: str = ""
+    argument_relations: str = ""
+    resource_flow: str = ""
+    teardown: str = ""
+    unresolved: "list[str]" = field(default_factory=list)
+    warnings: "list[str]" = field(default_factory=list)
+
+    def as_dict(self) -> dict:
+        """The receipt as the manifest stores it, or nothing if there is none.
+
+        The manifest's own ``schema`` versions this; an empty mapping is how a
+        harness with no receipt is recorded, so every consumer can read
+        "grounded" straight off the presence of the field.
+        """
+        if not self.recorded:
+            return {}
+        return {
+            "boundary": self.boundary,
+            "controls": self.controls,
+            "declaration": self.declaration,
+            "source_usage": self.source_usage,
+            "constructor": self.constructor,
+            "argument_relations": self.argument_relations,
+            "resource_flow": self.resource_flow,
+            "teardown": self.teardown,
+            "unresolved": list(self.unresolved),
+        }
+
+
+def harness_receipt(source: "str | os.PathLike") -> HarnessReceipt:
+    """Parse the neutral ``S4-RECEIPT`` comments at a harness's head.
+
+    Legacy and hand-written harnesses carry no receipt and remain valid. A
+    malformed or duplicate receipt stays visible as a warning but cannot turn
+    into a build failure: these fields help the agent reason about a driver;
+    the existing contract lints and probe path decide whether evidence counts.
+    """
+    try:
+        text = Path(source).read_text(errors="replace")[:64 * 1024]
+    except OSError:
+        return HarnessReceipt()
+    matches = list(_RECEIPT_LINE.finditer(text))
+    if not matches:
+        return HarnessReceipt()
+    receipt = HarnessReceipt(recorded=True)
+    seen: "set[str]" = set()
+    for match in matches:
+        label, value = match.group(1), match.group(2).strip()
+        if label == "UNRESOLVED":
+            if label in seen:
+                receipt.warnings.append("duplicate UNRESOLVED field; kept the first")
+                continue
+            seen.add(label)
+            receipt.unresolved = [
+                item.strip() for item in value.split(",")
+                if item.strip() and item.strip().lower() != "none"
+            ]
+            continue
+        attribute = _RECEIPT_FIELDS.get(label)
+        if attribute is None:
+            receipt.warnings.append(f"unknown receipt field {label}")
+            continue
+        if label in seen:
+            receipt.warnings.append(f"duplicate {label} field; kept the first")
+            continue
+        seen.add(label)
+        setattr(receipt, attribute, value)
+    for line in text.splitlines():
+        if "S4-RECEIPT" in line and _RECEIPT_LINE.fullmatch(line) is None:
+            receipt.warnings.append("malformed S4-RECEIPT line")
+    for token, attribute in _RECEIPT_ANSWERABLE:
+        value = getattr(receipt, attribute)
+        if (not value or value.upper() == "UNRESOLVED") \
+                and token not in receipt.unresolved:
+            receipt.unresolved.append(token)
+    return receipt
 
 
 # ── Contract faithfulness ───────────────────────────────────────────
@@ -1260,6 +1473,35 @@ def build_command(source: Path, binary: Path, san: str, config,
         *config.resolved_link_libs(),
         *shlex.split(os.environ.get("LDFLAGS", "")),
         "-o", str(binary),
+    ]
+
+
+def probe_compile_command(compiler: str, sanitizer_flag: str, source: Path,
+                          binary: Path, config, library: str,
+                          flags: "list[str]",
+                          coverage: bool = False) -> "list[str]":
+    """bin/probe's compile of one C/C++ harness, shared with its coverage twin.
+
+    ``-O0`` and ``-g1`` because a probe binary exists to reproduce and name a
+    frame, not to run fast. ``coverage`` adds trace-pc-guard so the same
+    source, linked against the coverage sibling's library, dumps the
+    ``.sancov`` `bin/hits` reads; everything else is identical on purpose,
+    so the twin executes the route the sanitizer run executed.
+    """
+    includes = [
+        value for path in config.includes
+        for value in ("-I", config.resolve_path(path))
+    ]
+    library_args = [library] if library else []
+    if library and Path(library).parent != Path("."):
+        library_args.append(f"-Wl,-rpath,{Path(library).parent}")
+    return [
+        compiler, f"-fsanitize={sanitizer_flag}",
+        *(("-fsanitize-coverage=trace-pc-guard",) if coverage else ()),
+        "-g1", "-O0", *flags,
+        *config.defines, *includes, str(source), *library_args,
+        *config.resolved_link_libs(),
+        *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary),
     ]
 
 
@@ -1492,8 +1734,9 @@ def write_manifest(binary: Path, source: Path, san: str,
         source_sha1 = hashlib.sha1(source.read_bytes()).hexdigest()
     except OSError:
         source_sha1 = ""
+    receipt = harness_receipt(source)
     manifest_path(binary).write_text(json.dumps({
-        "schema": 1,
+        "schema": 2,
         "harness": source.stem,
         "source_sha1": source_sha1,
         "compiler": compiler_for(source),
@@ -1506,6 +1749,8 @@ def write_manifest(binary: Path, source: Path, san: str,
         "sanitized": sanitized,
         "hypothesis_id": hypothesis,
         "binary": str(binary),
+        "receipt": receipt.as_dict(),
+        "receipt_warnings": receipt.warnings,
     }, indent=2, sort_keys=True), encoding="utf-8")
 
 
@@ -1523,8 +1768,13 @@ def built_harnesses(results_dir: "str | os.PathLike",
             record = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if record.get("schema") != 1 or record.get("sanitizer") != san:
+        if record.get("schema") not in (1, 2) or record.get("sanitizer") != san:
             continue
+        # Schema 1 predates source-grounding receipts. Keep it runnable and
+        # fail open to empty context rather than making a cached binary rebuild
+        # merely because status learned to explain it better.
+        record.setdefault("receipt", {})
+        record.setdefault("receipt_warnings", [])
         binary = Path(str(record.get("binary", "")))
         if not binary.is_file() or not os.access(binary, os.X_OK):
             continue

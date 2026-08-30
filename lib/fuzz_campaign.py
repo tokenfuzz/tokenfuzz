@@ -308,6 +308,11 @@ class HarnessState:
     # One number, because that is what selection needs and a full history
     # would have to be re-derived on every resume.
     value: float = 0.0
+    # The first slice is the fastest falsifier of a generated harness: it says
+    # whether the binary really executed, whether guidance moved, and which
+    # repair class applies. Keep that exact receipt across later productive
+    # slices instead of replacing it with high-water totals.
+    first_slice: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -376,6 +381,78 @@ def recommendation(state: HarnessState) -> str:
     if state.value > 0:
         return "keep — still finding new code, so more wall still pays"
     return "keep — one more campaign decides whether it is saturated"
+
+
+def status_rows(states: "dict[str, HarnessState]",
+                built: "dict[str, dict]") -> "dict[str, dict]":
+    """Join campaign state with current build/grounding receipts.
+
+    Returning data keeps ``bin/fuzz status`` a thin printer and makes the
+    resume view testable without spawning another Python process. The join is
+    read-only: receipts may explain what to try next, but they do not change a
+    quarantine, schedule, or evidence decision.
+    """
+    rows: "dict[str, dict]" = {}
+    for name in sorted(set(states) | set(built)):
+        state = states.get(name)
+        record = built.get(name, {})
+        record_binary = str(record.get("binary", ""))
+        if state is None or (record_binary and state.binary != record_binary):
+            state = HarnessState(
+                name=name, binary=record_binary,
+                source=str(record.get("source", "")),
+                hypothesis_id=str(record.get("hypothesis_id", "")),
+            )
+        row = state.as_dict()
+        build = {
+            key: record.get(key)
+            for key in (
+                "binary", "compiler", "source", "source_sha1", "library",
+                "tree", "guided", "sanitized", "current",
+            )
+            if key in record
+        }
+        receipt = record.get("receipt")
+        if not isinstance(receipt, dict):
+            receipt = {}
+        warnings = record.get("receipt_warnings")
+        if not isinstance(warnings, list):
+            warnings = []
+        next_step = recommendation(state)
+        if record and record.get("current") is False:
+            next_step = (
+                "rebuild — the harness source changed since this binary was built"
+            )
+        elif state.slices == 0 and record:
+            next_step = "run one bounded campaign to obtain first-slice feedback"
+        elif (state.quarantine == VERDICT_SATURATED
+              and bool(record.get("guided")) and receipt):
+            # No receipt at all — a legacy or hand-written harness — is not a
+            # grounded one, so it keeps the generic widen/re-seed advice
+            # rather than being told to preserve a contract nothing recorded.
+            unresolved = receipt.get("unresolved")
+            unresolved = unresolved if isinstance(unresolved, list) else []
+            if unresolved:
+                next_step = (
+                    "resolve the source-grounded receipt before varying this "
+                    "guided harness: " + ", ".join(str(item) for item in unresolved[:5])
+                )
+            else:
+                next_step = (
+                    "make at most one contract-preserving derivative: vary one "
+                    "caller-controlled argument or add one source-grounded "
+                    "public call, then rebuild — the next S4 iteration's single "
+                    "campaign runs it"
+                )
+        row.update({
+            "build": build,
+            "receipt": receipt,
+            "receipt_warnings": warnings,
+            "coverage": coverage_note(state),
+            "next": next_step,
+        })
+        rows[name] = row
+    return rows
 
 
 def fresh_artifacts(result: SliceResult, state: HarnessState) -> "list[str]":
@@ -1000,6 +1077,22 @@ class Campaign:
     def _record(self, state: HarnessState, result: SliceResult,
                 verdict: str, detail: str, new_edges: int,
                 fresh: "list[str]", new_features: int = 0) -> None:
+        if not state.first_slice:
+            state.first_slice = {
+                "seconds": round(result.seconds, 2),
+                "verdict": verdict,
+                "detail": detail,
+                "executions": result.executions,
+                "exec_rate": int(result.executions / result.seconds)
+                if result.seconds else 0,
+                "edges": result.edges,
+                "new_edges": new_edges,
+                "features": result.features,
+                "new_features": new_features,
+                "artifacts": len(result.artifacts),
+                "new_artifacts": len(fresh),
+                "log": result.log,
+            }
         state.slices += 1
         self.total_slices += 1
         state.seconds += result.seconds

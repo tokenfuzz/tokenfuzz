@@ -93,10 +93,17 @@ with tempfile.TemporaryDirectory() as td:
     (p / "tc1.asan.txt").write_text("ASAN_RUN_HEADER: ok\nfoo bar\n")
     (p / "tc2.asan.txt").write_text("EXECUTION_RATE: 5\n")
     (p / "tc3.asan.txt").write_text("COVERAGE_GATE: MISSED\nASAN_RUN_HEADER: still skipped\n")
+    # A native miss records the marker and then runs the sanitizer anyway.
+    (p / "tc4.asan.txt").write_text(
+        "ASAN_RUN_HEADER: ok\n"
+        "COVERAGE_GATE: MISSED - the input did not reach WANT; sanitizer proceeding, "
+        "revise the input (closest: app_parse)\n"
+        "[run-sanitizer-multi] EXECUTION_RATE: 1/1\n"
+    )
     # A sidecar that should also count when filename matches asan_output*.
     (p / "asan_output_19.txt").write_text("ERROR: AddressSanitizer: heap-use-after-free\n")
     proc = run(["count-asan-runs", str(p)], check=True)
-    assert_eq("3", proc.stdout.strip(), "three verified runs counted (MISSED excluded)")
+    assert_eq("4", proc.stdout.strip(), "four verified runs counted (skipped MISSED excluded, proceeded MISSED kept)")
 
     # Pair testcases with their sidecars so has-verified-asan works.
     (p / "tc1.js").write_text("// js")
@@ -105,6 +112,8 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq(0, run(["has-verified-asan", str(p / "tc1.js")]).returncode, "tc1 has verified asan")
     assert_eq(0, run(["has-verified-asan", str(p / "tc2.js")]).returncode, "tc2 has verified asan")
     assert_eq(1, run(["has-verified-asan", str(p / "tc3.js")]).returncode, "tc3 disqualified by MISSED")
+    (p / "tc4.js").write_text("// js")
+    assert_eq(0, run(["has-verified-asan", str(p / "tc4.js")]).returncode, "tc4 verified: the sanitizer ran past the miss")
 
 
 # ── list-testcases + count-testcases + count-orphans + scan-scratch ─

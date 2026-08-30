@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Boundary-directed fuzzing: what to fuzz, how to build it, how to run it.
 
-The S4 strategy's tool. Six verbs, the first five in the order an agent uses
+The S4 strategy's tool. Seven verbs, the first six in the order an agent uses
 them:
 
   inventory   what fuzz harnesses this target already has, and what each
@@ -11,11 +11,14 @@ them:
               published API that nothing already drives
   template    a harness skeleton for one admitted symbol, built to be
               compiled two ways — as a libFuzzer target and as a standalone
-              driver bin/probe can replay one artifact against
+              driver bin/probe can replay one artifact against; its receipt
+              starts from at most two target-local caller examples
   build       compile a harness out of tree, against the shared sanitizer
               build read-only
   run         spend a budget across the built harnesses, moving off any that
               stops paying
+  status      join the source/build receipt with first-slice and campaign
+              feedback, and say what remains unresolved
   doctor      prove the shared build is unaffected by any of the above
 
 Nothing here writes to the target checkout or to build-<san>/. That is not
@@ -68,18 +71,23 @@ def load_config(start: str) -> target_config.Config:
     )
 
 
-def chosen_sanitizer(config: target_config.Config, requested: str) -> str:
+def chosen_sanitizer(config: target_config.Config, requested: str,
+                     required: bool = True) -> str:
     """The sanitizer to build and fuzz under, or exit saying there is none.
 
     A findings-only target (`[sanitizer] enabled = []`) has no native build to
     link; answering "asan" anyway turns an unsupported configuration into one
-    that fails later at the compiler with a confusing error.
+    that fails later at the compiler with a confusing error. `required=False`
+    is for the read-only reporting path, which has nothing to link and should
+    print an empty session rather than exit.
     """
     if requested:
         return requested
     for name in config.sanitizers_enabled:
         if name in fuzz_harness.COMPILE_SANITIZERS:
             return name
+    if not required:
+        return ""
     raise SystemExit(
         f"[{TOOL}] {config.slug or 'this target'} enables no native sanitizer "
         f"([sanitizer] enabled = {config.sanitizers_enabled or '[]'}), so there "
@@ -255,6 +263,16 @@ TEMPLATE = '''// TARGET: {target}
 //   declaration: {declaration}
 //   admitted:    {controls} reach it via {shapes}
 //
+// S4-RECEIPT BOUNDARY: {symbol}
+// S4-RECEIPT CONTROLS: {controls}
+// S4-RECEIPT DECLARATION: {declaration}
+// S4-RECEIPT SOURCE-USAGE: {source_usage}
+// S4-RECEIPT CONSTRUCTOR: UNRESOLVED
+// S4-RECEIPT ARG-RELATIONS: UNRESOLVED
+// S4-RECEIPT RESOURCE-FLOW: UNRESOLVED
+// S4-RECEIPT TEARDOWN: UNRESOLVED
+// S4-RECEIPT UNRESOLVED: none
+//
 // Compiled two ways on purpose:
 //   bin/fuzz build  ->  -fsanitize=fuzzer,<san> -DFUZZ_CAMPAIGN_BUILD=1
 //   bin/probe       ->  -fsanitize=<san>        (the main() below)
@@ -366,6 +384,10 @@ def cmd_template(args) -> int:
     if destination.exists() and not args.force:
         say(f"refusing to overwrite {destination}; pass --force to replace it")
         return 1
+    examples = fuzz_harness.local_caller_examples(
+        config.target_root, args.symbol, limit=2)
+    source_usage = ", ".join(
+        f"{entry.path}:{entry.line}" for entry in examples) or "UNRESOLVED"
     destination.write_text(TEMPLATE.format(
         target=args.target or f"{args.symbol}",
         hypothesis=args.hypothesis_id or "H-TODO",
@@ -373,7 +395,15 @@ def cmd_template(args) -> int:
         declaration=verdict.declaration or "(no public declaration found)",
         controls=", ".join(verdict.controls) or "(forced)",
         shapes=", ".join(verdict.shapes) or "(none)",
+        source_usage=source_usage,
     ), encoding="utf-8")
+    if examples:
+        say(f"grounded the template in {len(examples)} local caller example(s); "
+            "read those locations and replace the UNRESOLVED receipt fields "
+            "before building")
+    else:
+        say("no local caller example found; the receipt stays UNRESOLVED and "
+            "does not block the declaration-first workflow")
     print(destination)
     return 0
 
@@ -466,20 +496,49 @@ def cmd_run(args) -> int:
 def cmd_status(args) -> int:
     config = load_config(args.results_dir)
     states = fuzz_campaign.load_states(config.results_dir)
+    sanitizer = chosen_sanitizer(config, args.sanitizer, required=False)
+    built = fuzz_harness.built_harnesses(
+        config.results_dir, sanitizer) if sanitizer else {}
+    rows = fuzz_campaign.status_rows(states, built)
     if args.json:
-        print(json.dumps({n: s.as_dict() for n, s in states.items()}, indent=2))
+        print(json.dumps(rows, indent=2))
         return 0
-    if not states:
-        print("No campaign has run in this session yet.")
+    if not rows:
+        print("No fuzz harness has been built or run in this session yet.")
         return 0
-    for name, state in sorted(states.items()):
-        status = state.quarantine or "active"
-        print(f"  {name}: {status} — {state.slices} slices, "
-              f"{state.artifacts} artifacts, {state.seconds:.0f}s")
-        print(f"    coverage: {fuzz_campaign.coverage_note(state)}")
-        print(f"    next: {fuzz_campaign.recommendation(state)}")
-        if state.quarantine_detail:
-            print(f"    why: {state.quarantine_detail}")
+    for name, row in rows.items():
+        status = row.get("quarantine") or (
+            "ready" if not row.get("slices") else "active")
+        print(f"  {name}: {status} — {row.get('slices', 0)} slices, "
+              f"{row.get('artifacts', 0)} artifacts, "
+              f"{row.get('seconds', 0):.0f}s")
+        print(f"    coverage: {row.get('coverage', '0 edges, 0 features')}")
+        build = row.get("build") or {}
+        if build:
+            guidance = "guided" if build.get("guided") else "blind"
+            runtime = ("sanitized" if build.get("sanitized")
+                       else "target-only sanitizer")
+            print(f"    build: {guidance}, {runtime}")
+            if build.get("current") is False:
+                print("    build: stale — the source changed since this binary")
+        receipt = row.get("receipt") or {}
+        if receipt:
+            print(f"    boundary: {receipt.get('boundary') or '(unrecorded)'}")
+            print(f"    source usage: {receipt.get('source_usage') or 'UNRESOLVED'}")
+            unresolved = receipt.get("unresolved") or []
+            if unresolved:
+                print(f"    unresolved: {', '.join(str(item) for item in unresolved)}")
+        first = row.get("first_slice") or {}
+        if first:
+            print(f"    first slice: {first.get('verdict', 'unknown')} — "
+                  f"{first.get('executions', 0)} execs, "
+                  f"+{first.get('new_edges', 0)} edges, "
+                  f"+{first.get('new_features', 0)} features")
+        print(f"    next: {row.get('next')}")
+        if row.get("quarantine_detail"):
+            print(f"    why: {row.get('quarantine_detail')}")
+        for warning in row.get("receipt_warnings") or []:
+            print(f"    receipt warning: {warning}")
     return 0
 
 

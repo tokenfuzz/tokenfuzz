@@ -112,7 +112,9 @@ _CLEAN_EVIDENCE_RE = re.compile(
     r"\[run-ubsan\] EXECUTION VERIFIED:|"
     r"ERROR: AddressSanitizer)"
 )
-_COVERAGE_MISSED_RE = re.compile(r"COVERAGE_GATE: MISSED")
+# A miss that withheld the sanitizer (browser/js gating). A native miss says
+# the sanitizer proceeds, and its evidence follows on later lines.
+_COVERAGE_MISSED_RE = re.compile(r"COVERAGE_GATE: MISSED(?!.*sanitizer proceeding)")
 _HIT_LINE_RE = re.compile(r"^HIT:")
 _HID_RE = re.compile(r"HYPOTHESIS-ID:\s*(H[0-9]+)")
 _TARGET_RE = re.compile(r"^[^A-Za-z]*TARGET:\s*(.+?)(?:\s*(?:-->|\*/)\s*)?$")
@@ -211,7 +213,8 @@ def _file_has_verified_asan(path: str) -> bool:
 
     Accepts ASAN_RUN_HEADER, CRASH_RATE, EXECUTION_RATE, run-asan
     CRASH/VERIFIED markers, or an AddressSanitizer error line. A
-    COVERAGE_GATE: MISSED marker disqualifies the run.
+    COVERAGE_GATE: MISSED marker that skipped the sanitizer disqualifies the
+    run; a native miss the sanitizer proceeded past does not.
     """
     verified = False
     try:

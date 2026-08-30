@@ -98,6 +98,31 @@ compiled only when `FUZZ_CAMPAIGN_BUILD` is undefined. The second is what lets
 `bin/probe` replay one artifact against the same code. **Keep both working** —
 without the `main`, a crash this target finds cannot enter the crash pipeline.
 
+The template also records at most two exact-symbol local caller examples from
+the target's tests, examples, samples, or existing fuzz sources. Read those
+locations with `bin/peek` before filling the harness. Local usage is evidence
+for construction, argument relationships, and teardown.
+It does not prove external-party reachability or override the admission gate.
+Do not search an external code index or copy an unrelated project's calling
+convention.
+
+Complete the `S4-RECEIPT` comments at the top of the source:
+
+- `SOURCE-USAGE` — the local caller locations actually read;
+- `CONSTRUCTOR` — the public operation that creates required state;
+- `ARG-RELATIONS` — length/capacity/option relationships the caller preserves;
+- `RESOURCE-FLOW` — ownership or state passed between public calls;
+- `TEARDOWN` — the public cleanup operation and when it is valid; and
+- `UNRESOLVED` — anything else source did not establish. Leave a field reading
+  `UNRESOLVED` and it lists itself; this line is for the rest.
+
+Follow a named definition for at most three call-graph or `bin/peek` hops when
+one of those fields is unresolved. Leave a field `UNRESOLVED` when source
+remains ambiguous: an unknown warns the next agent but never blocks build/run,
+closes a card, or licenses a guessed private call. `bin/fuzz build` binds the
+completed receipt to the exact harness source, and `bin/fuzz status` shows the
+receipt, build state, and first-slice feedback after resume.
+
 Fill it in in this order:
 
 1. Draw configuration with `fz_u8` / `fz_u32`. A harness with a fixed config
@@ -170,6 +195,16 @@ budget. Time it does not need goes back to the other strategies — that is the
 point. Do not raise the budget to keep a saturated harness running; fix the
 harness, or file what you have and rotate.
 
+For a guided harness that saturated with its receipt resolved, make at most one
+derivative — and make it the *next* iteration's harness, not a second campaign
+in this one. The review gate above still holds: when `bin/fuzz run` returns, S4
+is done for this iteration. Preserve the admitted boundary, constructor,
+teardown, and recorded argument relationships; change one caller-controlled
+fixed argument or add one source-grounded public call, and rebuild. A blind
+build, unresolved lifecycle, failed derivative, or CLEAN result is no evidence
+that the parent API is safe and never quarantines the parent by itself. Do not
+generate a batch or edit a harness automatically.
+
 ### 5. Crashes file themselves
 
 Every artifact is copied into scratch alongside the harness source and
@@ -212,11 +247,17 @@ library*. An ordinary `build-<san>/` usually has none, and a fuzzer linked
 against one runs **blind** — it still finds shallow faults but cannot tell
 that an input reached new code.
 
-The fix is a **sibling** tree, never a replacement:
+The fix is a **sibling** tree, never a replacement, and the harness builds it
+for you: `bin/setup-target <slug> --build` and audit preflight rerun the
+target's own recipe with coverage flags into
 
 ```
 targets/<slug>/build-asan+fuzz/     # same build, plus -fsanitize=fuzzer-no-link
 ```
+
+so it is normally already there when your session starts (`bin/fuzz doctor`
+says `guided`). The rest of this section is for building one by hand when it
+is reported unavailable — a recipe that ignores `CC`/`CXX`, say.
 
 Build it with the compiler `bin/fuzz build` names, not the one the target
 normally uses: a sanitizer runtime is version-locked to the code it

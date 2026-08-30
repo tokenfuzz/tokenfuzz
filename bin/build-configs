@@ -45,19 +45,6 @@ def build_lock(path: Path):
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-@contextlib.contextmanager
-def selected_suffix(value: str):
-    previous = os.environ.get("AUDIT_BUILD_SUFFIX")
-    os.environ["AUDIT_BUILD_SUFFIX"] = value
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop("AUDIT_BUILD_SUFFIX", None)
-        else:
-            os.environ["AUDIT_BUILD_SUFFIX"] = previous
-
-
 def recipe_command(
     root: Path, config: build_config.BuildConfig, recipe: Path,
 ) -> list[str]:
@@ -157,7 +144,7 @@ def is_fresh(root: Path, config: build_config.BuildConfig, base_suffix: str) -> 
         input_stamp_path(recipe), configuration_input_key(root, config, base_suffix)
     ):
         return False
-    with selected_suffix(build_config.suffix(config, base_suffix)):
+    with build_config.selected_suffix(build_config.suffix(config, base_suffix)):
         return target_config.build_freshness(
             root, "asan", recipe_path=recipe
         ) == "fresh"
@@ -270,7 +257,7 @@ def materialize(
         build_config.ready_path(tree).unlink(missing_ok=True)
         output_path = recipe.with_suffix(".build.log")
         log(f"{config.name}: building {tree.name}")
-        with output_path.open("ab") as output, selected_suffix(build_config.suffix(config, base_suffix)):
+        with output_path.open("ab") as output, build_config.selected_suffix(build_config.suffix(config, base_suffix)):
             completed = run_timeout(
                 [str(recipe), str(root), str(tree)], timeout_seconds,
                 env=os.environ.copy(), stdout=output, stderr=subprocess.STDOUT,

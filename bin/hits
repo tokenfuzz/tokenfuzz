@@ -6,37 +6,42 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import fcntl
 import hashlib
 import os
 import platform
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import coverage_build
 import edges
 import fuzz_harness
+import languages
 import sanitizer
 import sanitizer_run
 import target_config
 from timeout import run_timeout
 
 # Sibling build trees a native testcase can be replayed against for coverage.
-# `+fuzz` is the SanitizerCoverage sibling the directed-fuzzing recipe builds;
-# `+cov` is an accepted alias for a hand-built one. ASan's `coverage=1` .sancov
-# dump needs the trace-pc-guard __sancov_guards section, which the recipe now
-# emits, so the same sibling serves both libFuzzer's campaign and this probe.
-# A sibling that exists but lacks the section is skipped at selection time so
+# `+fuzz` is the SanitizerCoverage sibling bin/setup-target builds beside the
+# primary; `+cov` is an accepted alias for a hand-built one. ASan's
+# `coverage=1` .sancov dump needs the trace-pc-guard __sancov_guards section,
+# so the same sibling serves both libFuzzer's campaign and this probe. A
+# sibling that exists but lacks the section is skipped at selection time so
 # coverage reports unavailable (never a miss, never a hard error), rather than
 # being chosen and then rejected by probe_sancov.
-GENERIC_COVERAGE_SUFFIXES = (fuzz_harness.COVERAGE_TREE_SUFFIX, "+cov")
+GENERIC_COVERAGE_SUFFIXES = coverage_build.ACCEPTED_SUFFIXES
 
 NOISE_RE = re.compile(
     r"ne_context_new|cubeb_|nrappkit|nspr|nss_init|sqlite3|^ld-|^dyld_|gmp_|"
@@ -67,6 +72,12 @@ def parser() -> argparse.ArgumentParser:
              "when it is not the configured ASan CLI",
     )
     result.add_argument(
+        "--harness-source", default="",
+        help="generic-mode C/C++ harness source bin/probe compiled for the "
+             "route; coverage replays a twin of it linked against the "
+             "coverage sibling's library",
+    )
+    result.add_argument(
         "--generic-skip-testcase", action="store_true",
         help="generic-mode argv already contains the testcase",
     )
@@ -95,42 +106,28 @@ def cache_dir() -> Path:
     return result
 
 
-def _sancov_section_present(binary: Path) -> tuple[bool, str]:
-    """Whether a binary carries the trace-pc-guard __sancov_guards section.
-
-    Returns (present, diagnostic). A tool failure is (False, why) so callers
-    can either raise (validate) or simply not select the sibling (resolution).
-    """
-    if sys.platform == "darwin":
-        command = ["otool", "-l", str(binary)]
-        needle = "sectname __sancov_guards"
-    else:
-        tool = shutil.which("readelf") or shutil.which("llvm-readelf") or shutil.which("objdump")
-        if not tool:
-            return False, f"cannot inspect ELF sections ({binary}): install binutils or LLVM tools"
-        command = [tool, "-WS" if Path(tool).name == "readelf" else "-S" if Path(tool).name == "llvm-readelf" else "-h", str(binary)]
-        needle = "__sancov_guards"
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    output = completed.stdout + completed.stderr
-    if completed.returncode:
-        return False, f"{Path(command[0]).name} failed on {binary}: {output or '<no output>'}"
-    if needle not in output:
-        return False, (
-            f"__sancov_guards section not present in {binary} - rebuild the "
-            f"coverage sibling with -fsanitize-coverage=trace-pc-guard"
-        )
-    return True, ""
-
-
 def has_sancov_section(binary: Path) -> bool:
     """Guard check for selecting a coverage sibling; never raises."""
     if os.environ.get("HITS_SKIP_SANCOV_PROBE") == "1":
         return True
     try:
-        present, _ = _sancov_section_present(Path(binary))
+        present, _ = coverage_build.sancov_section_present(Path(binary))
     except OSError:
         return False
     return present
+
+
+_DEFINITION_RE = re.compile(
+    r"(?m)^[^\n;#]*?\b([A-Za-z_]\w*)\s*\([^;{}]*\)\s*(?:const\s*)?\{")
+
+
+def _defined_functions(source: Path) -> set[str]:
+    """Function names a C/C++ source defines (not merely calls)."""
+    try:
+        text = source.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return set()
+    return set(_DEFINITION_RE.findall(text))
 
 
 def probe_sancov(label: str, binary: Path) -> None:
@@ -140,7 +137,7 @@ def probe_sancov(label: str, binary: Path) -> None:
     cache = cache_dir() / f"sancov-{hashlib.sha1(key_text.encode()).hexdigest()}.ok"
     if cache.is_file() and cache.stat().st_size:
         return
-    present, diagnostic = _sancov_section_present(binary)
+    present, diagnostic = coverage_build.sancov_section_present(binary)
     if not present:
         raise RuntimeError(f"{label}: {diagnostic}")
     cache.write_text(key_text + "\n")
@@ -174,6 +171,11 @@ class Hits:
         self.generic_binary: Path | None = None
         self.generic_tree: Path | None = None
         self.generic_reason = ""
+        # When generic_binary is a coverage twin of a probe harness rather than
+        # the configured CLI, the harness source it was compiled from: the twin
+        # takes the harness's argv shape, and frames from that file are the
+        # harness's own, not target coverage.
+        self.harness_twin: Path | None = None
         if args.mode == "generic":
             self.generic_binary, self.generic_tree, self.generic_reason = (
                 self._resolve_generic()
@@ -190,21 +192,30 @@ class Hits:
         miss.
         """
         raw = self.config.sanitizer_bin("asan") if self.config else ""
-        if not raw:
-            return None, None, "target.toml has no asan_bin to instrument for coverage"
-        plain = Path(self.config.resolve_path(raw))
+        plain = Path(self.config.resolve_path(raw)) if raw else None
         route_text = self.args.route_binary or os.environ.get("ASAN_GENERIC_BIN", "")
         if route_text:
             route = Path(route_text)
-            try:
-                same_route = os.path.samefile(route, plain)
-            except OSError:
-                same_route = os.path.realpath(route) == os.path.realpath(plain)
+            same_route = False
+            if plain is not None:
+                try:
+                    same_route = os.path.samefile(route, plain)
+                except OSError:
+                    same_route = os.path.realpath(route) == os.path.realpath(plain)
             if not same_route:
+                # A library-only target has no CLI at all; its harness route
+                # is the only one, and the twin below is its coverage build.
+                if self.args.harness_source:
+                    return self._resolve_harness_twin(
+                        Path(self.args.harness_source), self.asan_build.name,
+                    )
                 return None, None, (
                     f"active sanitizer route {route} is not the configured ASan CLI "
-                    f"{plain}; no route-equivalent coverage sibling is available"
+                    f"{plain or '(none configured)'}; no route-equivalent coverage "
+                    f"sibling is available"
                 )
+        if plain is None:
+            return None, None, "target.toml has no asan_bin to instrument for coverage"
         plain_tree = self.asan_build.name
         present_without_guards: list[str] = []
         for suffix in GENERIC_COVERAGE_SUFFIXES:
@@ -224,15 +235,113 @@ class Hits:
         if present_without_guards:
             return None, None, (
                 f"sibling build {' and '.join(present_without_guards)} carries no "
-                f"__sancov_guards - rebuild it with -fsanitize-coverage=trace-pc-guard "
-                f"(see `bin/fuzz build` / the directed-fuzzing guide)"
+                f"__sancov_guards - `bin/setup-target <slug> --build --force` "
+                f"rebuilds it with -fsanitize-coverage=trace-pc-guard"
             )
         wanted = " or ".join(plain_tree + s for s in GENERIC_COVERAGE_SUFFIXES)
         return None, None, (
             f"no instrumented sibling build ({wanted}) carrying {Path(raw).name} - "
-            f"build one with -fsanitize-coverage=trace-pc-guard "
-            f"(see `bin/fuzz build` / the directed-fuzzing guide)"
+            f"`bin/setup-target <slug> --build` builds it "
+            f"(see the directed-fuzzing guide)"
         )
+
+    def _resolve_harness_twin(
+        self, source: Path, plain_tree: str,
+    ) -> tuple[Path | None, Path | None, str]:
+        """A coverage twin of bin/probe's compiled harness, or why there is none.
+
+        The sanitizer route was a harness bin/probe compiled against the plain
+        library, so the route-equivalent coverage binary is that same source
+        compiled with trace-pc-guard and linked against the coverage sibling's
+        library, by the toolchain that built the sibling. Cached beside the
+        other hits artifacts under the same identity discipline as probe's
+        harness cache.
+        """
+        label = f"harness route {source.name}"
+        if not source.is_file():
+            return None, None, f"{label}: harness source not found: {source}"
+        dispatch = languages.probe_dispatch(source.suffix)
+        if dispatch is None or dispatch["build_kind"] != "cc":
+            return None, None, (
+                f"{label}: only C/C++ harnesses have a coverage twin"
+            )
+        raw = self.config.sanitizer_lib("asan") if self.config else ""
+        if not raw:
+            return None, None, (
+                f"{label}: target.toml has no asan_lib, so there is no coverage "
+                f"sibling library to link a twin against"
+            )
+        library: Path | None = None
+        tree: Path | None = None
+        without: list[str] = []
+        for suffix in GENERIC_COVERAGE_SUFFIXES:
+            candidate = coverage_build.sibling_path(self.config, raw, "asan", suffix)
+            if candidate is None or not candidate.is_file():
+                continue
+            if (fuzz_harness.is_coverage_instrumented(candidate)
+                    or has_sancov_section(candidate)):
+                library, tree = candidate, self.target_root / (plain_tree + suffix)
+                break
+            without.append(plain_tree + suffix)
+        if library is None or tree is None:
+            if without:
+                return None, None, (
+                    f"{label}: sibling build {' and '.join(without)} carries no "
+                    f"SanitizerCoverage - `bin/setup-target <slug> --build --force` "
+                    f"rebuilds it"
+                )
+            wanted = " or ".join(plain_tree + s for s in GENERIC_COVERAGE_SUFFIXES)
+            return None, None, (
+                f"{label}: no instrumented sibling build ({wanted}) carrying "
+                f"{Path(raw).name} - `bin/setup-target <slug> --build` builds it"
+            )
+        compiler = fuzz_harness.compiler_for(source)
+        compiler_path = shutil.which(compiler) or compiler
+        flags = shlex.split(os.environ.get(dispatch["flags_env"], ""))
+        try:
+            compiler_stat = stat_key(Path(compiler_path))
+        except OSError:
+            compiler_stat = compiler_path
+        identity = "\n".join((
+            "schema=1", f"source={hashlib.sha1(source.read_bytes()).hexdigest()}",
+            f"compiler={compiler_path}", f"compiler_stat={compiler_stat}",
+            f"flags={flags}", f"library={library}", f"library_stat={stat_key(library)}",
+            f"includes={self.config.includes}", f"defines={self.config.defines}",
+            f"links={self.config.resolved_link_libs()}",
+            f"ldflags={os.environ.get('LDFLAGS', '')}",
+            f"target_rev={self.config.target_rev}",
+        ))
+        digest = hashlib.sha1(identity.encode()).hexdigest()
+        twin = cache_dir() / f"{source.name}.{digest}.cov"
+        log = cache_dir() / f"{source.name}.{digest}.cov.build.log"
+        lock = cache_dir() / f"{source.name}.{digest}.cov.lock"
+        command = fuzz_harness.probe_compile_command(
+            compiler_path, "address", source, twin, self.config, str(library),
+            flags, coverage=True,
+        )
+        with lock.open("a+") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                if not os.access(twin, os.X_OK) and log.is_file():
+                    # Same source, library and toolchain already failed; the
+                    # identity changes when any of them does.
+                    return None, None, (
+                        f"{label}: coverage twin did not compile; log: {log}"
+                    )
+                if not os.access(twin, os.X_OK):
+                    completed = subprocess.run(command, capture_output=True, check=False)
+                    text = (completed.stdout + completed.stderr).decode(errors="replace")
+                    if completed.returncode or not os.access(twin, os.X_OK):
+                        twin.unlink(missing_ok=True)
+                        log.write_text(shlex.join(command) + "\n\n" + text, encoding="utf-8")
+                        return None, None, (
+                            f"{label}: coverage twin did not compile "
+                            f"(rc={completed.returncode}); log: {log}"
+                        )
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        self.harness_twin = source
+        return twin, tree, ""
 
     def _browser_from_config(self) -> Path:
         if self.config and self.config.asan_bin:
@@ -385,6 +494,18 @@ class Hits:
         bin/probe replays it.
         """
         runner_args = list(self.config.runner_args) if self.config else []
+        if self.harness_twin:
+            # A harness takes what bin/probe handed the sanitizer run: the
+            # testcase (unless the route already carried it) and the trailing
+            # arguments. A [runner] template describes the configured CLI, not
+            # this program.
+            extra = list(self.args.extra)
+            if extra[:1] == ["--"]:
+                extra = extra[1:]
+            skip = self.args.generic_skip_testcase or sanitizer.generic_skips_testcase(
+                "asan"
+            )
+            return [*(() if skip else (str(self.testcase),)), *extra]
         if self.args.extra:
             extra = list(self.args.extra)
             if extra[:1] == ["--"]:
@@ -448,6 +569,24 @@ class Hits:
         if not frames:
             return [], []
         lines = self._offline_symbolize(frames)
+        if self.harness_twin is not None:
+            # The twin's own frames resolve to the harness source, which the
+            # symbolizer may print as a bare basename. They are not target
+            # coverage: keeping them would let a harness file rank as a
+            # subsystem and match a `want` that names it. A basename alone is
+            # not proof — a harness may share its name with a target file — so
+            # the function must also be one the harness itself defines.
+            harness = self.harness_twin.name
+            defined = _defined_functions(self.harness_twin)
+            prefix = str(Path(self.config.results_dir)) if self.config and self.config.results_dir else ""
+            kept: list[str] = []
+            for function, location in zip(lines[::2], lines[1::2]):
+                file_name = Path(location.rsplit(":", 1)[0]).name
+                own = file_name == harness and function.split("(", 1)[0].strip() in defined
+                if own or (prefix and location.startswith(prefix)):
+                    continue
+                kept.extend((function, location))
+            lines = kept
         return lines, lines
 
     @staticmethod
@@ -620,6 +759,14 @@ def main(argv: list[str] | None = None) -> int:
         return Hits(args).run()
     except (ValueError, RuntimeError, OSError) as exc:
         print(f"[hits] {exc}", file=sys.stderr)
+        return 2
+    except Exception:  # noqa: BLE001 - a defect here must not read as a miss
+        # The gate reads exit 1 as MISSED. An interpreter exit from an
+        # unhandled defect is 1 too, so it would count as reached-nothing and,
+        # in gated modes, skip the sanitizer. Say what broke and fail as the
+        # environment failure it is.
+        traceback.print_exc()
+        print("[hits] internal error; coverage is unavailable for this run", file=sys.stderr)
         return 2
 
 

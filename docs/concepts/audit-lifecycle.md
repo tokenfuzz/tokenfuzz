@@ -155,15 +155,16 @@ Common outcomes:
 | Outcome | Meaning | Action |
 | --- | --- | --- |
 | Did not execute | Syntax error, missing binary, runner refused. | Fix the testcase. This doesn't count against the sanitizer budget. |
-| Missed the target code | A supported coverage-gated probe did not reach the named function. | Revise the input. |
+| Missed the target code | The coverage replay did not reach the named function. Browser and JS modes skip the sanitizer; a native target still runs it and records the miss beside the verdict. | Revise the input around the closest reached frame. |
 | Clean hit | The code ran but the sanitizer was quiet. | Mutate input shape, state, timing, or allocator layout. |
 | Sanitizer diagnostic | The input might be a crash candidate. | Confirm by re-running, minimise, and file under `crashes/`. |
 
-Browser and JS modes use their configured coverage artifacts. A generic native
-target can also gate coverage when a route-equivalent
-SanitizerCoverage-instrumented sibling is available. If that sibling is absent,
-coverage is reported unavailable and the sanitizer run proceeds ungated; it is
-never counted as a miss.
+Browser and JS modes use their configured coverage artifacts. A native target
+is measured in the `build-<san>+fuzz` sibling that `bin/setup-target --build`
+and audit preflight build from the target's own recipe — the configured CLI,
+or a coverage twin of the testcase's `// HARNESS:`. If that sibling is absent,
+coverage is reported unavailable and the sanitizer run proceeds; it is never
+counted as a miss.
 
 Probe output is a contract, not a log: crash promotion requires saved
 sanitizer output on disk. Report-only FINDs go through FIND validation

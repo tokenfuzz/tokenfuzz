@@ -86,6 +86,8 @@ The paths an operator inspects after a run:
 | `findings/` | Security finding candidates — any class, with or without a reproducer. See note below. |
 | `findings-rejected/` | FIND directories triage rejected at quorum — substance gate, unreachable trigger, or source-disproved consequence — plus `REJECTED-FINDINGS.html` / `REJECTED-FINDINGS.md` listing them with reasons. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
+| `coverage/` | Per-agent edge journals (`edges-agent-N.journal`) written by `bin/hits`; `bin/coverage-summary` and `bin/rank-work` read them. `hits-N.log` beside them records one HIT/MISSED/COVERAGE_UNAVAILABLE row per coverage replay. |
+| `fuzz/` | S4 harness sources, binaries/manifests, persistent corpora, artifacts, slice logs, campaign journal, and resumable per-harness state. |
 | `scratch-N/` | Active testcase work for agent `N`. |
 | `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, `SESSION_STARTED`, and `TARGET_CONFIG_SHA256` values read by `bin/probe`. |
 | `.target.toml` | The post-preflight `target.toml` snapshot this session runs against, pinned by the `TARGET_CONFIG_SHA256` digest above. Every config consumer in the session reads it instead of the shared `output/<target>/target.toml`. Editing or removing it fails the run loud. |
@@ -98,6 +100,16 @@ actually run?". `state/callgraph.json` is present only with the optional
 installed; it holds the per-file call maps work-card prompts quote, and
 deleting it costs prompt context and nothing else. The rest is internal
 bookkeeping.
+
+S4's private `fuzz/bin/*.manifest.json` files use schema 2 for new builds.
+They bind an optional source-grounding `receipt` to one harness binary,
+alongside the source digest, guidance, sanitizer and linked library/tree the
+manifest already recorded. A harness that carries no receipt — hand-written, or
+built before schema 2 — records an empty one, so "is this harness grounded" is
+readable straight off the field. `fuzz/state.json` retains `first_slice` independently
+from later high-water totals; `bin/fuzz status` joins both without changing the
+campaign's schedule or any security-evidence decision. These are agent-facing
+diagnostics, not maintainer finding/crash fields.
 
 FIND directories without a report get a `.needs-content` marker and
 surface as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with

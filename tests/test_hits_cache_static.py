@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HITS = ROOT / "bin" / "hits"
+COVERAGE_BUILD = ROOT / "lib" / "coverage_build.py"
 
 
 class HitsCacheTests(unittest.TestCase):
@@ -25,11 +26,20 @@ class HitsCacheTests(unittest.TestCase):
         self.assertIn("cache_dir", self.functions)
 
     def test_probe_checks_cache_before_inspecting_sections(self) -> None:
-        # The expensive section inspection now lives in _sancov_section_present;
-        # probe_sancov must still consult its cache before calling it, so a
-        # cached-ok binary short-circuits without spawning otool/readelf.
+        # The expensive section inspection lives in
+        # coverage_build.sancov_section_present, shared with the sibling
+        # builder; probe_sancov must still consult its cache before calling
+        # it, so a cached-ok binary short-circuits without spawning
+        # otool/readelf.
         probe = self.functions["probe_sancov"]
-        inspector = self.functions["_sancov_section_present"]
+        shared = ast.parse(
+            COVERAGE_BUILD.read_text(encoding="utf-8"), filename=str(COVERAGE_BUILD)
+        )
+        inspector = next(
+            node for node in shared.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "sancov_section_present"
+        )
         # The inspector is where the section tools are named.
         tool_line = None
         for node in ast.walk(inspector):
@@ -45,7 +55,7 @@ class HitsCacheTests(unittest.TestCase):
                 name = ast.unparse(node.func)
                 if name == "cache.is_file":
                     cache_line = node.lineno
-                if name == "_sancov_section_present":
+                if name == "coverage_build.sancov_section_present":
                     inspect_call_line = node.lineno
         self.assertIsNotNone(cache_line)
         self.assertIsNotNone(inspect_call_line)

@@ -721,6 +721,13 @@ class SetupTargetTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertTrue((target / "build-asan" / "langbuild").is_file())
         self.assertIn("materializing asan build", process.stdout)
+        # The coverage sibling follows the primary through the same recipe and
+        # is verified, never assumed: a stub program carries no guards, so it
+        # reports unavailable with its own log, and setup still succeeds.
+        self.assertIn("coverage sibling build-asan+fuzz unavailable", process.stdout)
+        self.assertTrue((target / ".audit" / "build-materialize-asan+fuzz.log").is_file())
+        self.assertFalse((target / "build-asan+fuzz" / ".audit-build-stamp").exists())
+        self.assertTrue((target / "build-asan" / ".audit-build-stamp").is_file())
 
         sentinel = target / "build-asan" / "keep-existing-tree"
         sentinel.write_text("preserved\n")

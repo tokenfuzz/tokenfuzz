@@ -9,13 +9,14 @@ pure configuration/path policy; materialization lives in ``bin/build-configs``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -114,6 +115,25 @@ def find(configs: Iterable[BuildConfig], selector: str) -> BuildConfig | None:
 
 def suffix(config: BuildConfig, base: str = "") -> str:
     return f"{base}+cfg-{config.config_id}"
+
+
+@contextlib.contextmanager
+def selected_suffix(value: str) -> Iterator[None]:
+    """Address a sibling tree through the shared build-directory helpers.
+
+    Freshness, stamping and the materializer all resolve ``build-<san>`` from
+    ``AUDIT_BUILD_SUFFIX``; pointing that at a sibling suffix for the duration
+    of one operation is how an alternate or coverage tree reuses them.
+    """
+    previous = os.environ.get("AUDIT_BUILD_SUFFIX")
+    os.environ["AUDIT_BUILD_SUFFIX"] = value
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AUDIT_BUILD_SUFFIX", None)
+        else:
+            os.environ["AUDIT_BUILD_SUFFIX"] = previous
 
 
 def build_dir(

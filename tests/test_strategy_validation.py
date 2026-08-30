@@ -126,6 +126,26 @@ class StrategyValidationTests(unittest.TestCase):
         self.assertIn("Strategy S4", self.text("S4-directed-fuzzing.md"))
         self.assertEqual(prompt._STRATEGIES["S8"][0], "S8-property-based.md")
 
+    def test_s4_grounding_receipt_and_variation_are_bounded_and_non_gating(self) -> None:
+        # Matched against one normalised line so a paragraph reflow cannot
+        # fail a test that is about the guidance, not the line breaks.
+        s4 = " ".join(self.text("S4-directed-fuzzing.md").split())
+        for pattern in (
+            r"at most two.*local caller",
+            r"SOURCE-USAGE", r"CONSTRUCTOR", r"ARG-RELATIONS",
+            r"RESOURCE-FLOW", r"TEARDOWN", r"UNRESOLVED",
+            r"at most three.*hop",
+            r"does not prove.*reachab",
+            r"guided harness that saturated",
+            r"at most one derivative",
+            # The derivative must not become a second campaign inside the
+            # iteration the review gate closes.
+            r"not a second campaign in this one",
+            r"bin/probe --confirm",
+        ):
+            with self.subTest(pattern=pattern):
+                self.assertRegex(s4, pattern)
+
     def test_s6_playbook_time_query_and_mapping_guidance_are_current(self) -> None:
         s6 = self.text("S6-cross-project.md")
         for pattern in (

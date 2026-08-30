@@ -97,10 +97,9 @@ commands, and continued with fresh context. Carrying hundreds of tool
 calls forward costs more every turn and buys nothing that structured
 state does not already hold.
 
-## Coverage gate before sanitizer
+## Coverage before the sanitizer
 
-For browser, JS-shell, and generic CLI targets with a sancov-instrumented
-build:
+For browser and JS-shell targets with a sancov-instrumented build:
 
 1. `bin/probe` first runs the testcase against the coverage build.
 2. Only testcases that reach the named target code spend a
@@ -108,16 +107,21 @@ build:
 3. Testcases that miss never spend the more expensive budget — the
    agent revises the input instead.
 
-A generic CLI target reaches its coverage build through a sibling tree —
-`build-<san>+fuzz` or a `build-<san>+cov` tree built with
-`-fsanitize-coverage=trace-pc-guard` — that never replaces the shared
-`build-<san>`. When a testcase names a `WANT` symbol and that sibling exists,
-`bin/hits --mode generic` replays it there, maps the covered PCs to source
-files, and writes the same HIT rows and edge journal browser mode does. When
-no instrumented sibling exists the gate reports coverage **unavailable** and
-proceeds ungated — an unmeasurable input still runs the sanitizer and is never
-counted as a miss. On those ungated runs the savings come from the per-agent
-budget and rejected indexes, not from a coverage pre-check.
+A native target gets the same measurement as **feedback rather than a gate**.
+`bin/setup-target --build` and audit preflight build a coverage sibling,
+`build-<san>+fuzz`, by rerunning the target's own recipe with
+`-fsanitize-coverage=trace-pc-guard`; it never replaces the shared
+`build-<san>`. When a testcase names a `WANT` symbol, `bin/hits --mode
+generic` replays it there — the configured CLI, or for a `// HARNESS:` route a
+twin of that harness linked against the sibling's library — maps the covered
+PCs to source, and writes the same HIT/MISSED rows, closest frame, and edge
+journal browser mode does. A native replay costs milliseconds, so a miss does
+not withhold the sanitizer: the run proceeds, the `.asan.txt` and tried-inputs
+row carry `MISSED` and the closest frame, and the agent revises the input with
+that evidence. When no instrumented sibling exists (a recipe that ignores
+`CC`/`CXX`, or a tree outside `targets/`), coverage is reported
+**unavailable** and the run proceeds; an unmeasurable input is never counted as
+a miss.
 
 ## Work-card leases prevent duplicate spend
 

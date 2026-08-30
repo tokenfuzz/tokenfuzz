@@ -30,7 +30,7 @@ must export it as above or pass `--results-dir`. Everything lands under
 | Path | Contents |
 | --- | --- |
 | `fuzz/src/` | Harness sources. Never in the target checkout. |
-| `fuzz/bin/` | Built fuzzers and their compiler logs. |
+| `fuzz/bin/` | Built fuzzers, compiler logs, and source-bound build/contract manifests. |
 | `fuzz/corpus/<harness>/` | The corpus, which survives across campaigns. |
 | `fuzz/artifacts/<harness>/` | libFuzzer's crash/OOM/timeout artifacts. |
 | `fuzz/logs/<harness>/` | One log per slice. |
@@ -66,6 +66,30 @@ $ bin/fuzz candidates
 Widening `attacker_controls` in `target.toml` widens what is admitted — which
 is the point. A target whose threat model is `bytes` should not get a harness
 that fuzzes filenames.
+
+## Ground the harness in local callers
+
+`bin/fuzz template <symbol>` searches only the target's local tests, examples,
+samples, and existing fuzz sources for the exact symbol, and records at most
+two source locations in the generated `S4-RECEIPT`. Read those callers before
+writing setup code. They commonly reveal constructors, related length and
+capacity arguments, ownership transfer, and teardown that a declaration
+cannot express.
+
+The caller is construction evidence, not reachability evidence. Test code may
+perform trusted setup unavailable to an attacker, so it cannot override the
+published/untrusted/uncovered admission gate. When no example exists, the
+template records `UNRESOLVED` and continues from the public declaration.
+
+Fill the receipt's `CONSTRUCTOR`, `ARG-RELATIONS`, `RESOURCE-FLOW`, and
+`TEARDOWN` fields with source-anchored facts. `bin/fuzz build` stores them in
+the binary manifest beside the exact harness digest, coverage-guidance and
+sanitizer status. A field still reading `UNRESOLVED` lists itself as
+unresolved, so an answered field cannot be contradicted by a stale summary
+line. `bin/fuzz status` then joins that manifest with the campaign's
+first-slice result, so a resumed agent sees whether to repair setup, resolve a
+contract, seed the corpus, or continue. Receipt text never admits a target,
+changes scheduling, or counts as a finding.
 
 ## Real targets, not fake ones
 
@@ -127,7 +151,20 @@ library*. An ordinary `build-<san>/` usually has none, so a fuzzer linked
 against one runs **blind** — it still finds shallow faults, but it cannot tell
 that an input reached new code, and every coverage number stays flat.
 
-Do not rebuild the shared tree to fix that. Build a **sibling**:
+The shared tree is never rebuilt for that. `bin/setup-target <target> --build`
+and audit preflight build the **sibling** `build-<san>+fuzz` automatically:
+the target's own `.audit/build.sh` is rerun with `CC`/`CXX` pointed at
+`.audit/coverage-toolchain/{cc,cxx}`, shims that add
+`-fsanitize=fuzzer-no-link -fsanitize-coverage=trace-pc-guard` and exec the
+LLVM compiler that links the harnesses. The sibling is verified — the
+configured binary must carry `__sancov_guards` and start — and stamped like
+the primary, so it is rebuilt when the source or recipe changes. A recipe
+that does not honour `CC`/`CXX` yields no instrumentation; setup reports the
+sibling unavailable with `.audit/build-materialize-<san>+fuzz.log` and
+remembers that until the source, recipe, or toolchain changes (or
+`--build --force`).
+
+To build one by hand instead, for example against a different toolchain:
 
 ```bash
 # However this target normally builds, with coverage added, a different output
@@ -224,6 +261,15 @@ Progress counts libFuzzer's `ft` as well as `cov`. Value profiling — switched
 on once a harness goes dry, which is when a magic-byte comparison is the
 likely wall — reports through `ft` alone, so a campaign watching edges only
 would call the harness mined out exactly when it started making progress.
+
+The first slice is retained separately from later high-water totals: execution
+count, edge/feature deltas, artifacts, verdict, reason, and log path survive
+resume. For a guided harness with a resolved receipt that later saturates,
+`bin/fuzz status` permits at most one contract-preserving derivative—one
+caller-controlled argument change or one source-grounded public call—built for
+the next iteration's campaign, never as a second campaign in this one. Blind harnesses, unresolved receipts, and harnesses with
+no receipt at all keep the generic widen-or-re-seed advice, and a failed
+derivative never closes or quarantines its parent.
 
 Coverage totals are reported, never divided. libFuzzer's instrumented-counter
 total spans every loaded module including the harness's own translation unit;

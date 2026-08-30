@@ -26,6 +26,7 @@ sys.path.insert(0, str(LIB_DIR))
 import build_routes
 import build_config
 import crash_bundle
+import fuzz_harness
 import languages
 import runner_preflight
 import sanitizer as sanitizer_lib
@@ -713,16 +714,10 @@ class HarnessBuilder:
             sanitizer_flag = COMPILE_SANITIZERS.get(self.probe.sanitizer)
             if not sanitizer_flag:
                 raise ValueError(f"compiled C/C++ HARNESS does not support sanitizer: {self.probe.sanitizer}")
-            includes = [value for path in self.probe.config.includes for value in ("-I", self.probe.config.resolve_path(path))]
-            library_args = [library] if library else []
-            if library and Path(library).parent != Path("."):
-                library_args.append(f"-Wl,-rpath,{Path(library).parent}")
-            return [
-                compiler, f"-fsanitize={sanitizer_flag}", "-g1", "-O0", *flags,
-                *self.probe.config.defines, *includes, str(self.source), *library_args,
-                *self.probe.config.resolved_link_libs(),
-                *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary),
-            ]
+            return fuzz_harness.probe_compile_command(
+                compiler, sanitizer_flag, self.source, binary,
+                self.probe.config, library, flags,
+            )
         if kind == "go":
             return [compiler, "build", "-o", str(binary), *flags, str(self.source)]
         if kind == "swift":
@@ -1044,6 +1039,10 @@ class Probe:
             self.harness_source = source
             override, preargs, self.build_kind = HarnessBuilder(self, source).build()
             self.mode = "generic"
+            if self.build_kind == "cc":
+                # bin/hits rebuilds this exact source against the coverage
+                # sibling's library to measure the route the sanitizer runs.
+                self.environment["PROBE_HARNESS_SOURCE"] = str(source)
         elif self._runs_cargo() and self.exec_testcase.suffix.lower() == ".rs":
             override, preargs, self.build_kind = HarnessBuilder(
                 self, self.exec_testcase,
@@ -1172,6 +1171,8 @@ class Probe:
         )
         if self.exec_testcase != self.testcase:
             print(f"[probe] exec_testcase={self.exec_testcase} original_testcase={self.testcase}")
+        if self.environment.get("PROBE_HARNESS_SOURCE"):
+            print(f"[probe] harness_source={self.environment['PROBE_HARNESS_SOURCE']}")
         print(f"[probe] command: {shlex.join(self.command)}")
         return 0
 

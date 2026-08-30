@@ -253,6 +253,80 @@ class DeclarationReadingTests(unittest.TestCase):
         self.assertIn("api_parse", index)
 
 
+class LocalCallerExampleTests(unittest.TestCase):
+    """Harness construction starts from bounded, target-local usage."""
+
+    def test_exact_symbol_examples_are_bounded_and_source_anchored(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for directory in ("tests", "examples", "samples"):
+                (root / directory).mkdir()
+            (root / "tests" / "first.c").write_text(
+                "void check(const unsigned char *data, unsigned long size) {\n"
+                "  sample_parse(data, size);\n}\n",
+                encoding="utf-8",
+            )
+            (root / "examples" / "second.cc").write_text(
+                "void check_more(const char *data) { sample_parse(data, 1); }\n",
+                encoding="utf-8",
+            )
+            (root / "samples" / "third.c").write_text(
+                "void another(const char *data) { sample_parse(data, 1); }\n",
+                encoding="utf-8",
+            )
+            (root / "tests" / "noise.c").write_text(
+                "/* sample_parse(data, size); */\n"
+                "void check_other(void) { sample_parser(); }\n",
+                encoding="utf-8",
+            )
+
+            found = fuzz_harness.local_caller_examples(
+                root, "sample_parse", limit=2)
+
+        self.assertEqual(len(found), 2)
+        self.assertEqual(
+            [(entry.path, entry.line) for entry in found],
+            [("examples/second.cc", 1), ("samples/third.c", 1)],
+        )
+
+    def test_an_existing_fuzz_harness_outranks_a_test_fixture(self) -> None:
+        """Walk order is alphabetical noise; the fuzz dir teaches the most."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for directory in ("fuzz", "tests"):
+                (root / directory).mkdir()
+            # Sorts after "fuzz/..." only because of the rank, not the name.
+            (root / "tests" / "aaa_first.c").write_text(
+                "void t(const char *d) { sample_parse(d, 1); }\n",
+                encoding="utf-8")
+            (root / "fuzz" / "zzz_last.c").write_text(
+                "void f(const char *d) { sample_parse(d, 1); }\n",
+                encoding="utf-8")
+
+            found = fuzz_harness.local_caller_examples(
+                root, "sample_parse", limit=1)
+
+        self.assertEqual([entry.path for entry in found], ["fuzz/zzz_last.c"])
+
+    def test_missing_examples_fail_open(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            root.mkdir(exist_ok=True)
+            self.assertEqual(
+                fuzz_harness.local_caller_examples(root, "sample_parse"), [])
+
+    def test_a_parent_directory_named_tests_does_not_expand_the_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "tests" / "project"
+            (root / "src").mkdir(parents=True)
+            (root / "src" / "internal.c").write_text(
+                "void internal(const char *data) { sample_parse(data, 1); }\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                fuzz_harness.local_caller_examples(root, "sample_parse"), [])
+
+
 class HarnessInputAgreementTests(unittest.TestCase):
     """Whether the configured library and includes describe the same thing.
 
@@ -480,7 +554,8 @@ class ContractFaithfulnessTests(unittest.TestCase):
         rendered = namespace["TEMPLATE"].format(
             target="a.c:f", hypothesis="H-1", symbol="f",
             declaration="int f(const unsigned char *d, size_t n);",
-            controls="bytes", shapes="buffer+length")
+            controls="bytes", shapes="buffer+length",
+            source_usage="tests/sample_usage.c:7")
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "fuzz_f.c"
             path.write_text(rendered, encoding="utf-8")
@@ -488,6 +563,68 @@ class ContractFaithfulnessTests(unittest.TestCase):
         # Both entry points must survive, or an artifact cannot be replayed.
         self.assertIn("LLVMFuzzerTestOneInput", rendered)
         self.assertIn("#ifndef FUZZ_CAMPAIGN_BUILD", rendered)
+        for field in (
+            "BOUNDARY", "CONTROLS", "DECLARATION", "SOURCE-USAGE",
+            "CONSTRUCTOR", "ARG-RELATIONS", "RESOURCE-FLOW", "TEARDOWN",
+            "UNRESOLVED",
+        ):
+            self.assertIn(f"S4-RECEIPT {field}:", rendered)
+
+
+class HarnessReceiptTests(unittest.TestCase):
+    """A receipt preserves source facts without becoming an evidence gate."""
+
+    def test_receipt_fields_and_unresolved_items_are_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "fuzz_sample.c"
+            source.write_text(
+                "// S4-RECEIPT BOUNDARY: sample_parse\n"
+                "// S4-RECEIPT CONTROLS: bytes\n"
+                "// S4-RECEIPT DECLARATION: int sample_parse(const char *, size_t);\n"
+                "// S4-RECEIPT SOURCE-USAGE: tests/sample_usage.c:7\n"
+                "// S4-RECEIPT CONSTRUCTOR: sample_open — include/sample.h:12\n"
+                "// S4-RECEIPT ARG-RELATIONS: length is payload bytes\n"
+                "// S4-RECEIPT RESOURCE-FLOW: handle remains caller-owned\n"
+                "// S4-RECEIPT TEARDOWN: sample_close — include/sample.h:19\n"
+                "// S4-RECEIPT UNRESOLVED: callback-order, optional-state\n",
+                encoding="utf-8",
+            )
+            receipt = fuzz_harness.harness_receipt(source)
+
+        self.assertEqual(receipt.boundary, "sample_parse")
+        self.assertEqual(receipt.source_usage, "tests/sample_usage.c:7")
+        self.assertEqual(receipt.unresolved, ["callback-order", "optional-state"])
+        self.assertEqual(receipt.warnings, [])
+
+    def test_duplicates_warn_and_legacy_sources_remain_compatible(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            duplicate = root / "duplicate.c"
+            duplicate.write_text(
+                "// S4-RECEIPT BOUNDARY: sample_parse\n"
+                "// S4-RECEIPT BOUNDARY: sample_other\n",
+                encoding="utf-8",
+            )
+            legacy = root / "legacy.c"
+            legacy.write_text("int LLVMFuzzerTestOneInput(void) { return 0; }\n")
+            parsed = fuzz_harness.harness_receipt(duplicate)
+            old = fuzz_harness.harness_receipt(legacy)
+
+        self.assertEqual(parsed.boundary, "sample_parse")
+        self.assertTrue(any("duplicate BOUNDARY" in item for item in parsed.warnings))
+        # Nothing answered the source questions, so every one is unresolved
+        # whether or not the author remembered to list it.
+        self.assertEqual(parsed.unresolved, [
+            "source-usage", "constructor", "argument-relations",
+            "resource-flow", "teardown",
+        ])
+        # A source with no receipt records none, so "has a receipt" is
+        # readable straight off the manifest field rather than off a dict of
+        # blanks that any consumer would read as grounded.
+        self.assertEqual(old.as_dict(), {})
+        self.assertEqual(old.boundary, "")
+        self.assertEqual(old.unresolved, [])
+        self.assertEqual(old.warnings, [])
 
 
 class BuildIsolationTests(unittest.TestCase):
@@ -793,6 +930,168 @@ class ManifestTests(unittest.TestCase):
             self.manifest(results, "fuzz_api", "asan", hypothesis="H-9")
             built = fuzz_harness.built_harnesses(results, "asan")
         self.assertEqual(built["fuzz_api"]["hypothesis_id"], "H-9")
+
+    def test_schema_two_binds_the_harness_receipt_and_schema_one_fails_open(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            binary = root / "fuzz_sample"
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            source = root / "fuzz_sample.c"
+            source.write_text(
+                "// S4-RECEIPT BOUNDARY: sample_parse\n"
+                "// S4-RECEIPT CONTROLS: bytes\n"
+                "// S4-RECEIPT DECLARATION: int sample_parse(const char *, size_t);\n"
+                "// S4-RECEIPT SOURCE-USAGE: tests/sample_usage.c:7\n"
+                "// S4-RECEIPT CONSTRUCTOR: UNRESOLVED\n"
+                "// S4-RECEIPT ARG-RELATIONS: length is payload bytes\n"
+                "// S4-RECEIPT RESOURCE-FLOW: UNRESOLVED\n"
+                "// S4-RECEIPT TEARDOWN: UNRESOLVED\n"
+                "// S4-RECEIPT UNRESOLVED: constructor, resource-flow, teardown\n",
+                encoding="utf-8",
+            )
+            choice = fuzz_harness.LibraryChoice(
+                path="/build/libsample.a", tree="build-asan+fuzz",
+                instrumented=True,
+            )
+            fuzz_harness.write_manifest(
+                binary, source, "asan", choice, "digest", sanitized=True)
+            record = json.loads(fuzz_harness.manifest_path(binary).read_text())
+
+            plain = root / "fuzz_plain"
+            plain.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            plain.chmod(0o755)
+            plain_source = root / "fuzz_plain.c"
+            plain_source.write_text(
+                "int LLVMFuzzerTestOneInput(void) { return 0; }\n",
+                encoding="utf-8")
+            fuzz_harness.write_manifest(
+                plain, plain_source, "asan", choice, "digest", sanitized=True)
+            ungrounded = json.loads(
+                fuzz_harness.manifest_path(plain).read_text())
+
+            results = root / "results"
+            self.manifest(results, "fuzz_legacy", "asan")
+            legacy = fuzz_harness.built_harnesses(results, "asan")["fuzz_legacy"]
+
+        self.assertEqual(record["schema"], 2)
+        self.assertEqual(record["receipt"]["boundary"], "sample_parse")
+        self.assertEqual(
+            record["receipt"]["unresolved"],
+            ["constructor", "resource-flow", "teardown"],
+        )
+        self.assertEqual(ungrounded["receipt"], {})
+        self.assertEqual(legacy["receipt"], {})
+        self.assertEqual(legacy["receipt_warnings"], [])
+
+
+class FirstSliceReceiptTests(unittest.TestCase):
+    """The first useful feedback survives resume and is never overwritten."""
+
+    def test_first_slice_is_persisted_and_later_slices_do_not_replace_it(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            results = Path(raw) / "results"
+            results.mkdir()
+            config = config_for(Path(raw) / "source", ["bytes"])
+            config.results_dir = str(results)
+            campaign = fuzz_campaign.Campaign(config, log=lambda _: None)
+            state = campaign.add("fuzz_sample", "/tmp/fuzz_sample")
+            first = fuzz_campaign.SliceResult(
+                harness=state.name, seconds=2.0, returncode=0,
+                executions=200, edges=12, features=18, inited=True,
+                log="fuzz/logs/fuzz_sample/slice-0001.log",
+            )
+            campaign._record(
+                state, first, fuzz_campaign.VERDICT_PRODUCTIVE,
+                "12 new edges", 12, [], 18,
+            )
+            second = fuzz_campaign.SliceResult(
+                harness=state.name, seconds=3.0, returncode=0,
+                executions=500, edges=40, features=80, inited=True,
+                log="fuzz/logs/fuzz_sample/slice-0002.log",
+            )
+            campaign._record(
+                state, second, fuzz_campaign.VERDICT_PRODUCTIVE,
+                "28 new edges", 28, [], 62,
+            )
+            fuzz_campaign.save_states(results, campaign.states)
+            resumed = fuzz_campaign.load_states(results)[state.name]
+
+        self.assertEqual(resumed.first_slice["executions"], 200)
+        self.assertEqual(resumed.first_slice["new_edges"], 12)
+        self.assertEqual(resumed.first_slice["new_features"], 18)
+        self.assertEqual(resumed.first_slice["verdict"], "productive")
+
+    def test_status_joins_build_and_receipt_without_changing_campaign_state(self) -> None:
+        state = fuzz_campaign.HarnessState(
+            name="fuzz_sample", binary="/tmp/fuzz_sample",
+            slices=3, quarantine=fuzz_campaign.VERDICT_SATURATED,
+        )
+        original = state.as_dict()
+        rows = fuzz_campaign.status_rows({state.name: state}, {
+            state.name: {
+                "binary": state.binary, "guided": True, "sanitized": True,
+                "source_sha1": "abc", "receipt": {
+                    "schema": 1, "boundary": "sample_parse",
+                    "unresolved": ["resource-flow"],
+                },
+                "receipt_warnings": [],
+            },
+        })
+
+        self.assertEqual(state.as_dict(), original)
+        self.assertTrue(rows[state.name]["build"]["guided"])
+        self.assertEqual(rows[state.name]["receipt"]["boundary"], "sample_parse")
+        self.assertIn("resolve", rows[state.name]["next"])
+
+    def test_a_rebuilt_binary_does_not_inherit_a_stale_saturation_decision(self) -> None:
+        state = fuzz_campaign.HarnessState(
+            name="fuzz_sample", binary="/tmp/fuzz_sample-old",
+            slices=3, quarantine=fuzz_campaign.VERDICT_SATURATED,
+        )
+        rows = fuzz_campaign.status_rows({state.name: state}, {
+            state.name: {
+                "binary": "/tmp/fuzz_sample-new", "source": "/tmp/fuzz_sample.c",
+                "guided": True, "sanitized": True,
+                "receipt": {"schema": 1, "boundary": "sample_parse", "unresolved": []},
+            },
+        })
+
+        self.assertEqual(rows[state.name]["binary"], "/tmp/fuzz_sample-new")
+        self.assertEqual(rows[state.name]["slices"], 0)
+        self.assertFalse(rows[state.name]["quarantine"])
+        self.assertEqual(rows[state.name]["coverage"], "0 edges, 0 features")
+        self.assertIn("first-slice", rows[state.name]["next"])
+
+    def test_changed_source_is_told_to_rebuild_before_campaign_advice(self) -> None:
+        state = fuzz_campaign.HarnessState(
+            name="fuzz_sample", binary="/tmp/fuzz_sample",
+            slices=3, quarantine=fuzz_campaign.VERDICT_SATURATED,
+        )
+        rows = fuzz_campaign.status_rows({state.name: state}, {
+            state.name: {
+                "binary": state.binary, "current": False,
+                "guided": True, "sanitized": True,
+                "receipt": {"schema": 1, "boundary": "sample_parse", "unresolved": []},
+            },
+        })
+
+        self.assertIn("rebuild", rows[state.name]["next"])
+        self.assertNotIn("derivative", rows[state.name]["next"])
+
+    def test_a_harness_with_no_receipt_keeps_the_generic_saturation_advice(self) -> None:
+        state = fuzz_campaign.HarnessState(
+            name="fuzz_sample", binary="/tmp/fuzz_sample",
+            slices=3, quarantine=fuzz_campaign.VERDICT_SATURATED,
+        )
+        rows = fuzz_campaign.status_rows({state.name: state}, {
+            state.name: {"binary": state.binary, "guided": True, "receipt": {}},
+        })
+
+
+        self.assertEqual(
+            rows[state.name]["next"], fuzz_campaign.recommendation(state))
+        self.assertNotIn("derivative", rows[state.name]["next"])
 
 
 class ArtifactLifecycleTests(unittest.TestCase):

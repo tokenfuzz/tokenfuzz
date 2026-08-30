@@ -20,6 +20,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -29,6 +30,28 @@ import target_config  # noqa: E402
 HITS = ROOT / "bin" / "hits"
 
 # One neutral translation unit carrying the reached function and a CLI main.
+# The library half is also built alone (`libapp`) so a harness twin has the
+# same library to link that bin/probe's harness would.
+LIB_C = """\
+int app_parse(const char *s, int n) {
+    int acc = 0;
+    for (int i = 0; i < n; i++) { if (s[i] == 'x') acc++; else acc--; }
+    return acc;
+}
+"""
+HARNESS_C = """\
+#include <stdio.h>
+int app_parse(const char *s, int n);
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) return 3;
+    char buf[256];
+    int n = (int)fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    return app_parse(buf, n) > 0 ? 0 : 1;
+}
+"""
 APP_C = """\
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +77,7 @@ target = "sampleproj"
 upstream_url = "https://example.invalid/sampleproj"
 build_system = "cmake"
 asan_bin = "build-asan/app"
+asan_lib = "build-asan/libapp.a"
 is_browser = "0"
 [threat_model]
 attacker_controls = ["bytes"]
@@ -115,6 +139,11 @@ class GenericCoverageTests(unittest.TestCase):
         self._compile(src, self.plain / "app", instrumented=False)
         # Instrumented sibling: what generic coverage actually reads.
         self._compile(src, self.sibling / "app", instrumented=True)
+        # The library both trees carry, for harness routes.
+        lib_src = self.target / "lib.c"
+        lib_src.write_text(LIB_C)
+        self._archive(lib_src, self.plain / "libapp.a", instrumented=False)
+        self._archive(lib_src, self.sibling / "libapp.a", instrumented=True)
         if not _has_guards(self.sibling / "app"):
             self.skipTest("this clang did not emit trace-pc-guard (__sancov_guards)")
 
@@ -144,6 +173,38 @@ class GenericCoverageTests(unittest.TestCase):
             capture_output=True, text=True, check=False)
         if built.returncode:
             self.skipTest(f"cannot build instrumented fixture: {built.stderr[-200:]}")
+
+    def _archive(self, src: Path, out: Path, *, instrumented: bool) -> None:
+        flags = ["-g", "-O0", "-fsanitize=address", "-c"]
+        if instrumented:
+            flags.append("-fsanitize-coverage=trace-pc-guard")
+        obj = out.with_suffix(".o")
+        built = subprocess.run(
+            [self.clang, *flags, "-o", str(obj), str(src)],
+            capture_output=True, text=True, check=False)
+        if built.returncode:
+            self.skipTest(f"cannot build library fixture: {built.stderr[-200:]}")
+        ar = shutil.which("ar") or shutil.which("llvm-ar")
+        if not ar:
+            self.skipTest("no ar to build the library fixture")
+        packed = subprocess.run(
+            [ar, "rcs", str(out), str(obj)], capture_output=True, text=True, check=False)
+        if packed.returncode:
+            self.skipTest(f"cannot archive library fixture: {packed.stderr[-200:]}")
+
+    def _harness_route(self) -> tuple[Path, Path]:
+        """bin/probe's harness route: the source and the plain-linked binary."""
+        source = self.results / "scratch-1" / "harness.c"
+        source.write_text(HARNESS_C)
+        binary = self.results / "scratch-1" / ".harness-cache" / "harness.c.deadbeef.bin"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        built = subprocess.run(
+            [self.clang, "-g", "-O0", "-fsanitize=address", "-o", str(binary),
+             str(source), str(self.plain / "libapp.a")],
+            capture_output=True, text=True, check=False)
+        if built.returncode:
+            self.skipTest(f"cannot build harness fixture: {built.stderr[-200:]}")
+        return source, binary
 
     def _run_hits(
         self, want: str, *, environment: dict[str, str] | None = None,
@@ -228,6 +289,95 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertIn("COVERAGE_UNAVAILABLE", output)
         self.assertIn("active sanitizer route", output)
         self.assertNotIn("HIT:", output)
+
+    def test_a_harness_route_is_measured_through_a_coverage_twin(self) -> None:
+        # bin/probe compiled the harness against the plain library; coverage
+        # rebuilds that exact source against the sibling's instrumented
+        # library, so the route that ran the sanitizer is the route measured.
+        source, binary = self._harness_route()
+        result = self._run_hits(
+            "app_parse",
+            environment={"ASAN_GENERIC_BIN": str(binary)},
+            extra=["--harness-source", str(source)],
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("HIT: app_parse", output)
+        twins = list((self.results / ".hits-cache").glob("harness.c.*.cov"))
+        self.assertEqual(len(twins), 1, output)
+        # Target coverage only: the harness's own frames never reach the
+        # journal, so a harness file cannot rank as a subsystem.
+        journal = (self.results / "coverage" / "edges-agent-1.journal").read_text()
+        self.assertIn("app_parse|", journal)
+        self.assertNotIn(str(self.results), journal)
+        self.assertNotIn("harness.c", journal)
+
+        # The twin is cached: a second run compiles nothing new.
+        again = self._run_hits(
+            "app_parse",
+            environment={"ASAN_GENERIC_BIN": str(binary)},
+            extra=["--harness-source", str(source)],
+        )
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertEqual(
+            list((self.results / ".hits-cache").glob("harness.c.*.cov")), twins)
+
+    def test_a_harness_named_like_a_target_file_keeps_target_frames(self) -> None:
+        # The fixture library is lib.c; a harness also called lib.c must not
+        # cost the target's frames, only its own.
+        source, binary = self._harness_route()
+        collided = source.with_name("lib.c")
+        source.rename(collided)
+        result = self._run_hits(
+            "app_parse",
+            environment={"ASAN_GENERIC_BIN": str(binary)},
+            extra=["--harness-source", str(collided)],
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("HIT: app_parse", output)
+        journal = (self.results / "coverage" / "edges-agent-1.journal").read_text()
+        self.assertIn("app_parse|lib.c", journal)
+        self.assertNotIn("main|", journal)
+
+    def test_a_harness_route_without_a_sibling_library_is_unavailable(self) -> None:
+        source, binary = self._harness_route()
+        (self.sibling / "libapp.a").unlink()
+        result = self._run_hits(
+            "app_parse",
+            environment={"ASAN_GENERIC_BIN": str(binary)},
+            extra=["--harness-source", str(source)],
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 4, output)
+        self.assertIn("COVERAGE_UNAVAILABLE", output)
+        self.assertIn("harness route harness.c", output)
+        self.assertIn("bin/setup-target", output)
+        self.assertNotIn("MISSED", output)
+
+    def test_an_internal_defect_is_an_environment_failure_not_a_miss(self) -> None:
+        # Exit 1 means MISSED to the gate; a defect must not borrow it.
+        with mock.patch.dict(os.environ, {"HITS_SKIP_SANCOV_PROBE": "1"}):
+            pass
+        result = subprocess.run(
+            [sys.executable, "-c", (
+                "import runpy, sys, unittest.mock as m\n"
+                "sys.argv = ['hits', '--testcase', %r, '--want', 'app_parse',"
+                " '--mode', 'generic']\n"
+                "import importlib.machinery as im\n"
+                "loader = im.SourceFileLoader('hits_module', %r)\n"
+                "module = loader.load_module()\n"
+                "with m.patch.object(module.Hits, '_resolve_generic',"
+                " side_effect=KeyError('boom')):\n"
+                "    raise SystemExit(module.main())\n"
+            ) % (str(self.testcase), str(HITS))],
+            env={**os.environ, "SCRIPT_ROOT": str(ROOT), "TARGET_SLUG": "sampleproj",
+                 "RESULTS_DIR": str(self.results)},
+            capture_output=True, text=True, timeout=120, check=False)
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 2, output)
+        self.assertIn("KeyError", output)
+        self.assertIn("internal error", output)
 
     def test_exact_preexpanded_arguments_do_not_pass_the_option_separator(self) -> None:
         result = self._run_hits(

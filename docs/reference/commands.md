@@ -255,23 +255,26 @@ bin/fuzz doctor                       # prove the shared build is unaffected
 | --- | --- |
 | `bin/fuzz inventory` | List existing fuzz harnesses (libFuzzer, cargo-fuzz, Go, Atheris, Jazzer), what each drives, and its structural gaps. |
 | `bin/fuzz candidates` | Run every exported symbol through the admission gate; report the reason each rejection failed. |
-| `bin/fuzz template` | Write a dual-entry harness skeleton for one admitted symbol. |
+| `bin/fuzz template` | Write a dual-entry harness skeleton for one admitted symbol, with at most two target-local caller locations and a source-grounding receipt. |
 | `bin/fuzz build` | Compile a harness out of tree; refuses in-tree sources and unfaithful harnesses. |
 | `bin/fuzz run` | Spend a budget across harnesses, quarantine those that stop paying, replay artifacts through `bin/probe`. |
-| `bin/fuzz status` | What each harness did and why it stopped. |
+| `bin/fuzz status` | Join the current build/grounding receipt with first-slice and campaign state; report what to resolve or try next. `--json` includes `build`, `receipt`, `receipt_warnings`, `first_slice`, and `next` per harness. |
 | `bin/fuzz doctor` | Report the linked build, coverage feedback, lease state, and isolation. |
 
 See [Boundary-directed fuzzing](../guides/directed-fuzzing.md) for the workflow
 and the build-isolation rules.
 
 `bin/hits` provides coverage diagnostics for browser, JS, and generic CLI
-builds. `--mode generic`
-replays a native testcase against the configured ASan CLI in an instrumented sibling
-tree (`build-asan+fuzz` or `build-asan+cov`) and reports the source files it
-reached. The sibling is used only when the sanitizer selected that configured
-CLI route; API harnesses and alternate runners have no route-equivalent sibling,
-so they print `COVERAGE_UNAVAILABLE` and proceed ungated instead of gating on
-the wrong program. A missing sibling behaves the same way.
+builds. `--mode generic` replays a native testcase in the instrumented sibling
+tree (`build-asan+fuzz`, built by `bin/setup-target --build` and audit
+preflight from the target's own recipe, or a hand-built `build-asan+cov`) and
+reports the source files it reached. The configured ASan CLI is replayed from
+the sibling directly; a `// HARNESS:` route is replayed through a coverage
+twin of that harness (`--harness-source`, which `bin/probe` supplies) linked
+against the sibling's `asan_lib`. Interpreter and wrapper routes have no
+route-equivalent sibling, so they print `COVERAGE_UNAVAILABLE` and proceed
+instead of gating on the wrong program; a missing sibling behaves the same
+way. In generic mode a `MISSED` never withholds the sanitizer run.
 
 ```bash
 bin/hits --testcase "$RESULTS/scratch-1/testcase.js" \

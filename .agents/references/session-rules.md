@@ -78,9 +78,13 @@ bin/probe "${RESULTS_DIR}/scratch-N/tc.xml" -- 8 100       # trailing args go to
   harness a unique sibling filename and put that exact name in its HARNESS
   header. Never overwrite a shared `harness.c` while another testcase points
   to it.
-- MISSED → revise input, don't discard. Don't spend ASan budget.
-- Generic C/C++ targets do not support coverage gating; `bin/probe` falls back
-  to `bin/run-sanitizer-multi asan generic` and saves a sibling `.asan.txt`.
+- MISSED → revise input, don't discard. Browser/js: ASan was skipped. Native
+  targets: the sanitizer still ran; the `.asan.txt` carries
+  `COVERAGE_GATE: MISSED … (closest: <frame>)` — mutate toward that frame.
+- Native C/C++ targets get HIT/MISSED coverage automatically when the
+  `build-asan+fuzz` sibling exists (preflight builds it): the configured CLI,
+  or a coverage twin of your `// HARNESS:` source. `COVERAGE_UNAVAILABLE`
+  means the sibling is missing for this route; the run still counts.
 - Clean (no-crash) runs whose stdout exceeds ~200 lines are auto-truncated to
   first 80 + last 120, with a `[run-sanitizer-multi] DIGEST: …` marker pointing at the
   full `.asan.txt`. Crash runs bypass this line digest but still use the shared
