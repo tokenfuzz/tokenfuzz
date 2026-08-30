@@ -62,6 +62,12 @@ FEATURE_DISABLED_RE = re.compile(
     r"|(?:built|compiled)\s+without\s+[A-Za-z][A-Za-z0-9_+\-]*\s+support",
     re.IGNORECASE,
 )
+# Every FEATURE_DISABLED_RE alternative contains one of these tokens.
+# This cheap necessary-superset gate avoids the full expression on ordinary
+# target output while retaining Python's Unicode IGNORECASE behavior.
+FEATURE_DISABLED_HINT_RE = re.compile(
+    r"\b(?:not|without|no)\b|\bdisabled", re.IGNORECASE,
+)
 
 
 def output_is_feature_disabled(text: str) -> bool:
@@ -74,7 +80,10 @@ def output_is_feature_disabled(text: str) -> bool:
     """
     if not text:
         return False
-    return FEATURE_DISABLED_RE.search(text) is not None
+    return (
+        FEATURE_DISABLED_HINT_RE.search(text) is not None
+        and FEATURE_DISABLED_RE.search(text) is not None
+    )
 
 
 def bin_subpath(asan_bin: Path, build_dir: Path) -> Path | None:

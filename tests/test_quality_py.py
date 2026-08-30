@@ -18,6 +18,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HELPER = ROOT / "lib" / "quality.py"
+sys.path.insert(0, str(ROOT / "lib"))
+
+import quality
 
 PASSED = 0
 FAILED = 0
@@ -223,6 +226,29 @@ with tempfile.TemporaryDirectory() as td:
     ok("H-42ab7c9d10-" not in meta_text, "comment closer is not part of the id", meta_text[:200])
     ok("**New edges contributed:** 3" in meta_text, "new-edge count recorded", meta_text[:300])
 
+    # The long-running audit imports the same operation instead of paying for
+    # one interpreter per agent. Its structured result must retain every CLI
+    # disposition, including the two negative gates above.
+    api_corpus = p / "api-corpus"
+    api_tally = quality.promote_corpus(str(hits_log), str(api_corpus), "8")
+    assert_eq(
+        {
+            "promoted": 1,
+            "skipped_no_asan": 0,
+            "skipped_not_clean": 0,
+            "skipped_crashing": 1,
+            "skipped_no_header": 0,
+            "skipped_no_new_edges": 1,
+        },
+        api_tally,
+        "in-process promotion returns the complete CLI disposition tally",
+    )
+    ok(
+        quality.regenerate_corpus_index(str(api_corpus))
+        and "COVER-001-8" in (api_corpus / "INDEX.md").read_text(),
+        "in-process index regeneration writes the same corpus index",
+    )
+
     # Re-running unchanged should not duplicate the same input.
     proc = run(["promote-corpus", str(hits_log), str(scratch), str(corpus), "7"], check=True)
     ok("promoted=0" in proc.stdout, "idempotent: no double-promotion", proc.stdout.strip())
@@ -263,7 +289,7 @@ with tempfile.TemporaryDirectory() as td:
 # ── promote-corpus concurrency: COVER-NNN collisions ────────────────
 # Two concurrent promote-corpus calls for the same agent_num must not
 # silently lose promotions to a COVER-NNN-{agent_num} directory-name
-# collision. The retry-with-incremented-seq loop in _cmd_promote_corpus
+# collision. The retry-with-incremented-seq loop in promote_corpus
 # walks past the loser's first attempt and lands on the next free slot.
 print("\npromote-corpus concurrent same-agent promotions")
 import threading

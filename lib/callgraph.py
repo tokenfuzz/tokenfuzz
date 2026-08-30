@@ -180,8 +180,13 @@ def load(results_dir: Path) -> dict | None:
     return data if isinstance(data, dict) and data.get("version") == SCHEMA_VERSION else None
 
 
-def cache_signature(target_root: Path, results_dir: Path,
-                    artifacts: tuple[str, str] | None = None) -> str:
+def cache_signature(
+    target_root: Path,
+    results_dir: Path,
+    artifacts: tuple[str, str] | None = None,
+    *,
+    source_signature: str | None = None,
+) -> str:
     """Identity of every input the graph depends on, or "" when unknowable.
 
     Source content alone is not enough. The boundary comes from the sanitizer
@@ -194,13 +199,18 @@ def cache_signature(target_root: Path, results_dir: Path,
     Empty is not a value to cache against: a target with no VCS would hold one
     signature forever and keep serving a map of source that has since changed,
     which is worse than the cost of re-deriving it. The size guard bounds what
-    that costs.
+    that costs. ``source_signature`` lets an outer cache gate reuse the exact
+    tracked-source snapshot it already computed; an explicitly empty value is
+    authoritative and must not fall back to a second query.
     """
     if not interpreter():
         # Nothing to key: with no analysis available the outer gate should not
         # churn work cards, and refresh() reports the absence on its own.
         return ""
-    source = target_config.vcs_source_signature(target_root, include_untracked=False)
+    source = (
+        target_config.vcs_source_signature(target_root, include_untracked=False)
+        if source_signature is None else source_signature
+    )
     if not source:
         return ""
     parts = [f"schema={SCHEMA_VERSION}", f"source={source}", f"tools={_toolchain()}"]

@@ -329,6 +329,9 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         ("warning: unsupported chunk\nSegmentation fault\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=139)\n", "aborted"),
         ("note: cannot read trailer\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=-11)\n", "aborted"),
         ("app_parse: Assertion `node->type != INVALID' failed\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)\n", "aborted"),
+        ("ınvalid\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
+        ("İnvalid\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
+        ("ſyntax error\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
         # The header names the testcase; its name is not the target's verdict.
         ("ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic testcase=/r/scratch-1/invalid-utf8.xml\n"
          "cannot open input.bin: No such file or directory\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "exit"),
@@ -337,6 +340,21 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         fail_log.write_text(body)
         kind, hint = verdict.execution_failure_class(fail_log)
         check(kind == expected and bool(hint), f"execution failure class {expected!r} (got {kind!r})")
+    fail_log.write_text(
+        "syntax error\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n",
+        encoding="utf-8",
+    )
+    with mock.patch.object(
+        verdict, "execution_exit_reason",
+        side_effect=AssertionError("exit reason was rescanned"),
+    ):
+        kind, hint = verdict.execution_failure_class(
+            fail_log, exit_reason="child-rc=1",
+        )
+    check(
+        kind == "input-rejected" and bool(hint),
+        "execution failure classification reuses the caller's exit reason",
+    )
     # A spent per-iteration budget refuses the run before the testcase is
     # read. It records NO_EXEC exactly like a broken harness, so it has to be
     # separable from one: a measured cell spent 511 probes mutating an input
@@ -1521,26 +1539,52 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
 
     equal(
         (1, 1),
-        audit_runner._tally_transcript(_transcript("acted.jsonl", [
+        audit_runner._scan_transcript(_transcript("acted.jsonl", [
             {"type": "assistant", "message": {"content": [
                 {"type": "tool_use", "name": "Bash", "input": {}}]}},
-        ])),
+        ]))[1:],
         "a session that used a tool is tallied as having acted",
     )
     equal(
         (0, 1),
-        audit_runner._tally_transcript(_transcript("silent.jsonl", [
+        audit_runner._scan_transcript(_transcript("silent.jsonl", [
             {"type": "assistant", "message": {"content": [
                 {"type": "text", "text": "nothing to do"}]}},
-        ])),
+        ]))[1:],
         "a parsed session with no tool call is tallied as idle",
     )
     plain = tally / "plain.log"
     plain.write_text("assistant text, not JSON\n", encoding="utf-8")
     equal(
-        (0, 0), audit_runner._tally_transcript(plain),
+        (0, 0), audit_runner._scan_transcript(plain)[1:],
         "a transcript that parsed nothing stays distinct from an idle session",
     )
+
+    quota_marker = tally / ".quota-exhausted"
+    quota_marker.write_text("observed\n", encoding="utf-8")
+
+    class BrokenTranscript:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def __iter__(self):
+            yield json.dumps({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "name": "Bash", "input": {}},
+                ]},
+            })
+            raise OSError("transcript replaced mid-read")
+
+    with mock.patch.object(Path, "open", return_value=BrokenTranscript()):
+        equal(
+            ("capacity_limited", 1, 1),
+            audit_runner._scan_transcript(plain, quota_marker),
+            "a mid-stream read failure cannot discard an authoritative quota marker",
+        )
     config = target_config.Config(is_browser="1", build_system="mach")
     with mock.patch.dict(os.environ, {"BROWSER_AGENTS": "2", "SHELL_AGENTS": "2"}, clear=False):
         equal((4, 2, 2), audit_runner._agent_counts(config, 10), "audit honors configured browser and shell role counts")
@@ -2572,6 +2616,19 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         promoted == 1 and any((launch_results / "corpus").glob("COVER-*/coverage.html")),
         "post-iteration corpus promotion consumes probe's canonical HIT journal",
     )
+    with mock.patch.object(
+        audit_runner.quality, "promote_corpus", side_effect=SystemExit(7),
+    ), mock.patch.object(audit_runner, "index_log") as corpus_warning:
+        (launch_results / "hits-1.log").write_text(
+            (launch_results / "hits-1.log").read_text() + "\n",
+            encoding="utf-8",
+        )
+        failed_promotion = audit_runner.promote_corpus(launch_runtime)
+    check(
+        failed_promotion == 0
+        and "corpus promotion failed" in corpus_warning.call_args.args[1],
+        "in-process corpus promotion retains the former child failure boundary",
+    )
     orphan = launch_scratch / "orphan.html"
     orphan.write_text("<!-- TARGET: src/parser.c -->\n<!-- HYPOTHESIS-ID: H78 -->\n<html/>\n")
     def _enforce_probe(command, _seconds, **_kwargs):
@@ -2732,7 +2789,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     def _pool_result(agent, rc=0, issue="none", turn_capped=False, raw=Path()):
         # Tallied from the transcript exactly as a finished session is, so the
         # refill decision is still driven by real transcript content.
-        tools, events = audit_runner._tally_transcript(raw)
+        _issue, tools, events = audit_runner._scan_transcript(raw)
         return audit_runner.AgentResult(
             agent, "reproduce", rc, raw, Path(), {}, issue, None, turn_capped,
             tools, events,

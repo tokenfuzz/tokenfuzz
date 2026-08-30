@@ -7,13 +7,17 @@ import base64
 import datetime as dt
 import fcntl
 import hashlib
+import importlib.util
+import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -343,6 +347,112 @@ class MultiRun:
     def _signature(self, path: Path) -> tuple[str, ...] | None:
         if not self.stack_frames.is_file():
             return None
+        # A copied runner may carry a CLI-compatible sibling override. Keep
+        # that exceptional path in its historical child process: unlike the
+        # canonical harness module, an override need not expose an importable
+        # crash_signature() and may import helpers beside itself.
+        try:
+            canonical = (LIB_DIR / "stack_frames.py").resolve()
+            selected = self.stack_frames.resolve()
+        except OSError:
+            return None
+        if selected != canonical:
+            return self._signature_subprocess(path)
+        return self._signature_isolated(path)
+
+    def _signature_isolated(self, path: Path) -> tuple[str, ...] | None:
+        """Parse with fork-speed startup while preserving process containment.
+
+        Captured target output is untrusted and unbounded. Loading it in this
+        long-lived multi-run parent lets an output flood kill the controller;
+        the historical helper process contained that allocation. A fork keeps
+        the already-started interpreter (and therefore almost all of the spawn
+        saving) while making parser exits, faults, and bulk captured-output
+        allocation disposable. As before, the short signature response itself
+        is returned to the parent.
+        """
+        try:
+            read_fd, write_fd = os.pipe()
+            try:
+                child = os.fork()
+            except (AttributeError, OSError, RuntimeError):
+                os.close(read_fd)
+                os.close(write_fd)
+                return self._signature_subprocess(path)
+        except OSError:
+            return self._signature_subprocess(path)
+
+        if child == 0:
+            os.close(read_fd)
+            status = 1
+            try:
+                null_fd = os.open(os.devnull, os.O_WRONLY)
+                try:
+                    os.dup2(null_fd, 1)
+                    os.dup2(null_fd, 2)
+                finally:
+                    if null_fd > 2:
+                        os.close(null_fd)
+                parser = self._load_signature_parser()
+                if parser is not None:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                    payload = json.dumps(
+                        list(parser(text)), ensure_ascii=False,
+                    ).encode("utf-8")
+                    with os.fdopen(write_fd, "wb") as stream:
+                        write_fd = -1
+                        stream.write(payload)
+                    status = 0
+            except BaseException:
+                # This is a disposable containment child. The parent treats
+                # every parser failure exactly like the old helper's nonzero
+                # status and continues without a deduplication signature.
+                pass
+            finally:
+                if write_fd >= 0:
+                    os.close(write_fd)
+                os._exit(status)
+
+        os.close(write_fd)
+        payload: bytes | None = None
+        read_failed = False
+        try:
+            with os.fdopen(read_fd, "rb") as stream:
+                payload = stream.read()
+        except OSError:
+            read_failed = True
+        except BaseException:
+            read_failed = True
+            raise
+        finally:
+            if read_failed:
+                # If the parent stops draining a full pipe, the child can be
+                # blocked in write(). Kill this exact owned PID before reaping
+                # so an interrupt or allocation failure cannot leave a zombie
+                # or turn cleanup into a pipe deadlock.
+                try:
+                    os.kill(child, signal.SIGKILL)
+                except OSError:
+                    pass
+            while True:
+                try:
+                    _, status = os.waitpid(child, 0)
+                    break
+                except InterruptedError:
+                    continue
+        if status != 0 or payload is None:
+            return None
+        try:
+            signature = json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(signature, list) or not all(
+            isinstance(line, str) for line in signature
+        ):
+            return None
+        return tuple(signature)
+
+    def _signature_subprocess(self, path: Path) -> tuple[str, ...] | None:
         completed = subprocess.run(
             [sys.executable, str(self.stack_frames), "--signature", str(path)],
             capture_output=True,
@@ -352,6 +462,26 @@ class MultiRun:
         if completed.returncode:
             return None
         return tuple(completed.stdout.splitlines())
+
+    def _load_signature_parser(self) -> Callable[[str], list[str]] | None:
+        if not self.stack_frames.is_file():
+            return None
+        name = "_tokenfuzz_run_stack_frames"
+        try:
+            # Load the configured harness file itself rather than resolving a
+            # same-named module from the ambient Python path.
+            spec = importlib.util.spec_from_file_location(name, self.stack_frames)
+            if spec is None or spec.loader is None:
+                return None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+            parser = getattr(module, "crash_signature", None)
+            if callable(parser):
+                return parser
+        except (Exception, SystemExit):
+            sys.modules.pop(name, None)
+        return None
 
     def write_digest(self, path: Path) -> None:
         if self.no_digest:

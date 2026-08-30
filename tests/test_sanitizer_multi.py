@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -11,9 +13,20 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests"))
+from python_test_helpers import run_main_captured
+
+RUNNER_LOADER = importlib.machinery.SourceFileLoader(
+    "sanitizer_multi_test_module", str(ROOT / "bin" / "run-sanitizer-multi"),
+)
+RUNNER_SPEC = importlib.util.spec_from_loader(RUNNER_LOADER.name, RUNNER_LOADER)
+sanitizer_multi = importlib.util.module_from_spec(RUNNER_SPEC)
+sys.modules[RUNNER_SPEC.name] = sanitizer_multi
+RUNNER_LOADER.exec_module(sanitizer_multi)
 
 
 class SanitizerMultiTests(unittest.TestCase):
@@ -63,6 +76,7 @@ else:
         self, mode: str | None = "browser", testcase: Path | None = None,
         *, runs: int = 1, environment: dict[str, str] | None = None,
         extra_args: list[str] | None = None,
+        process_boundary: bool = False,
     ) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         for key in (
@@ -84,16 +98,27 @@ else:
         if testcase is not None or mode is not None:
             command.append(str(testcase or self.testcase))
         command.extend(extra_args or [])
-        return subprocess.run(
-            command, env=env, capture_output=True, text=True, timeout=60, check=False,
-        )
+        if process_boundary:
+            return subprocess.run(
+                command, env=env, capture_output=True, text=True,
+                timeout=60, check=False,
+            )
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            sanitizer_multi, "SCRIPT_DIR", self.bin,
+        ):
+            return run_main_captured(
+                sanitizer_multi.main, command[2:], command=command,
+                argv0=command[1],
+            )
 
     @staticmethod
     def output(process: subprocess.CompletedProcess) -> str:
         return process.stdout + process.stderr
 
     def test_clean_crash_noexec_and_inconclusive_rates(self) -> None:
-        clean = self.run_multi(runs=3)
+        # Keep one end-to-end thin-wrapper check; the remaining cases exercise
+        # the same main function without repeating interpreter startup.
+        clean = self.run_multi(runs=3, process_boundary=True)
         output = self.output(clean)
         for expected in (
             "CRASH_RATE: 0/3", "EXECUTION_RATE: 3/3", "SUCCESS_RATE: 3/3", "NO CRASHES",
@@ -335,7 +360,10 @@ print("HIT: sample_function")
             sum(int(line) for line in actual.read_text().splitlines()), 5
         )
 
-        self.assertIn("mode argument required", self.output(self.run_multi(mode=None)))
+        self.assertIn(
+            "mode argument required",
+            self.output(self.run_multi(mode=None, process_boundary=True)),
+        )
         missing = self.root / "missing.html"
         self.assertIn("testcase not found", self.output(self.run_multi(testcase=missing)))
 
@@ -527,14 +555,62 @@ print("[run-asan] CRASH DETECTED: ASan error found")
         self.assertNotIn("VERIFIED — same crash", self.output(full))
         self.assertEqual(self.output(full).count("READ of size 1"), 3)
 
+        # A noncanonical sibling override keeps the former CLI contract and
+        # its isolated import path. It need not expose crash_signature().
+        (self.root / "override_signature.py").write_text(
+            "SIGNATURE = 'sample::lexer::scan lexer.h:<n>'\n",
+            encoding="utf-8",
+        )
+        override_parser = self.root / "override-stack-frames.py"
+        override_parser.write_text(
+            "from override_signature import SIGNATURE\nprint(SIGNATURE)\n",
+            encoding="utf-8",
+        )
+        (self.root / "lib" / "stack_frames.py").unlink()
+        (self.root / "lib" / "stack_frames.py").symlink_to(override_parser)
+        overridden = self.run_multi(runs=3, environment=env)
+        self.assertEqual(
+            self.output(overridden).count("VERIFIED — same crash signature"), 2,
+        )
+
         broken = self.root / "broken-stack-frames.py"
         broken.write_text('raise SystemExit("simulated failure")\n')
         (self.root / "lib" / "stack_frames.py").unlink()
         (self.root / "lib" / "stack_frames.py").symlink_to(broken)
-        counter.write_text("0")
         fallback = self.run_multi(runs=3, environment=env)
         self.assertNotIn("VERIFIED — same crash", self.output(fallback))
         self.assertEqual(self.output(fallback).count("READ of size 1"), 3)
+
+    def test_canonical_signature_parser_failures_are_contained(self) -> None:
+        diagnostic = self.root / "diagnostic.txt"
+        diagnostic.write_text(
+            "==9==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "    #0 0x1 in sample::scan /tmp/sample.cc:42\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow /tmp/sample.cc:42\n"
+            "[run-asan] generic EXECUTION VERIFIED (post-run, rc=1)\n",
+            encoding="utf-8",
+        )
+        with mock.patch.dict(
+            os.environ, {"ASAN_OUTPUT_FILE_OPTIONAL": "1"}, clear=False,
+        ):
+            run = sanitizer_multi.MultiRun("asan", ["generic", str(self.testcase)])
+
+        for failure in (RuntimeError("broken parser"), SystemExit("stopped")):
+            def fail_parser(_text: str, failure=failure) -> list[str]:
+                raise failure
+
+            with self.subTest(failure=type(failure).__name__), mock.patch.object(
+                run, "_load_signature_parser", return_value=fail_parser,
+            ):
+                outcome = run.classify(diagnostic, 1)
+                self.assertTrue(outcome.crashed)
+                self.assertTrue(outcome.executed)
+                self.assertIsNone(outcome.signature)
+
+        self.assertEqual(
+            run._signature(diagnostic),
+            ("sample::scan /tmp/sample.cc:42",),
+        )
 
 
 if __name__ == "__main__":

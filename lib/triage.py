@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import benchmark
+import cluster_common
 import crash_artifacts
 import crash_bundle
 import finding_signature
@@ -4265,13 +4266,20 @@ def _render_reports(results: Path, workers: int) -> bool:
             stdin_data=report_paths,
         ) == 0
 
-    def render(report: Path) -> bool:
+    batches = [
+        reports[start:start + cluster_common.RENDER_MD_BATCH_PATHS]
+        for start in range(0, len(reports), cluster_common.RENDER_MD_BATCH_PATHS)
+    ]
+
+    def render(batch: list[Path]) -> bool:
         return _run_tool(
-            "render-md", str(report), "--html-sibling", "--title", report.parent.name
+            "render-md", *(str(report) for report in batch),
+            "--html-sibling", "--title-from", "parent",
         ) == 0
 
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        return all(pool.map(render, reports)) and enrich_succeeded
+    with ThreadPoolExecutor(max_workers=max(1, min(workers, len(batches)))) as pool:
+        render_succeeded = all(pool.map(render, batches))
+    return render_succeeded and enrich_succeeded
 
 
 def maintain_indexes(
@@ -4279,6 +4287,7 @@ def maintain_indexes(
     target_root: str | os.PathLike[str] | None = None,
     *,
     workers: int = 4,
+    refresh_clusters: bool = True,
 ) -> bool:
     results = Path(results_dir)
     prior_validations = validation_receipt.snapshot_current_tree(results)
@@ -4289,8 +4298,13 @@ def maintain_indexes(
     environment = os.environ.copy()
     if target_root:
         environment["TARGET_ROOT"] = str(target_root)
-    succeeded = _run_tool("cluster-crashes", str(results), env=environment) == 0
-    succeeded = _run_tool("cluster-findings", str(results), env=environment) == 0 and succeeded
+    succeeded = True
+    if refresh_clusters:
+        succeeded = _run_tool("cluster-crashes", str(results), env=environment) == 0
+        succeeded = (
+            _run_tool("cluster-findings", str(results), env=environment) == 0
+            and succeeded
+        )
     if os.environ.get("INDEX_HTML_AUTO", "1") == "1":
         succeeded = _render_reports(results, workers) and succeeded
         summaries = [

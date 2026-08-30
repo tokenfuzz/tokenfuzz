@@ -2323,6 +2323,25 @@ Generated score text.
         self.assertTrue(edited)
         self.assertIsNotNone(validation_receipt.read_current(self.finding))
 
+    def test_index_maintenance_can_render_preclustered_reports(self) -> None:
+        calls: list[str] = []
+
+        def run(tool, *_args, **_kwargs):
+            calls.append(tool)
+            return 0
+
+        with mock.patch.dict(os.environ, {"INDEX_HTML_AUTO": "0"}), \
+                mock.patch.object(triage, "_run_tool", side_effect=run):
+            self.assertTrue(
+                triage.maintain_indexes(
+                    self.root, self.root, workers=1,
+                    refresh_clusters=False,
+                ),
+            )
+
+        self.assertNotIn("cluster-crashes", calls)
+        self.assertNotIn("cluster-findings", calls)
+
     def test_malformed_batched_trigger_vote_stays_pending(self) -> None:
         report_text = triage.read_report_bounded(self.report)
         (self.finding / ".llm-find-quality.json").write_text(json.dumps(

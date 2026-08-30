@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import base64
+import re
 import subprocess
 import sys
 import tempfile
@@ -153,6 +154,72 @@ with tempfile.TemporaryDirectory() as directory:
     )
     check(verdict.execution_exit_reason(multi) == "child-rc=69",
           "the last post-run marker wins for a multi-run confirmation")
+
+    crash_witnesses = (
+        "==1==ERROR: AddressSanitizer: heap-buffer-overflow",
+        "==1==ERROR: HWAddressSanitizer: tag-mismatch",
+        "AddressSanitizer:DEADLYSIGNAL",
+        "WARNING: ThreadSanitizer: data race",
+        "WARNING: MemorySanitizer: use-of-uninitialized-value",
+        "WARNING: DataflowSanitizer: label mismatch",
+        "runtime error: sample UndefinedBehaviorSanitizer",
+        "UndefinedBehaviorSanitizer: undefined-behavior",
+        "[run-asan] CRASH DETECTED",
+        "[run-ubsan] UBSan issue detected",
+        "WARNING: DATA RACE",
+        "panic: runtime error: index out of range",
+        "fatal error: stack overflow",
+        "fatal error: out of memory",
+        "fatal error: concurrent map writes",
+        "thread 'main' panicked at sample.rs:1",
+        "fatal runtime error: stack overflow",
+        'Exception in thread "main" java.lang.Error',
+        "java.lang.OutOfMemoryError: heap space",
+        "java.lang.StackOverflowError",
+        "Fatal Python error: segmentation fault",
+        "FATAL ERROR: JavaScript heap out of memory",
+        "FATAL ERROR: Allocation failed",
+        "sample (NoMemoryError)",
+        "SystemStackError: stack level too deep",
+        "PHP Fatal error: Allowed memory size exhausted",
+        "==7==SEGV on unknown address",
+        "==7==ERROR: generic sanitizer failure",
+    )
+    check(
+        len(crash_witnesses) == len(verdict.CRASH_PATTERNS),
+        "static crash hint coverage has one witness per crash pattern",
+    )
+    crash_log = root / "crash.log"
+    for index, (pattern, witness) in enumerate(
+        zip(verdict.CRASH_PATTERNS, crash_witnesses), 1,
+    ):
+        check(
+            re.search(pattern, witness) is not None,
+            f"static crash witness matches pattern {index}",
+        )
+        check(
+            any(hint in witness for hint in verdict._CRASH_HINTS),
+            f"static crash hint admits pattern {index}",
+        )
+        crash_log.write_text(witness + "\n", encoding="utf-8")
+        check(
+            verdict.file_has_crash(crash_log),
+            f"static crash file scan admits pattern {index}",
+        )
+
+    crash_log.write_text("CUSTOM\nDIAGNOSTIC\n", encoding="utf-8")
+    check(
+        verdict.file_has_crash(crash_log, (r"^CUSTOM$",)),
+        "a configured crash pattern bypasses the static vocabulary gate",
+    )
+    crash_log.write_bytes(
+        b"x" * (64 * 1024 - len(b"AddressSanitizer"))
+        + b"AddressSanitizer:DEADLYSIGNAL\n"
+    )
+    check(
+        verdict.file_has_crash(crash_log),
+        "static crash hint preserves a marker split at the read boundary",
+    )
 
 value = "detect_leaks=1:note=two words"
 encoded = run("encode-options", value).stdout.strip()

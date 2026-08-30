@@ -17,6 +17,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
@@ -724,6 +726,49 @@ class FingerprintTests(unittest.TestCase):
         # churn work cards on its own.
         callgraph._RESOLVED = ""
         self.assertEqual(self.sign(), "")
+
+    def test_a_precomputed_source_signature_skips_the_vcs_query(self) -> None:
+        with mock.patch.object(
+            target_config, "vcs_source_signature",
+            side_effect=AssertionError("source signature recomputed"),
+        ):
+            signature = callgraph.cache_signature(
+                self.ctx.target_root,
+                self.ctx.results_dir,
+                (str(self.artifact), str(self.artifact)),
+                source_signature="src-precomputed",
+            )
+        self.assertTrue(signature)
+
+    def test_an_empty_precomputed_source_does_not_fall_back_to_vcs(self) -> None:
+        with mock.patch.object(
+            target_config, "vcs_source_signature",
+            side_effect=AssertionError("unknown source recomputed"),
+        ):
+            signature = callgraph.cache_signature(
+                self.ctx.target_root,
+                self.ctx.results_dir,
+                (str(self.artifact), str(self.artifact)),
+                source_signature="",
+            )
+        self.assertEqual(signature, "")
+
+    def test_the_outer_gate_queries_the_source_once(self) -> None:
+        import audit_runner
+
+        runtime = SimpleNamespace(
+            target_root=self.ctx.target_root,
+            results=self.ctx.results_dir,
+            target_rev="rev-1",
+            config=target_config.Config(),
+        )
+        with mock.patch.object(
+            target_config, "vcs_source_signature", return_value="src-once",
+        ) as source_signature:
+            self.assertTrue(audit_runner._work_card_signature(runtime))
+        source_signature.assert_called_once_with(
+            self.ctx.target_root, include_untracked=False,
+        )
 
     def test_the_outer_work_card_gate_sees_it(self) -> None:
         # refresh_work_cards can return before rank-work ever runs, so the

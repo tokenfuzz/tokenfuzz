@@ -30,6 +30,7 @@ _CLUSTER_TABLE_RE = re.compile(
 
 _PENDING_SIDECAR = ".promotion_pending"
 _PENDING_TODO_MARKER = "_TODO (agent):"
+RENDER_MD_BATCH_PATHS = 400
 
 
 def promotion_pending_reasons(directory: Path) -> list[str]:
@@ -177,9 +178,8 @@ def render_md_batch(md_paths: "list[Path]") -> None:
     if shutil.which("python3") is None:
         return
     html = os.environ.get("CLUSTER_HTML") != "0"
-    chunk = 400
-    for start in range(0, len(md_paths), chunk):
-        batch = md_paths[start:start + chunk]
+    for start in range(0, len(md_paths), RENDER_MD_BATCH_PATHS):
+        batch = md_paths[start:start + RENDER_MD_BATCH_PATHS]
         args = ["python3", str(render), *[str(p) for p in batch], "--title-from", "parent"]
         if html:
             args.append("--html-sibling")

@@ -19,9 +19,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMAND = ROOT / "bin" / "setup-target"
+sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "lib"))
 import build_materialize
 import target_config
+from python_test_helpers import run_main_captured
 
 
 def _load_setup_target():
@@ -32,6 +34,9 @@ def _load_setup_target():
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
+
+
+SETUP_TARGET = _load_setup_target()
 
 # Holds a shared build lease on a tree, the way a live audit does, until the
 # stop file appears.
@@ -58,16 +63,60 @@ class SetupTargetTests(unittest.TestCase):
         (self.harness / "bin").mkdir(parents=True)
         (self.harness / "lib").symlink_to(ROOT / "lib", target_is_directory=True)
         (self.harness / ".agents").symlink_to(ROOT / ".agents", target_is_directory=True)
-        self.remote = self.temp / "remote"
-        self.git("init", str(self.remote))
-        (self.remote / "CMakeLists.txt").write_text(
-            "cmake_minimum_required(VERSION 3.16)\nproject(sample C)\n",
-            encoding="utf-8",
-        )
-        self.commit(self.remote, "initial", "CMakeLists.txt")
+        self._remote: Path | None = None
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_direct_capture_uses_wrapper_argv_and_exit_semantics(self) -> None:
+        observed: list[list[str]] = []
+
+        def exits(arguments: list[str]) -> int:
+            observed.append(list(sys.argv))
+            self.assertEqual(arguments, ["value"])
+            raise SystemExit("stopped")
+
+        result = run_main_captured(
+            exits, ["value"], command=["setup-target", "value"],
+        )
+        self.assertEqual(observed, [["setup-target", "value"]])
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stderr, "stopped\n")
+
+        def exits_cleanly(_arguments: list[str]) -> int:
+            raise SystemExit
+
+        self.assertEqual(
+            run_main_captured(
+                exits_cleanly, [], command=["setup-target"],
+            ).returncode,
+            0,
+        )
+
+        for code in (256, -1, sys.maxsize + 1, -sys.maxsize - 2):
+            with self.subTest(code=code):
+                direct = run_main_captured(
+                    lambda _arguments, code=code: code,
+                    [],
+                    command=["setup-target"],
+                )
+                process = subprocess.run(
+                    [sys.executable, "-c", f"raise SystemExit({code})"],
+                    check=False,
+                )
+                self.assertEqual(direct.returncode, process.returncode)
+
+    @property
+    def remote(self) -> Path:
+        if self._remote is None:
+            self._remote = self.temp / "remote"
+            self.git("init", str(self._remote))
+            (self._remote / "CMakeLists.txt").write_text(
+                "cmake_minimum_required(VERSION 3.16)\nproject(sample C)\n",
+                encoding="utf-8",
+            )
+            self.commit(self._remote, "initial", "CMakeLists.txt")
+        return self._remote
 
     @staticmethod
     def git(*arguments: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
@@ -97,21 +146,32 @@ class SetupTargetTests(unittest.TestCase):
         )
 
     def setup(
-        self, slug: str, *arguments: str, environment: dict[str, str] | None = None,
+        self, slug: str, *arguments: str,
+        environment: dict[str, str] | None = None,
+        process_boundary: bool = False,
     ) -> subprocess.CompletedProcess:
         env = os.environ | {"AUDIT_ROOT": str(self.harness)}
         if environment:
             env.update(environment)
-        return subprocess.run(
-            [sys.executable, str(COMMAND), slug, *arguments],
-            env=env, capture_output=True, text=True, check=False,
-        )
+        command = [str(COMMAND), slug, *arguments]
+        if process_boundary:
+            return subprocess.run(
+                [sys.executable, *command], env=env,
+                capture_output=True, text=True, check=False,
+            )
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(SETUP_TARGET, "SCRIPT_ROOT", self.harness),
+        ):
+            return run_main_captured(
+                SETUP_TARGET.main, [slug, *arguments], command=command,
+            )
 
     def config(self, slug: str) -> Path:
         return self.harness / "output" / slug / "target.toml"
 
     def test_a_detected_harness_input_mismatch_does_not_retarget_the_library(self) -> None:
-        setup_target = _load_setup_target()
+        setup_target = SETUP_TARGET
         target = self.temp / "mismatch-target"
         target.mkdir()
         config = self.temp / "mismatch-target.toml"
@@ -138,7 +198,7 @@ class SetupTargetTests(unittest.TestCase):
         self.assertEqual(before, config.read_bytes())
 
     def test_a_header_only_repair_preserves_curated_harness_inputs(self) -> None:
-        setup_target = _load_setup_target()
+        setup_target = SETUP_TARGET
         target = self.temp / "header-mismatch-target"
         target.mkdir()
         config = self.temp / "header-mismatch-target.toml"
@@ -171,7 +231,7 @@ class SetupTargetTests(unittest.TestCase):
         setup_target.target_config.parse_toml(config)
 
     def test_browser_setup_does_not_invent_a_c_harness_contract(self) -> None:
-        setup_target = _load_setup_target()
+        setup_target = SETUP_TARGET
         target = self.temp / "browser-target"
         target.mkdir()
         config = self.temp / "browser-target.toml"
@@ -241,7 +301,13 @@ class SetupTargetTests(unittest.TestCase):
         pulled = self.setup("demo", "--pull")
         self.assertEqual(pulled.returncode, 0, pulled.stdout + pulled.stderr)
         self.assertTrue((self.harness / "targets" / "demo" / "skipped.c").is_file())
-        self.assertEqual(self.setup("demo", "--pull", "--no-update").returncode, 2)
+        direct_invalid = self.setup("demo", "--pull", "--no-update")
+        cli_invalid = self.setup(
+            "demo", "--pull", "--no-update", process_boundary=True,
+        )
+        self.assertEqual((direct_invalid.returncode, cli_invalid.returncode), (2, 2))
+        self.assertIn("usage: setup-target", direct_invalid.stderr)
+        self.assertEqual(direct_invalid.stderr, cli_invalid.stderr)
         (self.remote / "demo.c").write_text("int main(void) { return 0; }\n")
         self.commit(self.remote, "add demo", "demo.c")
         process = self.setup("demo", str(self.remote))
@@ -281,16 +347,14 @@ class SetupTargetTests(unittest.TestCase):
         (remote / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.16)\nproject(sample C)\n", encoding="utf-8",
         )
-        self.hg("--cwd", str(remote), "add", "CMakeLists.txt")
-        self.hg("--cwd", str(remote), "commit", "-m", "initial")
+        self.hg("--cwd", str(remote), "commit", "--addremove", "-m", "initial")
         self.assertEqual(self.setup("hgdemo", str(remote)).returncode, 0)
         checkout = self.harness / "targets" / "hgdemo"
         self.assertTrue((checkout / ".hg").is_dir())
         (checkout / "build-asan").mkdir()
         (checkout / "build-asan" / "libdemo.a").write_text("junk\n")
         (remote / "fresh.c").write_text("int fresh(void) { return 0; }\n")
-        self.hg("--cwd", str(remote), "add", "fresh.c")
-        self.hg("--cwd", str(remote), "commit", "-m", "add fresh")
+        self.hg("--cwd", str(remote), "commit", "--addremove", "-m", "add fresh")
 
         pulled = self.setup("hgdemo", "--pull")
         self.assertEqual(pulled.returncode, 0, pulled.stdout + pulled.stderr)
@@ -299,8 +363,7 @@ class SetupTargetTests(unittest.TestCase):
 
         (checkout / "CMakeLists.txt").write_text("# operator edit\n", encoding="utf-8")
         (remote / "later.c").write_text("int later(void) { return 0; }\n")
-        self.hg("--cwd", str(remote), "add", "later.c")
-        self.hg("--cwd", str(remote), "commit", "-m", "add later")
+        self.hg("--cwd", str(remote), "commit", "--addremove", "-m", "add later")
         blocked = self.setup("hgdemo", "--pull")
         self.assertEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
         self.assertIn("tracked local changes", blocked.stdout)
@@ -346,7 +409,7 @@ class SetupTargetTests(unittest.TestCase):
         # --force --build rematerializes build output. A reviewed [runner] that
         # only lacks its exit calibration is calibrated in place; handing the
         # helper --force made it re-select the argv the operator had reviewed.
-        setup_target = _load_setup_target()
+        setup_target = SETUP_TARGET
         target = self.temp / "force-build-target"
         binary = target / "build-asan" / "demo"
         binary.parent.mkdir(parents=True)
@@ -1509,7 +1572,11 @@ class SetupTargetTests(unittest.TestCase):
             'target = "phtarget"\nbuild_system = "cmake"\nasan_bin = "build-asan/FILL_ME"\n\n'
             '[threat_model]\nattacker_controls = ["hand-curated-token"]\n'
         )
-        process = self.setup("phtarget", "--build", environment={"LLM_DECIDE_DISABLE": "1"})
+        process = self.setup(
+            "phtarget", "--build",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+            process_boundary=True,
+        )
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertIn('attacker_controls = ["hand-curated-token"]', config.read_text())
         self.assertIn("--build does not re-seed", process.stdout)

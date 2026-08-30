@@ -428,25 +428,35 @@ def _file_sha256(path: str) -> str:
     return digest.hexdigest()
 
 
-def _cmd_promote_corpus(args) -> int:
-    hits_log = args.hits_log
-    scratch_dir = args.scratch_dir
-    corpus_root = args.corpus_root
-    agent_num = args.agent_num
+_PROMOTION_TALLY_KEYS = (
+    "promoted",
+    "skipped_no_asan",
+    "skipped_not_clean",
+    "skipped_crashing",
+    "skipped_no_header",
+    "skipped_no_new_edges",
+)
+
+
+def _empty_promotion_tally() -> dict[str, int]:
+    return dict.fromkeys(_PROMOTION_TALLY_KEYS, 0)
+
+
+def _format_promotion_tally(tally: dict[str, int]) -> str:
+    return " ".join(f"{key}={tally[key]}" for key in _PROMOTION_TALLY_KEYS)
+
+
+def promote_corpus(
+    hits_log: str, corpus_root: str, agent_num: str,
+) -> dict[str, int]:
+    """Promote clean coverage inputs and return the disposition tally."""
     require_new_edges = os.environ.get("CORPUS_REQUIRE_NEW_EDGES", "1") != "0"
+    tally = _empty_promotion_tally()
 
     if not os.path.isfile(hits_log):
-        print("promoted=0 skipped_no_asan=0 skipped_not_clean=0 skipped_crashing=0 skipped_no_header=0 skipped_no_new_edges=0")
-        return 0
+        return tally
 
     os.makedirs(corpus_root, exist_ok=True)
-
-    promoted = 0
-    skipped_no_asan = 0
-    skipped_not_clean = 0
-    skipped_crashing = 0
-    skipped_no_header = 0
-    skipped_no_new_edges = 0
 
     # Agents routinely reuse names such as testcase.js. Deduplicate the bytes,
     # not the basename, so a new coverage input is never discarded by name.
@@ -464,8 +474,7 @@ def _cmd_promote_corpus(args) -> int:
     try:
         f = open(hits_log, "r", encoding="utf-8", errors="replace")
     except OSError:
-        print("promoted=0 skipped_no_asan=0 skipped_not_clean=0 skipped_crashing=0 skipped_no_header=0 skipped_no_new_edges=0")
-        return 0
+        return tally
 
     with f:
         for raw in f:
@@ -481,7 +490,7 @@ def _cmd_promote_corpus(args) -> int:
             asan_out = (base + ".asan.txt") if base else (tc + ".asan.txt")
 
             if not os.path.isfile(asan_out) or os.path.getsize(asan_out) == 0:
-                skipped_no_asan += 1
+                tally["skipped_no_asan"] += 1
                 continue
 
             clean = crashing = False
@@ -494,7 +503,7 @@ def _cmd_promote_corpus(args) -> int:
                             diagnostic_line,
                         ))
             except OSError:
-                skipped_no_asan += 1
+                tally["skipped_no_asan"] += 1
                 continue
 
             if not clean:
@@ -503,17 +512,17 @@ def _cmd_promote_corpus(args) -> int:
                 # apart from the missing-output count because the two name
                 # different repairs — one is a route that never produced
                 # evidence, the other is evidence saying the input was refused.
-                skipped_not_clean += 1
+                tally["skipped_not_clean"] += 1
                 continue
 
             if crashing:
-                skipped_crashing += 1
+                tally["skipped_crashing"] += 1
                 continue
 
             header = _read_header(tc)
             hid_m = _HID_RE.search(header)
             if not hid_m:
-                skipped_no_header += 1
+                tally["skipped_no_header"] += 1
                 continue
             hid = hid_m.group(1)
             target = _extract_header_field(header, _TARGET_RE)
@@ -525,7 +534,7 @@ def _cmd_promote_corpus(args) -> int:
 
             new_edges_raw = fields.get("new", "")
             if require_new_edges and new_edges_raw.isdigit() and int(new_edges_raw) == 0:
-                skipped_no_new_edges += 1
+                tally["skipped_no_new_edges"] += 1
                 continue
 
             # Pick the next COVER-NNN-{agent_num} slot. Two concurrent
@@ -593,14 +602,14 @@ def _cmd_promote_corpus(args) -> int:
                 pass
 
             existing_digests.add(digest)
-            promoted += 1
+            tally["promoted"] += 1
 
-    print(
-        f"promoted={promoted} skipped_no_asan={skipped_no_asan} "
-        f"skipped_not_clean={skipped_not_clean} "
-        f"skipped_crashing={skipped_crashing} skipped_no_header={skipped_no_header} "
-        f"skipped_no_new_edges={skipped_no_new_edges}"
-    )
+    return tally
+
+
+def _cmd_promote_corpus(args) -> int:
+    tally = promote_corpus(args.hits_log, args.corpus_root, args.agent_num)
+    print(_format_promotion_tally(tally))
     return 0
 
 
@@ -612,8 +621,8 @@ _META_FIELD_RES = {
 }
 
 
-def _cmd_regenerate_corpus_index(args) -> int:
-    corpus_root = args.corpus_root
+def regenerate_corpus_index(corpus_root: str) -> bool:
+    """Rebuild ``INDEX.md`` and report whether the write succeeded."""
     idx_path = os.path.join(corpus_root, "INDEX.md")
     lines = [
         "# Corpus INDEX",
@@ -656,8 +665,12 @@ def _cmd_regenerate_corpus_index(args) -> int:
         with open(idx_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
     except OSError:
-        return 1
-    return 0
+        return False
+    return True
+
+
+def _cmd_regenerate_corpus_index(args) -> int:
+    return 0 if regenerate_corpus_index(args.corpus_root) else 1
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -487,7 +487,11 @@ run_tests_parallel() {
   for tf in "${TEST_FILES[@]}"; do
     index=$((index + 1))
     while true; do
-      running=$(jobs -pr | wc -l | tr -d ' ')
+      running=0
+      jobs -pr > "$out_dir/.running"
+      while IFS= read -r _; do
+        running=$((running + 1))
+      done < "$out_dir/.running"
       [ "$running" -lt "$JOBS" ] && break
       sleep 0.05
     done

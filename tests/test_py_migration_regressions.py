@@ -1475,6 +1475,75 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         ) == "transient",
         "an overload is still transient",
     )
+
+    dialect_markers = (
+        "aNtIgRaViTy ClI",
+        "ANTIGRAVITY-CLI",
+        "antigravity.google",
+        "[AGY CLI LOG TAIL: /tmp/cli.log]",
+        "yolo MODE IS ENABLED",
+        "RiPgReP is not available. Falling back to GrepTool",
+        "Rıpgrep is not available. Falling back to GrepTool",
+        "@GOOGLE/GEMINI-CLI/runtime",
+        '{"type":"init","model" : "GeMiNi-3.1-Pro"}',
+    )
+    for marker in dialect_markers:
+        check(
+            audit_helpers._provider_issue_from_lines([
+                marker, "Attempt 1 failed with status 429",
+            ]) == "capacity_limited",
+            f"provider dialect prefilter admits {marker[:36]!r}",
+        )
+
+    class SingleUseLines:
+        def __init__(self, values):
+            self.values = values
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            if self.iterations > 1:
+                raise AssertionError("transcript was iterated twice")
+            return iter(self.values)
+
+    observed = []
+    mixed_lines = SingleUseLines([
+        json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "Bash", "input": {}},
+        ]}}),
+        json.dumps({"type": "item.completed", "item": {"type": "file_change"}}),
+        "{malformed json",
+        "[1, 2, 3]",
+        "Antigravity CLI",
+        "Attempt 1 failed with status 429",
+    ])
+    issue = audit_helpers._provider_issue_from_lines(
+        mixed_lines, event_observer=observed.append,
+    )
+    check(
+        issue == "capacity_limited"
+        and mixed_lines.iterations == 1
+        and len(observed) == 2
+        and sum(audit_helpers._event_tool_counts(event)[1] for event in observed) == 2,
+        "provider classification exposes parsed events during its single pass",
+    )
+
+    marker_observed = []
+    quota_lines = [
+        '{"type":"error","message":"status 401 credential revoked"}',
+        '{"type":"item.completed","item":{"type":"command_execution"}}',
+    ]
+    check(
+        audit_helpers._provider_issue_from_lines(
+            quota_lines, classifier_marker, marker_observed.append,
+        ) == "capacity_limited"
+        and len(marker_observed) == 2
+        and sum(
+            audit_helpers._event_tool_counts(event)[1]
+            for event in marker_observed
+        ) == 1,
+        "quota precedence still allows finish telemetry to observe every event",
+    )
     # A refused cell is excluded rather than published: without the marker the
     # cell records as done and a same-run-id resume then skips it as measured.
     refused_cell = root / "refused-cell"
@@ -2254,8 +2323,22 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         repr(render_calls),
     )
     check(
-        len(html_calls) == 2,
-        "housekeeping still renders report HTML in parallel",
+        len(html_calls) == 1
+        and set(html_calls[0][1:-3]) == {str(report) for report in render_reports}
+        and html_calls[0][-3:] == ("--html-sibling", "--title-from", "parent"),
+        "housekeeping renders every report HTML in one parent-titled batch",
+        repr(render_calls),
+    )
+    render_calls.clear()
+    with mock.patch.object(
+        triage, "_run_tool",
+        side_effect=lambda *args, **_kwargs: render_calls.append(tuple(args)) or 1,
+    ):
+        render_ok = triage._render_reports(render_root, workers=2)
+    check(
+        not render_ok
+        and [call[0] for call in render_calls] == ["enrich-report", "render-md"],
+        "a failed enrichment never suppresses the independent report render pass",
         repr(render_calls),
     )
 

@@ -439,7 +439,8 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
          mock.patch.object(audit_runner.build_session_seed, "write_session_seed"):
         result = audit_runner.run_agent(stream_runtime, stream_context, 1, 1, True)
     check(
-        launch_count[0] == 2 and result.returncode == 0,
+        launch_count[0] == 2 and result.returncode == 0
+        and result.tool_calls == 0 and result.transcript_events == 1,
         "Claude stream-idle failure retries once through the real launch path",
     )
 

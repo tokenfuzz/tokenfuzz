@@ -855,6 +855,17 @@ Memory Safety
         self.assertIn("<title>FIND-002</title>", second.with_suffix(".html").read_text())
         self.assertNotEqual(self.render(first, second, arguments=("--title", "X")).returncode, 0)
 
+        third = self.markdown("FIND-003/report", "# Gamma\n\ntext\n")
+        missing = self.root / "FIND-MISSING/report.md"
+        fourth = self.markdown("FIND-004/report", "# Delta\n\ntext\n")
+        process = self.render(
+            third, missing, fourth,
+            arguments=("--html-sibling", "--title-from", "parent"),
+        )
+        self.assertNotEqual(process.returncode, 0)
+        self.assertTrue(third.with_suffix(".html").is_file())
+        self.assertTrue(fourth.with_suffix(".html").is_file())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -9,6 +9,8 @@ behavior is asserted.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -21,6 +23,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HELPER = ROOT / "lib" / "audit_helpers.py"
+sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT / "lib"))
+import audit_helpers  # noqa: E402
+from python_test_helpers import invoke_main  # noqa: E402
 
 PASSED = 0
 FAILED = 0
@@ -42,12 +48,33 @@ def assert_eq(expected, actual, name: str) -> None:
     ok(expected == actual, name, f"expected={expected!r} actual={actual!r}")
 
 
-def run(args, stdin: str = "", check: bool = False):
-    proc = subprocess.run(
-        [sys.executable, str(HELPER), *args],
-        input=stdin,
-        capture_output=True,
-        text=True,
+def run(
+    args, stdin: str = "", check: bool = False,
+    process_boundary: bool = False,
+):
+    if process_boundary:
+        proc = subprocess.run(
+            [sys.executable, str(HELPER), *args],
+            input=stdin, capture_output=True, text=True, check=False,
+        )
+        if check and proc.returncode != 0:
+            raise AssertionError(
+                f"helper failed rc={proc.returncode}: {proc.stderr}",
+            )
+        return proc
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    previous_stdin = sys.stdin
+    try:
+        sys.stdin = io.StringIO(stdin)
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            returncode = invoke_main(
+                audit_helpers.main, args, argv0=str(HELPER),
+            )
+    finally:
+        sys.stdin = previous_stdin
+    proc = subprocess.CompletedProcess(
+        [str(HELPER), *args], returncode, stdout.getvalue(), stderr.getvalue(),
     )
     if check and proc.returncode != 0:
         raise AssertionError(f"helper failed rc={proc.returncode}: {proc.stderr}")
@@ -982,7 +1009,10 @@ proc = run(["extract-vote-json"], stdin='prose\n{"vote": "Reject", "reason": "no
 assert_eq(0, proc.returncode, "multi-line Reject rc=0")
 ok('"vote": "Reject"' in proc.stdout, "multi-line vote object emitted")
 
-proc = run(["extract-vote-json"], stdin="no vote at all here")
+proc = run(
+    ["extract-vote-json"], stdin="no vote at all here",
+    process_boundary=True,
+)
 assert_eq(1, proc.returncode, "no vote → rc=1")
 assert_eq("", proc.stdout, "no vote → empty stdout")
 
@@ -1088,42 +1118,46 @@ with tempfile.TemporaryDirectory() as td:
 
 # Concurrent appenders must produce one well-formed JSON object per line.
 # events.jsonl is shared across parallel agents + orchestrator
-# (see docs/development.md logging discipline). This is a property test: each
-# subprocess opens, writes one buffered line, and closes — the kernel
-# does a single write() per process, which O_APPEND serializes for
-# regular files. So the test passes regardless of whether the in-process
-# flock around the write is present. The flock + flush-in-locked-region
-# matter when a single Python process makes multiple writes on one fd
-# or when a write is large enough to be split into multiple os.write()
-# syscalls; the test below does not exercise that path. Kept as a
-# regression sentinel for "concurrent emit-event produces valid JSONL".
+# (see docs/development.md logging discipline). Keep one Python process per
+# concurrent writer, but reuse that process for its 25 events. Each call still
+# opens and locks the shared file; as before, the resulting valid JSONL is a
+# concurrent emit-event sentinel, not proof that removing flock would fail on
+# every host, because O_APPEND may serialize these individual line writes.
 print("\nemit-event concurrent writes")
-import threading
 with tempfile.TemporaryDirectory() as td:
     events = Path(td) / "state" / "events.jsonl"
     events.parent.mkdir(parents=True, exist_ok=True)
     long_reason = "x" * 8000  # exceeds PIPE_BUF on Linux (4096)
     n_workers = 8
     n_events_per_worker = 25
-
-    def worker(idx: int) -> None:
-        for i in range(n_events_per_worker):
-            subprocess.run(
-                [
-                    sys.executable, str(HELPER), "emit-event",
-                    str(events), "agent-plan",
-                    f"agent={idx}", f"iter={i}",
-                    f"reason={long_reason}",
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_workers)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    worker = (
+        "import sys\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "import audit_helpers\n"
+        "path, agent, count, reason = sys.argv[2:]\n"
+        "for index in range(int(count)):\n"
+        "    rc = audit_helpers.main([\"emit-event\", path, \"agent-plan\", "
+        "f\"agent={agent}\", f\"iter={index}\", f\"reason={reason}\"])\n"
+        "    if rc:\n"
+        "        raise SystemExit(rc)\n"
+    )
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable, "-c", worker, str(ROOT / "lib"), str(events),
+                str(index), str(n_events_per_worker), long_reason,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for index in range(n_workers)
+    ]
+    for index, process in enumerate(processes):
+        _, error = process.communicate()
+        assert_eq(0, process.returncode, f"writer {index} exits cleanly")
+        if process.returncode:
+            print(f"    {error}")
 
     raw_lines = events.read_text().splitlines()
     assert_eq(n_workers * n_events_per_worker, len(raw_lines),

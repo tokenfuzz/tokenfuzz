@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Build the bounded, non-noise libFuzzer lead index."""
+
+from __future__ import annotations
+
+import heapq
+import os
+import stat
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+TOOL = "triage"
+DEFAULT_MAX_LEADS = 20
+SHUTDOWN_SHA1 = "crash-da39a3ee5e6b4b0d3255bfef95601890afd80709"
+CANDIDATE_PREFIXES = ("crash-", "oom-", "timeout-")
+
+
+@dataclass(frozen=True)
+class Candidate:
+    path: Path
+    mtime: int
+    size: int
+
+
+def parse_limit(raw: str) -> int | None:
+    if not raw.isascii() or not raw.isdigit():
+        return None
+    return int(raw)
+
+
+def candidates(fuzz_root: Path):
+    def ignore_walk_error(_error: OSError) -> None:
+        return
+
+    for current, directories, names in os.walk(
+        fuzz_root, topdown=True, followlinks=False, onerror=ignore_walk_error
+    ):
+        directories[:] = [name for name in directories if name != "shutdown-noise"]
+        current_path = Path(current)
+        for name in names:
+            if not name.startswith(CANDIDATE_PREFIXES) or name == SHUTDOWN_SHA1:
+                continue
+            path = current_path / name
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+                continue
+            yield Candidate(path=path, mtime=int(info.st_mtime), size=info.st_size)
+
+
+def newest_candidates(fuzz_root: Path, limit: int) -> list[Candidate]:
+    return heapq.nlargest(
+        limit,
+        candidates(fuzz_root),
+        key=lambda item: (item.mtime, os.fsencode(str(item.path))),
+    )
+
+
+def render_no_fuzz_root(fuzz_root_display: str) -> str:
+    return "\n".join(
+        [
+            "# Fuzz Crash Leads",
+            "",
+            f"_No {fuzz_root_display} yet — run a fuzz target first._",
+            "",
+        ]
+    )
+
+
+def render_leads(
+    leads: list[Candidate], max_leads: int, fuzz_root: Path,
+    fuzz_root_display: str,
+) -> str:
+    generated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = [
+        "# Fuzz Crash Leads",
+        "",
+        f"_Generated {generated} — newest first, max {max_leads}._",
+        "",
+        "Each lead is a libFuzzer artifact that survived infrastructure-noise",
+        "filtering. Convert high-value leads into state-file hypotheses:",
+        "",
+        "1. Derive FUZZER name from the parent dir.",
+        "2. Reproduce: `FUZZER=<Name> bin/run-asan fuzz-repro <path>`",
+        "3. If the ASan trace points at product code (not libFuzzer runtime,",
+        "   not shutdown-path Glean), add a hypothesis row + write a minimal",
+        "   hand-authored testcase that reaches the same sink.",
+        "",
+        "---",
+        "",
+    ]
+    for lead in leads:
+        fuzzer = lead.path.parent.name
+        relative_path = lead.path.relative_to(fuzz_root)
+        display_path = f"{fuzz_root_display}/{relative_path}"
+        modified = datetime.fromtimestamp(lead.mtime, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        lines.extend(
+            [
+                f"## {fuzzer} / {lead.path.name}",
+                "",
+                f"- **Path:** `{display_path}`",
+                f"- **Size:** {lead.size} bytes",
+                f"- **Modified:** {modified}",
+                f"- **Reproduce:** `FUZZER={fuzzer} bin/run-asan fuzz-repro {display_path}`",
+                "",
+            ]
+        )
+    if not leads:
+        lines.append("_No non-noise fuzz crashes found._")
+    return "\n".join(lines) + "\n"
+
+
+def atomic_write(path: Path, content: str) -> None:
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary_path = Path(temporary)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            output.write(content)
+            output.flush()
+        temporary_path.chmod(0o644)
+        os.replace(temporary_path, path)
+    finally:
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def update_fuzz_leads(
+    results_arg: str | os.PathLike[str], max_leads: int,
+) -> tuple[int, str]:
+    """Rewrite fuzz-leads.md and return ``(status, log_line)``.
+
+    The empty log line for a missing fuzz root matches the CLI's deliberately
+    quiet first-run marker. Errors are returned so Python callers retain the
+    command's fail-open boundary without a child interpreter.
+    """
+    results_text = os.fspath(results_arg)
+    results = Path(results_text)
+    fuzz_root = results / "fuzz-crashes"
+    output = results / "fuzz-leads.md"
+    fuzz_root_display = f"{results_text}/fuzz-crashes"
+    output_display = f"{results_text}/fuzz-leads.md"
+    try:
+        if not fuzz_root.is_dir():
+            atomic_write(output, render_no_fuzz_root(fuzz_root_display))
+            return 0, ""
+        leads = newest_candidates(fuzz_root, max_leads)
+        atomic_write(
+            output,
+            render_leads(leads, max_leads, fuzz_root, fuzz_root_display),
+        )
+    except OSError as error:
+        return 1, f"[{TOOL}] failed to write {output_display}: {error}"
+
+    return 0, f"[{TOOL}] wrote {output_display} ({len(leads)} leads)"

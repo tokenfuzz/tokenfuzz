@@ -952,6 +952,21 @@ _PROVIDER_DIALECT_RE = re.compile(
     r'@google/gemini-cli/|"model"[ \t]*:[ \t]*"gemini-[a-z0-9._-]+"',
     re.IGNORECASE,
 )
+# Necessary first tokens for every dialect alternative. Tool results can carry
+# megabytes on one JSON line; this keeps the authoritative expression off those
+# lines unless they contain vocabulary that could possibly satisfy it.
+_PROVIDER_DIALECT_HINTS = (
+    "antigravity", "[agy", "yolo", "ripgrep",
+    "@google/gemini-cli/", '"model"',
+)
+_IGNORECASE_EXTRA_CHARS = "İıſK"
+
+
+def _provider_dialect_may_match(line: str) -> bool:
+    folded = line.casefold()
+    return any(hint in folded for hint in _PROVIDER_DIALECT_HINTS) or any(
+        character in line for character in _IGNORECASE_EXTRA_CHARS
+    )
 
 
 def _status_class(match) -> str:
@@ -973,7 +988,9 @@ def _status_class(match) -> str:
     return ""
 
 
-def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
+def _provider_issue_from_lines(
+    lines, quota_marker: Path | None = None, event_observer=None,
+) -> str:
     """Classify backend/provider failures as none, transient, capacity_limited,
     or backend_rejected.
 
@@ -990,7 +1007,8 @@ def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
     # The Gemini watchdog observes the live retry stream and writes this marker
     # before terminating a quota-stalled process. It is stronger evidence than
     # transcript classification and therefore also outranks a transient error.
-    if quota_marker is not None and quota_marker.is_file():
+    quota_limited = quota_marker is not None and quota_marker.is_file()
+    if quota_limited and event_observer is None:
         return "capacity_limited"
 
     cap = trans = False              # credited in a backend error context
@@ -1011,18 +1029,27 @@ def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
                     event = parsed
             except (json.JSONDecodeError, ValueError):
                 event = None
+        if event is not None and event_observer is not None:
+            event_observer(event)
         event_type = event.get("type") if event else ""
         is_error_event = event_type in ("error", "turn.failed")
         is_plain = event is None
 
-        if _PROVIDER_DIALECT_RE.search(line):
+        if (
+            not dialect
+            and _provider_dialect_may_match(line)
+            and _PROVIDER_DIALECT_RE.search(line)
+        ):
             dialect = True
 
         # api_error_status is a dedicated field — trust it anywhere. Claude
         # reports every API failure through it, including on a `result` event
         # that no error-shaped rule below matches, so a refusal has to be read
         # here or that backend's credential failure is invisible.
-        m = _PROVIDER_API_ERROR_RE.search(line)
+        m = (
+            _PROVIDER_API_ERROR_RE.search(line)
+            if '"api_error_status"' in line else None
+        )
         if m:
             cls = _status_class(m)
             cap = cap or cls == "capacity"
@@ -1080,6 +1107,11 @@ def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
             ):
                 refused = True
 
+    # With an observer, a conclusive watchdog marker still scans the transcript
+    # so finish telemetry retains the same event/tool counts as the former
+    # independent tally pass. The marker keeps its historical precedence.
+    if quota_limited:
+        return "capacity_limited"
     if refused:
         return "backend_rejected"
     if cap or (dialect and cap_plain) or usage_limit_notice:

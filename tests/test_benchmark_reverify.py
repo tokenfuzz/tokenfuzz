@@ -1335,13 +1335,23 @@ class BenchmarkReverifyTests(unittest.TestCase):
 
     def rebuild_tool_calls(
         self, bench: Path, *, dry_run: bool = False,
+        cluster_failure: str = "",
     ) -> list[tuple[str, tuple]]:
         """Tools rebuild_pool invokes, with everything but the tools stubbed."""
         calls: list[tuple[str, tuple]] = []
 
         def fake_run_tool(name, *args, **kwargs):
             calls.append((name, args))
-            return 0
+            returncode = int(name == cluster_failure)
+            if not returncode and "--json-out" in args:
+                output = Path(args[args.index("--json-out") + 1])
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_text('{"clusters":[]}\n', encoding="utf-8")
+            return returncode
+
+        def fake_maintain(*args, **kwargs):
+            calls.append(("maintain-indexes", (args, kwargs)))
+            return True
 
         with mock.patch.object(benchmark_runner.metrics, "build_pool"), \
                 mock.patch.object(benchmark_runner.metrics, "relocate_experiments"), \
@@ -1349,7 +1359,11 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 mock.patch.object(benchmark_runner, "_decision_environment"), \
                 mock.patch.object(benchmark_runner.triage, "fill_reach_fields_tree"), \
                 mock.patch.object(benchmark_runner, "reverify_pool_crash_rates"), \
-                mock.patch.object(benchmark_runner, "_run_tool", fake_run_tool):
+                mock.patch.object(benchmark_runner, "_run_tool", fake_run_tool), \
+                mock.patch.object(
+                    benchmark_runner.triage, "maintain_indexes",
+                    side_effect=fake_maintain,
+                ):
             benchmark_runner.rebuild_pool(
                 bench, "slug", "codex", "model", dry_run, "test",
             )
@@ -1380,6 +1394,38 @@ class BenchmarkReverifyTests(unittest.TestCase):
                 names.index("severity"), names.index("cluster-crashes"),
                 f"dry_run={dry_run}",
             )
+
+    def test_pool_rebuild_clusters_each_accepted_tree_once(self) -> None:
+        bench = self.root / "single-accepted-cluster-pass"
+        staging = bench / ".pool.staging"
+        (staging / "crashes" / "CRASH-0001").mkdir(parents=True)
+        (staging / "findings" / "FIND-0001").mkdir(parents=True)
+
+        calls = self.rebuild_tool_calls(bench)
+
+        self.assertEqual(
+            sum(name == "cluster-crashes" for name, _args in calls), 1,
+        )
+        self.assertEqual(
+            sum(name == "cluster-findings" for name, _args in calls), 1,
+        )
+        maintain = [args for name, args in calls if name == "maintain-indexes"]
+        self.assertEqual(len(maintain), 1)
+        self.assertFalse(maintain[0][1]["refresh_clusters"])
+
+    def test_pool_rebuild_retries_index_clustering_after_a_failed_pass(self) -> None:
+        bench = self.root / "failed-accepted-cluster-pass"
+        staging = bench / ".pool.staging"
+        (staging / "crashes" / "CRASH-0001").mkdir(parents=True)
+        (staging / "findings" / "FIND-0001").mkdir(parents=True)
+
+        calls = self.rebuild_tool_calls(
+            bench, cluster_failure="cluster-crashes",
+        )
+
+        maintain = [args for name, args in calls if name == "maintain-indexes"]
+        self.assertEqual(len(maintain), 1)
+        self.assertTrue(maintain[0][1]["refresh_clusters"])
 
     def test_a_stale_score_aborts_before_clustering_or_pool_swap(self) -> None:
         bench = self.root / "stale-severity"

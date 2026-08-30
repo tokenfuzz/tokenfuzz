@@ -482,8 +482,7 @@ raise SystemExit(23)
         ), mock.patch.object(
             benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=cut_short,
         ), mock.patch.object(
-            benchmark_runner.subprocess, "run",
-            return_value=SimpleNamespace(stdout="{}", returncode=0),
+            benchmark_runner.llm_usage, "extract_usage", return_value={},
         ), mock.patch.object(
             benchmark_runner, "_reap_cell_processes",
         ), mock.patch.object(
@@ -500,6 +499,75 @@ raise SystemExit(23)
             benchmark.cell_run_quality(cell, "incomplete"),
             benchmark.NONCOMPARABLE_RUN_QUALITIES,
         )
+
+    def test_model_direct_usage_extraction_is_in_process_and_fails_open(self) -> None:
+        usage = {
+            "tokens": {
+                "input": 7, "cached_input": 0, "cache_creation": 0,
+                "output": 3,
+            },
+            "probe": {},
+            "estimated": False,
+        }
+        for name, extracted in (
+            ("measured", usage),
+            ("extractor-failed", RuntimeError("malformed usage stream")),
+            ("extractor-exited", SystemExit(2)),
+        ):
+            with self.subTest(name=name):
+                cell = self.work / f"usage-{name}"
+
+                def finish(_backend, _prompt, _wall, raw, **_kwargs):
+                    Path(raw).write_text(
+                        '{"type":"turn.completed"}\n', encoding="utf-8",
+                    )
+                    return 0
+
+                extraction = (
+                    mock.patch.object(
+                        benchmark_runner.llm_usage, "extract_usage",
+                        side_effect=extracted,
+                    )
+                    if isinstance(extracted, BaseException)
+                    else mock.patch.object(
+                        benchmark_runner.llm_usage, "extract_usage",
+                        return_value=extracted,
+                    )
+                )
+                with mock.patch.object(
+                    benchmark_runner.benchmark_model_direct_render,
+                    "render", return_value="prompt",
+                ), mock.patch.object(
+                    benchmark_runner.llm_invoke, "run_agent_prompt",
+                    side_effect=finish,
+                ), extraction as extract, mock.patch.object(
+                    benchmark_runner, "_reap_cell_processes",
+                ), mock.patch.object(
+                    benchmark_runner, "_target_artifact_guard",
+                    lambda *_args: contextlib.nullcontext(),
+                ), mock.patch.object(
+                    benchmark_runner.subprocess, "run",
+                    side_effect=AssertionError("usage extraction spawned a wrapper"),
+                ):
+                    self.assertEqual(
+                        benchmark_runner.run_model_direct(
+                            cell, self.target, "codex", "", 60,
+                        ),
+                        0,
+                    )
+
+                extract.assert_called_once_with(
+                    str(cell / "backend.raw.log"),
+                    str(cell / "prompt.txt"),
+                    backend="codex",
+                )
+                row = json.loads(
+                    (cell / "logs" / "index.jsonl").read_text(encoding="utf-8"),
+                )
+                self.assertEqual(row["resolved_effort"], "high")
+                self.assertEqual(row["usage_complete"], name == "measured")
+                if name == "measured":
+                    self.assertEqual(row["tokens"]["input"], 7)
 
     def test_agent_flags_harness_facade_and_cleanup(self) -> None:
         unlimited = llm_invoke.agent_flags("claude", max_turns=0, add_dirs="/tmp")

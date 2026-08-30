@@ -24,6 +24,17 @@ LOADER.exec_module(probe)
 
 
 class ProbeArgumentTests(unittest.TestCase):
+    def test_feature_hint_preserves_a_chunk_boundary_match(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "feature.txt"
+            prefix = "x" * (64 * 1024 - len("feature is "))
+            output.write_text(
+                prefix + "feature is disabled\n", encoding="utf-8",
+            )
+            self.assertEqual(
+                probe.feature_disabled_marker(output), "feature is disabled",
+            )
+
     def test_s8_requires_a_named_property_kind(self) -> None:
         probe.validate_s8_property("S8", "equivalence")
         probe.validate_s8_property("S8-property", "inverse")
@@ -74,7 +85,13 @@ class ProbeArgumentTests(unittest.TestCase):
                 "AssertionError\n",
                 encoding="utf-8",
             )
-            self.assertEqual(instance._classify(1), "PROPERTY")
+            with mock.patch.object(
+                probe,
+                "file_has_property_violation",
+                wraps=probe.file_has_property_violation,
+            ) as property_check:
+                self.assertEqual(instance._classify(1), "PROPERTY")
+            property_check.assert_called_once()
             instance.hypothesis_strategy = "S3"
             self.assertEqual(instance._classify(1), "EXEC_FAIL")
 
@@ -190,27 +207,75 @@ class ProbeArgumentTests(unittest.TestCase):
             self.assertEqual(instance._classify(124), "TIMEOUT")
 
     def test_runner_diagnostic_note_preserves_compact_amplification(self) -> None:
-        instance = object.__new__(probe.Probe)
-        instance.header = {"hypothesis": "H-RESOURCE"}
-        instance.agent = "2"
-        instance.card = "WORK-PARSER"
-        instance.mode = "generic"
-        instance.testcase = Path("testcase.job")
-        instance.output = Path("runner.txt")
-        instance.sanitizer = "runner"
-        instance.environment = {"SANITIZER_RUNS": "1"}
-        instance.elapsed_seconds = 1.0
-        commands = []
-        instance._state_command = lambda *args: commands.append(args)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            instance = object.__new__(probe.Probe)
+            instance.header = {"hypothesis": "H-RESOURCE"}
+            instance.agent = "2"
+            instance.card = "WORK-PARSER"
+            instance.mode = "generic"
+            instance.testcase = root / "testcase.job"
+            instance.testcase.write_bytes(b"input")
+            instance.output = root / "runner.txt"
+            instance.output.write_text("clean\n", encoding="utf-8")
+            instance.sanitizer = "runner"
+            instance.environment = {"SANITIZER_RUNS": "1"}
+            instance.elapsed_seconds = 1.0
+            instance.config = SimpleNamespace(
+                results_dir=str(root / "results"),
+                target_root=str(root / "target"),
+                slug="sampleproj",
+            )
+            (root / "target/.git").mkdir(parents=True)
+            with mock.patch.object(
+                probe.subprocess, "run",
+                side_effect=AssertionError("state recording spawned a process"),
+            ):
+                instance._record_state("CRASH")
 
-        with mock.patch.object(Path, "read_bytes", return_value=b"input"):
-            instance._record_state("CRASH")
+            notes = [
+                json.loads(line)
+                for line in (root / "results/state/notes.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(len(notes), 1)
+            text = notes[0]["text"]
+            self.assertIn("distinct resource-effect hypothesis", text)
+            self.assertIn("target's size ceiling", text)
+            self.assertIn("ordinary OOM remains noise", text)
 
-        note = next(args for args in commands if args[0] == "add-note")
-        text = note[note.index("--text") + 1]
-        self.assertIn("distinct resource-effect hypothesis", text)
-        self.assertIn("target's size ceiling", text)
-        self.assertIn("ordinary OOM remains noise", text)
+    def test_state_run_failure_does_not_suppress_the_crash_note(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            instance = object.__new__(probe.Probe)
+            instance.header = {"hypothesis": "H-STATE"}
+            instance.agent = "3"
+            instance.card = "WORK-STATE"
+            instance.mode = "generic"
+            instance.testcase = root / "testcase.bin"
+            instance.testcase.write_bytes(b"input")
+            instance.output = root / "asan.txt"
+            instance.output.write_text("diagnostic\n", encoding="utf-8")
+            instance.sanitizer = "asan"
+            instance.environment = {"SANITIZER_RUNS": "1"}
+            instance.elapsed_seconds = 0.25
+            instance.config = SimpleNamespace(
+                results_dir=str(root / "results"),
+                target_root=str(root / "target"),
+                slug="sampleproj",
+            )
+
+            with (
+                mock.patch.object(
+                    probe.workqueue, "add_run", side_effect=OSError("disk full")
+                ),
+                mock.patch.object(probe.workqueue, "add_note") as add_note,
+                mock.patch("sys.stderr") as stderr,
+            ):
+                instance._record_state("CRASH")
+
+            add_note.assert_called_once()
+            warning = "".join(call.args[0] for call in stderr.write.call_args_list)
+            self.assertIn("structured state add-run failed: disk full", warning)
 
     def test_runner_unavailable_exception_requires_testcase_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

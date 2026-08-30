@@ -16,7 +16,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 BIN_DIR = ROOT / "bin"
@@ -35,6 +35,7 @@ import stack_frames
 import strategies
 import target_config
 import verdict as verdict_lib
+import workqueue
 from file_tools import capture_command
 from probe_helpers import _nonnegative_int
 from timeout import run_timeout
@@ -281,8 +282,9 @@ def feature_disabled_marker(path: Path) -> str:
         with path.open(encoding="utf-8", errors="replace") as stream:
             while chunk := stream.read(64 * 1024):
                 text = overlap + chunk
-                if match := build_routes.FEATURE_DISABLED_RE.search(text):
-                    return match.group(0)
+                if build_routes.FEATURE_DISABLED_HINT_RE.search(text):
+                    if match := build_routes.FEATURE_DISABLED_RE.search(text):
+                        return match.group(0)
                 overlap = text[-4096:]
     except OSError:
         pass
@@ -1268,6 +1270,10 @@ class Probe:
 
     def _classify(self, returncode: int) -> str:
         if self.output.is_file() and self.output.stat().st_size:
+            property_test = (
+                self.hypothesis_strategy == "S8" and bool(self.header["property"])
+            )
+            property_violation: bool | None = None
             if self.sanitizer == "runner":
                 testcase_failure = verdict_lib.runner_testcase_failure(
                     self.output, self.exec_testcase,
@@ -1277,12 +1283,13 @@ class Probe:
                 # An S8 oracle that prints its marker and then asserts
                 # produced its counterexample; the assertion is how it exits
                 # nonzero, not a testcase defect.
-                if testcase_failure == "assertion" and not (
-                    self.hypothesis_strategy == "S8"
-                    and self.header["property"]
-                    and file_has_property_violation(self.output, returncode)
-                ):
-                    return "EXEC_FAIL"
+                if testcase_failure == "assertion":
+                    if property_test:
+                        property_violation = file_has_property_violation(
+                            self.output, returncode,
+                        )
+                    if not property_violation:
+                        return "EXEC_FAIL"
             if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
                 return "CRASH"
             # A property marker is agent-authored output, while 124 is the
@@ -1292,12 +1299,13 @@ class Probe:
             # evidence even when the wrapper later reaches its deadline.
             if returncode == 124:
                 return "TIMEOUT"
-            if (
-                self.hypothesis_strategy == "S8"
-                and self.header["property"]
-                and file_has_property_violation(self.output, returncode)
-            ):
-                return "PROPERTY"
+            if property_test:
+                if property_violation is None:
+                    property_violation = file_has_property_violation(
+                        self.output, returncode,
+                    )
+                if property_violation:
+                    return "PROPERTY"
             if verdict_lib.file_is_clean(self.output):
                 return "CLEAN"
             # The command ran and returned without completing cleanly. That is
@@ -1384,14 +1392,47 @@ class Probe:
                 Path(temporary_name).unlink(missing_ok=True)
                 raise
 
-    def _state_command(self, *args: str) -> None:
-        state = BIN_DIR / "state"
-        if not os.access(state, os.X_OK):
-            return
-        subprocess.run([
-            str(state), "--results-dir", self.config.results_dir, "--target-path", self.config.target_root,
-            "--target-slug", self.config.slug, *args,
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    def _state_context(self) -> workqueue.Context:
+        context = getattr(self, "_workqueue_context", None)
+        if context is None:
+            # These two writers consume only results_dir. Re-resolving a full
+            # CLI context here can query VCS on every probe even though the
+            # probe config already fixed all paths and the repository kind.
+            context = workqueue.Context(
+                ROOT,
+                Path(self.config.target_root).expanduser().resolve(),
+                self.config.slug,
+                Path(self.config.results_dir).expanduser().resolve(),
+                os.environ.get("TARGET_REPO_TYPE", ""),
+            )
+            self._workqueue_context = context
+        return context
+
+    def _append_state(
+        self,
+        operation: str,
+        writer: Callable[[workqueue.Context, argparse.Namespace], dict],
+        args: argparse.Namespace,
+    ) -> None:
+        try:
+            writer(self._state_context(), args)
+        except (Exception, SystemExit) as exc:
+            # Probe evidence remains useful when the auxiliary ledger is
+            # temporarily unwritable. Keep the target verdict and make the
+            # missing provenance visible instead of losing both.
+            print(
+                f"[probe] WARNING: structured state {operation} failed: {exc}",
+                file=sys.stderr,
+            )
+
+    def _append_state_note(self, hypothesis: str, text: str) -> None:
+        self._append_state("add-note", workqueue.add_note, argparse.Namespace(
+            agent=self.agent,
+            hypothesis_id=hypothesis,
+            card_id=self.card,
+            kind="decision",
+            text=text,
+        ))
 
     def _record_state(self, probe_verdict: str) -> None:
         if os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1":
@@ -1409,7 +1450,9 @@ class Probe:
             if probe_verdict in {"EXEC_FAIL", "NO_EXEC"} else ""
         )
         if probe_verdict == "EXEC_FAIL":
-            kind, hint = verdict_lib.execution_failure_class(self.output)
+            kind, hint = verdict_lib.execution_failure_class(
+                self.output, exit_reason=reason,
+            )
             if kind:
                 print(f"[probe] EXEC_FAIL class={kind}: {hint}")
                 reason = f"{reason} class={kind}".strip()
@@ -1431,32 +1474,34 @@ class Probe:
             )
             reason = f"{reason} class=budget-exhausted".strip()
         coverage, frame = verdict_lib.coverage_outcome(self.output)
-        self._state_command(
-            "add-run", "--agent", self.agent, "--hypothesis-id", hypothesis, "--card-id", self.card,
-            "--mode", self.mode, "--testcase", str(self.testcase),
-            "--testcase-sha1", hashlib.sha1(self.testcase.read_bytes()).hexdigest(),
-            "--asan-output", str(self.output), "--verdict", probe_verdict,
-            "--sanitizer", self.sanitizer,
-            "--sanitizer-runs", self.environment["SANITIZER_RUNS"],
-            *(["--reason", reason] if reason else []),
-            *(["--coverage", coverage] if coverage else []),
-            *(["--closest", frame[:200]] if frame else []),
-            *(
-                ["--duration-seconds", f"{self.elapsed_seconds:.3f}"]
-                if self.elapsed_seconds is not None else []
+        self._append_state("add-run", workqueue.add_run, argparse.Namespace(
+            agent=self.agent,
+            hypothesis_id=hypothesis,
+            card_id=self.card,
+            mode=self.mode,
+            testcase=str(self.testcase),
+            testcase_sha1=hashlib.sha1(self.testcase.read_bytes()).hexdigest(),
+            asan_output=str(self.output),
+            verdict=probe_verdict,
+            sanitizer=self.sanitizer,
+            sanitizer_runs=self.environment["SANITIZER_RUNS"],
+            duration_seconds=(
+                f"{self.elapsed_seconds:.3f}"
+                if self.elapsed_seconds is not None else ""
             ),
-        )
+            reason=reason,
+            coverage=coverage,
+            closest=frame[:200] if frame else "",
+        ))
         if probe_verdict == "CRASH" and self.sanitizer != "runner":
-            self._state_command(
-                "add-note", "--agent", self.agent, "--hypothesis-id", hypothesis,
-                "--card-id", self.card, "--kind", "decision",
-                "--text", "bin/probe observed a sanitizer diagnostic; keep hypothesis/card active until the filed crash report is complete",
+            self._append_state_note(
+                hypothesis,
+                "bin/probe observed a sanitizer diagnostic; keep hypothesis/card active until the filed crash report is complete",
             )
         elif probe_verdict == "CRASH":
-            self._state_command(
-                "add-note", "--agent", self.agent, "--hypothesis-id", hypothesis,
-                "--card-id", self.card, "--kind", "decision",
-                "--text", (
+            self._append_state_note(
+                hypothesis,
+                (
                     "bin/probe observed a runner diagnostic in findings-only mode; "
                     "keep the hypothesis/card active until a FIND report or explicit "
                     "discard closes it. If a compact input encoded a size/count that "
@@ -1501,11 +1546,9 @@ class Probe:
         if status == "FILED":
             print(f"[probe] CRASH FILED: {self.config.results_dir}/crashes/{crash_id} - reproducer + sanitizer.txt copied in; enrich report.md there")
             if self.header["hypothesis"]:
-                self._state_command(
-                    "add-note", "--agent", self.agent,
-                    "--hypothesis-id", self.header["hypothesis"],
-                    "--card-id", self.card, "--kind", "decision",
-                    "--text", f"bin/probe filed {crash_id} at crashes/{crash_id}",
+                self._append_state_note(
+                    self.header["hypothesis"],
+                    f"bin/probe filed {crash_id} at crashes/{crash_id}",
                 )
         else:
             print(f"[probe] CRASH already filed (identical reproducer): {self.config.results_dir}/crashes/{crash_id}")

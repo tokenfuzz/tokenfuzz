@@ -48,6 +48,34 @@ CLEAN_PATTERN = (
 )
 _CRASH_RE = re.compile("|".join(CRASH_PATTERNS))
 _CLEAN_RE = re.compile(CLEAN_PATTERN)
+# Every static crash alternative contains at least one of these exact tokens.
+# Check whole chunks first so ordinary target output does not pay for the much
+# more expensive combined regex on every line. Configured extra patterns bypass
+# this gate because their vocabulary is intentionally unconstrained.
+_CRASH_HINTS = (
+    "AddressSanitizer",
+    "ThreadSanitizer",
+    "MemorySanitizer",
+    "DataflowSanitizer",
+    "UndefinedBehaviorSanitizer",
+    "CRASH DETECTED",
+    "UBSan issue detected",
+    "WARNING: DATA RACE",
+    "panic: runtime error:",
+    "fatal error:",
+    "panicked at",
+    "fatal runtime error:",
+    "Exception in thread",
+    "OutOfMemoryError",
+    "StackOverflowError",
+    "Fatal Python error:",
+    "FATAL ERROR:",
+    "NoMemoryError",
+    "SystemStackError",
+    "PHP Fatal error:",
+    "SEGV on",
+    "==",
+)
 _RUNNER_IMPORT_FAILURE_RE = re.compile(
     r"^(?:ModuleNotFoundError: No module named|ImportError: cannot import name)\b"
 )
@@ -82,8 +110,32 @@ def _file_matches(path: str | Path, pattern: re.Pattern) -> bool:
 
 
 def file_has_crash(path: str | Path, extra_patterns: tuple[str, ...] = ()) -> bool:
-    pattern = re.compile("|".join((*CRASH_PATTERNS, *extra_patterns))) if extra_patterns else _CRASH_RE
-    return _file_matches(path, pattern)
+    if extra_patterns:
+        pattern = re.compile("|".join((*CRASH_PATTERNS, *extra_patterns)))
+        return _file_matches(path, pattern)
+    try:
+        pending = ""
+        with Path(path).open(encoding="utf-8", errors="replace") as stream:
+            while chunk := stream.read(64 * 1024):
+                text = pending + chunk
+                newline = text.rfind("\n")
+                if newline < 0:
+                    pending = text
+                    continue
+                complete = text[:newline + 1]
+                pending = text[newline + 1:]
+                if not any(hint in complete for hint in _CRASH_HINTS):
+                    continue
+                for line in complete.split("\n")[:-1]:
+                    if _CRASH_RE.search(line + "\n"):
+                        return True
+            return bool(
+                pending
+                and any(hint in pending for hint in _CRASH_HINTS)
+                and _CRASH_RE.search(pending)
+            )
+    except OSError:
+        return False
 
 
 def text_has_crash(text: str) -> bool:
@@ -207,6 +259,55 @@ _ABORT_RE = re.compile(
     r"|Trace/BPT trap|[Aa]ssertion .* failed|Assertion failed|panicked at|fatal error:",
 )
 
+# Necessary supersets for the expensive execution-failure expressions. The
+# full regex remains the authority; a false-positive hint only costs a scan.
+_LOADER_HINTS = (
+    "dyld",
+    "Library not loaded",
+    "error while loading shared libraries",
+    "cannot execute binary",
+    "Exec format error",
+    "exec format error",
+    "symbol lookup error",
+    "Symbol not found",
+    "cannot open shared object",
+    "image not found",
+)
+_USAGE_HINTS = ("usage:", "option", "argument", "operand")
+_ABORT_HINTS = (
+    "killed by SIG",
+    "Abort trap",
+    "Segmentation fault",
+    "Bus error",
+    "Illegal instruction",
+    "Trace/BPT trap",
+    "assertion ",
+    "Assertion ",
+    "panicked at",
+    "fatal error:",
+)
+_FORMAT_HINTS = (
+    "parse",
+    "parsing",
+    "syntax",
+    "decode",
+    "decoding",
+    "format",
+    "magic",
+    "checksum",
+    "length",
+    "header",
+    "invalid",
+    "malformed",
+    "corrupt",
+    "corrupted",
+    "unsupported",
+    "unrecognized",
+    "not",
+    "cannot",
+)
+_IGNORECASE_EXTRA_CHARS = "İıſK"
+
 # (class, hint) pairs, most specific first. The hint names the repair the
 # class implies; the class token is what telemetry counts.
 _EXEC_FAIL_CLASSES = {
@@ -227,7 +328,9 @@ _EXEC_FAIL_CLASSES = {
 }
 
 
-def execution_failure_class(path: str | Path) -> tuple[str, str]:
+def execution_failure_class(
+    path: str | Path, *, exit_reason: str | None = None,
+) -> tuple[str, str]:
     """(class, hint) for an EXEC_FAIL, from the saved output and exit code.
 
     Deterministic and text-only: nothing here is a verdict or a model
@@ -239,25 +342,49 @@ def execution_failure_class(path: str | Path) -> tuple[str, str]:
         text = strip_run_header(Path(path).read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return "", ""
-    reason = execution_exit_reason(path)
+    reason = execution_exit_reason(path) if exit_reason is None else exit_reason
     try:
         rc = int(reason.rpartition("=")[2]) if reason else None
     except ValueError:
         rc = None
-    if rc in (126, 127) or _LOADER_RE.search(text):
+    folded: str | None = None
+
+    def has_case_insensitive_hint(hints: tuple[str, ...]) -> bool:
+        nonlocal folded
+        if folded is None:
+            folded = text.casefold()
+        # Python's IGNORECASE gives ASCII ranges four extra Unicode matches.
+        # Some casefold to an ASCII hint; checking all four explicitly covers
+        # the remaining spellings without weakening the full-regex decision.
+        return any(hint in folded for hint in hints) or any(
+            character in text for character in _IGNORECASE_EXTRA_CHARS
+        )
+
+    if rc in (126, 127) or (
+        any(hint in text for hint in _LOADER_HINTS) and _LOADER_RE.search(text)
+    ):
         kind = "loader"
-    elif _USAGE_RE.search(text) and (rc in (2, 64) or rc is None):
+    elif (
+        (rc in (2, 64) or rc is None)
+        and has_case_insensitive_hint(_USAGE_HINTS)
+        and _USAGE_RE.search(text)
+    ):
         kind = "usage"
     elif (
         rc is not None and (-32 < rc < 0 or 128 < rc < 160)
-    ) or _ABORT_RE.search(text):
+    ) or (
+        any(hint in text for hint in _ABORT_HINTS) and _ABORT_RE.search(text)
+    ):
         # A signal death is a negative code from the runner's own wait, or
         # 129..159 through a shell; larger positive codes are a program's own
         # and say nothing about how it died. Decided before the input class:
         # a parser that warns "unsupported chunk" and then faults died on the
         # fault, and the hint must not send the agent back to the seed.
         kind = "aborted"
-    elif FORMAT_REJECT_RE.search(text) or rc in (65, 66):
+    elif rc in (65, 66) or (
+        has_case_insensitive_hint(_FORMAT_HINTS)
+        and FORMAT_REJECT_RE.search(text)
+    ):
         kind = "input-rejected"
     elif rc == 0:
         kind = "unverified-exit"

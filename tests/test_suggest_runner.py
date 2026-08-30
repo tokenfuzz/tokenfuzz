@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -18,9 +20,11 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMAND = ROOT / "bin" / "suggest-runner"
+sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "lib"))
 import llm_decide
 import target_config
+from python_test_helpers import invoke_main
 
 PROBE_LOADER = importlib.machinery.SourceFileLoader(
     "probe_runner_replay", str(ROOT / "bin/probe")
@@ -106,6 +110,7 @@ class SuggestRunnerTests(unittest.TestCase):
     def run_command(
         self, response: dict, *arguments: str, validation: dict | None = None,
         path_prefix: str = "",
+        process_boundary: bool = False,
     ) -> subprocess.CompletedProcess:
         env = os.environ | {
             "SCRIPT_ROOT": str(self.root),
@@ -118,18 +123,37 @@ class SuggestRunnerTests(unittest.TestCase):
         )
         if validation is not None:
             env["LLM_DECIDE_MOCK_RUNNER_VALIDATE"] = json.dumps(validation)
-        return subprocess.run(
-            [sys.executable, str(COMMAND), "sampleproj", *arguments],
-            env=env, capture_output=True, text=True, check=False,
+        if process_boundary:
+            return subprocess.run(
+                [sys.executable, str(COMMAND), "sampleproj", *arguments],
+                env=env, capture_output=True, text=True, check=False,
+            )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            suggest_runner, "ROOT", self.root,
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            returncode = invoke_main(
+                suggest_runner.main, ["sampleproj", *arguments],
+                argv0=str(COMMAND),
+            )
+        return subprocess.CompletedProcess(
+            [str(COMMAND), "sampleproj", *arguments],
+            returncode,
+            stdout.getvalue(),
+            stderr.getvalue(),
         )
 
     def test_applies_bounded_args_without_replacing_sanitizer_binary(self) -> None:
         self.toml.chmod(0o640)
-        result = self.run_command({
-            "binary": "c1",
-            "args": ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"],
-            "reasoning": "help names an input and sink",
-        }, "--apply")
+        result = self.run_command(
+            {
+                "binary": "c1",
+                "args": ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"],
+                "reasoning": "help names an input and sink",
+            },
+            "--apply",
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         config = target_config.Config(target_root=str(self.target))
         target_config.load_toml_into(config, self.toml)
@@ -140,7 +164,10 @@ class SuggestRunnerTests(unittest.TestCase):
         )
         self.assertEqual(config.runner_success_codes, [0])
         self.assertEqual(self.toml.stat().st_mode & 0o777, 0o640)
-        self.assertEqual(self.run_command({}, "--apply").returncode, 4)
+        self.assertEqual(
+            self.run_command({}, "--apply", process_boundary=True).returncode,
+            4,
+        )
 
     def test_calibrates_existing_args_without_reasking_for_an_argv(self) -> None:
         self.toml.write_text(

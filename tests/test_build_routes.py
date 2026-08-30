@@ -84,6 +84,23 @@ for phrase in feature_disabled_phrases:
         build_routes.output_is_feature_disabled(phrase),
         f"sentinel matches: {phrase[:48]!r}",
     )
+    assert_true(
+        build_routes.FEATURE_DISABLED_HINT_RE.search(phrase) is not None,
+        f"sentinel hint admits: {phrase[:48]!r}",
+    )
+
+# Python's IGNORECASE recognizes this dotted-I spelling. The cheap gate must
+# use the same semantics as the authoritative expression rather than a lower()
+# approximation that could strand a valid sibling-build route.
+unicode_feature_disabled = "feature dİsabled"
+assert_true(
+    build_routes.output_is_feature_disabled(unicode_feature_disabled),
+    "sentinel hint retains Unicode IGNORECASE semantics",
+)
+assert_true(
+    build_routes.output_is_feature_disabled("feature is disabled_state"),
+    "sentinel hint admits the authoritative disabled-prefix match",
+)
 
 # Phrases that look superficially similar but are NOT feature-disabled
 # (missing library / missing header / actual crash / unrelated text)

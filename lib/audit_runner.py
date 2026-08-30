@@ -30,6 +30,7 @@ import build_config
 import build_session_seed
 import callgraph
 import cluster_common
+import fuzz_triage
 import housekeeping
 import llm_decide
 import llm_invoke
@@ -793,12 +794,19 @@ def _work_card_signature(
     inputs: list[str] = []
     inputs.extend(str(path) for path in sorted((runtime.results / "coverage").glob("edges-agent-*.journal")))
     inputs.extend(str(path) for path in sorted((runtime.results / "corpus").glob("COVER-*/metadata.md")))
+    if source_signature is None:
+        source_signature = target_config.vcs_source_signature(
+            runtime.target_root, include_untracked=False,
+        )
     # The call-neighbourhood graph keys on inputs this signature does not see
     # — the sanitizer route, the built artifact, the parser version. Without
     # this the gate can return before rank-work runs, so installing trailmark
     # or retargeting a binary never rebuilds the graph. Empty when the
     # analysis is unavailable, which is the common case and changes nothing.
-    callgraph_signature = callgraph.cache_signature(runtime.target_root, runtime.results)
+    callgraph_signature = callgraph.cache_signature(
+        runtime.target_root, runtime.results,
+        source_signature=source_signature,
+    )
     config = getattr(runtime, "config", None)
     rank_config = json.dumps(
         {
@@ -814,10 +822,6 @@ def _work_card_signature(
         },
         sort_keys=True, separators=(",", ":"),
     )
-    if source_signature is None:
-        source_signature = target_config.vcs_source_signature(
-            runtime.target_root, include_untracked=False,
-        )
     return housekeeping.signature(
         "work-cards-refresh", inputs,
         f"{source_signature or runtime.target_rev}\nrank_config={rank_config}"
@@ -1463,8 +1467,10 @@ def _turn_cap() -> int:
     return int(raw)
 
 
-def _tally_transcript(raw_path: Path) -> tuple[int, int]:
-    """(tool calls, parsed events) for one finished session's transcript.
+def _scan_transcript(
+    raw_path: Path, quota_marker: Path | None = None,
+) -> tuple[str, int, int]:
+    """(provider issue, tool calls, parsed events) from one transcript pass.
 
     Two numbers, not one: no tool call means the session did nothing, but no
     parsed event at all means the transcript said nothing about it — and those
@@ -1472,10 +1478,28 @@ def _tally_transcript(raw_path: Path) -> tuple[int, int]:
     agent that could not act.
     """
     tools = events = 0
-    for event in audit_helpers._iter_json_events(str(raw_path)):
+
+    def tally_event(event: dict) -> None:
+        nonlocal tools, events
         events += 1
         tools += audit_helpers._event_tool_counts(event)[1]
-    return tools, events
+
+    try:
+        with raw_path.open(encoding="utf-8", errors="replace") as raw_stream:
+            issue = audit_helpers._provider_issue_from_lines(
+                raw_stream, quota_marker, tally_event,
+            )
+    except OSError:
+        # The watchdog marker is authoritative and the former two-pass path
+        # classified it before opening the transcript. Preserve that verdict
+        # if a partial or concurrently replaced log fails while this fused
+        # pass is also tallying events.
+        issue = (
+            "capacity_limited"
+            if quota_marker is not None and quota_marker.is_file()
+            else "none"
+        )
+    return issue, tools, events
 
 
 def _claude_stream_idle_retry_needed(raw_path: Path) -> bool:
@@ -1598,11 +1622,7 @@ def run_agent(
         extracted = ""
     text_path.write_text(extracted, encoding="utf-8")
     usage = llm_usage.extract_usage(str(raw_path), str(prompt_path), backend=runtime.backend)
-    try:
-        with raw_path.open(encoding="utf-8", errors="replace") as raw_stream:
-            issue = audit_helpers._provider_issue_from_lines(raw_stream, quota_marker)
-    except OSError:
-        issue = "none"
+    issue, tools, events = _scan_transcript(raw_path, quota_marker)
     if (
         issue == "none"
         and runtime.backend == "claude"
@@ -1619,7 +1639,6 @@ def run_agent(
             pass
     usage_complete = llm_usage.usage_is_complete(usage, rc)
     turn_capped = llm_invoke.session_turn_capped(raw_path)
-    tools, events = _tally_transcript(raw_path)
     ended_at = datetime.now(timezone.utc)
     probe_stats = workqueue.probe_span_stats(
         runtime.results, str(agent), launched_at, ended_at,
@@ -2125,12 +2144,10 @@ def maintain_aggregate_indexes(runtime: Runtime) -> bool:
 
 
 def promote_corpus(runtime: Runtime) -> int:
-    helper = runtime.root / "lib" / "quality.py"
     corpus = runtime.results / "corpus"
     promoted = 0
     for agent in range(1, runtime.num_agents + 1):
         hits = runtime.results / f"hits-{agent}.log"
-        scratch = runtime.results / f"scratch-{agent}"
         label = f"corpus-agent-{agent}"
         # Every promotable testcase has a HIT journal row. Using that journal
         # avoids recursively statting a potentially large scratch tree each
@@ -2138,20 +2155,21 @@ def promote_corpus(runtime: Runtime) -> int:
         signature = housekeeping.signature(label, [str(hits)])
         if not hits.is_file() or not housekeeping.should_run(label, signature, 0):
             continue
-        completed = subprocess.run(
-            [sys.executable, str(helper), "promote-corpus", str(hits),
-             str(runtime.results / f"scratch-{agent}"), str(corpus), str(agent)],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
-        )
-        if completed.returncode == 0:
-            match = re.search(r"\bpromoted=([0-9]+)", completed.stdout)
-            promoted += int(match.group(1)) if match else 0
-            housekeeping.mark_clean(label, signature)
+        try:
+            tally = quality.promote_corpus(str(hits), str(corpus), str(agent))
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 - fail open
+            index_log(runtime, f"WARN: corpus promotion failed for agent {agent}: {exc}")
+            continue
+        promoted += tally["promoted"]
+        housekeeping.mark_clean(label, signature)
     if promoted:
-        subprocess.run(
-            [sys.executable, str(helper), "regenerate-corpus-index", str(corpus)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
+        try:
+            index_ok = quality.regenerate_corpus_index(str(corpus))
+        except (Exception, SystemExit) as exc:  # noqa: BLE001 - fail open
+            index_log(runtime, f"WARN: corpus index regeneration failed: {exc}")
+        else:
+            if not index_ok:
+                index_log(runtime, "WARN: corpus index regeneration failed")
     return promoted
 
 
@@ -3067,6 +3085,35 @@ def run_agent_pool(
     return results
 
 
+def refresh_fuzz_leads(runtime: Runtime) -> bool:
+    """Refresh the bounded fuzz-lead index without starting another Python."""
+    returncode = 1
+    failure: BaseException | None = None
+    with runtime.index.open("a", encoding="utf-8") as output:
+        try:
+            returncode, message = fuzz_triage.update_fuzz_leads(
+                str(runtime.results), fuzz_triage.DEFAULT_MAX_LEADS,
+            )
+        except (Exception, SystemExit) as exc:
+            # The former child process isolated this auxiliary summary from
+            # the audit loop. Retain that boundary while leaving interrupts
+            # and other process-control exceptions alone.
+            failure = exc
+            message = (
+                f"[{fuzz_triage.TOOL}] failed to refresh fuzz leads: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if message:
+            print(message, file=output)
+    if failure is not None:
+        index_log(runtime, "WARN: triage-fuzz-crashes failed rc=1")
+        return False
+    if returncode:
+        index_log(runtime, f"WARN: triage-fuzz-crashes failed rc={returncode}")
+        return False
+    return True
+
+
 def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     runtime = state.runtime
     context = state.context
@@ -3074,15 +3121,7 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     if _productive_wall_exhausted(state):
         return "budget", []
     state.iteration += 1
-    fuzz_triage = runtime.root / "bin" / "triage-fuzz-crashes"
-    if os.access(fuzz_triage, os.X_OK):
-        with runtime.index.open("a", encoding="utf-8") as output:
-            completed = subprocess.run(
-                [str(fuzz_triage), str(runtime.results), "20"],
-                stdout=output, stderr=subprocess.STDOUT, check=False,
-            )
-        if completed.returncode:
-            index_log(runtime, f"WARN: triage-fuzz-crashes failed rc={completed.returncode}")
+    refresh_fuzz_leads(runtime)
     reset_sanitizer_run_counters(runtime)
     reset_llm_decision_counters(runtime)
     before = progress(runtime)

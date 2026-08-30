@@ -17,10 +17,12 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "lib"))
 
 import benchmark
 import benchmark_runner
+from python_test_helpers import invoke_main
 
 
 class BenchmarkCliTests(unittest.TestCase):
@@ -46,6 +48,28 @@ class BenchmarkCliTests(unittest.TestCase):
             check=False,
         )
 
+    def run_main(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        environment["LLM_DECIDE_DISABLE"] = "1"
+        output = io.StringIO()
+        previous_cwd = Path.cwd()
+        try:
+            os.chdir(ROOT)
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    redirect_stdout(output), redirect_stderr(output):
+                returncode = invoke_main(
+                    benchmark_runner.main, arguments,
+                    argv0=str(ROOT / "bin" / "benchmark"),
+                )
+        finally:
+            os.chdir(previous_cwd)
+        return subprocess.CompletedProcess(
+            [str(ROOT / "bin" / "benchmark"), *arguments],
+            returncode,
+            output.getvalue(),
+            "",
+        )
+
     def test_public_cli_rejects_invalid_arguments(self) -> None:
         cases = (
             (("--dry-run",), "--target is required"),
@@ -63,7 +87,9 @@ class BenchmarkCliTests(unittest.TestCase):
         )
         for arguments, expected in cases:
             with self.subTest(arguments=arguments):
-                result = self.run_cli(*arguments, "--bench-root", str(self.bench_root))
+                result = self.run_main(
+                    *arguments, "--bench-root", str(self.bench_root),
+                )
                 self.assertNotEqual(result.returncode, 0, result.stdout)
                 self.assertIn(expected, result.stdout)
 

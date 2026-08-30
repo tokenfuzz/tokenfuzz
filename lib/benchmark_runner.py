@@ -1220,16 +1220,11 @@ def run_model_direct(
             else:
                 os.environ["LOGDIR"] = previous_logdir
             _reap_cell_processes(reap_marker, cell_dir)
-    usage = subprocess.run(
-        [
-            sys.executable, str(SCRIPT_ROOT / "lib" / "llm_usage.py"),
-            "extract-usage", backend, str(raw), str(cell_dir / "prompt.txt"),
-        ],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
-    )
     try:
-        usage_event = json.loads(usage.stdout or "{}")
-    except ValueError:
+        usage_event = llm_usage.extract_usage(
+            str(raw), str(cell_dir / "prompt.txt"), backend=backend,
+        )
+    except (Exception, SystemExit):  # noqa: BLE001 - usage accounting is fail-open
         usage_event = {}
     usage_event["resolved_effort"] = llm_invoke.default_effort(backend)
     usage_event["usage_complete"] = llm_usage.usage_is_complete(usage_event, rc)
@@ -2199,7 +2194,13 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             prior_cluster_validations,
         )
     metrics.split_pool(bench_dir, stage_name)
-    if not triage.maintain_indexes(pool, target):
+    # Successful JSON-producing calls above already updated both accepted
+    # cluster reports. Index maintenance still renders and rebinds their
+    # receipts without repeating that work; a failed pass retains the old
+    # second attempt instead of turning an optimization into lost recovery.
+    if not triage.maintain_indexes(
+        pool, target, refresh_clusters=not clustering_succeeded,
+    ):
         log("WARN: combined pool index maintenance failed")
     _finalize_condition_pools(
         pool, target, backend, model, target_slug, bench_dir / "llm-decisions.log"

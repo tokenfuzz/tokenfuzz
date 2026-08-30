@@ -8,6 +8,7 @@ each subcommand (and the importable API used by lib/llm_decide.py).
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -41,6 +42,11 @@ for key in (
 ):
     os.environ.pop(key, None)
 
+sys.path.insert(0, str(ROOT / "tests"))
+sys.path.insert(0, str(ROOT / "lib"))
+import llm_invoke as inv  # noqa: E402
+from python_test_helpers import invoke_main  # noqa: E402
+
 PASSED = 0
 FAILED = 0
 
@@ -61,12 +67,25 @@ def assert_eq(expected, actual, name):
     ok(expected == actual, name, f"expected={expected!r} actual={actual!r}")
 
 
-def run(args, env=None, check=False):
+def run(args, env=None, check=False, process_boundary=False):
     child_env = env if env is not None else os.environ.copy()
-    proc = subprocess.run(
-        [sys.executable, str(HELPER), *args],
-        capture_output=True, text=True,
-        env=child_env,
+    if process_boundary:
+        proc = subprocess.run(
+            [sys.executable, str(HELPER), *args],
+            capture_output=True, text=True, env=child_env,
+        )
+        if check and proc.returncode != 0:
+            raise AssertionError(
+                f"helper failed rc={proc.returncode}: {proc.stderr}",
+            )
+        return proc
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with mock.patch.dict(os.environ, child_env, clear=True):
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            returncode = invoke_main(inv.main, args, argv0=str(HELPER))
+    proc = subprocess.CompletedProcess(
+        [str(HELPER), *args], returncode, stdout.getvalue(), stderr.getvalue(),
     )
     if check and proc.returncode != 0:
         raise AssertionError(f"helper failed rc={proc.returncode}: {proc.stderr}")
@@ -80,8 +99,16 @@ def flags(proc):
 # ── known-backend ───────────────────────────────────────────────────
 print("known-backend")
 for b in ("claude", "codex", "oss", "gemini", "grok"):
-    assert_eq(0, run(["known-backend", b]).returncode, f"{b} → rc=0")
-assert_eq(1, run(["known-backend", "openai"]).returncode, "openai → rc=1")
+    assert_eq(
+        0,
+        run(["known-backend", b]).returncode,
+        f"{b} → rc=0",
+    )
+assert_eq(
+    1,
+    run(["known-backend", "openai"], process_boundary=True).returncode,
+    "openai → rc=1",
+)
 assert_eq(1, run(["known-backend", ""]).returncode, "empty → rc=1")
 
 
@@ -521,8 +548,6 @@ with tempfile.TemporaryDirectory() as td:
 
 # ── Importable API used by lib/llm_decide.py ────────────────────────
 print("\nimportable API")
-sys.path.insert(0, str(ROOT / "lib"))
-import llm_invoke as inv  # noqa: E402
 
 with mock.patch.dict(os.environ, {}, clear=True):
     ok("native OS sandbox" in inv.agent_security_problem("oss", "sandboxed"),
