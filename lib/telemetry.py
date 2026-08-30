@@ -341,7 +341,8 @@ def lane_stats(results_dir: Path) -> dict[str, dict[str, int]]:
 
 
 def execution_verdicts(results_dir: Path) -> dict:
-    """Probe verdict counts. EXEC_FAIL is the target rejecting the input — a
+    """Probe verdict counts. EXEC_FAIL is a command that returned without
+    completing cleanly — rejected input, loader, usage, or runner failure — a
     launch that cost a sanitizer run and taught nothing."""
     counts: dict[str, int] = {}
     for row in _rows(Path(results_dir) / "state" / "runs.jsonl"):

@@ -1872,7 +1872,6 @@ def _log_phase_spans(
     if not records:
         return
     # Every phase here ran while the pool was empty, so it blocked discovery.
-    # A phase that later overlaps a cohort writes blocked=False for its share.
     rows = [
         {"type": "housekeeping_phase", "iteration": iteration, "blocked": True,
          "recorded": datetime.now(timezone.utc).isoformat(), **record}
@@ -2215,12 +2214,14 @@ def enforce_orphan_testcases(runtime: Runtime, *, deadline: float | None = None)
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             output = Path(testcase).with_suffix(".asan.txt")
+            # Probe's order: a partial SUCCESS_RATE still matches the clean
+            # pattern, so the timeout has to be read before it.
             if output.is_file() and verdict.file_has_crash(output):
                 label = "CRASH"
-            elif output.is_file() and verdict.file_is_clean(output):
-                label = "CLEAN"
             elif completed.returncode == 124:
                 label = "TIMEOUT"
+            elif output.is_file() and verdict.file_is_clean(output):
+                label = "CLEAN"
             elif output.is_file() and verdict.file_execution_attempted(output):
                 label = "EXEC_FAIL"
             else:
