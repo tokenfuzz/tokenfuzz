@@ -1268,6 +1268,29 @@ class BuildSelectionTests(unittest.TestCase):
         self.assertTrue(chosen["binary"].endswith("current"))
 
 
+class CrashingSeedTests(unittest.TestCase):
+    """A seed that reproduces a bug is evidence, not a broken harness."""
+
+    def test_a_seed_that_is_the_artifact_leaves_the_corpus(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            results = Path(raw) / "results"
+            results.mkdir()
+            config = config_for(Path(raw) / "src", ["bytes"])
+            config.results_dir = str(results)
+            campaign = fuzz_campaign.Campaign(config, log=lambda _: None)
+            state = campaign.add("h", "/nonexistent")
+            corpus = fuzz_harness.corpus_dir(results, "h")
+            corpus.mkdir(parents=True)
+            (corpus / "seed-crashing").write_bytes(b"boom")
+            (corpus / "seed-fine").write_bytes(b"fine")
+            artifact = Path(raw) / "crash-abc"
+            artifact.write_bytes(b"boom")
+            self.assertEqual(campaign._drop_crashing_seeds(state, [str(artifact)]), 1)
+            self.assertFalse((corpus / "seed-crashing").exists())
+            self.assertTrue((corpus / "seed-fine").exists())
+            self.assertEqual(campaign._drop_crashing_seeds(state, [str(artifact)]), 0)
+
+
 class CoverageLibraryTests(unittest.TestCase):
     """The campaign links the library its artifacts will be replayed against."""
 

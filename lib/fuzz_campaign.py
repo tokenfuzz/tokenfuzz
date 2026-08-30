@@ -761,6 +761,41 @@ class Campaign:
                      f"target's test data into an empty corpus")
         return copied
 
+    def _drop_crashing_seeds(self, state: HarnessState,
+                             artifacts: "list[str]") -> int:
+        """Remove corpus inputs whose bytes are one of these artifacts.
+
+        A seed copied from the target's test data that already reproduces a
+        bug crashes libFuzzer during its initial corpus pass, before INITED,
+        which reads as a startup crash -- and left in the corpus it does so on
+        every later slice, quarantining a working harness as broken while its
+        artifact goes to replay. The artifact is the evidence; the seed is not
+        needed to keep it.
+        """
+        digests: set[str] = set()
+        for raw in artifacts:
+            try:
+                digests.add(hashlib.sha1(Path(raw).read_bytes()).hexdigest())
+            except OSError:
+                continue
+        corpus = fuzz_harness.corpus_dir(self.results, state.name)
+        dropped = 0
+        try:
+            seeds = [path for path in corpus.iterdir() if path.is_file()]
+        except OSError:
+            return 0
+        for seed in seeds:
+            try:
+                if hashlib.sha1(seed.read_bytes()).hexdigest() in digests:
+                    seed.unlink()
+                    dropped += 1
+            except OSError:
+                continue
+        if dropped:
+            self.log(f"[fuzz] {state.name}: removed {dropped} seed(s) that "
+                     f"reproduce a crash from the corpus")
+        return dropped
+
     def corpus_size(self, name: str) -> int:
         directory = fuzz_harness.corpus_dir(self.results, name)
         try:
@@ -1070,6 +1105,13 @@ class Campaign:
             fresh = fresh_artifacts(result, state)
             verdict, detail = classify(
                 result, state, new_edges, fresh, new_features)
+            if verdict == VERDICT_STARTUP_CRASH and self._drop_crashing_seeds(
+                state, fresh,
+            ):
+                verdict, detail = VERDICT_PRODUCTIVE, (
+                    "a seeded corpus input already reproduces a crash; the "
+                    "seed was removed so the next slice runs past it, and the "
+                    "artifact is replayed like any other")
             self._record(state, result, verdict, detail,
                          new_edges, fresh, new_features)
             summary["slices"] += 1
