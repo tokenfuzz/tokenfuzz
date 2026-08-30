@@ -154,8 +154,13 @@ def _reasons(config, output: str) -> list[str]:
 
 
 def _under(root: Path, candidate: str) -> bool:
+    # A search path that does not exist proves nothing: the runtime skips it
+    # and resolves the installed copy, which is the failure this checks for.
+    path = Path(candidate)
+    if not path.is_dir():
+        return False
     try:
-        Path(candidate).resolve().relative_to(root)
+        path.resolve().relative_to(root)
     except (OSError, ValueError):
         return False
     return True

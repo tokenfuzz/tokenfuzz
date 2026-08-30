@@ -273,6 +273,17 @@ class MultiLanguageSupportTests(unittest.TestCase):
             f"{runner_canary.MARKER} cwd={self.target}\n",
         )
         self.assertIn("the harness did not report an EXECUTION_RATE", missing_rate)
+        # A seeded import path under the root that does not exist is skipped by
+        # the runtime, so it cannot stand as proof the audited tree is searched.
+        phantom = runner_canary._reasons(
+            self.canary_config(reaching),
+            f"{runner_canary.MARKER} cwd={self.target}\n"
+            f"{runner_canary.MARKER} path={self.target}/no-such-lib\n"
+            "EXECUTION_RATE: 1/1\n",
+        )
+        self.assertTrue(
+            any("runtime search paths" in reason for reason in phantom), phantom,
+        )
         failed_probe = subprocess.CompletedProcess(
             [], 7,
             f"{runner_canary.MARKER} cwd={self.target}\nEXECUTION_RATE: 1/1\n",
