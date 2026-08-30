@@ -868,6 +868,75 @@ class SeverityTests(unittest.TestCase):
         target_named_free = harness_only + "    #2 0x3 in free_node src/tree.c:91\n"
         self.assertFalse(severity._crash_is_harness_rooted(target_named_free))
 
+    def test_absolute_active_scratch_leaf_is_agent_authored_and_fails_open(self) -> None:
+        target = self.root / "target"
+        results = self.root / "output" / "sample" / "codex" / "results"
+        target.mkdir()
+        results.mkdir(parents=True)
+        driver = results / "scratch-2" / "nested" / "driver.rs"
+        other_driver = self.root / "other" / "scratch-2" / "driver.rs"
+        target_main = target / "src" / "tool.c"
+        headline = "==1==ERROR: AddressSanitizer: heap-use-after-free\n"
+
+        agent_only = headline + f"    #0 0x1 in main {driver}:49\n"
+        self.assertTrue(severity._crash_is_harness_rooted(
+            agent_only, target_root=str(target), results_root=str(results),
+        ))
+        self.assertFalse(severity._crash_is_harness_rooted(
+            agent_only, target_root="", results_root=str(results),
+        ))
+
+        # A target frame anywhere in allocation/free/origin context preserves
+        # the crash: the caller can be where a target lifetime bug surfaces.
+        target_context = agent_only + f"    #1 0x2 in app_free {target_main}:91\n"
+        self.assertFalse(severity._crash_is_harness_rooted(
+            target_context, target_root=str(target), results_root=str(results),
+        ))
+        # Missing ownership proof always falls open.
+        for report in (
+            headline + "    #0 0x1 in main driver.rs:49\n",
+            headline + f"    #0 0x1 in main {other_driver}:49\n",
+            headline + f"    #0 0x1 in main {target_main}:49\n",
+        ):
+            with self.subTest(report=report):
+                self.assertFalse(severity._crash_is_harness_rooted(
+                    report, target_root=str(target), results_root=str(results),
+                ))
+
+    def test_harness_rooted_cli_derives_only_the_owning_results_scratch(self) -> None:
+        target = self.root / "target"
+        results = self.root / "output" / "sample" / "codex" / "results"
+        crash = results / "crashes" / "CRASH-AGENT-LEAF"
+        target.mkdir()
+        crash.mkdir(parents=True)
+        (results / ".session-env").write_text(
+            f"TARGET_ROOT={target}\n", encoding="utf-8",
+        )
+        (crash / "report.md").write_text("# Driver crash\n", encoding="utf-8")
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            f"    #0 0x1 in main {results / 'scratch-1' / 'poc.c'}:12\n",
+            encoding="utf-8",
+        )
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            returncode = severity.main([
+                "--report", str(crash), "--harness-rooted-check",
+            ])
+
+        self.assertEqual(returncode, 0)
+        self.assertEqual(output.getvalue().strip(), "1")
+
+        # An artifact-local marker is agent-writable and cannot mint an owning
+        # results root; only the fixed results/crashes/CRASH-* layout may.
+        loose = self.root / "loose" / "crashes" / "CRASH-SPOOF"
+        loose.mkdir(parents=True)
+        (loose / ".session-env").write_text(
+            f"TARGET_ROOT={target}\n", encoding="utf-8",
+        )
+        self.assertEqual(severity._results_root_for_report(loose), "")
+
     def test_unenriched_and_validated_findings_fail_closed(self) -> None:
         skeleton = self.make_report(
             "heap-use-after-free\nWRITE of size 8\n_TODO (agent): describe the defect.",

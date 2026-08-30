@@ -532,8 +532,12 @@ class WorkQueueTests(unittest.TestCase):
         self.assertNotIn("closest", plain)
         listing = workqueue.recent_runs(self.ctx, limit=5, agent="1")
         header, *rows = listing.strip().splitlines()
-        self.assertTrue(header.endswith("|coverage|closest"))
-        self.assertTrue(any(line.endswith("|MISSED|app_parse") for line in rows), listing)
+        self.assertTrue(
+            header.endswith("|coverage|closest|execution_failure_class"),
+        )
+        self.assertTrue(
+            any(line.endswith("|MISSED|app_parse|") for line in rows), listing,
+        )
 
     def test_probe_span_stats_decompose_a_session_from_state(self) -> None:
         from datetime import datetime, timedelta, timezone
@@ -2006,6 +2010,213 @@ class WorkQueueTests(unittest.TestCase):
             )[0],
         )
 
+    def test_exec_failure_class_is_structured_with_legacy_reason_fallback(self) -> None:
+        row = self.add_run(
+            verdict="EXEC_FAIL",
+            reason="child-rc=65 class=input-rejected",
+        )
+
+        self.assertEqual(row["execution_failure_class"], "input-rejected")
+        self.assertEqual(
+            workqueue._run_execution_failure_class({
+                "verdict": "EXEC_FAIL",
+                "reason": "child-rc=127 class=loader",
+            }),
+            "loader",
+        )
+        self.assertEqual(
+            workqueue._run_execution_failure_class({
+                "verdict": "EXEC_FAIL",
+                "reason": "child-rc=1 class=made-up",
+            }),
+            "",
+        )
+
+    def test_repeated_input_rejection_is_card_wide_advice_only(self) -> None:
+        self.write_cards([
+            self.card("PARSER-CARD", "src/parser.c", strategy="S7"),
+            self.card("LIFECYCLE-CARD", "src/session.c", strategy="S5"),
+        ])
+        self.add_hypothesis(card_id="PARSER-CARD")
+        for index in range(5):
+            self.add_run(
+                index=index,
+                card_id="PARSER-CARD",
+                agent=str(1 + index % 2),
+                hypothesis_id=f"H-{1 + index % 2}",
+                verdict="EXEC_FAIL",
+                reason="child-rc=65 class=input-rejected",
+            )
+        claims_before = workqueue.read_jsonl(
+            self.results / "state" / "claims.jsonl",
+        )
+
+        feedback = workqueue.runtime_feedback(
+            self.ctx, card_id="PARSER-CARD", limit=5,
+        )
+
+        self.assertIn("execution-input-rejected=5", feedback)
+        self.assertIn("seed-format", feedback)
+        self.assertIn("5 consecutive", feedback)
+        self.assertIn("bin/find-seed src/parser.c", feedback)
+        # Advice never closes, demotes, or re-ranks the card.
+        self.assertNotIn("blocked", feedback)
+        self.assertNotIn("discard", feedback)
+        claims = workqueue.read_jsonl(self.results / "state" / "claims.jsonl")
+        self.assertEqual(claims, claims_before)
+
+        for index in range(5, 10):
+            self.add_run(
+                index=index,
+                card_id="LIFECYCLE-CARD",
+                agent=str(1 + index % 2),
+                hypothesis_id=f"H-LIFE-{index}",
+                verdict="EXEC_FAIL",
+                reason="child-rc=65 class=input-rejected",
+            )
+        lifecycle = workqueue.runtime_feedback(
+            self.ctx, card_id="LIFECYCLE-CARD", limit=5,
+        )
+        self.assertIn("repair the API setup or call sequence", lifecycle)
+        self.assertNotIn("bin/find-seed src/session.c", lifecycle)
+
+    def test_failure_streak_resets_and_artifact_priority_wins(self) -> None:
+        rows = [
+            {
+                "verdict": "EXEC_FAIL",
+                "execution_failure_class": "input-rejected",
+                "created_at": "2026-08-30T00:00:03Z",
+            },
+            {
+                "verdict": "CLEAN",
+                "created_at": "2026-08-30T00:00:02Z",
+            },
+            {
+                "verdict": "EXEC_FAIL",
+                "execution_failure_class": "input-rejected",
+                "created_at": "2026-08-30T00:00:01Z",
+            },
+        ]
+        self.assertEqual(
+            workqueue._consecutive_execution_failure_class(rows),
+            ("input-rejected", 1),
+        )
+        diagnosis, feedback = workqueue._runtime_feedback_decision(
+            {"EXEC_FAIL": 5, "FIND": 1}, 6,
+            {"filed-artifact": 1, "execution-input-rejected": 5},
+            failure_streak=("input-rejected", 5),
+            seed_hint="bin/find-seed src/parser.c",
+        )
+        self.assertEqual(diagnosis, "artifact-recorded")
+        self.assertNotIn("find-seed", feedback)
+        loader_diagnosis, loader_feedback = workqueue._runtime_feedback_decision(
+            {"EXEC_FAIL": 5}, 5, {"execution-loader": 5},
+            failure_streak=("loader", 5),
+            seed_hint="bin/find-seed src/parser.c",
+        )
+        self.assertEqual(loader_diagnosis, "execution-loader-streak")
+        self.assertIn("dynamic loader", loader_feedback)
+        self.assertNotIn("find-seed", loader_feedback)
+
+    def test_active_resume_uses_card_wide_failure_memory(self) -> None:
+        self.write_cards([
+            self.card("PARSER-CARD", "src/parser.c", strategy="S7"),
+        ])
+        self.add_hypothesis(card_id="PARSER-CARD")
+        for index in range(5):
+            self.add_run(
+                index=index,
+                card_id="PARSER-CARD",
+                agent="2",
+                hypothesis_id="H-OTHER",
+                verdict="EXEC_FAIL",
+                reason="child-rc=65 class=input-rejected",
+            )
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S7",
+        )
+
+        # The active hypothesis has no runs of its own. Only the streak reaches
+        # across hypotheses and workers; every ordinary signal stays empty.
+        self.assertIn("hypothesis `H-1`|none|none|seed-format", rendered)
+        self.assertIn("5 consecutive", rendered)
+
+    def test_card_failure_memory_does_not_rescope_other_feedback(self) -> None:
+        self.write_cards([
+            self.card("PARSER-CARD", "src/parser.c", strategy="S7"),
+        ])
+        self.add_hypothesis(card_id="PARSER-CARD")
+        for index in range(2):
+            self.add_run(
+                index=index,
+                card_id="PARSER-CARD",
+                hypothesis_id="H-1",
+                verdict="CLEAN",
+            )
+        for index in range(2, 7):
+            self.add_run(
+                index=index,
+                card_id="PARSER-CARD",
+                agent="2",
+                hypothesis_id="H-SIBLING",
+                verdict="NO_HIT",
+            )
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S7",
+        )
+
+        self.assertIn("hypothesis `H-1`|CLEAN=2", rendered)
+        self.assertIn("clean-no-diagnostic", rendered)
+        self.assertNotIn("coverage-routing", rendered)
+
+    def test_active_resume_routes_failure_feedback_by_hypothesis_strategy(
+        self,
+    ) -> None:
+        card = self.card("LIFECYCLE-CARD", "src/session.c", strategy="S7")
+        card["allowed_strategies"] = ["S5"]
+        self.write_cards([card])
+        self.add_hypothesis(card_id="LIFECYCLE-CARD", strategy="S5")
+        for index in range(5):
+            self.add_run(
+                index=index,
+                card_id="LIFECYCLE-CARD",
+                verdict="EXEC_FAIL",
+                reason="child-rc=65 class=input-rejected",
+            )
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S5",
+        )
+
+        self.assertIn("- Strategy: `S5`", rendered)
+        self.assertIn("repair the API setup or call sequence", rendered)
+        self.assertNotIn("bin/find-seed src/session.c", rendered)
+
+    def test_carried_s7_assignment_routes_failure_feedback_by_returned_strategy(
+        self,
+    ) -> None:
+        card = self.card("PARSER-CARD", "src/parser.c", strategy="S2")
+        card["allowed_strategies"] = ["S7"]
+        self.write_cards([card])
+        for index in range(5):
+            self.add_run(
+                index=index,
+                card_id="PARSER-CARD",
+                hypothesis_id=f"H-OLD-{index}",
+                verdict="EXEC_FAIL",
+                reason="child-rc=65 class=input-rejected",
+            )
+
+        rendered = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S7",
+        )
+
+        self.assertIn("- Strategy: `S7`", rendered)
+        self.assertIn("- Card primary strategy: `S2`", rendered)
+        self.assertIn("`bin/find-seed src/parser.c`", rendered)
+
     def test_s7_resume_checks_the_configured_input_route_before_a_hypothesis(self) -> None:
         self.write_cards([
             self.card("S7-PARSER-1", "src/parser.c", strategy="S7"),
@@ -2525,6 +2736,10 @@ class WorkQueueTests(unittest.TestCase):
         crashes = self.run_command(base + ["recent-runs", "--verdict", "^CRASH$"])
         self.assertIn("|CRASH|", crashes.stdout)
         self.assertNotIn("|CLEAN|", crashes.stdout)
+        help_result = self.run_command(base + ["--help"])
+        self.assertIn(
+            "execution_failure_class", "".join(help_result.stdout.split()),
+        )
         bad = self.run_command(base + ["recent-runs", "--verdict", "[bad"])
         bad_output = bad.stdout + bad.stderr
         self.assertIn("invalid --verdict regex", bad_output)

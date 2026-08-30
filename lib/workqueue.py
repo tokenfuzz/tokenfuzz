@@ -295,6 +295,15 @@ RUNTIME_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # signal the advice below sends the agent to repair one that works.
     ("budget-exhausted", verdict.BUDGET_EXHAUSTED_RE),
 )
+_EXECUTION_FAILURE_CLASSES = frozenset({
+    "loader", "usage", "input-rejected", "aborted",
+    "unverified-exit", "exit",
+})
+_EXECUTION_FAILURE_CLASS_RE = re.compile(
+    r"(?:^|\s)class=(loader|usage|input-rejected|aborted|unverified-exit|exit)"
+    r"(?=\s|$)",
+)
+_EXECUTION_FAILURE_STREAK_MIN = 5
 # Coverage near-miss: the probe's coverage gate prints the closest reached frame
 # when a testcase ran near, but not at, the suspicious point.
 NEAR_MISS_RE = re.compile(
@@ -5313,6 +5322,9 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
     reason = str(getattr(args, "reason", "") or "").strip()
     if reason:
         row["reason"] = reason
+    failure_class = _run_execution_failure_class(row)
+    if failure_class:
+        row["execution_failure_class"] = failure_class
     # The coverage gate's answer travels with the run: a MISSED with its
     # closest frame is the agent's next input, and a resumed session reads
     # it here rather than reopening the output file.
@@ -6271,9 +6283,17 @@ def state_resume(
     if active:
         hyp_id = active[0].get("id", "")
         card_id = active[0].get("card_id", "")
+        feedback_strategy = (
+            str(active[0].get("strategy", "")).strip().upper()
+            or strategy.strip().upper()
+        )
     else:
         hyp_id = ""
         card_id = card.get("id", "") if card else ""
+        feedback_strategy = (
+            str((card or {}).get("strategy", "")).strip().upper()
+            or strategy.strip().upper()
+        )
 
     # Resume payload sizing: each Recent-* digest is bytes the agent re-reads
     # at every iteration. limit=5 keeps the agent's working memory wide
@@ -6320,8 +6340,11 @@ def state_resume(
             "",
             "## Runtime Feedback",
             runtime_feedback(
-                ctx, limit=resume_limit, agent=history_agent, hypothesis_id=hyp_id,
+                ctx, limit=resume_limit, agent=history_agent,
+                hypothesis_id=hyp_id,
                 card_id=card_id, rows=runs, hypotheses=hyps,
+                route_strategy=feedback_strategy,
+                failure_rows=runs,
             ).strip(),
         ]
     )
@@ -6421,7 +6444,7 @@ def recent_runs(
 ) -> str:
     """Slim digest of runs.jsonl.
 
-    Returns id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest. Replaces
+    Returns id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest|execution_failure_class. Replaces
     `tail -80 runs.jsonl`, which dumps ~30 KB of full JSON when triaging
     typically only needs the verdict and which testcase produced it.
     """
@@ -6441,11 +6464,22 @@ def recent_runs(
     if card_id:
         rows = [r for r in rows if r.get("card_id", "") == card_id]
 
-    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    # JSONL order breaks timestamp ties: probe timestamps have one-second
+    # resolution, so the later append is the newer run in the digest.
+    rows = [
+        row for _index, row in sorted(
+            enumerate(rows),
+            key=lambda item: (item[1].get("created_at") or "", item[0]),
+            reverse=True,
+        )
+    ]
     if limit > 0:
         rows = rows[:limit]
 
-    out = ["id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest"]
+    out = [
+        "id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest|"
+        "execution_failure_class"
+    ]
     for r in rows:
         tc = (r.get("testcase") or "").replace("|", "/").replace("\n", " ")
         closest = (r.get("closest") or "").replace("|", "/").replace("\n", " ")
@@ -6454,7 +6488,7 @@ def recent_runs(
         out.append(
             f"{r.get('id','')}|{r.get('verdict','')}|{r.get('mode','')}|"
             f"{r.get('agent','')}|{r.get('hypothesis_id','')}|{r.get('card_id','')}|{tc}|"
-            f"{r.get('coverage','')}|{closest}"
+            f"{r.get('coverage','')}|{closest}|{_run_execution_failure_class(r)}"
         )
     return "\n".join(out) + "\n"
 
@@ -6467,6 +6501,8 @@ def runtime_feedback(
     card_id: str = "",
     rows: list[dict] | None = None,
     hypotheses: list[dict] | None = None,
+    route_strategy: str = "",
+    failure_rows: list[dict] | None = None,
 ) -> str:
     """Summarize recent probe outcomes into report-only next-action hints."""
     rows = list(rows) if rows is not None else read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl")
@@ -6481,7 +6517,42 @@ def runtime_feedback(
     else:
         scope = "agent recent runs"
 
-    rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+    # Only the same-class failure streak is card memory. Verdicts, artifacts,
+    # near misses, and every other diagnosis stay on the active hypothesis so
+    # a sibling worker cannot displace the evidence this worker must act on.
+    streak_rows = list(failure_rows) if failure_rows is not None else list(rows)
+    if failure_rows is not None:
+        if card_id:
+            streak_rows = [
+                row for row in streak_rows
+                if row.get("card_id", "") == card_id
+            ]
+        else:
+            if agent:
+                streak_rows = [
+                    row for row in streak_rows if row.get("agent", "") == agent
+                ]
+            if hypothesis_id:
+                streak_rows = [
+                    row for row in streak_rows
+                    if row.get("hypothesis_id", "") == hypothesis_id
+                ]
+    streak_rows = [
+        row for _index, row in sorted(
+            enumerate(streak_rows),
+            key=lambda item: (item[1].get("created_at") or "", item[0]),
+            reverse=True,
+        )
+    ]
+    # A streak is ordered by append when second-resolution timestamps tie.
+    rows = [
+        row for _index, row in sorted(
+            enumerate(rows),
+            key=lambda item: (item[1].get("created_at") or "", item[0]),
+            reverse=True,
+        )
+    ]
+    failure_streak = _consecutive_execution_failure_class(streak_rows)
     if limit > 0:
         rows = rows[:limit]
 
@@ -6513,7 +6584,11 @@ def runtime_feedback(
     filed_artifacts = set(filed.values())
 
     out = ["scope|recent_verdicts|runtime_signals|diagnosis|feedback"]
-    if not rows and not filed_artifacts:
+    if (
+        not rows
+        and not filed_artifacts
+        and failure_streak[1] < _EXECUTION_FAILURE_STREAK_MIN
+    ):
         out.append(
             f"{scope}|none|none|no-runtime-evidence|"
             "follow the assigned card's Next action"
@@ -6542,7 +6617,11 @@ def runtime_feedback(
             and str(row.get("hypothesis_id", "")) not in filed
         ):
             candidate_verdicts += 1
-        for signal in _runtime_row_signals(ctx, row):
+        row_signals = set(_runtime_row_signals(ctx, row))
+        failure_class = _run_execution_failure_class(row)
+        if failure_class:
+            row_signals.add(f"execution-{failure_class}")
+        for signal in row_signals:
             signal_counts[signal] = signal_counts.get(signal, 0) + 1
     if rejected_verdicts:
         signal_counts["triage-rejected-run"] = rejected_verdicts
@@ -6561,6 +6640,8 @@ def runtime_feedback(
     ) or "none"
     diagnosis, feedback = _runtime_feedback_decision(
         verdict_counts, sum(verdict_counts.values()), signal_counts, rejection,
+        failure_streak=failure_streak,
+        seed_hint=_card_seed_hint(ctx, card_id, route_strategy),
     )
     out.append(f"{scope}|{verdict_text}|{signal_text}|{diagnosis}|{feedback}")
     return "\n".join(out) + "\n"
@@ -6570,6 +6651,57 @@ def _one_line(value: str, limit: int) -> str:
     """One digest cell's worth of free text: no separators, bounded length."""
     text = " ".join(str(value).replace("|", "/").split())
     return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _run_execution_failure_class(row: dict) -> str:
+    """Validated EXEC_FAIL class, including the exact legacy reason token."""
+    if str(row.get("verdict") or "").strip().upper() != "EXEC_FAIL":
+        return ""
+    explicit = str(row.get("execution_failure_class") or "").strip().lower()
+    if explicit in _EXECUTION_FAILURE_CLASSES:
+        return explicit
+    match = _EXECUTION_FAILURE_CLASS_RE.search(str(row.get("reason") or ""))
+    return match.group(1) if match else ""
+
+
+def _consecutive_execution_failure_class(rows: list[dict]) -> tuple[str, int]:
+    """Newest same-class EXEC_FAIL streak; any other outcome resets it."""
+    failure_class = ""
+    count = 0
+    for row in rows:
+        current = _run_execution_failure_class(row)
+        if not current or (failure_class and current != failure_class):
+            break
+        failure_class = current
+        count += 1
+    return failure_class, count
+
+
+def _card_seed_hint(
+    ctx: Context, card_id: str, route_strategy: str = "",
+) -> str:
+    """Exact seed command only when the card itself proves a byte-parser lane."""
+    if not card_id:
+        return ""
+    card = next(
+        (
+            row for row in read_jsonl(work_cards_path(ctx))
+            if str(row.get("id") or "") == card_id
+        ),
+        {},
+    )
+    effective_strategy = (
+        route_strategy.strip().upper()
+        or str(card.get("strategy") or "").strip().upper()
+    )
+    if effective_strategy != "S7":
+        return ""
+    path = str(card.get("file") or "").strip()
+    function = str(card.get("function") or "").strip()
+    if not path:
+        return ""
+    target = f"{path}:{function}" if function else path
+    return f"bin/find-seed {shlex.quote(target)}"
 
 
 def _runtime_row_signals(ctx: Context, row: dict) -> list[str]:
@@ -6627,6 +6759,9 @@ def _runtime_feedback_decision(
     total: int,
     signals: dict[str, int],
     rejection: str = "",
+    *,
+    failure_streak: tuple[str, int] = ("", 0),
+    seed_hint: str = "",
 ) -> tuple[str, str]:
     recorded = sum(verdicts.get(value, 0) for value in ("CRASH", "FIND"))
     rejected = signals.get("triage-rejected-run", 0)
@@ -6696,6 +6831,36 @@ def _runtime_feedback_decision(
             "near-miss-targeting",
             "coverage near-miss seen; mutate around the closest reached frame before broadening seeds",
         )
+    failure_class, streak_count = failure_streak
+    if streak_count >= _EXECUTION_FAILURE_STREAK_MIN:
+        if failure_class == "input-rejected":
+            if seed_hint:
+                return (
+                    "seed-format",
+                    f"{streak_count} consecutive card-wide input rejections; "
+                    f"start from `{seed_hint}` and preserve magic, length, "
+                    "checksum, and nesting",
+                )
+            return (
+                "seed-format",
+                f"{streak_count} consecutive card-wide input rejections; "
+                "for a file/bytes parser route start from `bin/find-seed`, "
+                "but for an API or call-sequence card repair the API setup or "
+                "call sequence instead of substituting a corpus seed",
+            )
+        streak_advice = {
+            "loader": "repair the configured binary, dynamic loader, or dependency path",
+            "usage": "repair the argv or testcase-header contract",
+            "aborted": "inspect the repeated assertion or explicit abort before changing inputs",
+            "unverified-exit": "repair the runner/provenance marker so execution can be verified",
+            "exit": "inspect the repeated target exit in the saved output before changing inputs",
+        }.get(failure_class)
+        if streak_advice:
+            return (
+                f"execution-{failure_class}-streak",
+                f"{streak_count} consecutive card-wide {failure_class} failures; "
+                f"{streak_advice}",
+            )
     # format-reject is the more specific diagnosis: a parse/format rejection is
     # often also recorded as a NO_HIT/MISSED verdict, so check it before the
     # generic coverage-routing fallback or its precise seed advice gets masked.

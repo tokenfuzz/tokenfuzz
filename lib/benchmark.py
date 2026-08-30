@@ -292,6 +292,21 @@ def _local_path_replacements() -> list[tuple[str, str]]:
 def _scrub_local_paths(text: str) -> str:
     for needle, replacement in _local_path_replacements():
         text = text.replace(needle, replacement)
+        bare = needle[:-1]
+        bare_replacement = (
+            replacement[:-1] if replacement.endswith("/") else replacement
+        )
+        if not bare_replacement:
+            bare_replacement = "."
+        delimiter = r"[\s\"'`()\[\]{}<>|]"
+        punctuation = rf"[.!?,:;](?=$|{delimiter})"
+        uri_boundary = r"|[#?]" if bare.startswith("file:") else ""
+        text = re.sub(
+            re.escape(bare)
+            + rf"(?=$|{delimiter}|{punctuation}{uri_boundary})",
+            lambda _match: bare_replacement,
+            text,
+        )
     return text
 
 
@@ -303,10 +318,126 @@ def _should_scrub_pooled_file(path: Path) -> bool:
     return path.suffix.lower() in _SCRUB_TEXT_SUFFIXES
 
 
-def _scrub_pooled_tree(root: Path) -> None:
-    """Best-effort scrub of local absolute paths from copied pool artifacts."""
+def _source_anchor_identity(value: object) -> tuple | None:
+    """Comparable review fields for one host-verified source anchor."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        line = int(value.get("line"))
+    except (TypeError, ValueError):
+        return None
+    return (
+        str(value.get("path") or "").strip(),
+        line,
+        str(value.get("symbol") or "").strip(),
+        str(value.get("kind") or "").strip().lower(),
+        str(value.get("excerpt") or "").strip(),
+    )
+
+
+def _attested_review_anchors(receipt: dict | None) -> dict[str, set[tuple]]:
+    """Verified anchor identities that a pool scrub must leave unchanged."""
+    if not isinstance(receipt, dict):
+        return {}
+    evidence = receipt.get("evidence")
+    if not isinstance(evidence, dict):
+        return {}
+    protected: dict[str, set[tuple]] = {}
+    for attestation in evidence.get("source_attestations") or []:
+        if not isinstance(attestation, dict):
+            continue
+        review = str(attestation.get("review_artifact") or "")
+        if not review:
+            continue
+        identities = {
+            identity
+            for anchor in (attestation.get("anchors") or [])
+            if (identity := _source_anchor_identity(anchor)) is not None
+        }
+        if identities:
+            protected.setdefault(review, set()).update(identities)
+    return protected
+
+
+def _scrub_json_value(value):
+    if isinstance(value, str):
+        return _scrub_local_paths(value)
+    if isinstance(value, list):
+        return [_scrub_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            _scrub_local_paths(str(key)): _scrub_json_value(item)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _scrub_review_json(
+    original: str, protected: set[tuple],
+) -> str | None:
+    """Scrub review metadata without rewriting verified anchor evidence."""
+    duplicate_member = False
+
+    def unique_object(pairs):
+        nonlocal duplicate_member
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                duplicate_member = True
+            value[key] = item
+        return value
+
+    try:
+        payload = json.loads(original, object_pairs_hook=unique_object)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        scrubbed_payload = _scrub_json_value(payload)
+        if scrubbed_payload == payload and not duplicate_member:
+            return original
+        return json.dumps(scrubbed_payload, indent=2) + "\n"
+    scrubbed = {}
+    for key, value in payload.items():
+        scrubbed_key = _scrub_local_paths(str(key))
+        if key != "anchors" or not isinstance(value, list):
+            scrubbed[scrubbed_key] = _scrub_json_value(value)
+            continue
+        anchors = []
+        for anchor in value:
+            identity = _source_anchor_identity(anchor)
+            if identity not in protected or not isinstance(anchor, dict):
+                anchors.append(_scrub_json_value(anchor))
+                continue
+            core_fields = {"path", "line", "symbol", "kind", "excerpt"}
+            scrubbed_anchor = {
+                field: item
+                for field, item in anchor.items()
+                if field in core_fields
+            }
+            for field, item in anchor.items():
+                if field in core_fields:
+                    continue
+                scrubbed_field = _scrub_local_paths(str(field))
+                # Unverified metadata may not shadow a verified field after
+                # its key is made portable. Dropping that one colliding entry
+                # preserves the source claim and removes the host path.
+                if scrubbed_field in scrubbed_anchor:
+                    continue
+                scrubbed_anchor[scrubbed_field] = _scrub_json_value(item)
+            anchors.append(scrubbed_anchor)
+        scrubbed[scrubbed_key] = anchors
+    if scrubbed == payload and not duplicate_member:
+        return original
+    return json.dumps(scrubbed, indent=2, sort_keys=True) + "\n"
+
+
+def _scrub_pooled_tree(
+    root: Path, prior_validation: dict | None = None,
+) -> None:
+    """Best-effort scrub of local paths without altering attested anchors."""
     if not root.is_dir():
         return
+    protected_reviews = _attested_review_anchors(prior_validation)
     for path in root.rglob("*"):
         if not _should_scrub_pooled_file(path):
             continue
@@ -316,7 +447,20 @@ def _scrub_pooled_tree(root: Path) -> None:
             original = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        scrubbed = _scrub_local_paths(original)
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            relative = ""
+        protected = protected_reviews.get(relative)
+        if protected is not None:
+            scrubbed = _scrub_review_json(original, protected)
+            # A current attestation implies valid JSON. If a concurrent writer
+            # breaks that invariant, retain the evidence bytes rather than
+            # destroying publication authority during a best-effort scrub.
+            if scrubbed is None:
+                continue
+        else:
+            scrubbed = _scrub_local_paths(original)
         if scrubbed == original:
             continue
         try:
@@ -409,6 +553,29 @@ def _unique_with_medium_plus(
     if unjudged:
         inner += f", {unjudged}"
     return f"{'≥' if floor else ''}{unique} ({inner})"
+
+
+def _finding_class_display(condition: dict) -> tuple[int, str, int]:
+    """Return class terms only for a complete unique-cluster decomposition."""
+    histogram = condition.get("finding_class_histogram")
+    unique = _as_int(condition.get("unique_finding_clusters"))
+    if not isinstance(histogram, dict) or not histogram:
+        return 0, "", 0
+    normalized: dict[str, int] = {}
+    for name, count in histogram.items():
+        if (
+            not isinstance(name, str)
+            or not name
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+        ):
+            return 0, "", 0
+        normalized[name] = count
+    if sum(normalized.values()) != unique:
+        return 0, "", 0
+    top_class, top_class_pct = dominant_class_share(normalized)
+    return len(normalized), top_class, top_class_pct
 
 
 def _condition_pool_dir(bench_dir: Path, condition: str, kind: str) -> Path:
@@ -3525,6 +3692,10 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
         out_clusters.append(
             {
                 "id": cid,
+                "class": (
+                    " ".join(str(cl.get("class") or "other").split()).lower()
+                    or "other"
+                ),
                 "conditions": conds,
                 "members": members,
                 "size": cl.get("size", len(members)),
@@ -3570,10 +3741,17 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
             return best
         return (0, 0, "—")
 
+    cluster_by_id = {str(cluster["id"]): cluster for cluster in out_clusters}
     by_condition: dict[str, dict] = {}
     for cond, ids in cond_clusters.items():
-        cond_cls = [c for c in out_clusters if c["id"] in ids]
+        cond_cls = [cluster_by_id[cid] for cid in sorted(ids) if cid in cluster_by_id]
         novel = [c["id"] for c in cond_cls if c["conditions"] == [cond]]
+        class_histogram: dict[str, int] = {}
+        for cluster in cond_cls:
+            finding_class = str(cluster.get("class") or "other")
+            class_histogram[finding_class] = (
+                class_histogram.get(finding_class, 0) + 1
+            )
         # Score every cluster by THIS condition's own members, then take the
         # highest. Medium+ counts this condition's clusters at rank >= 2
         # (Critical=4, High=3, Medium=2, Low=1, unscored=0).
@@ -3585,6 +3763,7 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
             "top_severity_level": top[2],
             "top_severity_rank": top[0],
             "medium_plus": sum(1 for s in cond_sevs if s[0] >= 2),
+            "class_histogram": class_histogram,
         }
     return {"clusters": out_clusters, "by_condition": by_condition}
 
@@ -4113,18 +4292,13 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         pooled_rejected_finding_dirs[cond_name] = (
             pooled_rejected_finding_dirs.get(cond_name, 0) + 1
         )
-    # One mechanism restated at N locations is N accepted findings -- correctly,
-    # since N sites need N fixes -- so the count alone cannot say whether a
-    # condition covered the target or farmed one shape. Count the classes it
-    # actually reached beside it.
-    pooled_finding_names: dict[str, list[str]] = {}
-    for _name, _cond in members.get("findings", {}).items():
-        pooled_finding_names.setdefault(_cond, []).append(_name)
+    # The headline is a unique-cluster count, so its class decomposition must
+    # use the same denominator. Counting pooled directories here made one
+    # duplicated class occupy a larger displayed share even though clustering
+    # had already collapsed those reports into one finding.
     finding_class_histogram_by_cond = {
-        _cond: confirmed_finding_class_histogram(
-            bench_dir / "pool" / "findings", _names,
-        )
-        for _cond, _names in pooled_finding_names.items()
+        _cond: dict(_summary.get("class_histogram") or {})
+        for _cond, _summary in finding_by_cond.items()
     }
     finding_classes_by_cond = {
         _cond: len(_hist)
@@ -4342,6 +4516,9 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "top_severity_rank": cb.get("top_severity_rank", 0),
                 "medium_plus_bugs": cb.get("medium_plus", 0),
                 "unique_finding_clusters": fb.get("unique_clusters", 0),
+                "finding_class_histogram": finding_class_histogram_by_cond.get(
+                    cond, {},
+                ),
                 "unique_finding_classes": finding_classes_by_cond.get(cond, 0),
                 "top_finding_class": finding_top_class_by_cond.get(cond, ("", 0))[0],
                 "top_finding_class_pct": finding_top_class_by_cond.get(cond, ("", 0))[1],
@@ -4701,7 +4878,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
             dst = pool / "crashes" / dst_name
             shutil.copytree(src, dst, ignore=ignore_transient,
                             ignore_dangling_symlinks=True)
-            _scrub_pooled_tree(dst)
+            _scrub_pooled_tree(dst, prior_validation)
             if prior_validation is not None:
                 validation_receipt.rewrite_after_equivalent_transform(
                     dst, prior_validation,
@@ -4720,7 +4897,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 dst = pool / "findings" / dst_name
                 shutil.copytree(src, dst, ignore=ignore_transient,
                             ignore_dangling_symlinks=True)
-                _scrub_pooled_tree(dst)
+                _scrub_pooled_tree(dst, prior_validation)
                 if prior_validation is not None:
                     validation_receipt.rewrite_after_equivalent_transform(
                         dst, prior_validation,
@@ -5376,6 +5553,9 @@ def render_section(report: dict) -> str:
         cond_rejected_crashes = _condition_pool_dir(
             bench_dir, c["condition"], "crashes-rejected"
         )
+        finding_classes, top_finding_class, top_finding_class_pct = (
+            _finding_class_display(c)
+        )
         lines.append(
             "| {cond} | {rep} | {wall} | {worker_wall} | {rfi} | {uf} "
             "| {rcr} | {uc} | {sev} |".format(
@@ -5388,10 +5568,10 @@ def render_section(report: dict) -> str:
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0),
                         _as_int(c.get("unadjudicated_finding_total")),
-                        _as_int(c.get("unique_finding_classes")),
+                        finding_classes,
                         bool(c.get("finding_total_is_floor")),
-                        str(c.get("top_finding_class") or ""),
-                        _as_int(c.get("top_finding_class_pct"))),
+                        top_finding_class,
+                        top_finding_class_pct),
                     cond_findings, "FINDING-CLUSTERS"),
                 rfi=_artifact_report_link(
                     _rejected_label(
@@ -5938,6 +6118,9 @@ def crosstab(bench_root: Path) -> str:
             _condition_pool_dir(bench_dir, cond, "crashes-rejected")
             if bench_dir else None
         )
+        finding_classes, top_finding_class, top_finding_class_pct = (
+            _finding_class_display(c)
+        )
         lines.append(
             "| {tgt} | {bk} | {cond} | {rid} | {wall} | {reps} "
             "| {rfi} | {uf} "
@@ -5961,10 +6144,10 @@ def crosstab(bench_root: Path) -> str:
                         c.get("unique_finding_clusters", 0),
                         c.get("medium_plus_findings", 0),
                         _as_int(c.get("unadjudicated_finding_total")),
-                        _as_int(c.get("unique_finding_classes")),
+                        finding_classes,
                         bool(c.get("finding_total_is_floor")),
-                        str(c.get("top_finding_class") or ""),
-                        _as_int(c.get("top_finding_class_pct"))),
+                        top_finding_class,
+                        top_finding_class_pct),
                     findings_dir, "FINDING-CLUSTERS")),
                 rcr=("Pending" if provisional else _rejected_cell(
                     c.get("unique_rejected_crash_clusters"),

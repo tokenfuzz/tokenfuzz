@@ -230,7 +230,11 @@ bin/state explain-queue [--mode MODE] [--strategy S] [--top N] [--all]
 
 `bin/state resume` includes Runtime Feedback derived from recent probe
 artifacts. Treat it as next-mutation or harness-repair guidance only, not
-filing/discard evidence.
+filing/discard evidence. Repeated `EXEC_FAIL` classes are remembered across
+hypotheses and workers on the same card. Five consecutive `input-rejected`
+rows recommend `bin/find-seed` only for a byte/parser card; API and
+call-sequence cards get setup/sequence repair guidance instead. This advice
+never closes, demotes, or re-ranks the card.
 
 `update-card --status discarded` requires the configured evidence floor
 (default: three card-linked CLEAN runs across two distinct hypothesis shapes

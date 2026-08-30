@@ -7,6 +7,7 @@ import errno
 import io
 import inspect
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -1129,6 +1130,150 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(updated["incomplete_observed"][0]["crashes"], 6)
         self.assertEqual(updated["incomplete_observed"][0]["findings"], 5)
 
+    def test_finding_class_concentration_counts_unique_clusters(self) -> None:
+        """Duplicate reports cannot inflate the class share beside a unique count."""
+        bench = self.root / "finding-class-clusters"
+        self.write_json(bench / "run.json", {
+            "runid": "run1", "target": "sample", "backend": "codex",
+            "replicates": 1, "budget_wall": 60,
+            "conditions": ["harness"],
+            "target_sha": "abc", "harness_sha": "def",
+        })
+        self.make_cell(
+            bench, "harness-r1", "harness", 1, 0, findings=4,
+        )
+        finding_members = {
+            "FIND-dos-a": "harness",
+            "FIND-dos-b": "harness",
+            "FIND-dos-c": "harness",
+            "FIND-auth": "harness",
+        }
+        self.write_json(bench / "pool-members.json", {
+            "crashes": {}, "crash_cells": {},
+            "crashes-rejected": {}, "findings-rejected": {},
+            "findings": finding_members,
+        })
+        self.write_json(bench / "clusters-findings.json", {
+            "clusters": [
+                {
+                    "id": "FINDING-dos", "class": "dos",
+                    "members": ["FIND-dos-a", "FIND-dos-b", "FIND-dos-c"],
+                },
+                {
+                    "id": "FINDING-auth", "class": "auth",
+                    "members": ["FIND-auth"],
+                },
+            ],
+        })
+        for name in finding_members:
+            finding = bench / "pool" / "findings" / name
+            finding.mkdir(parents=True)
+            klass = "auth" if name == "FIND-auth" else "dos"
+            self.write_json(finding / ".llm-find-quality.json", {
+                "accept": True, "class": klass,
+            })
+
+        condition = benchmark.aggregate(bench)["conditions"][0]
+
+        self.assertEqual(condition["unique_finding_clusters"], 2)
+        self.assertEqual(
+            condition["finding_class_histogram"], {"auth": 1, "dos": 1},
+        )
+        self.assertEqual(condition["unique_finding_classes"], 2)
+        self.assertEqual(condition["top_finding_class_pct"], 50)
+        self.assertEqual(
+            sum(condition["finding_class_histogram"].values()),
+            condition["unique_finding_clusters"],
+        )
+
+        (bench / "clusters-findings.json").unlink()
+        unclustered = benchmark.aggregate(bench)["conditions"][0]
+        self.assertEqual(unclustered["finding_class_histogram"], {})
+        self.assertEqual(unclustered["unique_finding_classes"], 0)
+        self.assertEqual(unclustered["top_finding_class"], "")
+        self.assertEqual(unclustered["top_finding_class_pct"], 0)
+
+    def test_renderers_require_a_complete_cluster_class_histogram(self) -> None:
+        """Legacy occurrence shares must not label a unique-cluster count."""
+        run = self.root / "class-render" / "codex" / "run1"
+        condition = {
+            "condition": "harness",
+            "replicates_done": 1,
+            "replicates_total": 1,
+            "wall_median": 60,
+            "unique_finding_clusters": 2,
+            "medium_plus_findings": 0,
+            # These legacy scalars came from four report directories: three
+            # duplicate dos reports and one auth report.
+            "unique_finding_classes": 2,
+            "top_finding_class": "dos",
+            "top_finding_class_pct": 75,
+            "unique_crash_clusters": 0,
+            "medium_plus_bugs": 0,
+            "top_severity_level": "—",
+            "tokens": {},
+            "validation_waterfall": {
+                "crashes": {"candidates": 0, "lanes": {}},
+                "findings": {"candidates": 2, "lanes": {"reportable": 2}},
+            },
+        }
+        report = {
+            "run": {
+                "runid": "run1", "target": "sample", "backend": "codex",
+                "model": "gpt-test", "replicates": 1, "budget_wall": 60,
+            },
+            "bench_dir": str(run),
+            "conditions": [condition],
+            "crash_clusters": [],
+        }
+        self.write_json(run / "report.json", report)
+
+        legacy_section = benchmark.render_section(report)
+        legacy_crosstab = benchmark.crosstab(self.root / "class-render")
+        self.assertIn("2 (0 M+)", legacy_section)
+        self.assertIn("2 (0 M+)", legacy_crosstab)
+        self.assertNotIn("75% dos", legacy_section)
+        self.assertNotIn("75% dos", legacy_crosstab)
+
+        condition["finding_class_histogram"] = {"auth": 1, "dos": 1}
+        self.write_json(run / "report.json", report)
+        current_section = benchmark.render_section(report)
+        current_crosstab = benchmark.crosstab(self.root / "class-render")
+        self.assertIn("2 classes, top 50% dos", current_section)
+        self.assertIn("2 classes, top 50% dos", current_crosstab)
+
+        condition["finding_class_histogram"] = {"dos": 3}
+        self.assertNotIn("classes", benchmark.render_section(report))
+
+    def test_finding_cluster_class_is_condition_local_and_missing_is_other(self) -> None:
+        attributed = benchmark.attribute_clusters(
+            {
+                "clusters": [
+                    {
+                        "id": "FINDING-shared", "class": "auth",
+                        "members": ["FIND-harness", "FIND-direct"],
+                    },
+                    {
+                        "id": "FINDING-unlabelled",
+                        "members": ["FIND-harness-other"],
+                    },
+                ],
+            },
+            {
+                "FIND-harness": "harness",
+                "FIND-direct": "model-direct",
+                "FIND-harness-other": "harness",
+            },
+        )["by_condition"]
+
+        self.assertEqual(
+            attributed["harness"]["class_histogram"],
+            {"auth": 1, "other": 1},
+        )
+        self.assertEqual(
+            attributed["model-direct"]["class_histogram"], {"auth": 1},
+        )
+
     def test_aggregate_and_report_surface_unadjudicated_crashes(self) -> None:
         bench = self.root / "unjudged-crashes"
         self.write_json(bench / "run.json", {
@@ -1362,6 +1507,156 @@ class BenchmarkMetricsTests(unittest.TestCase):
                 *condition_pool.joinpath("findings").glob("FIND-*"),
             ):
                 self.assertIsNotNone(validation_receipt.read_current(directory))
+
+    def test_pool_scrub_rebinds_source_attestation_without_checkout(self) -> None:
+        bench = self.root / "attested-pool"
+        self.write_json(bench / "run.json", {
+            "runid": "attested", "target": "sample", "backend": "codex",
+            "conditions": ["harness"], "replicates": 1,
+        })
+        target = self.root / "target"
+        source = target / "src" / "sample.c"
+        source.parent.mkdir(parents=True)
+        local_build_root = str(Path.home() / "work" / "private" / "build")
+        excerpt = f'const char *build_root = "{local_build_root}";'
+        source.write_text(
+            "int app_parse(void) {\n"
+            f"  {excerpt}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        unrelated = self.root / "unrelated-target"
+        unrelated_source = unrelated / "src" / "sample.c"
+        unrelated_source.parent.mkdir(parents=True)
+        unrelated_source.write_text(
+            "int other_parse(void) { return 0; }\n",
+            encoding="utf-8",
+        )
+        results = self.root / "attested-results"
+        finding = results / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        (finding / "report.md").write_text("# Bounds finding\n")
+        review = finding / ".trigger-gate.json"
+        local_metadata_key = str(
+            Path.home() / "work" / "private" / "unverified-key.txt"
+        )
+        colliding_metadata_key = str(Path.home() / "work" / "path")
+        self.write_json(review, {
+            "vote": "Promote",
+            "rationale": {
+                "trace": str(
+                    Path.home() / "work" / "private" / "trace.txt"
+                ),
+                "exact_home": str(Path.home()),
+                "sentence_home": f"checkout was {Path.home()}.",
+                "sibling": f"{Path.home()}-backup/source",
+                "dot_sibling": f"{Path.home()}.backup/source",
+                "comma_sibling": f"{Path.home()},backup/source",
+                "colon_sibling": f"{Path.home()}:backup/source",
+                "uri_fragment": f"{Path.home().as_uri()}#fragment",
+                "uri_query": f"{Path.home().as_uri()}?view=1",
+            },
+            "anchors": [{
+                "path": "src/sample.c", "line": 2,
+                "symbol": "app_parse", "kind": "build",
+                "excerpt": excerpt,
+                local_metadata_key: "unverified metadata",
+                colliding_metadata_key: "must not replace the source path",
+            }],
+        })
+        shadow_path = str(
+            Path.home() / "work" / "private" / "unverified.c"
+        )
+        review.write_text(
+            review.read_text(encoding="utf-8").replace(
+                '"path": "src/sample.c"',
+                f'"path": {json.dumps(shadow_path)}, '
+                '"path": "src/sample.c"',
+                1,
+            ),
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {
+            "TARGET_ROOT": str(target), "TARGET_REV": "",
+        }):
+            prior = validation_receipt.write(
+                finding, kind="finding", state="reportable",
+            )
+        old_review_sha = prior["evidence"]["source_attestations"][0][
+            "review_sha256"
+        ]
+        cell = self.make_cell(
+            bench, "harness-r1", "harness", 1, 0, findings=1,
+        )
+        cell_data = json.loads((cell / "cell.json").read_text())
+        cell_data["results_dir"] = str(results)
+        self.write_json(cell / "cell.json", cell_data)
+        self.write_json(cell / "metrics.json", benchmark.harvest(results))
+
+        with mock.patch.dict(os.environ, {
+            "TARGET_ROOT": str(unrelated), "TARGET_REV": "",
+        }, clear=True):
+            self.assertIsNotNone(validation_receipt.read_current(finding))
+            benchmark.build_pool(bench)
+            pooled = bench / "pool" / "findings" / "FIND-0001"
+            unrelated_current = validation_receipt.read_current(pooled)
+
+        with mock.patch.dict(os.environ, {
+            "TARGET_ROOT": str(target), "TARGET_REV": "",
+        }, clear=True):
+            original_current = validation_receipt.read_current(pooled)
+
+        self.assertIsNotNone(unrelated_current)
+        self.assertIsNotNone(original_current)
+        self.assertNotEqual(
+            original_current["evidence"]["source_attestations"][0][
+                "review_sha256"
+            ],
+            old_review_sha,
+        )
+        pooled_review = json.loads(
+            (pooled / ".trigger-gate.json").read_text(encoding="utf-8"),
+        )
+        self.assertEqual(pooled_review["anchors"][0]["excerpt"], excerpt)
+        self.assertEqual(
+            pooled_review["anchors"][0]["path"], "src/sample.c",
+        )
+        self.assertNotIn(
+            shadow_path,
+            (pooled / ".trigger-gate.json").read_text(encoding="utf-8"),
+        )
+        self.assertNotIn(local_metadata_key, pooled_review["anchors"][0])
+        self.assertNotIn(colliding_metadata_key, pooled_review["anchors"][0])
+        self.assertEqual(pooled_review["rationale"]["exact_home"], "~")
+        self.assertEqual(
+            pooled_review["rationale"]["sentence_home"], "checkout was ~.",
+        )
+        self.assertEqual(
+            pooled_review["rationale"]["sibling"],
+            f"{Path.home()}-backup/source",
+        )
+        self.assertEqual(
+            pooled_review["rationale"]["dot_sibling"],
+            f"{Path.home()}.backup/source",
+        )
+        self.assertEqual(
+            pooled_review["rationale"]["comma_sibling"],
+            f"{Path.home()},backup/source",
+        )
+        self.assertEqual(
+            pooled_review["rationale"]["colon_sibling"],
+            f"{Path.home()}:backup/source",
+        )
+        self.assertEqual(
+            pooled_review["rationale"]["uri_fragment"], "~#fragment",
+        )
+        self.assertEqual(
+            pooled_review["rationale"]["uri_query"], "~?view=1",
+        )
+        self.assertNotIn(
+            str(Path.home() / "work"),
+            json.dumps(pooled_review["rationale"]),
+        )
 
     def test_pool_rebuild_survives_concurrent_writer_during_stale_cleanup(self) -> None:
         # A leftover staging tree from an interrupted run must be cleared even

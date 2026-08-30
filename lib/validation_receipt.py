@@ -6,10 +6,11 @@ import hashlib
 import json
 import os
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import crash_artifacts
 import report_identity
+import target_config
 import triage_validate
 
 SCHEMA_VERSION = 2
@@ -37,6 +38,18 @@ _FIXED_EVIDENCE_NAMES = (
     ".trigger-gate-resolution.json",
     ".trigger-gate-bypass.json",
 )
+_SOURCE_REVIEW_NAMES = (
+    ".trigger-gate.json",
+    ".trigger-gate-2.json",
+    ".trigger-gate-resolution.json",
+)
+_SOURCE_REVIEW_ARTIFACTS = frozenset(
+    _SOURCE_REVIEW_NAMES
+    + tuple(f".audit/{name}" for name in _SOURCE_REVIEW_NAMES)
+)
+_SOURCE_ATTESTATION_VERSION = "source-anchor-v1"
+_SOURCE_REVISION_CONTEXT_PREFIX = "revision:"
+_SOURCE_ROOT_CONTEXT_PREFIX = "root-path-sha256:"
 
 
 # Only large files are memoized. Every publication consumer rebuilds the
@@ -124,6 +137,312 @@ def _probe_facts(directory: Path) -> dict:
     return {}
 
 
+def _source_attestations(
+    directory: Path, artifacts: dict[str, dict],
+) -> list[dict]:
+    """Join host-verified source anchors to the review bytes that supplied them.
+
+    The review remains an untrusted model artifact.  Verification re-reads its
+    citations from the configured target tree and writes only the normalized
+    anchors returned by ``verify_source_anchors``.  The review digest already
+    present in ``artifacts`` makes that join independently checkable.
+    """
+    target_root_value = os.environ.get("TARGET_ROOT", "")
+    if not target_root_value:
+        return []
+    target_root = Path(target_root_value)
+    attestations: list[dict] = []
+    for root in (directory, directory / ".audit"):
+        for name in _SOURCE_REVIEW_NAMES:
+            path = root / name
+            try:
+                relative = path.relative_to(directory).as_posix()
+                artifact = artifacts.get(relative)
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(artifact, dict) or not isinstance(payload, dict):
+                continue
+            anchors = triage_validate.verify_source_anchors(
+                payload.get("anchors"), target_root,
+            )
+            if not anchors:
+                continue
+            attestations.append({
+                "review_artifact": relative,
+                "review_sha256": str(artifact.get("sha256") or ""),
+                "verifier": _SOURCE_ATTESTATION_VERSION,
+                "anchors": anchors,
+            })
+    return attestations
+
+
+def _source_root_context() -> str:
+    """Opaque identity for one exact host checkout path."""
+    target_root = os.environ.get("TARGET_ROOT", "").strip()
+    if not target_root:
+        return ""
+    try:
+        resolved = Path(target_root).resolve(strict=True)
+    except OSError:
+        return ""
+    if not resolved.is_dir():
+        return ""
+    digest = hashlib.sha256(os.fsencode(str(resolved))).hexdigest()
+    return f"{_SOURCE_ROOT_CONTEXT_PREFIX}{digest}"
+
+
+def _new_source_context(target_revision: str) -> str:
+    """Bind fresh source claims to a revision or one exact plain checkout."""
+    root_context = _source_root_context()
+    if not root_context:
+        return ""
+    expected = str(target_revision or "")
+    declared = os.environ.get("TARGET_REV")
+    if declared is not None and declared != expected:
+        return ""
+    if target_config.is_unpinned_rev(expected):
+        return root_context
+    target_root = os.environ.get("TARGET_ROOT", "").strip()
+    try:
+        detected = target_config.detect_rev(target_root)
+    except OSError:
+        detected = ""
+    if detected == expected:
+        return f"{_SOURCE_REVISION_CONTEXT_PREFIX}{expected}"
+    # Source archives can carry the immutable session revision without VCS
+    # metadata. Keep those claims local to this exact checkout rather than
+    # treating every archive with the same declaration as interchangeable.
+    if declared == expected and target_config.is_unpinned_rev(detected):
+        return root_context
+    return ""
+
+
+def _stored_source_context_valid(value: object, target_revision: str) -> bool:
+    """Whether a stored source context has a host-authored shape."""
+    if not isinstance(value, str):
+        return False
+    if value.startswith(_SOURCE_REVISION_CONTEXT_PREFIX):
+        revision = value.removeprefix(_SOURCE_REVISION_CONTEXT_PREFIX)
+        return (
+            bool(revision)
+            and not target_config.is_unpinned_rev(revision)
+            and revision == str(target_revision or "")
+        )
+    if not value.startswith(_SOURCE_ROOT_CONTEXT_PREFIX):
+        return False
+    digest = value.removeprefix(_SOURCE_ROOT_CONTEXT_PREFIX)
+    return (
+        len(digest) == 64
+        and all(char in "0123456789abcdef" for char in digest)
+    )
+
+
+def _source_context_matches(value: object, target_revision: str) -> bool:
+    """Whether TARGET_ROOT is the checkout a stored source claim describes."""
+    if not _stored_source_context_valid(value, target_revision):
+        return False
+    context = str(value)
+    if context.startswith(_SOURCE_ROOT_CONTEXT_PREFIX):
+        return _source_root_context() == context
+    target_root = os.environ.get("TARGET_ROOT", "").strip()
+    if not target_root:
+        return False
+    revision = context.removeprefix(_SOURCE_REVISION_CONTEXT_PREFIX)
+    try:
+        return target_config.detect_rev(target_root) == revision
+    except OSError:
+        return False
+
+
+def _stored_source_attestation_valid(value: object) -> bool:
+    """Whether one stored entry has the verifier's normalized shape."""
+    if not isinstance(value, dict):
+        return False
+    review_sha256 = value.get("review_sha256")
+    anchors = value.get("anchors")
+    if (
+        value.get("review_artifact") not in _SOURCE_REVIEW_ARTIFACTS
+        or value.get("verifier") != _SOURCE_ATTESTATION_VERSION
+        or not isinstance(review_sha256, str)
+        or len(review_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in review_sha256)
+        or not isinstance(anchors, list)
+        or not anchors
+    ):
+        return False
+    for anchor in anchors:
+        if not isinstance(anchor, dict):
+            return False
+        relative = str(anchor.get("path") or "")
+        excerpt = str(anchor.get("excerpt") or "")
+        line = anchor.get("line")
+        normalized_path = PurePosixPath(relative)
+        if (
+            not relative
+            or normalized_path.is_absolute()
+            or normalized_path.as_posix() != relative
+            or ".." in normalized_path.parts
+            or not excerpt
+            or not str(anchor.get("symbol") or "")
+            or str(anchor.get("kind") or "")
+            not in triage_validate.ANCHOR_KINDS
+            or isinstance(line, bool)
+            or not isinstance(line, int)
+            or line < 1
+            or anchor.get("excerpt_sha256")
+            != hashlib.sha256(excerpt.encode()).hexdigest()
+        ):
+            return False
+    return True
+
+
+def _attestations_match_artifacts(
+    value: object, artifacts: dict[str, dict],
+) -> bool:
+    """Whether stored attestations still name their digested review bytes."""
+    if not isinstance(value, list):
+        return False
+    for item in value:
+        if not _stored_source_attestation_valid(item):
+            return False
+        artifact = artifacts.get(item["review_artifact"])
+        if (
+            not isinstance(artifact, dict)
+            or item["review_sha256"] != artifact.get("sha256")
+        ):
+            return False
+    return True
+
+
+def _review_anchor_candidates(path: Path) -> list[dict] | None:
+    """Normalize cited anchors without claiming that source still matches."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("anchors"), list):
+        return None
+    anchors: list[dict] = []
+    for item in payload["anchors"]:
+        if not isinstance(item, dict):
+            continue
+        relative = str(item.get("path") or "").strip()
+        excerpt = str(item.get("excerpt") or "").strip()
+        symbol = str(item.get("symbol") or "").strip()
+        kind = str(item.get("kind") or "").strip().lower()
+        try:
+            line = int(item.get("line"))
+        except (TypeError, ValueError):
+            continue
+        normalized_path = PurePosixPath(relative)
+        if (
+            not relative
+            or normalized_path.is_absolute()
+            or normalized_path.as_posix() != relative
+            or ".." in normalized_path.parts
+            or not excerpt
+            or not symbol
+            or kind not in triage_validate.ANCHOR_KINDS
+            or line < 1
+        ):
+            continue
+        anchors.append({
+            "path": relative,
+            "line": line,
+            "symbol": symbol,
+            "kind": kind,
+            "excerpt": excerpt,
+            "excerpt_sha256": hashlib.sha256(excerpt.encode()).hexdigest(),
+        })
+    return anchors
+
+
+def _anchors_contain(candidates: list[dict], required: list[dict]) -> bool:
+    """Whether every previously verified anchor remains in the review."""
+    remaining = list(candidates)
+    for anchor in required:
+        try:
+            remaining.remove(anchor)
+        except ValueError:
+            return False
+    return True
+
+
+def _rebind_source_attestations(
+    directory: Path, value: object, artifacts: dict[str, dict],
+) -> list[dict] | None:
+    """Bind saved anchors across a trusted representation-only rewrite.
+
+    The old review digest may legitimately change when the harness updates
+    report hashes or scrubs local paths. The saved, host-verified anchors may
+    move to the same fixed review filename beneath ``.audit``; they may not be
+    removed or altered. This path never makes a new source claim.
+    """
+    if not isinstance(value, list):
+        return None
+    if not value:
+        return []
+    rebound: list[dict] = []
+    for item in value:
+        if not _stored_source_attestation_valid(item):
+            return None
+        previous = str(item["review_artifact"])
+        basename = PurePosixPath(previous).name
+        candidates = [
+            review for review in sorted(_SOURCE_REVIEW_ARTIFACTS)
+            if PurePosixPath(review).name == basename
+            and isinstance(artifacts.get(review), dict)
+            and (
+                normalized := _review_anchor_candidates(directory / review)
+            ) is not None
+            and _anchors_contain(normalized, item["anchors"])
+        ]
+        if previous in candidates:
+            review = previous
+        elif len(candidates) == 1:
+            review = candidates[0]
+        else:
+            return None
+        candidate = {
+            "review_artifact": review,
+            "review_sha256": artifacts[review]["sha256"],
+            "verifier": item.get("verifier"),
+            "anchors": item.get("anchors"),
+        }
+        if not _attestations_match_artifacts([candidate], artifacts):
+            return None
+        if candidate not in rebound:
+            rebound.append(candidate)
+    return rebound
+
+
+def _source_anchor_claims(value: object) -> list[str] | None:
+    """Comparable verified claims, independent of review path and metadata."""
+    if not isinstance(value, list):
+        return None
+    claims: list[str] = []
+    for item in value:
+        if not _stored_source_attestation_valid(item):
+            return None
+        claims.append(json.dumps({
+            "verifier": item.get("verifier"),
+            "anchors": item.get("anchors"),
+        }, sort_keys=True, separators=(",", ":")))
+    return sorted(claims)
+
+
+def _stamp_evidence_id(record: dict) -> dict:
+    identity = {
+        key: value for key, value in record.items() if key != "evidence_id"
+    }
+    encoded = json.dumps(
+        identity, sort_keys=True, separators=(",", ":"),
+    ).encode()
+    record["evidence_id"] = hashlib.sha256(encoded).hexdigest()
+    return record
+
+
 def evidence_record(
     directory: Path,
     *,
@@ -132,6 +451,8 @@ def evidence_record(
     attacker_controls: list[str] | None = None,
     review_facts: dict[str, str] | None = None,
     allow_missing_report: bool = False,
+    _preserved_source_attestations: object | None = None,
+    _preserved_source_context: object | None = None,
 ) -> dict | None:
     """Build the stable evidence identity used by every publication consumer."""
     directory = Path(directory)
@@ -149,6 +470,49 @@ def evidence_record(
     except (OSError, ValueError):
         return None
     probe = _probe_facts(directory)
+    resolved_target_revision = (
+        target_revision or str(probe.get("target_revision") or "")
+    )
+    preserving_source = _preserved_source_attestations is not None
+    source_context = (
+        _preserved_source_context
+        if preserving_source
+        else (_new_source_context(resolved_target_revision) or None)
+    )
+    if (
+        source_context is not None
+        and not _stored_source_context_valid(
+            source_context, resolved_target_revision,
+        )
+    ):
+        return None
+    source_checkout_matches = (
+        _source_context_matches(source_context, resolved_target_revision)
+        if source_context is not None else False
+    )
+    source_attestations = (
+        _source_attestations(directory, artifacts)
+        if source_checkout_matches else []
+    )
+    if _preserved_source_attestations is not None:
+        rebound = _rebind_source_attestations(
+            directory, _preserved_source_attestations, artifacts,
+        )
+        if rebound is None:
+            return None
+        if source_context is not None and not rebound:
+            return None
+        if source_checkout_matches:
+            # A matching checkout can strengthen the trusted-transform check:
+            # metadata may change, but the set of live verified claims may not.
+            if _source_anchor_claims(
+                rebound,
+            ) != _source_anchor_claims(source_attestations):
+                return None
+        else:
+            source_attestations = rebound
+    elif not source_attestations:
+        source_context = None
     record = {
         # Pending/rejected artifacts may be incomplete by definition. An empty
         # identity binds the absence itself: adding a report later changes this
@@ -157,9 +521,7 @@ def evidence_record(
             report_identity.content_sha1(report) if report is not None else ""
         ),
         "artifacts": artifacts,
-        "target_revision": (
-            target_revision or str(probe.get("target_revision") or "")
-        ),
+        "target_revision": resolved_target_revision,
         "target_config_sha256": (
             target_config_sha256
             or str(probe.get("target_config_sha256") or "")
@@ -169,13 +531,14 @@ def evidence_record(
             if attacker_controls is not None else None
         ),
         "probe": probe,
+        "source_attestations": source_attestations,
         "review_facts": triage_validate.source_review_facts(
             review_facts or {},
         ),
     }
-    encoded = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
-    record["evidence_id"] = hashlib.sha256(encoded).hexdigest()
-    return record
+    if source_context is not None:
+        record["source_context"] = source_context
+    return _stamp_evidence_id(record)
 
 
 def write(
@@ -188,6 +551,8 @@ def write(
     target_config_sha256: str | None = None,
     attacker_controls: list[str] | None = None,
     review_facts: dict[str, str] | None = None,
+    _preserved_source_attestations: object | None = None,
+    _preserved_source_context: object | None = None,
 ) -> dict | None:
     if kind not in {"finding", "crash"} or state not in ALL_STATES:
         raise ValueError("invalid validation receipt kind/state")
@@ -204,6 +569,8 @@ def write(
         attacker_controls=attacker_controls,
         review_facts=review_facts,
         allow_missing_report=state in {"pending", "rejected"},
+        _preserved_source_attestations=_preserved_source_attestations,
+        _preserved_source_context=_preserved_source_context,
     )
     if record is None:
         return None
@@ -260,6 +627,14 @@ def rewrite_after_equivalent_transform(
         review_facts=(
             saved.get("review_facts")
             if isinstance(saved.get("review_facts"), dict) else {}
+        ),
+        _preserved_source_attestations=(
+            saved.get("source_attestations")
+            if "source_attestations" in saved else None
+        ),
+        _preserved_source_context=(
+            saved.get("source_context")
+            if "source_context" in saved else None
         ),
     )
 
@@ -376,11 +751,33 @@ def read_current(directory: Path) -> dict | None:
             if isinstance(saved.get("review_facts"), dict) else {}
         ),
         allow_missing_report=payload.get("state") in {"pending", "rejected"},
+        _preserved_source_attestations=(
+            saved.get("source_attestations")
+            if "source_attestations" in saved else None
+        ),
+        _preserved_source_context=(
+            saved.get("source_context")
+            if "source_context" in saved else None
+        ),
     )
+    if current is None:
+        return None
+    restamp = False
+    if "source_attestations" not in saved:
+        # Schema-2 receipts written before source attestations remain readable.
+        # They gain source freshness only when a later review rewrites them.
+        current.pop("source_attestations", None)
+        current.pop("source_context", None)
+        restamp = True
+    else:
+        saved_attestations = saved.get("source_attestations")
+        if not _attestations_match_artifacts(
+            saved_attestations, current.get("artifacts", {}),
+        ):
+            return None
     report = report_identity.find_report(Path(directory))
     if (
-        current is not None
-        and report is not None
+        report is not None
         and saved.get("report_sha1")
         in report_identity.content_sha1_candidates(report)
     ):
@@ -388,14 +785,9 @@ def read_current(directory: Path) -> dict | None:
         # receipt identity. Accept that bounded legacy hash while migrating;
         # every artifact digest and scope field must still match below.
         current["report_sha1"] = saved.get("report_sha1")
-        identity_record = {
-            key: value for key, value in current.items()
-            if key != "evidence_id"
-        }
-        encoded = json.dumps(
-            identity_record, sort_keys=True, separators=(",", ":"),
-        ).encode()
-        current["evidence_id"] = hashlib.sha256(encoded).hexdigest()
-    if current is None or current != saved:
+        restamp = True
+    if restamp:
+        _stamp_evidence_id(current)
+    if current != saved:
         return None
     return payload

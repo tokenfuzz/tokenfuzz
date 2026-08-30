@@ -100,9 +100,13 @@ was offered, which is what `bin/state card-yield` replays. One file is worth
 knowing: `state/runs.jsonl` has one
 row per `bin/probe` invocation — verdict, sanitizer, duration, and when a
 coverage replay ran, `coverage` (`HIT`, `MISSED`, `UNAVAILABLE`, …) with the
-`closest` frame it reached, and for an `EXEC_FAIL` a `reason` naming the
-child exit code and failure class — so `wc -l` on it answers "did anything
-actually run?". `state/callgraph.json` is present only with the optional
+`closest` frame it reached. An `EXEC_FAIL` carries a normalized
+`execution_failure_class` plus the detailed `reason`; resume aggregates a
+five-run same-class streak across the whole card and offers repair or seed
+guidance, but never closes or re-ranks work from that advisory signal. Older
+rows retain the same class token in `reason` and are read compatibly. This is
+also why `wc -l` on the file answers "did anything actually run?".
+`state/callgraph.json` is present only with the optional
 [call-neighbourhood analysis](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
 installed; it holds the per-file call maps work-card prompts quote, and
 deleting it costs prompt context and nothing else. The rest is internal
@@ -136,9 +140,23 @@ severity. `not-reportable` is a final retained engineering defect, not a
 security report; `pending` is an artifact no review settled, which is neither
 credited nor written off.
 
+When `TARGET_ROOT` is available, new receipts join each source review to a
+`source_attestations` entry. The harness re-reads the review's path, line,
+symbol, and excerpt, replaces any reviewer-supplied excerpt digest with its
+own, and binds the normalized anchors plus the review artifact's SHA-256 into
+the receipt `evidence_id`. Reading with the checkout pinned to the receipt's
+target revision repeats that verification. For a plain source tree without a
+VCS revision, an opaque `source_context` binds re-verification to the exact
+host checkout that issued the attestation. An unrelated live checkout is not
+allowed to refute historical evidence; an exported bundle without its pinned
+checkout retains an attestation already recorded. Trusted representation-only
+rewrites may update the bound review digest only while every verified anchor
+remains present. Older schema-2 receipts may omit these optional fields and
+gain them on their next review.
+
 Changing the report, testcase, harness, sanitizer diagnostic, invocation
-evidence, target/config identity, or review evidence invalidates the receipt
-and returns the artifact to review.
+evidence, cited source, target/config identity, or review evidence invalidates
+the receipt and returns the artifact to review.
 
 A short run may leave `crashes/` and `findings/` empty — that is
 not a failed run by itself. Check the rejected indexes first to

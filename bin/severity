@@ -2126,8 +2126,11 @@ def compute_severity(
     # the impact instead of crediting it as a library-popular AV:N crash. Only
     # overrides a shipping surface; an already-internal/dev tier is unchanged.
     target_root = _target_root_for_report(report_dir)
+    results_root = _results_root_for_report(report_dir)
     if (surface_label not in NON_SHIPPING_SURFACES
-            and _crash_is_harness_rooted(report_text, target_root=target_root)):
+            and _crash_is_harness_rooted(
+                report_text, target_root=target_root, results_root=results_root,
+            )):
         surface_label = "internal"
         surface_reason = ("crash faults in the audit harness/driver with no target-library "
                           "frame anywhere in the report — harness-rooted, not a target bug")
@@ -2244,16 +2247,42 @@ _HARNESS_FILE_RE = re.compile(r"(?:^|[\\/_-])harness[\w-]*\.[ch]\w*\b", re.IGNOR
 # A `file.ext:line` location (real source) vs a bare module offset such as
 # `(dyld:arm64e+0x..)`, which is a system/runtime frame, not target source.
 _SOURCE_LOC_RE = re.compile(r"^(?P<path>.+\.\w+):\d+(?::\d+)?$")
+_AGENT_SCRATCH_RE = re.compile(r"^scratch-[1-9][0-9]*$")
 
 
 def _target_root_for_report(report_dir: Path | None) -> str:
     """Absolute source root belonging to this report's target context."""
     if report_dir is None:
         return ""
+    results_root = _results_root_for_report(report_dir)
+    if results_root:
+        try:
+            root = tc.read_session_env(Path(results_root)).get(
+                "TARGET_ROOT", "",
+            ).strip()
+            return str(Path(root).expanduser().resolve(strict=False)) if root else ""
+        except OSError:
+            return ""
     try:
         root = tc.find_target_root(report_dir, repository_root=HERE.parent)
         return str(root) if root is not None else ""
     except Exception:
+        return ""
+
+
+def _results_root_for_report(report_dir: Path | None) -> str:
+    """Owning live results root from the fixed crash-directory layout."""
+    if report_dir is None:
+        return ""
+    directory = Path(report_dir).absolute()
+    if directory.parent.name not in {"crashes", "crashes-rejected"}:
+        return ""
+    root = directory.parent.parent
+    if not (root / ".session-env").is_file():
+        return ""
+    try:
+        return str(root.resolve(strict=False))
+    except OSError:
         return ""
 
 
@@ -2273,7 +2302,43 @@ def _path_is_under_root(path: str, root: str) -> bool:
     return frame_path == target_root or target_root in frame_path.parents
 
 
-def _frame_is_harness_driver(frame: stack_frames.StackFrame) -> bool:
+def _frame_is_agent_scratch_source(
+    frame: stack_frames.StackFrame,
+    *,
+    results_root: str = "",
+    target_root: str = "",
+) -> bool:
+    """Whether an absolute source leaf is owned by this run's scratch tree.
+
+    Basenames are agent-controlled and prove nothing. Ownership requires the
+    nearest live results root, an immediate ``scratch-N`` child, and exclusion
+    from the target tree. Missing or relative provenance always falls open.
+    """
+    source_path = _frame_source_path(frame)
+    if (
+        not source_path.startswith("/")
+        or not results_root
+        or not target_root
+        or _path_is_under_root(source_path, target_root)
+    ):
+        return False
+    try:
+        source = Path(source_path).expanduser().resolve(strict=False)
+        root = Path(results_root).expanduser().resolve(strict=False)
+        relative = source.relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return len(relative.parts) >= 2 and bool(
+        _AGENT_SCRATCH_RE.fullmatch(relative.parts[0]),
+    )
+
+
+def _frame_is_harness_driver(
+    frame: stack_frames.StackFrame,
+    *,
+    results_root: str = "",
+    target_root: str = "",
+) -> bool:
     """A fault frame that belongs to the audit harness/driver, not the target.
 
     Recognised by libFuzzer's fixed entrypoint — compared on the normalized
@@ -2283,7 +2348,11 @@ def _frame_is_harness_driver(frame: stack_frames.StackFrame) -> bool:
     signal; a shipped CLI's own `main` is target code."""
     if (frame.state_function or "").strip().lower() in _HARNESS_DRIVER_FUNCS:
         return True
-    return bool(_HARNESS_FILE_RE.search(frame.location or ""))
+    return bool(_HARNESS_FILE_RE.search(frame.location or "")) or (
+        _frame_is_agent_scratch_source(
+            frame, results_root=results_root, target_root=target_root,
+        )
+    )
 
 
 def _frame_is_target_source(frame: stack_frames.StackFrame, target_root: str = "") -> bool:
@@ -2310,7 +2379,11 @@ def _frame_is_target_source(frame: stack_frames.StackFrame, target_root: str = "
     return _path_is_under_root(source_path, target_root)
 
 
-def _crash_is_harness_rooted(report_text: str, target_root: str = "") -> bool:
+def _crash_is_harness_rooted(
+    report_text: str,
+    target_root: str = "",
+    results_root: str = "",
+) -> bool:
     """True when the crash faults in the audit harness/driver itself and the
     target library is absent from the ENTIRE sanitizer report.
 
@@ -2345,7 +2418,9 @@ def _crash_is_harness_rooted(report_text: str, target_root: str = "") -> bool:
             if frame is not None:
                 leaf = frame
                 break
-    if leaf is None or not _frame_is_harness_driver(leaf):
+    if leaf is None or not _frame_is_harness_driver(
+        leaf, results_root=results_root, target_root=target_root,
+    ):
         return False
     for line in (report_text or "").splitlines():
         frame = stack_frames.parse_asan_frame(line)
@@ -2943,6 +3018,7 @@ def main(argv: list[str] | None = None) -> int:
         rooted = _crash_is_harness_rooted(
             "\n".join(texts),
             target_root=_target_root_for_report(report_dir),
+            results_root=_results_root_for_report(report_dir),
         )
         print("1" if rooted else "0")
         return 0 if rooted else 1

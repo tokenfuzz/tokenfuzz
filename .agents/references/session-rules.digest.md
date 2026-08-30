@@ -131,7 +131,11 @@ explain-queue [--mode MODE] [--strategy S] [--top N] [--all]
 ```
 
 `resume` Runtime Feedback is next-mutation or harness-repair guidance from
-recent probe artifacts. It is not filing or discard evidence.
+recent probe artifacts. It is not filing or discard evidence. Repeated
+`EXEC_FAIL` classes are card-wide memory; five consecutive input rejections
+route byte/parser cards toward `bin/find-seed`, while API/call-sequence cards
+get setup/sequence repair guidance. The advisory never closes or re-ranks a
+card.
 
 Card discard uses the configured floor (default: three card-linked CLEAN rows
 across two actually-probed hypothesis shapes). MISSED, NO_EXEC, EXEC_FAIL, and CRASH do

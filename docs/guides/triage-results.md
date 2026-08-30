@@ -68,7 +68,13 @@ the question, the artifact remains pending.
 
 Review receipts are content-addressed. Changing the authored report, testcase,
 harness, diagnostic, invocation evidence, target revision, config, or threat
-model invalidates the old decision and reopens review. Generated cluster,
+model invalidates the old decision and reopens review. When the target checkout
+is available at the pinned revision, new receipts also carry host-normalized
+source attestations linked to the exact review artifact; moving or changing a
+cited line then reopens the review even if the recorded revision string did not
+change. Plain source trees use an opaque identity for the exact host checkout.
+A different checkout cannot invalidate that historical attestation.
+Generated cluster,
 severity, patch-rendering, and enrichment annotations do not.
 
 ## Publication state
@@ -114,7 +120,7 @@ Three non-reportable outcomes require different operator action:
 
 | Disposition | Typical reason | What happens |
 | --- | --- | --- |
-| Hard rejection | Near-null dereference, OOM only, assertion or panic only, plain stack overflow, a fault rooted in the audit harness, or two source-anchored reviews disproving the route | The directory moves to `crashes-rejected/` with the reason. |
+| Hard rejection | Near-null dereference, OOM only, assertion or panic only, plain stack overflow, a fault rooted in the audit harness, or two source-anchored reviews disproving the route | The directory moves to `crashes-rejected/` with the reason. A scratch-source fault counts as harness-rooted only when the leaf has an absolute path under this run's own `scratch-N/` and no target-source frame appears anywhere in the diagnostic; missing path ownership or any target allocation/free/context frame fails open and preserves the crash. |
 | Promotion pending | The testcase, saved diagnostic, report, required fields, or exported invocation is incomplete; source review may also remain unsettled | The directory stays under `crashes/` with a pending receipt. Repeatedly incomplete promotion work eventually ages into rejection. |
 | Retained `not-reportable` defect | The report admits a caller-contract violation or harness-only parameter, or source review places the required trigger outside `attacker_controls` | The reproducible engineering evidence stays under `crashes/`, final and unscored. |
 

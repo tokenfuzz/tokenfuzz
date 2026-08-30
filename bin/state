@@ -277,7 +277,7 @@ def main(argv: list[str]) -> int:
 
     p_runs = sub.add_parser(
         "recent-runs",
-        help="slim listing of runs.jsonl (id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest)",
+        help="slim listing of runs.jsonl (id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest|execution_failure_class)",
     )
     p_runs.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
     p_runs.add_argument("--agent", default="")
