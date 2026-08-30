@@ -1227,6 +1227,19 @@ def run_model_direct(
         and (cell_dir / ".backend-unavailable").is_file()
     ):
         return 0
+    if issue == "capacity_limited" and rc not in (0, 124):
+        # The provider cut this cell short. A harness cell pauses through a
+        # capacity event and its wall excludes the pause; the direct CLI just
+        # exits, so scoring what it filed at its truncated wall would count a
+        # provider outage as a model outcome. Exclude it as an artifact-less
+        # cut is excluded; the artifacts stay on disk, and a resume reruns it.
+        (cell_dir / ".backend-unavailable").touch()
+        (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+        log(
+            f"WARN: model-direct backend exited rc={rc} under a provider "
+            "capacity limit; the cell is excluded rather than scored short"
+        )
+        return 0
     if rc not in (0, 124) and _has_substantive_artifacts(cell_dir):
         # The scoreboard reports actual wall beside the granted wall, so an
         # early backend termination remains a visible model outcome. Discarding

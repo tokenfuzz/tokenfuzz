@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
 import json
 import os
 import re
@@ -458,6 +459,47 @@ raise SystemExit(23)
                 (facade / "output" / self.slug / "target.toml").read_bytes(),
                 original,
             )
+
+    def test_a_provider_cut_direct_cell_is_excluded_not_scored_short(self) -> None:
+        # A harness cell pauses through a capacity event and excludes the
+        # pause from its wall; the direct CLI just exits. Retaining what it
+        # filed as backend_terminated scored a provider outage at a truncated
+        # wall beside full-budget harness cells.
+        cell = self.work / "direct-cell"
+        cell.mkdir()
+
+        def cut_short(*_args, **_kwargs):
+            (cell / "findings" / "FIND-0001").mkdir(parents=True)
+            (cell / "findings" / "FIND-0001" / "report.md").write_text(
+                "# finding\n\nreal body\n", encoding="utf-8")
+            (cell / "backend.raw.log").write_text(json.dumps({
+                "type": "error", "api_error_status": 429, "message": "rate limited",
+            }) + "\n", encoding="utf-8")
+            return 1
+
+        with mock.patch.object(
+            benchmark_runner.benchmark_model_direct_render, "render", return_value="prompt",
+        ), mock.patch.object(
+            benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=cut_short,
+        ), mock.patch.object(
+            benchmark_runner.subprocess, "run",
+            return_value=SimpleNamespace(stdout="{}", returncode=0),
+        ), mock.patch.object(
+            benchmark_runner, "_reap_cell_processes",
+        ), mock.patch.object(
+            benchmark_runner, "_target_artifact_guard",
+            lambda *_args: contextlib.nullcontext(),
+        ):
+            rc = benchmark_runner.run_model_direct(
+                cell, self.target, "codex", "", 60,
+            )
+        self.assertEqual(rc, 0)
+        self.assertTrue((cell / ".backend-unavailable").is_file())
+        self.assertFalse((cell / ".backend-terminated").exists())
+        self.assertIn(
+            benchmark.cell_run_quality(cell, "incomplete"),
+            benchmark.NONCOMPARABLE_RUN_QUALITIES,
+        )
 
     def test_agent_flags_harness_facade_and_cleanup(self) -> None:
         unlimited = llm_invoke.agent_flags("claude", max_turns=0, add_dirs="/tmp")
