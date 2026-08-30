@@ -64,7 +64,7 @@ with tempfile.TemporaryDirectory() as td:
     (p / "notes.txt").write_bytes(b"just notes")  # ambiguous .txt without stem prefix
     (p / "input.empty").write_bytes(b"")
     (p / "testcase.py").write_text(
-        "# TARGET: src/module.py\n# HYPOTHESIS-ID: H9\nprint('probe')\n"
+        "# TARGET: src/module.py\n# HYPOTHESIS-ID: H-9f1c2d3e4a\nprint('probe')\n"
     )
     (p / "helper.py").write_text("print('not a testcase')\n")
 
@@ -83,6 +83,19 @@ with tempfile.TemporaryDirectory() as td:
               "header-bearing managed-language testcase is recognized")
     assert_eq(1, run(["testcase-mode", str(p / "helper.py")]).returncode,
               "unmarked source helper is not treated as a testcase")
+
+    # The id shape is the one `bin/state add-hyp` mints: "H-" + a sha1 prefix.
+    # A pattern that only accepted digits read every real testcase as "not a
+    # testcase" and promoted none of them, while these fixtures stayed green on
+    # an id the harness never generates. Assert the real shapes by name so a
+    # narrowing fails here instead of downstream.
+    for index, header_id in enumerate(("H-7ce1f8ae01", "H-0a1b2c3d4e", "H12345")):
+        marked = p / f"minted-{index}.py"
+        marked.write_text(
+            f"# TARGET: src/module.py\n# HYPOTHESIS-ID: {header_id}\nprint('probe')\n"
+        )
+        assert_eq("generic", run(["testcase-mode", str(marked)]).stdout.strip(),
+                  f"harness-minted hypothesis id {header_id} is recognized")
 
 
 # ── count-asan-runs + has-verified-asan ──────────────────────────────
@@ -158,7 +171,7 @@ with tempfile.TemporaryDirectory() as td:
     # crashing run that should be excluded.
     promotable = scratch / "tc-1.html"
     promotable.write_text(
-        "<!-- HYPOTHESIS-ID: H42 -->\n"
+        "<!-- HYPOTHESIS-ID: H-42ab7c9d10 -->\n"
         "<!-- TARGET: src/lib/parser.cpp -->\n"
         "<!-- CATEGORY: bounds -->\n"
         "<html></html>"
@@ -170,7 +183,7 @@ with tempfile.TemporaryDirectory() as td:
 
     crashing = scratch / "tc-2.html"
     crashing.write_text(
-        "<!-- HYPOTHESIS-ID: H43 -->\n"
+        "<!-- HYPOTHESIS-ID: H-43be8f2a11 -->\n"
         "<!-- TARGET: src/lib/parser.cpp -->\n"
         "<html></html>"
     )
@@ -178,7 +191,7 @@ with tempfile.TemporaryDirectory() as td:
 
     no_new_edges = scratch / "tc-3.html"
     no_new_edges.write_text(
-        "<!-- HYPOTHESIS-ID: H44 -->\n"
+        "<!-- HYPOTHESIS-ID: H-44cf9a3b12 -->\n"
         "<!-- TARGET: src/other.cpp -->\n"
         "<html></html>"
     )
@@ -204,7 +217,7 @@ with tempfile.TemporaryDirectory() as td:
     ok((cover / "tc-1.html").is_file(), "testcase copied")
     ok((cover / "tc-1.asan.txt").is_file(), "asan sidecar copied")
     meta_text = (cover / "metadata.md").read_text()
-    ok("H42" in meta_text and "bounds" in meta_text and "new=3" not in meta_text,
+    ok("H-42ab7c9d10" in meta_text and "bounds" in meta_text and "new=3" not in meta_text,
        "metadata contains hypothesis + category", meta_text[:200])
     ok("**New edges contributed:** 3" in meta_text, "new-edge count recorded", meta_text[:300])
 
@@ -225,7 +238,7 @@ with tempfile.TemporaryDirectory() as td:
     idx_text = (corpus / "INDEX.md").read_text()
     ok("COVER-001-7" in idx_text, "index lists promoted COVER", idx_text)
     ok("COVER-002-7" in idx_text, "index lists same-name changed input", idx_text)
-    ok("H42" in idx_text, "index includes hypothesis column", idx_text)
+    ok("H-42ab7c9d10" in idx_text, "index includes hypothesis column", idx_text)
 
     # CORPUS_REQUIRE_NEW_EDGES=0 should also promote new=0 testcases.
     os.environ["CORPUS_REQUIRE_NEW_EDGES"] = "0"
@@ -267,7 +280,7 @@ with tempfile.TemporaryDirectory() as td:
     for i in range(n_cases):
         tc = scratch / f"tc-{i:02d}.html"
         tc.write_text(
-            f"<!-- HYPOTHESIS-ID: H{i:02d} -->\n"
+            f"<!-- HYPOTHESIS-ID: H-{i:02d}ab7c9d10 -->\n"
             f"<!-- TARGET: src/lib/parser.cpp -->\n"
             f"<!-- CATEGORY: bounds -->\n"
             f"<html></html>"

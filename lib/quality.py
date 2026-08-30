@@ -41,7 +41,7 @@ Subcommands (run as `python3 lib/quality.py <name> ...`):
   promote-corpus <hits_log> <scratch_dir> <corpus_root> <agent_num>
       Walk a hits.log, copy promotable testcases (plus their .asan.txt)
       into the corpus under COVER-NNN-<agent_num>/, and emit one tally
-      line `promoted=N skipped_no_asan=N skipped_crashing=N
+      line `promoted=N skipped_no_asan=N skipped_not_clean=N skipped_crashing=N
       skipped_no_header=N skipped_no_new_edges=N` to stdout.
 
   regenerate-corpus-index <corpus_root>
@@ -116,7 +116,14 @@ _CLEAN_EVIDENCE_RE = re.compile(
 # the sanitizer proceeds, and its evidence follows on later lines.
 _COVERAGE_MISSED_RE = re.compile(r"COVERAGE_GATE: MISSED(?!.*sanitizer proceeding)")
 _HIT_LINE_RE = re.compile(r"^HIT:")
-_HID_RE = re.compile(r"HYPOTHESIS-ID:\s*(H[0-9]+)")
+# `bin/state add-hyp` mints `H-` + a 10-char sha1 prefix, and an agent may
+# pass its own with --id, so a real header reads `HYPOTHESIS-ID: H-7ce1f8ae01`.
+# The previous `H[0-9]+` matched no id the harness has ever generated, which
+# cost two things silently: every promotable testcase failed this check, so
+# 30 recorded coverage HITs across every run on disk promoted nothing; and
+# `testcase_mode_for_file` uses the same pattern to recognise a source-extension
+# testcase, so those were not counted as testcases or swept for orphans.
+_HID_RE = re.compile(r"HYPOTHESIS-ID:\s*(H-?[A-Za-z0-9][A-Za-z0-9._-]*)")
 _TARGET_RE = re.compile(r"^[^A-Za-z]*TARGET:\s*(.+?)(?:\s*(?:-->|\*/)\s*)?$")
 _CATEGORY_RE = re.compile(r"^[^A-Za-z]*(?:CATEGORY|INTENT):\s*(.+?)(?:\s*(?:-->|\*/)\s*)?$")
 _C_FAMILY_HARNESS_EXTS = frozenset((".c", ".cc", ".cpp", ".cxx"))
@@ -425,13 +432,14 @@ def _cmd_promote_corpus(args) -> int:
     require_new_edges = os.environ.get("CORPUS_REQUIRE_NEW_EDGES", "1") != "0"
 
     if not os.path.isfile(hits_log):
-        print("promoted=0 skipped_no_asan=0 skipped_crashing=0 skipped_no_header=0 skipped_no_new_edges=0")
+        print("promoted=0 skipped_no_asan=0 skipped_not_clean=0 skipped_crashing=0 skipped_no_header=0 skipped_no_new_edges=0")
         return 0
 
     os.makedirs(corpus_root, exist_ok=True)
 
     promoted = 0
     skipped_no_asan = 0
+    skipped_not_clean = 0
     skipped_crashing = 0
     skipped_no_header = 0
     skipped_no_new_edges = 0
@@ -452,7 +460,7 @@ def _cmd_promote_corpus(args) -> int:
     try:
         f = open(hits_log, "r", encoding="utf-8", errors="replace")
     except OSError:
-        print("promoted=0 skipped_no_asan=0 skipped_crashing=0 skipped_no_header=0 skipped_no_new_edges=0")
+        print("promoted=0 skipped_no_asan=0 skipped_not_clean=0 skipped_crashing=0 skipped_no_header=0 skipped_no_new_edges=0")
         return 0
 
     with f:
@@ -486,7 +494,12 @@ def _cmd_promote_corpus(args) -> int:
                 continue
 
             if not clean:
-                skipped_no_asan += 1
+                # Ran, but never completed cleanly: an input the target
+                # rejected reaches the site and still makes a poor seed. Kept
+                # apart from the missing-output count because the two name
+                # different repairs — one is a route that never produced
+                # evidence, the other is evidence saying the input was refused.
+                skipped_not_clean += 1
                 continue
 
             if crashing:
@@ -580,6 +593,7 @@ def _cmd_promote_corpus(args) -> int:
 
     print(
         f"promoted={promoted} skipped_no_asan={skipped_no_asan} "
+        f"skipped_not_clean={skipped_not_clean} "
         f"skipped_crashing={skipped_crashing} skipped_no_header={skipped_no_header} "
         f"skipped_no_new_edges={skipped_no_new_edges}"
     )
