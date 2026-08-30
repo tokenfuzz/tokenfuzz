@@ -426,6 +426,35 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         )
         self.assertEqual(finalized["report_sha1"], report_identity.content_sha1(self.report))
 
+    def test_a_not_reportable_finding_records_no_productive_card(self) -> None:
+        # A retained defect that crosses no security boundary earns no credit;
+        # recording it as card yield kept a dead lead open for the whole run.
+        with mock.patch.object(
+            triage, "_prepare_accepted_finding", return_value=self.report,
+        ), mock.patch.object(
+            triage, "_finding_trigger_disposition", return_value="accepted",
+        ), mock.patch.object(
+            triage_validate, "trigger_attacker_controls", return_value=["bytes"],
+        ), mock.patch.object(
+            triage, "evaluate_crash_verdict",
+            return_value=("out-of-model", "trigger outside bytes"),
+        ), mock.patch.object(
+            triage, "_trigger_publication_evidence", return_value=(set(), {}),
+        ), mock.patch.object(
+            triage, "_score_final_report", side_effect=lambda _d, _r, _k, s, **_kw: s,
+        ), mock.patch.object(
+            triage, "_record_accepted_finding_card",
+        ) as record_productive:
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None,
+                ),
+                "accepted",
+            )
+        record_productive.assert_not_called()
+        receipt = json.loads((self.finding / "validation.json").read_text())
+        self.assertEqual(receipt["state"], "not-reportable")
+
     def test_harness_annotations_do_not_invalidate_semantic_content_key(self) -> None:
         base = "# State issue\n\nCaller-controlled data crosses a boundary.\n"
         generated = base + """

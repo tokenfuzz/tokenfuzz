@@ -3633,7 +3633,10 @@ def _finalize_accepted_finding(
     )
     if state == "pending":
         return "pending"
-    _record_accepted_finding_card(finding_dir, results_dir)
+    # A retained defect that crosses no security boundary is not yield: the
+    # not-reportable branch above records no card, and neither does this one.
+    if state in validation_receipt.SECURITY_STATES:
+        _record_accepted_finding_card(finding_dir, results_dir)
     return "accepted"
 
 
