@@ -1447,6 +1447,15 @@ def detect_web_vuln(text_lower: str) -> tuple[str, str] | None:
 # replacement by the quality gate's validated class when no report field or
 # runtime diagnostic already supplied a stronger classification. info_leak is
 # excluded because it also represents a precise MSan diagnostic.
+# Labels detect_primitive gives a prose-only keyword ("leaks", "type
+# confusion") when no diagnostic or structured field names the class. They are
+# a conservative guess, not a classification, so a two-reviewer validated class
+# replaces them the way it replaces an unknown primitive; otherwise a validated
+# disclosure finding scored lower for saying "leaks" than for neutral wording.
+_PROSE_FALLBACK_LABELS = frozenset({
+    "unconfirmed uninitialized read", "type-state mismatch",
+})
+
 _NARRATIVE_ONLY_PRIMITIVES = frozenset({
     "code_execution", "command_injection", "deserialization", "sqli", "ssti",
     "authn_bypass", "authz_bypass", "idor", "sandbox_escape", "ssrf",
@@ -2073,7 +2082,9 @@ def compute_severity(
             prim_label = class_label
             structured_authoritative = True
     if report_dir is not None and not structured_authoritative and (
-        prim_key == "unknown" or prim_key in _NARRATIVE_ONLY_PRIMITIVES
+        prim_key == "unknown"
+        or prim_key in _NARRATIVE_ONLY_PRIMITIVES
+        or prim_label in _PROSE_FALLBACK_LABELS
     ):
         validated_primitive, validated_class = _accepted_finding_primitive(report_dir)
         if validated_primitive in CVSS4_CLASS:

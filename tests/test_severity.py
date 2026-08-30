@@ -902,6 +902,27 @@ class SeverityTests(unittest.TestCase):
         (review / ".llm-find-quality.json").write_text("[]\n")
         self.assertEqual(self.score(review)["level"], "Needs review")
 
+    def test_validated_class_replaces_a_prose_keyword_guess(self) -> None:
+        # "leaks" alone lands in the conservative small-read tier; a validated
+        # disclosure class must replace that guess, or the same finding scores
+        # lower for its wording than for neutral prose.
+        quality = json.dumps({
+            "decision_version": severity.report_identity.FIND_QUALITY_DECISION_VERSION,
+            "accept": True, "accept_count": 2, "class": "info-disclosure:heap",
+        })
+        worded = self.make_report(
+            "The handler leaks 32 bytes of heap to the remote client.",
+            report_id="FIND-LEAK-WORDED", finding=True,
+        )
+        (worded / ".llm-find-quality.json").write_text(quality)
+        neutral = self.make_report(
+            "The handler returns 32 bytes of heap to the remote client.",
+            report_id="FIND-LEAK-NEUTRAL", finding=True,
+        )
+        (neutral / ".llm-find-quality.json").write_text(quality)
+        self.assertEqual(self.score(worded)["primitive_key"], "info_leak")
+        self.assertEqual(self.score(worded)["score"], self.score(neutral)["score"])
+
     def test_validated_class_aliases_preserve_consequence(self) -> None:
         aliases = {
             "boundary:path-traversal": "path_traversal",
