@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -657,6 +658,30 @@ def handoff_directive(context: PromptContext, agent: int) -> str:
     return "\n".join(lines)
 
 
+def _peer_holds_a_lease(context: PromptContext, agent: int) -> bool:
+    """Whether another worker currently leases a work card.
+
+    Only then would unassigned review duplicate an owner's work. A queue whose
+    cards are all blocked or outside every lane is dry, not leased, and the
+    primary discovery slot exists for exactly that queue.
+    """
+    try:
+        queue_context = workqueue.Context(
+            SCRIPT_ROOT, context.target_root, context.target_slug,
+            context.results_dir,
+            context.repo_type or target_config.detect_repo_type(context.target_root),
+        )
+        ttl = workqueue.work_card_claim_ttl()
+        now = datetime.now(timezone.utc)
+        return any(
+            workqueue.claim_blocks_card(row, ttl, now)
+            and str(row.get("agent", "")) != str(agent)
+            for row in workqueue.latest_claims_by_card(queue_context).values()
+        )
+    except (OSError, ValueError):
+        return False
+
+
 def cold_start_prompt(context: PromptContext, agent: int) -> str:
     mode = context.mode(agent)
     strategy = context.strategy(agent)
@@ -676,13 +701,16 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
         if context.fixed_strategy else ""
     )
     # A cold slot with no card, no handoff, and no fuzz lead has nothing this
-    # session can work: the queue's cards are all leased or ineligible, so
-    # unassigned source review would duplicate their owners. The other two
-    # sources are checked because audit_runner.should_skip_launch launches on
-    # them, and agent 1 launches on nothing at all -- exiting without asking
-    # would silently drop the work those launches exist for.
+    # session can work when a peer leases the queue's cards: unassigned source
+    # review would duplicate their owners. A dry queue -- every card blocked or
+    # outside the lanes -- is what the primary discovery slot exists for, so
+    # nobody is told to quit on it. The other two sources are checked because
+    # audit_runner.should_skip_launch launches on them, and agent 1 launches
+    # on nothing at all -- exiting without asking would silently drop the work
+    # those launches exist for.
     if (
         queue_has_cards and not card_directive
+        and _peer_holds_a_lease(context, agent)
         and not handoff_rows(context, agent)
         and fuzz_leads_empty(context.results_dir)
     ):

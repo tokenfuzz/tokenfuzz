@@ -373,6 +373,40 @@ class SharedPolicyAgreementTests(unittest.TestCase):
         self.assertNotIn("fill the same-subsystem queue to 3-5 hypotheses", rendered)
         self.assertNotIn("No work card is assigned", with_lead)
 
+    def test_a_dry_queue_keeps_the_primary_discovery_slot(self) -> None:
+        # Nobody leases anything: the only card is blocked. Telling agent 1 to
+        # quit here spent its launch every iteration and the run died on
+        # MAX_DRY instead of using the discovery slot the launch exists for.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            results = root / "results"
+            target = root / "target"
+            references = root / "references"
+            target.mkdir()
+            references.mkdir()
+            queue_context = workqueue.Context(
+                ROOT, target, "sampleproj", results, "none",
+            )
+            workqueue.init_state(queue_context)
+            card = {
+                "id": "WORK-ONLY", "kind": "ranked-source",
+                "file": "src/parser.c", "subsystem": "src",
+                "strategy": "S7", "mode": "generic", "score": 10,
+                "reason": "parser boundary", "auditable": True,
+            }
+            workqueue.write_cards(results / "work-cards.jsonl", [card])
+            workqueue.append_jsonl(results / "state" / "claims.jsonl", {
+                "card_id": "WORK-ONLY", "agent": "2", "status": "blocked",
+                "updated_at": workqueue.now_iso(), "source": "manual",
+            })
+            context = prompt.PromptContext(
+                results_dir=results, target_root=target,
+                target_slug="sampleproj", reference_dir=references,
+                num_agents=3, fixed_strategy="",
+            )
+            rendered = prompt.cold_start_prompt(context, 1)
+        self.assertNotIn("No work card is assigned", rendered)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
