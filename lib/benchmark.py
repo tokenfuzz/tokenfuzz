@@ -6853,7 +6853,8 @@ def resolve_reverify_lines(
         library_relative = config.sanitizer_lib(sanitizer)
 
     if (
-        harness_source is None
+        harness is None
+        and harness_source is None
         and testcase is not None
         and not testcase_from_header
         and library_relative

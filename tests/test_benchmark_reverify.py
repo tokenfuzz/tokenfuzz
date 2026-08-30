@@ -1565,6 +1565,25 @@ class BenchmarkReverifyTests(unittest.TestCase):
             benchmark_runner._resolve_reverify_fields(crash, target, slug),
         )
 
+    def test_a_compiled_harness_keeps_a_source_shaped_testcase(self) -> None:
+        # The driver is already compiled, so a main()-bearing `repro.c` beside
+        # it is the input it reads, not a second driver to classify; reading
+        # it as one replayed the harness with no argument at all.
+        target, slug = self.make_target(
+            "compiled-harness-bundle", library="build-asan/libtarget.a",
+        )
+        crash = self.make_crash("compiled-harness-bundle-cell")
+        (crash / "poc.bin").unlink()
+        shutil.copy2(sys.executable, crash / "harness")
+        (crash / "repro.c").write_text(
+            "#include <stdio.h>\nint main(void) { return 0; }\n", encoding="utf-8",
+        )
+        resolved = benchmark_runner._resolve_reverify_fields(crash, target, slug)
+        self.assertIsNotNone(resolved)
+        fields, _ = resolved
+        self.assertEqual(fields["MODE"], "harness")
+        self.assertEqual(fields["TESTCASE"], str(crash / "repro.c"))
+
     def test_a_source_consuming_target_still_replays_its_source_input(self) -> None:
         """The same file is genuinely the input when nothing links a harness.
 
