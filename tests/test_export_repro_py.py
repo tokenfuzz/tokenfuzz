@@ -544,6 +544,15 @@ assert_in('-L "$link_lib_0"', framework_args,
           "link_libs: split -L path resolves through a link variable")
 assert_in('link_lib_0="$build"/lib', framework_resolves,
           "link_libs: split -L path uses the build resolver")
+# A shell expansion after a path-taking option is not a target path: it used
+# to gain a link_lib resolver that prefixed it with the target root.
+sysroot_resolves, sysroot_args = er.emit_link_libs_with_resolves(
+    ["-isysroot", "$(xcrun --show-sdk-path)"], "asan"
+)
+assert_in("$(xcrun --show-sdk-path)", sysroot_args,
+          "link_libs: a shell expansion after -isysroot passes through verbatim")
+assert_not_in("link_lib_", sysroot_resolves,
+              "link_libs: a shell expansion is not resolved as a target path")
 # Numbering increments for multiple archives.
 resolves2, args2 = er.emit_link_libs_with_resolves(
     ["build-asan/lib/libfoo.a", "build-asan/lib/libbar.a"], "asan"

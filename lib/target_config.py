@@ -3686,7 +3686,9 @@ def link_arg_path_roles(values: list[str]) -> list[tuple[str, bool]]:
     roles: list[tuple[str, bool]] = []
     path_operand = False
     for value in values:
-        is_path = bool(value) and (
+        # `$` marks a shell expansion (`-isysroot $(xcrun --show-sdk-path)`),
+        # never a target-relative path, whichever option precedes it.
+        is_path = bool(value) and "$" not in value and (
             path_operand or (
                 not value.startswith("-") and _link_value_looks_like_path(value)
             )
