@@ -1235,11 +1235,20 @@ def coverage_library(config, sanitizer: str) -> LibraryChoice:
     tree = f"build-{sanitizer}{os.environ.get('AUDIT_BUILD_SUFFIX', '')}"
     sibling_tree = tree + COVERAGE_TREE_SUFFIX
     sibling = Path(str(plain).replace(f"/{tree}/", f"/{sibling_tree}/", 1))
+    stale = ""
     if str(sibling) != str(plain) and sibling.is_file():
-        return LibraryChoice(
-            str(sibling), sibling_tree, is_coverage_instrumented(sibling))
+        # A sibling built from other source than the primary fuzzes code the
+        # replay does not run: its artifacts then fail to reproduce against the
+        # build every verdict is measured on. bin/hits already declines it.
+        import coverage_build  # imports this module; resolved at call time
+        stale = coverage_build.stale_reason(
+            Path(config.target_root), sanitizer, COVERAGE_TREE_SUFFIX,
+        )
+        if not stale:
+            return LibraryChoice(
+                str(sibling), sibling_tree, is_coverage_instrumented(sibling))
     instrumented = is_coverage_instrumented(plain)
-    return LibraryChoice(plain, tree, instrumented, remedy="" if instrumented else (
+    return LibraryChoice(plain, tree, instrumented, remedy=stale or ("" if instrumented else (
         f"{Path(plain).name} carries no SanitizerCoverage, so libFuzzer will "
         f"run blind — it cannot tell that an input reached new code. "
         f"`bin/setup-target --build` builds a sibling tree with coverage on "
@@ -1252,7 +1261,7 @@ def coverage_library(config, sanitizer: str) -> LibraryChoice:
         f"The sibling never replaces {tree}/: it is pruned from the source "
         f"walk that decides build freshness and it takes its own build lease, "
         f"so no other backend's run is disturbed by building or using it."
-    ))
+    )))
 
 
 # ── Out-of-tree build ───────────────────────────────────────────────

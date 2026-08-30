@@ -1268,6 +1268,34 @@ class BuildSelectionTests(unittest.TestCase):
         self.assertTrue(chosen["binary"].endswith("current"))
 
 
+class CoverageLibraryTests(unittest.TestCase):
+    """The campaign links the library its artifacts will be replayed against."""
+
+    def test_a_stale_sibling_falls_back_to_the_plain_build(self) -> None:
+        # A sibling built from other source than the primary fuzzes code the
+        # replay never runs, so every artifact fails to reproduce; bin/hits
+        # already declines such a sibling and the campaign must agree.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw) / "src"
+            for tree in ("build-asan", "build-asan+fuzz"):
+                (root / tree).mkdir(parents=True)
+                (root / tree / "libx.a").write_bytes(b"!<arch>\n")
+                (root / tree / ".audit-build-stamp").write_text(
+                    "rev\nsig-a\nrecipe\n", encoding="utf-8")
+            config = config_for(root, ["bytes"])
+            config.asan_lib = "build-asan/libx.a"
+            with mock.patch.object(
+                fuzz_harness, "is_coverage_instrumented", return_value=True,
+            ):
+                fresh = fuzz_harness.coverage_library(config, "asan")
+                (root / "build-asan+fuzz" / ".audit-build-stamp").write_text(
+                    "rev\nsig-b\nrecipe\n", encoding="utf-8")
+                stale = fuzz_harness.coverage_library(config, "asan")
+        self.assertEqual(fresh.tree, "build-asan+fuzz")
+        self.assertEqual(stale.tree, "build-asan")
+        self.assertIn("different source", stale.remedy)
+
+
 class ChosenSanitizerTests(unittest.TestCase):
     """S4 needs a native build; saying otherwise fails later and worse."""
 
