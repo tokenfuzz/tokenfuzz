@@ -616,7 +616,8 @@ class Setup:
         )
         try:
             target_config.load_toml_into(fresh, self.toml)
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            log(f"WARN: runner reachability check skipped: {self.toml} could not be read ({exc})")
             return
         skipped = runner_canary.skip_reason(fresh)
         if skipped:
