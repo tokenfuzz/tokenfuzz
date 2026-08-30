@@ -121,7 +121,7 @@ than filing the run as contained.
 
 | Backend | `sandboxed` | What it enforces, or why it is refused |
 | --- | --- | --- |
-| Claude Code | Supported | Writes confined to the workspace (cwd plus `--add-dir`, granted in both the spelling asked for and its resolved path, since the sandbox matches resolved paths and the benchmark facade reaches the target tree by symlink); outbound network and DNS blocked; loopback kept open so local client/server harnesses still probe; web tools denied; unsandboxed commands denied and an unavailable sandbox is a hard error. |
+| Claude Code | Supported | Writes confined to the workspace (cwd plus `--add-dir`, each granted by its resolved path, since the sandbox matches resolved paths and the benchmark facade reaches the target tree by symlink); outbound network and DNS blocked; loopback kept open so local client/server harnesses still probe; web tools denied; unsandboxed commands denied and an unavailable sandbox is a hard error. |
 | Codex | Supported | `workspace-write` with `approval_policy="never"`: writes confined to the workspace roots the harness supplies, reads unrestricted, and **all** network blocked — including loopback, which it has no setting to re-open. |
 | Antigravity (`agy`) | Refused | Its terminal sandbox runs commands in a scratch directory, refuses writes to the launch directory, denies reads outside it, and auto-denies its file-writing tool headless. An audit could neither read the target nor file a result. |
 | Google Gemini CLI | Refused | Its container mounts only the launch directory — `--include-directories` adds workspace context, not a mount — so a cell runs blind to the target. Its macOS profile allows outbound network. |
@@ -169,17 +169,10 @@ grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
 bin/audit --target <target> --backend grok --agent-security external-bypass 1
 ```
 
-TokenFuzz uses headless streaming JSON, disables nested Grok subagents, applies
-the configured reasoning effort, and resumes the CLI session on later
-iterations. Grok's stream may not expose measured token counts; when it does
-not, usage reports label estimates rather than presenting them as measured.
-
-### Google Gemini CLI ripgrep
-
-When `USE_GEMINI_CLI=1`, some npm installations lack the CLI's vendored
-`ripgrep` binary. TokenFuzz warns with the path it checked. Repair or reinstall
-the Gemini CLI rather than changing TokenFuzz's source-search commands. The
-default Antigravity (`agy`) path does not use this bundle layout.
+TokenFuzz uses headless streaming JSON, disables nested Grok subagents, and
+applies the configured reasoning effort; every iteration is a fresh session.
+Grok's stream may not expose measured token counts; when it does not, usage
+reports label estimates rather than presenting them as measured.
 
 ## Containerised backend shell
 

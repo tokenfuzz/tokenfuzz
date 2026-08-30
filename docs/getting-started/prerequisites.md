@@ -192,8 +192,8 @@ container as privileged or mount the Docker socket into it.
 
 ## If preflight fails
 
-`bin/audit` names missing tools and invalid configuration before launching an
-agent. Install the named dependency, verify the target can build outside the
+`bin/audit` names an uninstalled backend and invalid configuration before
+launching an agent. Install the named dependency, verify the target can build outside the
 harness, then rerun the one-iteration command. See
 [Troubleshooting](../reference/troubleshooting.md) for sanitizer, runner, and
 backend failures.

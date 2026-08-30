@@ -20,12 +20,12 @@ failed.
 Symptom:
 
 ```text
-FATAL: missing required tool(s): ...
+FATAL: backend '<name>' is not installed or configured
 ```
 
 Fix:
 
-1. Install the named tools.
+1. Install and log in to the named backend CLI, or pass a `--backend` that is.
 2. Re-run:
 
    ```bash
@@ -95,8 +95,8 @@ output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
 Common reasons:
 
 - Report fields are missing.
-- The crash is OOM, assertion-only abort, timeout-only behaviour,
-  or a plain null dereference.
+- The crash is OOM, an assertion-only abort, or a plain null
+  dereference (a timeout is a probe verdict and is never filed).
 - The testcase violates a caller contract that real product input
   cannot violate.
 

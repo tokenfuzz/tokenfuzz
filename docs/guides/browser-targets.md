@@ -68,8 +68,8 @@ particular, a GN checkout that uses an external dependency client must be
 synced before setup; TokenFuzz does not replace project-specific source
 bootstrap tooling.
 
-Coverage gating (`bin/hits`) currently speaks only the Firefox command line
-and looks for `dist/Nightly.app/Contents/MacOS/XUL` on macOS or
+Browser-mode coverage gating (`bin/hits --mode browser`) speaks the Firefox
+command line and looks for `dist/Nightly.app/Contents/MacOS/XUL` on macOS or
 `dist/bin/libxul.so` on Linux — override with `COV_XUL`. Other browser targets
 run without the coverage pre-check; every probe spends a sanitizer run
 directly.

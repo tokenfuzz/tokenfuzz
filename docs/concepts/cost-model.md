@@ -61,10 +61,10 @@ A typical "look at this function" turn stays under a few KiB of new
 context. Agents that bypass the wrappers get the same output ceiling
 applied automatically.
 
-The same principle applies to probe output: `bin/probe` truncates an
-oversized sanitizer log before classification, keeping the head and
-tail where the summary lives, so a multi-megabyte log never lands in
-the conversation.
+The same principle applies to probe output: `bin/probe` classifies the
+whole sanitizer log, then truncates an oversized one for storage,
+keeping the head and tail where the summary lives, so a multi-megabyte
+log never lands in the conversation.
 
 ## Structured state over transcripts
 

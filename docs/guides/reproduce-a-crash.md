@@ -114,7 +114,7 @@ project-specific preparation first.
 ### Common one-off overrides
 
 ```bash
-CC=clang-18 ./reproduce.sh /path/to/checkout                   # pin compiler
+CC=clang-18 ./reproduce.sh /path/to/checkout                   # pin compiler (CMake bundles; other recipes pin clang)
 REPRO_AUTO_CLONE=1 ./reproduce.sh                              # fresh clone
 ASAN_OPTIONS="abort_on_error=1" ./reproduce.sh /path/to/co     # extra runtime opts
 ```
@@ -174,7 +174,8 @@ recorded revision *is* affected, the most common causes are:
 
 - **A compiler or sanitizer version different from the recorded
   one.** Some heap-layout-dependent bugs need a specific Clang. Try
-  the version named in `REPORT.md`'s "Build" section.
+  the Clang the bundle's `reproduce.sh` selects (`clang` on `PATH`, or
+  `CC` for a CMake bundle) at the recorded target revision.
 - **A configure-time option that disables the affected code path**
   (`--without-zlib`, `--disable-foo`). Diff your configure flags
   against the ones in `reproduce.sh`.

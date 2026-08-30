@@ -87,8 +87,8 @@ attacker_controls = ["bytes"]
 
 One related field is *not* seeded: `defines`, compiler define flags
 for C/C++ harness builds (such as `-DFOO=1`). Add it by hand when a
-harness build needs it — or let the audit's automatic repair propose
-it after repeated harness build failures (see
+harness build needs it — or run `bin/auto-repair-target-toml` to
+propose it after repeated harness build failures (see
 [Target configuration](../guides/configure-target.md#c-harness-readiness)).
 
 Which fields you need depends on what the run will do:

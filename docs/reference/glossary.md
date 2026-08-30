@@ -41,8 +41,8 @@ result means. See
 **REF.** Shared grep recipes used alongside any strategy. Not
 itself a strategy.
 
-**Rotation.** Switching an agent's current strategy after
-sustained dry effort. Effort-gated, not iteration-gated.
+**Rotation.** Switching an agent's current strategy after a run of
+dry iterations on it, once its notes show the strategy was worked.
 
 **Guard chain.** A repeating upstream error string ("Error:
 regexp too big", `NS_ERROR_…`) that blocks a run of testcases in
@@ -211,8 +211,8 @@ strand its card.
 
 **Subsystem.** The leading directories of a source file (`parser/xml`,
 `crypto/aes`, …) — never the file name, or a tree only that deep would
-give every file a subsystem of its own. Two agents are kept out of the
-same subsystem at once, so a run spreads across the tree.
+give every file a subsystem of its own. Ranking prefers not to put two
+agents in the same subsystem at once, so a run spreads across the tree.
 
 **Hypothesis.** A narrow, falsifiable claim about a specific
 `file:function:line` — the input shape that reaches it, the guard it

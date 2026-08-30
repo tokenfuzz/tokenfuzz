@@ -49,10 +49,10 @@ the strategy that fits:
 
 | What the file looks like | Primary strategy | Why |
 | --- | --- | --- |
-| Input consumers, deserializers, allocation/resize paths, command-injection or XXE surfaces, raw memory calls | **S7** Adversarial input | Byte- and shape-driven code. Existing seeds and hand-written boundary inputs pay off; fuzz harnesses belong to S4. |
+| Input consumers, deserializers, allocation/resize paths, raw memory calls | **S7** Adversarial input | Byte- and shape-driven code. Existing seeds and hand-written boundary inputs pay off; fuzz harnesses belong to S4. |
 | Lifetime / ownership operations, unsafe escape hatches, concurrency primitives | **S5** Lifetime and state | The interesting input is a sequence, teardown path, callback order, or interleaving. |
 | Assert / check / panic / precondition families | **S2** Invariant negation | The code already states the condition to challenge. |
-| Exported APIs, cast-heavy paths, size arithmetic | **S3** Spec vs. implementation | Contract, type, and size-boundary surfaces. |
+| Exported APIs, cast-heavy paths, size arithmetic, command-injection or XXE surfaces | **S3** Spec vs. implementation | Contract, type, and size-boundary surfaces. |
 | Encode/decode, compress/inflate, marshal/unmarshal, encrypt/decrypt, normalise/canonicalise/sanitise/dedupe pairs, hashers / fingerprinters / id-key generators, and declared numerical-domain functions (non-negative / finite / probability / clamp) | **S8** Property-based oracles | The code carries its own inverse, idempotence, injectivity, or numerical-domain oracle. |
 | Prior-fix patch card | **S1** Prior-fix and regression variant | The fix tells you the old wrong assumption and the likely sibling sites. |
 | Peer-project fix card | **S6** Cross-project variant mining | Another implementation already disclosed the shape worth checking. |
@@ -88,19 +88,12 @@ highest-ranked card on a file the window does not already hold, one
 buildability tier at a time. Every strategy keeps a share, and the slots buy
 distinct files.
 
-The angles the dropped companions carried are not lost: a selected card lists
-the strategies its dropped same-file siblings held, so an agent on any of them
-can claim that file. One card, every angle the file signalled.
-
-That carried list matters because nothing recreates a dropped card later. The
-claim path reads only persisted cards, and the productive-agent relaxation
-(below) lifts a subsystem restriction on cards that already exist rather than
-minting new ones. Without the list, a file would stay reachable under exactly
-one strategy for the whole run.
-
-The one thing this costs is concurrency: two agents can no longer hold the same
-file under different strategies at once, because there is a single card to
-claim.
+Each angle a file signals is its own card: a file that reads as both S7 and
+S5 material yields one card per strategy, and each is claimed, worked, and
+closed on its own evidence. Collapsing them into one card made their
+completion state inseparable — a dry S7 pass retired the S5 angle with it.
+Two agents can therefore hold the same file under different strategies at
+once; the subsystem preference (below) keeps that from becoming the norm.
 
 A delta run (`bin/audit --since <rev>`) fills no window at all: every card
 on a file changed in `<rev>..HEAD`, or on a one-hop caller of one, is
@@ -151,14 +144,11 @@ not adopt stays available for the next iteration.
 
 ## Strategy rotation
 
-Rotation is **effort-gated, not iteration-gated** — the harness only
-rotates an agent off its current strategy once it has actually done
-work on it and come up dry. "Done work" means concrete evidence in
-structured state: discarded hypotheses, recorded probe runs,
-environment blockers, and strategy-specific output. *Notes alone do
-not complete a strategy.* S1 is held longer than the other
-strategies before rotation, since patch review often takes several
-iterations to bear fruit.
+An agent rotates off its current strategy after a run of dry iterations
+(three by default) once its notes carry that strategy's evidence keywords —
+so a strategy the agent never actually worked is not rotated away from. S1
+is held longer (eight dry iterations), since patch review often takes
+several iterations to bear fruit.
 
 When it does rotate, the agent moves to the method with the most
 unclaimed work that no other agent is currently running, so the fleet

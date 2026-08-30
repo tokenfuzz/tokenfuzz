@@ -121,11 +121,11 @@ A compiled `HARNESS:` testcase uses:
 - `link_libs`, including target-relative archives or source files;
 - the target source root.
 
-After repeated C/C++ harness build failures, the audit may propose a
-conservative additive repair to `includes`, `defines`, or `link_libs`. It saves
-a timestamped config backup and logs the change. Review the proposal; an
-automatic compile fix is not evidence that the harness is faithful to a public
-API contract.
+After repeated C/C++ harness build failures, `bin/auto-repair-target-toml
+<target>` proposes a conservative additive repair to `includes`, `defines`, or
+`link_libs`, saving a timestamped config backup and logging the change. It is
+run by hand; nothing in an audit invokes it. Review the proposal: a compile fix
+is not evidence that the harness is faithful to a public API contract.
 
 Harnesses may also be written in the other compiled or interpreted languages
 registered by `lib/languages.py`. Run `python3 lib/languages.py list` for the

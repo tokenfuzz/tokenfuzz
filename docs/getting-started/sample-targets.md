@@ -69,8 +69,9 @@ bin/audit --target samples/sample-python --backend <backend> 1
 
 **Sanitizer samples** need their instrumented build first. The C and C++
 samples build automatically during audit preflight. The Rust, Go, and
-C-extension samples use an ecosystem bootstrap you run explicitly (audit
-preflight never runs those):
+C-extension samples use an ecosystem bootstrap; preflight runs it only where
+the sample commits a `.audit/build.sh` recipe (Rust and the C extension do,
+Go does not), so run it yourself before the first audit:
 
 ```bash
 bin/setup-target samples/sample-rust --build --no-llm-config
@@ -82,9 +83,10 @@ hand-authored `target.toml` and build recipe, and rematerializes only the build
 output. Running `bin/setup-target ... --force` without `--build` still
 regenerates the config from scratch.
 
-`samples/sample-swift` is the exception that needs no build step — its
-`[runner]` compiles the package under AddressSanitizer on every run, so a
-sanitizer diagnostic routes to `crashes/` like a C target would.
+`samples/sample-swift` is the exception that needs no build step — runner
+preflight builds the package under AddressSanitizer once and every run
+replays through that product, so a sanitizer diagnostic routes to `crashes/`
+like a C target would.
 
 Results land in the usual place — `output/samples/sample-rust/<backend>/results/`
 — and are read exactly as [Triage and review](../guides/triage-results.md)
