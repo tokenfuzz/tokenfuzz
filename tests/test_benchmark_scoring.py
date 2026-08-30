@@ -17,6 +17,7 @@ MANIFEST = ROOT / "output" / "canary" / ".ground-truth.json"
 sys.path.insert(0, str(ROOT / "lib"))
 
 import benchmark
+import validation_receipt
 
 
 class BenchmarkScoringTests(unittest.TestCase):
@@ -98,6 +99,79 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(zero["recall"], 0.0)
         self.assertEqual(zero["confirmed_crashes"], 0)
         self.assertEqual(zero["missed"], ["heap-oob-write", "stack-oob-write", "use-after-free"])
+
+    def make_finding(self, run, finding_id, function, condition=None):
+        finding = run / "findings" / finding_id
+        finding.mkdir(parents=True)
+        (finding / "REPORT.md").write_text(
+            f"# {finding_id}\n\n| Field | Value |\n| --- | --- |\n"
+            f"| File | src/sample.c |\n| Function | {function} |\n| Line | 42 |\n\n"
+            "## Summary\n\nA report.\n",
+            encoding="utf-8",
+        )
+        validation_receipt.write(
+            finding, kind="finding", state="reportable", detail="fixture",
+            target_revision="rev", target_config_sha256="cfg",
+        )
+        return finding
+
+    def test_findings_only_bugs_are_scored_from_confirmed_findings(self) -> None:
+        manifest = {
+            "target": "sampleproj",
+            "planted_bugs": [
+                {"id": "crash-bug", "kind": "real", "primitive": "heap-buffer-overflow",
+                 "signature_symbol": "render_cell", "access": "WRITE"},
+                {"id": "secret-leak", "kind": "real", "findings_only": True,
+                 "primitive": "info-disclosure", "signature_symbol": "render_template"},
+                {"id": "path-escape", "kind": "real", "findings_only": True,
+                 "primitive": "path-traversal", "signature_symbol": "open_entry"},
+            ],
+            "false_positive_traps": [
+                {"id": "json-config", "kind": "fp", "expected_outcome": "clean",
+                 "signature_symbol": "parse_config"},
+            ],
+        }
+        path = self.root / "gt.json"
+        path.write_text(json.dumps(manifest))
+        run = self.root / "findrun"
+        self.make_finding(run, "FIND-0001-leak", "render_template")
+        self.make_finding(run, "FIND-0002-trap", "parse_config")
+        self.make_finding(run, "FIND-0003-novel", "app_other_func")
+        unconfirmed = run / "findings" / "FIND-0004-pending"
+        unconfirmed.mkdir()
+        (unconfirmed / "REPORT.md").write_text("| Function | open_entry |\n")
+        members = self.root / "find-members.json"
+        members.write_text(json.dumps({"findings": {
+            "FIND-0001-leak": "harness", "FIND-0002-trap": "model-direct",
+            "FIND-0003-novel": "harness",
+        }}))
+        (run / "crashes").mkdir()
+        proc, score = self.score(run, manifest=path, members=members,
+                                 conditions="harness,model-direct")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        findings = score["findings"]["overall"]
+        # The pending FIND is not confirmed, so open_entry stays missed.
+        self.assertEqual(findings["detected"], ["secret-leak"])
+        self.assertEqual(findings["missed"], ["path-escape"])
+        self.assertEqual(findings["recall"], 0.5)
+        self.assertEqual(findings["false_positive_traps_fired"], ["json-config"])
+        self.assertEqual(findings["open_world_findings"], ["FIND-0003-novel"])
+        # Precision counts traps against, and keeps open-world neutral.
+        self.assertEqual(findings["precision"], 0.5)
+        self.assertEqual(findings["confirmed_findings"], 3)
+        harness = score["findings"]["by_condition"]["harness"]
+        self.assertEqual((harness["recall"], harness["precision"]), (0.5, 1.0))
+        direct = score["findings"]["by_condition"]["model-direct"]
+        self.assertEqual((direct["recall"], direct["false_positive_findings"]), (0.0, 1))
+        # The crash oracle is untouched by findings-only bugs.
+        self.assertEqual(score["overall"]["real_total"], 1)
+        rendered = "\n".join(benchmark._render_ground_truth(score))
+        self.assertIn("Ground truth — findings", rendered)
+        self.assertIn("| **overall** | 50% | 1/2 | path-escape | 50% | 3 | json-config | 1 |", rendered)
+        rendered_only = "\n".join(benchmark._render_ground_truth(
+            {"not_scored": "findings-only", "findings": score["findings"]}))
+        self.assertIn("crashes not scored", rendered_only)
+        self.assertIn("Ground truth — findings", rendered_only)
 
     def test_prose_caller_and_allocation_frames_cannot_spoof_attribution(self) -> None:
         spoof = self.root / "spoof"

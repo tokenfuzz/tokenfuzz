@@ -267,7 +267,10 @@ count, edge/feature deltas, artifacts, verdict, reason, and log path survive
 resume. For a guided harness with a resolved receipt that later saturates,
 `bin/fuzz status` permits at most one contract-preserving derivative—one
 caller-controlled argument change or one source-grounded public call—built for
-the next iteration's campaign, never as a second campaign in this one. Blind harnesses, unresolved receipts, and harnesses with
+the next iteration's campaign, never as a second campaign in this one. On
+that row it also lists up to three **compatible APIs**: admitted public calls
+whose declaration shares a struct or handle type with the boundary, in reading
+order for the one call the derivative may add. They are hints, never cards. Blind harnesses, unresolved receipts, and harnesses with
 no receipt at all keep the generic widen-or-re-seed advice, and a failed
 derivative never closes or quarantines its parent.
 

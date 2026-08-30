@@ -1609,6 +1609,9 @@ def run_agent(
     turn_capped = llm_invoke.session_turn_capped(raw_path)
     tools, events = _tally_transcript(raw_path)
     ended_at = datetime.now(timezone.utc)
+    probe_stats = workqueue.probe_span_stats(
+        runtime.results, str(agent), launched_at, ended_at,
+    )
     event = {
         "timestamp": ended_at.isoformat(), "iteration": iteration,
         # Session span: occupancy is occupied seconds over seats × wall, and a
@@ -1621,6 +1624,9 @@ def run_agent(
         "turn_soft_cap": turn_cap,
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
         "tool_calls": tools, "transcript_events": events,
+        # Where the session's wall went, from state: reasoning before the
+        # first probe, seconds inside probes, and probes that paid.
+        **probe_stats,
         "raw_log": str(raw_path), "text_log": str(text_path), **usage,
     }
     workqueue.append_jsonl(runtime.index_jsonl, event)
@@ -1632,10 +1638,13 @@ def run_agent(
         else f"finished rc={rc}"
     )
     token_display = _token_display(usage, usage_complete)
+    first_probe = probe_stats.get("first_probe_seconds")
     index_log(
         runtime,
         f"Agent {agent} {launch} {outcome} provider={issue} "
-        f"tokens={token_display} log={text_path.name}",
+        f"tokens={token_display} probes={probe_stats['probes']}"
+        f"{'' if first_probe is None else f' first-probe={first_probe:.0f}s'}"
+        f" probe-seconds={probe_stats['probe_seconds']:.0f} log={text_path.name}",
     )
     return AgentResult(
         agent, role, rc, raw_path, text_path, usage, issue, reset_at, turn_capped,

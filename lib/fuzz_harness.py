@@ -695,6 +695,84 @@ def input_shapes(declaration: str) -> "set[str]":
 _WIDTH_SUFFIX_RE = re.compile(r"^(?P<base>\w+?)_(?P<width>\d{1,3})$")
 
 
+# Tokens after which the next identifier is still part of the type.
+_TYPE_TAILS = frozenset({"struct", "enum", "union", "unsigned", "signed",
+                         "long", "short"})
+
+
+def parameter_types(declaration: str) -> "set[str]":
+    """The parameter types a declaration names, without qualifiers or names.
+
+    ``cJSON *item, const char *string, size_t length`` reads as
+    ``{"cJSON *", "char *", "size_t"}``. Pointer depth is kept because a
+    ``char **`` is not the buffer a ``char *`` is.
+    """
+    match = re.search(r"\((?P<params>.*)\)\s*[^()]*$", declaration, re.S)
+    if not match:
+        return set()
+    types: "set[str]" = set()
+    for param in split_parameters(match.group("params")):
+        bare = _QUALIFIER.sub(" ", param)
+        if re.search(r"\(\s*\*", bare):
+            continue  # a callback is a contract, not a shape to share
+        bare, arrays = re.subn(r"\[[^\]]*\]", "", bare)  # an array parameter is a pointer
+        tokens = bare.replace("*", " * ").split()
+        # The parameter name is a trailing identifier after the type; type
+        # keywords that can end a type (`unsigned int`, `struct foo`) keep it.
+        if (
+            len(tokens) >= 2
+            and re.fullmatch(r"[A-Za-z_]\w*", tokens[-1])
+            and tokens[-2] not in _TYPE_TAILS
+        ):
+            tokens = tokens[:-1]
+        tokens.extend(["*"] * arrays)
+        text = " ".join(tokens)
+        text = re.sub(r"\s*\*", " *", text)
+        text = re.sub(r"\*\s+\*", "**", text).strip()
+        if text:
+            types.add(text)
+    return types
+
+
+# Shapes every C API takes; sharing one says nothing about compatibility.
+_GENERIC_TYPES = frozenset({
+    "char *", "unsigned char *", "void *", "int", "unsigned", "unsigned int",
+    "size_t", "long", "unsigned long", "uint8_t *", "uint8_t", "uint32_t",
+    "uint64_t", "int32_t", "int64_t", "bool", "double", "float",
+})
+
+
+def compatible_api_hints(boundary_declaration: str, candidates,
+                         *, exclude: str = "", limit: int = 3) -> "list[dict]":
+    """Admitted APIs that share a non-generic type with a boundary.
+
+    The one contract-preserving move after a guided harness saturates is to
+    add one more public call over the state the harness already builds. The
+    calls that can take that state are the ones whose declaration names the
+    same struct or handle type; a shared ``char *`` proves nothing, so it is
+    only a tie-break. Advisory reading order, never a card and never a gate.
+    """
+    wanted = parameter_types(boundary_declaration)
+    specific = wanted - _GENERIC_TYPES
+    scored: "list[tuple[int, int, str, dict]]" = []
+    for candidate in candidates:
+        if not getattr(candidate, "admitted", False):
+            continue
+        if candidate.symbol == exclude:
+            continue
+        theirs = parameter_types(candidate.declaration)
+        shared_specific = len(specific & theirs)
+        shared_generic = len((wanted & theirs) - specific)
+        if not shared_specific and not (specific == set() and shared_generic):
+            continue
+        scored.append((-shared_specific, -shared_generic, candidate.symbol, {
+            "symbol": candidate.symbol, "declaration": candidate.declaration,
+            "shared_types": sorted((specific & theirs) or (wanted & theirs)),
+        }))
+    scored.sort(key=lambda item: item[:3])
+    return [item[3] for item in scored[:limit]]
+
+
 def suffix_aliases(exported: "set[str]") -> "dict[str, str]":
     """Unsuffixed spelling -> the exported symbol it actually names.
 

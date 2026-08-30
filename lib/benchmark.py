@@ -49,6 +49,7 @@ import audit_helpers
 import cluster_common
 import crash_artifacts
 import crash_bundle
+import finding_signature
 import llm_usage
 import report_identity
 import telemetry
@@ -2427,6 +2428,105 @@ def manifest_errors(manifest: dict) -> list[str]:
     return errors
 
 
+def _finding_report_text(finding_dir: Path) -> str:
+    for name in ("REPORT.md", "report.md", "description.md", "analysis.md"):
+        path = finding_dir / name
+        if path.is_file():
+            try:
+                return path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+    return ""
+
+
+def _manifest_symbols(entry: dict) -> set[str]:
+    symbols = {str(entry.get("signature_symbol", "")).strip()}
+    alternates = entry.get("alternate_signatures", [])
+    if isinstance(alternates, list):
+        for alternate in alternates:
+            if isinstance(alternate, dict):
+                symbols.add(str(alternate.get("signature_symbol", "")).strip())
+    return {s for s in symbols if s}
+
+
+def score_findings_ground_truth(
+    findings_dir: Path,
+    manifest: dict,
+    members: dict | None = None,
+    conditions: list | None = None,
+    target_root: str = "",
+) -> dict:
+    """Score confirmed findings against the manifest's findings-only bugs.
+
+    The mirror of score_ground_truth for the artifacts the crash oracle
+    cannot grade: a planted bug marked ``findings_only`` surfaces under
+    ``findings/`` with no sanitizer artifact, so it is credited when a
+    confirmed FIND names its ``signature_symbol`` as the function at fault
+    (the same exact-site identity crashes use, read by finding_signature's
+    location extractor from the report's own fields). A confirmed finding at
+    a false-positive trap's symbol is a false positive. Every other confirmed
+    finding is *open-world*: real code has bugs the answer key never planted,
+    so those are listed and kept neutral — they neither prove recall nor
+    count against precision.
+    """
+    findings_dir = Path(findings_dir)
+    if (findings_dir / "findings").is_dir():
+        findings_dir = findings_dir / "findings"
+    members = members or {}
+    real = [
+        b for b in manifest.get("planted_bugs", [])
+        if isinstance(b, dict) and b.get("kind", "real") == "real"
+        and b.get("findings_only")
+    ]
+    traps = [
+        t for t in manifest.get("false_positive_traps", []) if isinstance(t, dict)
+    ]
+    _count, names = count_confirmed_findings(findings_dir)
+    evidence: list[tuple[str, str]] = []
+    for name in names:
+        text = _finding_report_text(findings_dir / name)
+        _file, func = finding_signature.extract_location(text, target_root)
+        evidence.append((name, func))
+
+    def score_subset(items: list[tuple[str, str]]) -> dict:
+        detected: dict[str, list[str]] = {}
+        traps_fired: dict[str, list[str]] = {}
+        open_world: list[str] = []
+        for name, func in items:
+            hit = next((b for b in real if func and func in _manifest_symbols(b)), None)
+            if hit:
+                detected.setdefault(str(hit["id"]), []).append(name)
+                continue
+            trap = next((t for t in traps if func and func in _manifest_symbols(t)), None)
+            if trap:
+                traps_fired.setdefault(str(trap["id"]), []).append(name)
+            else:
+                open_world.append(name)
+        tp = sum(len(v) for v in detected.values())
+        fp = sum(len(v) for v in traps_fired.values())
+        return {
+            "real_total": len(real),
+            "detected": sorted(detected),
+            "missed": sorted(str(b["id"]) for b in real if str(b["id"]) not in detected),
+            "recall": round(len(detected) / len(real), 4) if real else None,
+            "confirmed_findings": len(items),
+            "true_positive_findings": tp,
+            "false_positive_findings": fp,
+            "false_positive_traps_fired": sorted(traps_fired),
+            "open_world_findings": sorted(open_world),
+            "precision": round(tp / (tp + fp), 4) if (tp + fp) else None,
+        }
+
+    result = {"overall": score_subset(evidence)}
+    conds = list(conditions) if conditions is not None else sorted(set(members.values()))
+    if conds:
+        result["by_condition"] = {
+            cond: score_subset([(n, f) for (n, f) in evidence if members.get(n) == cond])
+            for cond in conds
+        }
+    return result
+
+
 def ground_truth_path_for(target: str, repo_root: Path | None = None) -> Path:
     """Manifest (answer key) location for a target slug.
 
@@ -4250,13 +4350,29 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
             # A findings-only target ships no sanitizer; its planted bugs
             # surface under findings/, which the deterministic crash oracle
             # cannot grade. Scoring its (empty) crashes would report a
-            # misleading 0% recall, so mark it not-scored instead.
+            # misleading 0% recall, so mark them not-scored; the findings
+            # oracle below still scores what the target does plant.
             report["ground_truth_scoring"] = {"not_scored": "findings-only"}
         elif pool_crashes.is_dir():
             report["ground_truth_scoring"] = score_ground_truth(
                 pool_crashes,
                 manifest,
                 members.get("crashes", {}),
+                conditions=[c["condition"] for c in conditions],
+            )
+        pool_findings = bench_dir / "pool" / "findings"
+        if (
+            not errs and manifest is not None and pool_findings.is_dir()
+            and any(
+                isinstance(b, dict) and b.get("findings_only")
+                for b in manifest.get("planted_bugs", [])
+            )
+        ):
+            scoring = report.setdefault("ground_truth_scoring", {})
+            scoring["findings"] = score_findings_ground_truth(
+                pool_findings,
+                manifest,
+                members.get("findings", {}),
                 conditions=[c["condition"] for c in conditions],
             )
 
@@ -4926,13 +5042,13 @@ def _render_ground_truth(scoring: dict | None,
     if not scoring:
         return []
     if scoring.get("not_scored") == "findings-only":
-        return [
+        lines = [
             "### Ground truth", "",
-            "> **Findings-only target — not scored.** This target ships no "
-            "sanitizer; its planted bugs surface under `findings/`, which the "
-            "deterministic crash oracle does not grade. Run the audit and "
-            "review `findings/` against the answer key by hand.", "",
+            "> **Findings-only target — crashes not scored.** This target ships "
+            "no sanitizer; its planted bugs surface under `findings/`, which "
+            "the deterministic crash oracle does not grade.", "",
         ]
+        return lines + _render_findings_ground_truth(scoring.get("findings"))
     overall = scoring.get("overall", {})
     by_cond = scoring.get("by_condition", {})
     lines = ["### Ground truth (precision / recall)", ""]
@@ -4969,6 +5085,49 @@ def _render_ground_truth(scoring: dict | None,
         "or a confirmed crash with no runtime artifact to attribute "
         "(unattributed prose) all count against it. These are the labelled "
         "numbers the triage gate thresholds are tuned to."
+    )
+    lines.append("")
+    return lines + _render_findings_ground_truth(scoring.get("findings"))
+
+
+def _render_findings_ground_truth(scoring: dict | None) -> list[str]:
+    """The findings oracle's block; empty when the manifest plants none."""
+    if not scoring:
+        return []
+    overall = scoring.get("overall", {})
+    by_cond = scoring.get("by_condition", {})
+    lines = ["### Ground truth — findings (precision / recall)", ""]
+    lines.append(
+        "| Condition | Recall | Detected | Missed | Precision "
+        "| Confirmed | Traps fired | Open-world |"
+    )
+    lines.append("| --- | --: | --: | --- | --: | --: | --- | --: |")
+
+    def row(label: str, s: dict) -> str:
+        missed = ", ".join(s.get("missed", [])) or "—"
+        traps = ", ".join(s.get("false_positive_traps_fired", [])) or "—"
+        return (
+            f"| {label} "
+            f"| {_fmt_ratio(s.get('recall'))} "
+            f"| {len(s.get('detected', []))}/{s.get('real_total', 0)} "
+            f"| {missed} "
+            f"| {_fmt_ratio(s.get('precision'))} "
+            f"| {s.get('confirmed_findings', 0)} "
+            f"| {traps} "
+            f"| {len(s.get('open_world_findings', []))} |"
+        )
+
+    for cond in sorted(by_cond):
+        lines.append(row(f"`{cond}`", by_cond[cond]))
+    lines.append(row("**overall**", overall))
+    lines.append("")
+    lines.append(
+        "> **How to read this.** Planted `findings_only` bugs are credited "
+        "when a confirmed finding names the planted function as the one at "
+        "fault; a confirmed finding at a false-positive trap's function counts "
+        "against precision. Every other confirmed finding is **open-world** — "
+        "real code has bugs the answer key never planted — and is listed "
+        "without being counted for or against."
     )
     lines.append("")
     return lines
@@ -6875,6 +7034,9 @@ def main(argv: list[str]) -> int:
                       help="a crashes/ dir, or a results/pool dir holding one")
     p_sc.add_argument("--ground-truth", type=Path, required=True,
                       help="path to the target's .ground-truth.json")
+    p_sc.add_argument("--findings-dir", type=Path, default=None,
+                      help="findings/ tree to score against findings_only "
+                           "bugs (default: the findings/ beside crashes_dir)")
     p_sc.add_argument("--members", type=Path, default=None,
                       help="optional pool-members.json for per-condition scores")
     p_sc.add_argument("--conditions", default="",
@@ -7007,6 +7169,23 @@ def main(argv: list[str]) -> int:
                 members = {}
         conds = [c.strip() for c in args.conditions.split(",") if c.strip()] or None
         scoring = score_ground_truth(args.crashes_dir, manifest, members, conds)
+        findings_dir = args.findings_dir
+        if findings_dir is None:
+            crashes_dir = Path(args.crashes_dir)
+            base = crashes_dir.parent if crashes_dir.name == "crashes" else crashes_dir
+            findings_dir = base / "findings" if (base / "findings").is_dir() else None
+        if findings_dir is not None and Path(findings_dir).is_dir():
+            findings_members = {}
+            if args.members and args.members.is_file():
+                try:
+                    findings_members = json.loads(
+                        args.members.read_text(encoding="utf-8")
+                    ).get("findings", {})
+                except (OSError, ValueError):
+                    findings_members = {}
+            scoring["findings"] = score_findings_ground_truth(
+                Path(findings_dir), manifest, findings_members, conds,
+            )
         _write_json(args.out, scoring)
         return 0
 

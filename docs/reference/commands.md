@@ -298,7 +298,11 @@ bin/state --results-dir "$RESULTS" explain-queue
 ```
 
 `show-recent` is the best general checkpoint: it combines recent claims,
-hypotheses, and probe runs for one worker. The `list-*` commands emit compact
+hypotheses, and probe runs for one worker — each run with its `coverage`
+outcome and `closest` frame. `card-yield` replays the queue: claims, probed
+cards, runs, and diagnostics per rank bucket, and the share of the queue that
+was ever touched, so a ranking change is judged by conversion rather than
+taste. The `list-*` commands emit compact
 JSONL suitable for scripts. Use `show-card`, `show-crash`, or `show-finding`
 with an ID for one full compact record. Run `bin/state --help` and
 `bin/state <subcommand> --help` for filters and state-mutating commands used by

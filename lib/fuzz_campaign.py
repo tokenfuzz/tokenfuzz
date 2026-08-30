@@ -383,9 +383,28 @@ def recommendation(state: HarnessState) -> str:
     return "keep — one more campaign decides whether it is saturated"
 
 
+def derivative_ready(state: "HarnessState | None", record: dict) -> bool:
+    """Whether a harness is at the one point where an API hint is useful:
+    guided, saturated, and with its source-grounded receipt resolved."""
+    if state is None or state.quarantine != VERDICT_SATURATED:
+        return False
+    if not record.get("guided"):
+        return False
+    receipt = record.get("receipt")
+    if not isinstance(receipt, dict) or not receipt:
+        return False
+    unresolved = receipt.get("unresolved")
+    return not (isinstance(unresolved, list) and unresolved)
+
+
 def status_rows(states: "dict[str, HarnessState]",
-                built: "dict[str, dict]") -> "dict[str, dict]":
+                built: "dict[str, dict]",
+                hints: "dict[str, list[dict]] | None" = None) -> "dict[str, dict]":
     """Join campaign state with current build/grounding receipts.
+
+    ``hints`` maps a harness name to the compatible public APIs
+    `compatible_api_hints` found for its boundary; rendered only on the row
+    that is ready for a derivative, as reading order rather than a card.
 
     Returning data keeps ``bin/fuzz status`` a thin printer and makes the
     resume view testable without spawning another Python process. The join is
@@ -444,6 +463,8 @@ def status_rows(states: "dict[str, HarnessState]",
                     "public call, then rebuild — the next S4 iteration's single "
                     "campaign runs it"
                 )
+                if hints and hints.get(name):
+                    row["compatible_apis"] = list(hints[name])
         row.update({
             "build": build,
             "receipt": receipt,

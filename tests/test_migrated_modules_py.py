@@ -311,6 +311,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
           "verdict reads an unavailable gate line with no frame")
     gate_log.write_text("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n")
     check(verdict.coverage_outcome(gate_log) == ("", ""), "no gate line reads as no coverage")
+    gate_log.write_text("COVERAGE_GATE: MISSED - the input did not reach WANT; sanitizer proceeding, revise the input (closest: hits exited 1)\n")
+    check(verdict.coverage_outcome(gate_log) == ("MISSED", ""), "a fallback placeholder is not a frame")
     fail_log = root / "verdict-exec-fail.log"
     cases = (
         ("dyld[12]: Library not loaded: @rpath/libsample.dylib\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "loader"),
@@ -321,6 +323,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         ("done\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=0)\n", "unverified-exit"),
         ("something else\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=183)\n", "exit"),
         ("cannot open input.bin: No such file or directory\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "exit"),
+        # A signal death reaches the marker as the runner's negative code.
+        ("[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=-11)\n", "aborted"),
+        # The header names the testcase; its name is not the target's verdict.
+        ("ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic testcase=/r/scratch-1/invalid-utf8.xml\n"
+         "cannot open input.bin: No such file or directory\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "exit"),
     )
     for body, expected in cases:
         fail_log.write_text(body)

@@ -499,7 +499,8 @@ def cmd_status(args) -> int:
     sanitizer = chosen_sanitizer(config, args.sanitizer, required=False)
     built = fuzz_harness.built_harnesses(
         config.results_dir, sanitizer) if sanitizer else {}
-    rows = fuzz_campaign.status_rows(states, built)
+    hints = _derivative_hints(config, sanitizer, states, built)
+    rows = fuzz_campaign.status_rows(states, built, hints)
     if args.json:
         print(json.dumps(rows, indent=2))
         return 0
@@ -539,7 +540,51 @@ def cmd_status(args) -> int:
             print(f"    why: {row.get('quarantine_detail')}")
         for warning in row.get("receipt_warnings") or []:
             print(f"    receipt warning: {warning}")
+        for hint in row.get("compatible_apis") or []:
+            print(f"    compatible API: {hint['symbol']} — {hint['declaration']} "
+                  f"(shares {', '.join(hint['shared_types'])})")
     return 0
+
+
+def _derivative_hints(config, sanitizer: str, states, built) -> "dict[str, list[dict]]":
+    """Compatible-API hints for every harness ready for its one derivative.
+
+    The candidate scan reads the library's exports and the headers, so it
+    runs only when some harness has actually saturated with a resolved
+    receipt; an ordinary status call stays a state read.
+    """
+    ready = {
+        name for name, record in built.items()
+        if record.get("current") is not False
+        and states.get(name) is not None
+        and states[name].binary == str(record.get("binary", ""))
+        and fuzz_campaign.derivative_ready(states.get(name), record)
+    }
+    if not ready or not sanitizer:
+        return {}
+    exported = exported_symbols(config, sanitizer)
+    if not exported:
+        return {}
+    declarations = fuzz_harness.declaration_index(
+        config.target_root,
+        [config.resolve_path(path) for path in config.includes],
+    )
+    candidates = fuzz_harness.candidates(
+        config, exported, discovered(config, exported), declarations,
+        entry_routes(Path(config.results_dir)),
+    )
+    hints: "dict[str, list[dict]]" = {}
+    for name in ready:
+        receipt = built[name].get("receipt") or {}
+        boundary = str(receipt.get("boundary", ""))
+        declaration = str(receipt.get("declaration", "")) or declarations.get(boundary, "")
+        if not declaration:
+            continue
+        found = fuzz_harness.compatible_api_hints(
+            declaration, candidates, exclude=boundary)
+        if found:
+            hints[name] = found
+    return hints
 
 
 # ── doctor ──────────────────────────────────────────────────────────

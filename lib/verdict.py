@@ -197,6 +197,12 @@ def execution_failure_class(path: str | Path) -> tuple[str, str]:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return "", ""
+    # The run header names the testcase path; a file called `invalid-*.xml`
+    # must not read as the target rejecting it.
+    text = "\n".join(
+        line for line in text.splitlines()
+        if not line.startswith(("ASAN_RUN_HEADER:", "SANITIZER_RUN_HEADER:"))
+    )
     reason = execution_exit_reason(path)
     try:
         rc = int(reason.rpartition("=")[2]) if reason else None
@@ -208,9 +214,12 @@ def execution_failure_class(path: str | Path) -> tuple[str, str]:
         kind = "usage"
     elif FORMAT_REJECT_RE.search(text) or rc in (65, 66):
         kind = "input-rejected"
-    elif (rc is not None and 128 < rc < 160) or _ABORT_RE.search(text):
-        # 129..159 is the shell's signal encoding; larger codes are a
-        # program's own and say nothing about how it died.
+    elif (
+        rc is not None and (-32 < rc < 0 or 128 < rc < 160)
+    ) or _ABORT_RE.search(text):
+        # A signal death is a negative code from the runner's own wait, or
+        # 129..159 through a shell; larger positive codes are a program's own
+        # and say nothing about how it died.
         kind = "aborted"
     elif rc == 0:
         kind = "unverified-exit"
@@ -238,7 +247,7 @@ def coverage_outcome(path: str | Path) -> tuple[str, str]:
                     # hits annotates a closest frame with the pool it came
                     # from; state keeps the frame, the output keeps the note.
                     frame = re.sub(r"\s*\[pool=[^\]]*\]\s*$", "", frame)
-                    if frame in ("<none>", "<unnamed>"):
+                    if frame in ("<none>", "<unnamed>") or frame.startswith("hits exited "):
                         frame = ""
                     return verdict, frame
     except OSError:

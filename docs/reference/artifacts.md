@@ -86,7 +86,7 @@ The paths an operator inspects after a run:
 | `findings/` | Security finding candidates — any class, with or without a reproducer. See note below. |
 | `findings-rejected/` | FIND directories triage rejected at quorum — substance gate, unreachable trigger, or source-disproved consequence — plus `REJECTED-FINDINGS.html` / `REJECTED-FINDINGS.md` listing them with reasons. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
-| `coverage/` | Per-agent edge journals (`edges-agent-N.journal`) written by `bin/hits`; `bin/coverage-summary` and `bin/rank-work` read them. `hits-N.log` beside them records one HIT/MISSED/COVERAGE_UNAVAILABLE row per coverage replay. |
+| `coverage/` | Per-agent edge journals (`edges-agent-N.journal`) written by `bin/hits`, keyed by target-relative path; `bin/coverage-summary` and `bin/rank-work` read them. `hits-N.log` beside them records one HIT/MISSED/COVERAGE_UNAVAILABLE row per coverage replay. |
 | `fuzz/` | S4 harness sources, binaries/manifests, persistent corpora, artifacts, slice logs, campaign journal, and resumable per-harness state. |
 | `scratch-N/` | Active testcase work for agent `N`. |
 | `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, `SESSION_STARTED`, and `TARGET_CONFIG_SHA256` values read by `bin/probe`. |
@@ -96,7 +96,8 @@ The tree also holds the work queue and structured state the harness
 manages itself. One file is worth knowing: `state/runs.jsonl` has one
 row per `bin/probe` invocation — verdict, sanitizer, duration, and when a
 coverage replay ran, `coverage` (`HIT`, `MISSED`, `UNAVAILABLE`, …) with the
-`closest` frame it reached — so `wc -l` on it answers "did anything
+`closest` frame it reached, and for an `EXEC_FAIL` a `reason` naming the
+child exit code and failure class — so `wc -l` on it answers "did anything
 actually run?". `state/callgraph.json` is present only with the optional
 [call-neighbourhood analysis](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
 installed; it holds the per-file call maps work-card prompts quote, and

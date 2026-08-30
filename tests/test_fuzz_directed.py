@@ -1044,6 +1044,59 @@ class FirstSliceReceiptTests(unittest.TestCase):
         self.assertEqual(rows[state.name]["receipt"]["boundary"], "sample_parse")
         self.assertIn("resolve", rows[state.name]["next"])
 
+    def test_parameter_types_and_compatible_api_hints(self) -> None:
+        self.assertEqual(
+            fuzz_harness.parameter_types(
+                "int f(sample_ctx * const ctx, const char *s, size_t n, char **out, "
+                "void (*cb)(int), unsigned int flags, struct sample_opt *o, uint8_t buf[16])"),
+            {"sample_ctx *", "char *", "size_t", "char **", "unsigned int",
+             "struct sample_opt *", "uint8_t *"},
+        )
+        candidates = [
+            fuzz_harness.Candidate("sample_add", "int sample_add(sample_ctx *ctx, sample_ctx *item)", [], [], True, []),
+            fuzz_harness.Candidate("sample_print", "char *sample_print(const sample_ctx *ctx, int depth)", [], [], True, []),
+            fuzz_harness.Candidate("sample_parse", "sample_ctx *sample_parse(const char *text)", [], [], True, []),
+            fuzz_harness.Candidate("sample_free_all", "void sample_free_all(sample_ctx *ctx)", [], [], False, ["private"]),
+            fuzz_harness.Candidate("sample_version", "const char *sample_version(void)", [], [], True, []),
+            fuzz_harness.Candidate("sample_scan", "int sample_scan(const char *text, size_t n)", [], [], True, []),
+        ]
+        hints = fuzz_harness.compatible_api_hints(
+            "char *sample_print(const sample_ctx *ctx, int depth)", candidates,
+            exclude="sample_print")
+        # Shares the handle type as a parameter; a producer that merely
+        # returns it, the rejected candidate, the boundary itself, and a
+        # bare-`char *` API never appear.
+        self.assertEqual([h["symbol"] for h in hints], ["sample_add"])
+        self.assertEqual(hints[0]["shared_types"], ["sample_ctx *"])
+        # A boundary with only generic types falls back to sharing them.
+        generic = fuzz_harness.compatible_api_hints(
+            "sample_ctx *sample_parse(const char *text)", candidates,
+            exclude="sample_parse", limit=1)
+        self.assertEqual([h["symbol"] for h in generic], ["sample_scan"])
+
+    def test_status_shows_compatible_apis_only_when_a_derivative_is_due(self) -> None:
+        state = fuzz_campaign.HarnessState(
+            name="fuzz_sample", binary="/tmp/fuzz_sample",
+            slices=3, quarantine=fuzz_campaign.VERDICT_SATURATED,
+        )
+        resolved = {
+            "binary": state.binary, "guided": True, "sanitized": True,
+            "receipt": {"boundary": "sample_parse", "unresolved": []},
+            "receipt_warnings": [],
+        }
+        hints = {state.name: [{"symbol": "sample_add", "declaration": "int sample_add(sample_ctx *, sample_ctx *)", "shared_types": ["sample_ctx *"]}]}
+        self.assertTrue(fuzz_campaign.derivative_ready(state, resolved))
+        rows = fuzz_campaign.status_rows({state.name: state}, {state.name: resolved}, hints)
+        self.assertEqual(rows[state.name]["compatible_apis"][0]["symbol"], "sample_add")
+        self.assertIn("contract-preserving derivative", rows[state.name]["next"])
+        # Not ready: unresolved receipt, blind build, or still dry.
+        unresolved = dict(resolved, receipt={"boundary": "sample_parse", "unresolved": ["teardown"]})
+        self.assertFalse(fuzz_campaign.derivative_ready(state, unresolved))
+        self.assertFalse(fuzz_campaign.derivative_ready(state, dict(resolved, guided=False)))
+        dry = fuzz_campaign.HarnessState(name="fuzz_sample", binary=state.binary, slices=1)
+        self.assertFalse(fuzz_campaign.derivative_ready(dry, resolved))
+        self.assertNotIn("compatible_apis", fuzz_campaign.status_rows({dry.name: dry}, {dry.name: resolved}, hints)[dry.name])
+
     def test_a_rebuilt_binary_does_not_inherit_a_stale_saturation_decision(self) -> None:
         state = fuzz_campaign.HarnessState(
             name="fuzz_sample", binary="/tmp/fuzz_sample-old",

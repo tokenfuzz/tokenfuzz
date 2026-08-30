@@ -4075,6 +4075,10 @@ def _claim_next_card_locked(
 ) -> dict | None:
     cards = read_jsonl(work_cards_path(ctx))
     cards_by_id = {c.get("id", ""): c for c in cards}
+    # work-cards.jsonl is written in final rank order, so a card's position is
+    # its queue rank at claim time; the claim keeps it, because the queue is
+    # rewritten every iteration and the position is otherwise unrecoverable.
+    rank_by_id = {c.get("id", ""): index + 1 for index, c in enumerate(cards)}
     # Read each shared state file once and derive every set/count from the
     # in-memory snapshot. This path previously re-read work-cards, hypotheses,
     # and claims ~15× per claim (via the per-set helper functions) while holding
@@ -4285,6 +4289,10 @@ def _claim_next_card_locked(
                 "status": "claimed",
                 "claimed_at": claimed_at,
                 "expires_at": expires_at,
+                "queue_rank": rank_by_id.get(cid, 0),
+                "queue_size": len(cards),
+                "score": int(card.get("score", 0) or 0),
+                "strategy": str(card.get("strategy", "")),
             }
             _append_jsonl_unlocked(claims_path, claim_row)
         # The claimed copy is relabelled to the lane that claimed it, so a
@@ -5298,6 +5306,121 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
         row["closest"] = closest
     append_jsonl(state_dir(ctx.results_dir) / "runs.jsonl", row)
     return row
+
+
+_YIELD_BUCKETS = ((1, 5), (6, 10), (11, 20), (21, 40), (41, None))
+
+
+def card_yield(ctx: Context) -> str:
+    """Conversion by queue rank: what the ranked window actually bought.
+
+    Joins each claim's recorded rank with the runs its card produced. Cards
+    offered versus touched versus productive is the number a ranking change
+    must move; without it the window is tuned by taste. Claims without a
+    rank (older state) are listed under `unranked`.
+    """
+    claims = read_jsonl(state_dir(ctx.results_dir) / "claims.jsonl")
+    runs = read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl")
+    if not claims:
+        return "[card-yield] no claims recorded\n"
+    by_card: dict[str, dict[str, int]] = {}
+    for row in runs:
+        cid = str(row.get("card_id", "") or "")
+        if not cid:
+            continue
+        counts = by_card.setdefault(cid, {"runs": 0, "diagnostics": 0})
+        counts["runs"] += 1
+        if str(row.get("verdict", "")) in ("CRASH", "PROPERTY"):
+            counts["diagnostics"] += 1
+
+    def bucket_of(rank: int) -> str:
+        if rank <= 0:
+            return "unranked"
+        for low, high in _YIELD_BUCKETS:
+            if high is None or low <= rank <= high:
+                return f"{low}-{high}" if high else f"{low}+"
+        return "unranked"
+
+    buckets: dict[str, dict] = {}
+    seen: dict[str, set[str]] = {}
+    queue_sizes: list[int] = []
+    for claim in claims:
+        cid = str(claim.get("card_id", "") or "")
+        if not cid:
+            continue
+        rank = int(claim.get("queue_rank", 0) or 0)
+        if claim.get("queue_size"):
+            queue_sizes.append(int(claim["queue_size"]))
+        name = bucket_of(rank)
+        bucket = buckets.setdefault(
+            name, {"claims": 0, "cards": 0, "probed": 0, "runs": 0, "diagnostics": 0},
+        )
+        bucket["claims"] += 1
+        cards = seen.setdefault(name, set())
+        if cid in cards:
+            continue
+        cards.add(cid)
+        bucket["cards"] += 1
+        counts = by_card.get(cid)
+        if counts:
+            bucket["probed"] += 1
+            bucket["runs"] += counts["runs"]
+            bucket["diagnostics"] += counts["diagnostics"]
+    order = [f"{low}-{high}" if high else f"{low}+" for low, high in _YIELD_BUCKETS]
+    order.append("unranked")
+    lines = ["rank|claims|cards|probed|runs|diagnostics|diagnostics_per_card"]
+    for name in order:
+        bucket = buckets.get(name)
+        if not bucket:
+            continue
+        per_card = bucket["diagnostics"] / bucket["cards"] if bucket["cards"] else 0.0
+        lines.append(
+            f"{name}|{bucket['claims']}|{bucket['cards']}|{bucket['probed']}|"
+            f"{bucket['runs']}|{bucket['diagnostics']}|{per_card:.2f}"
+        )
+    touched = len({str(c.get("card_id", "")) for c in claims if c.get("card_id")})
+    offered = max(queue_sizes) if queue_sizes else 0
+    lines.append(
+        f"# cards touched: {touched}"
+        + (f" of a queue of up to {offered} ({touched * 100 / offered:.1f}%)" if offered else "")
+    )
+    return "\n".join(lines) + "\n"
+
+
+def probe_span_stats(
+    results_dir: Path, agent: str, started: datetime, ended: datetime,
+) -> dict:
+    """What one agent session spent on probes, from its runs.jsonl rows.
+
+    Decomposes a session's wall the only way state can: time to the first
+    probe (reading and reasoning before any execution), seconds inside probe
+    executions, and how many produced a diagnostic. Deterministic and
+    backend-agnostic, so the same numbers compare across backends.
+    """
+    rows = read_jsonl(state_dir(results_dir) / "runs.jsonl")
+    count = 0
+    first: datetime | None = None
+    seconds = 0.0
+    diagnostics = 0
+    for row in rows:
+        if str(row.get("agent", "")) != str(agent):
+            continue
+        created = parse_iso_utc(str(row.get("created_at", "")))
+        if created is None or created < started or created > ended:
+            continue
+        count += 1
+        if first is None or created < first:
+            first = created
+        duration = _run_duration_seconds(row.get("duration_seconds"))
+        if duration is not None:
+            seconds += duration
+        if str(row.get("verdict", "")) in ("CRASH", "PROPERTY"):
+            diagnostics += 1
+    stats: dict = {"probes": count, "probe_seconds": round(seconds, 3),
+                   "probe_diagnostics": diagnostics}
+    if first is not None:
+        stats["first_probe_seconds"] = round((first - started).total_seconds(), 3)
+    return stats
 
 
 def add_note(ctx: Context, args: argparse.Namespace) -> dict:

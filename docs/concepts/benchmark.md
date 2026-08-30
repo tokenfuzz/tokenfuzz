@@ -383,6 +383,16 @@ optimizer inlines distinct operations into the same crash-site symbol. These
 are aliases for the same bug id, not extra recall items; ambiguous or
 overlapping aliases make the manifest fail validation.
 
+A planted bug marked `findings_only: true` never crashes; it surfaces under
+`findings/`. Those are scored by a second oracle beside the crash one: a
+confirmed finding is credited when the function it names as at fault is the
+bug's `signature_symbol`, a confirmed finding at a false-positive trap's
+symbol counts against precision, and every other confirmed finding is listed
+as **open-world** — real code has bugs the answer key never planted — without
+counting for or against. `bin/benchmark score` reports both blocks; pass
+`--findings-dir` to point it at a `findings/` tree that is not beside the
+crashes.
+
 The canary is not alone: fifteen per-language `samples/sample-*` targets are
 committed the same way, each with its own answer key, so the same measurement
 works for Rust, Go, Python, Java, and the rest. Everything else under

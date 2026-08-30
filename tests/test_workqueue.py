@@ -535,6 +535,25 @@ class WorkQueueTests(unittest.TestCase):
         self.assertTrue(header.endswith("|coverage|closest"))
         self.assertTrue(any(line.endswith("|MISSED|app_parse") for line in rows), listing)
 
+    def test_probe_span_stats_decompose_a_session_from_state(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        started = datetime.now(timezone.utc) - timedelta(seconds=30)
+        self.add_run(verdict="CLEAN", duration_seconds="2.5")
+        self.add_run(verdict="CRASH", index=2, duration_seconds="1.0")
+        self.add_run(verdict="CLEAN", index=3, agent="2")
+        ended = datetime.now(timezone.utc) + timedelta(seconds=30)
+        stats = workqueue.probe_span_stats(self.results, "1", started, ended)
+        self.assertEqual(stats["probes"], 2)
+        self.assertEqual(stats["probe_diagnostics"], 1)
+        self.assertEqual(stats["probe_seconds"], 3.5)
+        self.assertGreaterEqual(stats["first_probe_seconds"], 0)
+        self.assertLessEqual(stats["first_probe_seconds"], 60)
+        # A window that predates every run has no first probe, and no probes.
+        early = workqueue.probe_span_stats(
+            self.results, "1", started - timedelta(days=1), started - timedelta(hours=1),
+        )
+        self.assertEqual(early, {"probes": 0, "probe_seconds": 0.0, "probe_diagnostics": 0})
+
     def test_patch_descriptions_and_deduplication_reject_noise(self) -> None:
         self.assertTrue(workqueue.is_version_only_file_set(["VERSION", "CHANGELOG.md"]))
         self.assertFalse(workqueue.is_version_only_file_set(["VERSION", "src/app.c"]))
@@ -934,6 +953,30 @@ class WorkQueueTests(unittest.TestCase):
         workqueue.append_jsonl(self.results / "state" / "claims.jsonl", stale)
         reclaimed = workqueue.claim_next_card(self.ctx, "2", mode="generic", strategy="S7", claim=False)
         self.assertEqual(reclaimed["id"], "WORK-B")
+
+    def test_claims_record_queue_rank_and_card_yield_replays_them(self) -> None:
+        # The queue is rewritten every iteration, so a card's rank at claim
+        # time lives only on the claim; card-yield joins it with the runs.
+        self.write_cards([
+            self.card("WORK-A", "src/a.c", strategy="S7", mode="generic", score=50),
+            self.card("WORK-B", "src/b.c", strategy="S7", mode="generic", score=40),
+            self.card("WORK-C", "src/c.c", strategy="S7", mode="generic", score=30),
+        ])
+        first = workqueue.claim_next_card(self.ctx, "1", mode="generic", strategy="S7", claim=True)
+        second = workqueue.claim_next_card(self.ctx, "2", mode="generic", strategy="S7", claim=True)
+        claims = workqueue.read_jsonl(self.results / "state" / "claims.jsonl")
+        by_card = {row["card_id"]: row for row in claims}
+        self.assertEqual((by_card[first["id"]]["queue_rank"], by_card[first["id"]]["queue_size"]), (1, 3))
+        self.assertEqual(by_card[second["id"]]["queue_rank"], 2)
+        self.assertEqual(by_card[first["id"]]["score"], 50)
+        self.assertEqual(by_card[first["id"]]["strategy"], "S7")
+        self.add_run(card_id=first["id"], verdict="CRASH")
+        self.add_run(card_id=first["id"], verdict="CLEAN", index=2)
+        table = workqueue.card_yield(self.ctx)
+        lines = table.strip().splitlines()
+        self.assertEqual(lines[0], "rank|claims|cards|probed|runs|diagnostics|diagnostics_per_card")
+        self.assertIn("1-5|2|2|1|2|1|0.50", lines[1])
+        self.assertIn("cards touched: 2 of a queue of up to 3 (66.7%)", lines[-1])
 
     def test_claim_reports_requested_carried_strategy(self) -> None:
         self.write_cards([
