@@ -39,6 +39,7 @@ import tempfile
 from pathlib import Path
 
 import languages
+from timeout import run_timeout
 import target_config
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -183,14 +184,18 @@ def check(config, timeout: int = 300) -> str:
             "LOGDIR": str(tree / "logs"),
             "PROBE_SANITIZER": runner_sanitizer(config),
         })
+        # Through the process-tree wrapper: a plain deadline killed bin/probe
+        # alone and left the harness build it started running in a directory
+        # that is deleted on exit.
         try:
-            completed = subprocess.run(
-                [str(ROOT / "bin" / "probe"), str(canary)],
-                capture_output=True, text=True, check=False,
-                timeout=timeout, env=environment,
+            completed = run_timeout(
+                [str(ROOT / "bin" / "probe"), str(canary)], timeout,
+                kill=True, capture_output=True, text=True, env=environment,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except OSError as exc:
             return f"the canary testcase could not be run: {exc}"
+        if completed.returncode == 124:
+            return f"the canary testcase did not finish within {timeout}s"
         report = canary.with_suffix(".asan.txt")
         output = report.read_text(errors="replace") if report.is_file() else ""
         failures = _reasons(config, output + completed.stdout + completed.stderr)

@@ -289,9 +289,17 @@ class MultiLanguageSupportTests(unittest.TestCase):
             f"{runner_canary.MARKER} cwd={self.target}\nEXECUTION_RATE: 1/1\n",
             "",
         )
-        with mock.patch.object(runner_canary.subprocess, "run", return_value=failed_probe):
+        with mock.patch.object(runner_canary, "run_timeout", return_value=failed_probe):
             self.assertIn(
                 "bin/probe exited 7",
+                runner_canary.check(self.canary_config(reaching)),
+            )
+        # The wrapper's reserved 124: the probe tree was killed at the
+        # deadline, so nothing it printed is a verdict.
+        timed_out = subprocess.CompletedProcess([], 124, "", "")
+        with mock.patch.object(runner_canary, "run_timeout", return_value=timed_out):
+            self.assertIn(
+                "did not finish within",
                 runner_canary.check(self.canary_config(reaching)),
             )
 
@@ -337,7 +345,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
         )
 
         with mock.patch.object(
-            runner_canary.subprocess, "run", return_value=completed,
+            runner_canary, "run_timeout", return_value=completed,
         ) as run:
             self.assertEqual(runner_canary.check(self.canary_config(scratch)), "")
 
