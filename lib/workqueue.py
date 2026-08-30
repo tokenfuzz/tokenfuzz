@@ -4524,7 +4524,10 @@ def _record_env_blocked_card(
         ),
         {},
     )
-    broad = _is_broad_file_card(card)
+    # A card the queue no longer lists cannot be read as concrete: the
+    # terminal `blocked` row would close it for the run if it re-enters the
+    # window, so an unknown scope takes the re-offerable side.
+    broad = _is_broad_file_card(card) if card else True
     claims_path = state_dir(ctx.results_dir) / "claims.jsonl"
     with jsonl_lock(claims_path):
         _append_jsonl_unlocked(
