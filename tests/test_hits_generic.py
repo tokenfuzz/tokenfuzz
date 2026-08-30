@@ -239,11 +239,13 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertRegex(hits_log, r"edges=[1-9]")
 
         # The edge journal coverage_gap_score/coverage-summary consume exists
-        # and names the reached source file.
+        # and names the reached source file by the target-relative path a work
+        # card carries — never a bare basename, never an absolute host path.
         journal = self.results / "coverage" / "edges-agent-1.journal"
         self.assertTrue(journal.is_file(), output)
         edges = journal.read_text()
-        self.assertIn("app_parse|", edges)
+        self.assertIn("app_parse|src.c\n", edges)
+        self.assertNotIn("|/", edges)
 
         # The shared build was neither touched nor made to look stale.
         self.assertEqual(target_config.source_signature(self.target), before_sig)

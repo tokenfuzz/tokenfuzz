@@ -154,7 +154,7 @@ Common outcomes:
 
 | Outcome | Meaning | Action |
 | --- | --- | --- |
-| Did not execute | Syntax error, missing binary, runner refused. | Fix the testcase. This doesn't count against the sanitizer budget. |
+| Did not execute | Syntax error, missing binary, runner refused. `bin/probe` names the class — `loader`, `usage`, `input-rejected`, `aborted`, `unverified-exit`, `exit` — and the repair it implies, and records it in the run's `reason`. | Fix what the class names: the route, the argv, or the input. This doesn't count against the sanitizer budget. |
 | Missed the target code | The coverage replay did not reach the named function. Browser and JS modes skip the sanitizer; a native target still runs it and records the miss beside the verdict. | Revise the input around the closest reached frame. |
 | Clean hit | The code ran but the sanitizer was quiet. | Mutate input shape, state, timing, or allocator layout. |
 | Sanitizer diagnostic | The input might be a crash candidate. | Confirm by re-running, minimise, and file under `crashes/`. |

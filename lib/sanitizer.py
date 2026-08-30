@@ -212,8 +212,11 @@ def symbolize_available() -> bool:
     return (Path(tool).is_file() and os.access(tool, os.X_OK)) or bool(shutil.which("atos") or shutil.which("addr2line"))
 
 
-def symbolize_file(path: str | os.PathLike[str]) -> bool:
+def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> bool:
     """Rewrite a sanitizer report in place with source locations.
+
+    ``full_path`` asks the platform symbolizer for full source paths; coverage
+    journals need them, crash reports keep the basenames their signatures use.
 
     Returns whether the report is free of unsymbolized frames afterwards. A
     failure is never fatal — the raw report is still evidence — but it must not
@@ -232,6 +235,8 @@ def symbolize_file(path: str | os.PathLike[str]) -> bool:
         args.append("--no-llvm-symbolizer")
     else:
         args.extend(("--llvm-symbolizer", llvm_tool("llvm-symbolizer")))
+    if full_path:
+        args.append("--full-path")
     with tempfile.NamedTemporaryFile() as rendered, report.open("rb") as source:
         completed = subprocess.run(
             [sys.executable, str(Path(__file__).with_name("timeout.py")), "60", "TERM", "0", *args],

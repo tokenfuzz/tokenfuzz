@@ -257,6 +257,16 @@ print("HIT: sample_function")
         # the same program the sanitizer ran.
         self.assertEqual(parsed["harness_source"], str(self.root / "harness.c"))
 
+    def test_a_coverage_hit_is_recorded_in_the_output_for_run_state(self) -> None:
+        # bin/probe reads the gate's answer back out of the saved output, so a
+        # HIT lands there like a MISSED does, naming the reached frame.
+        output_file = self.root / "hit.txt"
+        process = self.run_multi(environment={
+            "WANT": "sample_target", "ASAN_OUTPUT_FILE": str(output_file),
+        })
+        self.assertEqual(process.returncode, 0, self.output(process))
+        self.assertIn("COVERAGE_GATE: HIT - reached sample_function", output_file.read_text())
+
     def test_a_generic_coverage_miss_is_feedback_not_a_skipped_run(self) -> None:
         # Browser gating skips the sanitizer on a miss because a launch is the
         # expensive part. A native replay is not, and a miss can be the

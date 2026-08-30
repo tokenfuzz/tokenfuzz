@@ -587,14 +587,40 @@ class Hits:
                     continue
                 kept.extend((function, location))
             lines = kept
+        lines = self._target_relative(lines)
         return lines, lines
+
+    def _target_relative(self, lines: list[str]) -> list[str]:
+        """Key every location the way a work card names its file.
+
+        Ranking and the coverage summary group edges by the target-relative
+        path a card carries, so an absolute path is relativized and a frame
+        outside the target tree — a system or toolchain header, the standard
+        library — is dropped: it is not the target's coverage. A bare
+        basename the symbolizer could not resolve further is kept as it is.
+        """
+        root = str(self.target_root.resolve())
+        kept: list[str] = []
+        for function, location in zip(lines[::2], lines[1::2]):
+            path_text, colon, line_no = location.rpartition(":")
+            if not colon or not line_no.isdigit():
+                path_text, line_no = location, ""
+            path = Path(path_text)
+            if path.is_absolute():
+                try:
+                    relative = path.resolve().relative_to(root).as_posix()
+                except (OSError, ValueError):
+                    continue
+                location = f"{relative}:{line_no}" if line_no else relative
+            kept.extend((function, location))
+        return kept
 
     @staticmethod
     def _offline_symbolize(frames: list[str]) -> list[str]:
         with tempfile.TemporaryDirectory(prefix="hits-symbolize-") as tmp:
             report = Path(tmp) / "frames.txt"
             report.write_text("\n".join(frames) + "\n", encoding="utf-8")
-            sanitizer.symbolize_file(report)
+            sanitizer.symbolize_file(report, full_path=True)
             resolved = report.read_text(encoding="utf-8", errors="replace")
         lines: list[str] = []
         for raw in resolved.splitlines():

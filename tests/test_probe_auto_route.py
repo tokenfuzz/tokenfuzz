@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import json
+import shutil
 import stat
 import subprocess
 import sys
@@ -93,6 +94,24 @@ class ProbeAutoRouteTests(unittest.TestCase):
         return subprocess.run(
             [str(PROBE), *args, str(self.testcase)], capture_output=True, text=True, env=command_env
         )
+
+    def test_an_exec_fail_names_its_class_and_repair(self) -> None:
+        # A program that rejects its command line is a route problem, not an
+        # input problem; probe says which, and the run row keeps it.
+        self.canonical.write_text(
+            f"#!{sys.executable}\nimport sys\n"
+            "print('usage: myrunner [--jit] <file>', file=sys.stderr)\nraise SystemExit(2)\n",
+            encoding="utf-8",
+        )
+        for sibling in (self.target / "build-asan-jit", self.target / "build-asan-empty"):
+            shutil.rmtree(sibling)
+        proc = self.run_probe()
+        output = proc.stdout + proc.stderr
+        self.assertIn("[probe] verdict=EXEC_FAIL", output)
+        self.assertIn("[probe] EXEC_FAIL class=usage:", output)
+        self.assertIn("[runner].args", output)
+        runs = (self.results / "state" / "runs.jsonl").read_text(encoding="utf-8")
+        self.assertIn('"reason": "child-rc=2 class=usage"', runs)
 
     def test_sentinel_and_enumeration(self) -> None:
         output = self.root / "canonical.out"

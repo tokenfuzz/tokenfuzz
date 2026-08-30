@@ -255,6 +255,7 @@ class MultiRun:
             else:
                 os.environ["CLOSEST_FRAME"] = hit_frame
                 os.environ["HITS_VERDICT"] = "HIT"
+                self.emit(f"COVERAGE_GATE: HIT - reached {hit_frame or '<unnamed>'}")
                 print("[run-sanitizer-multi] COVERAGE GATE: HIT - proceeding to ASan")
             return None
 

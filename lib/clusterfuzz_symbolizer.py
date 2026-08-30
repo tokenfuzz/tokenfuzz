@@ -374,6 +374,10 @@ class DarwinSymbolizer(Symbolizer):
 
   def open_atos(self):
     cmdline = ['atos', '-o', self.binary, '-arch', self.arch]
+    if atos_full_path:
+      # Coverage journals key on the path a work card carries; atos prints a
+      # bare basename unless asked, and a basename cannot be relativized.
+      cmdline.append('-fullPath')
     self.atos = UnbufferedLineConverter(cmdline, close_stderr=True)
 
   def symbolize(self, addr, binary, offset):
@@ -583,10 +587,14 @@ def _resolve_llvm_symbolizer(explicit, disable=False):
   return found or ''
 
 
+atos_full_path = False
+
+
 def symbolize_stacktrace(unsymbolized_crash_stacktrace,
                          symbolizer_path=None,
                          enable_inline_frames=False,
-                         disable_llvm_symbolizer=False):
+                         disable_llvm_symbolizer=False,
+                         full_path=False):
   """Symbolize a crash stacktrace produced with symbolize=0.
 
   Uses the ClusterFuzz symbolizer chain: llvm-symbolizer when available, else
@@ -600,6 +608,8 @@ def symbolize_stacktrace(unsymbolized_crash_stacktrace,
   global pipes
   global stack_inlining
   global symbolizers
+  global atos_full_path
+  atos_full_path = bool(full_path)
   pipes = []
   stack_inlining = str(enable_inline_frames).lower()
   symbolizers = {}
@@ -624,12 +634,17 @@ def main(argv):
       'macOS, addr2line on Linux). atos is debug-map-aware, needs no .dSYM, and '
       'is immune to a stale one — unlike llvm-symbolizer, which an empty '
       '--llvm-symbolizer would still reach via PATH.')
+  parser.add_argument(
+      '--full-path', action='store_true',
+      help='Ask atos for full source paths instead of basenames (coverage '
+      'journals; crash reports keep the basenames their signatures use).')
   args = parser.parse_args(argv)
 
   raw = sys.stdin.read()
   sys.stdout.write(
       symbolize_stacktrace(raw, symbolizer_path=args.llvm_symbolizer,
-                           disable_llvm_symbolizer=args.no_llvm_symbolizer))
+                           disable_llvm_symbolizer=args.no_llvm_symbolizer,
+                           full_path=args.full_path))
   return 0
 
 

@@ -94,7 +94,9 @@ The paths an operator inspects after a run:
 
 The tree also holds the work queue and structured state the harness
 manages itself. One file is worth knowing: `state/runs.jsonl` has one
-row per `bin/probe` invocation, so `wc -l` on it answers "did anything
+row per `bin/probe` invocation — verdict, sanitizer, duration, and when a
+coverage replay ran, `coverage` (`HIT`, `MISSED`, `UNAVAILABLE`, …) with the
+`closest` frame it reached — so `wc -l` on it answers "did anything
 actually run?". `state/callgraph.json` is present only with the optional
 [call-neighbourhood analysis](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
 installed; it holds the per-file call maps work-card prompts quote, and

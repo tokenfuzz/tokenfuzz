@@ -1395,6 +1395,12 @@ class Probe:
             verdict_lib.execution_exit_reason(self.output)
             if probe_verdict in {"EXEC_FAIL", "NO_EXEC"} else ""
         )
+        if probe_verdict == "EXEC_FAIL":
+            kind, hint = verdict_lib.execution_failure_class(self.output)
+            if kind:
+                print(f"[probe] EXEC_FAIL class={kind}: {hint}")
+                reason = f"{reason} class={kind}".strip()
+        coverage, frame = verdict_lib.coverage_outcome(self.output)
         self._state_command(
             "add-run", "--agent", self.agent, "--hypothesis-id", hypothesis, "--card-id", self.card,
             "--mode", self.mode, "--testcase", str(self.testcase),
@@ -1403,6 +1409,8 @@ class Probe:
             "--sanitizer", self.sanitizer,
             "--sanitizer-runs", self.environment["SANITIZER_RUNS"],
             *(["--reason", reason] if reason else []),
+            *(["--coverage", coverage] if coverage else []),
+            *(["--closest", frame[:200]] if frame else []),
             *(
                 ["--duration-seconds", f"{self.elapsed_seconds:.3f}"]
                 if self.elapsed_seconds is not None else []

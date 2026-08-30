@@ -294,6 +294,38 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(verdict.file_has_crash(crash_log), "verdict recognizes a Go race diagnostic")
     crash_log.write_text("panic: runtime error: index out of range\n", encoding="utf-8")
     check(verdict.file_has_crash(crash_log), "verdict recognizes a managed-runtime crash")
+    gate_log = root / "verdict-gate.log"
+    gate_log.write_text(
+        "ASAN_RUN_HEADER: sanitizer=asan runs=1\n"
+        "COVERAGE_GATE: MISSED - the input did not reach WANT; sanitizer proceeding, "
+        "revise the input (closest: app_parse [pool=content (denoised head)])\n"
+        "[run-sanitizer-multi] EXECUTION_RATE: 1/1\n"
+    )
+    check(verdict.coverage_outcome(gate_log) == ("MISSED", "app_parse"),
+          "verdict reads a MISSED gate line and its closest frame without the pool note")
+    gate_log.write_text("COVERAGE_GATE: HIT - reached app_parse\n")
+    check(verdict.coverage_outcome(gate_log) == ("HIT", "app_parse"),
+          "verdict reads a HIT gate line and its reached frame")
+    gate_log.write_text("COVERAGE_GATE: COVERAGE_UNAVAILABLE - ASan proceeding ungated (coverage unavailable: no sibling)\n")
+    check(verdict.coverage_outcome(gate_log) == ("UNAVAILABLE", ""),
+          "verdict reads an unavailable gate line with no frame")
+    gate_log.write_text("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n")
+    check(verdict.coverage_outcome(gate_log) == ("", ""), "no gate line reads as no coverage")
+    fail_log = root / "verdict-exec-fail.log"
+    cases = (
+        ("dyld[12]: Library not loaded: @rpath/libsample.dylib\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "loader"),
+        ("usage: app [options] <file>\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=2)\n", "usage"),
+        ("not an RCF stream\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
+        ("checksum mismatch at offset 12\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
+        ("app: assertion `n > 0' failed\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)\n", "aborted"),
+        ("done\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=0)\n", "unverified-exit"),
+        ("something else\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=183)\n", "exit"),
+        ("cannot open input.bin: No such file or directory\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "exit"),
+    )
+    for body, expected in cases:
+        fail_log.write_text(body)
+        kind, hint = verdict.execution_failure_class(fail_log)
+        check(kind == expected and bool(hint), f"execution failure class {expected!r} (got {kind!r})")
     clean_log = root / "verdict-clean.log"
     clean_log.write_text("[probe] asan EXECUTION VERIFIED (post-run, rc=0)\n", encoding="utf-8")
     check(verdict.file_is_clean(clean_log), "verdict recognizes verified clean probe output")

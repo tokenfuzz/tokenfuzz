@@ -522,6 +522,19 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertNotIn("reason", self.add_run(index=2))
 
+    def test_run_coverage_and_closest_frame_travel_with_the_run(self) -> None:
+        # A MISSED with its closest frame is the agent's next input; a resumed
+        # session reads it from state rather than reopening the output file.
+        row = self.add_run(verdict="CLEAN", coverage="missed", closest="app_parse")
+        self.assertEqual((row["coverage"], row["closest"]), ("MISSED", "app_parse"))
+        plain = self.add_run(index=2)
+        self.assertNotIn("coverage", plain)
+        self.assertNotIn("closest", plain)
+        listing = workqueue.recent_runs(self.ctx, limit=5, agent="1")
+        header, *rows = listing.strip().splitlines()
+        self.assertTrue(header.endswith("|coverage|closest"))
+        self.assertTrue(any(line.endswith("|MISSED|app_parse") for line in rows), listing)
+
     def test_patch_descriptions_and_deduplication_reject_noise(self) -> None:
         self.assertTrue(workqueue.is_version_only_file_set(["VERSION", "CHANGELOG.md"]))
         self.assertFalse(workqueue.is_version_only_file_set(["VERSION", "src/app.c"]))

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Iterable
 
 import languages
+import verdict
 import report_identity
 from audit_scope import is_excluded_path_part
 # target_config (detect_repo_type below, vcs_source_signature in the
@@ -288,14 +289,7 @@ RUNTIME_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
             "|".join(f"(?:{p})" for p in languages.all_crash_patterns()) or r"(?!)"
         ),
     ),
-    (
-        "format-reject",
-        re.compile(
-            r"\b(?:parse|syntax|decode|format|magic|checksum|length)\s+"
-            r"(?:error|fail|invalid|mismatch|rejected?)\b",
-            re.IGNORECASE,
-        ),
-    ),
+    ("format-reject", verdict.FORMAT_REJECT_RE),
     # The runner refused to start because this iteration's sanitizer budget is
     # spent. It records NO_EXEC like a broken harness does, and without this
     # signal the advice below sends the agent to repair one that works.
@@ -5293,6 +5287,15 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
     reason = str(getattr(args, "reason", "") or "").strip()
     if reason:
         row["reason"] = reason
+    # The coverage gate's answer travels with the run: a MISSED with its
+    # closest frame is the agent's next input, and a resumed session reads
+    # it here rather than reopening the output file.
+    coverage = str(getattr(args, "coverage", "") or "").strip().upper()
+    if coverage:
+        row["coverage"] = coverage
+    closest = str(getattr(args, "closest", "") or "").strip()
+    if closest:
+        row["closest"] = closest
     append_jsonl(state_dir(ctx.results_dir) / "runs.jsonl", row)
     return row
 
@@ -6265,7 +6268,7 @@ def recent_runs(
 ) -> str:
     """Slim digest of runs.jsonl.
 
-    Returns id|verdict|mode|agent|hypothesis_id|card_id|testcase. Replaces
+    Returns id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest. Replaces
     `tail -80 runs.jsonl`, which dumps ~30 KB of full JSON when triaging
     typically only needs the verdict and which testcase produced it.
     """
@@ -6289,12 +6292,16 @@ def recent_runs(
     if limit > 0:
         rows = rows[:limit]
 
-    out = ["id|verdict|mode|agent|hypothesis_id|card_id|testcase"]
+    out = ["id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest"]
     for r in rows:
         tc = (r.get("testcase") or "").replace("|", "/").replace("\n", " ")
+        closest = (r.get("closest") or "").replace("|", "/").replace("\n", " ")
+        if len(closest) > 120:
+            closest = closest[:117] + "..."
         out.append(
             f"{r.get('id','')}|{r.get('verdict','')}|{r.get('mode','')}|"
-            f"{r.get('agent','')}|{r.get('hypothesis_id','')}|{r.get('card_id','')}|{tc}"
+            f"{r.get('agent','')}|{r.get('hypothesis_id','')}|{r.get('card_id','')}|{tc}|"
+            f"{r.get('coverage','')}|{closest}"
         )
     return "\n".join(out) + "\n"
 
@@ -6762,7 +6769,7 @@ def recent_tried(
 ) -> str:
     """Slim digest of tried-inputs-N.log (parsed key=value records).
 
-    Returns timestamp|verdict|mode|hash|hypothesis|target|closest|testcase. Replaces
+    Returns timestamp|verdict|mode|hash|hypothesis|target|closest|testcase|coverage. Replaces
     `tail -80 tried-inputs-N.log` which returns ~22 KB per call when the agent
     only needs to confirm a hash isn't a duplicate. --agent picks the file;
     --agent all reads every per-agent log under RESULTS_DIR.
@@ -6806,7 +6813,7 @@ def recent_tried(
     if limit > 0:
         rows = rows[:limit]
 
-    out = ["timestamp|verdict|mode|hash|hypothesis|target|closest|testcase"]
+    out = ["timestamp|verdict|mode|hash|hypothesis|target|closest|testcase|coverage"]
     for r in rows:
         tgt = (r.get("target") or "").replace("|", "/").replace("\n", " ")
         closest = (r.get("closest") or "").replace("|", "/").replace("\n", " ")
@@ -6815,7 +6822,8 @@ def recent_tried(
         tc = (r.get("testcase") or "").replace("|", "/").replace("\n", " ")
         out.append(
             f"{r.get('timestamp','')}|{r.get('verdict','')}|{r.get('mode','')}|"
-            f"{r.get('hash','')}|{r.get('hypothesis','')}|{tgt}|{closest}|{tc}"
+            f"{r.get('hash','')}|{r.get('hypothesis','')}|{tgt}|{closest}|{tc}|"
+            f"{r.get('hits_verdict','')}"
         )
     return "\n".join(out) + "\n"
 
