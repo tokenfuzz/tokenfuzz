@@ -27,7 +27,7 @@ from pathlib import Path
 import finding_signature
 import report_identity
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # Bump whenever scoring semantics change, so scores a previous scorer computed
 # are re-derived instead of being read as current. Named for the change that
 # introduced the version, the way the trigger gate names its decision version.
@@ -47,6 +47,13 @@ def _payload(report: Path, severity: dict) -> dict:
         "level": str(severity.get("level") or ""),
         "score": severity.get("score"),
         "vector": vector,
+        # The scorer already chose a normalized primitive; only the receipt
+        # was dropping it. Without it every later variety read re-parses
+        # mutable report prose, which is the identity class that invalidated
+        # the reverted disposition shadow. Recorded, never re-decided: it
+        # describes what was scored, and gates nothing.
+        "primitive": str(severity.get("primitive") or ""),
+        "primitive_key": str(severity.get("primitive_key") or ""),
     }
 
 

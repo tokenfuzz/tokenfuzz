@@ -1199,6 +1199,20 @@ class SeverityTests(unittest.TestCase):
         self.assertIn("CVSS:4.0/", marker["vector"])
         self.assertEqual(marker["level"], marker["level"].capitalize())
 
+        # The scorer already chose a normalized primitive; the receipt has to
+        # carry it, or every later variety read re-parses mutable report prose
+        # and disagrees with the score sitting beside it.
+        self.assertTrue(marker["primitive_key"])
+        self.assertTrue(marker["primitive"])
+        self.assertEqual(
+            marker["primitive_key"],
+            severity.detect_primitive(
+                (finding / "report.md").read_text(encoding="utf-8"), None,
+            )[0],
+        )
+        # It records what was scored; it never becomes a second opinion.
+        self.assertNotEqual(marker["primitive_key"], "unknown")
+
         # The content hash alone cannot detect a scorer-semantics change. A
         # receipt from the preceding scorer must be stale even when its report
         # and rendered severity still agree byte-for-byte.
