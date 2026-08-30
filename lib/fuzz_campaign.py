@@ -319,14 +319,18 @@ class HarnessState:
 
 
 # What probe prints when it has adjudicated an input either way. Anything
-# else — a build failure, a timeout, a killed replay — means no verdict was
-# reached and the artifact must stay pending rather than be marked seen.
+# else — a build failure, a killed replay, or a run whose command returned
+# without executing the input (EXEC_FAIL/NO_EXEC decide nothing about it) —
+# means no verdict was reached and the artifact must stay pending rather
+# than be marked seen.
 _PROBE_VERDICT = re.compile(r"^\[probe\] verdict=(\w+)", re.M)
+_ADJUDICATED = {"CRASH", "CLEAN", "TIMEOUT", "PROPERTY"}
 
 
-def _terminal_verdict(output: str, returncode: int) -> bool:
+def _terminal_verdict(output: str) -> bool:
     """Whether bin/probe actually decided something about this input."""
-    return bool(_PROBE_VERDICT.search(output)) and returncode in (0, 1)
+    match = _PROBE_VERDICT.search(output)
+    return match is not None and match.group(1) in _ADJUDICATED
 
 
 def _ewma(previous: float, sample: float, weight: float = 0.5) -> float:
@@ -910,12 +914,12 @@ class Campaign:
             if not landed.is_file():
                 landed.write_bytes(artifact.read_bytes())
             probe = Path(__file__).resolve().parent.parent / "bin" / "probe"
-            # probe rebuilds the same source with its own compiler. Left to
-            # its default that can be a different clang from the one that
-            # built the fuzzer — and two sanitizer runtimes in one process
-            # abort with "interceptors are not working" before the testcase
-            # ever runs, which reads as an unreproducible crash.
-            compiler = fuzz_harness.compiler_for(source)
+            # probe rebuilds the source with its own default compiler and
+            # links the plain sanitizer library, the same pairing every
+            # hand-written HARNESS probe uses. Forcing the fuzzing compiler
+            # here instead paired its runtime with a library built by the
+            # target's toolchain: two sanitizer runtimes in one process abort
+            # before the testcase runs, and every artifact read EXEC_FAIL.
             command = [sys.executable, str(probe), "--confirm",
                        "--harness", replica.name]
             # Without the hypothesis the run records against nothing, so the
@@ -934,13 +938,7 @@ class Campaign:
                      # The replay has to use the sanitizer the campaign fuzzed
                      # under, or a UBSan finding is re-run under ASan and
                      # recorded as unreproducible.
-                     "PROBE_SANITIZER": self.sanitizer,
-                     # The compiler that built the campaign binary, not an
-                     # ambient one: two sanitizer runtimes in one process
-                     # abort before the testcase runs, which reads as an
-                     # unreproducible crash.
-                     "CC": compiler,
-                     "CXX": compiler + "++" if not compiler.endswith("++") else compiler},
+                     "PROBE_SANITIZER": self.sanitizer},
             )
             output = (completed.stdout or "") + (completed.stderr or "")
             for line in output.splitlines():
@@ -951,7 +949,7 @@ class Campaign:
             # `pending_artifacts` picks it up at the start of the next
             # campaign — otherwise one transient failure suppressed a real
             # crash permanently.
-            if _terminal_verdict(output, completed.returncode):
+            if _terminal_verdict(output):
                 replayed.append(artifact.name)
             else:
                 self.log(f"[fuzz] {state.name}: {landed.name} reached no "

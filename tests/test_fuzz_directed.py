@@ -1160,12 +1160,63 @@ class ArtifactLifecycleTests(unittest.TestCase):
         # artifact pending — one transient failure used to suppress a real
         # crash for every later campaign.
         self.assertTrue(fuzz_campaign._terminal_verdict(
-            "[probe] verdict=CRASH\n", 1))
+            "[probe] verdict=CRASH\n"))
         self.assertTrue(fuzz_campaign._terminal_verdict(
-            "[probe] verdict=CLEAN\n", 0))
+            "[probe] verdict=CLEAN\n"))
+        self.assertTrue(fuzz_campaign._terminal_verdict(
+            "[probe] verdict=TIMEOUT\n"))
         self.assertFalse(fuzz_campaign._terminal_verdict(
-            "harness build failed\n", 2))
-        self.assertFalse(fuzz_campaign._terminal_verdict("", 124))
+            "harness build failed\n"))
+        self.assertFalse(fuzz_campaign._terminal_verdict(""))
+        # A run whose command returned without executing the input decided
+        # nothing about it: a replay binary that aborts at load reads
+        # EXEC_FAIL, and marking that seen discarded every real crash.
+        self.assertFalse(fuzz_campaign._terminal_verdict(
+            "[probe] verdict=EXEC_FAIL\n"))
+        self.assertFalse(fuzz_campaign._terminal_verdict(
+            "[probe] verdict=NO_EXEC\n"))
+
+    def _routed(self, raw: str, verdict: str, rc: int):
+        results = Path(raw) / "results"
+        results.mkdir()
+        source = Path(raw) / "fuzz_api.c"
+        source.write_bytes(b"int LLVMFuzzerTestOneInput(void){return 0;}")
+        config = config_for(Path(raw) / "src", ["bytes"])
+        config.results_dir = str(results)
+        campaign = fuzz_campaign.Campaign(config, log=lambda _: None)
+        campaign.deadline = fuzz_campaign.time.monotonic() + 600
+        state = campaign.add("fuzz_api", "/nonexistent", str(source))
+        artifacts = fuzz_harness.artifact_dir(results, "fuzz_api")
+        artifacts.mkdir(parents=True)
+        artifact = artifacts / "crash-aaa"
+        artifact.write_bytes(b"a")
+        seen: dict = {}
+
+        def fake_probe(command, seconds, **kwargs):
+            seen.update(kwargs["env"])
+            return subprocess.CompletedProcess(
+                command, rc, f"[probe] verdict={verdict}\n", "")
+
+        with mock.patch.object(fuzz_campaign, "run_timeout", fake_probe):
+            campaign.route_artifacts(state, [str(artifact)])
+        return state, seen
+
+    def test_replay_leaves_the_compiler_to_probe(self) -> None:
+        # The campaign binary is built by the fuzzing toolchain, but probe
+        # links the plain sanitizer library the target's own toolchain built.
+        # Forcing CC to the fuzzing clang paired two sanitizer runtimes in one
+        # process, which aborted before the testcase ran and read EXEC_FAIL.
+        with tempfile.TemporaryDirectory() as raw:
+            state, env = self._routed(raw, "CLEAN", 0)
+        self.assertEqual(env.get("CC"), os.environ.get("CC"))
+        self.assertEqual(env.get("CXX"), os.environ.get("CXX"))
+        self.assertEqual(env["PROBE_SANITIZER"], "asan")
+        self.assertEqual(state.seen_artifacts, ["crash-aaa"])
+
+    def test_a_replay_that_never_ran_the_input_leaves_it_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state, _ = self._routed(raw, "EXEC_FAIL", 1)
+        self.assertEqual(state.seen_artifacts, [])
 
     def test_unadjudicated_artifacts_are_found_again_next_campaign(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

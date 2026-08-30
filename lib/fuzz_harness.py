@@ -1535,7 +1535,7 @@ def build_command(source: Path, binary: Path, san: str, config,
     sanitizer_flag = COMPILE_SANITIZERS.get(san)
     if not sanitizer_flag:
         raise ValueError(f"fuzz harness does not support sanitizer: {san}")
-    compiler = os.environ.get("FUZZ_CC", "") or compiler_for(source)
+    compiler = compiler_for(source)
     includes = [
         value for path in config.includes
         for value in ("-I", config.resolve_path(path))
@@ -1598,7 +1598,7 @@ def build_identity(source: Path, san: str, config, library: str,
     an older library is the one cache failure that would corrupt results
     rather than merely waste time.
     """
-    compiler = os.environ.get("FUZZ_CC", "") or compiler_for(source)
+    compiler = compiler_for(source)
     try:
         stat = Path(library).stat() if library else None
     except OSError:
@@ -1880,8 +1880,7 @@ def _matches_source(record: dict, san: str) -> bool:
     source = Path(str(record.get("source", "")))
     if not source.is_file():
         return False
-    return str(record.get("digest", "")) == record.get("source_digest", "") or \
-        hashlib.sha1(source.read_bytes()).hexdigest() == str(record.get("source_sha1", ""))
+    return hashlib.sha1(source.read_bytes()).hexdigest() == str(record.get("source_sha1", ""))
 
 
 def _prefer(candidate: dict, incumbent: dict) -> bool:
