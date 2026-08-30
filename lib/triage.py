@@ -795,7 +795,10 @@ _ALL_REACH_FIELD_LABELS = {
 # Bump when a prompt/schema defect could have consumed the bounded retry budget
 # without asking for a field. Complete reports still short-circuit; only reports
 # that remain open receive fresh attempts.
-_REACH_FIELD_DECISION_VERSION = "reach-fields-v5-batch-schema"
+# Bumped with the prompt: 12420dd made fixed pre-input shaping application
+# setup (`trigger_source: bytes`, `parameter_control: application-supplied`)
+# but left cached answers keyed to the old policy, which severity reads.
+_REACH_FIELD_DECISION_VERSION = "reach-fields-v6-fixed-fallback-setup"
 _REACH_FIELD_ENUMS = {
     "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
