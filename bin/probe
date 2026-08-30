@@ -1274,7 +1274,14 @@ class Probe:
                 )
                 if testcase_failure == "unavailable":
                     return "NO_EXEC"
-                if testcase_failure == "assertion":
+                # An S8 oracle that prints its marker and then asserts
+                # produced its counterexample; the assertion is how it exits
+                # nonzero, not a testcase defect.
+                if testcase_failure == "assertion" and not (
+                    self.hypothesis_strategy == "S8"
+                    and self.header["property"]
+                    and file_has_property_violation(self.output, returncode)
+                ):
                     return "EXEC_FAIL"
             if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
                 return "CRASH"

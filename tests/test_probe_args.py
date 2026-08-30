@@ -59,6 +59,25 @@ class ProbeArgumentTests(unittest.TestCase):
             )
             self.assertEqual(instance._classify(0), "PROPERTY")
 
+            # An S8 oracle under the language runner exits nonzero by
+            # asserting after printing its marker; that assertion is the
+            # counterexample, not a testcase defect to repair.
+            testcase = Path(directory) / "oracle.py"
+            testcase.write_text("assert False\n", encoding="utf-8")
+            instance.sanitizer = "runner"
+            instance.exec_testcase = testcase
+            instance.output.write_text(
+                "ASAN_RUN_HEADER: sanitizer=runner runs=1\n"
+                "PROPERTY VIOLATION: equivalent forms differ\n"
+                "Traceback (most recent call last):\n"
+                f'  File "{testcase}", line 1, in <module>\n'
+                "AssertionError\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(1), "PROPERTY")
+            instance.hypothesis_strategy = "S3"
+            self.assertEqual(instance._classify(1), "EXEC_FAIL")
+
     def test_a_run_that_returned_is_exec_fail_not_a_dead_harness(self) -> None:
         """A command that ran and returned uncleanly is EXEC_FAIL, not NO_EXEC.
 
