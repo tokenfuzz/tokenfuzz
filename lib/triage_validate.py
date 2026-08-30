@@ -34,9 +34,15 @@ TRIGGER_GATE_ADVISORY_VERSIONS = {
 
 def trigger_resolution_review_names(
     first_vote: str | None, second_vote: str | None,
+    *, first_scope_open: bool = False,
 ) -> tuple[str, ...]:
-    """Return the prior review files needed to resolve an unsettled gate."""
-    if first_vote == "Uncertain":
+    """Return the prior review files needed to resolve an unsettled gate.
+
+    A Promote whose reviewer left `trigger_controls_fit` unclear settled
+    reachability but not scope, and scope decides publication; it is re-asked
+    the way an Uncertain is, or the artifact stays `pending` for good.
+    """
+    if first_vote == "Uncertain" or (first_vote == "Promote" and first_scope_open):
         return (".trigger-gate.json",)
     if first_vote == "Reject" and second_vote in {"Promote", "Uncertain"}:
         return (".trigger-gate.json", ".trigger-gate-2.json")

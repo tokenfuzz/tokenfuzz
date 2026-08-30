@@ -2038,6 +2038,16 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
     return None
 
 
+def _promote_left_scope_open(report: Path, vote_file: Path) -> bool:
+    """A Promote whose reviewer placed the trigger neither within nor outside
+    the declared controls. Reachability is settled, scope is not, and scope is
+    what publishes: without a resolver the artifact stayed `pending` for good."""
+    if _cached_trigger_vote(report, vote_file) != "Promote":
+        return False
+    facts = _source_review_facts(report, (vote_file,))
+    return facts.get("trigger_controls_fit") not in {"within", "outside"}
+
+
 def _trigger_resolution_sources(report: Path, directory: Path) -> tuple[Path, ...]:
     """Return the cached reviews a focused resolver must adjudicate."""
     first = directory / _TRIGGER_PRIMARY_NAME
@@ -2045,6 +2055,7 @@ def _trigger_resolution_sources(report: Path, directory: Path) -> tuple[Path, ..
     second = directory / _TRIGGER_SECOND_NAME
     names = triage_validate.trigger_resolution_review_names(
         first_vote, _cached_trigger_vote(report, second),
+        first_scope_open=_promote_left_scope_open(report, first),
     )
     return tuple(directory / name for name in names)
 
@@ -2454,7 +2465,10 @@ def _crash_trigger_gate(
         target_root, deadline, usage_index,
         target_root_is_product,
     ) != 1:
-        if _cached_trigger_vote(report, first) == "Uncertain":
+        if (
+            _cached_trigger_vote(report, first) == "Uncertain"
+            or _promote_left_scope_open(report, first)
+        ):
             _trigger_vote(
                 report, crash_dir / _TRIGGER_RESOLUTION_NAME, backend, model,
                 target_root, deadline, usage_index, target_root_is_product,
@@ -3329,9 +3343,11 @@ def _finding_trigger_disposition(
                 return "rejected-consequence"
             return "rejected"
         return "accepted"
-    if vote == "Promote":
+    if vote == "Promote" and not _promote_left_scope_open(
+        report, finding_dir / ".trigger-gate.json",
+    ):
         return "accepted"
-    if vote == "Uncertain":
+    if vote in {"Uncertain", "Promote"}:
         resolution = finding_dir / _TRIGGER_RESOLUTION_NAME
         if backend and target_root.is_dir():
             _trigger_vote(
@@ -3353,11 +3369,14 @@ def _cached_trigger_resolution(directory: Path, report: Path) -> bool:
     if _trigger_bypass_confirmed(directory):
         return True
     first = _cached_trigger_vote(report, directory / ".trigger-gate.json")
-    if first == "Promote":
-        return True
     resolution = _cached_trigger_vote(
         report, directory / _TRIGGER_RESOLUTION_NAME,
     )
+    if first == "Promote":
+        return (
+            not _promote_left_scope_open(report, directory / ".trigger-gate.json")
+            or resolution in {"Promote", "Reject", "Uncertain"}
+        )
     if first == "Uncertain":
         return resolution in {"Promote", "Reject", "Uncertain"}
     if first == "Reject":

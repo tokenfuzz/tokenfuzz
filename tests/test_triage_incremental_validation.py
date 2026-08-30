@@ -1542,6 +1542,61 @@ Generated score text.
             self.finding, self.report,
         ))
 
+    def test_a_promote_that_left_scope_open_is_resolved_not_parked(self) -> None:
+        # Reachability settled, scope not: the reviewer answered `unclear` on
+        # trigger_controls_fit. Publication needs scope, so without a resolver
+        # this artifact stayed `pending` for good and earned no credit.
+        first = self.finding / ".trigger-gate.json"
+        open_scope = trigger_vote(self.report, self.root, "Promote")
+        open_scope["review_facts"] = {"trigger_controls_fit": "unclear"}
+        first.write_text(json.dumps(open_scope), encoding="utf-8")
+        self.assertFalse(triage._cached_trigger_resolution(
+            self.finding, self.report,
+        ))
+        self.assertEqual(
+            triage._trigger_resolution_sources(self.report, self.finding),
+            (first,),
+        )
+
+        resolution = self.finding / ".trigger-gate-resolution.json"
+
+        def resolve(report, vote_file, *_args, **kwargs):
+            if kwargs.get("resolve"):
+                vote_file.write_text(json.dumps(trigger_resolution_vote(
+                    report, self.root, [first], "Promote",
+                )), encoding="utf-8")
+            return 0
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }), mock.patch.object(triage, "_trigger_vote", side_effect=resolve):
+            self.assertEqual(
+                triage._finding_trigger_disposition(self.finding, self.report),
+                "accepted",
+            )
+        self.assertTrue(triage._cached_trigger_resolution(
+            self.finding, self.report,
+        ))
+        votes, facts = triage._trigger_publication_evidence(
+            self.report, self.finding,
+        )
+        self.assertEqual(
+            triage._final_publication_state("promote", votes, facts),
+            "reportable",
+        )
+
+        # A Promote that did answer the scope question needs no resolver.
+        first.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Promote",
+        )), encoding="utf-8")
+        resolution.unlink()
+        self.assertTrue(triage._cached_trigger_resolution(
+            self.finding, self.report,
+        ))
+        self.assertEqual(
+            triage._trigger_resolution_sources(self.report, self.finding), (),
+        )
+
     def test_focused_resolution_can_settle_a_review_conflict(self) -> None:
         first = self.finding / ".trigger-gate.json"
         second = self.finding / ".trigger-gate-2.json"
