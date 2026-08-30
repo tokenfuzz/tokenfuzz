@@ -171,7 +171,8 @@ with tempfile.TemporaryDirectory() as td:
     # crashing run that should be excluded.
     promotable = scratch / "tc-1.html"
     promotable.write_text(
-        "<!-- HYPOTHESIS-ID: H-42ab7c9d10 -->\n"
+        # Closer without a space: the id must not swallow the `-->`.
+        "<!-- HYPOTHESIS-ID: H-42ab7c9d10-->\n"
         "<!-- TARGET: src/lib/parser.cpp -->\n"
         "<!-- CATEGORY: bounds -->\n"
         "<html></html>"
@@ -219,6 +220,7 @@ with tempfile.TemporaryDirectory() as td:
     meta_text = (cover / "metadata.md").read_text()
     ok("H-42ab7c9d10" in meta_text and "bounds" in meta_text and "new=3" not in meta_text,
        "metadata contains hypothesis + category", meta_text[:200])
+    ok("H-42ab7c9d10-" not in meta_text, "comment closer is not part of the id", meta_text[:200])
     ok("**New edges contributed:** 3" in meta_text, "new-edge count recorded", meta_text[:300])
 
     # Re-running unchanged should not duplicate the same input.

@@ -123,7 +123,11 @@ _HIT_LINE_RE = re.compile(r"^HIT:")
 # 30 recorded coverage HITs across every run on disk promoted nothing; and
 # `testcase_mode_for_file` uses the same pattern to recognise a source-extension
 # testcase, so those were not counted as testcases or swept for orphans.
-_HID_RE = re.compile(r"HYPOTHESIS-ID:\s*(H-?[A-Za-z0-9][A-Za-z0-9._-]*)")
+# The id ends on an alphanumeric, so a `-->` or `*/` closer written without a
+# space, or a trailing period, does not become part of the recorded id.
+_HID_RE = re.compile(
+    r"HYPOTHESIS-ID:\s*(H-?[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)"
+)
 _TARGET_RE = re.compile(r"^[^A-Za-z]*TARGET:\s*(.+?)(?:\s*(?:-->|\*/)\s*)?$")
 _CATEGORY_RE = re.compile(r"^[^A-Za-z]*(?:CATEGORY|INTENT):\s*(.+?)(?:\s*(?:-->|\*/)\s*)?$")
 _C_FAMILY_HARNESS_EXTS = frozenset((".c", ".cc", ".cpp", ".cxx"))
