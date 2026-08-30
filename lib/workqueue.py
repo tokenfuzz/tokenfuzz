@@ -293,10 +293,7 @@ RUNTIME_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # The runner refused to start because this iteration's sanitizer budget is
     # spent. It records NO_EXEC like a broken harness does, and without this
     # signal the advice below sends the agent to repair one that works.
-    (
-        "budget-exhausted",
-        re.compile(r"^\[run-sanitizer-multi\] BUDGET: EXHAUSTED", re.MULTILINE),
-    ),
+    ("budget-exhausted", verdict.BUDGET_EXHAUSTED_RE),
 )
 # Coverage near-miss: the probe's coverage gate prints the closest reached frame
 # when a testcase ran near, but not at, the suspicious point.

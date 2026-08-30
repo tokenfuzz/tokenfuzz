@@ -162,6 +162,19 @@ FORMAT_REJECT_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The runner refused to start because this iteration's sanitizer budget is
+#: spent. Nothing about the testcase was ever read, so the run records NO_EXEC
+#: exactly like a broken harness does — and the repair is the opposite one:
+#: wait for the next iteration rather than change the input.
+BUDGET_EXHAUSTED_RE = re.compile(
+    r"^\[run-sanitizer-multi\] BUDGET: EXHAUSTED", re.MULTILINE,
+)
+
+
+def file_budget_exhausted(path: str | Path) -> bool:
+    """Whether a spent per-iteration sanitizer budget refused this run."""
+    return _file_matches(path, BUDGET_EXHAUSTED_RE)
+
 
 def strip_run_header(text: str) -> str:
     """Drop the sanitizer runner's header lines from saved output.

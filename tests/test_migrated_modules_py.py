@@ -337,6 +337,30 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         fail_log.write_text(body)
         kind, hint = verdict.execution_failure_class(fail_log)
         check(kind == expected and bool(hint), f"execution failure class {expected!r} (got {kind!r})")
+    # A spent per-iteration budget refuses the run before the testcase is
+    # read. It records NO_EXEC exactly like a broken harness, so it has to be
+    # separable from one: a measured cell spent 511 probes mutating an input
+    # against a refusal that no input could have satisfied.
+    budget_log = root / "verdict-budget.log"
+    budget_log.write_text(
+        "ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic\n"
+        "[run-sanitizer-multi] BUDGET: 5/1 sanitizer invocations used this iteration\n"
+        "[run-sanitizer-multi] BUDGET: EXHAUSTED - no sanitizer run started\n",
+        encoding="utf-8",
+    )
+    check(verdict.file_budget_exhausted(budget_log),
+          "verdict recognizes a refused run as a spent sanitizer budget")
+    check(not verdict.file_execution_attempted(budget_log),
+          "a refused run is not an execution attempt")
+    started_log = root / "verdict-budget-started.log"
+    started_log.write_text(
+        "[run-sanitizer-multi] BUDGET: 1/4 sanitizer invocations used this iteration\n"
+        "=== Run 1/1 ===\n",
+        encoding="utf-8",
+    )
+    check(not verdict.file_budget_exhausted(started_log),
+          "a budget line that still allowed a run is not exhaustion")
+
     clean_log = root / "verdict-clean.log"
     clean_log.write_text("[probe] asan EXECUTION VERIFIED (post-run, rc=0)\n", encoding="utf-8")
     check(verdict.file_is_clean(clean_log), "verdict recognizes verified clean probe output")

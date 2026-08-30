@@ -1406,6 +1406,23 @@ class Probe:
             if kind:
                 print(f"[probe] EXEC_FAIL class={kind}: {hint}")
                 reason = f"{reason} class={kind}".strip()
+        elif probe_verdict == "NO_EXEC" and verdict_lib.file_budget_exhausted(self.output):
+            # A spent budget refuses the run before the testcase is read, so it
+            # looks exactly like a broken harness and the session rule for
+            # NO_EXEC ("nothing executed: fix the testcase") sends the agent to
+            # repair an input that is fine. One measured cell spent 511 probes
+            # mutating against a refusal. The queue already names this signal
+            # for a whole scope; say it here too, where the agent decides what
+            # to do next.
+            print(
+                "[probe] NO_EXEC class=budget-exhausted: this iteration's "
+                "sanitizer budget is spent, so the run never started and the "
+                "testcase was never read. Do not mutate the input or repair "
+                "the harness for this; reason from source and existing output, "
+                "and keep the next iteration's runs for the shapes that most "
+                "need execution."
+            )
+            reason = f"{reason} class=budget-exhausted".strip()
         coverage, frame = verdict_lib.coverage_outcome(self.output)
         self._state_command(
             "add-run", "--agent", self.agent, "--hypothesis-id", hypothesis, "--card-id", self.card,
