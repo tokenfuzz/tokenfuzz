@@ -905,11 +905,18 @@ _PROVIDER_RETRY_RE = re.compile(r'try again at|retry after|reset', re.IGNORECASE
 # and a pause wrongly subtracted from a benchmark wall hands the cell extra
 # budget. Two shapes, because one run hit both — a revoked credential, and a
 # model the installed CLI cannot serve.
-_PROVIDER_CREDENTIAL_TEXT_RE = re.compile(
+# The provider naming the refused credential itself. Trusted on a plain CLI
+# error line, where a bare status or "Unauthorized" is as often the audited
+# program's own HTTP client reporting through a plain-text backend.
+_PROVIDER_CREDENTIAL_TOKEN_RE = re.compile(
     r'token[_ ]revoked|refresh_token_invalidated|invalidated oauth|'
-    r'invalid[_ -]?api[_ -]?key|authentication_error|\bUnauthorized\b|'
-    r'not authenticated|oauth token[^.\n]{0,40}(?:expired|revoked|invalid)|'
+    r'invalid[_ -]?api[_ -]?key|authentication_error|'
+    r'oauth token[^.\n]{0,40}(?:expired|revoked|invalid)|'
     r'please (?:re-?)?(?:login|authenticate)',
+    re.IGNORECASE,
+)
+_PROVIDER_CREDENTIAL_TEXT_RE = re.compile(
+    _PROVIDER_CREDENTIAL_TOKEN_RE.pattern + r'|\bUnauthorized\b|not authenticated',
     re.IGNORECASE,
 )
 
@@ -1056,7 +1063,14 @@ def _provider_issue_from_lines(lines, quota_marker: Path | None = None) -> str:
         if is_error_event or (is_plain and _PROVIDER_ERROR_LINE_RE.search(line)):
             found = _PROVIDER_STATUS_CODE_RE.search(line)
             status = _status_class(found) if found else ""
-            if status == "refused" or _PROVIDER_CREDENTIAL_TEXT_RE.search(line):
+            if is_error_event and (
+                status == "refused" or _PROVIDER_CREDENTIAL_TEXT_RE.search(line)
+            ):
+                refused = True
+            # A plain line has to name the credential: a bare 401 there is as
+            # often the audited program's HTTP client writing to a plain-text
+            # backend's transcript, and one such line halted the whole run.
+            if is_plain and _PROVIDER_CREDENTIAL_TOKEN_RE.search(line):
                 refused = True
             # A 400 halts the run only when the provider named the model or the
             # client as the blocker; on its own it is one malformed request.

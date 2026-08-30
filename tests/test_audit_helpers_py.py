@@ -624,6 +624,20 @@ provider_cases = [
         "backend_rejected",
         "provider-issue: a refused credential is a provider state, not silence",
     ),
+    (
+        # A plain-text CLI relays the audited program's test output verbatim;
+        # an HTTP library's own 401 line is not the provider refusing us.
+        ["ERROR: request failed: 401 Unauthorized"],
+        "none",
+        "provider-issue: a bare 401 line without a provider dialect is target output",
+    ),
+    (
+        # The provider naming the credential on that same line shape is.
+        ["ERROR codex_models::manager: failed to refresh: unexpected status "
+         "401 Unauthorized: auth error code: token_revoked"],
+        "backend_rejected",
+        "provider-issue: a plain CLI line naming the revoked credential is a refusal",
+    ),
 ]
 
 for rows, expected, name in provider_cases:
