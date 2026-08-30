@@ -623,6 +623,40 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertEqual(verify.call_args.args[0], routed)
         self.assertTrue(routed.is_dir())
 
+    def test_a_replay_that_could_not_run_keeps_a_measured_verdict(self) -> None:
+        # Regenerate replays every direct crash. One that fails today for a
+        # host-side reason must not withdraw the reportable verdict a measured
+        # replay already reached by holding the bundle back to `pending`.
+        target, slug = self.make_target("measured-target")
+        results = self.root / "measured-results"
+        crash = results / "crashes" / "CRASH-0001"
+        crash.mkdir(parents=True)
+        (crash / "report.md").write_text("# Bounds issue\n", encoding="utf-8")
+        (crash / "sanitizer.txt").write_text(
+            DIAGNOSTIC + "CRASH_RATE: 5/5\n", encoding="utf-8",
+        )
+        (crash / "poc.bin").write_bytes(b"input")
+        (crash / "validation.json").write_text(
+            json.dumps({"state": "reportable"}), encoding="utf-8",
+        )
+        unmeasured = results / "crashes" / "CRASH-0002"
+        unmeasured.mkdir()
+        (unmeasured / "report.md").write_text("# Bounds issue\n", encoding="utf-8")
+        (unmeasured / "sanitizer.txt").write_text(DIAGNOSTIC, encoding="utf-8")
+        (unmeasured / "poc.bin").write_bytes(b"input")
+        with mock.patch.object(
+            benchmark_runner, "_verify_model_direct_crash",
+            return_value="unmeasured",
+        ), mock.patch.object(
+            benchmark_runner.triage, "triage_crash_dirs",
+            return_value={"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0},
+        ) as triage_dirs:
+            counts = benchmark_runner.triage_cell_crashes(
+                results, target, slug, workers=1, require_replay=True,
+            )
+        self.assertEqual(triage_dirs.call_args.kwargs["held"], {unmeasured})
+        self.assertEqual(counts["unreplayed"], 1)
+
     def test_split_config_suffix_and_unsafe_path_resolution(self) -> None:
         nonce = uuid.uuid4().hex
         split_slug = f"reverify-split-{nonce}"

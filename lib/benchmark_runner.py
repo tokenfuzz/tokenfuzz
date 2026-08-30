@@ -510,6 +510,21 @@ def triage_cell_crashes(
                     # run. That is the completeness gate's call, not this
                     # one's: leave it in place and let the gate hold it.
                     continue
+                if (
+                    _measured_crash_rate(crash_dir / "sanitizer.txt") is not None
+                    and validation_receipt.claims_state(
+                        crash_dir, validation_receipt.FINAL_STATES,
+                    )
+                ):
+                    # A replay that could not run today (host load, a temp
+                    # failure) does not withdraw the verdict a measured replay
+                    # already reached; ordinary triage re-reads that receipt.
+                    log(
+                        f"WARN: model-direct replay could not measure "
+                        f"{crash_dir.name} ({_REPLAY_NON_VERDICTS[status]}) - "
+                        f"its measured verdict stands"
+                    )
+                    continue
                 held.add(crash_dir)
                 log(
                     f"WARN: model-direct replay could not measure "
