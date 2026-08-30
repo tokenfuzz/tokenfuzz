@@ -35,13 +35,6 @@ the project has no such ceiling. Either one alone fails: an amplification a
 cap neutralizes is allocation handling, and a large demand that costs the
 attacker comparably large input is not amplification.
 
-**Exception — work card with a pre-filed FIND:** if your assigned work
-card carries a `find_id` (rendered in the card as a "PRE-FILED FIND"
-block), the FIND already exists in `{{ results_dir }}/findings/<find_id>/`.
-Augment that dir — never create a new `FIND-NNN-<slug>/` for the same
-defect. The pre-filed id is the canonical record; double-filing inflates
-the benchmark count and breaks cluster dedup.
-
 **Point at the fix (best-effort, never blocks filing).** End `report.md`
 with exactly one fix pointer: a `## Fix Direction` heading on its own line
 so the exporter detects it, or — when the fix is a surgical diff — a
