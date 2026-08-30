@@ -476,6 +476,27 @@ class ServedModelTests(unittest.TestCase):
         }}])
         self.assertEqual(llm_usage.substituted_model(raw, "claude-opus-5"), "")
 
+    def test_served_totals_count_tokens_not_the_blocks_constants(self) -> None:
+        # Claude Code reports contextWindow and maxOutputTokens beside the
+        # counters; summed in, a 200k constant outranked every real token and
+        # the model preflight refused a healthy session as substituted.
+        raw = self.write("constants.raw", [{"type": "result", "modelUsage": {
+            "claude-opus-5": {
+                "inputTokens": 3, "outputTokens": 60,
+                "cacheCreationInputTokens": 18_000, "costUSD": 0.1,
+                "contextWindow": 200_000, "maxOutputTokens": 32_000,
+            },
+            "claude-haiku-4-5": {
+                "inputTokens": 400, "outputTokens": 40, "costUSD": 0.001,
+                "contextWindow": 200_000, "maxOutputTokens": 64_000,
+            },
+        }}])
+        self.assertEqual(
+            llm_usage.served_models(raw),
+            {"claude-opus-5": 18_063, "claude-haiku-4-5": 440},
+        )
+        self.assertEqual(llm_usage.substituted_model(raw, "claude-opus-5"), "")
+
     def test_a_dated_snapshot_of_the_requested_model_is_not_substitution(self) -> None:
         raw = self.write("dated.raw", [
             {"modelUsage": {"claude-opus-5-20260101": {"inputTokens": 10}}},

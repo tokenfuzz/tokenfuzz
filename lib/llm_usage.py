@@ -246,6 +246,13 @@ def model_id_matches(model: str, *model_ids: str) -> bool:
 # output, and an agent that curls an API returning its own "models" object
 # would otherwise be read as the provider's billing record.
 _SERVED_MODEL_PATHS = (("modelUsage",), ("stats", "models"))
+# The per-model block also carries constants -- Claude Code reports
+# `contextWindow` and `maxOutputTokens` beside the counters -- so "busiest"
+# is decided by the token fields alone, never by every integer in the block.
+_SERVED_TOKEN_KEYS = frozenset({
+    "inputTokens", "outputTokens", "cacheReadInputTokens",
+    "cacheCreationInputTokens", "total_tokens", "input_tokens", "output_tokens",
+})
 
 
 def _served_from_object(obj: object, into: dict[str, int]) -> None:
@@ -261,8 +268,9 @@ def _served_from_object(obj: object, into: dict[str, int]) -> None:
             if not isinstance(name, str) or not isinstance(counters, dict):
                 continue
             total = sum(
-                value for value in counters.values()
-                if isinstance(value, int) and not isinstance(value, bool)
+                value for key, value in counters.items()
+                if key in _SERVED_TOKEN_KEYS
+                and isinstance(value, int) and not isinstance(value, bool)
             )
             if total > 0:
                 into[name] = into.get(name, 0) + total
