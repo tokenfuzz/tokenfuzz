@@ -363,6 +363,7 @@ def _rejected_label(value: object, upper_bound: bool) -> object:
 def _unique_with_medium_plus(
     unique: int, medium_plus: int, unadjudicated: int = 0,
     classes: int = 0, floor: bool = False,
+    top_class: str = "", top_class_pct: int = 0,
 ) -> str:
     """Label a unique-cluster count with its Medium+ subset: `6 (1 M+)`.
 
@@ -384,6 +385,12 @@ def _unique_with_medium_plus(
     only place the difference is visible. Findings only — crashes cluster by
     stack signature, which already carries it.
 
+    `top N% <class>` says how concentrated that spread is. Class count alone
+    still reads as breadth when one cheap class supplies most of the total, and
+    a count a reader cannot decompose is one a filing incentive can satisfy
+    with the weakest legible artifact. Shown only when one class holds at least
+    a third, so an evenly spread row stays uncluttered.
+
     `floor` prefixes `≥`. Every cell with an unjudged remainder is a floor, but
     a residue beside an adjudicated majority still reads as a measurement,
     while a remainder that outnumbers the verdicts does not: review stopped
@@ -397,6 +404,8 @@ def _unique_with_medium_plus(
     inner = f"{medium_plus} M+"
     if classes > 0:
         inner += f", {classes} classes"
+    if top_class and top_class_pct >= 33:
+        inner += f", top {top_class_pct}% {top_class}"
     if unjudged:
         inner += f", {unjudged}"
     return f"{'≥' if floor else ''}{unique} ({inner})"
@@ -985,21 +994,30 @@ def confirmed_finding_cluster_count(findings_dir: Path, names: list[str]) -> int
     return len(clusters)
 
 
-def confirmed_finding_class_count(findings_dir: Path, names: list[str]) -> int:
-    """Distinct bug classes across confirmed findings.
+def confirmed_finding_class_histogram(
+    findings_dir: Path, names: list[str],
+) -> dict[str, int]:
+    """How many confirmed findings fall in each bug class.
 
     Cluster identity is (class, file, line), so one mechanism restated at N
     locations is N countable findings -- correctly, since N sites need N fixes.
     That makes the finding count alone a poor read of what a condition covered:
     one cell reached 57 accepted findings across 3 classes while its peer
     reached 30 across 21, and the counts alone say the opposite of the
-    coverage. This counts the classes so the report can carry both. It ranks
-    nothing and gates nothing.
+    coverage.
+
+    The distinct-class count alone still hides concentration: a cell can reach
+    22 classes while two cheap ones supply most of the count, and a filing
+    incentive is always satisfied by the weakest legible artifact. Keeping the
+    per-class counts lets the report say which share the largest class holds.
+    It ranks nothing and gates nothing.
 
     The reviewed class from the quality gate is preferred over the report's own
-    free-text field, which varies per report for the same defect.
+    free-text field, which varies per report for the same defect. A finding
+    with neither is counted under its own name, so it reads as its own class
+    rather than merging with every other unlabelled finding.
     """
-    classes: set[str] = set()
+    classes: dict[str, int] = {}
     for name in names:
         directory = findings_dir / name
         value = ""
@@ -1029,8 +1047,30 @@ def confirmed_finding_class_count(findings_dir: Path, names: list[str]) -> int:
                 )
                 value = match.group(1) if match else ""
         normalized = " ".join(value.split()).lower()
-        classes.add(normalized if normalized and normalized not in {"—", "-"} else name)
-    return len(classes)
+        key = normalized if normalized and normalized not in {"—", "-"} else name
+        classes[key] = classes.get(key, 0) + 1
+    return classes
+
+
+def confirmed_finding_class_count(findings_dir: Path, names: list[str]) -> int:
+    """Distinct bug classes across confirmed findings."""
+    return len(confirmed_finding_class_histogram(findings_dir, names))
+
+
+def dominant_class_share(histogram: dict[str, int]) -> tuple[str, int]:
+    """The largest class and its percentage of the counted findings.
+
+    Reported beside the count because the two answer different questions: the
+    count says how much was filed, this says how much of it is one mechanism.
+    A row that is mostly one cheap class is a different result from an evenly
+    spread one at the same count, and only this term separates them. Ties
+    resolve by name so the label is stable across runs.
+    """
+    total = sum(histogram.values())
+    if not total:
+        return "", 0
+    name, count = max(histogram.items(), key=lambda kv: (kv[1], kv[0]))
+    return name, round(count * 100 / total)
 
 
 # Backends whose `input` token field already includes the cached prefix
@@ -4079,11 +4119,19 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
     pooled_finding_names: dict[str, list[str]] = {}
     for _name, _cond in members.get("findings", {}).items():
         pooled_finding_names.setdefault(_cond, []).append(_name)
-    finding_classes_by_cond = {
-        _cond: confirmed_finding_class_count(
+    finding_class_histogram_by_cond = {
+        _cond: confirmed_finding_class_histogram(
             bench_dir / "pool" / "findings", _names,
         )
         for _cond, _names in pooled_finding_names.items()
+    }
+    finding_classes_by_cond = {
+        _cond: len(_hist)
+        for _cond, _hist in finding_class_histogram_by_cond.items()
+    }
+    finding_top_class_by_cond = {
+        _cond: dominant_class_share(_hist)
+        for _cond, _hist in finding_class_histogram_by_cond.items()
     }
     # Crashes a post-pool gate demoted out of the accepted pool keep their
     # pooled-accepted name (CRASH-NNNN); cell-level rejects are CRASH-REJECTED-*.
@@ -4294,6 +4342,8 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "medium_plus_bugs": cb.get("medium_plus", 0),
                 "unique_finding_clusters": fb.get("unique_clusters", 0),
                 "unique_finding_classes": finding_classes_by_cond.get(cond, 0),
+                "top_finding_class": finding_top_class_by_cond.get(cond, ("", 0))[0],
+                "top_finding_class_pct": finding_top_class_by_cond.get(cond, ("", 0))[1],
                 "medium_plus_findings": fb.get("medium_plus", 0),
                 "unique_rejected_crash_clusters": unique_rejected_crashes,
                 "rejected_crash_clusters_upper_bound": rejected_crashes_upper_bound,
@@ -5338,7 +5388,9 @@ def render_section(report: dict) -> str:
                         c.get("medium_plus_findings", 0),
                         _as_int(c.get("unadjudicated_finding_total")),
                         _as_int(c.get("unique_finding_classes")),
-                        bool(c.get("finding_total_is_floor"))),
+                        bool(c.get("finding_total_is_floor")),
+                        str(c.get("top_finding_class") or ""),
+                        _as_int(c.get("top_finding_class_pct"))),
                     cond_findings, "FINDING-CLUSTERS"),
                 rfi=_artifact_report_link(
                     _rejected_label(
@@ -5909,7 +5961,9 @@ def crosstab(bench_root: Path) -> str:
                         c.get("medium_plus_findings", 0),
                         _as_int(c.get("unadjudicated_finding_total")),
                         _as_int(c.get("unique_finding_classes")),
-                        bool(c.get("finding_total_is_floor"))),
+                        bool(c.get("finding_total_is_floor")),
+                        str(c.get("top_finding_class") or ""),
+                        _as_int(c.get("top_finding_class_pct"))),
                     findings_dir, "FINDING-CLUSTERS")),
                 rcr=("Pending" if provisional else _rejected_cell(
                     c.get("unique_rejected_crash_clusters"),
@@ -6091,7 +6145,11 @@ def crosstab(bench_root: Path) -> str:
         "classes. The count links to the report. Read `N` and `C` together: "
         "one mechanism found at thirty locations is thirty findings and one "
         "class, and it is not the same result as thirty classes, even though "
-        "each of those thirty sites needs its own fix. A "
+        "each of those thirty sites needs its own fix. A `top P% <class>` term "
+        "appears when one class holds at least a third of the count, and says "
+        "which one and how much: a high share means most of `N` is a single "
+        "mechanism, so the count is carried by one vein rather than by "
+        "coverage. Its absence means no class reaches a third. A "
         "`K unjudged` term means `K` reports never reached a verdict — review "
         "did not finish before the run was published. They count as "
         "unconfirmed, so read the cell as a floor, not as a measured yield. "

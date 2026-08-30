@@ -707,5 +707,82 @@ class ModelDirectBudgetLineTests(unittest.TestCase):
         self.assertNotIn("many dozens", body)
 
 
+class FindingClassConcentrationTests(unittest.TestCase):
+    """A count a reader cannot decompose hides a one-class flood."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="finding-class-")
+        self.findings = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _finding(self, name: str, klass: str) -> str:
+        directory = self.findings / name
+        directory.mkdir(parents=True)
+        (directory / ".llm-find-quality.json").write_text(
+            json.dumps({"class": klass}), encoding="utf-8",
+        )
+        return name
+
+    def test_histogram_counts_each_class_and_names_the_dominant_one(self) -> None:
+        names = [
+            self._finding(f"FIND-{index:03d}", klass)
+            for index, klass in enumerate(
+                ["dos"] * 6 + ["info-disclosure"] * 3 + ["auth"]
+            )
+        ]
+        histogram = benchmark.confirmed_finding_class_histogram(
+            self.findings, names,
+        )
+        self.assertEqual(histogram, {"dos": 6, "info-disclosure": 3, "auth": 1})
+        # The distinct-class count stays what it always was.
+        self.assertEqual(
+            benchmark.confirmed_finding_class_count(self.findings, names), 3,
+        )
+        self.assertEqual(
+            benchmark.dominant_class_share(histogram), ("dos", 60),
+        )
+
+    def test_unlabelled_findings_do_not_merge_into_one_class(self) -> None:
+        names = []
+        for index in range(3):
+            directory = self.findings / f"FIND-BARE-{index}"
+            directory.mkdir(parents=True)
+            names.append(directory.name)
+        histogram = benchmark.confirmed_finding_class_histogram(
+            self.findings, names,
+        )
+        self.assertEqual(sum(histogram.values()), 3)
+        self.assertEqual(len(histogram), 3)
+
+    def test_empty_histogram_names_no_dominant_class(self) -> None:
+        self.assertEqual(benchmark.dominant_class_share({}), ("", 0))
+
+    def test_concentrated_row_shows_the_share_and_spread_row_does_not(self) -> None:
+        concentrated = benchmark._unique_with_medium_plus(
+            168, 159, 0, 22, False, "dos", 52,
+        )
+        self.assertIn("22 classes", concentrated)
+        self.assertIn("top 52% dos", concentrated)
+        spread = benchmark._unique_with_medium_plus(
+            30, 20, 0, 21, False, "auth", 14,
+        )
+        self.assertIn("21 classes", spread)
+        self.assertNotIn("top", spread)
+
+    def test_share_never_displaces_the_unjudged_remainder_or_the_floor(self) -> None:
+        rendered = benchmark._unique_with_medium_plus(
+            50, 40, 13, 4, True, "dos", 80,
+        )
+        self.assertTrue(rendered.startswith("≥50"))
+        self.assertIn("top 80% dos", rendered)
+        self.assertIn("13 unjudged", rendered)
+        # An empty cell stays a bare zero whatever the class terms say.
+        self.assertEqual(
+            benchmark._unique_with_medium_plus(0, 0, 0, 3, False, "dos", 99), "0",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
