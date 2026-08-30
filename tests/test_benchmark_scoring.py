@@ -189,6 +189,10 @@ class BenchmarkScoringTests(unittest.TestCase):
                  "signature_symbol": "load_state"},
                 {"id": "json-config", "kind": "fp", "expected_outcome": "clean",
                  "signature_symbol": "parse_config"},
+                # Refutes an abort crash's promotion, not a finding that the
+                # release build lacks the check.
+                {"id": "debug-assert", "kind": "fp", "expected_outcome": "abort",
+                 "signature_symbol": "check_field"},
             ],
         }
         path = self.root / "gt-top.json"
@@ -196,6 +200,7 @@ class BenchmarkScoringTests(unittest.TestCase):
         run = self.root / "toprun"
         self.make_finding(run, "FIND-0001-shell", "run_export")
         self.make_finding(run, "FIND-0002-state", "load_state")
+        self.make_finding(run, "FIND-0003-check", "check_field")
         (run / "crashes").mkdir()
         proc, score = self.score(run, manifest=path)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
@@ -203,6 +208,7 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(findings["real_total"], 2)
         self.assertEqual(findings["detected"], ["amplification", "shell-escape"])
         self.assertEqual(findings["false_positive_traps_fired"], [])
+        self.assertEqual(findings["open_world_findings"], ["FIND-0003-check"])
         self.assertEqual(findings["traps_sharing_a_real_symbol"], ["inert-reconstruction"])
         rendered = "\n".join(benchmark._render_ground_truth(
             {"not_scored": "findings-only", "findings": score["findings"]}))

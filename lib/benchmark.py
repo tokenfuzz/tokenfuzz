@@ -2469,7 +2469,8 @@ def score_findings_ground_truth(
     confirmed FIND names its ``signature_symbol`` as the function at fault
     (the same exact-site identity crashes use, read by finding_signature's
     location extractor from the report's own fields). A confirmed finding at
-    a false-positive trap's symbol is a false positive. Every other confirmed
+    a clean-outcome trap's symbol is a false positive (a trap expecting an
+    abort refutes that crash, not a finding). Every other confirmed
     finding is *open-world*: real code has bugs the answer key never planted,
     so those are listed and kept neutral — they neither prove recall nor
     count against precision.
@@ -2483,8 +2484,14 @@ def score_findings_ground_truth(
         if isinstance(b, dict) and b.get("kind", "real") == "real"
         and _findings_only_bug(manifest, b)
     ]
+    # Only a trap whose expected outcome is clean says "no artifact belongs
+    # here". A trap that expects an abort or another benign crash refutes that
+    # crash's promotion, not a source finding at the same function — the
+    # manifest's own refute text calls the release-mode defect there real.
     traps = [
-        t for t in manifest.get("false_positive_traps", []) if isinstance(t, dict)
+        t for t in manifest.get("false_positive_traps", [])
+        if isinstance(t, dict)
+        and str(t.get("expected_outcome", "")).strip() in ("", "clean")
     ]
     # A trap planted in the same function as a real bug cannot fire here: the
     # oracle keys on the function alone, and a report's class vocabulary does
@@ -5138,7 +5145,7 @@ def _render_findings_ground_truth(scoring: dict | None) -> list[str]:
     lines.append(
         "> **How to read this.** Planted `findings_only` bugs are credited "
         "when a confirmed finding names the planted function as the one at "
-        "fault; a confirmed finding at a false-positive trap's function counts "
+        "fault; a confirmed finding at a clean-outcome trap's function counts "
         "against precision. Every other confirmed finding is **open-world** — "
         "real code has bugs the answer key never planted — and is listed "
         "without being counted for or against."
