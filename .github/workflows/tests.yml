@@ -52,13 +52,15 @@ jobs:
             python3 -m pip install tomli
           fi
 
-      - name: Show tool versions
+      - name: Show tool versions and host facts
         run: |
           bash --version | head -1
           python3 --version
           jq --version
           clang --version | head -1
           rg --version | head -1
+          uname -mr
+          id -u
 
       - name: Run test suite
         run: bash tests/run-tests.sh
@@ -89,13 +91,21 @@ jobs:
         run: |
           brew install jq ripgrep llvm mercurial
 
-      - name: Show tool versions
+      - name: Show tool versions and host facts
         run: |
           /bin/bash --version | head -1
           python3 --version
           jq --version
           clang --version | head -1
           rg --version | head -1
+          # Host policy, not tooling. A runner has SIP off and a developer mac
+          # has it on, which decides whether this host discloses a platform
+          # binary's environment — a difference the reap tests read for a code
+          # bug until it was printed here.
+          sw_vers -productVersion
+          uname -mr
+          id -u
+          csrutil status || echo "csrutil status: no answer"
 
       - name: Run test suite
         run: /bin/bash tests/run-tests.sh
@@ -116,8 +126,11 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Show Docker version
-        run: docker version
+      - name: Show Docker version and host facts
+        run: |
+          docker version
+          uname -mr
+          id -u
 
       - name: Run test suite in Ubuntu image
         run: bash tests/run-tests.sh --image ubuntu:24.04 --jobs 4

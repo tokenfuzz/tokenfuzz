@@ -378,6 +378,10 @@ collect_tests() {
 TOTAL_PASSED=0
 TOTAL_FAILED=0
 ERRORS=()
+# The assertion text behind each failing suite. A red run prints thousands of
+# lines and the few that say what broke are somewhere in the middle of them;
+# these are reprinted under the results and, on CI, put on the run page.
+FAILING_LINES=()
 TEST_FILES=()
 EXCLUSIVE_TEST_FILES=()
 PARALLEL_TEST_FILES=()
@@ -429,6 +433,18 @@ run_suite() {
     "$interpreter" "$tf"
 }
 
+record_failing_assertions() {
+  local name="$1" line
+  # awk, not head: a truncating reader would SIGPIPE the producer feeding it.
+  while IFS= read -r line; do
+    FAILING_LINES+=("$name: $line")
+  done < <(
+    sed -e $'s/\033\[[0-9;]*m//g' \
+      | grep -E '^[[:space:]]*(✗|FAIL:|ERROR:)' \
+      | awk 'NR<=10'
+  )
+}
+
 run_test_file() {
   local tf="$1"
   local name
@@ -456,6 +472,7 @@ run_test_file() {
     printf "${RED}  Suite exit code: %s${NC}\n" "$rc"
     [ "$rc" -eq 124 ] && printf "${RED}  Suite timed out after %ss${NC}\n" "$SUITE_TIMEOUT"
     ERRORS+=("$name")
+    record_failing_assertions "$name" <<< "$output"
   fi
   TIMINGS+=("$elapsed $name")
   TIMING_ROWS+=("$name"$'\t'"$category"$'\t'"$p"$'\t'"$f"$'\t'"$rc"$'\t'"$elapsed"$'\t'"$(test_weight "$tf")"$'\t'"$tf")
@@ -517,6 +534,7 @@ run_tests_parallel() {
       printf "${RED}  Suite exit code: %s${NC}\n" "$rc"
       [ "$rc" -eq 124 ] && printf "${RED}  Suite timed out after %ss${NC}\n" "$SUITE_TIMEOUT"
       ERRORS+=("$name")
+      record_failing_assertions "$name" < "$out_dir/$i.out"
     fi
     TIMINGS+=("$elapsed $name")
     TIMING_ROWS+=("$name"$'\t'"$category"$'\t'"$p"$'\t'"$f"$'\t'"$rc"$'\t'"$elapsed"$'\t'"$(test_weight "$path")"$'\t'"$path")
@@ -605,6 +623,23 @@ total_elapsed=$((SECONDS - RUNNER_START_SECONDS))
 printf "${BOLD}  Total time:${NC} %s (%ss)\n" "$(format_elapsed_seconds "$total_elapsed")" "$total_elapsed"
 if [ "${#ERRORS[@]}" -gt 0 ]; then
   printf "${RED}  Failed suites: %s${NC}\n" "${ERRORS[*]}"
+  for failing_line in "${FAILING_LINES[@]}"; do
+    printf "${RED}    %s${NC}\n" "$failing_line"
+  done
+  # GITHUB_STEP_SUMMARY is set by the Actions runner, not by an operator: this
+  # puts the same lines on the run page, where a reader looks before opening a
+  # log of several thousand lines.
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      printf '### Failing suites\n\n'
+      printf -- '- `%s`\n' "${ERRORS[@]}"
+      if [ "${#FAILING_LINES[@]}" -gt 0 ]; then
+        printf '\n```\n'
+        printf '%s\n' "${FAILING_LINES[@]}"
+        printf '```\n'
+      fi
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
 fi
 if [ "${#TIMINGS[@]}" -gt 0 ]; then
   printf "${BOLD}  Slowest suites:${NC} "
