@@ -1,19 +1,19 @@
 # Audit Lifecycle
 
-[![Audit lifecycle: set up the target, run the audit, agents investigate, probe runs the testcase, triage decides outcome](../assets/audit-lifecycle.svg)](../assets/audit-lifecycle.svg){target="_blank" title="Open full-size diagram in a new tab"}
+[![Audit lifecycle: setup and preflight, source-only finding or probe path, lane-specific validation, preserved outcomes, and crash bundle export](../assets/audit-lifecycle.svg)](../assets/audit-lifecycle.svg){target="_blank" title="Open full-size diagram in a new tab"}
 
 This page follows a run from "I have source I'm allowed to audit" to
-"a reviewer is looking at a finding". Every other page in the handbook
-expands on one piece of it.
+"a reviewer is looking at evidence." It is the operational narrative; the
+other concept pages explain individual components and design choices.
 
 A useful run can end in either evidence lane:
 
 - **A written finding.** A concrete security issue that does not depend on a
   sanitizer-class crash lands in `findings/` as a substantive report for
   independent review. A reproducer is useful, but optional.
-- **A runnable crash.** When the testcase reproduces under a
+- **A confirmed crash.** When the testcase reproduces under a
   configured sanitizer or race detector, it lands in `crashes/` with the
-  trace, input, and a ready-to-run `reproduce.sh`.
+  trace, input, and a `reproduce.sh` that rebuilds and re-runs it.
 
 These are parallel lanes, not two copies of every issue. Managed-runtime
 panics and tracebacks normally become findings; sanitizer-class diagnostics
@@ -43,8 +43,10 @@ refresh it explicitly with `bin/setup-target <slug>` (or use
 
 ## 2. Build the sanitizer artifact
 
-For native C/C++ targets, the harness needs a sanitizer build. The default
-location is `targets/<target>/build-asan/`, and `target.toml` points
+For native C/C++ targets, the harness needs a sanitizer build. Outside a
+container the default location is `targets/<target>/build-asan/`; container
+runs add `${AUDIT_BUILD_SUFFIX}` so incompatible images use separate build
+trees. `target.toml` points
 the harness at the binary inside it (`asan_bin`, `asan_lib`). The same
 layout is used for browsers and generic CLI/library targets.
 
@@ -69,11 +71,11 @@ builds run explicitly through `bin/setup-target <target> --build`. After the
 required build exists, refresh the generated config and review only unresolved
 or incorrect values.
 
-For ordinary native targets the regular `build-asan` stays the control, while a
-second build with the project's optional features turned on takes a minority of
-the audit's effort — a bug behind a non-default feature is still a bug. A crash
-found there is replayed against the regular build and triaged with both
-results. Set `build_widening = false` in `target.toml` to skip it.
+For ordinary native targets the regular sanitizer build stays the control,
+while optional widened configurations take a minority of the audit's effort —
+a bug behind a non-default feature is still a bug. A crash found there is
+replayed against the regular build and triaged with both results. Set
+`build_widening = false` in `target.toml` to skip this work.
 
 ## 3. Run the audit
 
@@ -90,10 +92,11 @@ recorded evidence.
 
 Each agent is assigned a role and a strategy. Subsystem and starting
 point come from the work queue when the agent claims its first piece
-of source. Claims, hypotheses, notes, and probe verdicts are written
-as append-only rows under `state/`. That structured state — not the
-agent's transcript — is the source of truth across resume, compaction,
-and crash recovery.
+of source. Claims, notes, probe verdicts, and events append under `state/`;
+the current hypothesis table is updated atomically, and `work-cards.jsonl` is
+rewritten when the ranked queue refreshes. That structured state — not the
+agent's transcript — is the source of truth across resume, compaction, and
+crash recovery.
 
 `bin/audit --since <rev>` runs a **delta audit**: the work cards cover
 only the files changed in `<rev>..HEAD`, the files that call them (one
@@ -110,22 +113,30 @@ opening the primary agent's ordinary whole-tree discovery slot.
 
 ## 4. Agents investigate
 
-Each agent works on **one hypothesis at a time**:
+Each agent keeps **one active investigation at a time**, with other candidate
+hypotheses parked in its compact state:
 
 1. Take an assigned piece of source from the work queue.
 2. Pick or refine a hypothesis (a file, a function, a line, an input
    shape, an expected diagnostic).
 3. Read a small region of the source.
-4. Find an existing seed input, or write a testcase from scratch.
-5. Run the testcase. If it doesn't reach the right code through the
-   configured sanitizer or runner, revise the input and try again.
-6. If it does, confirm the result and move it through triage.
+4. If the source already establishes a concrete security issue, file the FIND
+   now; a reproducer strengthens it but is not a precondition.
+5. Find a seed or write one testcase and run it immediately. If it does not
+   reach the right code through the configured sanitizer or runner, revise the
+   input and try again.
+6. Confirm a diagnostic before crash promotion, then move the artifact through
+   its lane-specific validation.
 
-Investigation depth follows evidence. A deterministic bug can be dismissed
-after one clean probe that hit its exact trigger. Timing-, race-, GC-, and
-state-dependent triggers cannot: the harness wants repetition or different
-input shapes before it accepts a card's dry conclusion, so a flaky bug is not
-written off on a single quiet run.
+Investigation depth follows evidence. One clean probe that instantiates every
+named boundary or call step can close a deterministic hypothesis. Timing-,
+race-, scheduler-, GC-, allocator-, re-entrancy-, and state-dependent triggers
+cannot:
+they need repetition or different input shapes.
+
+Closing one hypothesis does not retire its card. A dry card needs at least
+three clean probes across at least two distinct input shapes before it can be
+discarded — a minimum per card, not a quota per hypothesis.
 
 That conclusion retires a concrete patch or site card. A broad whole-file card
 instead yields to fresher work and stays reofferable, because finite probes
@@ -154,14 +165,15 @@ Common outcomes:
 
 | Outcome | Meaning | Action |
 | --- | --- | --- |
-| Did not execute | Syntax error, missing binary, runner refused. `bin/probe` names the class — `loader`, `usage`, `input-rejected`, `aborted`, `unverified-exit`, `exit` — and the repair it implies, and records it in the run's `reason`. | Fix what the class names: the route, the argv, or the input. This doesn't count against the sanitizer budget. |
+| `NO_EXEC` | Nothing ran: the testcase is missing, the probe refused the route, or the per-iteration sanitizer launch budget is exhausted (`budget-exhausted`). | Fix the prerequisite, or wait for the next iteration. Not clean evidence; never a reason to discard a hypothesis. |
+| `EXEC_FAIL` | The command started but produced no valid result. The recorded reason names the class — `loader`, `usage`, `input-rejected`, `aborted`, `unverified-exit`, or `exit` — and the repair it implies. | Fix what the class names: the route, the argv, the harness, or the input. The launch still counts against the sanitizer budget. |
 | Missed the target code | The coverage replay did not reach the named function. Browser and JS modes skip the sanitizer; a native target still runs it and records the miss beside the verdict. | Revise the input around the closest reached frame. |
 | Clean hit | The code ran but the sanitizer was quiet. | Mutate input shape, state, timing, or allocator layout. |
 | Sanitizer diagnostic | The input might be a crash candidate. | Confirm by re-running, minimise, and file under `crashes/`. |
 
 Browser and JS modes use their configured coverage artifacts. A native target
-is measured in the `build-<san>+fuzz` sibling that `bin/setup-target --build`
-and audit preflight build from the target's own recipe — the configured CLI,
+is measured in the `build-asan+fuzz` sibling that `bin/setup-target --build`
+and audit preflight build from the target's ASan recipe — the configured CLI,
 or a coverage twin of the testcase's `// HARNESS:`. If that sibling is absent,
 coverage is reported unavailable and the sanitizer run proceeds; it is never
 counted as a miss.
@@ -181,8 +193,7 @@ Triage decides whether an artifact is useful and in scope.
 - the report fields are complete;
 - the result is not an auto-quarantined low-value class — null
   dereference (`0x0` SEGV), OOM, assertion-only abort (ABRT with no
-  sanitizer error), `MOZ_CRASH`/panic, timeout-only, or a plain
-  stack overflow.
+  sanitizer error), `MOZ_CRASH`/panic, or a plain stack overflow.
 
 A trigger source outside the target's declared attacker surface is not a
 rejection: the crash stays in `crashes/`, and when the source reviewer agrees
@@ -232,9 +243,8 @@ Building a reproducer is the expensive half of an audit, so a disproof is
 worth as much as a finding. When a reviewer rejects an artifact because its
 triggering state is not attacker-reachable, the anchored reason is appended to
 `state/unreachable-routes.jsonl`, and a later work card on any file that
-disproof names renders it, newest first. Without this, each session re-derives
-the same disproof on the same file — in one measured run, over half of all
-trigger rejections landed on a file that had already produced one.
+disproof names renders it, newest first. Without this, later sessions can spend
+time re-deriving the same disproved route on the same source.
 
 Two properties keep the note honest:
 
@@ -265,10 +275,10 @@ After bundling, each `crashes/CRASH-*` directory contains:
 ```text
 REPORT.md          one-page summary
 REPORT.html        generated sibling
-reproduce.sh       single command, no env vars
+reproduce.sh       ./reproduce.sh /path/to/source
 input.<ext>        the testcase bytes
 harness.{c,cc,cpp,cxx} only when the bug uses a C/C++ harness
-sanitizer.txt      full sanitizer output
+sanitizer.txt      saved sanitizer output
 patch.diff         optional candidate fix
 validation.json    the publication decision, bound to this evidence
 severity.json      only when a current reportable score exists
@@ -281,10 +291,10 @@ A maintainer runs:
 ./reproduce.sh /path/to/source
 ```
 
-and sees the same sanitizer output against a clean checkout. You can
-re-run `bin/export-repro <crash-id> --slug <target>` manually after
-editing files in the bundle, but the first export happens during
-triage without operator action.
+and sees the same sanitizer output against a clean checkout. The first export
+happens during triage without operator action;
+[Maintenance commands](../guides/triage-results.md#maintenance-commands) shows
+how to re-run it after editing a bundle.
 
 ## 8. Where to look
 

@@ -5,10 +5,9 @@ Backends account for context differently, but later turns generally carry an
 accumulated prompt or compacted summary. More source, logs, and narration in
 that context means more latency and usually more input-token cost.
 
-A naive agent that dumps raw logs into context turns a $20 session
-into a $200 session without finding anything extra. TokenFuzz treats
-context size as a first-class resource and gives the harness concrete
-levers to keep it bounded.
+An agent that dumps raw logs into context can multiply latency and token spend
+without adding evidence. TokenFuzz treats context size as a first-class
+resource and gives the harness concrete levers to keep it bounded.
 
 A long run, in practice, is just the audit command without an
 iteration count:
@@ -24,10 +23,10 @@ running.
 
 | Cost driver | Why it grows | How TokenFuzz contains it |
 | --- | --- | --- |
-| Cached input tokens per turn | Conversation length × cache-read price | Shared prompt cache; capped state views; session seeds across compactions. |
+| Cached input tokens per turn | Conversation length × cache-read price | Provider prefix caching where prompts match; compact state views; session seeds across compactions. |
 | New input tokens per turn | Source dumps, raw logs, transcripts | Capped source-reading commands; structured state views. |
-| Output tokens | Long model prose, narration | Strategy quality bar: agents are graded on testcases written, not words. |
-| Sanitizer runs | Each run takes wall-clock + RAM; browsers cost more | Per-agent sanitizer-run budget; coverage gate before sanitizer run. |
+| Output tokens | Long model prose, narration | Strategy quality bar: agents are graded on concrete evidence saved, not words. |
+| Sanitizer runs | Each run takes wall-clock + RAM; browsers cost more | Per-agent launch budget; browser/JS coverage gate, native coverage feedback. |
 | Redundant work | Two agents re-exploring the same surface | Work-card leases, per-agent input memory, rejected indexes. |
 
 The two anchors are simple. **Avoid re-reading**: every byte the
@@ -36,18 +35,19 @@ every probe that has already happened should not be repeated by
 another agent. Every mechanism below is a specific application of one
 of those — the columns of the table above map onto these two rules.
 
-## Cache-friendly prompt prefix
+## What prompt caching can reuse
 
-Every agent's prompt begins with an identical fixed prefix (the shared rules
-and safety framing). Hosted backends that expose prompt caching can reuse that
-stable prefix; other transports still benefit from keeping the changing tail
-small. Cache availability and price are provider-specific, so run logs record
-what the backend actually reports rather than assuming a discount.
+Cold-start and deep-investigation prompts begin with safety framing and the
+task-specific guide, followed by agent-, card-, and state-specific material.
+Their long common rules are centralized in a stable suffix; compact
+continuation prompts use a smaller suffix.
 
-Only the parts that genuinely differ per agent — coverage-gap
-suggestions, cross-agent summaries, the agent's own state — come after
-that prefix. The cost win is the stable prefix, not any sharing of the
-dynamic tail.
+That stable suffix keeps prompt behavior consistent, but it does not by itself
+create a cross-agent cache hit: provider caching generally reuses matching
+prefixes, and the dynamic material before the suffix differs between agents.
+The shared safety-and-guide prefix may still qualify where a backend supports
+automatic prefix caching. Availability and price are provider-specific, so run
+logs record what the backend actually reports rather than assuming a discount.
 
 ## Capped source reading
 
@@ -57,9 +57,8 @@ Agents read source through capping wrappers:
 - clamped ranges on file peeks;
 - per-session caches for patch diffs.
 
-A typical "look at this function" turn stays under a few KiB of new
-context. Agents that bypass the wrappers get the same output ceiling
-applied automatically.
+Focused reads stay bounded by the wrapper's line and byte caps. Agents that
+bypass the wrappers get the same output ceiling applied automatically.
 
 The same principle applies to probe output: `bin/probe` classifies the
 whole sanitizer log, then truncates an oversized one for storage,
@@ -68,9 +67,12 @@ log never lands in the conversation.
 
 ## Structured state over transcripts
 
-Agents and operators read the run through compact state views rather
-than raw JSON rows — roughly a tenth of the bytes for the same
-information. Nothing rereads a transcript to work out what happened.
+Agents and operators read the run through compact state views rather than raw
+JSON rows. The default `show-recent` view caps hypotheses, runs, and claims at
+ten rows each; it is row-bounded rather than byte-bounded, so long paths can
+make it larger than 4 KiB. Shell and file-reading wrappers separately cap raw
+output at roughly 50 KiB. Nothing rereads a transcript to work out what
+happened.
 
 ## Session seeds across compaction
 
@@ -92,10 +94,11 @@ continuous run instead, set `AUDIT_WALL_BUDGET_SECS` — the loop stops
 launching iterations once that budget is spent, which is how you leave
 an overnight audit running with a hard stop.
 
-A long backend session is also checkpointed once it has run a few dozen
-commands, and continued with fresh context. Carrying hundreds of tool
-calls forward costs more every turn and buys nothing that structured
-state does not already hold.
+A long backend session is checkpointed at the configured turn cap and continued
+with fresh context. The default cap is 128 agent/tool turns, although each
+backend's transport determines exactly how turns are counted. Carrying an
+unbounded tool history forward costs more every turn and buys nothing that
+structured state does not already hold.
 
 ## Coverage before the sanitizer
 
@@ -109,9 +112,9 @@ For browser and JS-shell targets with a sancov-instrumented build:
 
 A native target gets the same measurement as **feedback rather than a gate**.
 `bin/setup-target --build` and audit preflight build a coverage sibling,
-`build-<san>+fuzz`, by rerunning the target's own recipe with
+`build-asan+fuzz`, by rerunning the target's own ASan recipe with
 `-fsanitize-coverage=trace-pc-guard`; it never replaces the shared
-`build-<san>`. When a testcase names a `WANT` symbol, `bin/hits --mode
+`build-asan`. When a testcase names a `WANT` symbol, `bin/hits --mode
 generic` replays it there — the configured CLI, or for a `// HARNESS:` route a
 twin of that harness linked against the sibling's library — maps the covered
 PCs to source, and writes the same HIT/MISSED rows, closest frame, and edge
@@ -136,11 +139,11 @@ wasted work.
   [Strategy model](strategy-model.md#how-a-card-gets-to-an-agent)
   for the full exclusion rules.
 
-A second kind of duplicate spend is the unbuildable surface. Once an
-agent proves that a file cannot be built or imported in this
-environment, its card and the neighbouring cards on the same
-compilation unit are marked blocked, so later agents do not rediscover
-the same wall. A fresh run with a fixed toolchain re-evaluates them.
+A second kind of duplicate spend is a proven unexecutable route. On a concrete
+patch or site card, `ENV-BLOCKED` closes that card. On a broad source card it
+records and demotes only the failed route; the card can be reoffered for another
+route, and independent cards on the same file are not blocked by propagation. A
+fresh run with a repaired toolchain starts with fresh state.
 
 ## Rejected indexes prevent refiling
 
@@ -179,6 +182,7 @@ as a measurement:
 | Claude | Terminal counts on a normal finish. Stopped early, exact cache buckets are recovered from its per-request events, but the row is marked `estimated: true` because fresh input and output are then lower bounds. |
 | Codex | Usage only in `turn.completed`, which a session stopped at the turn cap or the wall deadline never emits. The harness therefore runs Codex without `--ephemeral` and reads the session rollout instead — its last `token_count` is measured, and covers every thread rather than only the ones that finished. |
 | Google Gemini CLI | Terminal counts on a normal finish; its native turn-limit result retains them. |
+| OpenCode (`oss`) | Structured usage events when the transport emits them; completeness is recorded rather than assumed. |
 | Antigravity, Grok | No native usage in the current transports. Rows are estimated from prompt and transcript size. |
 
 Where a backend leaves only one turn's counters standing in for a session, that

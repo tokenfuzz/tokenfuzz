@@ -20,8 +20,8 @@ different evidence:
 
 | | Crashes | Findings |
 |---|---|---|
-| Evidence | a sanitizer **stack trace** | a written **report** (often no stack) |
-| Strategy | ClusterFuzz **stack-state bucketing** | **exact-match clustering** on `(class, file, line)` or crash state |
+| Evidence | a sanitizer diagnostic, normally with a **stack trace** | a written **report** (often no stack) |
+| Strategy | **similarity clustering** over primitive and normalized stack state | **exact-match clustering** on `(class, file, line)` or crash state |
 | Command | `bin/cluster-crashes` | `bin/cluster-findings` |
 
 They are independent: nothing in the findings path can change crash
@@ -29,30 +29,37 @@ bucketing, and vice versa.
 
 ## Crash deduplication
 
-A crash always comes with a sanitizer stack trace, so crashes dedup the
-way ClusterFuzz does: by the **crash state** — the top few *interesting*
-stack frames, normalized. `bin/cluster-crashes` does the work, reusing
-ClusterFuzz's own stack-parsing rules.
+A complete crash normally carries a sanitizer stack trace. The clusterer uses a
+ClusterFuzz-style **crash state** — normalized interesting frames — but compares
+states by similarity rather than requiring one exact three-frame bucket.
+Pending or poorly symbolized artifacts stay deterministic through a narrow
+source/object fallback instead of all collapsing into an empty signature.
 
 ### How it works
 
-1. **Parse** the ASan/UBSan/MSan stack into frames (`#0 in func file:line`).
-2. **Drop noise frames** — libc, the sanitizer runtime, allocator
-   shims. What remains are the *interesting* frames: the target's own code.
-3. **Normalize each function name**: strip the argument list,
-   anonymous-namespace markers, and ABI tags, so
-   `Store::set_blob(unsigned int)` and `Store::set_blob` are one symbol.
-4. **Take the top three** interesting frames — the *crash state*. Two crashes
-   with the same crash state **and the same sanitizer primitive** (e.g.
-   `heap-buffer-overflow READ`) share a crash-signature cluster; identical
-   stacks reporting different primitives do not merge.
-5. **Bucket** crashes by that (primitive, crash state) pair. Stacks that
-   differ only in deep tail frames can still group together.
+1. **Parse and normalize** the first usable sanitizer diagnostic. Runtime,
+   interceptor, allocator, and libc noise is removed; function arguments,
+   anonymous-namespace markers, ABI suffixes, and unstable addresses are
+   normalized.
+2. **Classify the primitive and access direction.** Incompatible sanitizer
+   primitives do not merge.
+3. **Build the state** from the top three interesting frames of the faulting
+   stack, continuing into the "freed by" stack when the faulting stack is
+   short. The "previously allocated by" history is never part of the state.
+4. **Require the same faulting leaf**, allowing the inline-equivalent case where
+   one symbolizer expands an instruction and another prints only its outer
+   function. This prevents a shared dispatcher and callers from fusing sibling
+   bugs at different instructions.
+5. **Compare ordered state.** Exact states merge. Otherwise the default match
+   requires a longest common subsequence of at least two frames. Per-line fuzzy
+   similarity exists only as a non-default compatibility mode; ordinary
+   clustering does not use it.
+6. **Protect inline groups.** An expanded candidate must agree with every
+   expanded member already in the group, not just its first representative.
 
-Crucially, the crash state **stops at allocation stacks** — the "freed
-by" / "previously allocated by" sections of a use-after-free report are
-*not* part of the state, so a UAF buckets by where it crashes, not where
-the memory happened to be freed.
+If no interesting stack survives, the fallback uses an exact normalized report
+location, sanitizer summary location, stack object, or fixed-buffer token. With
+no such signal, the crash id keeps the pending artifact separate.
 
 ### Test-style example
 
@@ -67,16 +74,15 @@ Crash 1 stack (raw):                         Crash 2 stack (raw):
   crash state (top 3 interesting):             crash state (top 3 interesting):
     [set_blob, apply_line, run_file]             [set_blob, apply_line, run_file]
 
-→ SAME bucket. The argument-list difference is normalized away; only the
-  three interesting frames count, and ignored runtime frames do not consume
-  that frame budget.
+→ SAME cluster. The argument-list difference is normalized away; the faulting
+  leaf agrees, and the ordered state has enough common frames.
 ```
 
 ```text
 Crash A: state [parse_id, read_record, run]
 Crash B: state [decode_body, read_record, run]
-→ Different crash sites → DIFFERENT buckets, even though the deeper frames
-  overlap.
+→ DIFFERENT clusters. The two shared callers are not enough because the
+  faulting leaf differs.
 ```
 
 ### Output
@@ -90,10 +96,12 @@ sharing the signature, ordered by severity descending with the canonical in
 **bold**. This mirrors `bin/cluster-findings`, so both pages pick and present
 the canonical the same way.
 
-The cluster id is `CL-` plus eight hex digits of a hash of the bucket's
-(primitive, crash state) key — for example `CL-4b21c7de`. It is anchored on the
-signature, not on membership, so it survives reruns and does not change when a
-more severe member joins.
+The cluster id is `CL-` plus eight hex digits of a hash of the
+encounter-order representative's `(primitive, crash state)` — for example
+`CL-4b21c7de`. Canonical presentation is chosen separately by severity, so a
+more severe member can become canonical without making severity part of the
+id. The id is deterministic for the same ordered input set; it is not a
+universal root-cause identifier.
 
 ---
 
@@ -119,10 +127,10 @@ Two findings merge if they share **either** of:
   findings that embed a sanitizer stack.
 
 The signals compose: if A and B share a site and B and C share a crash state,
-all three land in one cluster. The canonical member is chosen by **evidence
-first, then severity, then id** — a finding backed by a proven reproducer
-outranks an unproven one *even if the unproven one scores higher*, so a proven
-Low can be canonical over an unproven Critical.
+all three land in one cluster. Canonical selection first separates findings
+that receive security credit from retained non-reportable defects. Within one
+credit tier it chooses **proven evidence, then severity, then lexical id** — so
+a proven Low can represent an unproven Critical in the same cluster.
 
 That is the whole algorithm. No similarity threshold, no cap on distinct root
 causes, and the same input always produces the same clusters.
@@ -134,12 +142,10 @@ an integer overflow that leads to an out-of-bounds write is filed by one
 reviewer as `integer-overflow` and by another as `memory-safety`. Left raw,
 that disagreement would split a true duplicate at one line into two clusters.
 
-So the class is **normalized before it becomes part of the key.** A small
-canonical vocabulary (`memory-safety`, `auth`, `injection`, `info-disclosure`,
-`crypto`, `race`, `dos`, `logic`, …) absorbs label drift, and one broad rule
-does the heavy lifting: **any `*overflow*` label folds into `memory-safety`**.
-The mechanism collapses into its consequence, so the two reviewers' labels
-agree and their findings merge.
+So the class is **normalized before it becomes part of the key.** A canonical
+vocabulary (`memory-safety`, `auth`, `injection`, `info-disclosure`, `crypto`,
+`race`, `dos`, `logic`, …) and common aliases absorb label drift, and any
+`*overflow*` label folds into `memory-safety`.
 
 ### Why location merges by line, never by function
 
@@ -162,8 +168,8 @@ two clusters to mentally join (cheap); wrongly merging hides a real bug
 
 Each cluster reports a **class** (its canonical member's, normalized) for the
 table's Class column. A second display field, **`(class, file, func)`**, fills
-the Signature column when a finding has no line — it anchors the cluster id but
-is never a merge edge.
+the Signature column when a finding has no line. It can contribute to the id,
+but it is never a merge edge.
 
 ### Examples
 
@@ -205,15 +211,16 @@ is never a merge edge.
 ### Output
 
 `bin/cluster-findings` writes `FINDING-CLUSTERS.md` (one row per cluster,
-sorted by max-member severity then size), stamps a `Cluster:` line into
-each member report, and drops a `.dup-of` marker in every non-canonical
-member pointing at the canonical FIND. The canonical is picked by
-evidence rank first, then severity, then lexicographic id (see above).
+sorted by the canonical member's severity, then size), stamps a `Cluster:` line
+into each member report, and drops a `.dup-of` marker in every non-canonical
+member pointing at the canonical FIND. Canonical ordering is security-credit
+tier, evidence rank, severity, then lexicographic id (see above).
 
-Finding cluster ids are `FCL-` plus eight hex digits of a hash of the key —
-`FCL-8c19a032` — mirroring the crash side's `CL-`. The stamped line names the
-siblings and the member's role, so a report says on its own face whether it is
-the one to read:
+Finding cluster ids are `FCL-` plus eight hex digits of a hash of the canonical
+signature key **and the canonical FIND id** — `FCL-8c19a032` — so two clusters
+that share a key but were deliberately kept apart still get different ids. The
+stamped line names the siblings and the member's role, so a report says on its
+own face whether it is the one to read:
 
 ```text
 Cluster: FCL-8c19a032 (2 reports: FIND-007) (canonical)

@@ -40,7 +40,8 @@ For each canonical row in a cluster index:
 3. Check the root `Location`, boundary, caller controls, trigger source, and
    caller contract against the source.
 4. For a crash, run `reproduce.sh` in an isolated build environment and compare
-   the new diagnostic with `sanitizer.txt`.
+   the new diagnostic with `sanitizer.txt`. If the script is a diagnostic stub
+   (no runnable route was captured), it says so and exits 2.
 5. Read the severity rationale only after the technical claim holds.
 6. Skim duplicate members only when they provide a better input, another
    carrier, or useful variant evidence.
@@ -229,9 +230,10 @@ The two accepted lanes use different deterministic signatures:
 - findings cluster by an exact normalized `(class, file, line)` site or a
   matching crash state.
 
-Each cluster has a canonical member. Non-canonical members remain on disk with
-a `.dup-of` marker because they may carry a useful input or route variant. A
-cluster is a review aid, not proof that every member shares one fix.
+Each cluster has a canonical member. Non-canonical members remain on disk
+(findings also get a `.dup-of` marker) because they may carry a useful input or
+route variant. A cluster is a review aid, not proof that every member shares
+one fix.
 
 Use backend-local indexes for one run and target-root indexes to compare all
 backends:
@@ -253,15 +255,19 @@ automatically. After a deliberate manual edit, these commands regenerate the
 derived views:
 
 ```bash
-export RESULTS=output/<target>/<backend>/results
-
-bin/export-repro CRASH-001-1 --slug <target>
-bin/severity --report "$RESULTS/crashes/CRASH-001-1"
-bin/severity --batch "$RESULTS"
-bin/cluster-crashes "$RESULTS"
-bin/cluster-findings "$RESULTS"
-bin/show-exclusions "$RESULTS"
+RESULTS_DIR=output/<target>/<backend>/results
+TOKENFUZZ_ROOT=$PWD
+(cd "$RESULTS_DIR" && "$TOKENFUZZ_ROOT/bin/export-repro" CRASH-001-1)
+bin/severity --report "$RESULTS_DIR/crashes/CRASH-001-1"
+bin/severity --batch "$RESULTS_DIR"
+bin/cluster-crashes "$RESULTS_DIR"
+bin/cluster-findings "$RESULTS_DIR"
+bin/show-exclusions "$RESULTS_DIR"
 ```
+
+`export-repro` reads the nearest `.session-env` above its working directory,
+which is why it runs from inside the result tree; `--slug` alone would pick the
+first backend alphabetically.
 
 `bin/severity --batch` scores reportable crashes and findings. Pending and
 not-reportable artifacts remain unscored. Re-run clustering after changing a

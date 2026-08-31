@@ -3,7 +3,8 @@
 `bin/benchmark` answers one question with evidence rather than opinion:
 
 > For the same target, backend, model, and wall-clock budget, does
-> TokenFuzz find stronger **real, reproducible** security issues than
+> TokenFuzz find stronger **validated security evidence** — reproducible
+> sanitizer crashes and substantive report-only findings — than
 > a direct "find vulnerabilities" prompt?
 
 You do not need to know the harness internals to run it or read the
@@ -45,12 +46,13 @@ do not blur together.
 Every cell gets the same per-cell wall-clock budget. With the defaults,
 `bin/benchmark --target <target>` runs three `model-direct` cells and
 three `harness` cells, each with a 10,800 second budget. That is six
-cells, about 18 hours of audit time if run serially, plus bounded final
-validation. Both conditions are told when their budget ends — the direct
-prompt names a UTC deadline and a `date -u` command to check it against —
-but nothing re-enters a finished session to hold it there. A baseline driven
-back to work by the runner would measure the runner, so the Scoreboard
-reports what each condition spent of what it was granted instead.
+cells, about 18 hours of audit time if run serially, plus a final validation
+pass that is measurement, not audit time (see
+[The closing pass](#the-closing-pass)). Both conditions are told when their
+budget ends — the direct prompt names a UTC deadline and a `date -u` command to
+check it against — but nothing re-enters a finished session to hold it there. A
+baseline driven back to work by the runner would measure the runner, so the
+Scoreboard reports what each condition spent of what it was granted instead.
 
 The benchmark keeps normal audit output separate. Cells run under
 isolated `bin/audit --experiment` trees, then the benchmark pools and
@@ -60,7 +62,7 @@ scores their evidence under `output/benchmark/`.
 
 A useful benchmark is not "which row printed the largest number."
 
-The direct prompt often produces more raw crash directories because it
+The direct prompt can produce more raw crash directories because it
 has little structure around API misuse, duplicates, or self-inflicted
 testcases. TokenFuzz spends budget on work the direct prompt does not
 do: queue construction, coverage-gated probes, validation,
@@ -69,6 +71,12 @@ deduplication, severity scoring, and maintainer-ready reproducers.
 That overhead is part of the comparison. The question is whether the
 extra machinery buys stronger evidence by the end of the same budget.
 Read the severity and uniqueness columns before the raw counts.
+
+Equal wall time does not mean equal worker capacity. `model-direct` has one
+agent; the harness defaults to three concurrent agents. The scoreboard keeps
+the wall comparison visible and separately reports occupancy, worker-hours,
+confirmed results per seat-hour, tokens, and cost so that concurrency is not
+mistaken for free efficiency.
 
 ## Quick start
 
@@ -91,8 +99,8 @@ With all defaults, the command means:
 | `--model` | backend config default | Optional model override used by both conditions. |
 | `--replicates` | `3` | Runs per condition. |
 | `--budget-wall` | `10800` | Active audit seconds per cell, including housekeeping. Provider-recovery pauses are excluded. `0` is unlimited. |
-| `--finalize-wall` | `0` | Start ceiling per final validation phase; crash triage and the finding drain each get their own budget, and a bounded finding group admitted before the ceiling finishes afterward. `0`, the default, is unlimited: the artifact set is frozen when the audit wall ends, so the phase runs to completion rather than publishing a partly-judged cell. |
-| `--finalize-workers` | `4` | Concurrent reviewers per final validation phase, for crash triage and the finding drain alike. Independent of `--agents`, which sizes the audit itself. It also scales the find gate's admission groups, so raising it shortens the closing pass but coarsens where a finite `--finalize-wall` can cut. |
+| `--finalize-wall` | `0` | Wall-clock ceiling per final validation phase; crash triage and the finding drain each get a fresh one. A finding group admitted before the ceiling finishes its review; crash review stops at the deadline and may leave a candidate pending. `0`, the default, is unlimited. |
+| `--finalize-workers` | `4` | Concurrent reviewers per final validation phase, for crash triage and the finding drain alike. Independent of `--agents`, which sizes the audit itself. It also scales the finding gate's admission groups, so raising it shortens the closing pass but coarsens where a finite `--finalize-wall` can stop admitting groups. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
@@ -121,9 +129,10 @@ That target has to be bootstrapped first: source in
 and `output/<target>/target.toml` reviewed. The shortest path is the
 [Add a target](../getting-started/add-a-target.md) flow.
 
-Treat a two-replicate, three-hour run as a layout and sanity check,
-not as a statistical claim. LLM runs are stochastic. For a result you would
-cite, use at least five replicates and more than one target.
+Treat a two-replicate, three-hour run as a layout and sanity check, not as a
+statistical claim. LLM runs are stochastic. Five or more replicates across more
+than one target is useful operational guidance for claims, not a formal power
+calculation.
 
 ## How a result is counted
 
@@ -136,9 +145,13 @@ to [Where results land](#where-results-land).
 When a cell's timed investigation stops, it triages its crashes and finishes
 validating its findings before metrics are read. That pass is *measurement*,
 not extra finding time: the artifact set is frozen when the audit wall ends, so
-the closing pass cannot buy a cell another finding. It gets its own budget
-(`--finalize-wall`), split so a crash-heavy cell cannot starve finding
-validation.
+the closing pass cannot buy a cell another finding. Crash triage and the finding
+drain each receive a fresh `--finalize-wall`, rather than sharing one pool. The
+default value `0` is unlimited. With a finite value, finding validation lets a
+bounded group admitted before expiry finish its allotted review attempts; it
+does not invent a verdict when the response omits or mangles an id. Crash
+triage passes the deadline through to its reviews, so a review that does not
+settle in time can remain pending.
 
 The finding drain repeats while its unjudged remainder keeps falling, because a
 review batch that returns no keyed output leaves its ids unadjudicated even on
@@ -154,8 +167,9 @@ candidate rather than receiving final credit or an assumed severity.
 A cell that finished but still holds unjudged findings keeps its place and its
 evidence; its finding count carries the remainder, and a count whose remainder
 outnumbers its verdicts is marked `≥` — read that as a lower bound on the
-condition, not a yield to compare. `bin/benchmark --regenerate` finishes the
-gate from cached receipts and removes the mark.
+condition, not a yield to compare. `bin/benchmark --regenerate` retries reviews
+that have no usable answer or need focused resolution; it removes the mark only
+if those decisions settle.
 
 A cell that could not produce a usable measurement at all — provider limit,
 interruption before substantive evidence, failed post-processing — is marked
@@ -251,9 +265,11 @@ it while the run is going: it refreshes as cells finish, under a
 validation are done. The full pooled comparison — revalidation, bundling,
 clustering — is computed once at the end.
 
-Each backend also has an append-only ledger,
-`output/benchmark/<backend>/benchmark-results.html`, with one section
-per run. Open the backend ledger when you want the full run narrative;
+Each backend also has a ledger,
+`output/benchmark/<backend>/benchmark-results.html`, with one section per run.
+A new run adds a section; resuming or regenerating an existing run replaces
+that run's section instead of appending a duplicate. Open the backend ledger
+when you want the full run narrative;
 open the root crosstab when you want to compare targets, backends,
 conditions, and reruns in one table.
 
@@ -300,7 +316,7 @@ replicates; an em dash means unrecorded, never zero.
 | `Blocked housekeeping` | Share of the effective wall the worker pool sat empty at the iteration barrier while crash triage, the result gates, indexes, orphan enforcement and corpus promotion ran. Still charged to the wall either way. |
 | `Review s/artifact` | In-wall and post-cell crash-triage plus result-gate seconds per artifact those gates judged. Post-cell time is measurement and remains excluded from `Wall (h)`, but it is real review cost. |
 | `First filed` / `First crash confirmed` / `First admitted` | Minutes from the run's first clock (its first backend call) to the first artifact filed, the first sanitizer-confirmed crash, and the first receipt claiming `reportable`. |
-| `EXEC_FAIL share` | Fraction of probes the target rejected before executing the input — a sanitizer launch that taught nothing. |
+| `EXEC_FAIL share` | Fraction of probes whose command started but produced no valid result. This includes classified loader, usage, input-rejection, abort, unverified-exit, and other exit failures; a sanitizer launch may already have been spent. |
 | `Duplicate roots` | Share of artifact signatures filed by more than one agent: convergence, not yield. |
 | `Confirmed / seat-h` | Reportable finding and crash clusters per worker-hour (`Worker-h`), so a condition with more concurrent seats is charged for them. |
 | `$ / confirmed` | Measured cost per reportable cluster; absent when cost was estimated or nothing was confirmed. |
@@ -412,8 +428,9 @@ targets/canary/run-benchmark.sh
 #   bin/benchmark --target canary --replicates 1 --budget-wall 900
 ```
 
-`lib/benchmark.py` scores the pooled crashes against the answer key and
-adds the **Ground truth** block to the ledger:
+`lib/benchmark.py` scores the pooled crashes and, where configured,
+findings-only entries against the answer key and adds the **Ground truth** block
+to the ledger:
 
 - **Recall** — the share of planted bugs confirmed at their crash site by a
   runtime sanitizer artifact. Attribution is read only from the sanitizer's
@@ -428,12 +445,11 @@ confirmed and deliberate traps do not appear as accepted crashes. The direct
 baseline is measured by the same rule; the result, not an expected winner, is
 the point of the experiment.
 
-The oracle grades **crashes**, because a sanitizer artifact is the only
-attribution it can trust. Two consequences: a findings-only target is reported
-as `not_scored: findings-only` rather than as 0% recall, and a planted bug on a
-sanitizer target that can never crash (path traversal, command injection)
-carries `findings_only: true` in the manifest so it stays out of the
-crash-recall denominator.
+The crash oracle trusts only runtime sanitizer attribution. A separate finding
+oracle grades entries marked `findings_only: true` from confirmed report
+locations. A target with no applicable oracle is reported as unscored rather
+than as 0% recall, and a planted non-crashing bug stays out of the crash-recall
+denominator.
 
 Score an existing results or pool tree directly:
 
@@ -459,7 +475,7 @@ declares it.
 !!! warning "Keep real-bug manifests local — never commit them"
     A real-CVE manifest names actual crashing symbols and primitives, which
     discloses unreleased bug detail — exactly what the
-    [neutral-fixture rule](https://github.com/tokenfuzz/tokenfuzz/blob/main/docs/development.md)
+    [neutral-fixture rule](../development.md#testing-discipline)
     forbids. `output/` is gitignored precisely so these stay private, so a
     real-bug `output/<slug>/.ground-truth.json` is uncommitted by default —
     leave it that way. The synthetic `canary` answer key is the one committed
@@ -591,10 +607,12 @@ run cleanly, so half-written artifacts are never folded into the
 result. `--replicates` is the desired total, so you can raise it during
 resume to add more cells.
 
-A usage limit hit mid-cell does not end it. The cell pauses until the backend's
-quota resets, and that wait counts against neither its budget nor its reported
-`Wall (h)`. Only a backend that is still down six hours later marks the cell
-provider-limited.
+Harness cells pause and retry provider-withheld capacity for up to six hours;
+that wait counts against neither their audit budget nor reported `Wall (h)`.
+The model-direct condition is one backend session and cannot be steered back
+into work after its CLI exits. A nonzero capacity-limited direct exit is
+excluded rather than scored at a truncated wall, its artifacts remain on disk,
+and resuming the run reruns that cell.
 
 ## Regenerating results after code changes
 
@@ -671,8 +689,9 @@ reproduction. Evidence whose own fault cannot be characterised claims no rate.
 - Pick targets that can plausibly produce evidence inside the budget.
   If both rows stay at zero, you measured target hardness, not harness
   quality.
-- Use 5+ replicates before making claims. Three replicates show a
-  direction; they do not settle stochastic behavior.
+- Prefer 5+ replicates before making claims. This is a practical rule of thumb,
+  not a derived confidence bound; report variability rather than treating the
+  count as statistically conclusive.
 - Compare more than one target. A harness change that helps one parser
   and hurts another should not disappear into a single headline row.
 - Read the Medium+ subset of unique crashes and top crash severity before raw

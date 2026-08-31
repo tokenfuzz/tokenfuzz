@@ -5,7 +5,8 @@ work state, testcase execution, triage, and artifact layout remain the same
 whether an audit uses one hosted backend, rotates several, or runs a local
 model.
 
-Choose the data path and execution boundary before choosing a model:
+Choose the data path and execution boundary before choosing a model. Most runs
+fit one of these four routes:
 
 | Need | Practical route |
 | --- | --- |
@@ -21,8 +22,14 @@ layout.
 ## Choose a backend
 
 ```bash
-bin/audit --target <target> --backend <backend> [--model <model>]
+# One hosted backend; best for a reproducible run.
+bin/audit --target <target> --backend codex [--model <model>]
+
+# Rotate every installed hosted backend allowed by the security mode.
 bin/audit --target <target> --backend all
+
+# Keep inference on a local OpenAI-compatible endpoint.
+bin/audit --target <target> --backend oss --model <served-model-id>
 ```
 
 Each launch runs under an execution boundary chosen by
@@ -64,8 +71,8 @@ to Google Gemini CLI.
 
 Install the chosen CLI through its upstream instructions:
 
-- [Claude Code](https://docs.claude.com/en/docs/claude-code)
-- [Codex CLI](https://developers.openai.com/codex/cli)
+- [Claude Code](https://code.claude.com/docs)
+- [Codex CLI](https://learn.chatgpt.com/docs/codex/cli)
 - [Antigravity CLI](https://github.com/google-antigravity/antigravity-cli)
 - [Google Gemini CLI](https://github.com/google-gemini/gemini-cli)
 - [Grok Build](https://docs.x.ai/build/overview)
@@ -114,10 +121,11 @@ the target mounted, entered before the audit starts.
 
 ### Backend support
 
-A backend is listed as supported only where the sandbox was measured doing the
-two things an audit needs — reading the target tree and writing results — while
-still containing the agent. Where it is not, TokenFuzz refuses the launch rather
-than filing the run as contained.
+This table is TokenFuzz's tested support policy, not a comparison of what each
+vendor CLI can do elsewhere. A backend is listed as supported only where its
+sandbox was measured doing the two things an audit needs — reading the target
+tree and writing results — while still containing the agent. Where it is not,
+TokenFuzz refuses the launch rather than recording the run as contained.
 
 | Backend | `sandboxed` | What it enforces, or why it is refused |
 | --- | --- | --- |

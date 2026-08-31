@@ -146,23 +146,30 @@ isolation:      OK — every campaign artifact is outside the checkout
 
 ## Giving it coverage feedback
 
-libFuzzer guides itself with SanitizerCoverage counters *inside the target
-library*. An ordinary `build-<san>/` usually has none, so a fuzzer linked
-against one runs **blind** — it still finds shallow faults, but it cannot tell
-that an input reached new code, and every coverage number stays flat.
+libFuzzer needs SanitizerCoverage counters *inside the target library* to guide
+mutations through target code. An ordinary `build-<san>/` usually has none, so
+a fuzzer linked against one is **blind to target internals**. It may still find
+shallow faults, and totals can move because the harness translation unit has
+its own counters. Changes in those totals alone do not prove the target library
+is providing guidance.
 
-The shared tree is never rebuilt for that. `bin/setup-target <target> --build`
-and audit preflight build the **sibling** `build-<san>+fuzz` automatically:
-the target's own `.audit/build.sh` is rerun with `CC`/`CXX` pointed at
+The shared tree is never rebuilt for that. When ASan is available,
+`bin/setup-target <target> --build` and audit preflight automatically build the
+**sibling** `build-asan+fuzz`. The target's own `.audit/build.sh` is rerun with
+`CC`/`CXX` pointed at
 `.audit/coverage-toolchain/{cc,cxx}`, shims that add
 `-fsanitize=fuzzer-no-link -fsanitize-coverage=trace-pc-guard` and exec the
 LLVM compiler that links the harnesses. The sibling is verified — the
 configured binary must carry `__sancov_guards` and start — and stamped like
 the primary, so it is rebuilt when the source or recipe changes. A recipe
 that does not honour `CC`/`CXX` yields no instrumentation; setup reports the
-sibling unavailable with `.audit/build-materialize-<san>+fuzz.log` and
+sibling unavailable with `.audit/build-materialize-asan+fuzz.log` and
 remembers that until the source, recipe, or toolchain changes (or
 `--build --force`).
+
+Other sanitizers do not receive an automatic coverage sibling. An operator can
+provide a compatible isolated tree explicitly, but the ASan sibling is the
+route setup and preflight materialize today.
 
 To build one by hand instead, for example against a different toolchain:
 
@@ -239,18 +246,17 @@ stops paying:
 | --- | --- |
 | `saturated` | No new coverage for three slices. Revived automatically when its corpus grows. |
 | `blocked-on-crash` | Crashing with no new coverage; libFuzzer stops at its first crash, so it cannot get past a filed bug. |
-| `dead` | Zero executions — usually the library failed to load. |
-| `startup-crash` | Crashed before the corpus finished loading. The harness is broken, not the target. |
+| `dead` | No meaningful executions — usually the library failed to load. |
+| `startup-crash` | Crashed before the initial corpus finished loading. If the crashing input is one of the seeds, that seed is removed and the campaign continues; otherwise the harness setup is broken. |
 | `noise-flood` | Only OOM/timeout/leak artifacts, which are auto-rejected downstream anyway. |
 
-Slices are allocated by measured new-edges-per-second with a UCB1 exploration
+Slices are allocated by measured new coverage per second with a UCB1 exploration
 term, so every harness runs before any runs twice and a quiet one is revisited
 rather than written off. Corpora persist and are periodically minimised, which
 is what makes many short slices as good as one long run.
 
 An empty corpus is seeded automatically from the target's own test data before
-the first slice — on libxml2 that is the difference between ~1900 edges and
-318 in the first slice. Point
+the first slice. Point
 [`FUZZ_SEED_CORPUS_DIR`](../reference/environment.md#directed-fuzzing) at a
 locally staged OSS-Fuzz or ClusterFuzz corpus to seed from it too; the harness
 never fetches one over the network. A corpus the fuzzer has already built is
@@ -265,14 +271,17 @@ would call the harness mined out exactly when it started making progress.
 The first slice is retained separately from later high-water totals: execution
 count, edge/feature deltas, artifacts, verdict, reason, and log path survive
 resume. For a guided harness with a resolved receipt that later saturates,
-`bin/fuzz status` permits at most one contract-preserving derivative—one
-caller-controlled argument change or one source-grounded public call—built for
-the next iteration's campaign, never as a second campaign in this one. On
-that row it also lists up to three **compatible APIs**: admitted public calls
-whose declaration shares a struct or handle type with the boundary, in reading
-order for the one call the derivative may add. They are hints, never cards. Blind harnesses, unresolved receipts, and harnesses with
-no receipt at all keep the generic widen-or-re-seed advice, and a failed
-derivative never closes or quarantines its parent.
+`bin/fuzz status` recommends at most one contract-preserving derivative: one
+caller-controlled argument change or one source-grounded public call, built for
+the next iteration's campaign rather than as a second campaign in this one.
+This is guidance in the status output, not a scheduler-enforced limit. On that
+row it also lists up to three **compatible APIs**: admitted public calls whose
+declaration shares a struct or handle type with the boundary, in reading order
+for the one call the derivative may add. They are hints, never cards.
+
+Blind harnesses, unresolved receipts, and harnesses with no receipt at all keep
+the generic widen-or-re-seed advice. A failed derivative never closes or
+quarantines its parent.
 
 Coverage totals are reported, never divided. libFuzzer's instrumented-counter
 total spans every loaded module including the harness's own translation unit;

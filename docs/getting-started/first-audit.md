@@ -25,18 +25,19 @@ export LOGS="output/$TARGET/$BACKEND/logs"
 bin/audit --target "$TARGET" --backend "$BACKEND" 1
 ```
 
+The `oss` backend has no default model: add `--model <id>` here and on every
+later audit command.
+
 The trailing `1` has special smoke-test behavior:
 
 - one worker launches, regardless of the normal pool size;
 - the worker claims ranked work and investigates for one iteration;
 - result and log directories remain available for the next run.
 
-Choose a model explicitly with `--model <name>` when reproducibility matters.
-Otherwise the hosted backend default and reasoning effort come from
-`config/models.toml`; per-shell model overrides are listed under
-[Model selection](../reference/environment.md#model-selection). The `oss`
-backend always requires `--model`: use a provider-qualified OpenCode catalog
-id or the exact id served by a local endpoint.
+For a hosted backend, choose a model explicitly with `--model <name>` when
+reproducibility matters. Otherwise its default model and reasoning effort come
+from `config/models.toml`; per-shell model overrides are listed under
+[Model selection](../reference/environment.md#model-selection).
 
 For a focused plumbing test, add `--strategy S1` (or S2–S8). This pins the
 strategy and suspends normal rotation for the run.
@@ -61,6 +62,7 @@ and result/log roots. The result tree should contain at least:
 ```text
 results/
   .session-env
+  .target.toml
   work-cards.jsonl
   state/
   scratch-1/
@@ -133,12 +135,14 @@ strategy rotation.
 To inspect cleanup before starting over:
 
 ```bash
-bin/cleanup_state --target "$TARGET" --dry-run
+bin/cleanup_state --target "$TARGET" --backend "$BACKEND" --dry-run
 bin/cleanup_logs --target "$TARGET" --backend "$BACKEND" --dry-run
 ```
 
 Remove `--dry-run` only after checking the printed paths. Cleanup does not
-delete source under `targets/`.
+delete source under `targets/`. Omitting `--backend` from `bin/cleanup_state`
+selects every backend and aggregate result under that target, so use it only
+when you intend a target-wide reset.
 
 ## Auditing with UBSan, MSan, or TSan
 

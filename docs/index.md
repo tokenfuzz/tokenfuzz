@@ -28,8 +28,8 @@ Keeping that separation over a long run is what the harness is for:
   filing agent's context, and each decision is content-addressed to the evidence
   it read, so editing a report reopens its review.
 - **Maintainer handoff.** An accepted crash becomes a self-contained bundle — a
-  report, the input, the sanitizer output, and a one-command `reproduce.sh` that
-  builds from a clean checkout.
+  report, the input, the saved sanitizer output, and a `reproduce.sh` that
+  rebuilds and re-runs it from a clean checkout.
 
 ## Supported targets
 

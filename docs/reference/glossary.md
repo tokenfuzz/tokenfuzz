@@ -51,13 +51,16 @@ one subsystem.
 ## Probe and execution
 
 **Probe (`bin/probe`).** The only execution gate for testcases.
-Reads headers, picks the right runner, coverage-gates, runs the
-sanitizer, and records `state/runs.jsonl`.
+Reads headers, picks the right runner, performs a coverage check where
+supported, runs the sanitizer or configured runner, and records
+`state/runs.jsonl`.
 
-**Coverage gate.** A pre-run on a sancov-instrumented build that
-confirms the testcase reaches the named target code before
-spending a sanitizer-run budget. When no route-equivalent coverage artifact
-exists, the sanitizer run proceeds ungated rather than being labelled a miss.
+**Coverage gate.** A pre-run on a sancov-instrumented build that checks whether
+a testcase reaches the named target code. Browser and JavaScript routes treat a
+miss as a hard gate and skip the sanitizer run; native routes record the miss
+as feedback and run the sanitizer anyway. When no route-equivalent coverage
+build exists or the check cannot run, the probe records why
+(`COVERAGE_UNAVAILABLE`, `COVERAGE_ENV_FAIL`) and proceeds ungated.
 
 **Probe verdicts.** The execution result recorded in `state/runs.jsonl`.
 
@@ -111,9 +114,10 @@ signature. It is a deduplication proxy, not proof of one root cause per cluster.
 Per-backend at the result tree; cross-backend at the target root. The
 `.md` siblings are the generated markdown source.
 
-**Export bundle.** The maintainer-facing form of a crash,
-produced by `bin/export-repro`: `REPORT.md`, `reproduce.sh`,
-`input.<ext>`, optional `harness.*`, `sanitizer.txt`. See
+**Export bundle.** The maintainer-facing form of a crash, produced by
+`bin/export-repro`: `REPORT.md`, `reproduce.sh`, `input.<ext>`, optional
+`harness.*`, and `sanitizer.txt`. When no runnable route was captured,
+`reproduce.sh` is a stub that says so and exits 2. See
 [Reproduce a crash](../guides/reproduce-a-crash.md).
 
 **Cluster id.** The hash naming a cluster — `CL-<8 hex>` for crashes,
@@ -219,6 +223,7 @@ agents in the same subsystem at once, so a run spreads across the tree.
 should violate, and the diagnostic expected. The unit of agent work,
 recorded with its outcome in `state/hypotheses.jsonl`.
 
-**`state/*.jsonl`.** Append-only records of claims, hypotheses, probe
-runs, and notes. This — not the model transcript — is what a resumed
-run reads.
+**Structured state (`state/*.jsonl`).** Durable claims, hypotheses, probe runs,
+notes, and events. Claims, runs, notes, and events are append-only ledgers;
+hypothesis status is maintained by an atomic rewrite. This — not the model
+transcript — is what a resumed run reads.

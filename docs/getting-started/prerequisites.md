@@ -20,8 +20,8 @@ TokenFuzz itself needs:
 | ripgrep (`rg`) | Bounded source search. |
 | `file` | Testcase and executable classification. |
 | LLVM (`clang`, `clang++`, `llvm-symbolizer`) | Building and diagnosing native sanitizer targets. |
-| `sancov` | Coverage-gated browser and JavaScript probes, when supported. |
-| [`trailmark`](https://github.com/trailofbits/trailmark) (experimental, optional) | Adds a static call map to each work-card prompt. `pip install trailmark` into any Python 3.12+ on `PATH`. See [below](#experimental-call-neighbourhood-context). |
+| `sancov` (optional) | Coverage feedback for native probes and the coverage gate for browser/JS probes. Everything runs without it. |
+| [`trailmark`](https://github.com/trailofbits/trailmark) (experimental, optional) | Adds a static call map to each work-card prompt. Needs Python 3.12+. See [below](#experimental-call-neighbourhood-context). |
 
 `bash` is needed by the repository test runner and its two shell-behavior suites.
 Your target may also need CMake, Meson, an archiver, a language runtime, or
@@ -68,6 +68,11 @@ Minimal containers may also need CA certificates and standard process/text
 utilities. The test driver can install its known container dependencies with
 `bash tests/run-tests.sh --install-container-deps`.
 
+The package lists above cover the core harness and sanitizer tooling. To run the
+full test suite without skipping its Node.js and Go runner checks, install
+`node` and `go` as well. The container dependency installer does this for you;
+read the suite's `SKIP` lines when those toolchains are absent.
+
 ## 2. One agent backend
 
 Install and authenticate at least one supported CLI:
@@ -80,19 +85,28 @@ Install and authenticate at least one supported CLI:
 | Grok | `grok` | Install Grok Build and configure its credentials. |
 | OpenCode | `opencode` | Use an OpenCode catalog id (`opencode/<id>`) or the exact id served by a local OpenAI-compatible endpoint. Both routes use `--backend oss`. |
 
+The `oss` backend has no default model; every audit command that selects it
+needs `--model`.
+
 Verify the chosen CLI directly before asking TokenFuzz to launch it. Exact
 installation links, authentication checks, model selection, local vLLM/Ollama
 setup, and ensemble behavior live in
 [Backends and isolation](../guides/backends.md).
 
+Codex sandboxing on Linux and WSL2 needs the distribution's `bubblewrap`
+package; see the
+[Codex sandboxing prerequisites](https://learn.chatgpt.com/docs/sandboxing?sandbox-os=ubuntu-debian#prerequisites)
+for the Ubuntu AppArmor notes.
+
 ### Cyber access for security research
 
 For authorised defensive research through a hosted model, register the
 organisation and use case through the provider's applicable trusted-access
-program before a long run. OpenAI offers
-[Trusted Access for Cyber](https://openai.com/index/trusted-access-for-cyber/),
-and Anthropic offers a
-[Cyber Verification Program](https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude).
+program before a long run. OpenAI documents Daybreak and Trusted Access for
+Cyber under
+[Models and Trusted Access](https://learn.chatgpt.com/docs/cyber-safety), and
+Anthropic offers a
+[Cyber Verification Program](https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude-opus-and-sonnet).
 
 Provider registration does not replace target authorisation or the provider's
 usage policy. Use a local backend when hosted-model data flow is not acceptable.
@@ -206,7 +220,7 @@ This dependency is optional; skip it for a first install. With
 source pack for resolved functions:
 
 ```bash
-python3 -m pip install trailmark
+python3 -m pip install trailmark   # any Python 3.12+; bin/callgraph finds it
 python3 bin/callgraph --probe
 ```
 

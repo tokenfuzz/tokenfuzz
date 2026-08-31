@@ -202,3 +202,16 @@ PROBE_BUILD_CONFIG=primary bin/probe .../scratch-1/testcase
 
 Normal audits assign this automatically, and a confirmed crash from an
 alternate build is compared against the primary without any override.
+
+## Probe output capture
+
+`bin/probe` classifies a diagnostic before limiting its saved size. By default,
+an output larger than 8 MiB is replaced with an explicit truncation marker plus
+its first and last 256 KiB. For a deliberate full-capture rerun:
+
+```bash
+PROBE_ASAN_OUTPUT_MAX_BYTES=0 bin/probe .../scratch-1/testcase
+```
+
+This can create a very large file. Use it only when the saved marker shows that
+the omitted middle contains context needed for review.

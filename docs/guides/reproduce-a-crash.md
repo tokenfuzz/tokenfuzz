@@ -11,7 +11,8 @@ If you are the operator running TokenFuzz, see
 Accepted crashes are exported in place during triage. The directory under
 `output/.../crashes/CRASH-*` is therefore the same self-contained shape an
 operator sends upstream. Older or interrupted runs may still contain the
-audit-side `report.md`; the operator can finish those with `bin/export-repro`.
+audit-side `report.md`; the operator can finish those with `bin/export-repro`
+(see [Maintenance commands](triage-results.md#maintenance-commands)).
 
 ## Bundle layout
 
@@ -21,10 +22,10 @@ The directory is named after the crash id. After unpacking you normally get:
 CRASH-001-1/
 ├── REPORT.md          # one-page summary: bug, root cause, candidate fix
 ├── REPORT.html        # browser-friendly render of REPORT.md
-├── reproduce.sh       # single command, no env vars
+├── reproduce.sh       # ./reproduce.sh /path/to/checkout
 ├── input.<ext>        # the testcase bytes
 ├── harness.{c,cc,cpp,cxx} # only when the bug uses a C/C++ harness
-├── sanitizer.txt      # full sanitizer output captured during discovery
+├── sanitizer.txt      # saved sanitizer output captured during discovery
 ├── patch.diff         # optional: candidate fix, verified to apply cleanly
 ├── validation.json    # the publication decision, bound to this evidence
 ├── severity.json      # only when a current reportable score exists
@@ -61,32 +62,34 @@ the target, it can clone source, fetch submodules, install project-local
 dependencies, and execute the target's build system. Review those network and
 build steps under your own policy.
 
+If no runnable route (testcase, harness, or wrapper) was captured,
+`reproduce.sh` is a stub: it names what is missing and exits 2. The report and
+saved diagnostic are still valid evidence; reproduction then needs a route you
+author yourself.
+
 ## Reproduce in one command
 
-`reproduce.sh` takes a source-checkout argument. For generic targets
-it is optional because the script can clone the recorded upstream URL;
-for Firefox/`mach` bundles it is mandatory unless you explicitly set
-`REPRO_AUTO_CLONE=1`.
+Pass a source checkout:
 
 ```bash
 ./reproduce.sh /path/to/your/checkout
 ```
 
+The argument may be omitted only when the bundle records a real upstream URL
+and a pinned revision, in which case the script clones next to itself (or when
+it runs in place on the machine that produced it). A local-only or unpinned
+target has no other fallback. Firefox/`mach` bundles
+always need the path unless you set `REPRO_AUTO_CLONE=1`, because that clone is
+very slow.
+
 What it does:
 
-1. Selects the source tree to build against. For generic targets
-   (every non-`mach` project), running with no argument clones the
-   recorded upstream URL at the recorded revision into a directory
-   next to the script. Running with a path uses that checkout
-   instead, checked out at the recorded revision — if that revision
-   cannot be checked out the script stops with exit 3 rather than build
-   a different commit. Local modifications in a checkout you pass are
-   preserved, so you can test an applied candidate patch; the recorded
-   revision fixes the commit, not the working tree.
-   **For Firefox/`mach` bundles**, the checkout path is
-   mandatory — pass it explicitly, or set `REPRO_AUTO_CLONE=1` to
-   `hg clone` the recorded upstream repository next to the script
-   (very slow).
+1. Selects the source tree to build against. A Git or Mercurial checkout you
+   pass is moved to the recorded revision; if that fails the script stops with
+   exit 3 rather than build a different commit. A plain source tree, or any
+   checkout given to a Firefox/`mach` bundle, is used as supplied — check its
+   revision yourself. Local modifications that do not conflict are kept, so you
+   can test an applied candidate patch.
 2. Configures and builds the project with the same sanitizer flags
    TokenFuzz used during discovery.
 3. Runs the recorded testcase against the resulting binary or
@@ -101,8 +104,11 @@ You need:
 
 - the same compiler and build tools you would normally use to build
   the project from source;
-- an LLVM that supports `-fsanitize=<name>` for the sanitizer
-  recorded in the bundle (ASan, UBSan, MSan, TSan, or Go's `race`).
+- for ASan, UBSan, MSan, or TSan, a compatible LLVM toolchain that supports the
+  recorded `-fsanitize=<name>` mode;
+- for Go `race`, a Go toolchain with race-detector support and the C compiler /
+  cgo support required by that platform. Go `race` is not an LLVM sanitizer
+  mode.
 
 Generated recipes do not provision operating-system packages for you. They may
 invoke package managers such as npm, pip, Bundler, Composer, Maven, Gradle, R,
@@ -125,9 +131,10 @@ build step fails, the trailing few lines name the step and the error.
 
 ## Reading the sanitizer output
 
-`sanitizer.txt` contains the original sanitizer report from
-discovery — unfiltered, with full stack traces. The top of the file
-names the diagnostic class. For ASan, that is one of:
+`sanitizer.txt` contains the sanitizer report from discovery with full stack
+traces. Output over 8 MiB is truncated in the middle for storage and says so
+with a marker; the head and tail are always kept. The top of the file names the
+diagnostic class. For ASan, that is one of:
 
 | Class | Meaning |
 | --- | --- |
@@ -149,8 +156,8 @@ Below the diagnostic line, the report has:
   (e.g. `fa` = heap-left-redzone, `fd` = freed-heap) tells you what
   was hit.
 
-`REPORT.md` normally points you at the line that matters. The full
-trace is in `sanitizer.txt` if you want the rest.
+`REPORT.md` normally points you at the line that matters. The full trace is in
+`sanitizer.txt` if you want the rest.
 
 ## Verifying your fix
 
@@ -179,9 +186,11 @@ recorded revision *is* affected, the most common causes are:
 - **A configure-time option that disables the affected code path**
   (`--without-zlib`, `--disable-foo`). Diff your configure flags
   against the ones in `reproduce.sh`.
-- **A racy lifetime bug that needs a specific allocator state.** Try
-  `ASAN_OPTIONS=quarantine_size_mb=1` (forces freed memory to stay
-  freed long enough to fire the diagnostic).
+- **A lifetime bug that needs a specific allocator state.** Vary ASan's
+  `quarantine_size_mb`: lowering it encourages earlier address reuse, while
+  increasing it keeps freed allocations quarantined longer. Record which
+  setting reproduces rather than assuming that a smaller value preserves the
+  allocation longer.
 
 ## What the report does **not** claim
 
@@ -208,8 +217,7 @@ The bundle is self-contained:
 If you would like to credit TokenFuzz in your advisory or commit
 message, a neutral attribution is:
 
-> Discovered with TokenFuzz (LLM-based sanitizer-regression
-> harness).
+> Discovered with TokenFuzz (LLM-assisted security audit).
 
 Follow the project's normal coordinated-disclosure and embargo process.
 

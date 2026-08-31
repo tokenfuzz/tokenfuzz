@@ -21,9 +21,10 @@ general native projects, so select browser mode explicitly for a GN browser:
 bin/setup-target my-gn-browser /path/to/source --browser --build
 ```
 
-Both browser and generic targets share the same `build-asan/` layout.
-`mach` writes its object directory there; CMake / autotools
-targets install there with `-DCMAKE_INSTALL_PREFIX` or `--prefix`.
+Both browser and generic targets use `build-asan/` as the canonical build
+directory. `mach` writes its object directory there. CMake, autotools, and
+Meson configure and build out of tree there; the generated recipes do not
+claim to install the project under that directory.
 Inside `bin/audit-container-shell`, `AUDIT_BUILD_SUFFIX` makes the
 actual build directory `build-asan-<image-id>/`; relative `build-asan/`
 paths in `target.toml` resolve through that suffix.
@@ -40,12 +41,14 @@ slug; see
 [Chromium and Chrome checkouts](../getting-started/add-a-target.md#chromium-and-chrome-checkouts)
 before the first setup.
 
-The generated recipe is stored under `targets/<target>/.audit/`, uses a clean
-release-mode sanitizer object directory, and is reused by audit preflight when
-the source moves. `mach` and GN are native adapters; neither adapter branches
-on a target or product name. GN builds its graph's default target. Browser
-projects with another build system can use `--browser` and provide the same
-`.audit/build.sh <source> <build-dir>` contract.
+The generated recipe is stored under the configured source root's `.audit/`
+directory, uses a clean release-mode sanitizer object directory, and is reused
+by audit preflight when the source moves. This distinction matters for layouts
+such as Chromium, whose configured source root may be nested below the target
+registration directory. `mach` and GN are native adapters; neither adapter
+branches on a target or product name. GN builds its graph's default target.
+Browser projects with another build system can use `--browser` and provide the
+same `.audit/build.sh <source> <build-dir>` contract.
 
 The browser runner's `{PROFILE}` argument is the page-route declaration. A
 browser-mode target without that token is treated as a script engine: it uses
@@ -59,20 +62,21 @@ executable or a target-named product under `dist`; it does not guess among
 ambiguous helpers by file size.
 
 Existing browser object directories created outside TokenFuzz have no
-`.audit-build-stamp`. The first setup or audit preflight therefore treats them
-as stale and performs one clean build before recording freshness; it does not
-assume an untracked binary matches the current source revision.
+`.audit-build-stamp`. The first `bin/setup-target --build` or audit preflight
+therefore treats them as stale and performs one clean build before recording
+freshness. Plain `bin/setup-target` detects and writes configuration but does
+not build the target.
 
 The source tree must already be complete enough for its native driver. In
 particular, a GN checkout that uses an external dependency client must be
 synced before setup; TokenFuzz does not replace project-specific source
 bootstrap tooling.
 
-Browser-mode coverage gating (`bin/hits --mode browser`) speaks the Firefox
-command line and looks for `dist/Nightly.app/Contents/MacOS/XUL` on macOS or
-`dist/bin/libxul.so` on Linux — override with `COV_XUL`. Other browser targets
-run without the coverage pre-check; every probe spends a sanitizer run
-directly.
+Browser-mode coverage gating (`bin/hits --mode browser`) is Firefox-specific:
+it looks for `dist/Nightly.app/Contents/MacOS/XUL` on macOS or
+`dist/bin/libxul.so` on Linux, with `COV_XUL` as an override. For another
+browser the gate cannot run; the probe records `COVERAGE_ENV_FAIL` and proceeds
+to the sanitizer run rather than claiming coverage was measured.
 
 ## Attacker surface
 
@@ -112,7 +116,8 @@ testcase.
 bin/audit --target <target> --backend <backend> 1
 ```
 
-Check `logs/index.log` for the resolved product executable and mode, then
-inspect the first scratch directory. A full browser route should create a fresh
-profile for each probe. A script-engine route should not acquire browser flags
-or a profile it never declared.
+Check the session's pinned `output/<target>/<backend>/results/.target.toml`
+for the resolved `asan_bin` and mode, then inspect the first scratch directory.
+A full browser route should create a fresh profile for each probe. A
+script-engine route should not acquire browser flags or a profile it never
+declared.

@@ -48,20 +48,22 @@ that crosses no independent security boundary because the same job chooses
 both sides of it. A run that promotes a trap is a precision failure, and the
 answer key says so.
 
-!!! note "Not every planted bug can crash"
-    The scorer grades crashes, because a sanitizer artifact is the only
-    attribution it can trust. A planted bug that no sanitizer can catch — a path
-    traversal, a command injection — is marked `findings_only: true` in the
-    manifest and stays out of the crash-recall denominator. On the three hybrid
-    sanitizer samples, `samples/sample-go` counts 1 of its 3 planted bugs
-    toward crash recall; `samples/sample-rust` and `samples/sample-swift` each
-    count 2 of 3. The rest exercise the finding path.
+!!! note "Crash and finding scores are separate"
+    The crash scorer trusts runtime diagnostics, not an agent's description of
+    a crash. A planted bug that no configured sanitizer can catch — a path
+    traversal or command injection, for example — is marked
+    `findings_only: true` and stays out of the crash-recall denominator. A
+    separate findings scorer credits a confirmed FIND when its report names the
+    planted fault function. On the three hybrid sanitizer samples,
+    `samples/sample-go` counts 1 of its 3 planted bugs toward crash recall;
+    `samples/sample-rust` and `samples/sample-swift` each count 2 of 3. Their
+    remaining bugs exercise the finding path.
 
 ## Run one
 
-**Findings-only samples** need nothing but their interpreter. The
-configuration is already committed, so go straight to a one-iteration
-smoke test:
+**Findings-only samples** need their configured runtime or toolchain, but no
+sanitizer build. Their configuration is already committed, so go straight to a
+one-iteration smoke test:
 
 ```bash
 bin/audit --target samples/sample-python --backend <backend> 1
@@ -81,7 +83,8 @@ bin/audit --target samples/sample-rust --backend <backend> 1
 `--no-llm-config` needs no backend. A forced build keeps the sample's
 hand-authored `target.toml` and build recipe, and rematerializes only the build
 output. Running `bin/setup-target ... --force` without `--build` still
-regenerates the config from scratch.
+regenerates the derived fields but keeps the curated threat model, peer
+list, and build-widening settings.
 
 `samples/sample-swift` is the exception that needs no build step — runner
 preflight builds the package under AddressSanitizer once and every run
@@ -105,9 +108,12 @@ python3 lib/benchmark.py score output/samples/sample-c/<backend>/results \
   --ground-truth output/samples/sample-c/.ground-truth.json
 ```
 
-The scorer is deterministic and reads the run's sanitizer artifacts, never an
-agent's prose — naming a bug in a report earns nothing. It grades crashes, so a
-findings-only target is reported as not scored rather than as 0% recall.
+The scorer is deterministic but uses different evidence for the two lanes. The
+crash oracle reads sanitizer artifacts, so merely naming a crash in prose earns
+nothing. The findings oracle reads the fault location from confirmed FIND
+reports; a vague mention without the exact function earns nothing. On a
+findings-only target, the empty crash lane is reported as not scored while the
+findings lane still reports recall and precision.
 
 `targets/canary/run-benchmark.sh` wires the whole thing together — build, short
 benchmark, ground-truth block in the ledger:

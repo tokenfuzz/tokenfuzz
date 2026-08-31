@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 570"
      font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
-     role="img" aria-label="TokenFuzz audit lifecycle: set up the target, run the audit, agents investigate, probe runs the testcase, triage decides outcome">
+     role="img" aria-label="TokenFuzz audit lifecycle: set up and preflight the target, agents either file source-only findings or run one testcase through probe, lane-specific validation records findings, crashes, rejected or unsettled artifacts, and crash bundles">
   <title>TokenFuzz audit lifecycle</title>
   <defs>
     <marker id="al-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -23,7 +23,7 @@
       .arrow      { stroke: #475569; stroke-width: 1.5; fill: none; }
       .title      { font-size: 14px; font-weight: 600; fill: #0f172a; }
       .sub        { font-size: 12px; fill: #475569; }
-      .micro      { font-size: 11px; fill: #64748b; }
+      .micro      { font-size: 11px; fill: #475569; }
       .chip       { font-size: 10.5px; fill: #475569; font-weight: 600; }
       .gate-label { font-size: 13px; font-weight: 700; fill: #7c2d12; text-anchor: middle; }
       .gate-sub   { font-size: 11px; fill: #92400e; text-anchor: middle; }
@@ -45,8 +45,8 @@
   <text x="40" y="146" class="step-num">2</text>
   <g filter="url(#al-shadow)"><rect x="70" y="112" width="850" height="64" class="step"/></g>
   <text x="90"  y="136" class="title">Run the audit</text>
-  <text x="90"  y="158" class="sub">One command reads the config, creates result, log, and state directories, and probes the build for compiled translation units.</text>
-  <text x="90"  y="172" class="micro">State and claims are append-only — the run survives compaction, resume, and crashes.</text>
+  <text x="90"  y="158" class="sub">Preflight converges the build, pins revision and config, creates results, then launches the selected backend.</text>
+  <text x="90"  y="172" class="micro">Claims, runs, notes, and events append; cards and current hypotheses update atomically.</text>
 
   <path d="M480,176 L480,206" class="arrow" marker-end="url(#al-arrow)"/>
 
@@ -54,46 +54,50 @@
   <circle cx="40" cy="256" r="13" class="step-dot"/>
   <text x="40" y="260" class="step-num">3</text>
   <g filter="url(#al-shadow)"><rect x="70" y="206" width="850" height="100" class="agent"/></g>
-  <text x="90"  y="230" class="title">Agents investigate, one card and one hypothesis at a time</text>
-  <text x="90"  y="252" class="sub">Each agent reads a focused region of source, forms a hypothesis, writes a small testcase, and runs it through `bin/probe`.</text>
-  <text x="90"  y="274" class="sub">If the testcase reaches the right code under the sanitizer, it goes to triage. Otherwise the agent revises the input.</text>
-  <text x="90"  y="296" class="micro">The ranked queue feeds cards in priority order.</text>
+  <text x="90"  y="230" class="title">Agents investigate, with one active investigation at a time</text>
+  <text x="90"  y="252" class="sub">An analysis agent can file a concrete source-only FIND; a reproduce agent writes one testcase and runs bin/probe.</text>
+  <text x="90"  y="274" class="sub">Browser/JS misses stop before sanitizer; native misses are feedback. Diagnostics are confirmed before promotion.</text>
+  <text x="90"  y="296" class="micro">The scheduler offers the highest eligible card for the assigned strategy.</text>
 
-  <path d="M480,306 L480,336" class="arrow" marker-end="url(#al-arrow)"/>
+  <path d="M330,306 C330,326 390,342 416,354" class="arrow" marker-end="url(#al-arrow)"/>
+  <text x="242" y="326" class="micro">source-only FIND</text>
+  <path d="M630,306 C630,326 570,342 544,354" class="arrow" marker-end="url(#al-arrow)"/>
+  <text x="622" y="326" class="micro">testcase → bin/probe</text>
 
   <!-- Step 4: Triage diamond -->
   <g filter="url(#al-shadow)">
-    <polygon points="480,336 580,396 480,456 380,396" class="gate"/>
+    <polygon points="480,326 640,396 480,466 320,396" class="gate"/>
   </g>
-  <text x="480" y="388" class="gate-label">TRIAGE</text>
-  <text x="480" y="406" class="gate-sub">security-relevant and concrete?</text>
-  <text x="480" y="422" class="gate-sub">evidence complete and reproducible?</text>
+  <text x="480" y="384" class="gate-label">LANE-SPECIFIC VALIDATION</text>
+  <text x="480" y="404" class="gate-sub">FIND: source-grounded substance</text>
+  <text x="480" y="422" class="gate-sub">CRASH: diagnostic + reproduction</text>
 
   <!-- Outcomes row -->
   <g filter="url(#al-shadow)"><rect x="40"  y="476" width="240" height="64" class="find"/></g>
-  <text x="56"  y="494" class="out-tag" fill="#166534">Primary output</text>
+  <text x="56"  y="494" class="out-tag" fill="#166534">Finding lane</text>
   <text x="56"  y="512" class="title">findings/FIND-*</text>
-  <text x="56"  y="530" class="micro">Concrete security issue, reproducer optional.</text>
+  <text x="56"  y="530" class="micro">Report state stays with evidence.</text>
 
   <g filter="url(#al-shadow)"><rect x="300" y="476" width="240" height="64" class="crash"/></g>
-  <text x="316" y="494" class="out-tag" fill="#991b1b">Reproducible subset</text>
+  <text x="316" y="494" class="out-tag" fill="#991b1b">Crash lane</text>
   <text x="316" y="512" class="title">crashes/CRASH-*</text>
-  <text x="316" y="530" class="micro">Reproducible sanitizer proof saved.</text>
+  <text x="316" y="530" class="micro">Testcase and diagnostic retained.</text>
 
   <g filter="url(#al-shadow)"><rect x="560" y="476" width="180" height="64" class="reject"/></g>
-  <text x="576" y="494" class="out-tag" fill="#374151">Dropped, with reason</text>
-  <text x="576" y="512" class="title">rejected /</text>
-  <text x="576" y="527" class="title">needs review</text>
+  <text x="576" y="494" class="out-tag" fill="#374151">Preserved</text>
+  <text x="576" y="512" class="title">rejected / unsettled</text>
+  <text x="576" y="530" class="micro">Reason or review retained.</text>
 
   <g filter="url(#al-shadow)"><rect x="760" y="476" width="160" height="64" class="bundle"/></g>
   <text x="776" y="494" class="out-tag" fill="#9a3412">Auto-export</text>
-  <text x="776" y="512" class="title">maintainer</text>
-  <text x="776" y="527" class="title">bundle</text>
+  <text x="776" y="509" class="title">maintainer bundle</text>
+  <text x="776" y="523" class="micro">report, input, diagnostic,</text>
+  <text x="776" y="536" class="micro">reproduce.sh</text>
 
   <!-- Triage arrows to outcomes -->
-  <path d="M400,430 C 320,462 220,474 165,476" class="arrow" marker-end="url(#al-arrow)"/>
-  <path d="M480,456 L420,476" class="arrow" marker-end="url(#al-arrow)"/>
-  <path d="M560,430 C 580,450 600,468 640,476" class="arrow" marker-end="url(#al-arrow)"/>
+  <path d="M402,430 C330,462 230,474 165,476" class="arrow" marker-end="url(#al-arrow)"/>
+  <path d="M480,466 L420,476" class="arrow" marker-end="url(#al-arrow)"/>
+  <path d="M558,430 C600,452 625,468 650,476" class="arrow" marker-end="url(#al-arrow)"/>
   <!-- crash -> bundle -->
-  <path d="M540,508 L760,508" class="arrow" marker-end="url(#al-arrow)"/>
+  <path d="M540,528 C610,560 700,560 760,528" class="arrow" marker-end="url(#al-arrow)"/>
 </svg>

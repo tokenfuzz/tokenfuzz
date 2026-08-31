@@ -93,8 +93,15 @@ The paths an operator inspects after a run:
 | `.session-env` | Active backend-local `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, `SESSION_STARTED`, and `TARGET_CONFIG_SHA256` values read by `bin/probe`. |
 | `.target.toml` | The post-preflight `target.toml` snapshot this session runs against, pinned by the `TARGET_CONFIG_SHA256` digest above. Every config consumer in the session reads it instead of the shared `output/<target>/target.toml`. Editing or removing it fails the run loud. |
 
-The tree also holds the work queue and structured state the harness
-manages itself. `state/claims.jsonl` records every card claim with the
+### Structured progress
+
+The tree also holds the work queue and structured state the harness manages
+itself. Claims, runs, notes, and events are append-only ledgers. Hypothesis
+status is updated by atomically rewriting `state/hypotheses.jsonl`, and queue
+refreshes can replace `work-cards.jsonl`; JSONL is the storage format, not a
+promise that every file only grows.
+
+`state/claims.jsonl` records every card claim with the
 `queue_rank`, `queue_size`, `score`, and `strategy` the card carried when it
 was offered, which is what `bin/state card-yield` replays. One file is worth
 knowing: `state/runs.jsonl` has one
@@ -112,7 +119,7 @@ installed; it holds the per-file call maps work-card prompts quote, and
 deleting it costs prompt context and nothing else. The rest is internal
 bookkeeping.
 
-S4's private `fuzz/bin/*.manifest.json` files use schema 2 for new builds.
+For S4, private `fuzz/bin/*.manifest.json` files use schema 2 for new builds.
 They bind an optional source-grounding `receipt` to one harness binary,
 alongside the source digest, guidance, sanitizer and linked library/tree the
 manifest already recorded. A harness that carries no receipt — hand-written, or
@@ -130,6 +137,8 @@ the directory to `findings-rejected/` rather than deleting it. `touch
 report must still contain complete boundary and trigger fields before the
 harness writes a final receipt. Editing the report's substance re-opens its
 review; mechanical severity, patch, enrichment, and cluster annotations do not.
+
+### Publication receipts
 
 Every adjudicated artifact has a content-addressed `validation.json`. It binds
 the publication state to the report, saved evidence, target revision/config,
@@ -194,21 +203,22 @@ CRASH-001-1/
   reproduce.sh          # ./reproduce.sh /path/to/source
   input.<ext>           # the testcase bytes
   harness.{c,cc,cpp,cxx} # only when the bug uses a C/C++ harness
-  sanitizer.txt         # original sanitizer output
+  sanitizer.txt         # saved sanitizer output
   patch.diff            # optional: candidate fix
   validation.json       # current publication state + evidence identity
   severity.json         # only when a current reportable score exists
   .audit/
-  .dup-of               # only on non-canonical cluster members
 ```
+
+When no runnable route (testcase, harness, or wrapper) was captured,
+`reproduce.sh` is a stub that explains what is missing and exits 2.
 
 Accepted crashes may carry other dot-files the triage gates leave behind
 (vote caches, timing and scoring markers, and the like). All of them are
 harness internals — safe to ignore when reviewing.
 
-`REPORT.md` carries a `Cluster: <ID>` line. Non-canonical cluster
-members also have a `.dup-of` file naming the canonical CRASH. The
-auto-generated `REPORT.html` is regenerated on every triage pass;
+`REPORT.md` carries a `Cluster: <ID>` line naming the cluster and this
+member's role in it. The auto-generated `REPORT.html` is regenerated on every triage pass;
 edit `REPORT.md` only. See
 [Triage and review](../guides/triage-results.md#clusters-and-duplicates)
 for the cluster model.

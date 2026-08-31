@@ -12,12 +12,12 @@ read those first.
 
 | You want to… | Use |
 | --- | --- |
-| Report a bug in TokenFuzz itself | [GitHub Issues](https://github.com/tokenfuzz/tokenfuzz/issues) on this repository. |
-| Ask a usage question | GitHub Issues, labelled `question`. |
-| Suggest a feature or investigation strategy | GitHub Issues, labelled `enhancement`. See [Development](development.md) before opening a PR. |
+| Report a bug in TokenFuzz itself | Search [GitHub Issues](https://github.com/tokenfuzz/tokenfuzz/issues), then open one. A focused pull request with a tested fix is welcome too. |
+| Ask a usage question | Check [Troubleshooting](reference/troubleshooting.md) and existing issues first, then open an issue labelled `question`. |
+| Suggest a feature or investigation strategy | Open an issue labelled `enhancement`. Read [Development](development.md) before opening a PR. |
 | Report a security issue **in TokenFuzz** | [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md). Do **not** open a public issue. |
 | Report a security issue **TokenFuzz found in another project** | The upstream project's normal security-disclosure process, not this repository. |
-| Share accepted impact from a TokenFuzz run | Open an issue with the public details, or use the private path in [`SECURITY.md`](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md) if disclosure timing is sensitive. |
+| Share accepted impact from a TokenFuzz run | Follow the upstream disclosure process first. Once details are public, attribution in the upstream advisory, issue, or acknowledgement is enough. |
 
 ## Before filing a support issue
 
@@ -52,8 +52,8 @@ Include:
 
 1. **TokenFuzz revision** — `git rev-parse HEAD` (run from inside
    the repository).
-2. **Host details** — OS name and version, Python version, and
-   `clang --version`.
+2. **Host details** — OS name and version and Python version. For a native
+   sanitizer target, include `clang --version` as well.
 3. **The exact command you ran** — copy-paste, not paraphrased.
 4. **The smoke-test output** — save it without cutting off the audit process:
 
@@ -61,7 +61,9 @@ Include:
    bin/audit --target <target> --backend <backend> 1 2>&1 | tee audit-smoke.log
    sed -n '1,80p' audit-smoke.log
    ```
-5. **Your `target.toml`** — redact upstream URLs if private.
+5. **The target config** — include `output/<target>/target.toml`. Redact private
+   upstream URLs, local source paths, runner environment values, and sensitive
+   threat-model details.
 6. **What you expected** vs. **what you got**.
 7. **Relevant logs** — paste the useful part of `$LOGS/index.log`.
    If it points at one agent session, include the matching
@@ -76,7 +78,7 @@ A minimal template:
 TokenFuzz: <git rev-parse HEAD output>
 OS: <uname -a>
 Python: <python3 --version>
-Clang: <clang --version | head -1>
+Clang (native targets only): <first line of clang --version>
 
 Command:
   bin/audit --target <target> --backend <backend> 1
@@ -89,7 +91,7 @@ Relevant log:
    plus the session log it points at>
 
 target.toml:
-  <paste, redact private URLs if needed>
+  <paste output/<target>/target.toml; redact private paths and values>
 ```
 
 ## What not to include
@@ -99,19 +101,20 @@ target.toml:
   with `index.log` and the session log it points at.
 - **Target source code.** We do not need it; pointing at the
   upstream revision is enough.
-- **API keys, tokens, or anything from `~/.config/<backend>/`.**
-  The harness does not read them; the backend CLI does.
+- **API keys, tokens, or anything from a backend CLI's config directory**
+  (`~/.claude`, `~/.codex`, `~/.gemini`, …). A support report never needs
+  them.
 
 ## Reaching maintainers privately
 
-For coordinated disclosure of a vulnerability found by a
-TokenFuzz run, or for a sensitive operational question, the
-contact path is in
-[SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md).
+Use the private path in
+[SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md)
+only for a vulnerability in TokenFuzz itself. A vulnerability found in an
+audited target belongs with that target's security team or documented
+disclosure contact.
 
-Please do not use private channels for ordinary support
-questions — they do not scale and the answer cannot help the
-next person.
+There is no private support channel. For a question that involves private
+target details, reduce it to a sanitized reproducer before filing publicly.
 
 ## Helping the project
 

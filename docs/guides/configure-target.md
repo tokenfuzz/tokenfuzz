@@ -46,9 +46,10 @@ is_browser = "0"
 attacker_controls = ["bytes"]
 ```
 
-Relative paths resolve under `targets/<target>/`. A CLI-only audit can proceed
-with a correct `asan_bin`; the library fields matter only when `bin/probe`
-compiles an API harness.
+Relative paths resolve under the target root — `targets/<target>/`, or the
+overlay's `source_subdir` for nested layouts such as Chromium's `src/`. A
+CLI-only audit can proceed with a correct `asan_bin`; the library fields matter
+only when `bin/probe` compiles an API harness.
 
 ### Findings-only language target
 
@@ -76,10 +77,12 @@ crash_patterns = []
 attacker_controls = ["bytes"]
 ```
 
-Runtime tracebacks and panics from a findings-only target are routed to
-`findings/`, not treated as sanitizer proof under `crashes/`. The
-[language-runner guide](multi-language.md) lists the generated defaults for
-each ecosystem.
+Runtime tracebacks and panics from a findings-only target are diagnostic
+signals, not sanitizer proof. `bin/probe` does not auto-file a crash bundle for
+the `runner` route; the agent writes a substantive security report under
+`findings/` when source analysis establishes one. The
+[language-runner guide](multi-language.md#crash-and-finding-routing) explains
+the probe, filing, and triage stages.
 
 ## Review the execution route
 
@@ -93,7 +96,7 @@ bin/setup-target <target>
 Then check:
 
 - `asan_bin` starts the intended product, not a test helper or fuzzer binary;
-- `[runner].bin` and `args` load code from `targets/<target>/`, not an installed
+- `[runner].bin` and `args` load code from the target root, not an installed
   copy elsewhere on the host;
 - `{TESTCASE}` appears where the program expects input (when omitted, TokenFuzz
   appends it);
@@ -121,11 +124,19 @@ A compiled `HARNESS:` testcase uses:
 - `link_libs`, including target-relative archives or source files;
 - the target source root.
 
-After repeated C/C++ harness build failures, `bin/auto-repair-target-toml
-<target>` proposes a conservative additive repair to `includes`, `defines`, or
-`link_libs`, saving a timestamped config backup and logging the change. It is
-run by hand; nothing in an audit invokes it. Review the proposal: a compile fix
-is not evidence that the harness is faithful to a public API contract.
+After repeated C/C++ harness build failures, `bin/auto-repair-target-toml`
+proposes a conservative additive repair to `includes`, `defines`, or
+`link_libs`:
+
+```bash
+bin/auto-repair-target-toml --toml output/<target>/target.toml \
+  --build-log <path/to/harness.build.log> --dry-run
+```
+
+Drop `--dry-run` to write it; a timestamped backup is saved beside the config
+and the decision is logged. It is run by hand — nothing in an audit invokes it.
+Review the proposal: a compile fix is not evidence that the harness is faithful
+to a public API contract.
 
 Harnesses may also be written in the other compiled or interpreted languages
 registered by `lib/languages.py`. Run `python3 lib/languages.py list` for the

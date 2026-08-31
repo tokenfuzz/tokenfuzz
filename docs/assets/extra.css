@@ -1,6 +1,6 @@
-/* Force the header logo to pure white over the indigo header,
-   regardless of the SVG's own colour. The same SVG renders in its
-   native colour everywhere else (README hero, favicon). */
+/* Force the standalone header mark to pure white over the indigo header.
+   logo.svg keeps its native colour as the favicon; the README hero uses
+   the separate logo-lockup.svg asset. */
 .md-header__button.md-logo img,
 .md-header__button.md-logo svg {
   filter: brightness(0) invert(1);

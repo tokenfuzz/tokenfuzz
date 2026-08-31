@@ -100,22 +100,28 @@ on a file changed in `<rev>..HEAD`, or on a one-hop caller of one, is
 emitted, the diversity floor is off, and the queue never expands — the
 delta is the scope.
 
-### Two card sources on top of the ranked list
+### Other card sources
 
-- **Patch cards** (always S1) — one per recent fix commit, with the
-  touched files, severity, and any testcase revisions recorded in
-  the issue tracker. Old fixes receive a mild age penalty; recently
-  touched fix sites get a boost.
+- **Patch cards** (always S1) — one per recent commit whose changed files
+  overlap the auditable source, recording the commit, date, subject, and
+  touched files. Old fixes receive a mild age penalty; recently touched fix
+  sites get a boost.
 - **Peer-fix cards** (always S6) — appended when `target.toml`
   declares peer projects, so a fix landing in one project becomes a
   probe against the unfixed analogue here.
+- **The S4 campaign card** — one target-wide boundary-fuzzing campaign, rather
+  than one feature-derived card per file. When more than one agent is available,
+  the scheduler reserves one reproduce seat for this campaign while it remains
+  eligible.
 
 ## How a card gets to an agent
 
-Each iteration:
+At run initialization, and again when its ranking inputs change:
 
-1. The harness builds the ranked card list (source-feature cards,
-   patch cards, peer-fix cards).
+1. The harness materializes the ranked card list (source-feature cards,
+   patch cards, peer-fix cards, and the S4 campaign). An unchanged source,
+   configuration, and ranking signature reuses the existing queue; an explicit
+   window expansion also refreshes it.
 2. Each agent pulls the next eligible one.
 
 A card is skipped if it is:
@@ -123,8 +129,9 @@ A card is skipped if it is:
 - already done or already claimed by another agent's hypothesis;
 - on the same active surface another agent owns;
 - incompatible with the agent's mode;
-- environment-blocked — an agent already proved this compilation unit
-  cannot be built or imported in the current environment;
+- environment-blocked as a concrete patch or site card; on a broad source card,
+  an `ENV-BLOCKED` result records and demotes only the failed route, so other
+  routes and independent cards on the same file remain eligible;
 - in a subsystem already owned by another generic-mode agent —
   *unless* the current agent has confirmed a crash or finding there.
 
@@ -170,12 +177,20 @@ A hypothesis:
 - names the guard or assumption it is trying to violate;
 - names the expected diagnostic.
 
-It is narrow enough that a single testcase resolves it. Anything
-broader is a note, not a hypothesis.
+It is narrow enough to name a falsifiable trigger shape. One exact clean probe
+can close a deterministic hypothesis; allocator-, scheduler-, race-, GC-,
+timing-, re-entrancy-, and state-dependent hypotheses need repetition or
+distinct shapes.
+
+Closing a hypothesis is not the same as retiring its card. Before a dry card is
+discarded, the audit contract requires at least three clean probes across at
+least two distinct input shapes — a minimum per card, not a quota per
+hypothesis. A broad whole-file card remains reofferable after a dry pass because
+finite probes cannot exhaust its unexamined functions.
 
 ## Strategy quality bar
 
-A strategy is useful when it ends in a runnable artifact on disk:
+A strategy is useful when it ends in concrete evidence on disk:
 
 - a saved seed;
 - a testcase;

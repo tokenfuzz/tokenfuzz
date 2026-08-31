@@ -17,19 +17,24 @@ diagnostics count as crash evidence.
 ```text
 Does the target have a sanitizer build?
 ├── Yes  → [sanitizer] enabled = ["asan", …]
-│         crashes/ keeps memory-safety crashes
-│         findings/ keeps non-crash security issues
+│         confirmed sanitizer/race evidence can become a crash bundle
+│         non-crash security issues remain findings
 │
 └── No   → [sanitizer] enabled = []
-          ordinary runtime panics/tracebacks route to findings/
-          genuine sanitizer/race output still routes to crashes/
-          findings/ also keeps non-crash security issues
+          the configured runner executes testcases
+          runtime diagnostics guide investigation but are not auto-filed
+          the agent files a finding only after establishing security impact
 ```
+
+A genuine sanitizer or race diagnostic is still crash-class evidence when a
+runner emits it, but it must satisfy the same confirmation and bundle
+requirements as any other crash. An ordinary exception, panic, or traceback is
+not sanitizer evidence and is not a security finding by itself.
 
 `bin/setup-target` picks a conservative default by introspecting the
 source tree (`Cargo.toml`, `go.mod`, `pyproject.toml`,
-`package.json`, …). For non-native ecosystems with no ASan binary
-detected, that default is findings-only:
+`package.json`, …). For a recognized non-native ecosystem with no configured
+sanitizer route, that default is findings-only:
 
 - `[sanitizer] enabled = []`;
 - a starter `[runner]`.
@@ -46,9 +51,9 @@ session reads its pinned `.target.toml` snapshot.
 | Rust | `RUSTFLAGS="-Z sanitizer=address"` (nightly) | `asan`; also `tsan` and `msan` on supported targets |
 | Go | `go build -race` | `race` |
 | Swift | `swift run --disable-sandbox --skip-build --scratch-path … -Xswiftc -sanitize={SWIFT_SANITIZER}` | `asan`, `ubsan`, `tsan` |
-| Java / JVM | None for JVM code; a JNI library can be built with ASan and driven separately | none for the JVM — exceptions route to `findings/` |
-| Python | `PYTHONMALLOC=malloc` plus CPython-ASan for C extensions | optional `asan` for native extensions |
-| Node / V8 | `--abort-on-uncaught-exception`; native modules can link ASan | optional `asan` for native add-ons |
+| Java / JVM | None for JVM code; a JNI library can be built with ASan and driven separately | none for the JVM — substantive security issues use `findings/` |
+| Python | An ASan-built C extension driven by a standalone harness (see `samples/sample-python-native`) | optional `asan` for native extensions |
+| Node / V8 | No compile-time sanitizer for ordinary JavaScript; native add-ons can link ASan | optional `asan` for native add-ons |
 | Everything else | None; findings-only mode is the right choice | n/a |
 
 When a sanitizer is available, enable the slug and configure its execution
@@ -57,9 +62,10 @@ the runner; neither follows the ordinary native `<name>_bin` rule.
 
 ## What `target.toml` looks like for each ecosystem
 
-`bin/setup-target` seeds these automatically. Every findings-only target has
-the same outer shape — `[sanitizer] enabled = []` plus a `[runner]` block naming
-the interpreter or driver. A Python target, fully annotated:
+`bin/setup-target` seeds these automatically for ecosystems in its language
+registry. A configured findings-only target has the same outer shape —
+`[sanitizer] enabled = []` plus a `[runner]` block naming the interpreter or
+driver. A Python target, fully annotated:
 
 ```toml
 target       = "demo"
@@ -112,8 +118,9 @@ route and does not pay for an unused Swift build. Preflight builds only
 package whose product is named differently from the slug needs only that one
 edit.
 
-`bin/setup-target` writes the matching starter `[runner]` block for each, and
-`--build` then proves that block reaches the target: it runs one generated
+`bin/setup-target` writes the matching starter `[runner]` block for each
+recognized registry ecosystem, and `--build` then proves that block reaches
+the target: it runs one generated
 testcase in the target's own language through `bin/probe`, and fails setup if
 the runner executed outside `targets/<slug>/` or resolved its imports entirely
 outside it. `bin/audit` and `bin/benchmark` repeat that check before spending a
@@ -123,6 +130,8 @@ aside when it cannot make that claim — a Cargo root package that exposes no
 library for the canary to depend on, a changed `[runner].bin` or `args`, or
 configured `[sanitizer]` binaries that own every enabled testcase route —
 because the registry's generated source is then no longer proof of what runs.
+An unrecognized build system does not receive a guessed runner; configure its
+`[runner]` explicitly.
 
 To print the registry's current answer for any build system:
 
@@ -143,7 +152,7 @@ A few ecosystem notes:
   detector, set `[sanitizer] enabled = ["race"]` and
   `args = ["run", "-race", "{TESTCASE}"]`, or point the `[runner]` at a
   pre-built `go build -race` binary (the `samples/sample-go` benchmark
-  target does the latter, and its concurrent `merge` op trips the detector).
+  target demonstrates the latter route).
 - **Rust** — a library-only crate has no `cargo run` route. Write the
   testcase as a direct `.rs` file calling the crate's public API, or a
   `// HARNESS: <name>.rs` driver beside an opaque input; `bin/probe` builds
@@ -164,10 +173,14 @@ A few ecosystem notes:
   compiles and runs in one shot. This is the seeded default. When seeding,
   `bin/setup-target` prefers a working JDK from `JAVA_HOME`, then a working
   `java` on `PATH`.
-- **Kotlin** — the seeded default is for script-style `.kts` probes.
+- **Kotlin** — `build_system = "kotlin"` seeds script-style `.kts` probes.
   Plain `.kt` sidecar harnesses compile through
-  `kotlinc -include-runtime`. Gradle-driven Kotlin apps should keep
-  the generated `gradle` build system and runner.
+  `kotlinc -include-runtime`. A detected `gradle` build currently receives the
+  Java JEP 330 runner (`java {TESTCASE}`), not the Kotlin script runner. For a
+  Gradle/Kotlin target, either use a Java-interoperable testcase with the
+  required target classpath or configure a project-specific Kotlin/Gradle
+  runner explicitly; do not assume the generated Java command loads Kotlin
+  application code.
 - **R** — `bin/setup-target --build` installs a package with a
   `DESCRIPTION` manifest into `.audit/r-library`, so a compiled component is
   built rather than skipped; the seeded runner points `R_LIBS_USER` at that
@@ -177,38 +190,36 @@ A few ecosystem notes:
 
 ## Crash and finding routing
 
-Once the runtime is wired up, the triager decides where each artifact
-lands:
+Keep three stages separate: the probe verdict, the agent's filing decision,
+and triage's publication decision.
 
-| Signal in the probe's saved output | Sanitizer enabled? | Destination |
+| Saved output | What `bin/probe` establishes | Filing action |
 | --- | --- | --- |
-| `ERROR: AddressSanitizer: ...` | yes or emitted by the route | `crashes/CRASH-*` |
-| `WARNING: ThreadSanitizer: data race` | yes (`tsan`) | `crashes/CRASH-*` |
-| `WARNING: MemorySanitizer: ...` | yes (`msan`) | `crashes/CRASH-*` |
-| `WARNING: DATA RACE` (Go runtime) | yes (`race`) | `crashes/CRASH-*` |
-| Python traceback | no | routed to `findings/FIND-*` |
-| Go `panic: runtime error:` | no | routed to `findings/FIND-*` |
-| Java `Exception in thread "main"` | no | routed to `findings/FIND-*` |
-| Node allocation fatal error | no | routed to `findings/FIND-*` |
-| Rust `thread 'main' panicked at` | no | routed to `findings/FIND-*` |
-| PHP `PHP Fatal error:` | no | routed to `findings/FIND-*` |
-| No recognized diagnostic | n/a | No crash promotion; a candidate crash directory is rejected. |
+| ASan, TSan, MSan, UBSan, or another accepted sanitizer diagnostic | Sanitizer-class evidence was observed on this execution route. | Confirm with `bin/probe --confirm`. On a native sanitizer route (CLI or compiled harness) the confirmed crash is filed under `crashes/` automatically; for an interpreted sidecar harness or the `runner` route, the probe prints the `crashes/` path and the agent files it. |
+| Go `WARNING: DATA RACE` | Race-detector evidence was observed. | Same as a sanitizer diagnostic when `race` is enabled. |
+| A registered traceback, panic, exception, or fatal-error banner with `[sanitizer] enabled = []` | The runner produced a diagnostic worth investigating. | Trace it to source. The agent authors `findings/FIND-*` only for a concrete issue that crosses a security boundary. |
+| No recognized diagnostic | Nothing to file. | Read the probe verdict (`CLEAN`, `NO_EXEC`, `EXEC_FAIL`) and its coverage column, then revise the testcase. |
 
-When a target has a sanitizer enabled
-(`[sanitizer] enabled = ["asan", …]`) but a particular crash
-directory does **not** have a sanitizer signal, it goes to
-`crashes-rejected/`. Findings routing for runtime diagnostics is reserved for the
-`[sanitizer] enabled = []` case, where the lack of an ASan trace is
-expected. A genuine sanitizer-class signal is never re-labelled as a managed
-runtime exception merely because the config was incomplete.
+In findings-only mode the probe route is `runner`. `bin/probe` still prints a
+`CRASH` verdict for a recognised runtime banner so the investigator does not
+miss it, but it never files a crash bundle for that route; the verdict is not a
+filing decision.
+
+Triage keeps the lanes honest afterwards. A crash directory that holds only a
+managed-runtime diagnostic is relocated to `findings/` when it carries a
+substantive report and a reproducer; otherwise it is held pending and then
+rejected. A crash directory
+on a sanitizer target that lacks the sanitizer signal ends up in
+`crashes-rejected/`.
 
 ## Writing harnesses in non-C/C++ languages
 
-Name the sidecar with a `HARNESS:` header comment. `bin/probe` parses these
-headers permissively: it ignores everything on the line before the label as
-long as that prefix contains no letters. Any comment syntax therefore works —
-`//`, `#`, `;`, `--`, `<!-- … -->`, `/* … */` — and the same rule applies to
-the other header fields (`TARGET:`, `HYPOTHESIS-ID:`, `CATEGORY:`, `MODE:`).
+Name the sidecar with a `HARNESS:` header in the file's native comment syntax
+— `# HARNESS:` in Python, `// HARNESS:` in C or JavaScript,
+`<!-- HARNESS: … -->` in HTML. `bin/probe` reads the header fields from the
+first 16 lines of the file, and any comment prefix without letters works
+(`//`, `#`, `;`, `--`, `/*`, `<!--`). The same rule applies to `TARGET:`,
+`MODE:`, and `PROPERTY:`.
 
 The file extension, not the header, picks the build-or-interpret path.
 
@@ -243,25 +254,20 @@ crash_patterns = [
 ]
 ```
 
-These layer on top of the built-in language-agnostic markers
-(`Traceback`, `panic:`, `Exception in thread`, …) that triage already
-recognises — you only need `crash_patterns` for a banner specific to
-your project.
+`bin/setup-target` seeds this list with the language's own runtime markers
+(`Traceback`, `panic:`, `Exception in thread`, …), layered on top of the
+built-in sanitizer patterns. Add to it only for a banner specific to your
+project.
 
 ## `reproduce.sh` templates
 
-`bin/export-repro` emits a runnable `reproduce.sh` for supported language
-routes. The maintainer runs
-`./reproduce.sh /path/to/upstream-src` and the script:
-
-1. Selects the supplied checkout, or clones a recorded upstream when that route
-   supports automatic cloning.
-2. Runs the language's canonical build step (`cargo build`,
-   `go build`, `npm install`, `mvn package`, …).
-3. Invokes the captured testcase via the recorded runner.
-
-If the language has no compile step (Python, Ruby, …), step 2 is a
-no-op or a virtual-env / dependency install.
+`bin/export-repro` writes a runnable `reproduce.sh` for crashes driven by a
+browser/JS page, a CLI input (including Go `race` binaries), a recorded shell
+wrapper, or a C/C++ sidecar harness. Sidecar harnesses in other languages
+(`.go`, `.rs`, `.swift`, `.kt`, and the interpreted extensions above) run
+through `bin/probe` but are not yet packaged by the exporter. See
+[Reproduce a crash](reproduce-a-crash.md) for the script's checkout and build
+contract.
 
 ## See also
 

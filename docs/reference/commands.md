@@ -21,6 +21,9 @@ export BACKEND=claude               # or codex, gemini, grok, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 ```
 
+The `oss` backend has no default model; when `BACKEND=oss`, add `--model <id>`
+to every command below that launches one.
+
 ## Set up a target
 
 ```bash
@@ -39,7 +42,7 @@ Useful flags:
 
 | Flag | Meaning |
 | --- | --- |
-| `--build` | For native targets, build now instead of waiting for audit preflight. The command fails if the requested build cannot be materialized. For supported language targets, explicitly run the ecosystem build step (audit preflight does not run it automatically). |
+| `--build` | Build now instead of waiting for audit preflight; fails if the requested build cannot be produced. Language targets run their ecosystem bootstrap here, and preflight repeats it later only for a target with a `.audit/build.sh` recipe or an already-stamped build that went stale. |
 | `--browser` / `--no-browser` | Select browser execution mode explicitly. A browser-specific driver such as `mach` is inferred when neither flag is present; shared build systems such as GN require an explicit choice. |
 | `--pull` | Update an existing VCS checkout to the latest upstream source without re-passing its repo URL. Tracked local edits leave the checkout untouched; untracked build trees, `.audit/` overlays, and run leftovers do not block the update. |
 | `--no-update` | Do not pull or fetch an existing VCS checkout. |
@@ -265,19 +268,19 @@ See [Boundary-directed fuzzing](../guides/directed-fuzzing.md) for the workflow
 and the build-isolation rules.
 
 `bin/hits` provides coverage diagnostics for browser, JS, and generic CLI
-builds. `--mode generic` replays a native testcase in the instrumented sibling
-tree (`build-asan+fuzz`, built by `bin/setup-target --build` and audit
-preflight from the target's own recipe, or a hand-built `build-asan+cov`) and
-reports the source files it reached. The configured ASan CLI is replayed from
-the sibling directly; a `// HARNESS:` route is replayed through a coverage
-twin of that harness (`--harness-source`, which `bin/run-sanitizer-multi`
-passes from the route `bin/probe` chose) linked against the sibling's
-`asan_lib`; `--route-binary` and `--generic-skip-testcase` carry that route's
-binary and argument shape the same way. A sibling built from other source
-than `build-asan` is reported unavailable rather than replayed. Interpreter and wrapper routes have no
-route-equivalent sibling, so they print `COVERAGE_UNAVAILABLE` and proceed
-instead of gating on the wrong program; a missing sibling behaves the same
-way. In generic mode a `MISSED` never withholds the sanitizer run.
+builds. `--mode generic` replays a native testcase in an instrumented ASan
+sibling (`build-asan+fuzz`, produced by `bin/setup-target --build` or audit
+preflight from the target's own recipe, or a compatible hand-built
+`build-asan+cov`) and reports the source files it reached. The configured ASan
+CLI is replayed from the sibling directly. A `// HARNESS:` route instead uses
+a coverage twin of that harness, linked against the sibling's `asan_lib`.
+
+The coverage route must describe the same program and source generation as the
+primary ASan route. Otherwise `bin/hits` reports `COVERAGE_UNAVAILABLE` and the
+sanitizer run proceeds. Interpreter and wrapper routes behave the same way
+because they have no route-equivalent native sibling. In generic mode,
+coverage is feedback: even a `MISSED` continues to the sanitizer run. Browser
+and JavaScript routes can use it as a hard pre-run gate.
 
 ```bash
 bin/hits --testcase "$RESULTS/scratch-1/testcase.js" \
@@ -342,7 +345,8 @@ automatically. These commands are for deliberate regeneration after a manual
 edit:
 
 ```bash
-bin/export-repro CRASH-001-1 --slug "$TARGET"
+TOKENFUZZ_ROOT=$PWD
+(cd "$RESULTS" && "$TOKENFUZZ_ROOT/bin/export-repro" CRASH-001-1)
 bin/severity --report "$RESULTS/crashes/CRASH-001-1"
 bin/severity --batch "$RESULTS"
 bin/cluster-crashes "$RESULTS"
@@ -350,16 +354,16 @@ bin/cluster-findings "$RESULTS"
 bin/show-exclusions "$RESULTS"
 ```
 
-`export-repro` normally gets the audited checkout and revision from the
-session. Maintenance code rebuilding an older pool passes both explicitly:
+`export-repro` reads the nearest `.session-env` above its working directory,
+so run it from inside the result tree; `--slug` alone picks the first backend
+alphabetically, which may not be the one you mean. For a detached artifact,
+name the crash, checkout, and revision explicitly:
 
 ```bash
 bin/export-repro CRASH-001-1 --slug "$TARGET" \
+  --crash-dir "$RESULTS/crashes/CRASH-001-1" \
   --target-root /path/to/audited-checkout --target-rev <commit>
 ```
-
-Use the pair together for detached artifacts. It prevents an unrelated live
-session for the same slug from supplying either the revision or build recipe.
 
 `bin/severity --batch` scores reportable crashes and findings together in one
 offline process; `not-reportable` artifacts remain unscored.
