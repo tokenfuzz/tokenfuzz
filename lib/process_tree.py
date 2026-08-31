@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
+from itertools import takewhile
 
 
 def _children_by_parent() -> dict[int, list[int]]:
@@ -163,12 +164,22 @@ _LIBC = None
 
 
 def _darwin_environ(pid: int) -> list[bytes]:
-    """*pid*'s environment entries from KERN_PROCARGS2, or [] when withheld.
+    """*pid*'s environment entries from KERN_PROCARGS2, or [] when it has none.
 
-    macOS hands back the argument vector of a process it will not disclose the
-    environment of — a platform binary such as /bin/sh read by a non-root
-    caller comes back with its argv intact and its environment blanked — so an
-    empty list here means "no answer", never "no environment".
+    The region holds the executable path, then argv, then the environment,
+    then the kernel's own `apple[]` vector (`ptr_munge=`, `executable_cdhash=`
+    and friends). Those trailing strings are not environment, and reading them
+    as environment made a process whose environment is *empty* answer like one
+    that has entries. That is the difference between the two answers callers
+    turn on, so the environment vector ends where it ends: at the padding that
+    separates it from `apple[]`.
+
+    An empty answer therefore means the host told us nothing usable, whether
+    it blanked the environment or the process genuinely has none — exactly
+    what /proc/<pid>/environ reports on Linux. Which of the two a host does is
+    not fixed: a SIP-protected mac blanks /bin/sh's environment for a non-root
+    caller, and a GitHub macOS runner, which ships with SIP off, discloses the
+    same /bin/sh. Only this parse makes the answer mean one thing on both.
     """
     global _LIBC
     import ctypes
@@ -191,19 +202,25 @@ def _darwin_environ(pid: int) -> list[bytes]:
         idx += 1
     while idx < len(data) and data[idx] == 0:
         idx += 1
-    return [entry for entry in data[idx:].split(b"\0")[argc:] if entry]
+    return list(takewhile(bool, data[idx:].split(b"\0")[argc:]))
 
 
 def _env_withheld(pids: set[int]) -> set[int]:
-    """Of *pids*, those whose environment this host would not show us.
+    """Of *pids*, those this host told us no environment for.
 
     The distinction ownership turns on: a process whose environment we read
-    and that did not carry the marker is provably not ours, while one the
-    kernel refuses to describe is simply unknown. A host that discloses every
-    environment therefore never claims anything this way, and neither does one
-    we have no way to ask — both fail closed. macOS withholds every platform
-    binary's environment (`/bin/sh`, a login shell, Terminal itself), which is
-    why the parent walk starts only from processes the marker proved.
+    and that did not carry the marker is provably not ours, while one we got
+    no entries for is simply unknown. A host we have no way to ask claims
+    nothing this way, so it fails closed.
+
+    Which processes land here is a host policy — a SIP-protected mac blanks a
+    platform binary's environment (`/bin/sh`, a login shell, Terminal itself)
+    and a mac without SIP discloses it — so the answer must not depend on that
+    policy holding. It does not: an environment that reads back with no
+    entries is the same answer whether the kernel blanked it or the process
+    was exec'd without one, on Linux and macOS alike. The walk still starts
+    only from processes the marker proved, and still stops at any parent that
+    answered.
     """
     if os.path.isdir("/proc"):
         return {pid for pid in pids if not _proc_environ(pid)}

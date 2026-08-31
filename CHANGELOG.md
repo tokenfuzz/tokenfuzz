@@ -2,10 +2,14 @@
 
 ## 1.5.3 - 2026-08-30
 
-Mostly about evidence: coverage a native target can actually produce, probe
-verdicts that name which repair they mean, and scores that grade a bug rather
-than label it. Behind those, an audit can now be scoped to a commit, and the
-orchestrator stops paying for the subprocesses it used to spawn.
+This release closes the distance between what a run observed and what it can
+show for it. Native targets get execution coverage for the first time — every C
+and C++ run on disk had reported it unavailable — and that coverage now feeds
+directed fuzzing, the card ranker and the agent. Around it, probe verdicts name
+which repair they mean, severity grades a bug by magnitude instead of labelling
+it by class, and the benchmark scores only the cells it could actually run. An
+audit can also be scoped to a single commit, and the orchestrator and the test
+suite stop paying for subprocesses neither needed.
 
 ### Native coverage and directed fuzzing
 
@@ -246,6 +250,16 @@ orchestrator stops paying for the subprocesses it used to spawn.
   children was invisible entirely. Both are claimed now, each uniquely to one
   cell of one run, and a path claim is what a process actually runs — the old
   argv match plus parent walk could claim an operator's own shell.
+
+- **The reap reads the same ownership answer on every macOS host.**
+  `KERN_PROCARGS2` returns the kernel's own `apple[]` strings after the
+  environment, and reading those as environment made a process exec'd without
+  one answer like a process that has entries. A SIP-protected mac blanks a
+  platform binary's environment and a mac without SIP discloses it, so the same
+  opaque supervisor was claimed on one host and left running on the other — and
+  the macOS test lane had been red on every run since the case was added. The
+  probe now ends the environment where it ends, so no entries means the same
+  thing on macOS and Linux alike.
 
 - **Where the wall goes is reported per cell.** Occupancy, blocked
   housekeeping, time-to-first and lane share were recoverable only by hand.

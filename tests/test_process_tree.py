@@ -366,6 +366,29 @@ with tempfile.TemporaryDirectory() as tmp:
             pass
 
 
+# ── the probe answers about environments, and nothing else ───────────
+print("\nenvironment probe")
+# What the widening walk turns on is whether a process answered at all. macOS
+# lays the kernel's own apple[] vector (`ptr_munge=`, `executable_cdhash=`)
+# directly after the environment in the region KERN_PROCARGS2 hands back, and
+# reading those as environment made a process exec'd with none answer like one
+# that has entries. A host that blanks a platform binary's environment hid
+# that; a host that discloses it — SIP is off on a GitHub macOS runner —
+# retired the parent walk below entirely.
+# An absolute path and no shell: with an empty environment there is no PATH,
+# and a child that died looking for its own program would answer "withheld"
+# from the grave, which is why the check below also demands it be alive.
+blank = subprocess.Popen(
+    ["/bin/sleep", "30"], env={},
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+time.sleep(1.0)
+ok(_alive(blank.pid) and pt._env_withheld({blank.pid}) == {blank.pid},
+   "a process exec'd with no environment answers like one the host blanked",
+   f"pid={blank.pid} alive={_alive(blank.pid)}")
+_cleanup(blank)
+
+
 # ── opaque supervisor whose driver left the group ────────────────────
 print("\nopaque supervisor above a driver in its own group")
 # The shape that stopped a real benchmark run. The supervisor is opaque, and
@@ -374,8 +397,10 @@ print("\nopaque supervisor above a driver in its own group")
 # the only thing left tying the two together is the parent link upward.
 #
 # Opacity is constructed rather than waited for: the supervisor execs with an
-# empty environment, which reads back exactly like the environment macOS
-# withholds for a platform binary — present, and empty — on every host.
+# empty environment, and an environment probe that comes back with no entries
+# is the same answer as one the host blanked. That holds whether or not this
+# host withholds a platform binary's environment, which is a SIP setting and
+# not something a test may wait for.
 severed = pt.new_marker()
 with tempfile.TemporaryDirectory() as tmp:
     supervisor = Path(tmp) / "supervise-newgroup.sh"
@@ -391,16 +416,26 @@ with tempfile.TemporaryDirectory() as tmp:
     time.sleep(2.0)
     token = f"{pt.REAP_MARKER_VAR}={severed}"
     readable = pt._pids_with_token_env(token)
-    _, groups = pt._process_table()
-    ok(parent_proc.pid not in readable,
-       "the probe cannot attribute the supervisor, as the failure requires",
+    parents, groups = pt._process_table()
+    ok(bool(readable) and parent_proc.pid not in readable,
+       "the driver is marked and the supervisor unattributable, as the "
+       "failure requires",
        f"readable={readable} supervisor={parent_proc.pid}")
     ok(all(groups.get(pid) != groups.get(parent_proc.pid) for pid in readable),
        "the driver holds a process group of its own, as `timeout` gives it",
        f"driver groups={[groups.get(pid) for pid in readable]} "
        f"supervisor group={groups.get(parent_proc.pid)}")
-    ok(parent_proc.pid in pt._pids_with_token(token),
-       "parent widening claims a supervisor no group or child link reaches")
+    # Name which link broke. This assertion failed on every macOS CI run with
+    # nothing but its own text to go on, and its three failure modes — a host
+    # that answered for the supervisor, a driver whose parent is not the
+    # supervisor, an unreadable process table — are not the same bug.
+    claimed = pt._pids_with_token(token)
+    ok(parent_proc.pid in claimed,
+       "parent widening claims a supervisor no group or child link reaches",
+       f"supervisor={parent_proc.pid} claimed={claimed} "
+       f"driver parents={[parents.get(pid) for pid in readable]} "
+       f"supervisor answered an environment="
+       f"{pt._env_withheld({parent_proc.pid}) != {parent_proc.pid}}")
     try:
         reaped = pt.kill_marked(severed, grace=0.5)
         raised = ""
