@@ -1,5 +1,296 @@
 # Changelog
 
+## 1.5.3 - 2026-08-30
+
+Mostly about evidence: coverage a native target can actually produce, probe
+verdicts that name which repair they mean, and scores that grade a bug rather
+than label it. Behind those, an audit can now be scoped to a commit, and the
+orchestrator stops paying for the subprocesses it used to spawn.
+
+### Native coverage and directed fuzzing
+
+- **C and C++ targets get execution coverage.** `bin/hits` spoke only
+  browser/JS, so every native run on disk reported coverage unavailable — 612
+  of 612. `--mode generic` replays a testcase in an instrumented
+  `build-<san>+fuzz` sibling and turns sancov into HIT rows and an edge
+  journal; `setup-target --build` and audit preflight build that sibling from
+  the target's own recipe, verify its guards and startup, and remember a doomed
+  build. A guard-less sibling is a clean "coverage unavailable" rather than a
+  raised environment failure, and a generic MISSED is feedback, never a skipped
+  sanitizer run.
+
+- **The instrumentation shim answers to every compiler name a build reaches
+  for.** Naming a shim in `CC`/`CXX` assumes the recipe honours them, and a
+  hand-written configure need not: ffmpeg's records `CC=gcc` even when
+  `CC=clang` is exported, so the shim never ran and the sibling came out with no
+  sancov section — indistinguishable from a working one until `verify_tree`
+  refuses it. ffmpeg, pcre2, snappy, fmt and leveldb all carried uninstrumented
+  siblings. The shim is now written under `cc`, `gcc`, `clang` and the `++`
+  forms, with that directory leading PATH for the sibling build alone. A build
+  that hardcodes an absolute compiler still fails loudly rather than shipping an
+  uninstrumented tree.
+
+- **Coverage reaches the ranker and the agent.** Offline `atos` printed
+  basenames, so `coverage_gap_score` matched no card path and every subsystem
+  ranked uncovered, and a HIT never reached `runs.jsonl` at all. hits
+  symbolizes with full paths, keys journal edges target-relative and drops
+  out-of-tree frames — a system header is not target coverage — and probe stores
+  coverage and the closest frame on the run row that recent-runs prints.
+
+- **S4 harnesses are grounded in the target's own callers.** The `bin/fuzz`
+  template points at the two most instructive target-local callers and carries
+  an S4 receipt the build binds to that exact source; status joins it with
+  first-slice feedback, so a resumed agent sees what to repair. A guided
+  harness that saturates lists up to three compatible public APIs as reading
+  order for its one contract-preserving derivative — hints, never cards.
+
+- **A replay runs with probe's own compiler, and a stale sibling is not the
+  campaign's library.** Forcing `CC`/`CXX` to the fuzzing clang put two ASan
+  runtimes in one process: every replay aborted at load, read `EXEC_FAIL`, and
+  that rc=1 marked the artifact seen for good. The override is gone, and only
+  CRASH, CLEAN, TIMEOUT or PROPERTY retires an artifact. The campaign also
+  linked a `+fuzz` sibling whose stamp differed from the primary build — code
+  the replay never runs — and now checks the same staleness reason `bin/hits`
+  does and falls back with it. A seed copied from the target's test data that
+  already crashes leaves the corpus instead of quarantining the harness on every
+  slice.
+
+### Auditing one commit
+
+- **`bin/audit --since REV` scopes a run to a change.** A full audit re-scans
+  the whole tree after every commit, so a landed fix waits behind unrelated
+  work. Delta mode restricts the queue to the files changed in `REV..HEAD`,
+  their one-hop CERTAIN-edge callers, and S1 cards for exactly those commits:
+  floor and window off, no peer or campaign lanes, scope diffed from the merge
+  base, and the delta recorded so a resume with different scope is refused. A
+  trigger Reject carries across the pin while its cited anchors still match,
+  keyed by content rather than revision.
+
+### Probe verdicts and runner calibration
+
+- **A CLI that rejects malformed input can reach CLEAN.** Such a target exits
+  nonzero by contract, so every generic probe reported `EXEC_FAIL` and nothing
+  on it could ever be clean — the crash lane was unusable.
+  `setup-target`/`suggest-runner` replay the configured argv once and record the
+  reviewed exit in `[runner].success_codes` without re-selecting the CLI, with
+  the accepted range held to 0–123 so a timeout status, an exec failure or a
+  signal death can never be declared success. `--force --build` calibrates the
+  reviewed runner instead of re-selecting it, and an exit observed alongside a
+  sanitizer diagnostic is refused.
+
+- **Calibration describes the configured program, not a harness.** The `[runner]`
+  exit set was applied to every generic execution, so an agent-built harness that
+  exited 1 on its own setup failure read `EXECUTION VERIFIED` and probe recorded
+  CLEAN toward the card-discard floor. A harness-built execution keeps rc==0 as
+  its only success.
+
+- **`EXEC_FAIL` and `NO_EXEC` name the repair they mean.**
+  `verdict.execution_failure_class` reads loader, usage, input-rejected,
+  aborted, unverified-exit or exit out of the saved output; probe prints the
+  repair each implies, records the class, and threads the child exit code onto
+  the run row — a clean rejection at rc=69 and a loader that could not start at
+  rc=126 used to record the same bare `EXEC_FAIL`. A run the sanitizer budget
+  refused carries `class=budget-exhausted` and its own repair line where the
+  agent reads it, rather than the "fix the testcase" advice that sent one
+  measured cell through 511 probes mutating an input against a refusal no input
+  could satisfy.
+
+- **A timeout is read before a partial clean.** The orphan-enforcement twin
+  checked the clean pattern before rc 124, and a clean-then-timeout repetition
+  prints a partial success rate, so the agent-facing line said CLEAN for a run
+  probe records as TIMEOUT. Under the language runner the same ordering bug hid
+  an S8 counterexample: an oracle that printed `PROPERTY VIOLATION` and then
+  exited by assertion recorded `EXEC_FAIL`.
+
+- **The runner canary proves what it claims.** A `PERL5LIB` or `RUBYLIB` entry
+  that does not exist resolved under the target root and passed the path claim,
+  so a runtime that skipped it and loaded the installed copy read as reaching
+  the audited tree. The deadline now kills the probe tree rather than
+  `bin/probe` alone — a severed cargo build kept running in a directory that was
+  then deleted — and an unreadable `target.toml` logs the skipped check and its
+  cause instead of passing silently.
+
+- **A shell expansion is not a target path.** `-isysroot $(xcrun
+  --show-sdk-path)` was resolved under the target root and exported as a
+  `link_lib` resolver; any `$`-bearing token stays verbatim.
+
+### The work queue and cards
+
+- **An unreachable route no longer retires a whole file.** `ENV-BLOCKED` wrote a
+  terminal `blocked` claim on whatever card the hypothesis named, and `blocked`
+  is the one status that closes a broad card — so one blocked route discarded
+  every remaining function in the file, which is the proof `blocked` is
+  documented to require. A broad ranked-source card records the failed route as
+  `discarded`, re-offerable behind fresher work; a concrete site card still
+  closes, and a card the queue no longer lists takes the re-offerable side too.
+
+- **The discovery slot survives a dry queue.** Telling every cardless cold
+  worker to end its session also ended agent 1 on a queue whose cards were all
+  blocked or outside every lane — the one launch kept for exactly that case,
+  spent every iteration until the dry-streak cap. A cold slot quits only when
+  another worker holds a card lease, which is the duplication the exit exists to
+  avoid.
+
+- **The corpus was never being filled.** `bin/state add-hyp` mints `H-` plus a
+  sha1 prefix, but the header pattern was `H[0-9]+`, which matches no id the
+  harness has ever produced: every promotable testcase failed the header check,
+  so the coverage hits recorded across every run on disk promoted nothing and
+  `corpus/` has always been empty. The same pattern classified source-extension
+  testcases, which were therefore never counted or swept for orphans. The
+  fixtures used ids production never mints, which is what hid it. The id also
+  ends on an alphanumeric now, so a comment closer written without a space no
+  longer lands inside it.
+
+- **A not-reportable finding is not card yield.** An accepted-artifact claim was
+  recorded for every non-pending state, so a defect the reviewers placed outside
+  the threat model kept its card open as productive while earning no credit.
+
+- **Cards carry caller and callee source, and the model can score the window.**
+  `RANK_WORK_LLM_MODE=primary` lets the model score the window's key rather than
+  nudge scores it re-asked about on every drift, with tiers, floor and card set
+  kept; the verdict cache keys on the VCS content signature and candidate ids.
+  Work cards gain a ≤600-token pack of caller/callee definition excerpts.
+
+### Triage and severity
+
+- **Denial of service is graded by magnitude, not by class.**
+  `dos_amplification`, `regex_dos` and `memory_leak` all mapped to high
+  availability impact, so a quadratic scan measured in milliseconds scored
+  Medium like a decompression bomb. An optional `Availability loss:
+  total|degraded` report field, graded from the report's own numbers, mirrors
+  the existing disclosed-content mechanism on the other impact axis: only
+  `total` keeps the high rating. Per-request fatal signals are excluded — a
+  diagnostic already proved that request died, so there is no spectrum to grade.
+
+- **A library-API bug is not labelled a CLI bug.** Export-repro's surface
+  override fired whenever the narrative named a shipped tool, dropping attack
+  vector to local for a bug in the library. It is narrowed to the boundary and
+  trusted-caller fields, with matching trigger-provenance guidance in the
+  prompt.
+
+- **Retained crashes are visible and rejected findings are counted once.**
+  Crashes kept but not reportable showed as a bare `0`; the crash cell now
+  carries a `K retained` term. A rejected-finding directory an agent created
+  but never wrote a report into inflated both the rejected count and the pool,
+  and now requires a report.
+
+- **A Promote that left scope unsettled publishes.** A first-pass Promote with
+  `trigger_controls_fit` unclear or missing was an absorbing pending state:
+  publication withheld credit without scope, the cached resolution called the
+  vote settled, and no path ran the resolver — so a reachable,
+  consequence-verified defect never published. It is now asked the way an
+  Uncertain is.
+
+- **A validated class outranks a prose keyword guess, and the scored primitive
+  is recorded.** Prose "leaks" or "uninitialized" routed to the small-read tier,
+  and that key was not one the two-reviewer validated class could replace, so a
+  validated disclosure finding scored Low for its wording. The receipt also
+  wrote only level, score and vector, so every later read re-parsed mutable
+  report prose and 13.4% of reportable artifacts carried no structured class;
+  the primitive and its key are recorded now. Cached reach fields are re-keyed
+  to the policy that made fixed pre-input shaping application setup, so stale
+  answers no longer feed severity a trigger source the prompt has stopped
+  producing.
+
+- **`CRASH_TRIGGER_GATE=0` is honoured by the batched round.** The serial gate
+  and the cached shortcut skip the review under the opt-out; the batched round
+  still launched it, spending reviews and parking any crash whose vote came back
+  malformed.
+
+- **Publication claims are bound to host evidence.** Source anchors are
+  re-verified against a pinned checkout, only identical verified claims survive
+  a trusted bundle transform, class concentration is reported over unique
+  clusters, and an agent scratch frame is classified only on exact run ownership
+  with no target frame present.
+
+### Benchmark measurement
+
+- **The direct arm reproduces what it files.** The model-direct crash lane
+  invited a source-review scan without ever asking for the probe that would
+  settle it, so the control filed source findings the harness arm would have had
+  to reproduce. It now asks for the smallest faithful probe, or a recorded
+  reason no public route can run one, before the next broad scan, and for a
+  distinct shape on allocator-, state-, race- and timing-dependent triggers.
+
+- **Planted findings-only bugs are scored.** A findings oracle credits a
+  confirmed finding whose at-fault function is the planted signature symbol,
+  counts a trap's symbol against precision, and leaves every other confirmed
+  finding open-world neutral, rendered beside the crash block and reachable via
+  `bin/benchmark score --findings-dir`. A trap fires only on a clean outcome: a
+  trap whose expected outcome is an abort refutes that crash's promotion, not a
+  source finding at the same function.
+
+- **A finding count says how much of it is one class.** A class count reads as
+  breadth even when one cheap class supplies most of the total — a measured
+  ffmpeg control filed 168 findings whose top two classes were 158 of them, and
+  the cell rendered that as 22 classes. The per-class counts are kept, and a
+  dominant class is rendered as a share; the noisy top-class term was then
+  dropped from the cell itself, which named a bug class in the scoreboard and
+  stretched the column on a one-finding row.
+
+- **A cell that could not run is excluded rather than scored short.** A
+  model-direct cell whose CLI exited under a capacity limit was counted at its
+  truncated wall while the harness excludes provider pauses from its own; it is
+  marked provider-limited, artifacts stay, and a resume reruns it. A replay that
+  came back unmeasured for a host-side reason no longer writes pending over a
+  reportable receipt a measured replay had reached, a compiled harness keeps its
+  source-shaped testcase instead of replaying with no argument, and a cell that
+  never started records no results tree — it used to record `Path()`, which
+  reads back as the working directory and had `relocate_experiments` calling
+  `shutil.move` on the repository.
+
+- **The reap claims campaign supervisors a marker cannot see.** A model-direct
+  cell left 40-odd fuzz processes running and the reap raised rather than
+  measure the next cell against them: a severed process group hid an opaque
+  supervisor above a marked driver, and a supervisor asleep between its marked
+  children was invisible entirely. Both are claimed now, each uniquely to one
+  cell of one run, and a path claim is what a process actually runs — the old
+  argv match plus parent walk could claim an operator's own shell.
+
+- **Where the wall goes is reported per cell.** Occupancy, blocked
+  housekeeping, time-to-first and lane share were recoverable only by hand.
+  Session rows carry start and end times, phases and dispositions stamp
+  `state/events.jsonl`, and the harvest renders an Efficiency table with
+  confirmed-per-seat-hour and cost-per-confirmed columns. `POOL_OVERTIME=any-peer`
+  lets a drained slot fill the most common refill refusal — an in-flight peer
+  that is itself overtime — with its one capped session.
+
+### Orchestration cost and honest labels
+
+- **The orchestrator and the suite stop paying for subprocesses.** Repeated
+  Python spawns and duplicate analysis passes became importable helpers,
+  batching and cheap prefilters, keeping disposable-process containment around
+  untrusted crash output; the full suite fell from 73s to 53–61s on macOS and
+  from 49s to 42s on Ubuntu 24.04. Reading a receipt cost four revision
+  detections — 95% of the read — and discarded every one for a receipt written
+  before source attestations existed: a read no longer mints a source claim, and
+  `read_current` on a pinned tree went from 6.69ms to 0.14ms.
+
+- **An iteration's label says what it did.** An iteration that filed candidates
+  the result gate deferred past the deadline was logged env-blocked with zero
+  findings; filing and env-blocking are independent and the label now carries
+  both, with a filed-but-unadjudicated state of its own. Crash discovery is
+  stamped before the deadline defer, so a crash filed on the last iteration
+  keeps a first-seen stamp the way findings already did.
+
+- **A plain 401 line must name the credential.** Reading any plain
+  `ERROR ... 401 Unauthorized` line as a refused backend let an audited HTTP
+  library's own test output halt the run and mark the cell provider-limited;
+  a plain line now needs the provider's credential tokens, while structured
+  error events keep the full rule. Served-model ranking also sums only token
+  counters — `contextWindow` sat beside them, so a 200k constant outranked real
+  tokens and preflight refused healthy sessions as substituted.
+
+### Documentation
+
+- **The handbook is task-focused and checked against the code.** Reader paths
+  for operators, security reviewers, upstream maintainers and contributors, with
+  page URLs preserved and one name per page in nav, heading and link text.
+  Several claims were traced back to `bin/` and `lib/` and corrected — preflight
+  text, ecosystem bootstrap, one card per strategy angle, resolved-path sandbox
+  grants, coverage columns, `--slug` backend selection, and the crash-state and
+  cluster-header wording — and each remaining caveat is stated once and linked.
+
 ## 1.5.2 - 2026-08-28
 
 Mostly about where an audit's time and attention go: which lane each agent
