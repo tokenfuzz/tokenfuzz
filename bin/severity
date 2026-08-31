@@ -147,6 +147,9 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     # `null_deref` stays AT:N; splitting that into its own AT:P class needs a
     # target-agnostic allocation-failure detector and is a separate change.)
     "oom":               ("N", "N", "H", "N", "N", "N", "P"),
+    # Argued from source, not proved by a sanitizer: the row is the class
+    # worst case and `availability_loss` grades what the report showed (see
+    # _availability_loss_modified_impacts).
     "memory_leak":       ("N", "N", "H", "N", "N", "N", None),
     "regex_dos":         ("N", "N", "H", "N", "N", "N", None),
     "dos_amplification": ("N", "N", "H", "N", "N", "N", None),
@@ -866,6 +869,46 @@ def _disclosed_content_modified_impacts(
     return {}, ""
 
 
+# Availability classes whose damage is a SPECTRUM the report has to quantify:
+# amplification and accumulation, where "how much" is the whole question and
+# VA:H is the class ceiling rather than an observed fact. Inclusion criterion:
+# the impact grows with attacker effort, so a measurement decides the band.
+# Deliberately excluded are the per-request fatal signals (null_deref, bus,
+# stack_exhaustion, oom): a diagnostic already proves that request died, there
+# is no spectrum to grade, and their transience is modelled by
+# TRANSIENT_CRASH_PRIMITIVES and the oom AT:P override instead.
+_GRADED_AVAILABILITY_PRIMITIVES = frozenset({
+    "dos_amplification", "regex_dos", "memory_leak",
+})
+
+
+def _availability_loss_modified_impacts(
+    prim_key: str, fields: dict, metrics: dict[str, str],
+) -> tuple[dict[str, str], str]:
+    """Rate a resource-exhaustion claim on what it demonstrated.
+
+    Every amplification/accumulation class maps to VA:H, so a quadratic loop
+    measured in milliseconds scored exactly like a decompression bomb: one
+    corpus produced 52 accepted DoS findings, all Medium. The Base row stays
+    the class worst case; whether the report showed the service dying or
+    merely slowing is an Environmental fact, expressed the way the caller-only
+    floor already is.
+
+    Unlike ``disclosed_content``, silence is not free here: the find gate
+    requires a resource claim to quantify its demand, so an ungraded report
+    is one whose numbers did not show total loss, and CVSS reserves VA:H for
+    the attacker who can fully deny service. Only ``total`` keeps the row.
+    """
+    if prim_key not in _GRADED_AVAILABILITY_PRIMITIVES or metrics.get("VA") != "H":
+        return {}, ""
+    grade = (fields.get("availability_loss", "") or "").strip().lower()
+    if grade == "total":
+        return {}, "availability loss=total → demonstrated full denial → VA:H stands"
+    return ({"MVA": "L"},
+            f"availability loss={grade or 'ungraded'} → demonstrated cost is "
+            "bounded by the attacker's own input → MVA:L")
+
+
 def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
                    contract_concern: bool,
                    report_dir: Path | None = None) -> tuple[dict[str, str] | None, list[str]]:
@@ -923,6 +966,8 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
     metrics.update(caller_mods)
     content_mods, content_note = _disclosed_content_modified_impacts(fields, metrics)
     metrics.update(content_mods)
+    loss_mods, loss_note = _availability_loss_modified_impacts(prim_key, fields, metrics)
+    metrics.update(loss_mods)
     notes = [
         f"surface={surface_label} → AV:{surface_av}/UI:{ui}",
         f"class={prim_key} → VC:{vc}/VI:{vi}/VA:{va}/SC:{sc}/SI:{si}/SA:{sa}",
@@ -942,6 +987,8 @@ def _cvss4_metrics(prim_key: str, surface_label: str, fields: dict,
     ]
     if content_note:
         notes.append(content_note)
+    if loss_note:
+        notes.append(loss_note)
     if contract_concern:
         notes.append("caller contract concern → MAT:P")
     if limited_note:
@@ -1881,6 +1928,7 @@ _FIELD_KEYS = {
     "surface", "trigger source", "caller contract", "caller controls",
     "trusted caller actions", "parameter control", "reproduction rate",
     "boundary", "primitive", "class", "advisory", "disclosed content",
+    "availability loss",
 }
 
 
@@ -1927,6 +1975,7 @@ def extract_report_fields(report_text: str, report_dir: Path | None = None) -> d
     fields = {
         "surface":           out.get("surface", ""),
         "disclosed_content": out.get("disclosed content", ""),
+        "availability_loss": out.get("availability loss", ""),
         "trigger_source":    out.get("trigger source", ""),
         "caller_contract":   out.get("caller contract", ""),
         "caller_controls":   out.get("caller controls", ""),
@@ -2604,7 +2653,7 @@ def _format_severity_section(sev: dict) -> str:
         env_attack = "/".join(m.get(k, "X") for k in ("MAV", "MAC", "MAT", "MPR", "MUI"))
         lines.append(f"| Env Modified AV/AC/AT/PR/UI | {env_attack} | caller control / contract concern |")
         env_impact = "/".join(m.get(k, "X") for k in ("MVC", "MVI", "MVA", "MSC", "MSI", "MSA"))
-        lines.append(f"| Env Modified C/I/A impacts | {env_impact} | non-shipping / caller-only reachability floor |")
+        lines.append(f"| Env Modified C/I/A impacts | {env_impact} | non-shipping / caller-only reachability floor; demonstrated disclosure / availability |")
     lines.append("")
     lines.append(f"**Severity level: {sev['level']}** — CVSS bands: Critical ≥ 9.0, "
                  "High ≥ 7.0, Medium ≥ 4.0, Low ≥ 0.1, None = 0.0.")
@@ -2689,6 +2738,7 @@ _SURFACED_REACH_FIELDS = (
     ("primitive_field", _FIELD_LABELS["primitive"]),
     ("surface",         _FIELD_LABELS["surface"]),
     ("disclosed_content", _FIELD_LABELS["disclosed_content"]),
+    ("availability_loss", _FIELD_LABELS["availability_loss"]),
     ("trigger_source",  _FIELD_LABELS["trigger_source"]),
     ("caller_contract", _FIELD_LABELS["caller_contract"]),
     ("caller_controls", _FIELD_LABELS["caller_controls"]),

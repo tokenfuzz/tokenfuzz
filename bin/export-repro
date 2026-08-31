@@ -2374,19 +2374,22 @@ def infer_surface(harness_src: Optional[Path], asan_file: Path,
 
 
 def adjust_surface_from_report(surface_value: str, surface_reason: str,
-                               report_text: str, boundary_value: str,
+                               boundary_value: str,
                                trusted_actions_value: str,
                                cfg: object = None) -> tuple[str, str]:
     """Use the report's real boundary to correct harness-shaped guesses.
 
     C harnesses often drive shipped command-line tools or embedded tool mains.
     The harness shape alone then looks like `library-api`, but the maintainer
-    surface is the CLI named by Boundary/Trusted caller actions. Only override
-    on explicit CLI/tool signals so public-library reports that merely mention
-    a harness remain library-api. CLI tool names come from target.toml via
-    _target_tool_names — no hardcoded per-project list.
+    surface is the CLI named by Boundary/Trusted caller actions. Only those two
+    authored claims are read: a narrative names the shipped tool as one
+    embedding of a library bug ("the combination `apptool --scan` uses") or
+    cites an in-tree fuzz/ harness in passing, and scanning it turned such
+    library-API reports into `cli` (AV:L/UI:P) or `maint-tool`. CLI tool names
+    come from target.toml via _target_tool_names — no hardcoded per-project
+    list.
     """
-    blob = "\n".join([boundary_value or "", trusted_actions_value or "", report_text or ""])
+    blob = "\n".join([boundary_value or "", trusted_actions_value or ""])
     if _REPORT_DEV_SURFACE_RE.search(blob):
         return "maint-tool", "report boundary points into maintenance/test tooling"
     if _REPORT_CLI_KEYWORD_RE.search(blob) or _names_in_text(_target_tool_names(cfg), blob):
@@ -3715,14 +3718,11 @@ def main(argv: list[str]) -> int:
         strategy_value = ""
         canonical_surface_value = ""
         canonical_surface_reason = ""
-        report_text = ""
-        if report_md is not None:
-            report_text = report_md.read_text(encoding="utf-8", errors="replace")
-        # Surface inference reads the agent narrative only. A rebundled
-        # REPORT.md inlines the sanitizer diagnostic, whose harness frames
-        # (`fuzz/`, `tests/`) trip the dev-surface regex — feeding it back
-        # would flip Surface to maint-tool on every re-export. The fields the
-        # regenerated report does own reach the blob as named values below.
+        # Surface correction reads the report's Boundary and Trusted caller
+        # actions only, never the narrative or a rebundled REPORT.md: the
+        # inlined sanitizer diagnostic and a passing mention of the shipped
+        # tool or an in-tree harness would otherwise flip a library-API
+        # report on every export.
         if field_report_md is not None:
             canonical_surface_value, canonical_surface_reason = parse_surface_field(
                 read_bare_field(field_report_md, "Surface")
@@ -3743,7 +3743,7 @@ def main(argv: list[str]) -> int:
         # Default to the harness input boundary when nothing named the trigger.
         trigger_value = trigger_value or "bytes"
         surface_value, surface_reason = adjust_surface_from_report(
-            surface_value, surface_reason, report_text, boundary_value,
+            surface_value, surface_reason, boundary_value,
             trusted_actions_value, cfg
         )
         # A surface a later triage pass inferred is this bundle's only evidence

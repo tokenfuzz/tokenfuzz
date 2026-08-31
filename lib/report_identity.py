@@ -57,6 +57,7 @@ FIELD_LABELS = {
     "advisory": "Advisory",
     "reproducer_carrier": "Reproducer carrier",
     "disclosed_content": "Disclosed content",
+    "availability_loss": "Availability loss",
     "strategy": "Strategy",
 }
 # Cluster, dedup and verification identity stamped into the same block. Table

@@ -1141,6 +1141,66 @@ class SeverityTests(unittest.TestCase):
         """
         self.assertNotIn("v13-python", Path(severity.__file__).read_text())
 
+    def test_availability_loss_reaches_the_scorer_from_the_report(self) -> None:
+        """A source-argued DoS earns VA:H only once graded `total`.
+
+        Every reasoning-confirmed DoS class mapped to VA:H unconditionally, so
+        a quadratic loop measured at milliseconds scored Medium beside a
+        decompression bomb. The grade travels report -> extract_report_fields
+        -> scorer, and silence reads as degraded because the find gate already
+        demands a quantified claim.
+        """
+        self.assertIn(
+            "availability_loss",
+            severity.extract_report_fields(
+                "| Field | Value |\n| Availability loss | total |\n",
+            ),
+        )
+        scored = {}
+        for value in ("", "degraded", "total"):
+            extra = [("Primitive", "dos_amplification")]
+            if value:
+                extra.append(("Availability loss", value))
+            scored[value] = self.score(self.make_report(
+                "attacker schema drives a quadratic scan",
+                report_id=f"FIND-dos-{value or 'ungraded'}",
+                finding=True, reproduction="", extra_fields=extra,
+            ))
+        for value in ("", "degraded"):
+            self.assertEqual(
+                (scored[value]["level"], scored[value]["score"]), ("Low", 2.7), value,
+            )
+            self.assert_metrics(scored[value], VA="H", MVA="L")
+        self.assertEqual(
+            (scored["total"]["level"], scored["total"]["score"]), ("Medium", 6.6),
+        )
+        self.assertNotIn("MVA", scored["total"]["metrics"])
+
+    def test_availability_loss_modifier_units(self) -> None:
+        """Only the argued DoS rows are graded; proved crashes keep VA:H."""
+        for primitive in ("dos_amplification", "regex_dos", "memory_leak"):
+            for value in ("", "degraded", "nonsense"):
+                graded, _ = severity._cvss4_metrics(
+                    primitive, "library", {"availability_loss": value}, False,
+                )
+                self.assertEqual((graded["VA"], graded["MVA"]), ("H", "L"), (primitive, value))
+            total, _ = severity._cvss4_metrics(
+                primitive, "library", {"availability_loss": "total"}, False,
+            )
+            self.assertNotIn("MVA", total, primitive)
+        # A sanitizer-proved availability class already showed the process
+        # die; the grade must not touch it either way.
+        for primitive in ("null_deref", "stack_exhaustion", "oom"):
+            crash, _ = severity._cvss4_metrics(
+                primitive, "library", {"availability_loss": "degraded"}, False,
+            )
+            self.assertNotIn("MVA", crash, primitive)
+        # Nor a class with no availability row to grade.
+        leak, _ = severity._cvss4_metrics(
+            "info_leak", "library", {"availability_loss": "degraded"}, False,
+        )
+        self.assertNotIn("MVA", leak)
+
     def test_disclosed_content_modifier_units(self) -> None:
         """Each enum value maps to the modifier it claims, DoS untouched."""
         # Every info-disclosure class maps to info_leak (VC:H), so a few bytes

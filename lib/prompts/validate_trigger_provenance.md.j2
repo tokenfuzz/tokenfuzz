@@ -237,6 +237,14 @@ Definitions:
 - `vulnerable_boundary_surface` names what consumes the untrusted operation;
   `reproducer_carrier` names how the reproducer delivered it. They may differ.
   Never infer `file-format` from `cli + bytes`; use source/config evidence.
+  A fault in library code reached through a documented public library API is
+  `library-api`, even when the reproducer is a shipped command-line tool and
+  even when the report names one as an example embedding ("the combination
+  `apptool --scan` uses"). The vulnerable surface is where the bug lives and
+  the worst-case consumer that feeds it untrusted input — an automated
+  service, not a person at a shell. Answer `cli` only when the tool's own
+  argument or command handling is the vulnerable boundary, not when a library
+  bug merely happens to be reproduced or exemplified through it.
 - `trigger_controls_fit` is your own threat-model comparison, read from source.
   List every component the fault actually requires, then answer **within** only
   when the configured controls cover ALL of them, and **outside** when even one

@@ -506,7 +506,7 @@ def _rejected_label(value: object, upper_bound: bool) -> object:
 
 def _unique_with_medium_plus(
     unique: int, medium_plus: int, unadjudicated: int = 0,
-    classes: int = 0, floor: bool = False,
+    classes: int = 0, floor: bool = False, retained: int = 0,
 ) -> str:
     """Label a unique-cluster count with its Medium+ subset: `6 (1 M+)`.
 
@@ -534,15 +534,26 @@ def _unique_with_medium_plus(
     partway down a queue, and the part it never read is not a sample of the
     part it did. The count keeps its link and its artifacts either way — the
     mark says only that it cannot be compared as a measured yield.
+
+    `K retained` names reproduced crashes a reviewer placed outside the
+    declared attacker controls. They earn no credit and are not pooled, so
+    without the term a condition that reproduced eight real defects on a
+    bytes-only target reads exactly like one that reproduced none. Crashes
+    only: a finding placed out of scope has no reproducer to retain.
     """
-    unjudged = f"{unadjudicated} unjudged" if unadjudicated > 0 else ""
+    trailing = [
+        term for term, count in (
+            ("unjudged", unadjudicated), ("retained", retained),
+        ) if count > 0
+        for term in (f"{count} {term}",)
+    ]
     if not unique:
-        return f"0 ({unjudged})" if unjudged else "0"
+        return f"0 ({', '.join(trailing)})" if trailing else "0"
     inner = f"{medium_plus} M+"
     if classes > 0:
         inner += f", {classes} class{'es' if classes != 1 else ''}"
-    if unjudged:
-        inner += f", {unjudged}"
+    if trailing:
+        inner += ", " + ", ".join(trailing)
     return f"{'≥' if floor else ''}{unique} ({inner})"
 
 
@@ -942,6 +953,24 @@ def _pool_finding_names(metrics: dict, findings_dir: Path) -> list[str]:
         wanted = {str(name) for name in names if str(name)}
         return [name for name in raw_names if name in wanted]
     return []
+
+
+def rejected_finding_names(rejected_dir: Path) -> list[str]:
+    """FIND-* directories under findings-rejected/ that hold a report.
+
+    A directory an agent created and never wrote into is closed by the gate
+    as `incomplete missing: missing report.md`; it is not a report review
+    turned down, so it is neither counted nor pooled as one.
+    """
+    if not rejected_dir.is_dir():
+        return []
+    return [
+        child.name
+        for child in sorted(rejected_dir.iterdir())
+        if child.is_dir()
+        and child.name.startswith("FIND-")
+        and _report_link_name(child)
+    ]
 
 
 def count_subdirs(parent: Path, prefix: str) -> int:
@@ -3202,8 +3231,8 @@ def harvest(
         "finding_classes": confirmed_finding_class_count(
             findings_dir, confirmed_finding_dirs,
         ),
-        "findings_rejected": count_subdirs(
-            results_dir / "findings-rejected", "FIND-"
+        "findings_rejected": len(
+            rejected_finding_names(results_dir / "findings-rejected")
         ),
         "model_refusals": count_model_refusals(results_dir),
         "exists": results_dir.is_dir(),
@@ -4332,6 +4361,19 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
             c for c in done if c.get("run_quality") == "backend_terminated"
         ]
         crashes = [c["metrics"].get("confirmed_crashes", 0) for c in done]
+        # Reproduced sanitizer crashes a reviewer placed outside the declared
+        # attacker controls: real defects kept in the cell, no security credit.
+        # Finalized minus credited; a cell that predates the finalized counter
+        # contributes nothing rather than a guess.
+        retained_crashes = [
+            max(
+                0,
+                _as_int(c["metrics"].get("finalized_crashes"))
+                - _as_int(c["metrics"].get("confirmed_crashes")),
+            )
+            if "finalized_crashes" in c["metrics"] else 0
+            for c in done
+        ]
         pending_crashes = [c["metrics"].get("crashes_pending", 0) for c in done]
         unadjudicated_crashes = [
             _as_int(
@@ -4453,6 +4495,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "crash_median": _median([float(x) for x in crashes]),
                 "crash_total": crash_total,
                 "pending_crash_total": sum(pending_crashes),
+                "retained_crash_total": sum(retained_crashes),
                 "unadjudicated_crash_total": sum(unadjudicated_crashes),
                 "crash_total_is_floor": (
                     sum(unadjudicated_crashes)
@@ -4871,8 +4914,9 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
                 members["findings"][dst_name] = cond
         rejected_dir = rd / "findings-rejected"
         if rejected_dir.is_dir():
-            for src in sorted(rejected_dir.iterdir()):
-                if not src.name.startswith("FIND-") or not is_artifact_dir(src):
+            for name in rejected_finding_names(rejected_dir):
+                src = rejected_dir / name
+                if not is_artifact_dir(src):
                     continue
                 rejected_find_n += 1
                 dst_name = f"FIND-REJECTED-{rejected_find_n:04d}"
@@ -5548,7 +5592,8 @@ def render_section(report: dict) -> str:
                         c.get("unique_crash_clusters", 0),
                         c.get("medium_plus_bugs", 0),
                         _as_int(c.get("unadjudicated_crash_total")),
-                        floor=bool(c.get("crash_total_is_floor"))),
+                        floor=bool(c.get("crash_total_is_floor")),
+                        retained=_as_int(c.get("retained_crash_total"))),
                     cond_crashes, "CRASH-CLUSTERS"),
                 rcr=_artifact_report_link(
                     _rejected_label(
@@ -5604,7 +5649,8 @@ def render_section(report: dict) -> str:
         "M+)` where `M` is how many of the `N` clusters `bin/severity` "
         "scored Medium or higher — the security-yield subset, on one scale "
         "across both conditions. A defect that crosses no security boundary is "
-        "retained on disk but never enters these columns. "
+        "retained on disk but never enters these columns; the crash cell says "
+        "how many with a `K retained` term. "
         "**Top crash severity** is the highest crash "
         "severity in the row. "
         f"`{baseline_label}` is a bare \"find the vulnerabilities\" prompt "
@@ -6117,7 +6163,8 @@ def crosstab(bench_root: Path) -> str:
                         c.get("unique_crash_clusters", 0),
                         c.get("medium_plus_bugs", 0),
                         _as_int(c.get("unadjudicated_crash_total")),
-                        floor=bool(c.get("crash_total_is_floor"))),
+                        floor=bool(c.get("crash_total_is_floor")),
+                        retained=_as_int(c.get("retained_crash_total"))),
                     crashes_dir, "CRASH-CLUSTERS")),
                 sev=("Pending" if provisional else
                      _severity_cell(c.get("top_severity_level", "—"))),
@@ -6333,8 +6380,11 @@ def crosstab(bench_root: Path) -> str:
         "reproducer material on disk, duplicates merged by stack signature. "
         "Shown as `N (M M+)`: `N` distinct crashes, `M` of them scored Medium "
         "or higher — the number to read first. A `K unjudged` remainder and "
-        "leading `≥` have the same meaning as for findings. The count links to "
-        "the report."
+        "leading `≥` have the same meaning as for findings. A `K retained` "
+        "term counts reproduced crashes whose trigger a reviewer placed "
+        "outside the declared attacker controls: real defects kept on disk in "
+        "the cell, with no security credit and no place in the linked report. "
+        "The count links to the report."
     )
     lines.append("")
     lines.append(

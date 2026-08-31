@@ -2679,6 +2679,60 @@ Generated score text.
             triage._valid_reach_field("disclosed_content", "invented"), "",
         )
 
+    def test_availability_loss_is_optional_enum_bound_and_asked_for_dos(self) -> None:
+        """A resource report owes one grade; other reports buy no extra call."""
+        self.assertIn("availability_loss", triage._OPTIONAL_REACH_FIELD_LABELS)
+        self.assertNotIn("availability_loss", triage._REACH_FIELD_LABELS)
+        self.assertNotIn(
+            "availability_loss", triage._missing_reach_fields("| Class | x |"),
+        )
+        self.assertEqual(
+            triage._valid_reach_field("availability_loss", "total"), "total",
+        )
+        self.assertEqual(
+            triage._valid_reach_field("availability_loss", "severe"), "",
+        )
+        required = "".join(
+            f"| {label} | stated |\n"
+            for label in triage._REACH_FIELD_LABELS.values()
+        )
+        for header in (
+            "| Class | dos:algorithmic |\n",
+            "| Class | resource-exhaustion |\n| Primitive | dos_amplification |\n",
+            "Primitive: memory_leak\n",
+        ):
+            self.assertEqual(
+                triage._pending_optional_reach_fields(header + required),
+                {"availability_loss": "Availability loss"}, header,
+            )
+        self.assertEqual(
+            triage._pending_optional_reach_fields(
+                "| Class | dos:algorithmic |\n| Availability loss | degraded |\n"
+                + required,
+            ),
+            {},
+        )
+        # A disclosure report is asked for its own grade and not this one.
+        self.assertEqual(
+            triage._pending_optional_reach_fields(
+                "| Class | info-disclosure:uninitialized-memory |\n" + required,
+            ),
+            {"disclosed_content": "Disclosed content"},
+        )
+        self.assertEqual(
+            triage._pending_optional_reach_fields(
+                "| Class | memory-safety:bounds |\n" + required,
+            ),
+            {},
+        )
+        self.report.write_text("| Class | dos:algorithmic |\n" + required, encoding="utf-8")
+        self.assertTrue(triage.fill_reach_fields(
+            self.finding, decision_override={"availability_loss": "degraded"},
+        ))
+        self.assertEqual(
+            triage._field(self.report.read_text(), "Availability loss"), "degraded",
+        )
+
     def test_complete_disclosure_report_is_still_asked_once(self) -> None:
         """A complete report short-circuits the fill; the ask must survive it.
 

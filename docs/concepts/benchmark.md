@@ -303,7 +303,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Unique rejected findings` | FIND reports the validator rejected, after clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
 | `Security findings to report` | Distinct evidence-signature clusters of reportable non-crash security findings, shown as `N` clusters with the Medium-or-higher subset and class breadth. Every term uses unique clusters as its denominator, so duplicate reports cannot inflate class breadth. These remain separate descriptive axes rather than an arbitrary weighted score. Links to the finding cluster report. |
 | `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
-| `Unique security crashes to report` | Distinct reportable sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. The existing crash-cluster link includes reportable crashes at every numeric severity, including Low. |
+| `Unique security crashes to report` | Distinct reportable sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. The existing crash-cluster link includes reportable crashes at every numeric severity, including Low. A `K retained` term counts reproduced crashes a reviewer placed outside the declared attacker controls — real defects kept in the cell with no security credit. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
 
 **Efficiency** follows the scoreboard whenever a cell recorded any of it, and

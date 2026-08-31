@@ -26,7 +26,8 @@ evidence for it):
   "trusted_caller_actions": "<normal public call | private mutation | callback ordering | harness-only>",
   "boundary":        "<short description of the attacker boundary>",
   "advisory":        "<yes | no, only when the report clearly says so>",
-  "disclosed_content": "<cross-principal | same-context | attacker-derived | fixed-or-zero> — ONLY for a disclosure report, and only when the report names the allocation the bytes come from and says what lives there. cross-principal: data not already observable to the attacking principal, including another user, session, tenant, or unrelated process memory. same-context: data already observable to this same attacking principal/session, but not necessarily the exact disclosed bytes. attacker-derived: the exact bytes the attacker supplied. fixed-or-zero: zeros or a non-sensitive public constant, never merely a value that happens to be fixed. Omit when the report does not settle it"
+  "disclosed_content": "<cross-principal | same-context | attacker-derived | fixed-or-zero> — ONLY for a disclosure report, and only when the report names the allocation the bytes come from and says what lives there. cross-principal: data not already observable to the attacking principal, including another user, session, tenant, or unrelated process memory. same-context: data already observable to this same attacking principal/session, but not necessarily the exact disclosed bytes. attacker-derived: the exact bytes the attacker supplied. fixed-or-zero: zeros or a non-sensitive public constant, never merely a value that happens to be fixed. Omit when the report does not settle it",
+  "availability_loss": "<total | degraded> — ONLY for a resource-exhaustion report (algorithmic DoS, amplification, leak, regex complexity) with no sanitizer-proved crash, graded on what the report demonstrates. total: the process or service dies or stops answering — an abort or OOM kill, a hang past any timeout, or demand that grows without bound relative to the attacker's own bytes (an amplification factor that lets input the attacker can afford exhaust the resource, or memory that persists after the request and accumulates across requests). degraded: the demonstrated cost is finite and bounded by the size of the input the attacker must send, however superlinear — extra CPU seconds or memory a larger document buys proportionally, while the service keeps serving. Omit when the report does not settle it"
 }
 
 Allowed primitive_keys:
@@ -133,6 +134,12 @@ Rules:
   regex backtracking from an attacker pattern/subject or deep nesting a parser
   accepts with no lower limit. Controlling the field VALUES is not controlling
   the exhausting quantity.
+- `availability_loss` is read from the report's own numbers, not from its
+  adjectives: a quadratic loop measured at seconds of CPU for a megabyte of
+  input is `degraded` even when the report calls it a denial of service; a
+  decompression ratio that turns kilobytes into gigabytes, an exponential
+  blow-up, or a leak that survives the request is `total`. A report with no
+  measurement settles nothing — omit the key.
 - Use `data_race` ONLY when the report carries a race-detector diagnostic
   (ThreadSanitizer / "WARNING: DATA RACE"). A race argued from source alone —
   unsynchronized shared state, a TOCTOU window, a global cache read across

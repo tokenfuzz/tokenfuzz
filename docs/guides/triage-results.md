@@ -219,6 +219,13 @@ decides the fault, not every setup call the driver makes. `Parameter control`
 matters when a compiled harness supplies a value the external input does not
 directly choose.
 
+Two fields are classified by the harness from the report rather than
+authored, and each can only lower a score: `Disclosed content` grades what an
+information-disclosure report shows reaching the attacker, and `Availability
+loss` grades whether a source-argued resource-exhaustion report demonstrates
+the service dying (`total`, the only value that keeps the class's VA:H) or
+merely slowing in proportion to the attacker's own input (`degraded`).
+
 `Cluster`, `Dedup frames`, severity text, and patch rendering are written by
 the harness. Do not hand-author those generated sections.
 

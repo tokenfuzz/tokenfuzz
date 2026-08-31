@@ -787,6 +787,10 @@ _OPTIONAL_REACH_FIELD_LABELS = {
         # the only way this field moves a score and silence never costs a
         # finding.
         "disclosed_content",
+        # Whether a resource-exhaustion report demonstrates total loss or a
+        # slower service. Optional the same way; the scorer reads silence as
+        # degraded, so a source-only DoS claim earns VA:H only once graded.
+        "availability_loss",
     )
 }
 _ALL_REACH_FIELD_LABELS = {
@@ -799,7 +803,9 @@ _ALL_REACH_FIELD_LABELS = {
 # Bumped with the prompt: 12420dd made fixed pre-input shaping application
 # setup (`trigger_source: bytes`, `parameter_control: application-supplied`)
 # but left cached answers keyed to the old policy, which severity reads.
-_REACH_FIELD_DECISION_VERSION = "reach-fields-v6-fixed-fallback-setup"
+# v7 added `availability_loss`; a resource report whose attempts an earlier
+# schema exhausted must be asked once for the grade the scorer now reads.
+_REACH_FIELD_DECISION_VERSION = "reach-fields-v7-availability-loss"
 _REACH_FIELD_ENUMS = {
     "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
@@ -810,6 +816,7 @@ _REACH_FIELD_ENUMS = {
     "disclosed_content": {
         "cross-principal", "same-context", "attacker-derived", "fixed-or-zero",
     },
+    "availability_loss": {"total", "degraded"},
 }
 _SURFACE_KINDS = {"network", "library-api", "file-format", "cli", "dev-tool", "internal", "unknown"}
 _CARRIER_KINDS = {"network", "library-api", "file-format", "cli", "harness", "runner", "unknown"}
@@ -869,8 +876,14 @@ def _missing_reach_fields(text: str) -> dict[str, str]:
 
 
 # Broad and stable rather than a class list that rots: any report whose own
-# class or primitive says it discloses something is worth one bounded ask.
-_DISCLOSURE_SHAPE_RE = re.compile(r"disclos|info[-_ ]?leak|uninit|residu", re.I)
+# class or primitive says it discloses something, or that it exhausts a
+# resource, is worth one bounded ask for the grade the scorer reads.
+_OPTIONAL_REACH_FIELD_SHAPES = (
+    ("disclosed_content",
+     re.compile(r"disclos|info[-_ ]?leak|uninit|residu", re.I)),
+    ("availability_loss",
+     re.compile(r"\bdos\b|amplif|exhaust|memory[-_ ]?leak|regex|resource", re.I)),
+)
 
 
 def _pending_optional_reach_fields(text: str) -> dict[str, str]:
@@ -882,17 +895,20 @@ def _pending_optional_reach_fields(text: str) -> dict[str, str]:
     a complete report short-circuits before the fill prompt ever runs, so the
     field could never be populated on exactly the reports it exists for.
     """
-    label = _OPTIONAL_REACH_FIELD_LABELS["disclosed_content"]
-    if _reach_field_present(text, label):
-        return {}
-    for field in ("Class", "Primitive"):
-        match = re.search(
+    shape_text = " ".join(
+        match.group(1)
+        for field in ("Class", "Primitive")
+        if (match := re.search(
             rf"^(?:{field}\s*:\s*|\|\s*{field}\s*\|\s*)([^|\n]+)",
             text, re.IGNORECASE | re.MULTILINE,
-        )
-        if match and _DISCLOSURE_SHAPE_RE.search(match.group(1)):
-            return {"disclosed_content": label}
-    return {}
+        ))
+    )
+    return {
+        key: _OPTIONAL_REACH_FIELD_LABELS[key]
+        for key, shape in _OPTIONAL_REACH_FIELD_SHAPES
+        if shape.search(shape_text)
+        and not _reach_field_present(text, _OPTIONAL_REACH_FIELD_LABELS[key])
+    }
 
 
 def _accepted_reach_fields(

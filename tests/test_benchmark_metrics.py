@@ -59,6 +59,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         refusals: int = 0,
         actual_agents: int | None = None,
         unadjudicated_crashes: int = 0,
+        retained_crashes: int = 0,
     ) -> Path:
         cell = bench / "cells" / name
         payload = {
@@ -72,8 +73,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.write_json(cell / "cell.json", payload)
         self.write_json(cell / "metrics.json", {
             "confirmed_crashes": crashes,
-            "crash_candidates": crashes + unadjudicated_crashes,
-            "finalized_crashes": crashes,
+            "crash_candidates": crashes + retained_crashes + unadjudicated_crashes,
+            "finalized_crashes": crashes + retained_crashes,
             "crashes_unadjudicated": unadjudicated_crashes,
             "crash_clusters": crashes,
             "crash_dirs": [f"CRASH-{i}" for i in range(crashes)],
@@ -176,6 +177,17 @@ class BenchmarkMetricsTests(unittest.TestCase):
             )
             self.finalize_fixture_finding(findings / name)
         (results / "findings-rejected" / "FIND-REJECTED").mkdir(parents=True)
+        (results / "findings-rejected" / "FIND-REJECTED" / "report.md").write_text(
+            "# rejected report\n", encoding="utf-8",
+        )
+        # A directory an agent created and never wrote into, closed by the
+        # gate as `incomplete missing: missing report.md`: not a report review
+        # turned down, so it is not a rejected finding.
+        (results / "findings-rejected" / "FIND-EMPTY").mkdir(parents=True)
+        (results / "findings-rejected" / "FIND-EMPTY" / "REJECTION.md").write_text(
+            "# Rejected artifact\n\nReason: incomplete missing: missing report.md\n",
+            encoding="utf-8",
+        )
         (results / "state").mkdir()
         (results / "state" / "hypotheses.jsonl").write_text(
             '{"id":"H1","status":"DISCARDED"}\n{"id":"H2","status":"PENDING"}\n'
@@ -222,9 +234,18 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ],
             1,
         )
+        # The waterfall is the full gate ledger, so the report-less directory
+        # is a candidate that fell at evidence and was routed to the rejected
+        # lane; the headline `findings_rejected` counts reports turned down.
         self.assertEqual(
             metrics["validation_waterfall"]["findings"]["lanes"]["rejected"],
-            1,
+            2,
+        )
+        self.assertEqual(
+            metrics["validation_waterfall"]["findings"]["candidates"], 6,
+        )
+        self.assertEqual(
+            metrics["validation_waterfall"]["findings"]["evidence_complete"], 3,
         )
 
         legacy = self.root / "legacy-row-rejected"
@@ -1291,6 +1312,40 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(condition["unadjudicated_crash_total"], 2)
         self.assertTrue(condition["crash_total_is_floor"])
         self.assertIn("2 unjudged", benchmark.render_section(report))
+
+    def test_aggregate_and_report_surface_retained_crashes(self) -> None:
+        """Out-of-scope reproduced crashes are counted beside the credit.
+
+        On a bytes-only target a condition that reproduced eight real defects
+        through caller call sequences read exactly like one that reproduced
+        none: they are finalized `not-reportable`, never pooled, and the cell
+        showed a bare `0`.
+        """
+        bench = self.root / "retained-crashes"
+        self.write_json(bench / "run.json", {
+            "runid": "run1", "target": "sample", "backend": "codex",
+            "replicates": 1, "budget_wall": 60,
+            "conditions": ["model-direct"],
+            "target_sha": "abc", "harness_sha": "def",
+        })
+        self.make_cell(
+            bench, "model-direct-r1", "model-direct", 1, 0, retained_crashes=8,
+        )
+        report = benchmark.aggregate(bench)
+        condition = report["conditions"][0]
+        self.assertEqual(condition["retained_crash_total"], 8)
+        self.assertEqual(condition["crash_total"], 0)
+        self.assertFalse(condition["crash_total_is_floor"])
+        self.assertIn("0 (8 retained)", benchmark.render_section(report))
+        self.assertEqual("0", benchmark._unique_with_medium_plus(0, 0))
+        self.assertEqual(
+            "2 (1 M+, 6 retained)",
+            benchmark._unique_with_medium_plus(2, 1, retained=6),
+        )
+        self.assertEqual(
+            "≥2 (1 M+, 3 unjudged, 6 retained)",
+            benchmark._unique_with_medium_plus(2, 1, 3, floor=True, retained=6),
+        )
 
     def test_wall_is_also_reported_as_worker_capacity(self) -> None:
         """Equal wall is not equal effort across conditions.

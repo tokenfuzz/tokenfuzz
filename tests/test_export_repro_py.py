@@ -880,7 +880,6 @@ assert_eq("library-api", v2,
           "infer_surface: harness #include of pcre2.h → library-api")
 v3, why3 = er.adjust_surface_from_report(
     "library-api", "C harness calls a public library entry point",
-    "## Summary\napptool accepts commands on stdin.",
     "apptool --shell stdin",
     "",
 )
@@ -890,12 +889,30 @@ assert_in("command-line", why3,
           "adjust_surface_from_report: cli reason is readable")
 v4, _ = er.adjust_surface_from_report(
     "library-api", "C harness calls a public library entry point",
-    "## Summary\nThe public parser API consumes bytes.",
     "Public parser API byte input",
     "call parser_parse_memory",
 )
 assert_eq("library-api", v4,
           "adjust_surface_from_report: public API boundary stays library-api")
+# The shipped tool named in Trusted caller actions is the boundary; the same
+# name in the narrative is one embedding of a library bug and must not demote
+# the surface to cli (AV:L/UI:P) — only the two authored claims are read.
+v5, _ = er.adjust_surface_from_report(
+    "library-api", "C harness calls a public library entry point",
+    "Document bytes parsed through the public library API",
+    "create a reader, attach the schema, pump parser_read to completion",
+    cli_cfg,
+)
+assert_eq("library-api", v5,
+          "adjust_surface_from_report: tool name absent from boundary fields → library-api")
+v6, _ = er.adjust_surface_from_report(
+    "library-api", "C harness calls a public library entry point",
+    "untrusted file argument passed to apptool",
+    "run apptool on the file",
+    cli_cfg,
+)
+assert_eq("cli", v6,
+          "adjust_surface_from_report: tool named in Boundary → cli")
 
 # 5c. Generic targets: surface inference must work for ANY project, not a
 # hardcoded library family. The signals are cfg-derived (tool names) and
@@ -940,12 +957,11 @@ assert_eq(set(), er._target_tool_names(ff_cfg),
 
 # adjust_surface_from_report: a cfg-derived tool name in the boundary text
 # flips to cli even without a generic CLI keyword.
-v5, _ = er.adjust_surface_from_report(
+v7, _ = er.adjust_surface_from_report(
     "library-api", "reason",
-    "## Summary\nThe brotli program compresses a file.",
     "brotli file input", "", brotli_cfg,
 )
-assert_eq("cli", v5,
+assert_eq("cli", v7,
           "adjust_surface_from_report: cfg tool name in boundary → cli")
 
 # 5b. read_field_from_fields_table + read_bare_field table fallback.
