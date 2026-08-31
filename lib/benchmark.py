@@ -507,7 +507,6 @@ def _rejected_label(value: object, upper_bound: bool) -> object:
 def _unique_with_medium_plus(
     unique: int, medium_plus: int, unadjudicated: int = 0,
     classes: int = 0, floor: bool = False,
-    top_class: str = "", top_class_pct: int = 0,
 ) -> str:
     """Label a unique-cluster count with its Medium+ subset: `6 (1 M+)`.
 
@@ -529,12 +528,6 @@ def _unique_with_medium_plus(
     only place the difference is visible. Findings only — crashes cluster by
     stack signature, which already carries it.
 
-    `top N% <class>` says how concentrated that spread is. Class count alone
-    still reads as breadth when one cheap class supplies most of the total, and
-    a count a reader cannot decompose is one a filing incentive can satisfy
-    with the weakest legible artifact. Shown only when one class holds at least
-    a third, so an evenly spread row stays uncluttered.
-
     `floor` prefixes `≥`. Every cell with an unjudged remainder is a floor, but
     a residue beside an adjudicated majority still reads as a measurement,
     while a remainder that outnumbers the verdicts does not: review stopped
@@ -547,21 +540,19 @@ def _unique_with_medium_plus(
         return f"0 ({unjudged})" if unjudged else "0"
     inner = f"{medium_plus} M+"
     if classes > 0:
-        inner += f", {classes} classes"
-    if top_class and top_class_pct >= 33:
-        inner += f", top {top_class_pct}% {top_class}"
+        inner += f", {classes} class{'es' if classes != 1 else ''}"
     if unjudged:
         inner += f", {unjudged}"
     return f"{'≥' if floor else ''}{unique} ({inner})"
 
 
-def _finding_class_display(condition: dict) -> tuple[int, str, int]:
-    """Return class terms only for a complete unique-cluster decomposition."""
+def _finding_class_count(condition: dict) -> int:
+    """Return the class count only for a complete unique-cluster decomposition."""
     histogram = condition.get("finding_class_histogram")
     unique = _as_int(condition.get("unique_finding_clusters"))
     if not isinstance(histogram, dict) or not histogram:
-        return 0, "", 0
-    normalized: dict[str, int] = {}
+        return 0
+    total = 0
     for name, count in histogram.items():
         if (
             not isinstance(name, str)
@@ -570,12 +561,11 @@ def _finding_class_display(condition: dict) -> tuple[int, str, int]:
             or not isinstance(count, int)
             or count < 1
         ):
-            return 0, "", 0
-        normalized[name] = count
-    if sum(normalized.values()) != unique:
-        return 0, "", 0
-    top_class, top_class_pct = dominant_class_share(normalized)
-    return len(normalized), top_class, top_class_pct
+            return 0
+        total += count
+    if total != unique:
+        return 0
+    return len(histogram)
 
 
 def _condition_pool_dir(bench_dir: Path, condition: str, kind: str) -> Path:
@@ -1173,11 +1163,9 @@ def confirmed_finding_class_histogram(
     reached 30 across 21, and the counts alone say the opposite of the
     coverage.
 
-    The distinct-class count alone still hides concentration: a cell can reach
-    22 classes while two cheap ones supply most of the count, and a filing
-    incentive is always satisfied by the weakest legible artifact. Keeping the
-    per-class counts lets the report say which share the largest class holds.
-    It ranks nothing and gates nothing.
+    Per-class counts are kept rather than a set so the report can check that
+    the classes it prints decompose the same unique-cluster count. It ranks
+    nothing and gates nothing.
 
     The reviewed class from the quality gate is preferred over the report's own
     free-text field, which varies per report for the same defect. A finding
@@ -1222,22 +1210,6 @@ def confirmed_finding_class_histogram(
 def confirmed_finding_class_count(findings_dir: Path, names: list[str]) -> int:
     """Distinct bug classes across confirmed findings."""
     return len(confirmed_finding_class_histogram(findings_dir, names))
-
-
-def dominant_class_share(histogram: dict[str, int]) -> tuple[str, int]:
-    """The largest class and its percentage of the counted findings.
-
-    Reported beside the count because the two answer different questions: the
-    count says how much was filed, this says how much of it is one mechanism.
-    A row that is mostly one cheap class is a different result from an evenly
-    spread one at the same count, and only this term separates them. Ties
-    resolve by name so the label is stable across runs.
-    """
-    total = sum(histogram.values())
-    if not total:
-        return "", 0
-    name, count = max(histogram.items(), key=lambda kv: (kv[1], kv[0]))
-    return name, round(count * 100 / total)
 
 
 # Backends whose `input` token field already includes the cached prefix
@@ -4304,10 +4276,6 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         _cond: len(_hist)
         for _cond, _hist in finding_class_histogram_by_cond.items()
     }
-    finding_top_class_by_cond = {
-        _cond: dominant_class_share(_hist)
-        for _cond, _hist in finding_class_histogram_by_cond.items()
-    }
     # Crashes a post-pool gate demoted out of the accepted pool keep their
     # pooled-accepted name (CRASH-NNNN); cell-level rejects are CRASH-REJECTED-*.
     # Reconcile re-files demoted entries under crashes-rejected, so a plain
@@ -4520,8 +4488,6 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                     cond, {},
                 ),
                 "unique_finding_classes": finding_classes_by_cond.get(cond, 0),
-                "top_finding_class": finding_top_class_by_cond.get(cond, ("", 0))[0],
-                "top_finding_class_pct": finding_top_class_by_cond.get(cond, ("", 0))[1],
                 "medium_plus_findings": fb.get("medium_plus", 0),
                 "unique_rejected_crash_clusters": unique_rejected_crashes,
                 "rejected_crash_clusters_upper_bound": rejected_crashes_upper_bound,
@@ -5534,7 +5500,7 @@ def render_section(report: dict) -> str:
     lines.append(
         "| Condition | Replicates | Wall (h) | Worker-h "
         "| Unique rejected findings | Security findings to report "
-        "| Unique rejected crashes | Unique Security crashes to report "
+        "| Unique rejected crashes | Unique security crashes to report "
         "| Top crash severity |"
     )
     lines.append(
@@ -5553,9 +5519,7 @@ def render_section(report: dict) -> str:
         cond_rejected_crashes = _condition_pool_dir(
             bench_dir, c["condition"], "crashes-rejected"
         )
-        finding_classes, top_finding_class, top_finding_class_pct = (
-            _finding_class_display(c)
-        )
+        finding_classes = _finding_class_count(c)
         lines.append(
             "| {cond} | {rep} | {wall} | {worker_wall} | {rfi} | {uf} "
             "| {rcr} | {uc} | {sev} |".format(
@@ -5569,9 +5533,7 @@ def render_section(report: dict) -> str:
                         c.get("medium_plus_findings", 0),
                         _as_int(c.get("unadjudicated_finding_total")),
                         finding_classes,
-                        bool(c.get("finding_total_is_floor")),
-                        top_finding_class,
-                        top_finding_class_pct),
+                        bool(c.get("finding_total_is_floor"))),
                     cond_findings, "FINDING-CLUSTERS"),
                 rfi=_artifact_report_link(
                     _rejected_label(
@@ -5635,7 +5597,7 @@ def render_section(report: dict) -> str:
         "are FIND reports that failed the independent validator gate and link "
         "to a table showing the reachability / guards / primitive booleans. "
         "**Security findings to report** counts only reportable FIND reports. "
-        "Findings carry no on-disk crash; **Unique Security crashes to report** counts only crash "
+        "Findings carry no on-disk crash; **Unique security crashes to report** counts only crash "
         "directories with real sanitizer output on disk — an agent "
         "claiming a crash in prose never counts. The reportable columns are "
         "annotated `N (M "
@@ -6041,7 +6003,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "| Target | Backend | Condition | Run | Wall (h) | Replicates "
         "| Unique rejected findings | Security findings to report "
-        "| Unique rejected crashes | Unique Security crashes to report "
+        "| Unique rejected crashes | Unique security crashes to report "
         "| Top crash severity "
         "| Input | Output | Cost |"
     )
@@ -6118,9 +6080,7 @@ def crosstab(bench_root: Path) -> str:
             _condition_pool_dir(bench_dir, cond, "crashes-rejected")
             if bench_dir else None
         )
-        finding_classes, top_finding_class, top_finding_class_pct = (
-            _finding_class_display(c)
-        )
+        finding_classes = _finding_class_count(c)
         lines.append(
             "| {tgt} | {bk} | {cond} | {rid} | {wall} | {reps} "
             "| {rfi} | {uf} "
@@ -6145,9 +6105,7 @@ def crosstab(bench_root: Path) -> str:
                         c.get("medium_plus_findings", 0),
                         _as_int(c.get("unadjudicated_finding_total")),
                         finding_classes,
-                        bool(c.get("finding_total_is_floor")),
-                        top_finding_class,
-                        top_finding_class_pct),
+                        bool(c.get("finding_total_is_floor"))),
                     findings_dir, "FINDING-CLUSTERS")),
                 rcr=("Pending" if provisional else _rejected_cell(
                     c.get("unique_rejected_crash_clusters"),
@@ -6329,11 +6287,7 @@ def crosstab(bench_root: Path) -> str:
         "classes. The count links to the report. Read `N` and `C` together: "
         "one mechanism found at thirty locations is thirty findings and one "
         "class, and it is not the same result as thirty classes, even though "
-        "each of those thirty sites needs its own fix. A `top P% <class>` term "
-        "appears when one class holds at least a third of the count, and says "
-        "which one and how much: a high share means most of `N` is a single "
-        "mechanism, so the count is carried by one vein rather than by "
-        "coverage. Its absence means no class reaches a third. A "
+        "each of those thirty sites needs its own fix. A "
         "`K unjudged` term means `K` reports never reached a verdict — review "
         "did not finish before the run was published. They count as "
         "unconfirmed, so read the cell as a floor, not as a measured yield. "
@@ -6375,7 +6329,7 @@ def crosstab(bench_root: Path) -> str:
         "are merged by stack signature; `up to N` marks an upper bound."
     )
     lines.append(
-        "- **Unique Security crashes to report** — crashes with sanitizer output and "
+        "- **Unique security crashes to report** — crashes with sanitizer output and "
         "reproducer material on disk, duplicates merged by stack signature. "
         "Shown as `N (M M+)`: `N` distinct crashes, `M` of them scored Medium "
         "or higher — the number to read first. A `K unjudged` remainder and "

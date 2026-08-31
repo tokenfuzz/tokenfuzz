@@ -740,9 +740,6 @@ class FindingClassConcentrationTests(unittest.TestCase):
         self.assertEqual(
             benchmark.confirmed_finding_class_count(self.findings, names), 3,
         )
-        self.assertEqual(
-            benchmark.dominant_class_share(histogram), ("dos", 60),
-        )
 
     def test_unlabelled_findings_do_not_merge_into_one_class(self) -> None:
         names = []
@@ -756,32 +753,25 @@ class FindingClassConcentrationTests(unittest.TestCase):
         self.assertEqual(sum(histogram.values()), 3)
         self.assertEqual(len(histogram), 3)
 
-    def test_empty_histogram_names_no_dominant_class(self) -> None:
-        self.assertEqual(benchmark.dominant_class_share({}), ("", 0))
-
-    def test_concentrated_row_shows_the_share_and_spread_row_does_not(self) -> None:
-        concentrated = benchmark._unique_with_medium_plus(
-            168, 159, 0, 22, False, "dos", 52,
-        )
-        self.assertIn("22 classes", concentrated)
-        self.assertIn("top 52% dos", concentrated)
-        spread = benchmark._unique_with_medium_plus(
-            30, 20, 0, 21, False, "auth", 14,
-        )
-        self.assertIn("21 classes", spread)
-        self.assertNotIn("top", spread)
-
-    def test_share_never_displaces_the_unjudged_remainder_or_the_floor(self) -> None:
-        rendered = benchmark._unique_with_medium_plus(
-            50, 40, 13, 4, True, "dos", 80,
-        )
-        self.assertTrue(rendered.startswith("≥50"))
-        self.assertIn("top 80% dos", rendered)
-        self.assertIn("13 unjudged", rendered)
-        # An empty cell stays a bare zero whatever the class terms say.
+    def test_class_term_counts_classes_and_never_names_one(self) -> None:
         self.assertEqual(
-            benchmark._unique_with_medium_plus(0, 0, 0, 3, False, "dos", 99), "0",
+            benchmark._unique_with_medium_plus(168, 159, 0, 22),
+            "168 (159 M+, 22 classes)",
         )
+        # One class is singular, and no class label ever reaches the cell.
+        self.assertEqual(
+            benchmark._unique_with_medium_plus(1, 0, 0, 1), "1 (0 M+, 1 class)",
+        )
+
+    def test_class_term_never_displaces_the_unjudged_remainder_or_the_floor(
+        self,
+    ) -> None:
+        self.assertEqual(
+            benchmark._unique_with_medium_plus(50, 40, 13, 4, True),
+            "≥50 (40 M+, 4 classes, 13 unjudged)",
+        )
+        # An empty cell stays a bare zero whatever the class terms say.
+        self.assertEqual(benchmark._unique_with_medium_plus(0, 0, 0, 3), "0")
 
 
 if __name__ == "__main__":

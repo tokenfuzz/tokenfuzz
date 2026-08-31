@@ -1131,7 +1131,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(updated["incomplete_observed"][0]["findings"], 5)
 
     def test_finding_class_concentration_counts_unique_clusters(self) -> None:
-        """Duplicate reports cannot inflate the class share beside a unique count."""
+        """Duplicate reports cannot inflate the class count beside a unique count."""
         bench = self.root / "finding-class-clusters"
         self.write_json(bench / "run.json", {
             "runid": "run1", "target": "sample", "backend": "codex",
@@ -1180,7 +1180,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             condition["finding_class_histogram"], {"auth": 1, "dos": 1},
         )
         self.assertEqual(condition["unique_finding_classes"], 2)
-        self.assertEqual(condition["top_finding_class_pct"], 50)
+        self.assertNotIn("top_finding_class", condition)
         self.assertEqual(
             sum(condition["finding_class_histogram"].values()),
             condition["unique_finding_clusters"],
@@ -1190,8 +1190,6 @@ class BenchmarkMetricsTests(unittest.TestCase):
         unclustered = benchmark.aggregate(bench)["conditions"][0]
         self.assertEqual(unclustered["finding_class_histogram"], {})
         self.assertEqual(unclustered["unique_finding_classes"], 0)
-        self.assertEqual(unclustered["top_finding_class"], "")
-        self.assertEqual(unclustered["top_finding_class_pct"], 0)
 
     def test_renderers_require_a_complete_cluster_class_histogram(self) -> None:
         """Legacy occurrence shares must not label a unique-cluster count."""
@@ -1239,11 +1237,13 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.write_json(run / "report.json", report)
         current_section = benchmark.render_section(report)
         current_crosstab = benchmark.crosstab(self.root / "class-render")
-        self.assertIn("2 classes, top 50% dos", current_section)
-        self.assertIn("2 classes, top 50% dos", current_crosstab)
+        self.assertIn("2 (0 M+, 2 classes)", current_section)
+        self.assertIn("2 (0 M+, 2 classes)", current_crosstab)
+        self.assertNotIn("% dos", current_section)
+        self.assertNotIn("% dos", current_crosstab)
 
         condition["finding_class_histogram"] = {"dos": 3}
-        self.assertNotIn("classes", benchmark.render_section(report))
+        self.assertNotIn("class", benchmark.render_section(report))
 
     def test_finding_cluster_class_is_condition_local_and_missing_is_other(self) -> None:
         attributed = benchmark.attribute_clusters(
@@ -1946,7 +1946,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         for expected in (
             "can appear on both sides if it was reportable in one write-up",
             "Unique rejected findings | Security findings to report",
-            "Unique rejected crashes | Unique Security crashes to report",
+            "Unique rejected crashes | Unique security crashes to report",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)
