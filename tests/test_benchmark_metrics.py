@@ -1267,6 +1267,56 @@ class BenchmarkMetricsTests(unittest.TestCase):
         condition["finding_class_histogram"] = {"dos": 3}
         self.assertNotIn("class", benchmark.render_section(report))
 
+    def test_s4_reports_what_it_did_as_separate_facts(self) -> None:
+        """S4 can file a crash without the campaign machinery ever starting.
+
+        An agent may compile a one-shot harness through bin/probe and probe it
+        directly. That is allowed, but the tree then looks the same whether
+        the managed path worked, was never reached, or was stepped around.
+        The signals stay separate because they disagree in ways one word would
+        hide. Read-only: bin/fuzz run is the sole writer of the campaign state
+        this keys on.
+        """
+        results = self.root / "s4" / "results"
+        (results / "fuzz" / "src").mkdir(parents=True)
+        (results / "fuzz" / "bin").mkdir(parents=True)
+        quiet = benchmark.harvest_fuzz_campaign(results)
+        self.assertEqual(quiet["harnesses_authored"], 0)
+        self.assertEqual(quiet["builds_attempted"], 0)
+        self.assertFalse(quiet["campaign_invoked"])
+        self.assertEqual(quiet["probe_harnesses_observed"], 0)
+
+        # A harness compiled through probe, outside the managed path.
+        cache = results / "scratch-1" / ".harness-cache"
+        cache.mkdir(parents=True)
+        (cache / "harness.c.abcdef.bin").write_bytes(b"\x00")
+        self.assertEqual(
+            benchmark.harvest_fuzz_campaign(results)["probe_harnesses_observed"], 1,
+        )
+
+        # A build that was attempted and failed: the log survives, and no
+        # debug output was ever produced. Counting the log as a success is
+        # exactly the claim the files cannot support.
+        (results / "fuzz" / "src" / "fuzz_app_parse.c").write_text("int main(void){}")
+        (results / "fuzz" / "bin" / "fuzz_app_parse.asan.dead.build.log").write_text("error")
+        failed = benchmark.harvest_fuzz_campaign(results)
+        self.assertEqual(failed["harnesses_authored"], 1)
+        self.assertEqual(failed["builds_attempted"], 1)
+        self.assertEqual(failed["builds_with_debug_output"], 0)
+        self.assertFalse(failed["campaign_invoked"])
+
+        # A build that linked leaves debug output beside its log.
+        (results / "fuzz" / "bin" / "fuzz_app_parse.asan.dead.dSYM").mkdir()
+        self.assertEqual(
+            benchmark.harvest_fuzz_campaign(results)["builds_with_debug_output"], 1,
+        )
+
+        # The campaign itself ran.
+        (results / "fuzz" / "campaign.jsonl").write_text(
+            '{"harness": "fuzz_app_parse", "verdict": "clean"}\n')
+        ran = benchmark.harvest_fuzz_campaign(results)
+        self.assertTrue(ran["campaign_invoked"])
+        self.assertEqual(ran["campaign_slices_recorded"], 1)
     def _finding(self, findings: Path, name: str, file: str, func: str) -> None:
         directory = findings / name
         directory.mkdir(parents=True)

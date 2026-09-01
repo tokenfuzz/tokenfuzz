@@ -586,6 +586,61 @@ def _finding_class_count(condition: dict) -> int:
 UNKNOWN_SCORER = "unknown"
 
 
+def harvest_fuzz_campaign(results_dir: Path) -> dict:
+    """What S4 actually did, as separate facts rather than one verdict.
+
+    S4 can file an accepted crash without the managed campaign ever starting:
+    an agent compiles a one-shot harness through `bin/probe` and probes it
+    directly. That is allowed, but the tree then looks identical whether the
+    campaign machinery worked, was never reached, or was stepped around, and
+    an operator cannot tell which from the artifacts.
+
+    Each signal is reported on its own because they answer different
+    questions and disagree in ways a single word would hide: a failed compile
+    still leaves its build log, so attempts are not successes, and an authored
+    harness that never built is not a campaign that found nothing. Naming them
+    separately also keeps this honest about what the files can prove.
+
+    Read only. `bin/fuzz run` is the sole writer of the campaign state keyed
+    on here, so this reports what happened rather than adding a runtime path
+    that could fail an audit.
+    """
+    results_dir = Path(results_dir)
+    fuzz = results_dir / "fuzz"
+    authored = sorted(
+        path.name for path in (fuzz / "src").glob("*")
+        if path.is_file() and path.suffix in (".c", ".cc", ".cpp", ".rs")
+    )
+    # A build log is written for a failed compile too, so it counts attempts.
+    attempted = sorted(path.name for path in (fuzz / "bin").glob("*.build.log"))
+    # What a successful link leaves behind. The compiled harness itself does
+    # not survive the run, so it cannot serve as the receipt; debug output is
+    # produced only after a link succeeds, and where a toolchain emits none
+    # this reports 0 rather than claiming a failure.
+    linked = sorted(path.name for path in (fuzz / "bin").glob("*.dSYM"))
+    records = 0
+    journal = fuzz / "campaign.jsonl"
+    if journal.is_file():
+        try:
+            records = sum(
+                1 for line in journal.read_text(
+                    encoding="utf-8", errors="replace").splitlines() if line.strip()
+            )
+        except OSError:
+            records = 0
+    return {
+        "harnesses_authored": len(authored),
+        "builds_attempted": len(attempted),
+        "builds_with_debug_output": len(linked),
+        "campaign_invoked": (fuzz / "state.json").is_file() or records > 0,
+        "campaign_slices_recorded": records,
+        "probe_harnesses_observed": len([
+            path for path in results_dir.glob("scratch-*/.harness-cache/*")
+            if path.is_file() and path.suffix == ".bin"
+        ]),
+    }
+
+
 def severity_scorer_versions(bench_dir: Path) -> list[str]:
     """Every severity scorer version behind this run's pooled artifacts.
 
@@ -3410,6 +3465,7 @@ def harvest(
         finding_signatures=finding_clusters,
     )
     # Where the wall went: passive, fails open to None, never a disposition.
+    metrics["s4_campaign"] = harvest_fuzz_campaign(results_dir)
     metrics["telemetry"] = telemetry.summary(results_dir, started_at)
     return metrics
 
