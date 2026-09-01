@@ -198,7 +198,8 @@ def execution_exit_reason(path: str | Path) -> str:
 
 _COVERAGE_GATE_RE = re.compile(
     r"^COVERAGE_GATE: (HIT|MISSED|COVERAGE_UNAVAILABLE|COVERAGE_ENV_FAIL|"
-    r"COVERAGE_EXEC_FAIL)\b(?: - reached (?P<hit>.*))?"
+    r"COVERAGE_EXEC_FAIL|COVERAGE_TIMEOUT|COVERAGE_NO_SANCOV|"
+    r"COVERAGE_SYMBOLIZE_FAIL)\b(?: - reached (?P<hit>.*))?"
     r"(?:.*\(closest: (?P<closest>.*)\))?.*$"
 )
 

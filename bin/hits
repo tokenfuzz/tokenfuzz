@@ -174,6 +174,10 @@ class Hits:
         self.generic_binary: Path | None = None
         self.generic_tree: Path | None = None
         self.generic_reason = ""
+        # Set by the generic replay; browser/js keep their own deadlines.
+        self.deadline_hit = False
+        # Set when the symbolizer itself was killed at its deadline.
+        self.symbolize_timed_out = False
         # When generic_binary is a coverage twin of a probe harness rather than
         # the configured CLI, the harness source it was compiled from: the twin
         # takes the harness's argv shape, and frames from that file are the
@@ -433,7 +437,7 @@ class Hits:
                     key, value = expanded.split("=", 1)
                     environment[key] = value
             with output.open("wb") as stream:
-                run_timeout(
+                completed = run_timeout(
                     [str(self.generic_binary), *self._generic_command_args()],
                     self.args.timeout, env=environment,
                     cwd=sanitizer_run.configured_runner_cwd(
@@ -441,6 +445,10 @@ class Hits:
                     ),
                     stdout=stream, stderr=subprocess.STDOUT,
                 )
+            # A run killed at the deadline dumps no .sancov, which is a
+            # different answer from an instrumented binary that ran and
+            # reached nothing. lib/timeout reserves 124 for the deadline.
+            self.deadline_hit = completed.returncode == 124
             return output, None
         if self.args.mode == "js":
             flags: list[str] = []
@@ -586,6 +594,7 @@ class Hits:
         if timed_out:
             # The tool, not the input: retrying it through the shared path
             # would spend the same budget wedging on the same binary.
+            self.symbolize_timed_out = True
             return [], []
         if lines is None:
             lines = self._offline_symbolize(frames)
@@ -829,6 +838,41 @@ class Hits:
                 return contextlib.nullcontext(str(directory))
         return tempfile.TemporaryDirectory(prefix="hits-cov-")
 
+    def _no_coverage_reason(self, coverage_dir: Path) -> "tuple[str, str]":
+        """Why this run produced no coverage, as a label the gate can record.
+
+        One generic failure covered three unrelated causes, and telling them
+        apart is the difference between "fix the testcase", "fix the build"
+        and "fix the toolchain". The exit code is unchanged — coverage still
+        falls open and the sanitizer still runs — so this sharpens the record
+        without moving a decision.
+        """
+        if self.deadline_hit:
+            return (
+                "COVERAGE_TIMEOUT",
+                f"the instrumented run was killed at its {self.args.timeout}s "
+                "deadline before it could dump coverage",
+            )
+        if not any(coverage_dir.glob("*.sancov")):
+            return (
+                "COVERAGE_NO_SANCOV",
+                "the run wrote no sancov files (an uninstrumented binary, or "
+                "one that never exited cleanly)",
+            )
+        if self.symbolize_timed_out:
+            return (
+                "COVERAGE_SYMBOLIZE_FAIL",
+                "the symbolizer was killed at its "
+                f"{sanitizer.SYMBOLIZE_TIMEOUT_SECONDS}s deadline with the "
+                "run's PCs still unresolved",
+            )
+        return (
+            "COVERAGE_SYMBOLIZE_FAIL",
+            "sancov files were written but none of their PCs resolved to a "
+            "source location (a stripped build, a moved binary, or a "
+            "symbolizer that could not run)",
+        )
+
     def run(self) -> int:
         if self.args.mode == "generic" and self.generic_binary is None:
             # No instrumented tree to measure against. Report it plainly so the
@@ -847,9 +891,10 @@ class Hits:
             all_lines, content = self.symbolize(coverage_dir, parent_pid)
             hits_file = self.write_hits(all_lines, content)
             if not all_lines:
-                print("NO_COVERAGE - no sancov files or empty hit list (check mozconfig + ASAN_OPTIONS coverage=1)")
+                label, detail = self._no_coverage_reason(coverage_dir)
+                print(f"{label} - {detail}")
                 print(f"hits-file: {hits_file}", file=sys.stderr)
-                self.append_verdict("NO_COVERAGE:")
+                self.append_verdict(f"{label}:", detail)
                 return 3
             return self.result(hits_file, all_lines, content)
 

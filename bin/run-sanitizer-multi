@@ -215,11 +215,21 @@ class MultiRun:
             closest = ""
             hit_frame = ""
             unavailable = ""
+            coverage_fail = ""
             with completed.stdout.open(encoding="utf-8", errors="replace") as stream:
                 for line in stream:
                     match = re.match(r"^(?:MISSED . closest reached: |EXEC_FAIL|NO_COVERAGE:? ?)(.*)$", line)
                     if match and not closest:
                         closest = match.group(1).strip()[:200]
+                    # hits names which of the three unrelated coverage
+                    # failures this was; the gate records that rather than one
+                    # label for all of them. The decision is unchanged.
+                    match = re.match(
+                        r"^(COVERAGE_TIMEOUT|COVERAGE_NO_SANCOV|"
+                        r"COVERAGE_SYMBOLIZE_FAIL) - (.*)$", line)
+                    if match and not coverage_fail:
+                        coverage_fail = match.group(1)
+                        closest = closest or match.group(2).strip()[:200]
                     match = re.match(r"^HIT: (.*)$", line)
                     if match and not hit_frame:
                         hit_frame = match.group(1).strip()[:200]
@@ -252,7 +262,10 @@ class MultiRun:
                 print(f"[run-sanitizer-multi] COVERAGE GATE: COVERAGE_UNAVAILABLE - proceeding to ASan ungated (coverage unavailable: {reason})")
                 return None
             if completed.returncode:
-                label = "COVERAGE_EXEC_FAIL" if completed.returncode == 3 else "COVERAGE_ENV_FAIL"
+                if completed.returncode == 3:
+                    label = coverage_fail or "COVERAGE_EXEC_FAIL"
+                else:
+                    label = "COVERAGE_ENV_FAIL"
                 os.environ["HITS_VERDICT"] = label
                 self.emit(f"COVERAGE_GATE: {label} - ASan proceeding ungated (hits rc={completed.returncode}; {closest})")
                 print(f"[run-sanitizer-multi] COVERAGE GATE: {label} - proceeding to ASan ungated (hits rc={completed.returncode}; {closest})")

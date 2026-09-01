@@ -249,7 +249,7 @@ def main(argv: list[str]) -> int:
     p_run.add_argument("--sanitizer-runs", default="", help="SANITIZER_RUNS count for this run (1 default, 5 for --confirm)")
     p_run.add_argument("--duration-seconds", default="", help="wall seconds the target execution took, so a sweep is not counted as one cheap run")
     p_run.add_argument("--reason", default="", help="short diagnostic for a non-evidence verdict, e.g. the child exit code behind an EXEC_FAIL")
-    p_run.add_argument("--coverage", default="", help="coverage gate outcome for this run: HIT, MISSED, UNAVAILABLE, ENV_FAIL, EXEC_FAIL")
+    p_run.add_argument("--coverage", default="", help="coverage gate outcome for this run: HIT, MISSED, UNAVAILABLE, ENV_FAIL, EXEC_FAIL, TIMEOUT, NO_SANCOV, SYMBOLIZE_FAIL")
     p_run.add_argument("--closest", default="", help="the frame coverage reached (HIT) or came closest to (MISSED)")
     p_run.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 

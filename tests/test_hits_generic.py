@@ -512,6 +512,32 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertTrue(timed_out)
         self.assertIsNone(lines)
         self.assertLess(elapsed, 60, "the call ran past its own deadline")
+    def test_a_coverage_failure_names_which_failure_it_was(self) -> None:
+        """One label for three unrelated causes cost a day of diagnosis.
+
+        A run that wrote no sancov, one killed at its deadline, and one whose
+        PCs would not symbolize are different problems with different fixes,
+        and all three read as the same generic failure. The exit code is
+        unchanged — coverage still falls open and the sanitizer still runs —
+        so this sharpens the record without moving a decision.
+        """
+        if sys.platform != "darwin":
+            self.skipTest("this forces the failure through atos, which is macOS-only")
+        shim = Path(self._tmp.name) / "mute-atos"
+        shim.mkdir(exist_ok=True)
+        (shim / "atos").write_text("#!/bin/sh\nexit 0\n")
+        (shim / "atos").chmod(0o755)
+        result = self._run_hits("app_parse", environment={
+            "PATH": f"{shim}:{os.environ['PATH']}",
+        })
+        output = result.stdout + result.stderr
+        # Coverage could not be measured, so the run falls open exactly as
+        # before: hits still exits 3 and the caller still runs the sanitizer.
+        self.assertEqual(result.returncode, 3, output)
+        self.assertIn("COVERAGE_SYMBOLIZE_FAIL", output)
+        # It says which failure, and does not claim the run wrote nothing.
+        self.assertIn("sancov files were written", output)
+        self.assertNotIn("COVERAGE_NO_SANCOV", output)
 
     def test_an_atos_answer_that_does_not_line_up_is_declined_not_mispaired(self) -> None:
         """A short answer list must not shift every address onto a later name.
