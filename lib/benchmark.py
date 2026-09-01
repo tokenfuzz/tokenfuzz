@@ -2590,7 +2590,7 @@ def manifest_errors(manifest: dict) -> list[str]:
         if not isinstance(entries, list):
             errors.append(f"{label} must be a list")
             return
-        keys: set[tuple[str, str]] = set()
+        keys: list[tuple[tuple[str, str], dict]] = []
         for i, e in enumerate(entries):
             where = f"{label}[{i}]"
             if not isinstance(e, dict):
@@ -2620,17 +2620,32 @@ def manifest_errors(manifest: dict) -> list[str]:
             # a stray string like "false" (truthy) must not silently drop it.
             if "findings_only" in e and not isinstance(e["findings_only"], bool):
                 errors.append(f"{where} ({eid or '?'}) findings_only must be true or false")
+            # An optional file pins which source the symbol must be in, so a
+            # same-named function elsewhere cannot claim this entry. A
+            # non-string would be compared against a path and never match,
+            # silently making the entry unreachable.
+            if "file" in e and not (isinstance(e["file"], str) and e["file"].strip()):
+                errors.append(f"{where} ({eid or '?'}) file must be a non-empty string")
             # A trap must declare what a benign occurrence looks like, so the
             # scorer can tell a fired trap from a real crash in the same frame.
             outcome = str(e.get("expected_outcome", "")).strip()
             if need_outcome and not outcome:
                 errors.append(f"{where} ({eid or '?'}) needs an expected_outcome")
+            # The file is part of the identity when an entry pins one, so two
+            # entries sharing a symbol in different files are distinct rather
+            # than a collision — and two that could share a site still are.
             key = (prim, sym) if need_primitive else (outcome, sym)
-            if sym and key in keys:
-                errors.append(
-                    f"{where} ({eid or '?'}) duplicates match key {key!r}")
-            elif sym:
-                keys.add(key)
+            if sym:
+                clash = next(
+                    (seen_entry for seen_key, seen_entry in keys
+                     if seen_key == key and _entries_may_share_a_site(e, seen_entry)),
+                    None,
+                )
+                if clash is not None:
+                    errors.append(
+                        f"{where} ({eid or '?'}) duplicates match key {key!r}")
+                else:
+                    keys.append((key, e))
 
     check(manifest.get("planted_bugs", []), "planted_bugs",
           need_primitive=True, need_outcome=False, want_kind="real")
@@ -2643,17 +2658,20 @@ def manifest_errors(manifest: dict) -> list[str]:
     # access-less key is a wildcard, so it overlaps either access-qualified
     # form and cannot belong to a second bug.
     bugs = manifest.get("planted_bugs", [])
-    runtime_keys: list[tuple[tuple[str, str, str], str]] = []
+    runtime_keys: list[tuple[tuple[str, str, str], str, dict]] = []
     if isinstance(bugs, list):
         for i, bug in enumerate(bugs):
             if not isinstance(bug, dict):
                 continue
             bug_where = f"planted_bugs[{i}]"
+            # A bug's alternates inherit its file: they are aliases for one
+            # source defect, so they sit where it sits.
             candidates = [(
                 str(bug.get("primitive", "")).strip(),
                 str(bug.get("signature_symbol", "")).strip(),
                 "",
                 bug_where,
+                bug,
             )]
             alternates = bug.get("alternate_signatures", [])
             if not isinstance(alternates, list):
@@ -2679,19 +2697,22 @@ def manifest_errors(manifest: dict) -> list[str]:
                     errors.append(f"{where} needs a signature_symbol")
                 if access not in {"", "READ", "WRITE"}:
                     errors.append(f"{where} access must be READ or WRITE")
-                candidates.append((prim, sym, access, where))
-            for prim, sym, access, where in candidates:
+                candidates.append((prim, sym, access, where, bug))
+            for prim, sym, access, where, owner in candidates:
                 if not prim or not sym:
                     continue
                 key = (prim, sym, access)
-                for prior, prior_where in runtime_keys:
+                for prior, prior_where, prior_owner in runtime_keys:
                     same_surface = key[:2] == prior[:2]
                     access_overlaps = not key[2] or not prior[2] or key[2] == prior[2]
-                    if same_surface and access_overlaps:
+                    if (
+                        same_surface and access_overlaps
+                        and _entries_may_share_a_site(owner, prior_owner)
+                    ):
                         errors.append(
                             f"{where} overlaps runtime match key from {prior_where}")
                         break
-                runtime_keys.append((key, where))
+                runtime_keys.append((key, where, owner))
     return errors
 
 
@@ -2704,6 +2725,54 @@ def _finding_report_text(finding_dir: Path) -> str:
             except OSError:
                 continue
     return ""
+
+
+def _same_source_file(one: str, other: str) -> bool:
+    """Whether two source references can name the same file.
+
+    Both qualified — either carries a directory — is an exact comparison: the
+    whole point is that `src/a/parse.c` and `src/b/parse.c` are different
+    files, and matching their basenames would credit one for the other. Only
+    when a side is genuinely basename-only is a basename comparison the best
+    either side can support, which happens because the report extractor falls
+    back to a bare frame basename when nothing richer is in the report.
+    """
+    if not one or not other:
+        return False
+    first, second = Path(one), Path(other)
+    if first.parent != Path(".") and second.parent != Path("."):
+        return first == second
+    return first.name == second.name
+
+
+def _manifest_file_allows(entry: dict, found: str) -> bool:
+    """Whether *found* is the file this manifest entry names, if it names one.
+
+    The findings oracle matched on the fault function alone, so a confirmed
+    finding at `a.c:parse` credited a planted bug at `b.c:parse`. An entry may
+    pin its file, and only a manifest that says so is held to it.
+
+    An entry that pins a file and a report that names none do not match. This
+    is ground truth: a report with no identity evidence is unattributed —
+    open-world — rather than credited to a bug it never located.
+    """
+    declared = str(entry.get("file", "")).strip()
+    if not declared:
+        return True
+    return _same_source_file(declared, found)
+
+
+def _entries_may_share_a_site(one: dict, other: dict) -> bool:
+    """Whether two manifest entries could be pinned to the same file.
+
+    An unpinned entry is a wildcard: it could be anywhere, so it can collide
+    with anything. Two pinned entries in different files cannot.
+    """
+    first = str(one.get("file", "")).strip()
+    second = str(other.get("file", "")).strip()
+    if not first or not second:
+        return True
+    return _same_source_file(first, second)
 
 
 def _manifest_symbols(entry: dict) -> set[str]:
@@ -2761,30 +2830,42 @@ def score_findings_ground_truth(
         and str(t.get("expected_outcome", "")).strip() in ("", "clean")
     ]
     # A trap planted in the same function as a real bug cannot fire here: the
-    # oracle keys on the function alone, and a report's class vocabulary does
-    # not map onto the manifest's primitives. Say so rather than score it.
-    real_symbols = set().union(*(_manifest_symbols(b) for b in real)) if real else set()
+    # oracle keys on the function (refined by `file` where an entry pins one),
+    # and a report's class vocabulary does not map onto the manifest's
+    # primitives. Say so rather than score it.
     ambiguous = sorted(
-        str(t.get("id", "")) for t in traps
-        if _manifest_symbols(t) & real_symbols
+        str(trap.get("id", "")) for trap in traps
+        if any(
+            _manifest_symbols(trap) & _manifest_symbols(bug)
+            and _entries_may_share_a_site(trap, bug)
+            for bug in real
+        )
     )
     _count, names = count_confirmed_findings(findings_dir)
-    evidence: list[tuple[str, str]] = []
+    evidence: list[tuple[str, str, str]] = []
     for name in names:
         text = _finding_report_text(findings_dir / name)
-        _file, func = finding_signature.extract_location(text, target_root)
-        evidence.append((name, func))
+        file, func = finding_signature.extract_location(text, target_root)
+        evidence.append((name, file, func))
 
-    def score_subset(items: list[tuple[str, str]]) -> dict:
+    def score_subset(items: list[tuple[str, str, str]]) -> dict:
         detected: dict[str, list[str]] = {}
         traps_fired: dict[str, list[str]] = {}
         open_world: list[str] = []
-        for name, func in items:
-            hit = next((b for b in real if func and func in _manifest_symbols(b)), None)
+        for name, file, func in items:
+            hit = next((
+                b for b in real
+                if func and func in _manifest_symbols(b)
+                and _manifest_file_allows(b, file)
+            ), None)
             if hit:
                 detected.setdefault(str(hit["id"]), []).append(name)
                 continue
-            trap = next((t for t in traps if func and func in _manifest_symbols(t)), None)
+            trap = next((
+                t for t in traps
+                if func and func in _manifest_symbols(t)
+                and _manifest_file_allows(t, file)
+            ), None)
             if trap:
                 traps_fired.setdefault(str(trap["id"]), []).append(name)
             else:
@@ -2809,7 +2890,7 @@ def score_findings_ground_truth(
     conds = list(conditions) if conditions is not None else sorted(set(members.values()))
     if conds:
         result["by_condition"] = {
-            cond: score_subset([(n, f) for (n, f) in evidence if members.get(n) == cond])
+            cond: score_subset([row for row in evidence if members.get(row[0]) == cond])
             for cond in conds
         }
     return result

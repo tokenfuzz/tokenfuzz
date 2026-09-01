@@ -1267,6 +1267,114 @@ class BenchmarkMetricsTests(unittest.TestCase):
         condition["finding_class_histogram"] = {"dos": 3}
         self.assertNotIn("class", benchmark.render_section(report))
 
+    def _finding(self, findings: Path, name: str, file: str, func: str) -> None:
+        directory = findings / name
+        directory.mkdir(parents=True)
+        (directory / "report.md").write_text(
+            "## Fields\n\n"
+            f"| File | `{file}` |\n"
+            f"| Function | `{func}` |\n",
+            encoding="utf-8",
+        )
+        validation_receipt.write(
+            directory, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
+
+    def test_a_finding_does_not_credit_a_bug_planted_in_another_file(self) -> None:
+        """Same function name, different file, is not the same bug.
+
+        The oracle matched on the fault function alone, so a finding at
+        a.c:parse credited a planted bug at b.c:parse. An entry that pins its
+        file is now held to it.
+        """
+        findings = self.root / "oracle" / "findings"
+        self._finding(findings, "FIND-0001", "src/b.c", "parse")
+        manifest = {"planted_bugs": [{
+            "id": "planted-in-a", "kind": "real", "primitive": "dos",
+            "signature_symbol": "parse", "file": "src/a.c",
+            "findings_only": True,
+        }]}
+        scored = benchmark.score_findings_ground_truth(findings, manifest)
+        self.assertEqual(scored["overall"]["detected"], [])
+        self.assertEqual(scored["overall"]["missed"], ["planted-in-a"])
+        # Not a precision failure either — it is simply someone else's bug.
+        self.assertEqual(scored["overall"]["open_world_findings"], ["FIND-0001"])
+
+        # The same finding against the file it really is in still counts.
+        manifest["planted_bugs"][0]["file"] = "src/b.c"
+        scored = benchmark.score_findings_ground_truth(findings, manifest)
+        self.assertEqual(scored["overall"]["detected"], ["planted-in-a"])
+
+    def test_a_basename_only_report_still_matches_a_pinned_path(self) -> None:
+        """The extractor yields a bare basename when nothing richer is there.
+
+        Comparing basenames is the best either side can support then, so it
+        must not cost a real detection. A report that names no file at all is
+        a different case: with no identity evidence it is unattributed.
+        """
+        findings = self.root / "oracle-shapes" / "findings"
+        self._finding(findings, "FIND-0001", "chtio.c", "cht_read")
+        manifest = {"planted_bugs": [{
+            "id": "pinned", "kind": "real", "primitive": "double-free",
+            "signature_symbol": "cht_read", "file": "src/chtio.c",
+            "findings_only": True,
+        }]}
+        scored = benchmark.score_findings_ground_truth(findings, manifest)
+        self.assertEqual(scored["overall"]["detected"], ["pinned"], "basename must match a path")
+
+        fileless = self.root / "oracle-fileless" / "findings"
+        directory = fileless / "FIND-0001"
+        directory.mkdir(parents=True)
+        (directory / "report.md").write_text(
+            "## Fields\n\n| Function | `cht_read` |\n", encoding="utf-8")
+        validation_receipt.write(
+            directory, kind="finding", state="reportable",
+            attacker_controls=["bytes"],
+        )
+        scored = benchmark.score_findings_ground_truth(fileless, manifest)
+        self.assertEqual(scored["overall"]["detected"], [])
+        self.assertEqual(
+            scored["overall"]["open_world_findings"], ["FIND-0001"],
+            "a report that locates nothing is unattributed, not credited",
+        )
+        # Unattributed is not a precision failure either.
+        self.assertEqual(scored["overall"]["false_positive_findings"], 0)
+
+    def test_same_basename_in_another_directory_is_a_different_file(self) -> None:
+        """Two qualified paths are compared whole: that is the point."""
+        findings = self.root / "oracle-dirs" / "findings"
+        self._finding(findings, "FIND-0001", "src/b/parse.c", "parse")
+        manifest = {"planted_bugs": [{
+            "id": "in-a", "kind": "real", "primitive": "dos",
+            "signature_symbol": "parse", "file": "src/a/parse.c",
+            "findings_only": True,
+        }]}
+        scored = benchmark.score_findings_ground_truth(findings, manifest)
+        self.assertEqual(scored["overall"]["detected"], [])
+
+    def test_two_bugs_sharing_a_symbol_in_different_files_are_distinct(self) -> None:
+        """Pinning a file makes them separate entries, not a collision."""
+        distinct = {"planted_bugs": [
+            {"id": "a", "kind": "real", "primitive": "dos",
+             "signature_symbol": "parse", "file": "src/a.c"},
+            {"id": "b", "kind": "real", "primitive": "dos",
+             "signature_symbol": "parse", "file": "src/b.c"},
+        ]}
+        self.assertEqual(benchmark.manifest_errors(distinct), [])
+        # Without files they could be the same site, so they still collide.
+        for bug in distinct["planted_bugs"]:
+            bug.pop("file")
+        self.assertTrue(benchmark.manifest_errors(distinct))
+
+
+
+
+
+
+
+
+
     def _scored_run(self, name: str, versions: dict[str, str]) -> tuple[Path, dict]:
         """A run whose pooled findings carry the given scorer versions."""
         run = self.root / name / "codex" / "run1"

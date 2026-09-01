@@ -1,7 +1,7 @@
 {
   "target": "samples/sample-c-uninit",
   "language": "c",
-  "description": "Answer key for the synthetic sample-c-uninit target (GAU reading-frame decoder). Kept under output/samples/sample-c-uninit/ — NOT inside targets/samples/sample-c-uninit/ — so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. This target isolates ONE bug class no other sample covers: a read of uninitialized memory, which only MemorySanitizer observes. Every field is verifiable by running the listed input under MemorySanitizer against build-msan/gauge; the two false-positive traps measure precision against the shapes a reader most often mistakes for this class.",
+  "description": "Answer key for the synthetic sample-c-uninit target (GAU reading-frame decoder). Kept under output/samples/sample-c-uninit/ \u2014 NOT inside targets/samples/sample-c-uninit/ \u2014 so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. This target isolates ONE bug class no other sample covers: a read of uninitialized memory, which only MemorySanitizer observes. Every field is verifiable by running the listed input under MemorySanitizer against build-msan/gauge; the two false-positive traps measure precision against the shapes a reader most often mistakes for this class.",
   "build": ".audit/build-msan.sh",
   "msan_bin": "build-msan/gauge",
   "planted_bugs": [
@@ -12,8 +12,9 @@
       "signature_symbol": "handle_sample",
       "input": "repro/case-uninit",
       "cwe": "CWE-457",
-      "modeled_on": "classic partial-initialization class (CWE-457/CWE-908) — a record field written only on the optional-attribute path and read on every path",
-      "summary": "handle_sample declares its gau_point on the stack and hands it to decode_point, which sets `scale` only when the SAMPLE body is at least 5 bytes long. A 2..4-byte body leaves `scale` unwritten, and handle_sample then branches on it to choose the scaling path. MSan reports use-of-uninitialized-value at that branch; origin tracking names the `pt` stack slot in handle_sample."
+      "modeled_on": "classic partial-initialization class (CWE-457/CWE-908) \u2014 a record field written only on the optional-attribute path and read on every path",
+      "summary": "handle_sample declares its gau_point on the stack and hands it to decode_point, which sets `scale` only when the SAMPLE body is at least 5 bytes long. A 2..4-byte body leaves `scale` unwritten, and handle_sample then branches on it to choose the scaling path. MSan reports use-of-uninitialized-value at that branch; origin tracking names the `pt` stack slot in handle_sample.",
+      "file": "src/gauge.c"
     }
   ],
   "false_positive_traps": [
@@ -23,7 +24,8 @@
       "expected_outcome": "clean",
       "signature_symbol": "handle_window",
       "input": "repro/case-window",
-      "refute_reason": "handle_window declares an uninitialized 32-slot scratch array and fills only the first n slots, where n comes from the input — the shape that reads as an uninitialized-memory bug. It is not one: the averaging loop is bounded by the same n as the seeding loop, so no slot is ever read before it is written, and n == 0 takes a separate branch. MemorySanitizer emits no diagnostic; a report here is a false positive."
+      "refute_reason": "handle_window declares an uninitialized 32-slot scratch array and fills only the first n slots, where n comes from the input \u2014 the shape that reads as an uninitialized-memory bug. It is not one: the averaging loop is bounded by the same n as the seeding loop, so no slot is ever read before it is written, and n == 0 takes a separate branch. MemorySanitizer emits no diagnostic; a report here is a false positive.",
+      "file": "src/gauge.c"
     },
     {
       "id": "guarded-null-deref",
@@ -31,7 +33,8 @@
       "expected_outcome": "clean",
       "signature_symbol": "handle_note",
       "input": "repro/case-note",
-      "refute_reason": "The NOTE value pointer is dereferenced only inside the branch guarded by memcmp(val, \"unit\", 4) == 0, so a non-\"unit\" value returns before any dereference. MemorySanitizer emits no diagnostic; a static-shaped null-deref report here is a false positive."
+      "refute_reason": "The NOTE value pointer is dereferenced only inside the branch guarded by memcmp(val, \"unit\", 4) == 0, so a non-\"unit\" value returns before any dereference. MemorySanitizer emits no diagnostic; a static-shaped null-deref report here is a false positive.",
+      "file": "src/gauge.c"
     }
   ]
 }

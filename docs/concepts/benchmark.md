@@ -403,7 +403,17 @@ overlapping aliases make the manifest fail validation.
 A planted bug marked `findings_only: true` never crashes; it surfaces under
 `findings/`. Those are scored by a second oracle beside the crash one: a
 confirmed finding is credited when the function it names as at fault is the
-bug's `signature_symbol`, a confirmed finding at a clean-outcome trap's
+bug's `signature_symbol`. An entry may also pin a `file`, which the finding
+must agree with — a report at `a.c:parse` must not credit a bug planted at
+`b.c:parse`. Only an entry that names a file is held to it. Two qualified
+paths are compared whole, so `src/a/parse.c` and `src/b/parse.c` are different
+files; a basename is compared only when one side is genuinely basename-only,
+which happens because a report's location can come from a bare stack frame. A
+report that locates nothing against an entry that pins a file is
+**open-world** rather than credited — with no identity evidence it is
+unattributed, not a true positive. A pinned file is part of an entry's
+identity, so two bugs sharing a symbol in different files are distinct rather
+than a duplicate match key. A confirmed finding at a clean-outcome trap's
 symbol counts against precision (a trap that expects an abort refutes that
 crash, not a source finding there), and every other confirmed finding is listed
 as **open-world** — real code has bugs the answer key never planted — without
