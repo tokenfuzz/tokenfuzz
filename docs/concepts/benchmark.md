@@ -305,6 +305,7 @@ found it. If no sanitizer-confirmed crash exists, it says so.
 | `Unique rejected crashes` | Crash candidates triage rejected, after stack/signature clustering merges duplicates where evidence permits. `up to N` marks an upper bound. |
 | `Unique security crashes to report` | Distinct reportable sanitizer-signature clusters with real sanitizer output on disk, shown `N (M M+)`: N clusters, M scored Medium or higher. The existing crash-cluster link includes reportable crashes at every numeric severity, including Low. A `K retained` term counts reproduced crashes a reviewer placed outside the declared attacker controls — real defects kept in the cell with no security credit. |
 | `Top crash severity` | Highest crash severity observed in the cell. |
+| `Run` | The run's UTC id. A `‡` marks a run whose severities came from a superseded scorer: the same artifacts score differently once the rules change, so its `M+` counts are not on the same scale as an unmarked row and the two must not be compared or summed. `bin/benchmark --regenerate` rescores the run and clears the mark. |
 
 **Efficiency** follows the scoreboard whenever a cell recorded any of it, and
 says where each condition's wall went. Every value is a median over completed

@@ -25,6 +25,7 @@ import benchmark
 import llm_invoke
 import llm_usage
 import report_identity
+import severity_receipt
 import triage_validate
 import validation_receipt
 
@@ -1265,6 +1266,96 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
         condition["finding_class_histogram"] = {"dos": 3}
         self.assertNotIn("class", benchmark.render_section(report))
+
+    def _scored_run(self, name: str, versions: dict[str, str]) -> tuple[Path, dict]:
+        """A run whose pooled findings carry the given scorer versions."""
+        run = self.root / name / "codex" / "run1"
+        for artifact, version in versions.items():
+            self.write_json(
+                run / "pool" / "findings" / artifact / "severity.json",
+                {"level": "Medium", "score": 4.6, "scorer_version": version},
+            )
+        condition = {
+            "condition": "harness",
+            "replicates_done": 1, "replicates_total": 1, "wall_median": 60,
+            "unique_finding_clusters": 1, "medium_plus_findings": 1,
+            "unique_crash_clusters": 0, "medium_plus_bugs": 0,
+            "top_severity_level": "—", "tokens": {},
+            "validation_waterfall": {
+                "crashes": {"candidates": 0, "lanes": {}},
+                "findings": {"candidates": 1, "lanes": {"reportable": 1}},
+            },
+        }
+        report = {
+            "run": {
+                "runid": "run1", "target": "sample", "backend": "codex",
+                "model": "gpt-test", "replicates": 1, "budget_wall": 60,
+            },
+            "bench_dir": str(run),
+            "conditions": [condition],
+            "crash_clusters": [],
+        }
+        self.write_json(run / "report.json", report)
+        return run, report
+
+    def test_a_row_scored_by_a_superseded_scorer_says_so(self) -> None:
+        """M+ from another scorer is a different scale, and must not read as one.
+
+        The page accumulates rows for months. When the scoring rules change,
+        the same artifacts yield a different M+, so an unlabelled old row
+        invites a comparison that is not valid.
+        """
+        run, report = self._scored_run("stale-scorer", {"FIND-0001": "severity-v0-ancient"})
+        rendered = benchmark.crosstab(self.root / "stale-scorer")
+        self.assertIn("‡", rendered)
+        self.assertIn("severity-v0-ancient", rendered)
+        self.assertIn(severity_receipt.SCORER_DECISION_VERSION, rendered)
+        self.assertIn("not on the same scale", rendered)
+        # The per-run page carries the same warning in its own words.
+        self.assertIn("severity-v0-ancient", benchmark.render_section(report))
+
+    def test_a_row_scored_by_the_current_scorer_carries_no_mark(self) -> None:
+        """Silence is the common case; a mark on every row would say nothing."""
+        run, report = self._scored_run(
+            "current-scorer",
+            {"FIND-0001": severity_receipt.SCORER_DECISION_VERSION},
+        )
+        rendered = benchmark.crosstab(self.root / "current-scorer")
+        self.assertNotIn("‡", rendered)
+        self.assertNotIn("not on the same scale", rendered)
+        self.assertNotIn("not on the same scale", benchmark.render_section(report))
+
+    def test_scorer_versions_come_from_the_receipts_not_the_report(self) -> None:
+        """A report written before the field existed still has its receipts.
+
+        Reading the pool is what makes the mark appear on runs that predate
+        the record; a run with no pool at all stays silent rather than
+        guessing a scale it cannot know.
+        """
+        run, report = self._scored_run(
+            "receipt-scan",
+            {"FIND-0001": "severity-v0-ancient", "FIND-0002": "severity-v0-ancient"},
+        )
+        self.assertEqual(
+            benchmark.severity_scorer_versions(run), ["severity-v0-ancient"],
+        )
+        # A receipt that cannot name its scorer reads as unknown, never as
+        # the current one: silence there would let the row pass as current.
+        (run / "pool" / "findings" / "FIND-0003").mkdir(parents=True)
+        (run / "pool" / "findings" / "FIND-0003" / "severity.json").write_text("{not json")
+        self.write_json(run / "pool" / "findings" / "FIND-0004" / "severity.json", {"level": "Low"})
+        self.assertEqual(
+            benchmark.severity_scorer_versions(run),
+            ["severity-v0-ancient", benchmark.UNKNOWN_SCORER],
+        )
+        self.assertIn(
+            benchmark.UNKNOWN_SCORER,
+            benchmark._outdated_scorers({}, run),
+            "an unnameable scorer must not read as the current one",
+        )
+        self.assertEqual(benchmark.severity_scorer_versions(self.root / "nope"), [])
+        # No report field and no pool: nothing is claimed either way.
+        self.assertEqual(benchmark._outdated_scorers({}, None), [])
 
     def test_finding_cluster_class_is_condition_local_and_missing_is_other(self) -> None:
         attributed = benchmark.attribute_clusters(

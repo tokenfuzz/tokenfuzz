@@ -52,6 +52,7 @@ import crash_bundle
 import finding_signature
 import llm_usage
 import report_identity
+import severity_receipt
 import telemetry
 import triage_validate
 import validation_receipt
@@ -577,6 +578,64 @@ def _finding_class_count(condition: dict) -> int:
     if total != unique:
         return 0
     return len(histogram)
+
+
+#: Stands in for a severity receipt that exists but cannot name its scorer.
+#: It is never the current version, so such a row is marked rather than read
+#: as though today's rules produced it.
+UNKNOWN_SCORER = "unknown"
+
+
+def severity_scorer_versions(bench_dir: Path) -> list[str]:
+    """Every severity scorer version behind this run's pooled artifacts.
+
+    `M+` counts one thing: artifacts the scorer put at Medium or higher. When
+    the scorer's own rules change, the same artifact set yields a different
+    count, so two rows scored by different versions are not comparable even
+    though the column header is identical. The page accumulates rows across
+    months, which is exactly where that goes unnoticed, so record what scored
+    the numbers rather than leaving a reader to assume one scale.
+
+    Read from the artifacts themselves — the scorer stamps every severity.json
+    — so a run regenerated under a newer scorer re-reports honestly and a
+    partial aggregate with no pool yet simply says nothing.
+    """
+    versions: set[str] = set()
+    pool = bench_dir / "pool"
+    if not pool.is_dir():
+        return []
+    for receipt in pool.glob("*/*/severity.json"):
+        # A receipt that cannot say what scored it is not evidence that the
+        # current scorer did. Skipping it would let the row read as current,
+        # which is the one answer the file does not support.
+        try:
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            versions.add(UNKNOWN_SCORER)
+            continue
+        version = payload.get("scorer_version")
+        versions.add(version if isinstance(version, str) and version
+                     else UNKNOWN_SCORER)
+    return sorted(versions)
+
+
+def _outdated_scorers(report: dict, bench_dir: "Path | None" = None) -> list[str]:
+    """Scorer versions behind *report* that are not the one running now.
+
+    A report written before the run recorded its scorer still has the receipts
+    on disk, so fall back to reading them rather than showing a stale row as
+    if it were current. Silence is reserved for the case where neither the
+    report nor a pool can answer.
+    """
+    recorded = report.get("severity_scorers")
+    if not isinstance(recorded, list):
+        recorded = severity_scorer_versions(bench_dir) if bench_dir else []
+    return sorted(
+        version for version in recorded
+        if isinstance(version, str)
+        and version
+        and version != severity_receipt.SCORER_DECISION_VERSION
+    )
 
 
 def _condition_pool_dir(bench_dir: Path, condition: str, kind: str) -> Path:
@@ -4578,6 +4637,10 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         "bench_dir": str(bench_dir),
         "run": run_meta,
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        # What scored the M+ columns. A row scored by an older scorer is not
+        # comparable with a newer one; the page says so rather than implying
+        # one scale across every run it has accumulated.
+        "severity_scorers": severity_scorer_versions(bench_dir),
         "conditions": conditions,
         "crash_clusters": crash_attr["clusters"],
         "finding_clusters": finding_attr["clusters"],
@@ -5617,6 +5680,17 @@ def render_section(report: dict) -> str:
     if any(c.get("incomplete_observed") for c in conditions):
         lines.append("")
     baseline_label = _condition_label("model-direct", backend)
+    # A run scored by a superseded scorer says so: the same artifacts yield a
+    # different M+ once the scoring rules change, so the number cannot be read
+    # beside one scored today without saying which scale it is on.
+    stale_scorers = _outdated_scorers(report, bench_dir)
+    scorer_note = (
+        "Those severities came from "
+        + ", ".join(f"`{version}`" for version in stale_scorers)
+        + f", not the current `{severity_receipt.SCORER_DECISION_VERSION}`, "
+        "so this run's `M+` counts are not on the same scale as a run scored "
+        "today; `bin/benchmark --regenerate` rescores it. "
+    ) if stale_scorers else ""
     lines.append(
         "> **How to read this.** Each condition ran **Replicates** times "
         "under the same per-cell time budget; **Wall (h)** is the median "
@@ -5652,7 +5726,7 @@ def render_section(report: dict) -> str:
         "retained on disk but never enters these columns; the crash cell says "
         "how many with a `K retained` term. "
         "**Top crash severity** is the highest crash "
-        "severity in the row. "
+        "severity in the row. " + scorer_note +
         f"`{baseline_label}` is a bare \"find the vulnerabilities\" prompt "
         "with no harness around it, so a large raw crash count there is "
         "mostly repeated noise. `tokenfuzz` is the audit harness — triage, "
@@ -6015,6 +6089,9 @@ def crosstab(bench_root: Path) -> str:
                 "bench_dir": Path(bench_dir) if bench_dir else None,
                 "provisional": bool(report.get("provisional")),
                 "provisional_reason": str(report.get("provisional_reason") or ""),
+                "outdated_scorers": _outdated_scorers(
+                    report, Path(bench_dir) if bench_dir else None,
+                ),
             })
 
     lines: list[str] = []
@@ -6103,7 +6180,8 @@ def crosstab(bench_root: Path) -> str:
         target_cell = _target_cell(target, run.get("target_sha"), stacked=True)
         bench_dir = entry["row"]["bench_dir"]
         provisional = entry["row"]["provisional"]
-        run_cell = _run_cell(runid)
+        outdated_scorers = entry["row"]["outdated_scorers"]
+        run_cell = _run_cell(runid) + ("&nbsp;‡" if outdated_scorers else "")
         if c is None:
             lines.append(
                 f"| {target_cell} | {backend_cell} | — | {run_cell} "
@@ -6406,6 +6484,20 @@ def crosstab(bench_root: Path) -> str:
         "- **Top crash severity** — the highest-severity reportable crash in the "
         "row, or `—` when the row has none."
     )
+    stale = sorted({
+        version for entry in flat_rows
+        for version in entry["row"]["outdated_scorers"]
+    })
+    if stale:
+        lines.append(
+            f"- **`\u2021`** — this row was scored by "
+            f"{', '.join(f'`{version}`' for version in stale)}, not by the "
+            f"current `{severity_receipt.SCORER_DECISION_VERSION}`. The "
+            "scoring rules changed since, so its `M+` counts are not on the "
+            "same scale as an unmarked row and the two should not be compared "
+            "or summed. `bin/benchmark --regenerate` rescores the run and "
+            "clears the mark."
+        )
     lines.append("")
 
     lines.append("**Tokens and cost.**")
