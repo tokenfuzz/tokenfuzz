@@ -224,6 +224,12 @@ def _state_strategy_arg(context: PromptContext, agent: int) -> str:
 # card. The complete evidence remains in the rejected artifact.
 _RULED_OUT_ROUTES_SHOWN = 3
 
+# Same bound, for the same reason, on blocked-card proofs: enough to recognise
+# a wall a peer already hit, not enough to crowd out the card itself. The note
+# is truncated because an agent writes it free-form and some run long.
+_BLOCKED_ROUTES_SHOWN = 3
+_BLOCKED_NOTE_CHARS = 300
+
 
 def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
     """Trigger routes a source-review gate already disproved on this file.
@@ -289,6 +295,61 @@ def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
     ]
 
 
+def _blocked_routes(context: PromptContext, card_id: str) -> list[str]:
+    """Cards this run already blocked, and the proof that blocked them.
+
+    Blocking retires one card, and the queue never offers that card again. It
+    says nothing about the sibling cards behind it, so when the wall is the
+    configured runner rather than the file — a route the pinned invocation
+    cannot select at all — each sibling buys the same disproof again with a
+    whole session. One measured run spent 26 sessions that way, several of
+    them re-reading the same option dispatch to reach the same conclusion.
+
+    The note is already the proof: `update-card --status blocked` refuses an
+    empty one. So this shows what a peer wrote, not a verdict derived from it,
+    and rows the harness generated for itself (which carry a ``source``) stay
+    out — an agent's own words are the ones worth reading.
+
+    Advisory only. Nothing here closes a card or excuses skipping one: the
+    reader is told to check the claim, because a wrong block is a lost surface
+    and the disproof is a peer's reading, not a gate's.
+    """
+    rows = workqueue.read_jsonl(
+        workqueue.state_dir(context.results_dir) / "claims.jsonl"
+    )
+    seen: set[str] = set()
+    shown: list[str] = []
+    for row in reversed(rows):
+        if str(row.get("status", "")) != "blocked" or row.get("source"):
+            continue
+        blocked_id = str(row.get("card_id", ""))
+        note = str(row.get("note", "")).strip()
+        if not blocked_id or blocked_id == card_id or not note:
+            continue
+        if note in seen:
+            continue
+        seen.add(note)
+        if len(note) > _BLOCKED_NOTE_CHARS:
+            note = note[:_BLOCKED_NOTE_CHARS].rstrip() + "…"
+        shown.append(f"  - `{blocked_id}` — {note}")
+        if len(shown) >= _BLOCKED_ROUTES_SHOWN:
+            break
+    if not shown:
+        return []
+    return [
+        "- **Cards already blocked in this run** (most recent first), with "
+        "the proof the agent recorded:",
+        *shown,
+        "  Read these before spending the session re-deriving one. A peer's "
+        "proof is a lead, not a verdict on your card: if it looks like the "
+        "same wall, check it against *this* card's route first — the runner "
+        "facts it cites are cheap to re-read — and cite the card you relied "
+        "on when you record what you found. They bound a *route*, not a file: "
+        "a different attacker-controlled path to the same code still counts, "
+        "and a block you can show to be wrong is worth arguing.",
+    ]
+
+
 def work_card_directive(context: PromptContext, agent: int, *, force: bool = False) -> str:
     cards = context.results_dir / "work-cards.jsonl"
     if not cards.is_file() or not cards.stat().st_size:
@@ -346,6 +407,7 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
     lines += workqueue.peer_fix_markdown(card)
     lines += _ruled_out_routes(context, card.get("file", ""))
+    lines += _blocked_routes(context, str(card.get("id", "")))
     lines += callgraph.block_for(
         context.results_dir, card.get("file", ""), context.target_root,
     )

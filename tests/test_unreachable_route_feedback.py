@@ -235,5 +235,99 @@ class UnreachableRouteFeedbackTests(unittest.TestCase):
         self.assertEqual(sum(1 for line in lines if "Same route" in line), 1)
 
 
+class BlockedCardProofTests(unittest.TestCase):
+    """A card blocked on the configured runner must warn the cards behind it.
+
+    Blocking retires one card and the queue never offers it again, so the
+    proof dies with it. When the wall is the runner rather than the file —
+    a route the pinned invocation cannot select at all — every sibling card
+    buys the same disproof again with a whole session. One measured run spent
+    26 sessions that way, several re-reading the same option dispatch.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="blocked-cards-")
+        self.root = Path(self.temporary.name)
+        self.results = self.root / "results"
+        (self.results / "state").mkdir(parents=True)
+        self.target = self.root / "target"
+        self.target.mkdir()
+        self.references = self.root / "references"
+        self.references.mkdir()
+        self.ctx = workqueue.Context(
+            script_root=ROOT, target_root=self.target,
+            target_slug="sampleproj", results_dir=self.results,
+            repo_type="none",
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def context(self) -> prompt.PromptContext:
+        return prompt.PromptContext(
+            results_dir=self.results, target_root=self.target,
+            target_slug="sampleproj", reference_dir=self.references,
+            num_agents=1, repo_type="none",
+        )
+
+    def block(self, card_id: str, note: str) -> None:
+        """Block a card the way an agent does, through the real writer."""
+        workqueue.update_card_status(self.ctx, card_id, "blocked", "1", note)
+
+    def test_a_peers_block_proof_reaches_the_next_card(self) -> None:
+        self.block("WORK-aaa", "Pinned runner args carry no --xinclude, so bytes "
+                               "cannot reach the include path.")
+        lines = "\n".join(prompt._blocked_routes(self.context(), "WORK-bbb"))
+        self.assertIn("Cards already blocked in this run", lines)
+        self.assertIn("WORK-aaa", lines)
+        self.assertIn("--xinclude", lines)
+        # Advisory, never a licence to skip: a peer's proof is a lead the
+        # reader must check against this card before acting on it.
+        self.assertIn("worth arguing", lines)
+        self.assertIn("not a verdict on your card", lines)
+        self.assertNotIn("immediately", lines)
+
+    def test_a_card_is_never_warned_about_itself(self) -> None:
+        self.block("WORK-aaa", "no --xinclude in the pinned runner")
+        self.assertEqual(prompt._blocked_routes(self.context(), "WORK-aaa"), [])
+
+    def test_only_an_agents_own_proof_is_shown(self) -> None:
+        """A harness-generated env-block row is not a peer's reading."""
+        workqueue._record_env_blocked_card(
+            self.ctx, "WORK-ccc", "1", "env-blocked hypothesis", "probe",
+        )
+        self.assertEqual(prompt._blocked_routes(self.context(), "WORK-bbb"), [])
+
+    def test_repeated_and_excess_proofs_do_not_crowd_the_card(self) -> None:
+        for index in range(6):
+            self.block(f"WORK-{index}", "the same wall, restated")
+        lines = prompt._blocked_routes(self.context(), "WORK-bbb")
+        # One distinct note, shown once, however many cards recorded it.
+        self.assertEqual(sum(1 for line in lines if "restated" in line), 1)
+        for index in range(6, 12):
+            self.block(f"WORK-{index}", f"a distinct wall {index}")
+        lines = prompt._blocked_routes(self.context(), "WORK-bbb")
+        self.assertEqual(
+            sum(1 for line in lines if line.startswith("  - ")),
+            prompt._BLOCKED_ROUTES_SHOWN,
+        )
+        # Most recent first: the newest distinct proof is present.
+        self.assertIn("a distinct wall 11", "\n".join(lines))
+
+    def test_a_long_proof_is_truncated_not_dropped(self) -> None:
+        self.block("WORK-aaa", "x" * (prompt._BLOCKED_NOTE_CHARS + 200))
+        lines = prompt._blocked_routes(self.context(), "WORK-bbb")
+        proof = next(line for line in lines if line.startswith("  - "))
+        self.assertIn("…", proof)
+        # The bounded part is the note an agent wrote free-form, not the
+        # fixed guidance around it.
+        self.assertLessEqual(
+            len(proof), prompt._BLOCKED_NOTE_CHARS + len("  - `WORK-aaa` — …"),
+        )
+
+    def test_a_run_with_no_blocked_card_adds_nothing(self) -> None:
+        self.assertEqual(prompt._blocked_routes(self.context(), "WORK-bbb"), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
