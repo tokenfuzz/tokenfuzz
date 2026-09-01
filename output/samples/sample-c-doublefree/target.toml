@@ -1,0 +1,21 @@
+# target.toml — sample-c-doublefree synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-c-doublefree"
+upstream_url  = "synthetic — TokenFuzz bug-class benchmark (C, double-free)"
+build_system  = "cmake"
+
+# Direct CLI binary — what `bin/run-asan generic` runs by default.
+asan_bin      = "build-asan/chtio"
+
+includes      = ["include"]
+
+is_browser    = "0"
+
+[threat_model]
+# The reader consumes an attacker-supplied CHT byte stream through a single
+# stateless entry point (cht_read); nothing else is attacker-controlled.
+attacker_controls = ["bytes"]
+
+[sanitizer]
+enabled = ["asan"]

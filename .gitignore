@@ -39,6 +39,7 @@ targets/samples/sample-*/node_modules/
 targets/samples/sample-*/.build/
 targets/samples/sample-*/.audit/*
 !targets/samples/sample-*/.audit/build.sh
+!targets/samples/sample-*/.audit/build-*.sh
 # Compiled C-extension artifacts (sample-python's reportnative build)
 targets/samples/sample-*/build/
 targets/samples/sample-*/*.so

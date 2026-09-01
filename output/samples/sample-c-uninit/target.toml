@@ -1,0 +1,25 @@
+# target.toml — sample-c-uninit synthetic benchmark target (hand-authored,
+# committed). Paths below are relative to target_root.
+
+target        = "samples/sample-c-uninit"
+upstream_url  = "synthetic — TokenFuzz bug-class benchmark (C, uninitialized read)"
+build_system  = "cmake"
+
+includes      = ["include"]
+
+is_browser    = "0"
+
+[threat_model]
+# The decoder consumes an attacker-supplied GAU byte frame through a single
+# stateless entry point (gau_decode); nothing else is attacker-controlled.
+attacker_controls = ["bytes"]
+
+# MSan-only target: this is the one sample whose planted bug is a read of
+# uninitialized memory, which no other sanitizer observes. The target is
+# dependency-free self-contained C, so plain `clang -fsanitize=memory`
+# instruments everything MSan must answer for; .audit/build-msan.sh refuses to
+# build on a host without an MSan runtime (there is no Darwin one) rather than
+# emitting an uninstrumented binary that would read as a clean run.
+[sanitizer]
+enabled = ["msan"]
+msan_bin  = "build-msan/gauge"

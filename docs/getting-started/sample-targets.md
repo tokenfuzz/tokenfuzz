@@ -17,7 +17,7 @@ to be findable; an upstream parser is not.
 
 ## What is shipped
 
-These sixteen trees are the only ones committed under `targets/`; everything
+These eighteen trees are the only ones committed under `targets/`; everything
 else there, and everything else under `output/` (beyond the committed `target.toml` and
 `.ground-truth.json` answer keys), is a gitignored working area.
 
@@ -26,6 +26,8 @@ else there, and everything else under `output/` (beyond the committed `target.to
 | `canary` | C / cmake | ASan | 3 | 2 |
 | `samples/sample-c` | C / cmake | ASan | 5 | 2 |
 | `samples/sample-cpp` | C++ / cmake | ASan | 5 | 2 |
+| `samples/sample-c-doublefree` | C / cmake | ASan | 1 | 2 |
+| `samples/sample-c-uninit` | C / cmake | MSan (Linux only) | 1 | 2 |
 | `samples/sample-rust` | Rust / cargo | ASan (nightly `build-std`) | 3 | 4 |
 | `samples/sample-swift` | Swift / SwiftPM | ASan (via `[runner]`) | 3 | 4 |
 | `samples/sample-go` | Go / `go build -race` | `race` | 3 | 5 |
@@ -47,6 +49,15 @@ traps**: code that looks dangerous to a quick scan but is safe, or an operation
 that crosses no independent security boundary because the same job chooses
 both sides of it. A run that promotes a trap is a precision failure, and the
 answer key says so.
+
+Two of them are named for a bug class rather than a language.
+`samples/sample-c-doublefree` and `samples/sample-c-uninit` each plant exactly
+one class the per-language trees never covered on its own, so recall for that
+class can be read directly instead of inferred from a bug that happens to
+manifest that way. The uninitialized-read one is the only target that needs
+MemorySanitizer, which has no Darwin runtime; its build refuses on a host
+without one rather than producing an uninstrumented binary that would read as
+a clean run of the bug it plants.
 
 !!! note "Crash and finding scores are separate"
     The crash scorer trusts runtime diagnostics, not an agent's description of

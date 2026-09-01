@@ -1,0 +1,37 @@
+{
+  "target": "samples/sample-c-doublefree",
+  "language": "c",
+  "description": "Answer key for the synthetic sample-c-doublefree target (CHT stream reader). Kept under output/samples/sample-c-doublefree/ — NOT inside targets/samples/sample-c-doublefree/ — so the audited agents are not handed the answer while being measured. The deterministic scorer reads it after the run. This target isolates ONE bug class: a double-free reached from attacker bytes alone, so double-free recall can be measured on its own rather than as a side manifestation of a use-after-free. Every field is verifiable by running the listed input under AddressSanitizer against build-asan/chtio; the two false-positive traps measure precision.",
+  "build": ".audit/build.sh",
+  "asan_bin": "build-asan/chtio",
+  "planted_bugs": [
+    {
+      "id": "error-path-double-free",
+      "kind": "real",
+      "primitive": "double-free",
+      "signature_symbol": "cht_read",
+      "input": "repro/case-doublefree",
+      "cwe": "CWE-415",
+      "modeled_on": "classic error-path double free (CWE-415) — a failure path releases an owner the caller's cleanup releases again",
+      "summary": "PUSH's over-long-payload failure path frees ctx->chunk and returns -1 without clearing the owner; cht_read breaks out of the pass and frees ctx.chunk again in its exit cleanup. A stream of OPEN(cap) followed by a PUSH larger than cap is the whole reproducer. The buffer is never dereferenced after the first free, so the defect surfaces only as a double-free (the freeing frame is handle_push; the faulting frame ASan reports is cht_read)."
+    }
+  ],
+  "false_positive_traps": [
+    {
+      "id": "guarded-null-deref",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "handle_note",
+      "input": "repro/case-note",
+      "refute_reason": "The NOTE value pointer is dereferenced only inside the branch guarded by memcmp(val, \"on\", 2) == 0, so a non-\"on\" value returns before any dereference. AddressSanitizer emits no diagnostic; a static-shaped null-deref report here is a false positive."
+    },
+    {
+      "id": "debug-only-assert",
+      "kind": "fp",
+      "expected_outcome": "abort",
+      "signature_symbol": "handle_trail",
+      "input": "repro/case-trail",
+      "refute_reason": "A TRAIL field longer than its 32-byte scratch trips assert() and aborts before the copy. With handle_abort=1 AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) would be an unexpected crash."
+    }
+  ]
+}

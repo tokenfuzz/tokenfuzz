@@ -489,11 +489,42 @@ class BenchmarkScoringTests(unittest.TestCase):
         manifests = sorted((ROOT / "output" / "samples").glob(
             "sample-*/.ground-truth.json"
         ))
-        self.assertEqual(len(manifests), 15)
+        self.assertEqual(len(manifests), 17)
         for manifest in manifests:
             with self.subTest(manifest=manifest.parent.name):
                 payload = json.loads(manifest.read_text())
                 self.assertEqual(benchmark.manifest_errors(payload), [])
+
+    def test_every_sample_can_actually_run_the_sanitizer_it_declares(self) -> None:
+        """A declared sanitizer with nothing to run is an inert fixture.
+
+        `[sanitizer] enabled` and the binary that serves it are set in
+        different places, and a per-sanitizer binary written at the top level
+        of target.toml parses fine and loads as the empty string — the target
+        then measures nothing while still counting as a planted-bug fixture.
+        Ask the loader, not the file, so the check follows the same path the
+        harness takes. A sanitizer driven through `[runner]` has no binary of
+        its own and answers with the runner instead.
+        """
+        sys.path.insert(0, str(ROOT / "lib"))
+        import target_config  # noqa: PLC0415 - lives beside the harness, not the test
+
+        manifests = sorted((ROOT / "output" / "samples").glob(
+            "sample-*/.ground-truth.json"
+        ))
+        self.assertTrue(manifests)
+        for manifest in manifests:
+            config_path = manifest.parent / "target.toml"
+            with self.subTest(sample=manifest.parent.name):
+                self.assertTrue(config_path.is_file())
+                config = target_config.Config()
+                target_config.load_toml_into(config, config_path)
+                for sanitizer in config.sanitizers_enabled:
+                    self.assertTrue(
+                        config.sanitizer_bin(sanitizer) or config.runner_bin,
+                        f"{manifest.parent.name} enables {sanitizer} but the "
+                        "loader finds neither a binary for it nor a runner",
+                    )
 
     def test_aggregate_and_rendering_handle_not_scored_states_explicitly(self) -> None:
         no_pool = self.root / "no-pool"
