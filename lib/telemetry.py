@@ -248,25 +248,36 @@ def finalization(results_dir: Path) -> dict:
     }
 
 
-def run_start(results_dir: Path) -> float | None:
-    """The run's first clock: the earliest index row, else the earliest state row."""
+def run_start(results_dir: Path, origin: str = "") -> float | None:
+    """The run's first clock: the cell's own start, or the earliest row found.
+
+    ``origin`` is the cell's recorded ``started_at``, which is the only honest
+    clock a model-direct cell has: it writes no agent index rows while it runs,
+    so the rows discovered below are its *finalization*, minutes to hours after
+    the fact, and every artifact then reads as filed at second zero. Harness
+    cells have both, and the earliest of the two is the run's start either way,
+    so a resumed cell whose stamp moved forward cannot push the origin past
+    work already on disk.
+    """
     # Agent index rows are appended when a session ends. Their ``timestamp``
     # therefore measures completion, while ``started`` is the run clock the
     # occupancy recorder already captured. Prefer it when present so an
     # artifact filed during the first session does not clamp to time zero.
+    declared = _parse_ts(origin)
     stamps = [
         _parse_ts(row.get("started") or row.get("timestamp"))
         for row in index_rows(results_dir)
     ]
     stamps = [stamp for stamp in stamps if stamp is not None]
-    if stamps:
-        return min(stamps)
-    state = Path(results_dir) / "state"
-    for name in ("claims.jsonl", "hypotheses.jsonl", "runs.jsonl"):
-        for row in _rows(state / name):
-            stamp = _parse_ts(row.get("claimed_at") or row.get("created_at"))
-            if stamp is not None:
-                stamps.append(stamp)
+    if not stamps:
+        state = Path(results_dir) / "state"
+        for name in ("claims.jsonl", "hypotheses.jsonl", "runs.jsonl"):
+            for row in _rows(state / name):
+                stamp = _parse_ts(row.get("claimed_at") or row.get("created_at"))
+                if stamp is not None:
+                    stamps.append(stamp)
+    if declared is not None:
+        stamps.append(declared)
     return min(stamps) if stamps else None
 
 
@@ -287,10 +298,10 @@ def _confirmed_crash_run(row: dict) -> bool:
     )
 
 
-def time_to_first(results_dir: Path) -> dict:
+def time_to_first(results_dir: Path, origin: str = "") -> dict:
     """Seconds from run start to the first filed, confirmed, and admitted artifact."""
     results = Path(results_dir)
-    start = run_start(results)
+    start = run_start(results, origin)
     events = _rows(results / "state" / "events.jsonl")
     runs = _rows(results / "state" / "runs.jsonl")
     filed = _min_stamp([
@@ -430,14 +441,18 @@ def write_lineage(results_dir: Path, path: Path) -> int:
     return len(rows)
 
 
-def summary(results_dir: Path) -> dict:
-    """The whole telemetry block for one results tree (see harvest)."""
+def summary(results_dir: Path, origin: str = "") -> dict:
+    """The whole telemetry block for one results tree (see harvest).
+
+    ``origin`` is the cell's recorded start; see run_start for why a
+    model-direct cell cannot be clocked without it.
+    """
     results = Path(results_dir)
     return {
         "occupancy": occupancy(results),
         "housekeeping": housekeeping(results),
         "finalization": finalization(results),
-        "time_to_first": time_to_first(results),
+        "time_to_first": time_to_first(results, origin),
         "lanes": lane_stats(results),
         "execution": execution_verdicts(results),
         "duplicate_roots": duplicate_roots(results),

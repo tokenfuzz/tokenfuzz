@@ -770,7 +770,7 @@ def write_cell(
     path: Path, condition: str, replicate: int, experiment: str,
     results_dir: Path | None, wall: int, status: str, requested_agents: int | None,
     paused: int = 0, started_at: str = "", housekeeping: int = 0,
-    build_identity: dict | None = None,
+    build_identity: dict | None = None, audit_started_at: str = "",
 ) -> None:
     # Run-quality markers must survive every rewrite of the cell record.
     quality = metrics.cell_run_quality(path.parent, status)
@@ -795,6 +795,13 @@ def write_cell(
         # this is the only origin it has.
         "started_at": started_at,
     }
+    # The wall's own origin. `started_at` is stamped before the shared
+    # dashboard is regenerated, which is orchestration the audit wall
+    # deliberately excludes, so a metric rebased on it counts time the cell
+    # never had. Recorded separately rather than moving `started_at`, which
+    # resume and the cell record read for their own purposes.
+    if audit_started_at:
+        payload["audit_started_at"] = audit_started_at
     if requested_agents is not None:
         payload["requested_agents"] = requested_agents
     if drift:
@@ -1324,6 +1331,25 @@ _SNAPSHOT_ROOT_FILES = (
     "AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "SECURITY.md",
     "requirements.txt", ".gitignore",
 )
+
+
+def _cell_started_at(cell_dir: Path) -> str:
+    """The cell's own clock for telemetry that has none of its own.
+
+    A model-direct cell writes no agent index row while it runs, so its only
+    honest origin is the stamp the runner wrote. Prefer the one taken where
+    the wall starts; `started_at` precedes off-wall dashboard work and is the
+    fallback for a cell recorded before that distinction existed.
+    """
+    try:
+        payload = json.loads((cell_dir / "cell.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    for key in ("audit_started_at", "started_at"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def prepare_facade(
@@ -3082,6 +3108,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 update_live_result(bench_root, f"start {name}")
                 # Dashboard generation is orchestration before the cell, not
                 # agent time or in-run steering. Keep it outside the audit wall.
+                audit_started_at = datetime.now(timezone.utc).isoformat()
                 start = time.monotonic()
                 status = "done"
                 if args.dry_run:
@@ -3164,6 +3191,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     cell_json, condition, replicate, experiment, results, wall,
                     checkpoint_status, args.agents, paused=paused,
                     started_at=started_at, housekeeping=housekeeping,
+                    audit_started_at=audit_started_at,
                 )
                 # Post-cell adjudication is measurement, not discovery, but its
                 # tokens land in the same index as the audit's. Stamp the
@@ -3248,6 +3276,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     summary = metrics.harvest(
                         results, args.backend, model,
                         require_trigger_confirmation=require_trigger_confirmation,
+                        started_at=_cell_started_at(cell_dir),
                     )
                     # A drain that stops early leaves findings unjudged, and
                     # every one of them counts as unconfirmed — so the cell
@@ -3431,6 +3460,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 summary = metrics.harvest(
                     results, args.backend, model,
                     require_trigger_confirmation=require_trigger_confirmation,
+                    started_at=_cell_started_at(cell_dir),
                 )
                 _write_json(cell_dir / "metrics.json", summary)
                 _write_lineage(cell_dir, results)

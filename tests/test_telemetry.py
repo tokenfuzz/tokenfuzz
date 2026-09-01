@@ -177,6 +177,88 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(ttf["run_start"], "2026-08-28T10:00:00+00:00")
         self.assertEqual(ttf["filed_seconds"], 480.0)
 
+    def test_a_direct_cell_is_clocked_from_its_own_start(self) -> None:
+        """A model-direct cell writes no index row until it is already over.
+
+        Its rows are finalization — the gate and scorer running after the wall
+        — so reconstructing the origin from them puts the run's start after
+        every artifact it filed, and each one reads as filed at second zero.
+        The cell's recorded start is the only honest clock it has.
+        """
+        self._index([
+            {"role": "decision:find_quality",
+             "timestamp": "2026-08-28T14:00:00+00:00"},
+        ])
+        _write_jsonl(self.results / "state" / "events.jsonl", [{
+            "type": "finding_created", "id": "FIND-001", "signature": ["x"],
+            "mtime": "2026-08-28T10:30:00+00:00",
+            "first_seen": "2026-08-28T14:00:00+00:00",
+        }])
+        blind = telemetry.time_to_first(self.results)
+        self.assertEqual(blind["run_start"], "2026-08-28T14:00:00+00:00")
+        self.assertEqual(blind["filed_seconds"], 0.0)
+
+        clocked = telemetry.time_to_first(
+            self.results, "2026-08-28T10:00:00+00:00",
+        )
+        self.assertEqual(clocked["run_start"], "2026-08-28T10:00:00+00:00")
+        self.assertEqual(clocked["filed_seconds"], 1800.0)
+
+    def test_a_declared_start_never_moves_the_origin_past_real_work(self) -> None:
+        """A resumed cell's stamp cannot push the origin after its artifacts."""
+        self._index([{
+            "role": "analysis", "agent": 1,
+            "started": "2026-08-28T10:00:00+00:00",
+            "timestamp": "2026-08-28T10:20:00+00:00",
+        }])
+        _write_jsonl(self.results / "state" / "events.jsonl", [{
+            "type": "finding_created", "id": "FIND-001", "signature": ["x"],
+            "mtime": "2026-08-28T10:05:00+00:00",
+            "first_seen": "2026-08-28T10:21:00+00:00",
+        }])
+        ttf = telemetry.time_to_first(
+            self.results, "2026-08-28T12:00:00+00:00",
+        )
+        self.assertEqual(ttf["run_start"], "2026-08-28T10:00:00+00:00")
+        self.assertEqual(ttf["filed_seconds"], 300.0)
+
+    def test_the_origin_is_the_wall_start_not_the_record_stamp(self) -> None:
+        """`started_at` precedes off-wall dashboard work; the wall does not.
+
+        Rebasing a metric on the record stamp counts orchestration the audit
+        wall deliberately excludes, so a cell that spent a minute regenerating
+        the shared dashboard would report every artifact a minute later than
+        it found it.
+        """
+        cell = self.root / "cell"
+        cell.mkdir()
+        (cell / "cell.json").write_text(json.dumps({
+            "started_at": "2026-08-28T09:59:00+00:00",
+            "audit_started_at": "2026-08-28T10:00:00+00:00",
+        }), encoding="utf-8")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+        import benchmark_runner  # noqa: PLC0415 - beside the harness, not the test
+
+        self.assertEqual(
+            benchmark_runner._cell_started_at(cell),
+            "2026-08-28T10:00:00+00:00",
+        )
+        # A cell recorded before the distinction existed still has an origin.
+        (cell / "cell.json").write_text(json.dumps({
+            "started_at": "2026-08-28T09:59:00+00:00",
+        }), encoding="utf-8")
+        self.assertEqual(
+            benchmark_runner._cell_started_at(cell),
+            "2026-08-28T09:59:00+00:00",
+        )
+
+    def test_an_unparseable_declared_start_is_ignored(self) -> None:
+        self._index([
+            {"role": "model-preflight", "timestamp": "2026-08-28T10:00:00+00:00"},
+        ])
+        ttf = telemetry.time_to_first(self.results, "not a timestamp")
+        self.assertEqual(ttf["run_start"], "2026-08-28T10:00:00+00:00")
+
     def test_time_to_first_is_none_without_a_start_or_an_event(self) -> None:
         ttf = telemetry.time_to_first(self.results)
         self.assertEqual(ttf, {

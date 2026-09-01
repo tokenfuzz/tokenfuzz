@@ -3197,6 +3197,7 @@ def harvest(
     default_model: str = "",
     *,
     require_trigger_confirmation: bool = True,
+    started_at: str = "",
 ) -> dict:
     """Compute the deterministic metric set for one results/ tree.
 
@@ -3328,7 +3329,7 @@ def harvest(
         finding_signatures=finding_clusters,
     )
     # Where the wall went: passive, fails open to None, never a disposition.
-    metrics["telemetry"] = telemetry.summary(results_dir)
+    metrics["telemetry"] = telemetry.summary(results_dir, started_at)
     return metrics
 
 
