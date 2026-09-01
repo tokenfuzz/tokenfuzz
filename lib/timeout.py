@@ -31,6 +31,11 @@ RSS_SAMPLE_SECONDS = 0.5
 REAP_POLL_SECONDS = 0.02
 
 
+#: Exit status this wrapper reports when it enforced the deadline, so a
+#: caller can tell "the tool was killed" from "the tool failed".
+TIMEOUT_RC = 124
+
+
 def run_timeout(
     command: Sequence[str],
     seconds: int,
@@ -258,7 +263,7 @@ def main():
     for sig in exit_for_signal:
         signal.signal(sig, on_forwarded)
 
-    signal.signal(signal.SIGALRM, lambda *_: escalate_and_exit(124))
+    signal.signal(signal.SIGALRM, lambda *_: escalate_and_exit(TIMEOUT_RC))
 
     if rss_mb > 0:
         # RSS-watch path: poll instead of a single blocking wait so we can
@@ -288,7 +293,7 @@ def main():
                 break
             now = time.time()
             if now >= deadline:
-                escalate_and_exit(124)
+                escalate_and_exit(TIMEOUT_RC)
             if now >= next_sample:
                 next_sample = now + RSS_SAMPLE_SECONDS
                 rss_kb = _tree_rss_kb(pid)

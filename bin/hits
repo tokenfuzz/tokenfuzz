@@ -31,7 +31,7 @@ import languages
 import sanitizer
 import sanitizer_run
 import target_config
-from timeout import run_timeout
+from timeout import TIMEOUT_RC, run_timeout
 
 # Sibling build trees a native testcase can be replayed against for coverage.
 # `+fuzz` is the SanitizerCoverage sibling bin/setup-target builds beside the
@@ -42,6 +42,11 @@ from timeout import run_timeout
 # coverage reports unavailable (never a miss, never a hard error), rather than
 # being chosen and then rejected by probe_sancov.
 GENERIC_COVERAGE_SUFFIXES = coverage_build.ACCEPTED_SUFFIXES
+
+# `atos -fullPath` answers one line per address: `symbol (in module) (file:line)`.
+# Anything else — a bare address, a symbol with no source behind it — resolved
+# no source location and contributes no coverage edge.
+ATOS_ANSWER_RE = re.compile(r"^(?P<function>.+?) \(in [^)]*\) \((?P<location>.+:\d+)\)$")
 
 NOISE_RE = re.compile(
     r"ne_context_new|cubeb_|nrappkit|nspr|nss_init|sqlite3|^ld-|^dyld_|gmp_|"
@@ -560,6 +565,7 @@ class Hits:
         by_name = {path.name: path for path in binaries if path.is_file()}
         arch = platform.machine() if sys.platform == "darwin" else ""
         frames: list[str] = []
+        by_binary: dict[str, list[str]] = {}
         for coverage in sorted(coverage_dir.glob("*.sancov")):
             stem = coverage.name.removesuffix(".sancov")
             base, _, _pid = stem.rpartition(".")
@@ -569,12 +575,20 @@ class Hits:
                 [str(self.sancov), "-print", str(coverage)],
                 capture_output=True, text=True, check=False,
             ).stdout
-            for token in printed.split():
-                if token.startswith("0x"):
-                    frames.append(f"    #0 0x0 ({module}+{token})")
+            offsets = [token for token in printed.split() if token.startswith("0x")]
+            for token in offsets:
+                frames.append(f"    #0 0x0 ({module}+{token})")
+            if offsets:
+                by_binary.setdefault(str(target), []).extend(offsets)
         if not frames:
             return [], []
-        lines = self._offline_symbolize(frames)
+        lines, timed_out = self._batch_atos(by_binary, arch)
+        if timed_out:
+            # The tool, not the input: retrying it through the shared path
+            # would spend the same budget wedging on the same binary.
+            return [], []
+        if lines is None:
+            lines = self._offline_symbolize(frames)
         if self.harness_twin is not None:
             # The twin's own frames resolve to the harness source, which the
             # symbolizer may print as a bare basename. They are not target
@@ -620,6 +634,63 @@ class Hits:
                 location = f"{relative}:{line_no}" if line_no else relative
             kept.extend((function, location))
         return kept
+
+    @staticmethod
+    def _batch_atos(
+        by_binary: dict[str, list[str]], arch: str,
+    ) -> "tuple[list[str] | None, bool]":
+        """Resolve each module's whole offset list in one `atos` call, or None.
+
+        The shared symbolizer speaks to atos one address at a time over a pty.
+        A sandboxed agent shell can be denied a pty, and the fallback then
+        spends one process per address: tolerable for a crash report's twenty
+        frames, ruinous for a coverage run's hundreds, which overran the
+        symbolizer's own 60s budget and left every probe with no coverage at
+        all. atos answers a whole address list in one pass, so ask it that way.
+        Addresses go on stdin because a list this long can outgrow the
+        command-line limit.
+
+        Returns (lines, timed_out). A None answer means "not answered here" —
+        no atos, a failed call, or answers that do not line up with the
+        addresses — and the caller keeps the shared path. Positional mapping is
+        only sound when every address got exactly one answer, so a short answer
+        declines rather than guesses.
+
+        The call runs under the same deadline the shared symbolizer uses, and
+        through the process-tree wrapper so a wedged atos cannot outlive it: an
+        unbounded call here would hang the whole audit, since the coverage gate
+        has no outer deadline of its own. A deadline is reported rather than
+        declined, because spending the same budget again on the fallback would
+        wedge on the same tool.
+        """
+        if sys.platform != "darwin" or not arch:
+            return None, False
+        atos = shutil.which("atos")
+        if not atos:
+            return None, False
+        lines: list[str] = []
+        for binary, offsets in by_binary.items():
+            completed = run_timeout(
+                [atos, "-o", binary, "-arch", arch, "-fullPath"],
+                sanitizer.SYMBOLIZE_TIMEOUT_SECONDS,
+                input="\n".join(offsets) + "\n",
+                capture_output=True, text=True,
+            )
+            if completed.returncode == TIMEOUT_RC:
+                return None, True
+            if completed.returncode != 0:
+                return None, False
+            # The same progress chatter DarwinSymbolizer skips past.
+            answers = [row.strip() for row in completed.stdout.splitlines()
+                       if row.strip() and "got symbolicator for" not in row]
+            if len(answers) != len(offsets):
+                return None, False
+            for answer in answers:
+                resolved = ATOS_ANSWER_RE.match(answer)
+                if resolved:
+                    lines.append(resolved.group("function").strip())
+                    lines.append(resolved.group("location"))
+        return lines, False
 
     @staticmethod
     def _offline_symbolize(frames: list[str]) -> list[str]:

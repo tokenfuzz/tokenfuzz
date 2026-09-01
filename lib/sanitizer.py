@@ -32,6 +32,10 @@ FUZZER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # carries spaces and parentheses (`operator new(unsigned long)+0x20`), so any
 # pattern that constrains that text only recognizes plain C identifiers. A
 # fully symbolized frame has no such trailer.
+#: Wall a symbolizer gets before the report is kept as it is. Shared with
+#: bin/hits' batched call so a wedged tool costs one budget, not two.
+SYMBOLIZE_TIMEOUT_SECONDS = 60
+
 RAW_FRAME = re.compile(
     r"^ *#[0-9]+ +0x[0-9a-f]+ +(?:in +.*? +)?\([^)]*\+0x[0-9a-f]+\)", re.M)
 
@@ -239,7 +243,8 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
         args.append("--full-path")
     with tempfile.NamedTemporaryFile() as rendered, report.open("rb") as source:
         completed = subprocess.run(
-            [sys.executable, str(Path(__file__).with_name("timeout.py")), "60", "TERM", "0", *args],
+            [sys.executable, str(Path(__file__).with_name("timeout.py")),
+             str(SYMBOLIZE_TIMEOUT_SECONDS), "TERM", "0", *args],
             stdin=source,
             stdout=rendered,
             stderr=subprocess.PIPE,
@@ -271,7 +276,7 @@ def _warn_unsymbolized(report: Path, completed) -> None:
         reason = tail[-1] if tail else f"rc={completed.returncode}"
         detail = f"symbolizer failed: {reason}"
         if completed.returncode == 124:
-            detail = "symbolizer timed out after 60s"
+            detail = f"symbolizer timed out after {SYMBOLIZE_TIMEOUT_SECONDS}s"
     print(
         f"[sanitizer] WARN: {report.name} keeps unsymbolized frames "
         f"({detail}); some stack frames may lack source lines",

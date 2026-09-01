@@ -19,6 +19,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -431,6 +432,112 @@ class GenericCoverageTests(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertEqual(result.returncode, 0, output)
         self.assertIn("HIT: app_parse", output)
+
+    def _deny_pty(self) -> Path:
+        """A PYTHONPATH entry that takes the pty away from every child."""
+        denied = Path(self._tmp.name) / "no-pty"
+        denied.mkdir(exist_ok=True)
+        (denied / "sitecustomize.py").write_text(
+            "import pty\n"
+            "def _denied(*args, **kwargs):\n"
+            "    raise OSError(23, 'out of pty devices')\n"
+            "pty.fork = _denied\n"
+        )
+        return denied
+
+    def _counting_atos(self) -> tuple[Path, Path]:
+        """An `atos` earlier on PATH that records how often it is executed."""
+        shim = Path(self._tmp.name) / "atos-shim"
+        shim.mkdir(exist_ok=True)
+        calls = shim / "calls"
+        real = shutil.which("atos")
+        if not real:
+            self.skipTest("no atos on this host")
+        (shim / "atos").write_text(
+            f'#!/bin/sh\necho call >> "{calls}"\nexec "{real}" "$@"\n')
+        (shim / "atos").chmod(0o755)
+        return shim, calls
+
+    def test_a_shell_without_a_pty_symbolizes_coverage_in_one_atos_call(self) -> None:
+        """Coverage asks atos once per module, never once per address.
+
+        The shared symbolizer drives atos one address at a time through a pty.
+        A sandboxed agent shell can be denied one, and the per-address fallback
+        then spends a process per PC; a coverage run has hundreds, which
+        overran the symbolizer's 60s budget and left every probe reporting no
+        coverage at all. Both host properties are constructed rather than
+        sampled: a host that grants a pty would never reach the fallback, and
+        counting real processes is what separates one batched call from one
+        call per address.
+        """
+        if sys.platform != "darwin":
+            self.skipTest("atos, and this fallback, are macOS-only")
+        shim, calls = self._counting_atos()
+        result = self._run_hits("app_parse", environment={
+            "PYTHONPATH": str(self._deny_pty()),
+            "PATH": f"{shim}:{os.environ['PATH']}",
+        })
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("HIT: app_parse", output)
+        # The reached edge still lands in the journal ranking consumes.
+        journal = self.results / "coverage" / "edges-agent-1.journal"
+        self.assertIn("app_parse|src.c\n", journal.read_text())
+        # One module in this fixture, so exactly one atos execution. The
+        # per-address fallback runs as many as the binary has guards.
+        self.assertEqual(calls.read_text().count("call"), 1, output)
+
+    def test_a_wedged_symbolizer_cannot_hang_the_run(self) -> None:
+        """The batched call must not outlive the deadline the old path had.
+
+        The coverage gate has no outer deadline of its own, so an unbounded
+        symbolizer call hangs the whole audit rather than one probe. Falling
+        back to the shared path on a deadline would wedge on the same tool for
+        a second budget, so a deadline ends symbolization instead.
+        """
+        if sys.platform != "darwin":
+            self.skipTest("the batched call is the macOS atos path")
+        shim = Path(self._tmp.name) / "wedged-atos"
+        shim.mkdir(exist_ok=True)
+        (shim / "atos").write_text("#!/bin/sh\nsleep 600\n")
+        (shim / "atos").chmod(0o755)
+        loader = importlib.machinery.SourceFileLoader("hits_module_wedge", str(HITS))
+        module = loader.load_module()
+        with mock.patch.dict(os.environ, {"PATH": f"{shim}:{os.environ['PATH']}"}), \
+                mock.patch.object(sys, "platform", "darwin"), \
+                mock.patch.object(module.sanitizer, "SYMBOLIZE_TIMEOUT_SECONDS", 2):
+            started = time.monotonic()
+            lines, timed_out = module.Hits._batch_atos({"/bin/app": ["0x1"]}, "arm64")
+            elapsed = time.monotonic() - started
+        self.assertTrue(timed_out)
+        self.assertIsNone(lines)
+        self.assertLess(elapsed, 60, "the call ran past its own deadline")
+
+    def test_an_atos_answer_that_does_not_line_up_is_declined_not_mispaired(self) -> None:
+        """A short answer list must not shift every address onto a later name.
+
+        Positional mapping is the whole economy of the batched call, so the
+        one thing it may never do is pair an address with another address's
+        answer. Declining returns None and the caller keeps the shared path.
+        """
+        loader = importlib.machinery.SourceFileLoader("hits_module_atos", str(HITS))
+        module = loader.load_module()
+        shim = Path(self._tmp.name) / "short-atos"
+        shim.mkdir(exist_ok=True)
+        (shim / "atos").write_text(
+            '#!/bin/sh\necho "only_one (in mod) (/src/a.c:1)"\n')
+        (shim / "atos").chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{shim}:{os.environ['PATH']}"}), \
+                mock.patch.object(sys, "platform", "darwin"):
+            declined, declined_timeout = module.Hits._batch_atos(
+                {"/bin/app": ["0x1", "0x2"]}, "arm64")
+            paired, paired_timeout = module.Hits._batch_atos(
+                {"/bin/app": ["0x1"]}, "arm64")
+        # Declining is not a deadline: the caller still tries the shared path.
+        self.assertIsNone(declined)
+        self.assertFalse(declined_timeout)
+        self.assertEqual(paired, ["only_one", "/src/a.c:1"])
+        self.assertFalse(paired_timeout)
 
 
 if __name__ == "__main__":
