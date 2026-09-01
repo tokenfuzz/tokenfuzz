@@ -439,6 +439,105 @@ raise SystemExit(23)
         self.assertEqual(cell["status"], "failed")
         self.assertEqual(cell["run_quality"], "unowned_artifacts")
 
+    def test_a_cell_keeps_the_harness_it_started_with(self) -> None:
+        """An edit to the checkout must not reach a cell already running.
+
+        The cell runs entirely through the facade — bin/audit and every agent
+        session get SCRIPT_ROOT=facade — so symlinking the control plane meant
+        a mid-run edit silently split one cell across two harnesses while
+        run.json still named the launch commit. The property is constructed:
+        the edit is made after the facade exists, which is exactly the case a
+        checkout that is never touched mid-run would not exercise.
+        """
+        facade = benchmark_runner.prepare_facade(self.work / "pinned-cell", self.slug)
+        snapshot = facade / "lib" / "benchmark_runner.py"
+        self.assertTrue(snapshot.is_file())
+        self.assertFalse((facade / "lib").is_symlink())
+        self.assertFalse((facade / "bin").is_symlink())
+        before = snapshot.read_text(encoding="utf-8")
+
+        live = benchmark_runner.SCRIPT_ROOT / "lib" / "benchmark_runner.py"
+        original = live.read_bytes()
+        try:
+            live.write_bytes(original + b"\n# edited mid-run\n")
+            self.assertEqual(snapshot.read_text(encoding="utf-8"), before)
+        finally:
+            live.write_bytes(original)
+
+        # The target tree stays shared: its build lease and source signature
+        # are what every cell is measured against.
+        self.assertTrue((facade / "targets").is_symlink())
+        # Compiled caches are per-interpreter and dominate the tree's size.
+        self.assertFalse((facade / "lib" / "__pycache__").exists())
+        # The runtime contract agents read is pinned with the code.
+        self.assertTrue((facade / "AGENTS.md").is_file())
+        self.assertFalse((facade / "AGENTS.md").is_symlink())
+
+    def test_the_snapshot_can_resolve_a_model_from_inside_the_facade(self) -> None:
+        """Copied code must find everything it reaches by walking up from itself.
+
+        lib/llm_invoke resolves config/models.toml from its own file. While
+        lib/ was a symlink that escaped to the checkout; a copy does not, so a
+        control plane without config/ cannot name a default model and every
+        harness cell fails to launch. Checking that files were copied would
+        not have caught it — this runs the copied code.
+        """
+        facade = benchmark_runner.prepare_facade(self.work / "config-cell", self.slug)
+        probe = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(facade / 'lib')!r})\n"
+            "import llm_invoke\n"
+            "print(llm_invoke.default_model('codex'))\n"
+            "print(llm_invoke.default_effort('codex'))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True, check=False, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.strip())
+
+    def test_every_cell_of_a_run_holds_the_same_harness(self) -> None:
+        """A per-cell copy pins a cell against edits during its own life only.
+
+        Two cells of one run could then hold different harnesses while sharing
+        a single run.json and its tokenfuzz_sha. The run freezes one control
+        plane and every facade is a copy of it.
+        """
+        bench = self.work / "one-snapshot"
+        snapshot = benchmark_runner.snapshot_harness(bench)
+        first = benchmark_runner.prepare_facade(
+            self.work / "cell-a", self.slug, None, snapshot)
+
+        live = benchmark_runner.SCRIPT_ROOT / "lib" / "benchmark_runner.py"
+        original = live.read_bytes()
+        try:
+            live.write_bytes(original + b"\n# edited between cells\n")
+            second = benchmark_runner.prepare_facade(
+                self.work / "cell-b", self.slug, None, snapshot)
+        finally:
+            live.write_bytes(original)
+
+        self.assertEqual(
+            (first / "lib" / "benchmark_runner.py").read_bytes(),
+            (second / "lib" / "benchmark_runner.py").read_bytes(),
+        )
+        # A resumed run keeps the snapshot it started with.
+        self.assertEqual(benchmark_runner.snapshot_harness(bench), snapshot)
+        self.assertNotIn(
+            b"edited between cells",
+            (snapshot / "lib" / "benchmark_runner.py").read_bytes(),
+        )
+
+    def test_the_snapshot_names_no_tree_the_checkout_lacks(self) -> None:
+        """A missing tree is skipped, never left as a dangling link."""
+        facade = benchmark_runner.prepare_facade(self.work / "absent-tree", self.slug)
+        for name in benchmark_runner._SNAPSHOT_TREES:
+            entry = facade / name
+            if entry.exists():
+                self.assertTrue(entry.is_dir(), name)
+            else:
+                self.assertFalse(entry.is_symlink(), name)
+
     def test_facades_use_the_run_config_snapshot(self) -> None:
         run = self.work / "snapshot-run"
         snapshot = benchmark_runner._snapshot_benchmark_config(

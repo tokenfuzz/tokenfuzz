@@ -1268,14 +1268,95 @@ def run_model_direct(
     return 0 if rc in (0, 124) else rc
 
 
+#: Control-plane trees copied so the harness a cell ran under is pinned for
+#: its whole life and readable afterwards. `targets` is excluded on purpose
+#: (see prepare_facade). A name that does not exist is skipped, so the list can
+#: name a tree not every checkout ships.
+#:
+#: `config` is not optional decoration: lib/llm_invoke resolves
+#: config/models.toml from its own file, so a copied lib without it cannot
+#: name a default model and every harness cell fails to launch. Anything the
+#: copied code reaches by walking up from itself has to be here.
+_SNAPSHOT_TREES = ("bin", "lib", ".agents", "config", "docs", "schema")
+
+#: Where the run keeps the one control plane every cell is derived from.
+HARNESS_SNAPSHOT_DIRNAME = "harness-snapshot"
+
+
+def snapshot_harness(bench_dir: Path) -> Path:
+    """Freeze the control plane once per run, and reuse it for every cell.
+
+    Copying per cell pinned each cell against edits during its own life but
+    not against edits between cells: two cells of one run could hold different
+    harnesses while sharing a single run.json and its tokenfuzz_sha. The run
+    takes one copy up front and every facade is built from that, so the sha
+    describes all of them.
+
+    Written once and then only read; a resumed run keeps the snapshot it
+    started with rather than re-freezing a checkout that has moved on.
+    """
+    snapshot = Path(bench_dir) / HARNESS_SNAPSHOT_DIRNAME
+    if snapshot.is_dir():
+        return snapshot
+    staging = snapshot.with_name(f".{HARNESS_SNAPSHOT_DIRNAME}.{os.getpid()}")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    try:
+        for name in _SNAPSHOT_TREES:
+            source = SCRIPT_ROOT / name
+            if source.is_dir():
+                shutil.copytree(
+                    source, staging / name,
+                    ignore=shutil.ignore_patterns("__pycache__"),
+                )
+        for name in _SNAPSHOT_ROOT_FILES:
+            source = SCRIPT_ROOT / name
+            if source.is_file():
+                shutil.copy2(source, staging / name)
+        os.replace(staging, snapshot)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return snapshot
+
+
+#: Root files an agent reads as its runtime contract, pinned with the code.
+_SNAPSHOT_ROOT_FILES = (
+    "AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "SECURITY.md",
+    "requirements.txt", ".gitignore",
+)
+
+
 def prepare_facade(
     cell_dir: Path, target_slug: str, config_snapshot: Path | None = None,
+    harness_snapshot: Path | None = None,
 ) -> Path:
     facade = cell_dir / "repo-root"
     shutil.rmtree(facade, ignore_errors=True)
     facade.mkdir(parents=True)
-    for name in ("bin", "lib", ".agents", "docs", "schema", "targets"):
-        (facade / name).symlink_to(SCRIPT_ROOT / name, target_is_directory=True)
+    # The cell runs entirely through this facade — `bin/audit` and every agent
+    # session get SCRIPT_ROOT=facade — so a symlink to the checkout meant the
+    # harness under a running cell was whatever the working tree happened to
+    # hold at that instant. run.json's tokenfuzz_sha then describes the commit
+    # at launch, not the code that produced the numbers, and an edit landing
+    # mid-run silently splits one cell across two harnesses. Copy them instead:
+    # the snapshot is what the cell executed, and it is still there afterwards
+    # to read. Compiled caches are rebuilt per interpreter and are the bulk of
+    # the tree, so they are left behind.
+    # Derived from the run's frozen copy when there is one, so every cell of a
+    # run holds the same harness; a bare call still freezes the checkout it
+    # sees, which is what a standalone facade wants.
+    origin = Path(harness_snapshot) if harness_snapshot else SCRIPT_ROOT
+    for name in _SNAPSHOT_TREES:
+        source = origin / name
+        if source.is_dir():
+            shutil.copytree(
+                source, facade / name,
+                ignore=shutil.ignore_patterns("__pycache__"),
+            )
+    # The target tree is deliberately shared, not copied: its build lease,
+    # build artifacts and source signature are what every cell is measured
+    # against, and a per-cell copy would fork them.
+    (facade / "targets").symlink_to(SCRIPT_ROOT / "targets", target_is_directory=True)
     config_dir = facade / "output" / target_slug
     config_dir.mkdir(parents=True)
     source_config = (
@@ -1285,10 +1366,12 @@ def prepare_facade(
     )
     if source_config.is_file():
         shutil.copy2(source_config, config_dir / "target.toml")
-    for name in ("AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "SECURITY.md", "requirements.txt", ".gitignore"):
-        source = SCRIPT_ROOT / name
-        if source.exists():
-            (facade / name).symlink_to(source)
+    # AGENTS.md is the runtime contract every spawned agent reads, so it is
+    # snapshotted for the same reason as the code.
+    for name in _SNAPSHOT_ROOT_FILES:
+        source = origin / name
+        if source.is_file():
+            shutil.copy2(source, facade / name)
     return facade
 
 
@@ -1297,8 +1380,11 @@ def run_harness(
     experiment: str, wall: int, agents: int | None, build_identity: dict,
     config_snapshot: Path | None = None,
     agent_security: str = llm_invoke.DEFAULT_AGENT_SECURITY,
+    harness_snapshot: Path | None = None,
 ) -> tuple[int, Path]:
-    facade = prepare_facade(cell_dir, target_slug, config_snapshot)
+    facade = prepare_facade(
+        cell_dir, target_slug, config_snapshot, harness_snapshot,
+    )
     target = (SCRIPT_ROOT / "targets" / target_slug).resolve()
     result_dir = (
         facade / "output" / f"{target_slug}-{experiment}" / backend / "results"
@@ -2798,6 +2884,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     run_identity: dict = {}
     run_source = ""
     config_snapshot: Path | None = None
+    harness_snapshot: Path | None = None
     run_config: target_config.Config | None = None
     # A run that already recorded a generation is being resumed, so from here on
     # it verifies rather than converges.
@@ -2813,6 +2900,9 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 bench_dir, target_root, args.target,
                 replace=pinned_identity is None and not args.regenerate,
             )
+            # One control plane for the whole run: every cell facade is a copy
+            # of this, so the tokenfuzz_sha in run.json describes all of them.
+            harness_snapshot = snapshot_harness(bench_dir)
             recorded_config = str(previous.get("target_config_sha256") or "")
             current_config = _config_digest(config_snapshot)
             if recorded_config and current_config != recorded_config:
@@ -3009,7 +3099,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     rc, results = run_harness(
                         cell_dir, args.target, args.backend, model, experiment,
                         args.budget_wall, args.agents, cell_build_identity,
-                        config_snapshot, args.agent_security,
+                        config_snapshot, args.agent_security, harness_snapshot,
                     )
                 # Stop the clock where the finding work stops. Everything below
                 # — crash triage, the find-gate drain, metrics — is measurement
