@@ -73,7 +73,7 @@ results/
 ```
 
 Whether `state/hypotheses.jsonl`, `state/runs.jsonl`, or a testcase appears
-depends on how far the single agent gets. Their absence is a reason to inspect
+depends on how far the agents get. Their absence is a reason to inspect
 the log, not proof that directory setup failed.
 
 Press Ctrl-C to stop a longer run. The orchestrator terminates the active

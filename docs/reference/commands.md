@@ -118,7 +118,7 @@ Common flags:
 | `--strategy S1|S2|S3|S4|S5|S6|S7|S8` | Pin one investigation strategy and suspend rotation. |
 | `--since <rev>` | Delta mode: audit only what changed in `<rev>..HEAD` — the changed files, their one-hop callers from the call-neighbourhood graph, and S1 cards for exactly those commits. The results tree records both ends of the delta, so a resumed run must keep the same `HEAD` and pass the same `--since` (or use `--experiment` for a separate tree). An unresolvable revision or tracked working-tree change stops the run rather than widening or measuring code outside that range; an empty or exhausted range exits without a whole-tree discovery slot. |
 | `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer is still running. |
-| `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits. |
+| `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits — except on Antigravity (`agy`), which has no memory switch; see [Backends](../guides/backends.md#egress-and-socket-driving-targets). |
 | `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. Each backend defaults to the strongest mode it can run under; see [Agent security modes](../guides/backends.md#agent-security-modes). |
 | `--new-target <slug>` | Generate starter config and exit without starting an audit. |
 | `--allow-concurrent` | Skip the one-instance lock below. Two runs then append to one state tree; use it only when you know why you want that. |

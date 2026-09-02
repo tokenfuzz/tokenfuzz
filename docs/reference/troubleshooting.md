@@ -43,7 +43,10 @@ FATAL: model preflight refused for backend=gemini: Gemini CLI ignored the harnes
 Gemini CLI silently discards every `--admin-policy` file when a system policies
 directory holds any policy, which would leave cross-run memory and web tools
 enabled for the whole run. Remove or empty that directory on the audit host, or
-run under `USE_GEMINI_CLI=0` (Antigravity), then start again.
+run under `USE_GEMINI_CLI=0` (Antigravity), then start again. A benchmark cell
+has no preflight; the launch itself reports the same condition with
+`ERROR: Gemini CLI ignored the harness admin policies` and exit code 46, and
+the cell counts as failed rather than measured.
 
 ## Target config does not parse
 

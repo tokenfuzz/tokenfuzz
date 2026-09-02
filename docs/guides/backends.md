@@ -171,11 +171,10 @@ events, Codex `spawn_agent` calls read from its rollout), summed per cell and
 shown in the report's token table. Claude and Gemini CLI run subagents inside
 the session, so their usage covers them; Codex and OpenCode run them as
 separate threads or sessions the parent's usage cannot see, so a delegating row
-on those backends is a spend floor: its cost prints with `~`, per-dollar
-efficiency is withheld, and Confirmed / seat-h is shown as an upper bound. Grok
-reports no usage at all and its subagent events are hook names whose presence
-in the output stream is unconfirmed, so every Grok condition's seat-hour figure
-is published as a bound whatever was counted.
+on those backends is a spend floor; Grok reports no usage at all and its
+subagent events are hook names whose presence in the output stream is
+unconfirmed, so its fan-out is treated as unobservable. How the report marks a
+floor is on the [benchmark page](../concepts/benchmark.md).
 
 ### Using the modes
 

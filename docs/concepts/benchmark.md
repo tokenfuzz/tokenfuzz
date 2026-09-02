@@ -34,9 +34,11 @@ Each benchmark run is a small controlled experiment:
 Each cell isolates the backend from any instruction files, plugins, or skills
 you have installed, using whatever per-run control that CLI provides. This keeps
 an operator-installed security workflow from duplicating TokenFuzz's own
-orchestration or contaminating the model-direct control. Antigravity and Grok
-Build have no such one-shot control yet, so disable their installed plugins and
-skills by hand before using them for benchmark claims.
+orchestration or contaminating the model-direct control. Antigravity turns
+skill expansion off but has no plugin or memory switch, and Grok Build turns
+memory off but has no plugin or skill switch, so disable their installed
+plugins by hand before using them for benchmark claims; the per-backend detail is in the
+[backends guide](../guides/backends.md).
 
 The `--conditions` flag always uses the stable tokens
 `model-direct` and `harness`. The rendered labels are reader-facing
@@ -72,8 +74,10 @@ That overhead is part of the comparison. The question is whether the
 extra machinery buys stronger evidence by the end of the same budget.
 Read the severity and uniqueness columns before the raw counts.
 
-Equal wall time does not mean equal worker capacity. `model-direct` has one
-agent; the harness defaults to three concurrent agents. The scoreboard keeps
+Equal wall time does not mean equal worker capacity. `model-direct` is one
+launch of the CLI at its defaults, which may delegate internally
+(`delegation_events` records how often, and the Efficiency table marks such
+conditions `≤`); the harness defaults to three concurrent agents. The scoreboard keeps
 the wall comparison visible and separately reports occupancy, worker-hours,
 confirmed results per seat-hour, tokens, and cost so that concurrency is not
 mistaken for free efficiency.
@@ -319,8 +323,8 @@ replicates; an em dash means unrecorded, never zero.
 | `First filed` / `First crash confirmed` / `First admitted` | Minutes from the run's first clock (its first backend call) to the first artifact filed, the first sanitizer-confirmed crash, and the first receipt claiming `reportable`. |
 | `EXEC_FAIL share` | Fraction of probes whose command started but produced no valid result. This includes classified loader, usage, input-rejection, abort, unverified-exit, and other exit failures; a sanitizer launch may already have been spent. |
 | `Duplicate roots` | Share of artifact signatures filed by more than one agent: convergence, not yield. |
-| `Confirmed / seat-h` | Reportable finding and crash clusters per worker-hour (`Worker-h`), so a condition with more concurrent seats is charged for them. |
-| `$ / confirmed` | Measured cost per reportable cluster; absent when cost was estimated or nothing was confirmed. |
+| `Confirmed / seat-h` | Reportable finding and crash clusters per worker-hour (`Worker-h`), so a condition with more concurrent seats is charged for them. Seats count launches; a `≤` prefix marks a condition in which a launch delegated to subagents, or whose backend cannot show its fan-out (Grok), so the seat capacity is a floor and the rate an upper bound. |
+| `$ / confirmed` | Measured cost per reportable cluster; absent when cost was estimated, a delegating cell's spend is a floor, or nothing was confirmed. |
 
 The same numbers sit in each cell's `metrics.json` under `telemetry`, and a
 `lineage.jsonl` beside it joins card → hypothesis → testcase → artifact →
@@ -359,8 +363,13 @@ an `up to` rejected count is a conservative upper bound — neither figure is
 condition is the total, and the harness side includes everything it spends
 beyond the agents themselves — preflight, triage, validation, and its other
 model calls — so the comparison is not flattered by hiding overhead. Estimated
-figures are marked; Gemini through the Antigravity CLI reports no usage, so its
-numbers are estimates.
+figures are marked: Gemini through the Antigravity CLI and Grok Build report no
+usage, so their numbers are estimates, and a Codex or OpenCode cell that
+delegated to subagents is a spend floor, because those run as separate threads
+or sessions the cell's usage cannot see. The `Delegation` column counts the
+subagent spawns each cell's transcripts show; the
+[backends guide](../guides/backends.md) says which backends carry their
+subagents' spend in the row and which do not.
 
 **Bugs by severity** lists distinct crash clusters strongest first.
 The bug id links to the crash directory, and the reproducer link opens
@@ -507,7 +516,7 @@ bin/benchmark --target <target> --conditions harness
 # Pick the backend and model explicitly.
 bin/benchmark --target <target> --backend codex --model <model>
 
-# Use more harness workers than the default of 3. The direct baseline is still launched as one agent.
+# Use more harness workers than the default of 3. The direct baseline is still one launch of the CLI at its defaults.
 bin/benchmark --target <target> --agents 5
 
 # Start a fresh backend ledger. The previous one is archived.

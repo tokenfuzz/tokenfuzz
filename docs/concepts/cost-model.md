@@ -50,19 +50,16 @@ automatic prefix caching. Availability and price are provider-specific, so run
 logs record what the backend actually reports rather than assuming a discount.
 
 Every backend runs with its CLI's default tool set and delegation inside one
-isolation policy the harness applies to all of them alike: operator
-customisation, plugins, skills, and cross-run memory off, web tools denied, and
-the reasoning effort `config/models.toml` names, recorded on every usage row.
-A benchmark therefore measures each backend as it ships, less the operator's
-environment and the network; the per-backend exceptions (Antigravity's memory
-and web switches) are in the backends guide. Two cost-only choices shrink what
-a request carries without changing what it can do. Codex loads the repo-root `AGENTS.md` itself, so its cold-start
-prompt points at that copy instead of embedding a second one. One-shot Claude
-decisions write their prompt cache at the five-minute tier, since nothing
-re-reads a decision prompt an hour later; that changes only the billing tier
-of the cache write, never the model, tools, or output. Agent sessions keep the
-CLI default, and an explicit `CLAUDE_CODE_PROMPT_CACHE_TTL` in the environment
-overrides the harness.
+isolation policy applied to all of them alike, so a benchmark measures each
+backend as it ships, less the operator's environment and the network; the
+policy and its per-backend exceptions are in the
+[backends guide](../guides/backends.md#egress-and-socket-driving-targets).
+Two cost-only choices shrink what a request carries without changing what it
+can do: Codex loads the repo-root `AGENTS.md` itself, so its cold-start prompt
+points at that copy instead of embedding a second one; and one-shot Claude
+decisions write their prompt cache at the cheaper five-minute tier
+(`CLAUDE_CODE_PROMPT_CACHE_TTL` in the
+[environment reference](../reference/environment.md)).
 
 Every prompt the harness renders — session prompts and decision prompts — puts
 its static instructions first and the per-agent or per-artifact material last.
