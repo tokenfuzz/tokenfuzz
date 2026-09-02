@@ -276,27 +276,61 @@ def _served_from_object(obj: object, into: dict[str, int]) -> None:
                 into[name] = into.get(name, 0) + total
 
 
-def served_models(raw_path: "str | Path") -> dict[str, int]:
+def served_models_from_text(raw: str) -> dict[str, int]:
     """Models the provider actually billed in a transcript, by token total."""
     served: dict[str, int] = {}
+    for line in raw.splitlines():
+        # A transcript is mostly tool output and can reach hundreds of
+        # megabytes; only the few lines that could carry the block are
+        # worth parsing.
+        if "modelUsage" not in line and "models" not in line:
+            continue
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            _served_from_object(json.loads(line), served)
+        except ValueError:
+            continue
+    return served
+
+
+def served_models(raw_path: "str | Path") -> dict[str, int]:
+    """`served_models_from_text` over a transcript on disk; {} if unreadable."""
     try:
-        with Path(raw_path).open(encoding="utf-8", errors="replace") as stream:
-            for line in stream:
-                # A transcript is mostly tool output and can reach hundreds of
-                # megabytes; only the few lines that could carry the block are
-                # worth parsing.
-                if "modelUsage" not in line and "models" not in line:
-                    continue
-                line = line.strip()
-                if not line.startswith("{"):
-                    continue
-                try:
-                    _served_from_object(json.loads(line), served)
-                except ValueError:
-                    continue
+        raw = Path(raw_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return {}
-    return served
+    return served_models_from_text(raw)
+
+
+def substituted_model_from_text(raw: str, requested: str) -> str:
+    """`substituted_model` over an already-read transcript."""
+    if not requested:
+        return ""
+    served = served_models_from_text(raw)
+    if not served:
+        return ""
+    busiest = max(served, key=lambda name: served[name])
+    return "" if model_id_matches(busiest, requested) else busiest
+
+
+def annotate_served_model(row: dict, raw: str, requested: str) -> dict:
+    """Name on a usage row the model that did its work, when that is not the
+    one asked for.
+
+    The preflight's substitution gate reads one small transcript, and a
+    provider can honour that request and serve another model to the sessions
+    behind it (measured: every audit session of a run whose preflight passed
+    as Fable 5.1 was billed to Opus 4.8). A row that names only the requested
+    model then prices the wrong rate card whenever the CLI reports no cost of
+    its own. Same busiest-model rule as the preflight, so a helper model
+    beside the requested one is not substitution.
+    """
+    served = substituted_model_from_text(raw, requested)
+    if served:
+        row["served_model"] = served
+    return row
 
 
 def substituted_model(raw_path: "str | Path", requested: str) -> str:
@@ -316,13 +350,11 @@ def substituted_model(raw_path: "str | Path", requested: str) -> str:
     "did it appear?" would wave through. Whichever model did the work is the
     one the row has to be named and priced for.
     """
-    if not requested:
+    try:
+        raw = Path(raw_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return ""
-    served = served_models(raw_path)
-    if not served:
-        return ""
-    busiest = max(served, key=lambda name: served[name])
-    return "" if model_id_matches(busiest, requested) else busiest
+    return substituted_model_from_text(raw, requested)
 
 
 def _model_usage_tokens(obj: object) -> dict | None:
@@ -987,6 +1019,7 @@ def append_usage_event(
         estimate_missing=True,
     )
     usage_complete = bool(usage_complete and usage_is_complete(usage, 0))
+    annotate_served_model(usage, raw_text, model)
     if not index_path:
         return usage
     event = {

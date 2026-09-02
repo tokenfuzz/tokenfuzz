@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 import traceback
+from collections.abc import Collection
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1635,6 +1636,16 @@ def run_agent(
         extracted = ""
     text_path.write_text(extracted, encoding="utf-8")
     usage = llm_usage.extract_usage(str(raw_path), str(prompt_path), backend=runtime.backend)
+    served = llm_usage.substituted_model(raw_path, runtime.model)
+    if served:
+        # The preflight's gate saw the requested model; this session did not.
+        # The row names what ran so the ledger prices the right rate card.
+        usage["served_model"] = served
+        index_log(
+            runtime,
+            f"WARN: agent {agent} requested model={runtime.model} but the "
+            f"provider served {served}; its usage row is priced as {served}",
+        )
     issue, tools, events = _scan_transcript(raw_path, quota_marker)
     if (
         issue == "none"
@@ -1901,11 +1912,19 @@ def _log_phase_spans(
             f"WARN: housekeeping phase timing could not be recorded: {exc}",
             file=sys.stderr,
         )
+    # Every phase here ran while the pool was empty, so it blocked discovery.
+    _record_phase_rows(runtime, records, iteration=iteration, blocked=True)
+
+
+def _record_phase_rows(
+    runtime: Runtime, records: list[dict] | None, *,
+    iteration: int | None, blocked: bool,
+) -> None:
+    """Append phase rows to the timeline; advisory, never fatal."""
     if not records:
         return
-    # Every phase here ran while the pool was empty, so it blocked discovery.
     rows = [
-        {"type": "housekeeping_phase", "iteration": iteration, "blocked": True,
+        {"type": "housekeeping_phase", "iteration": iteration, "blocked": blocked,
          "recorded": datetime.now(timezone.utc).isoformat(), **record}
         for record in records
     ]
@@ -2036,6 +2055,7 @@ def _migrate_cluster_backlog(runtime: Runtime) -> None:
 
 def expand_new_crash_clusters(
     runtime: Runtime, *, deadline: float | None = None,
+    only: Collection[Path] | None = None,
 ) -> dict[str, int]:
     """Expand each newly accepted crash once and queue its concrete siblings.
 
@@ -2053,6 +2073,9 @@ def expand_new_crash_clusters(
         if crash.is_dir()
         and not (crash / ".cluster_expanded").is_file()
     ]
+    if only is not None:
+        chosen = {Path(path) for path in only}
+        candidates = [crash for crash in candidates if crash in chosen]
     attempted = getattr(runtime, "cluster_expansion_attempted", None)
     if attempted is None:
         attempted = set()
@@ -2904,6 +2927,217 @@ def _session_did_work(result: AgentResult) -> bool:
     return result.tool_calls > 0 or result.transcript_events == 0
 
 
+_CRASH_OWNER_RE = re.compile(r"CRASH-\d+-(\d+)$")
+
+
+def _crash_owner(name: str) -> int | None:
+    """The slot that filed a crash bundle, from the name bin/probe gave it."""
+    match = _CRASH_OWNER_RE.match(name)
+    return int(match.group(1)) if match else None
+
+
+class SealedGateWorker:
+    """Adjudicate artifacts no live session can still write, while agents run.
+
+    The barrier held every result gate until the slowest slot returned:
+    measured cells spent 12-14% of the audit wall there with every slot
+    idle, and a crash-heavy target up to 700s an iteration. None of that work
+    depends on the barrier, only on the artifact being finished, and an
+    artifact is finished when the session that wrote it has ended. The one
+    earlier attempt to gate in the background had no such seal, raced agents
+    mid-write, and was reverted; the seal is the difference.
+
+    Ownership is never read from content. A crash bundle names its slot
+    (`CRASH-NNN-<agent>`). A finding does not, so it is sealed only once it
+    predates every chain still in flight. A chain is one slot's run of
+    sessions sharing in-flight work: a turn-capped session's continuation
+    inherits its start, so nothing the cut session filed is sealed before the
+    continuation ends. Time is a logical clock: a slot's launch takes a fresh
+    tick, and the pool stamps every artifact it can see just before it
+    relaunches a slot, so first-seen is an upper bound on filing time and
+    sits strictly before the chain launched next. That keeps the test
+    conservative on any wall clock.
+    Six recorded cells (141 findings) show no session writing into a finding
+    another session filed; that observation is what makes a session's end
+    the seal.
+
+    Everything a sweep does the barrier repeats over the whole tree, with the
+    caches the sweep left, so a repeated verdict costs no provider call and a
+    failed sweep is retried there. A sweep never ages a pending crash: the
+    promotion-pending ceiling counts barrier passes, not sweeps.
+    """
+
+    def __init__(self, state: BackendState) -> None:
+        self.state = state
+        self.runtime = state.runtime
+        self._lock = threading.Lock()
+        self._clock = 0
+        self._chains: dict[int, int] = {}
+        self._first_seen: dict[str, int] = {}
+        self._wake = threading.Event()
+        self._stop = False
+        self._thread: threading.Thread | None = None
+        self.sweeps = 0
+        self.seconds = 0.0
+        results = getattr(self.runtime, "results", None)
+        self._results = Path(results) if results else None
+        if self._results is None:
+            return
+        # Whatever exists before the first launch was filed by a session that
+        # has already ended, or by the harness itself.
+        self.observe()
+        self._thread = threading.Thread(
+            target=self._run, name="sealed-gate", daemon=True,
+        )
+        self._thread.start()
+
+    def _artifacts(self) -> list[Path]:
+        found: list[Path] = []
+        for sub, prefix in (("findings", "FIND-"), ("crashes", "CRASH-")):
+            root = self._results / sub
+            if root.is_dir():
+                found.extend(
+                    path for path in sorted(root.glob(prefix + "*"))
+                    if path.is_dir()
+                )
+        return found
+
+    def observe(self) -> None:
+        """Stamp every artifact on disk as seen no later than now."""
+        if self._results is None:
+            return
+        with self._lock:
+            for directory in self._artifacts():
+                self._first_seen.setdefault(directory.name, self._clock)
+
+    def launch(self, agent: int, *, continuation: bool) -> None:
+        with self._lock:
+            if not continuation or agent not in self._chains:
+                self._clock += 1
+                self._chains[agent] = self._clock
+
+    def retire(self, agent: int) -> None:
+        with self._lock:
+            self._chains.pop(agent, None)
+
+    def request_sweep(self) -> None:
+        if self._thread is not None:
+            self._wake.set()
+
+    def close(self) -> None:
+        """Finish the sweep in flight, start no other, and return."""
+        if self._thread is None:
+            return
+        self._stop = True
+        self._wake.set()
+        self._thread.join()
+
+    def _run(self) -> None:
+        while True:
+            self._wake.wait()
+            self._wake.clear()
+            if self._stop:
+                return
+            try:
+                self._sweep()
+            except Exception as exc:  # noqa: BLE001 - the barrier retries; a silent worker is the R08 failure
+                index_log(
+                    self.runtime,
+                    "ERROR: background result gate failed: "
+                    f"{type(exc).__name__}: {exc}; the barrier will retry it",
+                )
+
+    def sealed(self) -> tuple[list[Path], list[Path], int, int]:
+        """Sealed findings and crashes, plus the totals they were drawn from."""
+        with self._lock:
+            chains = dict(self._chains)
+            artifacts = self._artifacts()
+            seen_at = {
+                directory.name: self._first_seen.setdefault(
+                    directory.name, self._clock,
+                )
+                for directory in artifacts
+            }
+        threshold = min(chains.values(), default=self._clock + 1)
+        findings: list[Path] = []
+        crashes: list[Path] = []
+        total_findings = total_crashes = 0
+        for directory in artifacts:
+            seen = seen_at[directory.name]
+            if directory.name.startswith("FIND-"):
+                total_findings += 1
+                if seen < threshold:
+                    findings.append(directory)
+                continue
+            total_crashes += 1
+            owner = _crash_owner(directory.name)
+            start = chains.get(owner) if owner is not None else threshold
+            if start is None or seen < start:
+                crashes.append(directory)
+        return findings, crashes, total_findings, total_crashes
+
+    def _sweep(self) -> None:
+        findings, crashes, total_findings, total_crashes = self.sealed()
+        if not findings and not crashes:
+            return
+        deadline = _productive_wall_deadline(self.state)
+        if deadline is not None and time.monotonic() >= deadline:
+            return
+        runtime = self.runtime
+        started = time.monotonic()
+        # The same phase rows the barrier writes, marked as not blocking the
+        # pool: review cost per artifact keeps counting them, the blocked
+        # share does not.
+        records: list[dict] = []
+        crash_counts = {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0}
+        with _phase_span([], "crash_triage", records=records):
+            if crashes:
+                crash_counts.update(triage.triage_crash_dirs(
+                    runtime.results, runtime.target_root, runtime.target_slug,
+                    runtime.config.attacker_controls, workers=runtime.num_agents,
+                    findings_only=runtime.config.sanitizers_explicitly_disabled,
+                    deadline=deadline, target_root_is_product=True,
+                    age_pending=False, only=crashes,
+                ))
+        finding_counts = {"accepted": 0, "rejected": 0, "pending": 0}
+        with _phase_span([], "result_gates", records=records), \
+                concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            expansion = pool.submit(
+                expand_new_crash_clusters, runtime, deadline=deadline,
+                only=crashes,
+            )
+            try:
+                if findings:
+                    finding_counts.update(triage.validate_find_gate(
+                        runtime.results, workers=runtime.num_agents,
+                        deadline=deadline, target_root_is_product=True,
+                        only=findings,
+                    ))
+            finally:
+                cluster_counts = expansion.result()
+        elapsed = time.monotonic() - started
+        self.sweeps += 1
+        self.seconds += elapsed
+        _record_phase_rows(
+            runtime, records, iteration=self.state.iteration, blocked=False,
+        )
+        acted = (
+            crash_counts["rejected"] or crash_counts["demoted"]
+            or finding_counts["rejected"] or cluster_counts["added"]
+        )
+        if elapsed >= 1.0 or acted:
+            index_log(
+                runtime,
+                f"Background gates: sealed findings={len(findings)}/{total_findings} "
+                f"crashes={len(crashes)}/{total_crashes}: "
+                f"crashes promoted={crash_counts['promoted']} rejected={crash_counts['rejected']} "
+                f"pending={crash_counts['pending']} demoted={crash_counts['demoted']} "
+                f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
+                f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']} "
+                f"in {elapsed:.1f}s",
+            )
+
+
 def run_agent_pool(
     state: BackendState, agents: list[int], cold: bool
 ) -> list[AgentResult]:
@@ -2980,10 +3214,23 @@ def run_agent_pool(
     overtime: set[int] = set()
     # Provider trouble reported by any slot stops launches in all of them.
     halted = ""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=runtime.num_agents) as pool:
+    # Gates sealed artifacts while the slots run; joined before the barrier so
+    # post-iteration triage never overlaps a sweep.
+    gate_worker = SealedGateWorker(state)
+    launched_now: set[int] = set()
+    with ExitStack() as stack:
+        stack.callback(gate_worker.close)
+        pool = stack.enter_context(
+            concurrent.futures.ThreadPoolExecutor(max_workers=runtime.num_agents)
+        )
         futures: dict[concurrent.futures.Future, tuple[bool, bool]] = {}
 
-        def launch(agent: int, initial: bool, cohort_era: bool = True) -> None:
+        def launch(
+            agent: int, initial: bool, cohort_era: bool = True,
+            continuation: bool = False,
+        ) -> None:
+            gate_worker.launch(agent, continuation=continuation)
+            launched_now.add(agent)
             future = pool.submit(
                 run_agent_guarded, runtime, context, agent, state.iteration,
                 cold and initial, epoch_remaining(),
@@ -2997,6 +3244,7 @@ def run_agent_pool(
                 futures, return_when=concurrent.futures.FIRST_COMPLETED
             )
             finished = []
+            launched_now.clear()
             for future in done:
                 futures.pop(future)
                 result = future.result()
@@ -3009,93 +3257,116 @@ def run_agent_pool(
                         f"Worker-pool: agent={result.agent} reported {halted}; no further "
                         "launches this iteration, finishing in-flight sessions first",
                     )
-            if halted or not getattr(runtime, "refill_workers", True):
-                continue
+            # Before any relaunch: what the finished sessions filed is on disk
+            # now, and must be seen before the next chain takes its tick.
+            gate_worker.observe()
             # Nothing in flight means the barrier is here: the iteration ends
             # whatever this slot would do next.
-            if not futures:
-                continue
-            in_flight = list(futures.values())
-            cohort_running = any(initial for initial, _era in in_flight)
-            # Only a cohort-era peer justifies overtime. Letting one overtime
-            # session justify the next is what turns a slot filling an idle gap
-            # into an iteration that outlives its cohort by a session per slot.
-            cohort_era_running = any(era for _initial, era in in_flight)
+            if futures and not halted and getattr(runtime, "refill_workers", True):
+                _refill_finished_slots(
+                    state, finished, futures, launch, policy, epoch_remaining,
+                    retried, overtime,
+                )
             for result in finished:
-                if not cohort_running and result.agent in overtime:
-                    index_log(
-                        runtime,
-                        f"Worker-pool refill: agent={result.agent} slot left idle; "
-                        "its one overtime session is spent",
-                    )
-                    continue
-                if (
-                    not cohort_running and not cohort_era_running
-                    and policy == "cohort-era"
-                ):
-                    index_log(
-                        runtime,
-                        f"Worker-pool refill: agent={result.agent} slot left idle; "
-                        "every peer still running is itself overtime",
-                    )
-                    continue
-                outcome = _refill_outcome(result)
-                if outcome in ("provider", "deadline"):
-                    index_log(
-                        runtime,
-                        f"Worker-pool refill: agent={result.agent} slot left idle; "
-                        f"{outcome} outcome rc={result.returncode}",
-                    )
-                    continue
-                # A turn-capped session carries in-flight work, and a failed one
-                # produced no information about whether work remains — treating
-                # its crash as "found nothing" would strand the slot. Only a
-                # clean session has to justify its replacement.
-                if outcome == "clean":
-                    if should_skip_launch(
-                        runtime, context, result.agent, primary_always_launches=False,
-                    ):
-                        index_log(
-                            runtime,
-                            f"Worker-pool refill: agent={result.agent} slot left idle; "
-                            "no active hypothesis, handoff, claimable card, or fuzz lead",
-                        )
-                        continue
-                    if not _session_did_work(result):
-                        index_log(
-                            runtime,
-                            f"Worker-pool refill: agent={result.agent} slot left idle; "
-                            "its session made no tool call, so a replacement would repeat it",
-                        )
-                        continue
-                elif outcome == "failed" and result.agent in retried:
-                    index_log(
-                        runtime,
-                        f"Worker-pool refill: agent={result.agent} slot left idle; "
-                        f"already retried once after an unexpected exit rc={result.returncode}",
-                    )
-                    continue
-                remaining = epoch_remaining()
-                if remaining <= 0:
-                    index_log(
-                        runtime,
-                        f"Worker-pool refill: agent={result.agent} slot left idle; "
-                        "pool epoch closed, deferring to post-iteration triage",
-                    )
-                    continue
-                if outcome == "failed":
-                    # Spend the allowance only on a launch that actually happens.
-                    retried.add(result.agent)
-                if not cohort_running:
-                    overtime.add(result.agent)
+                if result.agent not in launched_now:
+                    gate_worker.retire(result.agent)
+            gate_worker.request_sweep()
+    return results
+
+
+def _refill_finished_slots(
+    state: BackendState, finished: list[AgentResult],
+    futures: dict, launch, policy: str, epoch_remaining,
+    retried: set[int], overtime: set[int],
+) -> None:
+    """Decide, for each slot that just finished, whether it launches again."""
+    runtime = state.runtime
+    context = state.context
+    in_flight = list(futures.values())
+    cohort_running = any(initial for initial, _era in in_flight)
+    # Only a cohort-era peer justifies overtime. Letting one overtime
+    # session justify the next is what turns a slot filling an idle gap
+    # into an iteration that outlives its cohort by a session per slot.
+    cohort_era_running = any(era for _initial, era in in_flight)
+    for result in finished:
+        if not cohort_running and result.agent in overtime:
+            index_log(
+                runtime,
+                f"Worker-pool refill: agent={result.agent} slot left idle; "
+                "its one overtime session is spent",
+            )
+            continue
+        if (
+            not cohort_running and not cohort_era_running
+            and policy == "cohort-era"
+        ):
+            index_log(
+                runtime,
+                f"Worker-pool refill: agent={result.agent} slot left idle; "
+                "every peer still running is itself overtime",
+            )
+            continue
+        outcome = _refill_outcome(result)
+        if outcome in ("provider", "deadline"):
+            index_log(
+                runtime,
+                f"Worker-pool refill: agent={result.agent} slot left idle; "
+                f"{outcome} outcome rc={result.returncode}",
+            )
+            continue
+        # A turn-capped session carries in-flight work, and a failed one
+        # produced no information about whether work remains — treating
+        # its crash as "found nothing" would strand the slot. Only a
+        # clean session has to justify its replacement.
+        if outcome == "clean":
+            if should_skip_launch(
+                runtime, context, result.agent, primary_always_launches=False,
+            ):
                 index_log(
                     runtime,
-                    f"Worker-pool refill: agent={result.agent} slot free; launching "
-                    f"{'an overtime' if not cohort_running else 'another'} session "
-                    f"with {remaining}s left in the epoch",
+                    f"Worker-pool refill: agent={result.agent} slot left idle; "
+                    "no active hypothesis, handoff, claimable card, or fuzz lead",
                 )
-                launch(result.agent, False, cohort_running)
-    return results
+                continue
+            if not _session_did_work(result):
+                index_log(
+                    runtime,
+                    f"Worker-pool refill: agent={result.agent} slot left idle; "
+                    "its session made no tool call, so a replacement would repeat it",
+                )
+                continue
+        elif outcome == "failed" and result.agent in retried:
+            index_log(
+                runtime,
+                f"Worker-pool refill: agent={result.agent} slot left idle; "
+                f"already retried once after an unexpected exit rc={result.returncode}",
+            )
+            continue
+        remaining = epoch_remaining()
+        if remaining <= 0:
+            index_log(
+                runtime,
+                f"Worker-pool refill: agent={result.agent} slot left idle; "
+                "pool epoch closed, deferring to post-iteration triage",
+            )
+            continue
+        if outcome == "failed":
+            # Spend the allowance only on a launch that actually happens.
+            retried.add(result.agent)
+        if not cohort_running:
+            overtime.add(result.agent)
+        index_log(
+            runtime,
+            f"Worker-pool refill: agent={result.agent} slot free; launching "
+            f"{'an overtime' if not cohort_running else 'another'} session "
+            f"with {remaining}s left in the epoch",
+        )
+        # A continuation or a retry resumes state its predecessor left
+        # mid-write, so the slot's chain, and its seal, carry over.
+        launch(
+            result.agent, False, cohort_running,
+            continuation=outcome in ("continue", "failed"),
+        )
 
 
 def refresh_fuzz_leads(runtime: Runtime) -> bool:

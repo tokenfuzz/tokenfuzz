@@ -607,6 +607,28 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(native["cost_usd"], "0.123456")
         self.assertEqual(native["cost_source"], "backend-reported")
 
+        # A row billed to another model than it asked for is priced at the
+        # served model's rate card, not the requested one's.
+        served_tokens = {"input": 1_000_000, "output": 0}
+        for requested, served in (("claude-fable-5-1", "claude-opus-4-8"),):
+            index.write_text(json.dumps({
+                "backend": "claude", "model": requested,
+                "served_model": served, "tokens": served_tokens,
+            }) + "\n")
+            substituted = benchmark.harvest_tokens(index)
+            index.write_text(json.dumps({
+                "backend": "claude", "model": served, "tokens": served_tokens,
+            }) + "\n")
+            self.assertEqual(
+                substituted["cost_usd"], benchmark.harvest_tokens(index)["cost_usd"],
+            )
+            index.write_text(json.dumps({
+                "backend": "claude", "model": requested, "tokens": served_tokens,
+            }) + "\n")
+            self.assertNotEqual(
+                substituted["cost_usd"], benchmark.harvest_tokens(index)["cost_usd"],
+            )
+
     def test_artifact_links_are_advisory_and_preserve_raw_counts(self) -> None:
         results = self.root / "linked-results"
         findings = results / "findings"

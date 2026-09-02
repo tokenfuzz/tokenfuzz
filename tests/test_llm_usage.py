@@ -599,6 +599,34 @@ class ServedModelTests(unittest.TestCase):
         ])
         self.assertEqual(llm_usage.substituted_model(raw, "claude-opus-5"), "")
 
+    def test_a_usage_row_names_the_model_that_served_it(self) -> None:
+        # The preflight passes on one small transcript; the sessions behind
+        # it can still be billed to another model. The row must say which.
+        index = self.root / "index.jsonl"
+        raw = json.dumps({"type": "result", "modelUsage": {
+            "claude-opus-4-8": {"inputTokens": 9, "cacheReadInputTokens": 900_000},
+            "claude-fable-5-1": {"inputTokens": 2, "cacheReadInputTokens": 40_000},
+            "claude-haiku-4-5": {"inputTokens": 16_000},
+        }})
+        usage = llm_usage.append_usage_event(
+            index, backend="claude", model="claude-fable-5-1", kind="analysis",
+            prompt_text="p", raw_text=raw,
+        )
+        self.assertEqual(usage["served_model"], "claude-opus-4-8")
+        row = json.loads(index.read_text(encoding="utf-8").splitlines()[-1])
+        self.assertEqual(row["model"], "claude-fable-5-1")
+        self.assertEqual(row["served_model"], "claude-opus-4-8")
+        # The requested model doing the work carries no served note at all.
+        served_raw = json.dumps({"type": "result", "modelUsage": {
+            "claude-fable-5-1": {"inputTokens": 2, "cacheReadInputTokens": 40_000},
+            "claude-haiku-4-5": {"inputTokens": 900},
+        }})
+        healthy = llm_usage.append_usage_event(
+            index, backend="claude", model="claude-fable-5-1", kind="analysis",
+            prompt_text="p", raw_text=served_raw,
+        )
+        self.assertNotIn("served_model", healthy)
+
     def test_a_cli_reporting_no_served_model_falls_open(self) -> None:
         # Absence of telemetry is not evidence of substitution; oss reports
         # none, and refusing every oss run would be a worse failure.

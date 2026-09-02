@@ -2097,6 +2097,10 @@ def harvest_tokens(
             totals["delegation_observable"] = False
         backend = str(row.get("backend") or default_backend or "").strip().lower()
         model = str(row.get("model") or default_model or "").strip()
+        # A row names the model it asked for; when the provider billed the
+        # work to another (llm_usage.annotate_served_model), that one's rate
+        # card is the honest denominator.
+        model = str(row.get("served_model") or model).strip()
         tok = row.get("tokens") or {}
         if not isinstance(tok, dict):
             tok = {}
