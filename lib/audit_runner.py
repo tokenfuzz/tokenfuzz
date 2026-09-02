@@ -529,6 +529,18 @@ def validate_model(runtime: Runtime) -> None:
             if unresolved_model:
                 last_rc = 45
                 break
+            if runtime.backend == "gemini" and llm_invoke.use_gemini_cli() \
+                    and llm_invoke.gemini_admin_policy_dropped(raw):
+                # Gemini CLI discards every --admin-policy, silently for the
+                # run, when a system policies directory holds any policy.
+                # That drops the memory and web denies together, so a run
+                # would proceed unisolated with nothing in its logs saying so.
+                raise RuntimeError(
+                    "model preflight refused for backend=gemini: Gemini CLI "
+                    "ignored the harness admin policies (a system policies "
+                    "directory is defined on this host), so cross-run memory "
+                    f"and web access would stay enabled; transcript: {raw}"
+                )
             if last_rc == 0 and acted:
                 # A CLI that quietly falls back to another model answers a
                 # wrong --model with a cheerful success, so no exit code

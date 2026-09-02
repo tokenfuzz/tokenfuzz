@@ -34,6 +34,17 @@ Fix:
 
 3. Start the audit again.
 
+Symptom (Google Gemini CLI only):
+
+```text
+FATAL: model preflight refused for backend=gemini: Gemini CLI ignored the harness admin policies
+```
+
+Gemini CLI silently discards every `--admin-policy` file when a system policies
+directory holds any policy, which would leave cross-run memory and web tools
+enabled for the whole run. Remove or empty that directory on the audit host, or
+run under `USE_GEMINI_CLI=0` (Antigravity), then start again.
+
 ## Target config does not parse
 
 Common fixes:

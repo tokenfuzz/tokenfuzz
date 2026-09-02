@@ -1,0 +1,17 @@
+# Deny Gemini CLI's built-in web tools for every harness launch, so an agent
+# reading an untrusted tree has no egress — the same posture every other
+# backend's harness launch already has (Claude denies WebFetch/WebSearch, Grok
+# passes --disable-web-search, Codex runs with web_search="disabled"). Applied on
+# every launch, unlike gemini-no-memory.policy.toml, which is conditional on
+# the memory setting. Tool names are Gemini CLI's built-in registrations.
+[[rule]]
+toolName = "google_web_search"
+decision = "deny"
+priority = 999
+denyMessage = "Web access is disabled by TokenFuzz for audit sessions on untrusted source."
+
+[[rule]]
+toolName = "web_fetch"
+decision = "deny"
+priority = 999
+denyMessage = "Web access is disabled by TokenFuzz for audit sessions on untrusted source."

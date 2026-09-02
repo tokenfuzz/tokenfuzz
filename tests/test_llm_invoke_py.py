@@ -155,6 +155,11 @@ proc = run(["agent-flags", "claude"], check=True)
 f = flags(proc)
 ok("--print" in f, "claude has --print", f)
 ok("stream-json" in f, "claude has stream-json")
+assert_eq("WebFetch,WebSearch", f[f.index("--disallowedTools") + 1],
+          "claude agent removes the web tools outright; delegation stays at the CLI default")
+bypass = inv.agent_flags("claude", agent_security="external-bypass")
+assert_eq("WebFetch,WebSearch", bypass[bypass.index("--disallowedTools") + 1],
+          "claude external-bypass launch denies web too (it carries no settings deny)")
 ok("--dangerously-skip-permissions" not in f, "claude sandboxed mode omits skip-permissions")
 assert_eq("dontAsk", f[f.index("--permission-mode") + 1], "claude never blocks on a prompt")
 claude_settings = json.loads(f[f.index("--settings") + 1])
@@ -190,7 +195,38 @@ ok('approval_policy="never"' in f, "codex runs non-interactively without approva
 ok('model_reasoning_effort="high"' in f, "codex agent wires configured effort")
 ok("project_root_markers=[]" in f,
    "codex agent stops project instruction discovery at --cd")
+ok('web_search="disabled"' in f,
+   "codex agent denies web search like every other backend's agent launch (its default is on)")
+ok("features.multi_agent=false" not in f,
+   "codex agent keeps the CLI's default delegation; only a bounded validator turns it off")
+guide_bytes = (ROOT / "AGENTS.md").stat().st_size
+ok(guide_bytes < 32768,
+   "AGENTS.md stays under codex's default 32 KiB project-doc cap, so a cold "
+   "codex session's auto-loaded guide is never truncated",
+   f"{guide_bytes} bytes")
 
+with mock.patch.dict(os.environ, {"USE_GEMINI_CLI": "0"}):
+    agy = inv.agent_flags("gemini")
+    ok("--disable-slash-commands" in agy,
+       "agy agent turns operator skill expansion off (parity with claude --safe-mode, codex plugins off, gemini-cli skills off)")
+    ok("--disable-slash-commands" in inv.decide_flags("gemini"),
+       "agy decide turns operator skill expansion off too")
+with mock.patch.dict(os.environ, {"USE_GEMINI_CLI": "1"}):
+    dec = inv.decide_flags("gemini")
+    ok(any(dec[i + 1].endswith("gemini-no-web.policy.toml")
+           for i, x in enumerate(dec) if x == "--admin-policy"),
+       "gemini-cli decide loads the no-web policy like its agent launch")
+with mock.patch.dict(os.environ, {"USE_GEMINI_CLI": "1", "TOKENFUZZ_MEMORY_ENABLED": "1"}):
+    cli = inv.agent_flags("gemini")
+    policies = [cli[i + 1] for i, x in enumerate(cli) if x == "--admin-policy"]
+    ok(any(p.endswith("gemini-no-web.policy.toml") for p in policies),
+       "gemini-cli agent denies web tools even with memory enabled")
+    ok(not any(p.endswith("gemini-no-memory.policy.toml") for p in policies),
+       "gemini-cli memory policy stays conditional on the memory setting")
+ok(inv.opencode_config("m", "external-bypass").get("permission") == {"webfetch": "deny", "websearch": "deny"},
+   "oss agent launch (external-bypass) denies web like every other backend")
+ok(inv.opencode_config("m", "sandboxed").get("permission", {}).get("external_directory") == "deny",
+   "oss sandboxed decide config keeps its full deny set")
 proc = run(["agent-flags", "oss"], check=True)
 f = flags(proc)
 assert_eq(
@@ -288,7 +324,10 @@ ok("--disable-web-search" in f,
    "Grok disables web tools in every profile: no outer sandbox withholds them")
 ok("streaming-json" in f, "Grok agent uses streaming JSON")
 ok("--no-auto-update" in f, "Grok agent disables background updates")
-ok("--no-subagents" in f, "Grok agent keeps harness-owned concurrency")
+ok("--no-subagents" not in f,
+   "Grok harness agent keeps the CLI's default delegation, like claude and codex")
+ok("--no-subagents" in inv.agent_flags("grok", allow_subagents=False),
+   "a bounded Grok validator review turns delegation off, like claude and codex")
 ok("--no-memory" in f, "Grok agent disables cross-run memory by default")
 assert_eq("23", f[f.index("--max-turns") + 1], "Grok agent wires max turns")
 assert_eq("grok-4.6", f[f.index("--model") + 1], "Grok agent wires default model")
@@ -385,6 +424,16 @@ proc = run(["decide-flags", "claude"], check=True)
 f = flags(proc)
 ok("--print" in f, "decide claude --print")
 ok("--max-turns" not in f, "decide claude has no turn cap (timeout-bounded, like codex/gemini)")
+assert_eq("WebFetch,WebSearch", f[f.index("--disallowedTools") + 1],
+          "decide claude denies web: plan mode gates the filesystem, not egress")
+ok(inv.decide_env("codex") == {}, "decide_env is a no-op for codex")
+with mock.patch.dict(os.environ, {}, clear=False):
+    os.environ.pop("CLAUDE_CODE_PROMPT_CACHE_TTL", None)
+    os.environ.pop("FORCE_PROMPT_CACHING_5M", None)
+    assert_eq({"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}, inv.decide_env("claude"),
+              "one-shot claude decisions bill the cheaper five-minute cache tier")
+with mock.patch.dict(os.environ, {"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"}):
+    assert_eq({}, inv.decide_env("claude"), "an operator's own cache TTL is respected")
 assert_eq("json", f[f.index("--output-format") + 1],
           "decide claude asks for the usage-bearing envelope")
 turns_idx = f.index("--permission-mode")
@@ -399,6 +448,8 @@ ok("danger-full-access" not in f, "decide codex NOT danger-full-access")
 ok('model_reasoning_effort="high"' in f, "decide codex wires configured effort")
 ok("project_root_markers=[]" in f,
    "decide codex stops project instruction discovery at cwd")
+ok('web_search="disabled"' in f,
+   "decide codex denies web search like every other harness launch")
 
 proc = run(["decide-flags", "gemini"], check=True)
 f = flags(proc)
@@ -424,6 +475,7 @@ ok("--dangerously-skip-permissions" not in f, "Gemini CLI decide omits agy skip-
 proc = run(["decide-flags", "grok"], check=True)
 f = flags(proc)
 assert_eq("plan", f[f.index("--permission-mode") + 1], "Grok decide uses read-only plan mode")
+ok("--disable-web-search" in f, "Grok decide denies web search like its agent launch")
 ok("plain" in f, "Grok decide uses plain assistant output")
 ok("--no-memory" in f, "Grok decide disables cross-run memory")
 ok("--always-approve" not in f, "Grok decide does not allow writes")
@@ -669,6 +721,34 @@ with tempfile.TemporaryDirectory() as td:
         "Claude native cap avoids kill-based transcript polling",
         repr(kwargs),
     )
+
+    dropped = launch_root / "dropped.raw"
+
+    def _write_dropped(*_args, **_kwargs):
+        dropped.write_text(
+            "Security Warning: Ignoring --admin-policy because system policies "
+            "are already defined in /etc/gemini-cli/policies\n",
+            encoding="utf-8",
+        )
+        return 0
+
+    dropped_stderr = io.StringIO()
+    with mock.patch.dict(os.environ, {"USE_GEMINI_CLI": "1"}), mock.patch.object(
+        inv, "backend_bin", return_value="gemini",
+    ), mock.patch.object(
+        inv, "_run_agent_process", side_effect=_write_dropped,
+    ), mock.patch.object(
+        inv, "agent_security_problem", return_value="",
+    ), contextlib.redirect_stderr(dropped_stderr):
+        rc = inv.run_agent_prompt(
+            "gemini", "prompt", 0, dropped, model="fixture-model", cwd=launch_root,
+            agent_security="external-bypass",
+        )
+    assert_eq(46, rc,
+              "a gemini-cli launch whose admin policies were dropped fails loudly "
+              "(memory and web denies went with them), so a benchmark cell is not a measurement")
+    ok("ignored the harness admin policies" in dropped_stderr.getvalue(),
+       "the dropped-policy failure names its cause on stderr")
 
     command, kwargs = capture_rollover("grok", "grok", 17)
     assert_eq(
@@ -954,7 +1034,8 @@ with tempfile.TemporaryDirectory() as td, \
 
 claude_single = inv.agent_flags("claude", allow_subagents=False)
 ok("--disallowedTools" in claude_single, "single-agent Claude disables native delegation")
-ok("Agent,Task" in claude_single, "single-agent Claude denies current and legacy delegation tools")
+assert_eq("WebFetch,WebSearch,Agent,Task", claude_single[claude_single.index("--disallowedTools") + 1],
+          "a bounded validator adds both delegation tool names to the standing web deny")
 codex_single = inv.agent_flags("codex", allow_subagents=False)
 ok("features.multi_agent=false" in codex_single, "single-agent Codex disables native delegation")
 ok("features.plugins=false" in codex_single,
@@ -1101,10 +1182,10 @@ for builder in (inv.agent_flags, inv.decide_flags):
     ok("--experimental-memory" in grok_flags and "--no-memory" not in grok_flags,
        f"grok.{builder.__name__} enables memory only on explicit opt-in", grok_flags)
 os.environ["USE_GEMINI_CLI"] = "1"
-ok("--admin-policy" not in inv.agent_flags("gemini"),
-   "Gemini CLI agent omits admin-policy when memory enabled")
-ok("--admin-policy" not in inv.decide_flags("gemini"),
-   "Gemini CLI decide omits admin-policy when memory enabled")
+ok(not any(x.endswith("gemini-no-memory.policy.toml") for x in inv.agent_flags("gemini")),
+   "Gemini CLI agent omits the memory policy when memory enabled")
+ok(not any(x.endswith("gemini-no-memory.policy.toml") for x in inv.decide_flags("gemini")),
+   "Gemini CLI decide omits the memory policy when memory enabled")
 os.environ.pop("USE_GEMINI_CLI", None)
 os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
 

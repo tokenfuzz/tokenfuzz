@@ -1437,6 +1437,38 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         not list((model_runtime.target_root / ".audit").glob("preflight-*")),
         "every backend answers one preflight, and it leaves no sentinel behind",
     )
+    # Gemini CLI drops every --admin-policy when a system policies directory
+    # exists, printing one warning; that removes the memory and web denies
+    # together, so the preflight must refuse rather than run unisolated.
+    def _preflight_acts_but_policy_dropped(_backend, prompt_text, _timeout, raw_log, **_kwargs):
+        token, sentinel = _preflight_command(prompt_text)
+        Path(sentinel).write_text(token, encoding="utf-8")
+        Path(raw_log).write_text(
+            "Security Warning: Ignoring --admin-policy because system policies "
+            "are already defined in /etc/gemini-cli/policies\n",
+            encoding="utf-8",
+        )
+        return 0
+
+    model_runtime.backend = "gemini"
+    with mock.patch.dict(
+        os.environ,
+        {"AUDIT_MODEL_PREFLIGHT_ATTEMPTS": "1", "USE_GEMINI_CLI": "1"},
+        clear=False,
+    ), mock.patch.object(
+        audit_runner.llm_invoke, "run_agent_prompt",
+        side_effect=_preflight_acts_but_policy_dropped,
+    ):
+        try:
+            audit_runner.validate_model(model_runtime)
+            refused_dropped_policy = False
+        except RuntimeError as exc:
+            refused_dropped_policy = "admin polic" in str(exc)
+    check(
+        refused_dropped_policy,
+        "gemini-cli preflight refuses to run when the CLI dropped the harness admin policies",
+    )
+
     model_runtime.backend = "gemini"
     with mock.patch.dict(
         os.environ,

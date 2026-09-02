@@ -309,6 +309,24 @@ def gemini_memory_policy_path() -> str:
     return str(_CONFIG_PATH.parent / "gemini-no-memory.policy.toml")
 
 
+# The exact warning Gemini CLI prints when it drops --admin-policy files.
+GEMINI_ADMIN_POLICY_DROPPED = "Ignoring --admin-policy"
+
+
+def gemini_admin_policy_dropped(raw_log: str | os.PathLike[str]) -> bool:
+    """Whether a Gemini CLI transcript shows the admin policies were dropped."""
+    try:
+        with open(raw_log, encoding="utf-8", errors="replace") as stream:
+            return any(GEMINI_ADMIN_POLICY_DROPPED in line for line in stream)
+    except OSError:
+        return False
+
+
+def gemini_no_web_policy_path() -> str:
+    """Absolute path to the Gemini CLI admin policy that denies web tools."""
+    return str(_CONFIG_PATH.parent / "gemini-no-web.policy.toml")
+
+
 # Marker file that identifies a TokenFuzz-staged GEMINI_CLI_HOME, so a child
 # process that inherits the exported GEMINI_CLI_HOME reuses it instead of
 # wiping and re-staging it mid-run.
@@ -604,6 +622,12 @@ def invocation_env(
     return environment
 
 
+# Claude Code's built-in web tools and its delegation tools (current name and
+# the legacy one), for --disallowedTools. Named tools are removed from the
+# session whatever the permission mode.
+_CLAUDE_WEB_TOOLS = ("WebFetch", "WebSearch")
+_CLAUDE_DELEGATION_TOOLS = ("Agent", "Task")
+
 # Codex memory-disable controls, added to the flag list when memory is
 # disabled. All are `-c` config overrides rather than `--disable memories`:
 # an unknown `-c` key is accepted and ignored on any Codex version, whereas
@@ -757,6 +781,13 @@ def opencode_config(model: str, agent_security: str | None = None) -> dict:
             "webfetch": "deny",
             "websearch": "deny",
         }
+    else:
+        # The only profile an oss agent can run under. Web stays denied here
+        # too, matching every other backend's harness launch (claude denies
+        # WebFetch/WebSearch, grok --disable-web-search, codex
+        # web_search="disabled"): audited source is untrusted, so no agent
+        # gets egress.
+        config["permission"] = {"webfetch": "deny", "websearch": "deny"}
     return config
 
 
@@ -854,6 +885,33 @@ def granted_dirs(add_dirs: str) -> list[str]:
     return granted
 
 
+def decide_env(backend: str) -> dict[str, str]:
+    """Cost-only environment for a one-shot decision. Never changes behaviour.
+
+    Claude Code writes its prompt cache at the one-hour tier by default, billed
+    at 2x fresh input against the five-minute tier's 1.25x. A decision is one
+    short session — a few read-only tool turns at most, seconds apart — whose
+    prompt is never sent again once it ends, and the system-prompt prefix it
+    shares with its fan-out siblings is re-read within minutes, so the hour
+    buys nothing. This changes only which cache-write tier the request bills at
+    — same model, same tools, same output — so it is a cost choice, not a
+    configuration that alters what the decision can do. It touches decision
+    calls alone, which have no model-direct counterpart, so no benchmark
+    condition is advantaged relative to another. Agent sessions are left on the
+    CLI default: their prefix is re-read across the iteration barrier, which can
+    exceed five minutes. An operator's own cache setting wins.
+    """
+    if backend == "claude":
+        # Presence, not value: an operator who set either has made the choice.
+        if (
+            "CLAUDE_CODE_PROMPT_CACHE_TTL" in os.environ
+            or "FORCE_PROMPT_CACHING_5M" in os.environ
+        ):
+            return {}
+        return {"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}
+    return {}
+
+
 def agent_flags(
     backend: str,
     model: str = "",
@@ -880,6 +938,16 @@ def agent_flags(
             "--verbose",
             "--output-format", "stream-json",
         ]
+        # One disallowed list for both security profiles. The web tools are
+        # named here and not only in the sandboxed settings below, because
+        # external-bypass carries no settings at all and used to leave
+        # WebFetch/WebSearch reachable; every other backend's launch denies
+        # web, and audited source is untrusted. Delegation is added only for
+        # a bounded validator review (see allow_subagents).
+        disallowed = list(_CLAUDE_WEB_TOOLS)
+        if not allow_subagents:
+            disallowed += list(_CLAUDE_DELEGATION_TOOLS)
+        flags += ["--disallowedTools", ",".join(disallowed)]
         if bypass:
             flags.append("--dangerously-skip-permissions")
         else:
@@ -937,11 +1005,6 @@ def agent_flags(
             flags += ["--model", resolved_model]
         if effort:
             flags += ["--effort", effort]
-        if not allow_subagents:
-            # A model-direct benchmark is one provider session by contract.
-            # Deny both current and legacy delegation tool names so local
-            # Claude settings cannot silently expand that concurrency.
-            flags += ["--disallowedTools", "Agent,Task"]
         for d in granted_dirs(add_dirs):
             flags += ["--add-dir", d]
         return flags
@@ -960,6 +1023,13 @@ def agent_flags(
             "-c", 'history.persistence="none"',
             *_CODEX_PLUGIN_OFF_FLAGS,
             *_CODEX_PROJECT_ROOT_FLAGS,
+            # Codex's web search is on by default (measured: a default session
+            # answered a search with example.com's title and streamed a
+            # `web_search` item). Every other backend's agent launch denies
+            # web tools, because audited source is untrusted input, so codex
+            # does too. The value is an enum — disabled|cached|indexed|live —
+            # and a bare boolean is rejected at config load.
+            "-c", 'web_search="disabled"',
             "--skip-git-repo-check",
         ]
         if bypass:
@@ -1021,6 +1091,9 @@ def agent_flags(
             # cross-run memory.
             if not memory_enabled():
                 flags += ["--admin-policy", gemini_memory_policy_path()]
+            # Unconditional: web stays denied whatever the memory setting, as
+            # it is for every other backend's harness launch.
+            flags += ["--admin-policy", gemini_no_web_policy_path()]
             for d in granted_dirs(add_dirs):
                 flags += ["--include-directories", d]
             return flags
@@ -1034,7 +1107,13 @@ def agent_flags(
         # AGY_LOG_FILE, when set (by that preflight), pins agy's log to a
         # per-probe path so the unresolved-flag signature can be read back
         # deterministically.
-        flags = ["--dangerously-skip-permissions"]
+        # --disable-slash-commands is agy's only launch-time control over
+        # operator skills; it is the parity with claude --safe-mode, codex
+        # features.plugins=false and gemini-cli skills.enabled=false. agy has
+        # no memory or home isolation switch at all, and its memory store
+        # shares a directory with its OAuth token, so cross-run memory cannot
+        # be isolated for this dialect; use gemini-cli for benchmark rows.
+        flags = ["--dangerously-skip-permissions", "--disable-slash-commands"]
         label = agy_model_label(resolved_model, effort)
         if label:
             flags += ["--model", label]
@@ -1048,13 +1127,19 @@ def agent_flags(
     if backend == "grok":
         flags = [
             "--no-auto-update",
-            "--no-subagents",
             "--output-format", "streaming-json",
             # No sandbox profile: the sandboxed profile refuses this backend,
             # and --permission-mode is not enforced for anything but bypass.
             "--always-approve",
             "--disable-web-search",
         ]
+        if not allow_subagents:
+            # Same rule as claude and codex: only a bounded validator review
+            # turns delegation off; agents and model-direct keep the default.
+            # Grok may report each spawn as a `subagent_start` event (the
+            # usage reader counts those where they appear) and its fan-out is
+            # disclosed as unobservable either way; its spend is a floor.
+            flags.append("--no-subagents")
         flags.append("--experimental-memory" if memory_enabled() else "--no-memory")
         if max_turns > 0:
             flags += ["--max-turns", str(max_turns)]
@@ -1238,6 +1323,20 @@ def run_agent_prompt(
         return 127
     if backend == "gemini" and not use_gemini_cli():
         _capture_agy_cli_log_diag(raw_log)
+    if backend == "gemini" and use_gemini_cli() and gemini_admin_policy_dropped(raw_log):
+        # Gemini CLI discards every --admin-policy, with one warning, when a
+        # system policies directory holds any policy. The memory and web
+        # denies went with it, so this session ran unisolated. The audit
+        # preflight refuses before any session; a benchmark cell has no
+        # preflight, so the launch itself reports the failure and the cell
+        # counts as failed rather than as a measurement.
+        message = (
+            "Gemini CLI ignored the harness admin policies (a system policies "
+            "directory is defined on this host); the session ran with memory "
+            f"and web tools enabled: {raw_log}"
+        )
+        print(f"ERROR: {message}", file=sys.stderr)
+        return 46
     warning = refusal_warning(backend, str(raw_log), prompt)
     if warning:
         print(warning, file=sys.stderr)
@@ -1499,8 +1598,10 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
     decision that reads source to judge (find_quality, reachability, cluster
     siblings, …) can — with the same read-only reach across backends: codex
     --sandbox read-only, gemini --approval-mode=plan, claude --permission-mode
-    plan. Used by lib/llm_decide.py's backend dispatcher (imported, not
-    subprocessed).
+    plan. Web tools are denied here as on agent launches: a decision reads
+    untrusted source, and read-only modes gate the filesystem, not egress.
+    Antigravity exposes no web switch. Used by lib/llm_decide.py's backend
+    dispatcher (imported, not subprocessed).
     """
     resolved_model = resolve_model_name(backend, model)
     effort = default_effort(backend)
@@ -1524,6 +1625,10 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
             "--no-session-persistence",
             "--output-format", "json",
             "--permission-mode", "plan",
+            # Plan mode is read-only for the filesystem, not for the network:
+            # a decision reads untrusted source and artifacts, so it gets the
+            # same web denial as an agent session.
+            "--disallowedTools", ",".join(_CLAUDE_WEB_TOOLS),
         ]
         if resolved_model:
             flags += ["--model", resolved_model]
@@ -1537,6 +1642,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         flags = [
             "--json", "-c", 'history.persistence="none"',
             *_CODEX_PLUGIN_OFF_FLAGS, *_CODEX_PROJECT_ROOT_FLAGS,
+            "-c", 'web_search="disabled"',
             "--skip-git-repo-check", "--sandbox", "read-only",
         ]
         if resolved_model:
@@ -1570,6 +1676,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
             # regardless of plan-mode tool gating (see agent_flags).
             if not memory_enabled():
                 flags += ["--admin-policy", gemini_memory_policy_path()]
+            flags += ["--admin-policy", gemini_no_web_policy_path()]
             return flags
 
         # Antigravity CLI (agy) decide mode: --print emits plain text.
@@ -1577,7 +1684,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         # Its --mode plan is not a read-only guarantee (measured: a shell write
         # under plan still lands), and its sandbox cannot read the tree a
         # decision must judge, so neither is used here.
-        flags = ["--dangerously-skip-permissions"]
+        flags = ["--dangerously-skip-permissions", "--disable-slash-commands"]
         label = agy_model_label(resolved_model, effort)
         if label:
             flags += ["--model", label]
@@ -1589,6 +1696,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
             "--no-subagents",
             "--permission-mode", "plan",
             "--output-format", "plain",
+            "--disable-web-search",
         ]
         flags.append("--experimental-memory" if memory_enabled() else "--no-memory")
         if resolved_model:

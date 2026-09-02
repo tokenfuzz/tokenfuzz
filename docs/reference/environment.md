@@ -82,6 +82,7 @@ for a shared shell, or a backend binary outside `PATH`.
 | `GROK_MODEL_DEFAULT` | `config/models.toml` | Default Grok model. |
 | `CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN` / `GROK_BIN` / `OPENCODE_BIN` | the CLI's own name (`agy` for Gemini) | Backend executable outside `PATH`. |
 | `USE_GEMINI_CLI` | `0` | Use Google Gemini CLI instead of the default Antigravity CLI. |
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | unset | Claude Code's prompt-cache write tier (`5m` or `1h`). TokenFuzz sets `5m` on its own one-shot decision calls, which nothing re-reads later; agent sessions keep the CLI default. Set it yourself to override both. Cost tier only; it never changes model behaviour. |
 | `AUDIT_MODEL_PREFLIGHT` | `1` | Before starting, launch the selected model once through the real agent path — same granted directories as an audit session — and require it to run a command that writes into the target tree. A backend that can reply but cannot act fails here rather than spending the run. Set `0` only for an intentionally offline or mock run. |
 | `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds (`300` for Google Gemini CLI) | Ceiling on that probe. Raise it when a slow local model loses the probe and the audit never reaches its first agent. |
 
