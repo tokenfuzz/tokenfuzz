@@ -269,6 +269,7 @@ class Runtime:
             fixed_strategy=self.fixed_strategy,
             turn_soft_cap=_turn_cap(),
             config=self.config,
+            backend=self.backend,
         )
 
 

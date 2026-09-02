@@ -89,6 +89,7 @@ class PromptContext:
     tool_call_deep_soft_target: int = 150
     turn_soft_cap: int = DEFAULT_TURN_SOFT_CAP
     config: target_config.Config | None = None
+    backend: str = ""
 
     def soft_target(self, deep: bool) -> int:
         """Self-pacing hint, never above the cap that actually ends the session."""
@@ -121,11 +122,39 @@ def safety_framing(context: PromptContext) -> str:
     return render_template("safety_framing.md.j2", {"results_dir": str(context.results_dir)})
 
 
+# Backends whose CLI already loads the repo-root AGENTS.md as its project
+# document, so a prompt that also embeds it puts the same bytes in context
+# twice. Only codex qualifies today: `project_root_markers=[]` makes the launch
+# directory its project root, and the audit launches every session with that
+# directory as cwd, so the guide is loaded before the prompt is read (measured:
+# a codex call at the repo root carries ~5.5k tokens that the same call with
+# project docs disabled does not — the size of AGENTS.md). Claude reads
+# CLAUDE.md rather than AGENTS.md and the Gemini dialects read GEMINI.md, so
+# each of those still needs the embedded copy; grok and oss are left out
+# because nothing here has measured what they load.
+_GUIDE_AUTOLOADING_BACKENDS = frozenset({"codex"})
+
+
+def guide_autoloaded(context: PromptContext) -> bool:
+    """Whether this backend already has the guide in context on its own."""
+    return context.backend in _GUIDE_AUTOLOADING_BACKENDS
+
+
 def guide_section(context: PromptContext, cold: bool) -> str:
     if not context.guide_text:
         return ""
-    if cold:
+    if cold and not guide_autoloaded(context):
         return f"\n## AGENT GUIDE\n\n{context.guide_text}\n"
+    if cold:
+        # Deep and compact sessions have always run on the auto-loaded copy
+        # alone, so pointing a cold session at the same copy withholds nothing
+        # — it drops a duplicate that every later request of the session would
+        # otherwise replay.
+        return (
+            f"\n## AGENT GUIDE\n\n`{context.guide_path}` is already loaded in "
+            "this session's context as the project guide. Follow it; do not "
+            "read it again.\n"
+        )
     return (
         f"\n## AGENT GUIDE\n\nFollow `{context.guide_path}`. Do not re-read it unless "
         "the structured resume or this prompt conflicts with the remembered workflow.\n"

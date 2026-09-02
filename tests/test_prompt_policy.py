@@ -201,6 +201,37 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertIn("--strategy STRATEGY", compact_contract)
         self.assertNotIn("--strategy S1", compact_contract)
 
+    def test_cold_guide_is_embedded_once_per_backend(self) -> None:
+        # Codex loads the repo-root AGENTS.md itself as its project document
+        # (project_root_markers=[] with the launch dir as cwd), so a cold
+        # prompt that also embeds the guide replays the same bytes in every
+        # request of the session. Claude reads CLAUDE.md, not AGENTS.md, so it
+        # still needs the embedded copy; deep sessions never embedded it.
+        marker = "GUIDE BODY MARKER app_parse child_free"
+        guide = f"# Guide\n\n{marker}\n"
+
+        def context(backend: str) -> prompt.PromptContext:
+            return prompt.PromptContext(
+                results_dir=self.results, target_root=self.target,
+                target_slug="sampleproj", reference_dir=self.references,
+                num_agents=1, agent_roles=("reproduce",),
+                guide_text=guide, backend=backend,
+            )
+
+        codex_cold = prompt.cold_start_prompt(context("codex"), 1)
+        self.assertNotIn(marker, codex_cold)
+        self.assertIn("## AGENT GUIDE", codex_cold)
+        self.assertIn("already loaded", codex_cold)
+        self.assertIn("`AGENTS.md`", codex_cold)
+        for backend in ("claude", "gemini", "grok", "oss", ""):
+            with self.subTest(backend=backend or "unset"):
+                self.assertIn(marker, prompt.cold_start_prompt(context(backend), 1))
+        for backend in ("codex", "claude"):
+            with self.subTest(variant="deep", backend=backend):
+                deep = prompt.deep_investigation_prompt(context(backend), 1)
+                self.assertNotIn(marker, deep)
+                self.assertIn("Follow `AGENTS.md`", deep)
+
     def test_compact_prompt_defers_to_the_resumed_cards_strategy_gate(self) -> None:
         compact = prompt.compact_fresh_prompt(self.context(), 1)
 
