@@ -1380,6 +1380,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     model_runtime.results.mkdir()
 
     preflight_grants: list[str] = []
+    preflight_prompts: list[str] = []
 
     def _preflight_command(prompt_text):
         """The (token, sentinel) the probe told its agent to write."""
@@ -1392,6 +1393,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     def _preflight_acts(_backend, prompt_text, *_args, **kwargs):
         """Stand in for an agent that can actually run the command it was given."""
         preflight_grants.append(kwargs.get("add_dirs", ""))
+        preflight_prompts.append(prompt_text)
         token, sentinel = _preflight_command(prompt_text)
         Path(sentinel).write_text(token, encoding="utf-8")
         return 0
@@ -1403,7 +1405,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     ), mock.patch.object(
         audit_runner.llm_invoke, "run_agent_prompt", side_effect=_preflight_acts,
     ):
-        audit_runner.validate_model(model_runtime)
+        audit_runner.validate_model(model_runtime, "ROUTING_GUARD_MARKER")
     check(
         "Model preflight passed" in model_runtime.index.read_text(encoding="utf-8"),
         "model preflight exercises the requested model through the agent launch path",
@@ -1415,6 +1417,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         str(model_runtime.target_root) in preflight_grants[0]
         and str(model_runtime.results) in preflight_grants[0],
         "the preflight is granted the same directories the audit will use",
+    )
+    check(
+        "ROUTING_GUARD_MARKER" in preflight_prompts[0],
+        "the preflight exercises the audit guide that real sessions receive",
     )
     preflight_usage = json.loads(
         (model_runtime.logs / "index.jsonl").read_text(encoding="utf-8")

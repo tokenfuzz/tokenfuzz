@@ -276,23 +276,117 @@ def _served_from_object(obj: object, into: dict[str, int]) -> None:
                 into[name] = into.get(name, 0) + total
 
 
-def served_models_from_text(raw: str) -> dict[str, int]:
-    """Models the provider actually billed in a transcript, by token total."""
+def _explicit_substitution(obj: object, requested: str) -> str:
+    """Return a provider-declared fallback target for ``requested``."""
+    if not isinstance(obj, dict) or not requested:
+        return ""
+    pairs: list[tuple[object, object]] = []
+    if obj.get("type") == "system" \
+            and obj.get("subtype") == "model_refusal_fallback":
+        pairs.append((obj.get("original_model"), obj.get("fallback_model")))
+    message = obj.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), list):
+        for item in message["content"]:
+            if not isinstance(item, dict) or item.get("type") != "fallback":
+                continue
+            source = item.get("from")
+            target = item.get("to")
+            pairs.append((
+                source.get("model") if isinstance(source, dict) else "",
+                target.get("model") if isinstance(target, dict) else "",
+            ))
+    for source, target in pairs:
+        if (
+            isinstance(source, str) and isinstance(target, str)
+            and model_id_matches(source, requested)
+            and not model_id_matches(target, requested)
+        ):
+            return target
+    return ""
+
+
+def _model_routes_from_text(
+    raw: str, requested: str = "",
+) -> tuple[dict[str, int], str]:
+    """Billing totals and any explicit provider-declared substitution."""
     served: dict[str, int] = {}
+    explicit = ""
     for line in raw.splitlines():
         # A transcript is mostly tool output and can reach hundreds of
-        # megabytes; only the few lines that could carry the block are
-        # worth parsing.
-        if "modelUsage" not in line and "models" not in line:
+        # megabytes; only lines that could carry billing or an explicit route
+        # are worth parsing.
+        has_billing = "modelUsage" in line or "models" in line
+        has_route = bool(
+            requested
+            and ("model_refusal_fallback" in line or '"fallback"' in line)
+        )
+        if not has_billing and not has_route:
             continue
         line = line.strip()
         if not line.startswith("{"):
             continue
         try:
-            _served_from_object(json.loads(line), served)
+            obj = json.loads(line)
         except ValueError:
             continue
-    return served
+        if has_billing:
+            _served_from_object(obj, served)
+        if has_route and not explicit:
+            explicit = _explicit_substitution(obj, requested)
+    return served, explicit
+
+
+def refusal_fallback_category_from_text(raw: str) -> str:
+    """The provider's own category for a declared model-refusal fallback.
+
+    A substitution inferred from billing says only that another model ran.
+    This says why, and the remedy differs: a safeguard refusal means the
+    requested model will not take this workload at all, while an unnamed
+    substitution can be capacity. Reported verbatim as the provider's short
+    category (for example `cyber`), never interpreted here.
+    """
+    for line in raw.splitlines():
+        if "model_refusal_fallback" not in line:
+            continue
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            isinstance(obj, dict)
+            and obj.get("subtype") == "model_refusal_fallback"
+        ):
+            category = obj.get("api_refusal_category")
+            if isinstance(category, str) and category.strip():
+                return category.strip()
+    return ""
+
+
+def refusal_fallback_category(raw_path: "str | Path") -> str:
+    """`refusal_fallback_category_from_text` over a transcript on disk."""
+    try:
+        raw = Path(raw_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return refusal_fallback_category_from_text(raw)
+
+
+def substitution_note(raw_path: "str | Path") -> str:
+    """A parenthetical naming the provider's declared refusal, or ""."""
+    category = refusal_fallback_category(raw_path)
+    return (
+        f" The provider declared a safeguard refusal [{category}], so the "
+        "requested model declined this workload rather than being unavailable."
+        if category else ""
+    )
+
+
+def served_models_from_text(raw: str) -> dict[str, int]:
+    """Models the provider actually billed in a transcript, by token total."""
+    return _model_routes_from_text(raw)[0]
 
 
 def served_models(raw_path: "str | Path") -> dict[str, int]:
@@ -308,7 +402,9 @@ def substituted_model_from_text(raw: str, requested: str) -> str:
     """`substituted_model` over an already-read transcript."""
     if not requested:
         return ""
-    served = served_models_from_text(raw)
+    served, explicit = _model_routes_from_text(raw, requested)
+    if explicit:
+        return explicit
     if not served:
         return ""
     busiest = max(served, key=lambda name: served[name])

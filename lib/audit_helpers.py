@@ -1035,6 +1035,17 @@ def _provider_issue_from_lines(
         is_error_event = event_type in ("error", "turn.failed")
         is_plain = event is None
 
+        # Claude Code can recover a Fable safeguard refusal by silently
+        # switching the whole session to Opus. The request still rejected the
+        # model the run is meant to measure, so this is terminal just like an
+        # unsupported model rather than a healthy assistant response.
+        if (
+            event_type == "system"
+            and event.get("subtype") == "model_refusal_fallback"
+            and event.get("trigger") == "refusal"
+        ):
+            refused = True
+
         if (
             not dialect
             and _provider_dialect_may_match(line)

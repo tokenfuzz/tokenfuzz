@@ -2021,6 +2021,11 @@ def _has_refusal_value(value) -> bool:
 
 def _json_has_refusal_signal(value) -> bool:
     if isinstance(value, dict):
+        if (
+            _norm_json_scalar(value.get("subtype")) == "MODEL_REFUSAL_FALLBACK"
+            and _norm_json_scalar(value.get("trigger")) == "REFUSAL"
+        ):
+            return True
         for key, item in value.items():
             k = str(key).lower()
             scalar = _norm_json_scalar(item)

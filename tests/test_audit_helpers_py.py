@@ -652,6 +652,16 @@ provider_cases = [
         "provider-issue: a refused credential is a provider state, not silence",
     ),
     (
+        [{
+            "type": "system", "subtype": "model_refusal_fallback",
+            "trigger": "refusal", "original_model": "claude-fable-5-1",
+            "fallback_model": "claude-opus-4-8",
+            "api_refusal_category": "cyber",
+        }],
+        "backend_rejected",
+        "provider-issue: a model safeguard fallback rejects the requested backend",
+    ),
+    (
         # A plain-text CLI relays the audited program's test output verbatim;
         # an HTTP library's own 401 line is not the provider refusing us.
         ["ERROR: request failed: 401 Unauthorized"],

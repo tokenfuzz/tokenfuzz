@@ -115,7 +115,7 @@ assert_eq(1, run(["known-backend", ""]).returncode, "empty → rc=1")
 # ── default-model ───────────────────────────────────────────────────
 print("\ndefault-model")
 proc = run(["default-model", "claude"], check=True)
-assert_eq("claude-fable-5-1", proc.stdout.strip(), "claude default")
+assert_eq("claude-opus-5", proc.stdout.strip(), "claude default")
 proc = run(["default-model", "codex"], check=True)
 assert_eq("gpt-5.6-sol", proc.stdout.strip(), "codex default")
 proc = run(["default-model", "gemini"], check=True)
@@ -183,7 +183,7 @@ for tool in ("Read", "Write", "Edit", "Glob", "Grep"):
        f"claude never blanket-allows {tool}: no sandbox confines that tool")
 ok("--max-turns" in f, "claude has --max-turns")
 ok("80" in f, "claude default max-turns 80")
-ok("claude-fable-5-1" in f, "claude default model wired")
+ok("claude-opus-5" in f, "claude default model wired")
 assert_eq("high", f[f.index("--effort") + 1], "claude agent wires configured effort")
 
 proc = run(["agent-flags", "codex"], check=True)
@@ -1065,7 +1065,7 @@ ok("features.plugins=false" in codex_single,
 
 ok(inv.known_backend("claude") is True, "known_backend('claude') True")
 ok(inv.known_backend("openai") is False, "known_backend('openai') False")
-assert_eq("claude-fable-5-1", inv.default_model("claude"), "default_model claude")
+assert_eq("claude-opus-5", inv.default_model("claude"), "default_model claude")
 assert_eq("gpt-5.6-sol", inv.default_model("codex"), "default_model codex")
 assert_eq("gemini-3.7-flash", inv.default_model("gemini"), "default_model gemini")
 assert_eq("grok-4.6", inv.default_model("grok"), "default_model grok")
@@ -1465,6 +1465,22 @@ with tempfile.NamedTemporaryFile("w", suffix=".raw", delete=False) as _fh:
 ok(run(["transient-tail", _p]).returncode == 0, "transient-tail subcommand: exit 0 on a fatal tail")
 os.unlink(_p)
 ok(run(["transient-tail", "/no/such/raw.log"]).returncode == 1, "transient-tail subcommand: exit 1 when the log is missing")
+
+# A Claude safeguard can answer by switching models rather than returning an
+# error status. The structured event is still a refusal of the requested
+# model, and must reach the same warning path as a terminal refusal.
+with tempfile.NamedTemporaryFile("w", suffix=".raw", delete=False) as _fh:
+    json.dump({
+        "type": "system", "subtype": "model_refusal_fallback",
+        "trigger": "refusal", "original_model": "claude-fable-5-1",
+        "fallback_model": "claude-opus-4-8",
+    }, _fh)
+    _refusal_fallback = _fh.name
+ok(
+    inv.raw_log_has_model_refusal("claude", _refusal_fallback),
+    "model safeguard fallback reaches the structured refusal detector",
+)
+os.unlink(_refusal_fallback)
 
 
 print(f"\n  \033[1m{PASSED}/{PASSED + FAILED} passed\033[0m")

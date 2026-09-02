@@ -562,6 +562,53 @@ class ServedModelTests(unittest.TestCase):
             llm_usage.substituted_model(raw, "gemini-3.7-flash"), "gemini-3.5-flash"
         )
 
+    def test_explicit_refusal_fallback_wins_over_inconsistent_billing(self) -> None:
+        # Claude Code reports the safety-switch target in the stream, while
+        # the terminal modelUsage block can attribute that first request to a
+        # different Opus generation. The explicit route is what answered.
+        raw = self.write("refusal-fallback.raw", [
+            {
+                "type": "assistant",
+                "message": {
+                    "model": "claude-opus-4-8",
+                    "content": [{
+                        "type": "fallback",
+                        "from": {"model": "claude-fable-5-1"},
+                        "to": {"model": "claude-opus-4-8"},
+                    }],
+                },
+            },
+            {
+                "type": "result",
+                "modelUsage": {
+                    "claude-opus-5": {"inputTokens": 40_000},
+                },
+            },
+        ])
+        self.assertEqual(
+            llm_usage.substituted_model(raw, "claude-fable-5-1"),
+            "claude-opus-4-8",
+        )
+
+    def test_a_declared_safeguard_refusal_is_named_for_the_operator(self) -> None:
+        # "the provider served another model" reads as capacity. The remedy
+        # for a safeguard refusal is different, and the provider says which.
+        raw = self.write("refusal-note.raw", [{
+            "type": "system", "subtype": "model_refusal_fallback",
+            "trigger": "refusal", "original_model": "claude-fable-5-1",
+            "fallback_model": "claude-opus-4-8",
+            "api_refusal_category": "cyber",
+        }])
+        self.assertEqual(llm_usage.refusal_fallback_category(raw), "cyber")
+        note = llm_usage.substitution_note(raw)
+        self.assertIn("safeguard refusal [cyber]", note)
+        # An ordinary substitution with no declared refusal stays silent.
+        quiet = self.write("quiet-sub.raw", [{"modelUsage": {
+            "claude-opus-5": {"inputTokens": 10},
+        }}])
+        self.assertEqual(llm_usage.refusal_fallback_category(quiet), "")
+        self.assertEqual(llm_usage.substitution_note(quiet), "")
+
     def test_a_small_helper_model_beside_the_requested_one_is_healthy(self) -> None:
         # Claude Code bills a helper model in modelUsage next to the one it was
         # asked for, and this harness prices those rows. Refusing every session

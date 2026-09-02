@@ -446,13 +446,16 @@ def _operator_decision_timeout(override: str | None) -> int:
     return int(override)
 
 
-def validate_model(runtime: Runtime) -> None:
+def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
     """Exercise the requested model through the same tool-capable launch path.
 
     CLI auth/version checks cannot detect an invalid model selection, and an
     OSS model that can chat but cannot read files is unusable for an audit.
-    Keep this probe small and bounded; failed transcripts remain on disk for
-    diagnosis. Offline/mock runs may disable the probe before launch.
+    Keep this probe bounded; failed transcripts remain on disk for diagnosis.
+    The audit guide is part of the request because a tiny unrelated command
+    can be served by the requested model even when its policy routes the real
+    audit contract elsewhere. Offline/mock runs may disable the probe before
+    launch.
     """
     if os.environ.get("AUDIT_MODEL_PREFLIGHT", "1") == "0":
         return
@@ -488,7 +491,13 @@ def validate_model(runtime: Runtime) -> None:
         {
             "token": token,
             "command": f"printf %s {shlex.quote(token)} > {shlex.quote(str(sentinel))}",
+            "audit_guide": audit_guide,
         },
+    )
+    # Match the final transform applied to every real agent prompt. Testing a
+    # different vocabulary here can certify a route the first session loses.
+    prompt_text = vocab_rules.strip_markers(
+        vocab_rules.neutralize_string(prompt_text)
     )
 
     last_rc = 1
@@ -563,8 +572,9 @@ def validate_model(runtime: Runtime) -> None:
                     raise RuntimeError(
                         f"model preflight refused for backend={runtime.backend}: "
                         f"requested model={runtime.model} but the provider served "
-                        f"{served}. Results would name a model that never ran; "
-                        f"transcript: {raw}"
+                        f"{served}. Results would name a model that never ran."
+                        f"{llm_usage.substitution_note(raw)}"
+                        f" Transcript: {raw}"
                     )
                 raw.unlink(missing_ok=True)
                 if agy_log is not None:
@@ -1644,7 +1654,8 @@ def run_agent(
         index_log(
             runtime,
             f"WARN: agent {agent} requested model={runtime.model} but the "
-            f"provider served {served}; its usage row is priced as {served}",
+            f"provider served {served}; its usage row is priced as {served}."
+            f"{llm_usage.substitution_note(raw_path)}",
         )
     issue, tools, events = _scan_transcript(raw_path, quota_marker)
     if (
@@ -3579,7 +3590,7 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         runner_preflight.validate(
             runtime.config, lambda message: index_log(runtime, message)
         )
-        validate_model(runtime)
+        validate_model(runtime, guide)
         preflight_build(runtime)
         state = initialize_backend(runtime, args, guide, started_at=time.monotonic())
         while args.max_iterations == 0 or state.iteration < args.max_iterations:
@@ -3632,7 +3643,7 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
         )
         for runtime in runtimes:
             _activate_runtime(runtime)
-            validate_model(runtime)
+            validate_model(runtime, guide)
         preflight_build(runtimes[0])
         for runtime in runtimes[1:]:
             pin_runtime_config(runtime)
