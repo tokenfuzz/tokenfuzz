@@ -615,6 +615,7 @@ def invocation_env(
 ) -> dict[str, str]:
     """Return environment controls needed for one backend invocation."""
     environment = memory_env(backend)
+    environment.update(prompt_cache_env(backend))
     if backend == "gemini" and use_gemini_cli():
         settings = prepare_gemini_settings(model, max_session_turns)
         if settings:
@@ -885,21 +886,29 @@ def granted_dirs(add_dirs: str) -> list[str]:
     return granted
 
 
-def decide_env(backend: str) -> dict[str, str]:
-    """Cost-only environment for a one-shot decision. Never changes behaviour.
+def prompt_cache_env(backend: str) -> dict[str, str]:
+    """Cost-only environment for a Claude launch. Never changes behaviour.
 
-    Claude Code writes its prompt cache at the one-hour tier by default, billed
-    at 2x fresh input against the five-minute tier's 1.25x. A decision is one
-    short session — a few read-only tool turns at most, seconds apart — whose
-    prompt is never sent again once it ends, and the system-prompt prefix it
-    shares with its fan-out siblings is re-read within minutes, so the hour
-    buys nothing. This changes only which cache-write tier the request bills at
-    — same model, same tools, same output — so it is a cost choice, not a
-    configuration that alters what the decision can do. It touches decision
-    calls alone, which have no model-direct counterpart, so no benchmark
-    condition is advantaged relative to another. Agent sessions are left on the
-    CLI default: their prefix is re-read across the iteration barrier, which can
-    exceed five minutes. An operator's own cache setting wins.
+    Claude Code writes its prompt cache at the one-hour tier by default,
+    billed at 2x fresh input against the five-minute tier's 1.25x; a read
+    costs the same at either tier. The hour pays off only for a prefix that
+    goes unread for more than five minutes and is then read again, and the
+    harness rarely leaves one idle that long: a session's requests are
+    seconds apart except while a tool call runs, a decision is a few
+    read-only turns whose prompt is never sent again, and the CLI prefix a
+    new session shares with its siblings is re-read within minutes.
+
+    Measured on 122 audit sessions (per-request usage and timestamps from
+    the stream transcripts, Claude API list prices): the five-minute tier
+    costs 20% less in total at Fable 5.1 rates and 10% less at Opus rates,
+    where a read is a larger share. Eleven inter-request gaps in five
+    sessions exceeded five minutes — each a foreground fuzz campaign or probe
+    loop of five to ten minutes — and every one re-wrote that session's
+    context at 1.25x, raising those five sessions' cost by 14–124%; the
+    other 117 each saved 18–24%. Three five-hour model-direct cells: two
+    saved 8%, one lost 1.5% on a single gap. Same tier for every launch in
+    both benchmark conditions, so no condition is advantaged. An operator's
+    own cache setting wins.
     """
     if backend == "claude":
         # Presence, not value: an operator who set either has made the choice.

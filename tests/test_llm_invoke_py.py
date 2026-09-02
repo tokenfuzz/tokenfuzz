@@ -426,14 +426,20 @@ ok("--print" in f, "decide claude --print")
 ok("--max-turns" not in f, "decide claude has no turn cap (timeout-bounded, like codex/gemini)")
 assert_eq("WebFetch,WebSearch", f[f.index("--disallowedTools") + 1],
           "decide claude denies web: plan mode gates the filesystem, not egress")
-ok(inv.decide_env("codex") == {}, "decide_env is a no-op for codex")
+ok(inv.prompt_cache_env("codex") == {}, "the cache tier is a no-op for codex")
 with mock.patch.dict(os.environ, {}, clear=False):
     os.environ.pop("CLAUDE_CODE_PROMPT_CACHE_TTL", None)
     os.environ.pop("FORCE_PROMPT_CACHING_5M", None)
-    assert_eq({"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}, inv.decide_env("claude"),
-              "one-shot claude decisions bill the cheaper five-minute cache tier")
+    assert_eq({"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}, inv.prompt_cache_env("claude"),
+              "claude launches bill the cheaper five-minute cache tier")
+    assert_eq("5m", inv.invocation_env("claude").get("CLAUDE_CODE_PROMPT_CACHE_TTL"),
+              "every claude invocation — session, validator, decision — carries the tier")
+    ok("CLAUDE_CODE_PROMPT_CACHE_TTL" not in inv.invocation_env("codex"),
+       "a codex invocation carries no Claude cache setting")
 with mock.patch.dict(os.environ, {"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"}):
-    assert_eq({}, inv.decide_env("claude"), "an operator's own cache TTL is respected")
+    assert_eq({}, inv.prompt_cache_env("claude"), "an operator's own cache TTL is respected")
+with mock.patch.dict(os.environ, {"FORCE_PROMPT_CACHING_5M": "1"}):
+    assert_eq({}, inv.prompt_cache_env("claude"), "an operator's legacy cache switch is respected")
 assert_eq("json", f[f.index("--output-format") + 1],
           "decide claude asks for the usage-bearing envelope")
 turns_idx = f.index("--permission-mode")
@@ -812,6 +818,22 @@ with tempfile.TemporaryDirectory() as td:
             extra_env={"PATH": "/fixture/bin"},
         )
     guarded_env = guarded_process.call_args.args[4]
+    ok("CLAUDE_CODE_PROMPT_CACHE_TTL" not in guarded_env,
+       "a codex launch carries no Claude cache-tier setting")
+    with mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(
+        inv, "backend_bin", return_value="claude",
+    ), mock.patch.object(
+        inv, "_run_agent_process", return_value=0,
+    ) as claude_process, mock.patch.object(
+        inv, "agent_security_problem", return_value="",
+    ):
+        os.environ.pop("CLAUDE_CODE_PROMPT_CACHE_TTL", None)
+        os.environ.pop("FORCE_PROMPT_CACHING_5M", None)
+        inv.run_agent_prompt("claude", "prompt", 0, raw, cwd=launch_root)
+    assert_eq(
+        "5m", claude_process.call_args.args[4].get("CLAUDE_CODE_PROMPT_CACHE_TTL"),
+        "a claude agent launch bills the five-minute cache tier",
+    )
     wrappers = str(ROOT / "lib" / "wrappers")
     guards = str(ROOT / "lib" / "agent_shell_guards")
     ok(

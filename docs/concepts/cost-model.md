@@ -54,12 +54,19 @@ isolation policy applied to all of them alike, so a benchmark measures each
 backend as it ships, less the operator's environment and the network; the
 policy and its per-backend exceptions are in the
 [backends guide](../guides/backends.md#egress-and-socket-driving-targets).
-Two cost-only choices shrink what a request carries without changing what it
+Two cost-only choices shrink what a request bills without changing what it
 can do: Codex loads the repo-root `AGENTS.md` itself, so its cold-start prompt
-points at that copy instead of embedding a second one; and one-shot Claude
-decisions write their prompt cache at the cheaper five-minute tier
-(`CLAUDE_CODE_PROMPT_CACHE_TTL` in the
-[environment reference](../reference/environment.md)).
+points at that copy instead of embedding a second one; and every Claude launch
+writes its prompt cache at the five-minute tier rather than the CLI's one-hour
+default (`CLAUDE_CODE_PROMPT_CACHE_TTL` in the
+[environment reference](../reference/environment.md)). A cache write at the
+one-hour tier costs 2x fresh input against 1.25x, and a read costs the same at
+either tier, so the hour only pays for a prefix left unread for more than five
+minutes. Measured over 122 audit sessions, the five-minute tier cost 20% less
+at Fable 5.1 list prices (10% at Opus prices): eleven gaps longer than five
+minutes — foreground fuzz campaigns and probe loops — each re-wrote one
+session's context, and the other 117 sessions saved 18–24% apiece. Both
+benchmark conditions bill the same tier.
 
 Every prompt the harness renders — session prompts and decision prompts — puts
 its static instructions first and the per-agent or per-artifact material last.

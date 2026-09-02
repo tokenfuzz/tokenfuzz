@@ -101,7 +101,6 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from llm_invoke import (  # noqa: E402
     _cli_assistant_texts as _assistant_texts,
-    decide_env as _decide_env,
     decide_flags as _decide_flags_for_backend,
     default_model as _default_model,
     gemini_default_bin as _gemini_default_bin,
@@ -703,7 +702,6 @@ def _invoke_backend(
     # codex carries its disable as `-c` flags already in the decide flags.
     child_env = os.environ.copy()
     child_env.update(_invocation_env(backend, model))
-    child_env.update(_decide_env(backend))
     run_input = prompt
     launch_cwd = None
     if backend == "grok" or (backend == "gemini" and not gemini_cli):
