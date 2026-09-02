@@ -805,6 +805,10 @@ class BenchmarkMetricsTests(unittest.TestCase):
         cases = (
             ("codex", "gpt-5.6", "4", "0.40", "20"),
             ("codex", "gpt-5.6-sol", "4", "0.40", "20"),
+            ("codex", "gpt-daybreak-blue-latest", "4", "0.40", "20"),
+            ("codex", "gpt-5.6-cyber", "12.50", "1.25", "75"),
+            ("codex", "gpt-daybreak-red-latest", "12.50", "1.25", "75"),
+            ("codex", "gpt-5.5-cyber", "12.50", "1.25", "75"),
             ("codex", "gpt-5.6-terra", "2", "0.20", "12"),
             ("codex", "gpt-5.6-luna", "0.20", "0.02", "1.20"),
             ("codex", "gpt-5.5-2026-04-23", "5", "0.50", "30"),
@@ -832,6 +836,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("codex", "o4-mini", "1.10", "0.275", "4.40"),
             ("codex", "gpt-4-turbo-2024-04-09", "10", "0", "30"),
             ("codex", "gpt-3.5-turbo", "0.50", "0", "1.50"),
+            ("claude", "claude-fable-5-1", "10", "0.25", "50"),
+            ("claude", "claude-mythos-5-1", "10", "0.25", "50"),
             ("claude", "claude-fable-5", "10", "1", "50"),
             ("claude", "claude-mythos-5", "10", "1", "50"),
             ("claude", "claude-opus-5", "5", "0.50", "25"),
@@ -936,6 +942,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
                     self.assertEqual(str(rates["cache_write_high"]), write_high)
 
         claude_cache = (
+            ("claude-fable-5-1", "12.50", "20"),
             ("claude-fable-5", "12.50", "20"),
             ("claude-opus-5", "6.25", "10"),
             ("claude-opus-4-8", "6.25", "10"),

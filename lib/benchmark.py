@@ -1410,6 +1410,17 @@ def _pricing_rates(
     if b == "claude":
         # Claude API pricing, standard global routing. Cache-write TTL is
         # carried per event: five-minute writes cost 1.25x, one-hour 2x.
+        # Fable 5.1 and Mythos 5.1 keep Fable 5's per-token rates but read
+        # their cache at 0.025x ($0.25/MTok), so they need their own row.
+        if _model_id_is(m, "claude-fable-5-1", "claude-mythos-5-1"):
+            return {
+                "input": _money("10"),
+                "cache_write": _money("12.50"),
+                "cache_write_1h": _money("20"),
+                "cache_read": _money("0.25"),
+                "output": _money("50"),
+                "source": "claude-api-fable-5.1",
+            }
         if _model_id_is(m, "claude-fable-5", "claude-mythos-5"):
             return {
                 "input": _money("10"),
@@ -1543,7 +1554,25 @@ def _pricing_rates(
                 "output_high": _money("18"),
                 "source": "openai-api-gpt-5.6-terra-standard",
             }
-        if _model_id_is(m, "gpt-5.6", "gpt-5.6-sol"):
+        # Trusted-access cyber models: one flat rate, no long-context tier.
+        # gpt-daybreak-red-latest is OpenAI's alias for the current cyber
+        # model; gpt-daybreak-blue-latest aliases the flagship (Sol) below.
+        if _model_id_is(m, "gpt-5.6-cyber", "gpt-daybreak-red-latest"):
+            return {
+                "input": _money("12.50"),
+                "cache_write": _money("15.625"),
+                "cache_read": _money("1.25"),
+                "output": _money("75"),
+                "source": "openai-api-gpt-5.6-cyber-standard",
+            }
+        if _model_id_is(m, "gpt-5.5-cyber"):
+            return {
+                "input": _money("12.50"),
+                "cache_read": _money("1.25"),
+                "output": _money("75"),
+                "source": "openai-api-gpt-5.5-cyber-standard",
+            }
+        if _model_id_is(m, "gpt-5.6", "gpt-5.6-sol", "gpt-daybreak-blue-latest"):
             return {
                 "tiered": True,
                 "threshold": 272_000,
