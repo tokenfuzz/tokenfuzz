@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -911,6 +912,33 @@ def _pending_optional_reach_fields(text: str) -> dict[str, str]:
     }
 
 
+# Fields the fill prompt tells the model to leave out unless the report settles
+# them: `class` only when the primitive is unclear, `advisory` only when the
+# report says so, `parameter_control` only for a local precondition beyond the
+# trigger bytes. One answered attempt is that omission. Counting them as still
+# missing bought a second identical ask for every accepted finding — a full
+# provider round on the barrier that never filled a field.
+_CONDITIONAL_REACH_FIELD_KEYS = frozenset({"class", "advisory", "parameter_control"})
+
+
+def _answered_reach_attempts(cache: dict) -> int:
+    try:
+        return int(cache.get("_answered_attempts", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _reach_fields_owed(text: str, cache: dict) -> bool:
+    """Whether this report still earns a provider ask for its scorer fields."""
+    missing = _missing_reach_fields(text)
+    if _answered_reach_attempts(cache):
+        missing = {
+            key: label for key, label in missing.items()
+            if key not in _CONDITIONAL_REACH_FIELD_KEYS
+        }
+    return bool(missing) or bool(_pending_optional_reach_fields(text))
+
+
 def _accepted_reach_fields(
     source: object, missing: dict[str, str],
 ) -> dict[str, str]:
@@ -1054,11 +1082,11 @@ def fill_reach_fields(
     except OSError:
         return False
     text = full_text[:6000]
-    missing = _missing_reach_fields(full_text)
-    if not missing and not _pending_optional_reach_fields(full_text):
-        return False
     sidecar = directory / ".llm_fields.json"
     cache = _reach_field_cache(sidecar)
+    if not _reach_fields_owed(full_text, cache):
+        return False
+    missing = _missing_reach_fields(full_text)
     changed = _materialize_reach_fields_preserving_positive_votes(
         report, _accepted_reach_fields(cache, missing),
     )
@@ -1066,7 +1094,7 @@ def fill_reach_fields(
         full_text = report.read_text(encoding="utf-8", errors="replace")
         text = full_text[:6000]
         missing = _missing_reach_fields(full_text)
-        if not missing:
+        if not _reach_fields_owed(full_text, cache):
             return True
     try:
         attempts = int(cache.get("_fill_attempts", 0))
@@ -1086,6 +1114,7 @@ def fill_reach_fields(
     if not isinstance(decision, dict):
         _write_atomic_json(sidecar, cache)
         return changed
+    cache["_answered_attempts"] = _answered_reach_attempts(cache) + 1
     accepted = _accepted_reach_fields(decision, missing)
     cache.update(accepted)
     _write_atomic_json(sidecar, cache)
@@ -1116,11 +1145,10 @@ def _batch_reach_field_decisions(
         except OSError:
             continue
         narrative = report_text[:6000]
-        missing = _missing_reach_fields(report_text)
-        if not missing and not _pending_optional_reach_fields(report_text):
-            continue
         cache = _reach_field_cache(directory / ".llm_fields.json")
-        cached = _accepted_reach_fields(cache, missing)
+        if not _reach_fields_owed(report_text, cache):
+            continue
+        cached = _accepted_reach_fields(cache, _missing_reach_fields(report_text))
         if cached:
             if _materialize_reach_fields_preserving_positive_votes(
                 report, cached,
@@ -1128,8 +1156,7 @@ def _batch_reach_field_decisions(
                 prefilled.add(directory)
             report_text = report.read_text(encoding="utf-8", errors="replace")
             narrative = report_text[:6000]
-            missing = _missing_reach_fields(report_text)
-            if not missing and not _pending_optional_reach_fields(report_text):
+            if not _reach_fields_owed(report_text, cache):
                 continue
         try:
             attempts = int(cache.get("_fill_attempts", 0))
@@ -1177,9 +1204,9 @@ def reach_fields_open(directory: Path) -> bool:
         text = report.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    if not _missing_reach_fields(text) and not _pending_optional_reach_fields(text):
-        return False
     cache = _reach_field_cache(directory / ".llm_fields.json")
+    if not _reach_fields_owed(text, cache):
+        return False
     try:
         attempts = int(cache.get("_fill_attempts", 0))
     except (TypeError, ValueError):
@@ -2795,16 +2822,22 @@ def triage_crash_dirs(
     confirmed_trigger_bypasses: set[Path] | None = None,
     age_pending: bool = True,
     held: set[Path] | None = None,
+    only: Collection[Path] | None = None,
 ) -> dict[str, int]:
     """Triage the crash bundles in one results tree.
 
     `held` names bundles this pass must not adjudicate. They keep their place
     under `crashes/` and take no verdict, so they carry no final receipt and
     are counted as unadjudicated rather than as confirmed crashes.
+
+    `only` restricts the pass to those bundles — the sealed background sweep —
+    and skips the tree-wide restore and finding-routing passes, which stay
+    with the barrier.
     """
     results = Path(results_dir)
-    _restore_stale_trigger_rejections(results, kind="crash")
-    route_finding_diagnostics(results)
+    if only is None:
+        _restore_stale_trigger_rejections(results, kind="crash")
+        route_finding_diagnostics(results)
     crashes = results / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
     controls = attacker_controls or ["bytes"]
@@ -2823,6 +2856,9 @@ def triage_crash_dirs(
         path for path in sorted(crashes.glob("CRASH-*"))
         if path.is_dir() and path not in withheld
     ]
+    if only is not None:
+        chosen = {Path(path) for path in only}
+        directories = [path for path in directories if path in chosen]
     for directory in directories:
         sanitizer = _sanitizer_file(directory)
         sanitizer_text = _read(sanitizer) if sanitizer else ""
@@ -3234,16 +3270,34 @@ def _batch_quality_votes(
     instructions = render_template("triage_find_quality.md.j2", {"body": ""}).split(
         "Output a single JSON object", 1,
     )[0]
-    for _ in range(max(1, accept_quorum + quorum - 1)):
+
+    def unconditional_rounds(directory: Path) -> int:
+        """Votes this report needs before any verdict is even possible.
+
+        Neither quorum can be met sooner, so these rounds are cast whatever
+        the earlier ones say and can be issued together. Each is an
+        independent call carrying no prior vote, so the multiset of votes and
+        the verdict it settles are the same as the serial order produced.
+        """
+        cast = votes[directory]
+        accepts = sum(1 for vote in cast if vote.get("accept") is True)
+        rejects = len(cast) - accepts
+        return max(1, min(accept_quorum - accepts, quorum - rejects))
+
+    def cast_round(ordered: list[Path]) -> dict[str, dict]:
         vote_timeout = _decision_timeout(timeout, deadline)
-        if vote_timeout <= 0 or not active:
-            break
-        ordered = sorted(active)
-        items = [{"id": directory.name, "report": reports[directory]} for directory in ordered]
-        by_id = _batch_decisions(
+        if vote_timeout <= 0 or not ordered:
+            return {}
+        items = [
+            {"id": directory.name, "report": reports[directory]}
+            for directory in ordered
+        ]
+        return _batch_decisions(
             "find_quality_batch", "triage_find_quality_batch.md.j2",
             instructions, items, vote_timeout, usage_index, deadline, workers,
         )
+
+    def record(ordered: list[Path], by_id: dict[str, dict]) -> None:
         for directory in ordered:
             vote = by_id.get(directory.name)
             if not isinstance(vote, dict) or not isinstance(vote.get("accept"), bool):
@@ -3257,6 +3311,28 @@ def _batch_quality_votes(
             votes[directory] = list(payload["votes"])
             if _quality_terminal(payload, quorum, accept_quorum):
                 active.discard(directory)
+
+    total_rounds = max(1, accept_quorum + quorum - 1)
+    # The barrier paid these rounds one after another: at the default quorum
+    # every open report needs two votes before either verdict is reachable, so
+    # the second round was never conditional on the first — only later ones.
+    rounds = [
+        sorted(d for d in active if unconditional_rounds(d) > index)
+        for index in range(min(total_rounds, max(
+            (unconditional_rounds(d) for d in active), default=0,
+        )))
+    ]
+    rounds = [ordered for ordered in rounds if ordered]
+    if rounds:
+        with ThreadPoolExecutor(max_workers=len(rounds)) as pool:
+            outcomes = list(pool.map(cast_round, rounds))
+        for ordered, by_id in zip(rounds, outcomes):
+            record(ordered, by_id)
+    for _ in range(total_rounds - len(rounds)):
+        if not active or _decision_timeout(timeout, deadline) <= 0:
+            break
+        ordered = sorted(active)
+        record(ordered, cast_round(ordered))
     return votes
 
 
@@ -4069,16 +4145,24 @@ def validate_find_gate(
     target_root_is_product: bool = False,
     reject_missing_reports: bool = False,
     finish_started_group: bool = False,
+    only: Collection[Path] | None = None,
 ) -> dict[str, int]:
+    """Validate the findings tree, or with ``only`` just the named directories.
+
+    A restricted pass is the sealed background sweep an audit runs while its
+    agents are still working: it adjudicates artifacts no live session can
+    still write, and leaves the tree-wide restore passes to the barrier.
+    """
     results = Path(results_dir)
     findings = results / "findings"
     findings.mkdir(parents=True, exist_ok=True)
     q = quorum or _positive_int_env("FIND_GATE_QUORUM", 2)
     aq = accept_quorum or _positive_int_env("FIND_GATE_ACCEPT_QUORUM", 2)
-    _restore_stale_trigger_rejections(results, kind="finding")
-    _refresh_or_restore_quality_rejections(
-        results, quorum=q, accept_quorum=aq,
-    )
+    if only is None:
+        _restore_stale_trigger_rejections(results, kind="finding")
+        _refresh_or_restore_quality_rejections(
+            results, quorum=q, accept_quorum=aq,
+        )
     # Stamp discovery before the deadline-gated vote work below: when the wall
     # budget is already spent the votes are skipped, but the finding was still
     # found and must keep its place on the timeline. This is telemetry for a
@@ -4093,6 +4177,9 @@ def validate_find_gate(
             file=sys.stderr,
         )
     directories = [path for path in sorted(findings.glob("FIND-*")) if path.is_dir()]
+    if only is not None:
+        chosen = {Path(path) for path in only}
+        directories = [path for path in directories if path in chosen]
     timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
     # Finish conclusive cached work before asking a provider for anything.
