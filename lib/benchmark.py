@@ -2018,6 +2018,17 @@ def harvest_tokens(
         # estimates the prompt side. Summed here so such a cell
         # is not silently scored as zero-cost.
         "prompt_estimate_tokens": 0,
+        # Subagent spawns the transcripts actually show (Claude `Agent`,
+        # OpenCode `task`, Codex `spawn_agent` in its rollout). A cell is one
+        # launch by contract; this says what that launch did with the CLI's
+        # default delegation, so a seat-hour figure is read against it.
+        "delegation_events": 0,
+        # True when a row's delegated work ran where its usage cannot see it
+        # (Codex threads, OpenCode sessions): the cell's spend is a floor.
+        "spend_lower_bound": False,
+        # False when a row's backend cannot show its fan-out at all (Grok);
+        # the cell's seat capacity is then a floor whatever was counted.
+        "delegation_observable": True,
         "estimated": False,
         "cost_estimated": False,
         "cost_usd": "",
@@ -2050,6 +2061,11 @@ def harvest_tokens(
         if not isinstance(row, dict):
             continue
         totals["usage_records"] += 1
+        totals["delegation_events"] += _int(row.get("delegation_events"))
+        if row.get("spend_lower_bound") is True:
+            totals["spend_lower_bound"] = True
+        if row.get("delegation_observable") is False:
+            totals["delegation_observable"] = False
         backend = str(row.get("backend") or default_backend or "").strip().lower()
         model = str(row.get("model") or default_model or "").strip()
         tok = row.get("tokens") or {}
@@ -4033,10 +4049,13 @@ def _unique_rejected(
 def _cell_worker_seats(cell: dict) -> int | None:
     """Concurrent agent seats a cell ran, or None when it is not recorded.
 
-    model-direct is one provider session by contract, so its absent count is
-    knowledge rather than a gap. A harness cell that recorded no count is a
-    real gap — old or malformed — and defaulting it to one would silently
-    report a multi-agent cell as single-agent.
+    model-direct is one launch by contract, so its absent count is knowledge
+    rather than a gap. That launch runs the CLI's default delegation, so it
+    may have fanned out internally; `tokens.delegation_events` records how
+    often it did, and a seat-hour figure for a cell with a non-zero count is
+    a floor on the concurrency that produced it. A harness cell that recorded
+    no count is a real gap — old or malformed — and defaulting it to one
+    would silently report a multi-agent cell as single-agent.
     """
     agents = cell.get("actual_agents")
     if isinstance(agents, int) and agents > 0:
@@ -4194,6 +4213,12 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
         if worker_wall is None:
             worker_wall = c.get("worker_wall_median")  # old aggregate reports
         per_seat_hour = _ratio(confirmed_total, (worker_wall or 0) / 3600.0)
+        # Seats count launches. A launch that delegated ran more workers than
+        # that, so the true rate is at most the one computed here.
+        seat_bound = (
+            "≤" if _as_int(c.get("delegation_events_total")) > 0
+            or c.get("delegation_observable") is False else ""
+        )
         per_dollar = (
             None if c.get("cost_estimated")
             else _ratio(c.get("cost_usd_total"), confirmed_total)
@@ -4210,7 +4235,7 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
                 admitted=_fmt_minutes(c.get("time_to_first_admitted_median")),
                 exec_fail=_fmt_fraction(c.get("exec_fail_share_median")),
                 dup=_fmt_fraction(c.get("duplicate_root_rate_median")),
-                seat=("—" if per_seat_hour is None else f"{per_seat_hour:.2f}"),
+                seat=("—" if per_seat_hour is None else f"{seat_bound}{per_seat_hour:.2f}"),
                 dollar=("—" if per_dollar is None else f"${per_dollar:.0f}"),
             )
         )
@@ -4228,8 +4253,12 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
         "input, loader, usage, or runner failure); **Duplicate "
         "roots** is the share of artifact signatures filed by more than one "
         "agent; **Confirmed / seat-h** is reportable clusters per worker-hour "
-        "(so a wider pool is charged for its seats) and **$ / confirmed** is "
-        "measured cost per reportable cluster. Medians over completed "
+        "(so a wider pool is charged for its seats; `≤` marks a condition in "
+        "which a launch delegated to subagents, or whose backend cannot show "
+        "its fan-out at all, so its seat capacity is a floor and the rate an "
+        "upper bound) and **$ / confirmed** is "
+        "measured cost per reportable cluster, withheld when any cost is "
+        "estimated or a spend floor. Medians over completed "
         "replicates; an em dash is unrecorded, never zero."
     )
     lines.append("")
@@ -4306,6 +4335,14 @@ def _tokens_for_cell(cell: dict) -> dict:
         "cost_source": str(tokens.get("cost_source") or ""),
         "cost_estimated": bool(tokens.get("cost_estimated")) or estimated,
         "usage_records": _as_nonnegative_int(tokens.get("usage_records")),
+        # Observed subagent spawns for the cell; a seat-hour figure is a
+        # floor when this is non-zero.
+        "delegation_events": (
+            None if tokens.get("delegation_events") is None
+            else _as_nonnegative_int(tokens.get("delegation_events"))
+        ),
+        "spend_lower_bound": bool(tokens.get("spend_lower_bound")),
+        "delegation_observable": tokens.get("delegation_observable") is not False,
         "estimated": estimated,
         "token_source": str(tokens.get("token_source") or ""),
     }
@@ -4315,8 +4352,10 @@ def _row_token_source(row: dict) -> str:
     """Where one token row's numbers came from: measured/estimated/unknown.
 
     `measured`  — parsed from the backend's own usage telemetry.
-    `estimated` — derived from character counts (a backend that reports no
-                  usage at all, e.g. the gemini CLI).
+    `estimated` — a floor: derived from character counts (a backend that
+                  reports no usage at all, e.g. Antigravity), recovered from
+                  a terminal-less stream, or measured for a session whose
+                  delegated work ran where its usage cannot see it.
     `unknown`   — the row carries no token signal of any kind, so it must
                   not be presented as a measurement of zero cost.
     """
@@ -4765,6 +4804,20 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "cost_source": _cost_source(token_rows),
                 "cost_estimated": any(
                     bool(row.get("cost_estimated")) for row in token_rows
+                ),
+                # Observed subagent spawns across the condition's cells, and
+                # whether any of them ran where the cell's usage cannot see
+                # its spend. Seat capacity is a floor once anything delegated,
+                # so the seat-hour rate is published as an upper bound.
+                "delegation_events_total": sum(
+                    _as_nonnegative_int(row.get("delegation_events"))
+                    for row in token_rows
+                ),
+                "spend_lower_bound": any(
+                    bool(row.get("spend_lower_bound")) for row in token_rows
+                ),
+                "delegation_observable": all(
+                    row.get("delegation_observable") is not False for row in token_rows
                 ),
                 "token_source": _token_source(token_rows),
                 "cells": cells,
@@ -5895,10 +5948,11 @@ def render_section(report: dict) -> str:
         lines.append("")
         lines.append(
             "| Condition | Rep | Experiment | Wall (h) | Source "
-            "| Input | Cache write | Cached input | Output | Prompt est. | Cost |"
+            "| Input | Cache write | Cached input | Output | Prompt est. "
+            "| Delegation | Cost |"
         )
         lines.append(
-            "| --- | --: | --- | --: | --- | --: | --: | --: | --: | --: | --: |"
+            "| --- | --: | --- | --: | --- | --: | --: | --: | --: | --: | --: | --: |"
         )
         by_cond: dict[str, list[dict]] = {}
         for row in token_rows:
@@ -5915,12 +5969,20 @@ def render_section(report: dict) -> str:
                             if cell else f"`{exp}`")
                 lines.append(
                     "| {cond} | {rep} | {exp} | {wall} | {source} "
-                    "| {inp} | {create} | {cached} | {out} | {prompt} | {cost} |".format(
+                    "| {inp} | {create} | {cached} | {out} | {prompt} "
+                    "| {deleg} | {cost} |".format(
                         cond=label,
                         rep=row.get("replicate") or "—",
                         exp=exp_cell,
                         wall=_fmt_hours(row.get("wall_seconds")),
                         source=source,
+                        # Unrecorded, or a backend that cannot show its
+                        # fan-out, is an em dash — never a measured zero.
+                        deleg=(
+                            "—" if row.get("delegation_events") is None
+                            or row.get("delegation_observable") is False
+                            else _as_nonnegative_int(row.get("delegation_events"))
+                        ),
                         inp=_fmt_token_approx(row.get("input_tokens"), source),
                         create=_fmt_token_approx(
                             row.get("cache_creation_tokens"), source,
@@ -5946,9 +6008,13 @@ def render_section(report: dict) -> str:
             lines.append(
                 "| **{cond}** | — | **{n} cell{s}** | **{wall}** | {source} "
                 "| **{inp}** | **{create}** | **{cached}** | **{out}** "
-                "| **{prompt}** | **{cost}** |".format(
+                "| **{prompt}** | **{deleg}** | **{cost}** |".format(
                     cond=label,
                     n=n,
+                    deleg=(
+                        "—" if agg.get("delegation_observable") is False
+                        else _as_nonnegative_int(agg.get("delegation_events_total"))
+                    ),
                     s="" if n == 1 else "s",
                     wall=_fmt_hours(
                         sum(r.get("wall_seconds", 0) or 0 for r in rows)
@@ -5984,6 +6050,16 @@ def render_section(report: dict) -> str:
             "> - **Cached input** — cache READS only, billed at ~10% "
             "of base. Large numbers mean the harness is reusing a stable "
             "prefix — that's what keeps cost down."
+        )
+        lines.append(
+            "> - **Delegation** — subagent spawns the transcripts show "
+            "(Claude `Agent`, OpenCode `task`, Gemini CLI `invoke_agent`, "
+            "Grok `subagent_start`, Codex `spawn_agent` from its rollout). "
+            "Claude and Gemini CLI run them inside the session, so the row's "
+            "usage covers them; Codex and OpenCode run them as separate "
+            "threads or sessions the row cannot see, and Grok reports no "
+            "usage and may not stream its spawns at all, so a delegating row "
+            "there is a spend floor and its cost prints with `~`."
         )
         lines.append(
             "> - **Cost** — USD-equivalent token cost at public provider "

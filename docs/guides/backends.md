@@ -148,6 +148,35 @@ visible in the counts. Claude Code keeps loopback for exactly this reason; Codex
 cannot. Audit such a target under `external-bypass` in a hardened environment,
 and do not publish sandboxed benchmark rows for it.
 
+Web tools are denied on every launch the harness makes — agent sessions in
+both security modes and one-shot decisions alike — so nothing reading an
+untrusted tree has egress through the model's own tools: Claude Code gets
+`--disallowedTools WebFetch,WebSearch` (a read-only plan mode gates the
+filesystem, not the network), Grok `--disable-web-search`, Codex
+`web_search="disabled"` (its default is on), Gemini CLI
+`config/gemini-no-web.policy.toml`, and OpenCode denies `webfetch`/`websearch`
+in every profile. Antigravity (`agy`) exposes no web switch. The same launch
+flags serve both benchmark conditions, so the model-direct control is
+egress-free too. Cross-project research (S6 peer fixes, advisories) is done by
+the harness's own tooling, not by agents. Two things stay uneven and are
+documented rather than fixed: Antigravity (`agy`) exposes no memory or home
+isolation and keeps its memory store beside its OAuth token, so cross-run memory
+cannot be isolated for that dialect — prefer `USE_GEMINI_CLI=1` for benchmark
+rows; and every backend keeps its CLI's default delegation in both conditions —
+a control that cannot delegate is not the product a user gets — with only the
+bounded validator reviews turning it off. What a session actually did is
+recorded on its usage row as `delegation_events` (Claude `Agent` calls,
+OpenCode `task` calls, Gemini CLI `invoke_agent` calls, Grok `subagent_start`
+events, Codex `spawn_agent` calls read from its rollout), summed per cell and
+shown in the report's token table. Claude and Gemini CLI run subagents inside
+the session, so their usage covers them; Codex and OpenCode run them as
+separate threads or sessions the parent's usage cannot see, so a delegating row
+on those backends is a spend floor: its cost prints with `~`, per-dollar
+efficiency is withheld, and Confirmed / seat-h is shown as an upper bound. Grok
+reports no usage at all and its subagent events are hook names whose presence
+in the output stream is unconfirmed, so every Grok condition's seat-hour figure
+is published as a bound whatever was counted.
+
 ### Using the modes
 
 ```bash
@@ -177,8 +206,10 @@ grok -p "Reply exactly: tokenfuzz-grok-auth-ok"
 bin/audit --target <target> --backend grok --agent-security external-bypass 1
 ```
 
-TokenFuzz uses headless streaming JSON, disables nested Grok subagents, and
-applies the configured reasoning effort; every iteration is a fresh session.
+TokenFuzz uses headless streaming JSON and applies the configured reasoning
+effort; every iteration is a fresh session. Nested Grok subagents stay at the
+CLI's default (see the delegation note above); only a bounded validator review
+disables them.
 Grok's stream may not expose measured token counts; when it does not, usage
 reports label estimates rather than presenting them as measured.
 

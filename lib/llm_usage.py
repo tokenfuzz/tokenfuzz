@@ -566,7 +566,126 @@ def _claude_per_request_usage(raw: str) -> tuple[dict, bool] | None:
     return totals, True
 
 
-def _codex_rollout_usage(raw: str) -> dict | None:
+# Tool names that spawn a subagent, per backend transcript dialect. Claude
+# Code exposes delegation as the `Agent` tool (`Task` before it was renamed);
+# OpenCode's is `task`; Gemini CLI's is `invoke_agent`; Codex issues
+# `spawn_agent` in the `collaboration` namespace, but only its rollout shows
+# that call — the parent's --json stream never surfaces it, which is why the
+# codex count comes from the rollout below.
+_CLAUDE_DELEGATION_TOOLS = frozenset({"Agent", "Task"})
+_GENERIC_DELEGATION_TOOLS = frozenset({
+    "task", "agent", "subagent", "invoke_agent", "spawn_agent",
+})
+_CODEX_SPAWN_TOOL = "spawn_agent"
+# Grok Build names `subagent_start` / `subagent_end` events with a
+# `subagent_id` in its CLI binary, beside its hook event names — so they may
+# reach hook scripts rather than the streaming-json output. Counted here on
+# the chance the stream carries them; not confirmed against a live transcript,
+# which is why Grok is also listed as unobservable below.
+_GROK_SPAWN_EVENT = "subagent_start"
+
+# Backends whose fan-out this reader cannot be sure to see at all. A row from
+# one of these is disclosed as a seat-capacity floor whatever it counted.
+_DELEGATION_UNOBSERVABLE = frozenset({"grok"})
+
+# Backends whose delegated work runs where this session's usage cannot see
+# it. Codex spawns a separate thread with its own rollout (unlinkable: the
+# spawn returns a task name, not a thread id); OpenCode's `task` runs a
+# separate session whose events never enter the parent's stream (measured:
+# one session id in a transcript that delegated). Claude's subagents run in
+# the same session and its terminal `modelUsage` carries them (measured: a
+# delegating run reported 3.5x the tokens of a plain one); Gemini CLI's
+# `invoke_agent` runs in-process and its `stats` is the session aggregate.
+# Grok reports no usage at all (its rows are character estimates), so a
+# subagent's spend there is unknown rather than merely unseen. A row for one
+# of these backends with any delegation is a spend floor.
+_CHILD_SPEND_UNATTRIBUTED = frozenset({"codex", "oss", "grok"})
+
+
+def _delegation_events_from_text(raw: str, backend: str) -> int:
+    """Subagent spawns visible in a streamed transcript, one per call id.
+
+    Observed concurrency, never assumed: a cell recorded as one launch may
+    delegate internally at the CLI's default, and the benchmark's seat-hour
+    figures need to know when it did. Streams repeat a tool part as its state
+    changes (OpenCode emits one `tool_use` per update), so calls are counted
+    by id where the event carries one. Codex is counted from its rollout
+    instead (see _codex_rollout_usage); its stream shows nothing.
+    """
+    if backend == "codex":
+        return 0
+    seen: set[str] = set()
+    count = 0
+
+    def note(identifier: object) -> None:
+        nonlocal count
+        key = str(identifier) if identifier else ""
+        if key:
+            if key in seen:
+                return
+            seen.add(key)
+        count += 1
+
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if backend == "claude":
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            for item in content if isinstance(content, list) else ():
+                if (
+                    isinstance(item, dict) and item.get("type") == "tool_use"
+                    and item.get("name") in _CLAUDE_DELEGATION_TOOLS
+                ):
+                    note(item.get("id"))
+            continue
+        if backend == "grok":
+            if event.get("type") == _GROK_SPAWN_EVENT:
+                note(event.get("subagent_id") or event.get("id"))
+            continue
+        part = event.get("part")
+        if isinstance(part, dict):
+            if str(part.get("tool") or "").lower() in _GENERIC_DELEGATION_TOOLS:
+                note(part.get("callID") or part.get("id"))
+            continue
+        if event.get("type") in ("tool_use", "tool_call"):
+            name = str(
+                event.get("tool_name") or event.get("name") or event.get("tool") or ""
+            ).lower()
+            if name in _GENERIC_DELEGATION_TOOLS:
+                note(
+                    event.get("tool_call_id") or event.get("call_id")
+                    or event.get("tool_use_id") or event.get("id")
+                )
+    return count
+
+
+def _mark_delegation(row: dict, backend: str, delegation: int) -> dict:
+    """Stamp observed delegation, and the spend floor it implies, on a row.
+
+    `estimated` already means "the counters are real but their coverage is a
+    floor" (see the fallback paths below), and the report prints such cost
+    with a `~` and withholds per-dollar efficiency, so a row whose delegated
+    spend it cannot see joins that class rather than inventing a new one.
+    `spend_lower_bound` names the reason.
+    """
+    row["delegation_events"] = delegation
+    if backend in _DELEGATION_UNOBSERVABLE:
+        row["delegation_observable"] = False
+    if delegation > 0 and backend in _CHILD_SPEND_UNATTRIBUTED:
+        row["estimated"] = True
+        row["spend_lower_bound"] = True
+    return row
+
+
+def _codex_rollout_usage(raw: str) -> tuple[dict, int] | None:
     """Usage for every Codex thread in this transcript, from their rollouts.
 
     `turn.completed` is the stream's only usage report, and the harness stops
@@ -603,15 +722,16 @@ def _codex_rollout_usage(raw: str) -> dict | None:
         return None
 
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-    resolved: dict[str, tuple[dict, list[Path]]] = {}
+    resolved: dict[str, tuple[dict, int, list[Path]]] = {}
     for tid in ids:
         # Matched on the thread id this transcript reported, so a run never
         # reads or removes another session's rollout.
         paths = sorted(home.glob(f"sessions/**/rollout-*-{tid}.jsonl"))
         for path in paths:
-            usage = _rollout_last_token_count(path)
-            if usage is not None:
-                resolved[tid] = (usage, paths)
+            read = _rollout_last_token_count(path)
+            if read is not None:
+                usage, spawns = read
+                resolved[tid] = (usage, spawns, paths)
                 break
     if len(resolved) != len(ids):
         return None
@@ -619,33 +739,51 @@ def _codex_rollout_usage(raw: str) -> dict | None:
     totals = dict.fromkeys(
         ("input", "cached_input", "cache_creation", "cache_creation_1h", "output"), 0
     )
-    for usage, paths in resolved.values():
+    delegation = 0
+    for usage, spawns, paths in resolved.values():
         totals["input"] += _first_int(usage, _INPUT_KEYS)
         totals["cached_input"] += _cached_input_int(usage)
         totals["cache_creation"] += _cache_write_int(usage)
         totals["output"] += _first_int(usage, _OUTPUT_KEYS)
+        delegation += spawns
         for path in paths:
             try:
                 path.unlink()
             except OSError:
                 pass
-    return totals
+    return totals, delegation
 
 
-def _rollout_last_token_count(path: Path) -> dict | None:
-    """The cumulative counters the rollout's last `token_count` carried."""
+def _rollout_last_token_count(path: Path) -> tuple[dict, int] | None:
+    """The rollout's last cumulative `token_count`, and its subagent spawns.
+
+    Spawns are read in the same pass because the rollout is deleted once its
+    usage is consumed; nothing else could count them afterwards. A spawned
+    thread writes its own rollout that this reader cannot link back (the spawn
+    call returns a task name, not a thread id), so the child's spend is not
+    added here — the count is what makes that gap visible per session.
+    """
     last = None
+    spawns = 0
     try:
         with path.open(encoding="utf-8", errors="replace") as stream:
             for line in stream:
-                if "token_count" not in line:
+                if "token_count" not in line and _CODEX_SPAWN_TOOL not in line:
                     continue
                 try:
                     event = json.loads(line)
                 except ValueError:
                     continue
                 payload = event.get("payload") if isinstance(event, dict) else None
-                if not isinstance(payload, dict) or payload.get("type") != "token_count":
+                if not isinstance(payload, dict):
+                    continue
+                if (
+                    payload.get("type") == "function_call"
+                    and payload.get("name") == _CODEX_SPAWN_TOOL
+                ):
+                    spawns += 1
+                    continue
+                if payload.get("type") != "token_count":
                     continue
                 info = payload.get("info")
                 usage = info.get("total_token_usage") if isinstance(info, dict) else None
@@ -653,7 +791,9 @@ def _rollout_last_token_count(path: Path) -> dict | None:
                     last = usage
     except OSError:
         return None
-    return last
+    if last is None:
+        return None
+    return last, spawns
 
 
 def extract_usage_from_text(
@@ -666,6 +806,7 @@ def extract_usage_from_text(
     """Return a usage row from an already-read raw transcript."""
 
     reported_cost = 0.0
+    delegation = _delegation_events_from_text(raw, backend)
 
     # Codex: the rollout covers every thread, including any the stream never
     # reported, so it outranks the terminal events below. Codex streams carry
@@ -673,16 +814,17 @@ def extract_usage_from_text(
     if backend == "codex":
         rollout = _codex_rollout_usage(raw)
         if rollout is not None:
-            return {
-                "tokens": rollout, "probe": {}, "estimated": False,
+            tokens, delegation = rollout
+            return _mark_delegation({
+                "tokens": tokens, "probe": {}, "estimated": False,
                 "backend": backend,
-            }
+            }, backend, delegation)
 
     def with_reported_cost(row: dict) -> dict:
         if reported_cost > 0:
             row["cost_usd"] = reported_cost
             row["cost_source"] = "backend-reported"
-        return row
+        return _mark_delegation(row, backend, delegation)
 
     # Primary path: SUM the usage of every terminal/summary event. Each
     # such event holds one invocation's cumulative total, and a cell may

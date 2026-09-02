@@ -543,6 +543,31 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(totals["output_tokens"], 127967)
         self.assertEqual(totals["token_source"], "measured")
 
+    def test_harvest_sums_observed_delegation_per_cell(self) -> None:
+        # A cell is one launch by contract, but the CLI may delegate at its
+        # default; the per-row count is summed so the cell says what it did.
+        index = self.root / "index.jsonl"
+        rows = [
+            {"backend": "codex", "tokens": {"input": 10, "output": 1}, "delegation_events": 3},
+            {"backend": "codex", "tokens": {"input": 10, "output": 1}},
+            {"backend": "codex", "tokens": {"input": 10, "output": 1}, "delegation_events": 1},
+        ]
+        index.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        totals = benchmark.harvest_tokens(index)
+        self.assertEqual(totals["delegation_events"], 4)
+        self.assertFalse(totals["spend_lower_bound"])
+        rows[0]["spend_lower_bound"] = True
+        rows[0]["estimated"] = True
+        index.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        totals = benchmark.harvest_tokens(index)
+        self.assertTrue(totals["spend_lower_bound"], "one floor row makes the cell a floor")
+        self.assertTrue(totals["estimated"])
+        self.assertTrue(totals["delegation_observable"])
+        rows.append({"backend": "grok", "tokens": {"input": 1}, "delegation_observable": False})
+        index.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.assertFalse(benchmark.harvest_tokens(index)["delegation_observable"],
+                         "one unobservable row makes the cell's seat capacity a floor")
+
     def test_token_normalization_sources_and_pricing(self) -> None:
         index = self.root / "index.jsonl"
         rows = [
@@ -1060,6 +1085,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(token_row["output_tokens"], 0)
         self.assertEqual(token_row["wall_seconds"], 0)
         self.assertEqual(token_row["usage_records"], 0)
+        self.assertIsNone(token_row["delegation_events"],
+                          "a cell that predates delegation recording is unrecorded, not zero")
 
     def test_configured_default_models_have_pricing(self) -> None:
         # Every backend default in config/models.toml must key a pricing row.

@@ -580,7 +580,7 @@ raise SystemExit(23)
             benchmark_runner.benchmark_model_direct_render, "render", return_value="prompt",
         ), mock.patch.object(
             benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=cut_short,
-        ), mock.patch.object(
+        ) as launch, mock.patch.object(
             benchmark_runner.llm_usage, "extract_usage", return_value={},
         ), mock.patch.object(
             benchmark_runner, "_reap_cell_processes",
@@ -592,6 +592,9 @@ raise SystemExit(23)
                 cell, self.target, "codex", "", 60,
             )
         self.assertEqual(rc, 0)
+        # The control is the CLI as a user gets it: delegation stays at the
+        # backend's default rather than being switched off for the cell.
+        self.assertNotIn("allow_subagents", launch.call_args.kwargs)
         self.assertTrue((cell / ".backend-unavailable").is_file())
         self.assertFalse((cell / ".backend-terminated").exists())
         self.assertIn(

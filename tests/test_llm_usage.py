@@ -290,6 +290,102 @@ class UsageExtractionTests(unittest.TestCase):
         self.assertFalse(consumed.exists(), "the rollout is deleted once read")
         self.assertTrue(untouched.exists(), "another thread's rollout is left alone")
 
+    def test_delegation_events_are_read_from_the_codex_rollout(self) -> None:
+        # Codex surfaces a subagent spawn only in its rollout, as a
+        # `spawn_agent` function call; the parent's --json stream shows one
+        # thread and nothing else. The count has to be taken in the same pass
+        # that consumes (and deletes) the rollout.
+        raw = self.fixture("codex-spawn.raw", [
+            {"type": "thread.started", "thread_id": "thread-s"},
+            {"type": "turn.started"},
+        ])
+        home = self.root / "codex-home"
+        path = self.rollout(
+            home, "thread-s", {"input_tokens": 50, "output_tokens": 5},
+        )
+        with path.open("a", encoding="utf-8") as stream:
+            for _ in range(2):
+                stream.write(json.dumps({"type": "response_item", "payload": {
+                    "type": "function_call", "name": "spawn_agent",
+                    "namespace": "collaboration", "arguments": "{}",
+                }}) + "\n")
+            stream.write(json.dumps({"type": "response_item", "payload": {
+                "type": "function_call", "name": "exec", "arguments": "{}",
+            }}) + "\n")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(home)}):
+            row = llm_usage.extract_usage(str(raw), backend="codex")
+        self.assertEqual(row["delegation_events"], 2)
+        self.assertEqual(row["tokens"]["input"], 50)
+        self.assertTrue(row["spend_lower_bound"], "a spawned codex thread's rollout is not linkable")
+        self.assertTrue(row["estimated"])
+
+    def test_opencode_delegation_is_a_spend_floor_counted_once_per_call(self) -> None:
+        # OpenCode repeats a tool part as its state changes, and its `task`
+        # subagent runs in a separate session the parent's stream never shows
+        # (measured: one session id in a delegating transcript), so the row
+        # counts distinct call ids and is marked a floor.
+        raw = self.fixture("oss-task.raw", [
+            {"type": "tool_use", "part": {"id": "p1", "callID": "c1", "tool": "task",
+                                          "state": {"status": "running"}}},
+            {"type": "tool_use", "part": {"id": "p1", "callID": "c1", "tool": "task",
+                                          "state": {"status": "completed"}}},
+            {"type": "tool_use", "part": {"id": "p2", "callID": "c2", "tool": "task"}},
+            {"type": "tool_use", "part": {"id": "p3", "callID": "c3", "tool": "bash"}},
+            {"type": "step_finish", "usage": {"input_tokens": 30, "output_tokens": 4}},
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="oss")
+        self.assertEqual(row["delegation_events"], 2)
+        self.assertTrue(row["spend_lower_bound"])
+        self.assertTrue(row["estimated"], "unseen child spend makes the row a floor")
+
+    def test_gemini_cli_invoke_agent_is_recognised_and_not_a_floor(self) -> None:
+        raw = self.fixture("gemini-agent.raw", [
+            {"type": "tool_call", "tool_name": "invoke_agent", "tool_call_id": "t1"},
+            {"type": "tool_call", "tool_name": "invoke_agent", "tool_call_id": "t1"},
+            {"type": "result", "stats": {"input_tokens": 9, "output_tokens": 2}},
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="gemini")
+        self.assertEqual(row["delegation_events"], 1)
+        self.assertFalse(row.get("spend_lower_bound", False),
+                         "gemini-cli runs subagents in-process; its stats cover them")
+
+    def test_grok_subagent_events_are_counted_and_a_floor(self) -> None:
+        # Grok streams one lifecycle event per spawned subagent and reports no
+        # usage at all, so the spawn is counted by its id and the row is a
+        # spend floor. Event names come from the CLI binary; a live Grok
+        # transcript with a subagent has not yet been read.
+        raw = self.fixture("grok-subagent.raw", [
+            {"type": "subagent_start", "subagent_id": "s1", "subagent_type": "explore"},
+            {"type": "subagent_start", "subagent_id": "s1"},
+            {"type": "subagent_end", "subagent_id": "s1", "tool_calls": 3},
+            {"type": "subagent_start", "subagent_id": "s2"},
+            {"type": "text", "data": "done"},
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="grok")
+        self.assertEqual(row["delegation_events"], 2)
+        self.assertTrue(row["spend_lower_bound"])
+        self.assertFalse(row["delegation_observable"],
+                         "Grok's fan-out is disclosed as unobservable whatever was counted")
+        plain = self.fixture("grok-plain.raw", [{"type": "text", "data": "done"}])
+        self.assertFalse(llm_usage.extract_usage(str(plain), backend="grok")["delegation_observable"])
+
+    def test_delegation_events_count_claude_agent_calls_only(self) -> None:
+        raw = self.fixture("claude-agent.raw", [
+            {"type": "assistant", "message": {"id": "m1", "usage": {"input_tokens": 4, "output_tokens": 1},
+             "content": [{"type": "tool_use", "name": "Agent", "input": {}},
+                         {"type": "tool_use", "name": "Bash", "input": {}},
+                         {"type": "tool_use", "name": "Task", "input": {}}]}},
+            {"type": "result", "usage": {"input_tokens": 4, "output_tokens": 1},
+             "modelUsage": {"m": {"inputTokens": 4, "outputTokens": 1}}},
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="claude")
+        self.assertEqual(row["delegation_events"], 2)
+        plain = self.fixture("claude-plain.raw", [
+            {"type": "result", "usage": {"input_tokens": 4, "output_tokens": 1},
+             "modelUsage": {"m": {"inputTokens": 4, "outputTokens": 1}}},
+        ])
+        self.assertEqual(llm_usage.extract_usage(str(plain), backend="claude")["delegation_events"], 0)
+
     def test_codex_sums_every_thread_including_the_interrupted_one(self) -> None:
         # One transcript, two threads: A finished and reported a terminal
         # event, B was interrupted and exists only in its rollout. Preferring

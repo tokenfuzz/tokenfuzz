@@ -28,7 +28,7 @@ Each benchmark run is a small controlled experiment:
 
 | Condition token | Rendered label | What runs |
 | --- | --- | --- |
-| `model-direct` | `<model>-direct` when the model is known, otherwise `<backend>-direct` | One agent with a bare vulnerability-hunting prompt. This is the control. |
+| `model-direct` | `<model>-direct` when the model is known, otherwise `<backend>-direct` | One launch of the backend CLI at its defaults with a bare vulnerability-hunting prompt. This is the control. It may delegate internally if the CLI does by default; how often is recorded as `delegation_events`. |
 | `harness` | `tokenfuzz` | `bin/audit` as shipped: ranked work cards, strategy rotation, `bin/probe`, triage, validation, clustering, severity scoring, and reproducer bundling. |
 
 Each cell isolates the backend from any instruction files, plugins, or skills

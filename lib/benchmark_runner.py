@@ -1218,7 +1218,10 @@ def run_model_direct(
                 backend, prompt, wall, raw, model=model, max_turns=0,
                 add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
                 watchdog_marker_dir=cell_dir,
-                allow_subagents=False,
+                # The CLI's default delegation stays on: the control is the
+                # product as a user gets it, and any subagent spend lands in
+                # the same session's usage. What it actually did is recorded
+                # as `delegation_events` on the cell's usage row.
                 extra_env={process_tree.REAP_MARKER_VAR: reap_marker},
             )
         finally:
