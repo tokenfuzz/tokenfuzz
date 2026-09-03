@@ -186,6 +186,15 @@ instead.
 
 Triage decides whether an artifact is useful and in scope.
 
+It runs at the end of every iteration over the whole results tree, and it
+also runs earlier: while agent slots are still busy, a background sweep
+adjudicates the artifacts no live session can still write — a crash bundle
+once the slot that filed it has ended its session, a finding once every
+session still running started after it was filed. A turn-capped session's
+continuation counts as the same session. The end-of-iteration pass repeats
+the work over everything, reusing the cached verdicts, so what the sweep
+settled costs no further review and what it could not reach is judged there.
+
 **For crashes, the gates are strict:**
 
 - there is a runnable testcase;

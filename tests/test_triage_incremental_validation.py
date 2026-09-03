@@ -8,6 +8,7 @@ import io
 import json
 import hashlib
 import os
+import re
 import runpy
 import subprocess
 import sys
@@ -3624,6 +3625,177 @@ Generated score text.
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt["state"], "pending")
         self.assertIn("obsolete numeric severity", stderr.getvalue())
+
+
+    def _reach_report(self, *, drop: tuple[str, ...] = ()) -> None:
+        """A report carrying every scorer field but the ones named in ``drop``."""
+        lines = {
+            "surface": "Surface: library-api",
+            "primitive": "Primitive: authz_bypass",
+            "class": "Class: authorization",
+            "caller_contract": "Caller contract: obeyed",
+            "caller_controls": "Caller controls: bytes",
+            "trigger_source": "Trigger source: bytes",
+            "parameter_control": "Parameter control: direct",
+            "trusted_caller_actions": "Trusted caller actions: normal public call",
+            "boundary": "Boundary: public request handler",
+            "advisory": "Advisory: no",
+        }
+        self.report.write_text(
+            "# State issue\n\nA caller-controlled request crosses an "
+            "authorization boundary.\n\n"
+            + "\n".join(line for key, line in lines.items() if key not in drop)
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def test_conditional_reach_fields_do_not_reopen_the_ask(self) -> None:
+        # The shape every accepted finding in recorded cells had after review:
+        # the author filled the required fields, and the prompt tells the
+        # model to omit class, advisory and parameter_control unless the
+        # report settles them. That silence used to buy a second identical
+        # round on every barrier.
+        self._reach_report(drop=("class", "advisory", "parameter_control"))
+        calls: list[dict] = []
+
+        def decide(_decision, _required, prompt, _timeout, **_kwargs):
+            calls.append({"prompt": prompt})
+            return {"items": [{"id": self.finding.name, "surface": "library-api"}]}
+
+        self.assertTrue(triage.reach_fields_open(self.finding))
+        with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(triage.reach_fields_open(self.finding))
+        cache = json.loads((self.finding / ".llm_fields.json").read_text())
+        self.assertEqual(
+            (cache["_fill_attempts"], cache["_answered_attempts"]), (1, 1),
+        )
+        # A second convergence pass, as the barrier and the pool rebuild run,
+        # asks nothing more.
+        with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        self.assertEqual(len(calls), 1)
+
+    def test_an_unanswered_or_incomplete_reach_ask_is_still_retried(self) -> None:
+        # No answer at all spends an attempt but settles nothing: the retry
+        # budget still applies to the same open fields.
+        self._reach_report(drop=("class", "advisory"))
+        with mock.patch.object(
+            triage.llm_decide, "llm_decide", return_value={"items": []},
+        ) as silent:
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        self.assertEqual(silent.call_count, 2)
+        self.assertFalse(triage.reach_fields_open(self.finding))
+        # A required field left missing by an answered attempt is asked again;
+        # only the conditional ones stop reopening the ask.
+        self._reach_report(drop=("surface", "class", "advisory"))
+        (self.finding / ".llm_fields.json").unlink()
+        answers = iter([
+            {"items": [{"id": self.finding.name, "class": "authorization"}]},
+            {"items": [{"id": self.finding.name, "surface": "library-api"}]},
+        ])
+        with mock.patch.object(
+            triage.llm_decide, "llm_decide", side_effect=lambda *_a, **_k: next(answers),
+        ) as asked:
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        self.assertEqual(asked.call_count, 2)
+        text = self.report.read_text(encoding="utf-8")
+        self.assertIn("Class: authorization", text)
+        self.assertIn("Surface: library-api", text)
+        self.assertFalse(triage.reach_fields_open(self.finding))
+
+    def test_a_batched_answer_still_lands_after_cached_fields_complete_the_report(self) -> None:
+        # Cached required fields complete the report, but a resource report
+        # still owes its optional grade. The batch already asked for it; the
+        # answer must be applied rather than dropped on the early return.
+        self._reach_report(drop=("surface", "primitive"))
+        self.report.write_text(
+            self.report.read_text(encoding="utf-8").replace(
+                "Class: authorization", "Class: dos amplification",
+            ),
+            encoding="utf-8",
+        )
+        (self.finding / ".llm_fields.json").write_text(json.dumps({
+            "_decision_version": triage._REACH_FIELD_DECISION_VERSION,
+            "_fill_attempts": 0,
+            "surface": "library-api",
+            "primitive": "dos_amplification",
+        }))
+        self.assertTrue(triage.fill_reach_fields(
+            self.finding, None, decision_override={"availability_loss": "total"},
+        ))
+        text = self.report.read_text(encoding="utf-8")
+        self.assertIn("Surface: library-api", text)
+        self.assertIn("Availability loss: total", text)
+        self.assertFalse(triage.reach_fields_open(self.finding))
+
+    def test_unconditional_quality_rounds_are_cast_together(self) -> None:
+        # At the default quorum no verdict is reachable before two votes, so
+        # the second round never depended on the first and is issued with it.
+        # A report already holding one vote needs only one more, and the
+        # tie-break round stays serial behind the wave.
+        fresh = self.root / "findings" / "FIND-002"
+        fresh.mkdir()
+        (fresh / "report.md").write_text(
+            "# Another issue\n\nA second caller-controlled request.\n",
+            encoding="utf-8",
+        )
+        (self.finding / ".llm-find-quality.json").write_text(json.dumps(
+            triage._quality_payload(
+                triage.read_report_bounded(self.report),
+                [quality_vote(self.finding.name)["items"][0]],
+                2, 2, report_identity.content_sha1(self.report),
+            )
+        ))
+        lock = threading.Lock()
+        both_started = threading.Barrier(2, timeout=2)
+        rounds: list[tuple[list[str], float, float]] = []
+        wave_verdicts = iter([True, False])
+
+        def decide(_decision, _required, prompt, _timeout, **_kwargs):
+            ids = re.findall(r'"id": "(FIND-[0-9]+)"', prompt)
+            started = time.monotonic()
+            with lock:
+                index = len(rounds)
+                rounds.append((ids, started, 0.0))
+            if index < 2:
+                # Neither of the first two rounds may wait for the other.
+                both_started.wait()
+                accept = next(wave_verdicts) if "FIND-002" in ids else True
+            else:
+                accept = True
+            time.sleep(0.05)
+            with lock:
+                rounds[index] = (ids, started, time.monotonic())
+            return {"items": [
+                {
+                    "id": item_id, "accept": accept if item_id == "FIND-002" else True,
+                    "reason": "concrete boundary issue" if accept else "not security relevant",
+                    "class": "auth:bypass", "severity": "high",
+                }
+                for item_id in ids
+            ]}
+
+        with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
+            votes = triage._batch_quality_votes(
+                [self.finding, fresh], self.root, 2, 2, 120, None, 2,
+            )
+        self.assertEqual(len(rounds), 3, repr(rounds))
+        first, second, third = rounds
+        # The wave: one round carries both reports, the other only the fresh
+        # one, and the tie-break starts only after both have returned.
+        self.assertEqual(sorted(len(ids) for ids, _s, _e in (first, second)), [1, 2])
+        self.assertEqual(third[0], ["FIND-002"])
+        self.assertGreaterEqual(third[1], max(first[2], second[2]))
+        self.assertEqual(len(votes[self.finding]), 2)
+        self.assertEqual(len(votes[fresh]), 3)
+        cached = json.loads((fresh / ".llm-find-quality.json").read_text())
+        self.assertTrue(cached["accept"])
+        self.assertEqual((cached["accept_count"], cached["reject_count"]), (2, 1))
+        self.assertTrue(json.loads(
+            (self.finding / ".llm-find-quality.json").read_text(),
+        )["accept"])
 
 
 class DecisionTimeoutBackoffTests(unittest.TestCase):

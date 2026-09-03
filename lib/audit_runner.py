@@ -2959,8 +2959,12 @@ class SealedGateWorker:
     mid-write, and was reverted; the seal is the difference.
 
     Ownership is never read from content. A crash bundle names its slot
-    (`CRASH-NNN-<agent>`). A finding does not, so it is sealed only once it
-    predates every chain still in flight. A chain is one slot's run of
+    (`CRASH-NNN-<agent>`), and its owner is sent back to it by every later
+    resume while it is still a `bin/probe` skeleton or holds a
+    `.promotion_pending` marker — so an unfinished bundle is never sealed,
+    and is first seen only once complete, by which point the chain that
+    completed it holds a tick no earlier. A finding names no slot, so it is
+    sealed only once it predates every chain still in flight. A chain is one slot's run of
     sessions sharing in-flight work: a turn-capped session's continuation
     inherits its start, so nothing the cut session filed is sealed before the
     continuation ends. Time is a logical clock: a slot's launch takes a fresh
@@ -3013,13 +3017,34 @@ class SealedGateWorker:
                 )
         return found
 
+    @staticmethod
+    def _unfinished(directory: Path) -> bool:
+        """A bundle its owner's next session is told to finish first."""
+        return directory.name.startswith("CRASH-") and bool(
+            cluster_common.promotion_pending_reasons(directory)
+        )
+
+    def _stamp(self, artifacts: list[Path]) -> dict[str, int | None]:
+        """Record first-seen for what is complete; None for what is not."""
+        seen: dict[str, int | None] = {}
+        for directory in artifacts:
+            if self._unfinished(directory):
+                # First-seen restarts from completion, so a bundle held again
+                # after a stamp cannot re-seal on the older tick.
+                self._first_seen.pop(directory.name, None)
+                seen[directory.name] = None
+                continue
+            seen[directory.name] = self._first_seen.setdefault(
+                directory.name, self._clock,
+            )
+        return seen
+
     def observe(self) -> None:
-        """Stamp every artifact on disk as seen no later than now."""
+        """Stamp every complete artifact on disk as seen no later than now."""
         if self._results is None:
             return
         with self._lock:
-            for directory in self._artifacts():
-                self._first_seen.setdefault(directory.name, self._clock)
+            self._stamp(self._artifacts())
 
     def launch(self, agent: int, *, continuation: bool) -> None:
         with self._lock:
@@ -3063,18 +3088,16 @@ class SealedGateWorker:
         with self._lock:
             chains = dict(self._chains)
             artifacts = self._artifacts()
-            seen_at = {
-                directory.name: self._first_seen.setdefault(
-                    directory.name, self._clock,
-                )
-                for directory in artifacts
-            }
-        threshold = min(chains.values(), default=self._clock + 1)
+            seen_at = self._stamp(artifacts)
+            threshold = min(chains.values(), default=self._clock + 1)
         findings: list[Path] = []
         crashes: list[Path] = []
         total_findings = total_crashes = 0
         for directory in artifacts:
             seen = seen_at[directory.name]
+            if seen is None:
+                total_crashes += 1
+                continue
             if directory.name.startswith("FIND-"):
                 total_findings += 1
                 if seen < threshold:
@@ -3281,7 +3304,10 @@ def run_agent_pool(
             for result in finished:
                 if result.agent not in launched_now:
                     gate_worker.retire(result.agent)
-            gate_worker.request_sweep()
+            # With nothing left in flight the barrier gate is next; a sweep
+            # here would do its work under the wrong accounting.
+            if futures:
+                gate_worker.request_sweep()
     return results
 
 
