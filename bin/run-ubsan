@@ -21,7 +21,7 @@ from sanitizer_helpers import (
     report_browser_execution, untrusted_browser_filters,
 )
 from sanitizer_run import SanitizerRunner
-from timeout import capture_timeout, run_timeout
+from timeout import capture_timeout
 
 MACH_PROFILE_PREFS = '''user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("datareporting.policy.dataSubmissionEnabled", false);
@@ -52,7 +52,6 @@ CONFIG = load_config()
 ENV = sanitizer.prepare_runtime_env("ubsan")
 sanitizer.warn_if_disabled("ubsan", CONFIG)
 TARGET_ROOT = CONFIG.target_root if CONFIG else ENV.get("TARGET_ROOT", str(Path.cwd()))
-BUILD_DIR = sanitizer.build_dir("ubsan", TARGET_ROOT, ENV)
 sanitizer.hold_build("ubsan", TARGET_ROOT, ENV)
 
 

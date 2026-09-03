@@ -104,7 +104,6 @@ TESTCASE_UNKNOWN = "unknown"
 
 def testcase_verdict(
     binary: Path, args: list[str], env: dict[str, str] | None = None,
-    *, seconds: int = 10,
 ) -> str:
     """Whether this launch's observable behaviour varies with its testcase.
 
@@ -146,7 +145,7 @@ def testcase_verdict(
         for path in (present, present, absent):
             try:
                 completed, output = capture_probe(
-                    [str(binary), *expand(path)], seconds, directory,
+                    [str(binary), *expand(path)], 10, directory,
                     65536, env,
                 )
             except (OSError, subprocess.SubprocessError):

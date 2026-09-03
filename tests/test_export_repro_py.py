@@ -2314,8 +2314,6 @@ if result_t.returncode == 0:
         "Trusted caller actions",
         "Reproduction rate",
     )
-    fields_block = report_t.split("## Fields", 1)[1].split("\n\n", 2)
-    fields_table_text = "\n\n".join(fields_block[:2]) if fields_block else ""
     for label in required_rows:
         # Row exists.
         assert_in(f"| {label}", report_t,

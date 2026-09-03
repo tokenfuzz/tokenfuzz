@@ -1017,11 +1017,7 @@ def subsystem_for(path: str) -> str:
 
 
 def auto_subsystem_depth(
-    source_paths: Iterable[str],
-    *,
-    default: int = _DEFAULT_SUBSYSTEM_DEPTH,
-    max_depth: int = _MAX_SUBSYSTEM_DEPTH,
-    dominance_threshold: float = 0.7,
+    source_paths: Iterable[str], *, default: int = _DEFAULT_SUBSYSTEM_DEPTH,
 ) -> int:
     """Pick the shallowest depth that gives reasonable partition spread.
 
@@ -1029,8 +1025,8 @@ def auto_subsystem_depth(
     under a single ``include/<name>`` or ``src/`` prefix — collapse to
     one bucket at depth 2, which makes overlap detection and rotation
     useless. We keep increasing the depth while either (a) fewer than
-    two distinct buckets emerge, or (b) one bucket holds more than
-    ``dominance_threshold`` of all source files. Targets with naturally
+    two distinct buckets emerge, or (b) one bucket holds more than 70% of
+    all source files. Targets with naturally
     diverse 2-component prefixes (browsers, multi-binary repos) stay at
     depth 2.
 
@@ -1043,7 +1039,7 @@ def auto_subsystem_depth(
     if not paths:
         return default
     total = len(paths)
-    for depth in range(default, max_depth + 1):
+    for depth in range(default, _MAX_SUBSYSTEM_DEPTH + 1):
         buckets: dict[str, int] = {}
         for raw in paths:
             bucket = subsystem_bucket(raw, depth)
@@ -1051,10 +1047,10 @@ def auto_subsystem_depth(
         if len(buckets) < 2:
             continue
         largest = max(buckets.values())
-        if largest / total <= dominance_threshold:
+        if largest / total <= 0.7:
             return depth
         # One bucket dominates — try a deeper split unless we've hit the cap.
-    return max_depth
+    return _MAX_SUBSYSTEM_DEPTH
 
 
 def init_subsystem_depth(
@@ -1829,7 +1825,6 @@ def structural_path_score(rel: str) -> tuple[int, list[str]]:
     elif depth >= 7:
         score -= 4
         reasons.append("deep source path")
-    name = Path(rel).name
     stem = Path(rel).stem
     if any(ch.isupper() for ch in stem) or "_" in stem:
         score += 2
@@ -3847,11 +3842,6 @@ def agent_current_scopes(ctx: Context, agent: str) -> tuple[str, str]:
     if subsystem == "unknown":
         subsystem = ""
     return subsystem, source
-
-
-def agent_current_subsystem(ctx: Context, agent: str) -> str:
-    """Return the subsystem represented by an agent's latest live/result row."""
-    return agent_current_scopes(ctx, agent)[0]
 
 
 # Card `mode` describes the execution surface needed by the testcase. The

@@ -9,7 +9,6 @@ assertions reflect what bin/audit observes at runtime.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys

@@ -181,7 +181,6 @@ class ContinuousSchedulerTests(unittest.TestCase):
 
     def test_the_steward_ticks_while_slots_run_and_can_stall_the_run(self) -> None:
         h = _Harness(self.root)
-        ticks = 0
 
         def agent(number, cold):
             time.sleep(0.15)

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "lib" / "file_tools.py"
 sys.path.insert(0, str(ROOT / "lib"))
 from command_tools import find_executable
-from file_tools import cap_output_bytes, clipped_prefix_bytes, tail_lines
+from file_tools import cap_output_file, tail_lines
 passed = 0
 failed = 0
 
@@ -53,11 +53,11 @@ with tempfile.TemporaryDirectory() as directory:
     check(b"Full output: /tmp/full.log" in process.stdout,
           "head-tail reports spill path")
 
-    check(clipped_prefix_bytes(b"one\ntwo\nthree\n", 9) == b"one\ntwo\n",
-          "byte clipping shares the newline-aligned boundary")
     spill = Path(directory) / "spill"
-    rendered = cap_output_bytes(
-        b"head\n" + b"middle\n" * 20 + b"tail\n",
+    capped = Path(directory) / "capped.bin"
+    capped.write_bytes(b"head\n" + b"middle\n" * 20 + b"tail\n")
+    rendered = cap_output_file(
+        capped,
         "sample/path",
         {
             "OUTCAP_MAX_BYTES": "32",

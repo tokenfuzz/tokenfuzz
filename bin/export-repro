@@ -478,14 +478,6 @@ def _glob_sort_key(p: Path) -> str:
     return p.name.casefold()
 
 
-def _list_visible_entries(d: Path) -> list[Path]:
-    """Return non-dot entries in deterministic case-insensitive order."""
-    return sorted(
-        (e for e in d.iterdir() if not e.name.startswith(".")),
-        key=_glob_sort_key,
-    )
-
-
 def find_first_in_scan(scan_dirs: list[Path], pattern: str) -> Optional[Path]:
     """Glob `pattern` against each scan dir in order. First match wins.
 
@@ -1613,7 +1605,6 @@ _SUMMARY_HEADING_RE = re.compile(r"^#{1,6}\s+Summary\s*$", re.IGNORECASE | re.MU
 # variants mirror lib/report_enrich.py's `_FIX_SECTION_NAMES`.
 # `## Fix Direction` is intentionally excluded — that's the
 # advisory-no-patch narrative and load-bearing for downstream TL;DR mining.
-_FIX_HEADING_NAMES = ("Fix", "Suggested fix", "Recommended fix", "Proposed fix")
 _FIX_HEADING_PATTERN = re.compile(
     r"^##\s+(?:Fix|Suggested\s+fix|Recommended\s+fix|Proposed\s+fix)\s*$.*?(?=^##\s|\Z)",
     re.MULTILINE | re.DOTALL | re.IGNORECASE,
@@ -3323,7 +3314,6 @@ def main(argv: list[str]) -> int:
             cfg.target_root = env.get("TARGET_ROOT", "")
             cfg.slug = env.get("TARGET_SLUG", "")
             cfg.target_rev = env.get("TARGET_REV", "")
-            cfg.session_started = env.get("SESSION_STARTED", "")
             cfg.logdir = env.get("LOGDIR", "")
         elif os.environ.get("RESULTS_DIR") and os.environ.get("TARGET_ROOT"):
             env_slug = os.environ.get("TARGET_SLUG", args.slug)
@@ -3333,7 +3323,6 @@ def main(argv: list[str]) -> int:
             cfg.target_root = os.environ.get("TARGET_ROOT", "")
             cfg.slug = env_slug or args.slug
             cfg.target_rev = os.environ.get("TARGET_REV", "")
-            cfg.session_started = os.environ.get("SESSION_STARTED", "")
             cfg.logdir = os.environ.get("LOGDIR", "")
             cfg.is_browser = os.environ.get("TARGET_IS_BROWSER", os.environ.get("IS_BROWSER_TARGET", "0"))
         else:
@@ -3850,9 +3839,8 @@ def main(argv: list[str]) -> int:
         # ── Migrate junk into .audit/ ────────────────────────────────
         if out_dir == crash_dir:
             audit_subdir.mkdir(parents=True, exist_ok=True)
-            # Bash uses `shopt -s dotglob nullglob` here so dotfiles are also
-            # migrated; mirror that by walking iterdir() (which already lists
-            # hidden files) instead of _list_visible_entries.
+            # Dotfiles migrate too, so walk iterdir() rather than a
+            # visible-entries glob.
             for f in sorted(crash_dir.iterdir()):
                 if not f.exists():
                     continue

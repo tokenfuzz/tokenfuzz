@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import NoReturn
 
 
 HELP = r'''Usage:
@@ -127,13 +128,13 @@ def log(message: str) -> None:
     print(f"[audit-container-shell] {message}", file=sys.stderr)
 
 
-def fatal(message: str) -> "NoReturn":
+def fatal(message: str) -> NoReturn:
     print(f"[audit-container-shell] FATAL: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
 class Parser(argparse.ArgumentParser):
-    def error(self, message: str) -> "NoReturn":
+    def error(self, message: str) -> NoReturn:
         if message.startswith("unrecognized arguments: "):
             value = message.removeprefix("unrecognized arguments: ").split()[0]
             fatal(f"unknown option: {value}" if value.startswith("--") else f"unexpected argument: {value}")

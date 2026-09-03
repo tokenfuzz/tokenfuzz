@@ -473,10 +473,6 @@ class BuildConfigTests(unittest.TestCase):
             self.assertIn("automatic widening requires --backend", completed.stderr)
             self.assertEqual(list((root / ".audit/configs").glob("*.unavailable")), [])
 
-            help_output = subprocess.run(
-                [str(ROOT / "bin/build-configs"), "--help"],
-                capture_output=True, text=True, check=False,
-            )
 
     def test_widening_without_surface_options_is_cached_as_not_applicable(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

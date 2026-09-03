@@ -790,8 +790,6 @@ class SanitizerRouteTests(unittest.TestCase):
         binary.write_bytes(b"x")
         binary.chmod(0o755)
         (root / "target.toml").write_text(body, encoding="utf-8")
-        import workqueue
-        ctx = workqueue.Context(ROOT, root, "unit", root / "results", "none")
         original = target_config.find_target_toml
         target_config.find_target_toml = lambda start: root / "target.toml"
         self.addCleanup(setattr, target_config, "find_target_toml", original)

@@ -534,10 +534,6 @@ class ServedModelTests(unittest.TestCase):
                 "gemini-3-flash-preview": {"total_tokens": 69_625},
             },
         }}])
-        self.assertEqual(
-            llm_usage.served_models(raw),
-            {"gemini-3.5-flash": 10_099_986, "gemini-3-flash-preview": 69_625},
-        )
         # The busiest served model, so the operator message names what ran.
         self.assertEqual(
             llm_usage.substituted_model(raw, "gemini-3.7-flash"),
@@ -634,10 +630,6 @@ class ServedModelTests(unittest.TestCase):
                 "contextWindow": 200_000, "maxOutputTokens": 64_000,
             },
         }}])
-        self.assertEqual(
-            llm_usage.served_models(raw),
-            {"claude-opus-5": 18_063, "claude-haiku-4-5": 440},
-        )
         self.assertEqual(llm_usage.substituted_model(raw, "claude-opus-5"), "")
 
     def test_a_dated_snapshot_of_the_requested_model_is_not_substitution(self) -> None:
@@ -678,7 +670,6 @@ class ServedModelTests(unittest.TestCase):
         # Absence of telemetry is not evidence of substitution; oss reports
         # none, and refusing every oss run would be a worse failure.
         raw = self.write("quiet.raw", [{"type": "step_finish", "tokens": {"input": 5}}])
-        self.assertEqual(llm_usage.served_models(raw), {})
         self.assertEqual(llm_usage.substituted_model(raw, "opencode/x-free"), "")
 
     def test_a_cache_ttl_decoration_is_the_same_model(self) -> None:
@@ -715,7 +706,6 @@ class ServedModelTests(unittest.TestCase):
         raw = self.write("toolout.raw", [{"type": "tool_use", "part": {"state": {
             "output": json.dumps({"models": {"someone-elses-model": {"total_tokens": 999}}}),
         }}}])
-        self.assertEqual(llm_usage.served_models(raw), {})
         self.assertEqual(llm_usage.substituted_model(raw, "gemini-3.7-flash"), "")
 
     def test_a_zero_token_model_entry_is_not_a_served_model(self) -> None:

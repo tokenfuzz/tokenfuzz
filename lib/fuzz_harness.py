@@ -1062,7 +1062,6 @@ _NON_INPUT_SUFFIXES = frozenset({
     ".sh", ".bat", ".cmake", ".am", ".ac", ".m4", ".mk", ".o", ".a", ".so",
     ".dylib", ".dll", ".exe", ".md", ".txt.in", ".in", ".cmakein",
 })
-_SANITIZER_BUILD_RE = re.compile(r"/build-(?:asan|ubsan|msan|tsan)")
 
 
 # ── Dictionaries ────────────────────────────────────────────────────

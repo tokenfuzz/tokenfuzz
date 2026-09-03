@@ -6,7 +6,6 @@ from __future__ import annotations
 import concurrent.futures
 import os
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile

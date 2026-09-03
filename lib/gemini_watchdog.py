@@ -184,13 +184,11 @@ class Watchdog(threading.Thread):
         self.use_cli = use_cli
         self.logger = logger or (lambda message: print(f"[gemini-watchdog] {message}", file=sys.stderr))
         self._stop_event = threading.Event()
-        self.killed = False
 
     def stop(self) -> None:
         self._stop_event.set()
 
     def _terminate(self) -> None:
-        self.killed = True
         try:
             descendants = process_tree.descendants(self.pid)
         except (OSError, subprocess.SubprocessError):

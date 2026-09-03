@@ -11,8 +11,6 @@ from typing import Mapping, Sequence
 
 import sanitizer
 import sanitizer_helpers
-from sanitizer_helpers import copy_file
-from timeout import capture_timeout, run_timeout
 
 
 def runner_exit_succeeded(

@@ -61,8 +61,6 @@ import sys
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
@@ -793,6 +791,12 @@ def opencode_config(model: str, agent_security: str | None = None) -> dict:
 
 
 def local_model_available(model: str) -> bool:
+    # Imported here: urllib.request costs ~45ms at startup and only this
+    # local-provider probe needs it, while every llm_decide caller pays the
+    # module import.
+    import urllib.error
+    import urllib.request
+
     resolved = (model or "").strip()
     url = local_provider_base_url().rstrip("/") + "/models"
     try:

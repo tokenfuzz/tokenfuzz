@@ -142,7 +142,7 @@ def main(argv=None) -> int:
     if not argv:
         print("usage: vocab_rules.py <subcommand>", file=sys.stderr)
         return 2
-    cmd, rest = argv[0], argv[1:]
+    cmd = argv[0]
     if cmd == "neutralize-string":
         return _cmd_neutralize_string()
     if cmd == "strip-markers":

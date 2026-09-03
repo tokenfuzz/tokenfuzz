@@ -2896,12 +2896,7 @@ def changed_build_recipe(
     return ""
 
 
-def build_input_key(
-    target_root: "str | os.PathLike",
-    san: str = "asan",
-    *,
-    recipe_path: "str | os.PathLike | None" = None,
-) -> str:
+def build_input_key(target_root: "str | os.PathLike", san: str = "asan") -> str:
     """Short identity of everything a build is made from.
 
     Names an isolated build directory, so two runs that diverge from the shared
@@ -2910,8 +2905,7 @@ def build_input_key(
     duplicate identical builds, which is where build explosion starts.
     """
     root = Path(target_root)
-    recipe = Path(recipe_path) if recipe_path is not None else \
-        build_recipe_path(root, san)
+    recipe = build_recipe_path(root, san)
     payload = f"{_source_state_signature(root)}\n{_build_recipe_digest(recipe)}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
 
@@ -3502,7 +3496,6 @@ class Config:
     target_root: str = ""
     results_dir: str = ""
     target_rev: str = ""
-    session_started: str = ""
     logdir: str = ""
 
     upstream_url: str = ""
@@ -3991,7 +3984,6 @@ def load(start: str | os.PathLike) -> Config:
     cfg.target_root = env.get("TARGET_ROOT", "")
     cfg.slug = env.get("TARGET_SLUG", "")
     cfg.target_rev = env.get("TARGET_REV", "")
-    cfg.session_started = env.get("SESSION_STARTED", "")
     cfg.logdir = env.get("LOGDIR", "")
     toml_path = target_toml_for_session_dir(slug_dir)
     if not toml_path.is_file():

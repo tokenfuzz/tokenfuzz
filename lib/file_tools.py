@@ -11,10 +11,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Mapping, Sequence
 
 
 def reverse_lines(path: Path):
@@ -65,12 +64,6 @@ def clipped_prefix(path: Path, cap: int) -> bytes:
     return data[: newline + 1] if newline >= 0 else data
 
 
-def clipped_prefix_bytes(data: bytes, cap: int) -> bytes:
-    clipped = data[:cap]
-    newline = clipped.rfind(b"\n")
-    return clipped[: newline + 1] if newline >= 0 else clipped
-
-
 def _non_negative_int(env: Mapping[str, str], name: str, default: int) -> int:
     value = env.get(name, str(default))
     if not value.isdigit():
@@ -78,36 +71,6 @@ def _non_negative_int(env: Mapping[str, str], name: str, default: int) -> int:
             f"[output_cap] {name} must be a non-negative integer (got: {value})"
         )
     return int(value)
-
-
-def _spill_output(data: bytes, label: str, env: Mapping[str, str]) -> str:
-    configured = env.get("OUTCAP_SPILL_DIR")
-    if configured:
-        spill_dir = Path(configured)
-    elif env.get("RESULTS_DIR"):
-        spill_dir = Path(env["RESULTS_DIR"]) / "logs" / ".raw" / "outcap"
-    else:
-        spill_dir = Path(tempfile.mkdtemp(prefix="outcap-", dir=env.get("TMPDIR")))
-    try:
-        spill_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        spill_dir.chmod(0o700)
-        digest = hashlib.sha1(data).hexdigest()[:12]
-        destination = spill_dir / f"outcap-{label}-{digest}.txt"
-        fd, temporary = tempfile.mkstemp(prefix=".outcap-", dir=spill_dir)
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as stream:
-                fd = -1
-                stream.write(data)
-            os.replace(temporary, destination)
-        except BaseException:
-            if fd >= 0:
-                os.close(fd)
-            Path(temporary).unlink(missing_ok=True)
-            raise
-        return str(destination)
-    except OSError:
-        return ""
 
 
 def _spill_output_file(path: Path, label: str, env: Mapping[str, str]) -> str:
@@ -185,20 +148,6 @@ def _render_head_tail_parts(
     return head + marker.encode() + tail + (b"" if tail.endswith(b"\n") else b"\n")
 
 
-def cap_output_bytes(
-    data: bytes, label: str, env: Mapping[str, str] | None = None
-) -> bytes:
-    environment = os.environ if env is None else env
-    maximum = _non_negative_int(environment, "OUTCAP_MAX_BYTES", 51200)
-    head = _non_negative_int(environment, "OUTCAP_HEAD_BYTES", 24576)
-    tail = _non_negative_int(environment, "OUTCAP_TAIL_BYTES", 20480)
-    if maximum == 0 or len(data) <= maximum:
-        return data
-    safe_label = re.sub(r"[^A-Za-z0-9._-]", "-", label) or "output"
-    spill_path = _spill_output(data, safe_label, environment)
-    return render_head_tail(data, head, tail, safe_label, spill_path)
-
-
 def cap_output_file(
     path: Path, label: str, env: Mapping[str, str] | None = None,
 ) -> bytes:
@@ -225,11 +174,16 @@ def cap_output_file(
     return _render_head_tail_parts(head, tail, size, safe_label, spill_path)
 
 
-@dataclass(frozen=True)
 class CapturedCommand:
-    returncode: int
-    stdout: Path
-    stderr: Path | None
+    # A plain class rather than a dataclass: importing dataclasses costs
+    # ~30ms per process, and rg-safe/peek are the most frequently spawned
+    # agent tools.
+    __slots__ = ("returncode", "stdout", "stderr")
+
+    def __init__(self, returncode: int, stdout: Path, stderr: Path | None) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 @contextmanager

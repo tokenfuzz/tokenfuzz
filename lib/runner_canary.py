@@ -34,7 +34,6 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 

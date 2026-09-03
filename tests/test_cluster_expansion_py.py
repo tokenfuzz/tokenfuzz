@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
 
     with mock.patch.dict(os.environ, {"LLM_DECISION_TIMEOUT": "17"}, clear=False), \
          mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
-        rows = triage.cluster_expansion_decision(crash, target)
+        rows = triage.cluster_expansion_decisions([crash], target).get(crash)
     check(len(rows or []) == 1, "decision returns a concrete sibling row")
     check("int line_20" in str(captured.get("prompt")), "decision prompt includes bounded nearby source")
     check(captured.get("timeout") == 17, "an explicit session setting overrides the per-decision default")
@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
         captured.clear()
         with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": backend}, clear=True), \
              mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
-            triage.cluster_expansion_decision(crash, target)
+            triage.cluster_expansion_decisions([crash], target)
         check(
             captured.get("timeout") == expected,
             f"standalone cluster decisions get the measured {backend} default",
@@ -188,8 +188,8 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
         return {"items": [{"id": crash.name, "rows": []}]}
 
     with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=scoped_decide):
-        triage.cluster_expansion_decision(
-            crash, target, attacker_controls=["bytes", "call-sequence"],
+        triage.cluster_expansion_decisions(
+            [crash], target, attacker_controls=["bytes", "call-sequence"],
         )
     check(
         "bytes,call-sequence" in str(captured.get("prompt")),

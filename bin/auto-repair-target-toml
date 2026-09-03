@@ -124,9 +124,9 @@ def _sha1(data: bytes) -> str:
     return hashlib.sha1(data).hexdigest()
 
 
-def _llm_propose(prompt: str, *, timeout_secs: int = 30) -> dict | None:
+def _llm_propose(prompt: str) -> dict | None:
     """Request and validate one structured repair proposal."""
-    proposal = llm_decide.llm_decide("target-toml-repair", "", prompt, timeout_secs)
+    proposal = llm_decide.llm_decide("target-toml-repair", "", prompt, 30)
     return proposal if isinstance(proposal, dict) else None
 
 

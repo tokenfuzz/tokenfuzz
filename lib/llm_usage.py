@@ -384,20 +384,6 @@ def substitution_note(raw_path: "str | Path") -> str:
     )
 
 
-def served_models_from_text(raw: str) -> dict[str, int]:
-    """Models the provider actually billed in a transcript, by token total."""
-    return _model_routes_from_text(raw)[0]
-
-
-def served_models(raw_path: "str | Path") -> dict[str, int]:
-    """`served_models_from_text` over a transcript on disk; {} if unreadable."""
-    try:
-        raw = Path(raw_path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    return served_models_from_text(raw)
-
-
 def substituted_model_from_text(raw: str, requested: str) -> str:
     """`substituted_model` over an already-read transcript."""
     if not requested:

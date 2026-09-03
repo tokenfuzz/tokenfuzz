@@ -1614,15 +1614,6 @@ def _accepted_finding_primitive(report_dir: Path) -> tuple[str, str]:
 # *kind*.
 
 
-# The set of surface tier labels the classifier can emit. Severity maps each
-# to CVSS AV/UI via _SURFACE_AVUI. There are no per-tier point values — the
-# tier is a label, not a score.
-SURFACE_TIERS = frozenset({
-    "network", "library", "file",
-    "cli_production", "dev_tool", "internal", "unknown",
-})
-
-
 # ── Dev/test/maintenance tool detection ──────────────────────────────────
 #
 # The single most important calibration in v2: a memory-safety bug in code

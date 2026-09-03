@@ -37,7 +37,6 @@ import json
 import os
 import re
 import shutil
-import statistics
 import sys
 import tempfile
 import urllib.parse
@@ -162,7 +161,6 @@ else:  # pragma: no cover - stack_frames should always import
 # are skipped during the grep so harvest stays fast on big result trees.
 _MAX_SCAN_BYTES = 2 * 1024 * 1024
 
-_CLUSTER_COUNT_RE = re.compile(r"(\d+)\s+unique\s+cluster")
 _MODEL_REFUSAL_RE = re.compile(r"\bMODEL_REFUSAL\b")
 _ARTIFACT_REF_RE = re.compile(
     r"\b(?:FIND|CRASH)-[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*\b"
@@ -976,25 +974,6 @@ def _finding_has_terminal_reject(finding_dir: Path) -> bool:
     )
 
 
-def _iter_jsonl(path: Path):
-    """Yield dict rows from a JSONL file, tolerating a missing file and bad
-    lines (a partial write from a live run). Read-only metric use."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(row, dict):
-            yield row
-
-
 def count_confirmed_findings(
     findings_dir: Path, *, require_trigger_confirmation: bool = True,
 ) -> tuple[int, list[str]]:
@@ -1268,20 +1247,6 @@ def _format_discarded_hypotheses_roster(
         )
     lines.append("")
     return "\n".join(lines)
-
-
-def parse_cluster_count(clusters_md: Path, fallback: int) -> int:
-    """Read 'N unique cluster(s)' out of a CRASH/FINDING-CLUSTERS.md file.
-
-    The harness writes these during triage; when the file is absent (e.g.
-    an un-triaged model-direct workspace) we fall back to the raw dir count.
-    """
-    try:
-        text = clusters_md.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return fallback
-    m = _CLUSTER_COUNT_RE.search(text)
-    return int(m.group(1)) if m else fallback
 
 
 def confirmed_finding_cluster_count(findings_dir: Path, names: list[str]) -> int:
@@ -4023,6 +3988,8 @@ def _median(values: list[float]) -> float | int:
     """
     if not values:
         return 0
+    import statistics
+
     m = statistics.median(values)
     return int(m) if float(m).is_integer() else float(m)
 

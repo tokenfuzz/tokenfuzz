@@ -7,7 +7,6 @@ import argparse
 import concurrent.futures
 import contextlib
 import fcntl
-import http.server
 import json
 import os
 import re
@@ -18,7 +17,6 @@ import subprocess
 import sys
 import threading
 import time
-import traceback
 from collections.abc import Collection
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -33,7 +31,6 @@ import callgraph
 import cluster_common
 import fuzz_triage
 import housekeeping
-import llm_decide
 import llm_invoke
 import llm_usage
 import prompt
@@ -1872,6 +1869,8 @@ def run_agent_guarded(
     try:
         return run_agent(runtime, context, agent, iteration, cold, timeout_limit)
     except Exception as exc:
+        import traceback
+
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         error_path = runtime.raw / f"session_{stamp}_internal-error-{agent}.log.raw"
         try:
@@ -2840,6 +2839,9 @@ def _browser_canary_observed(
     runtime: Runtime, *, browser_override: str = "",
 ) -> tuple[bool, Path]:
     """Run one product-route canary without trusting output from an older run."""
+    # Imported here: http.server costs ~50ms at startup for one preflight probe.
+    import http.server
+
     canary, output = _canary_paths(runtime, "canary.html")
     browser_loaded = threading.Event()
 

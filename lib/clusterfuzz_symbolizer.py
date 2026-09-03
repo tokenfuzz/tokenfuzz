@@ -225,7 +225,6 @@ class LLVMSymbolizer(Symbolizer):
     pipe = subprocess.Popen(
         cmd, env=env_copy, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
-    global pipes
     pipes.append(pipe)
     return pipe
 
@@ -272,7 +271,6 @@ class Addr2LineSymbolizer(Symbolizer):
   def open_addr2line(self):
     cmd = ['addr2line', '--demangle', '-f', '-e', self.binary]
     pipe = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    global pipes
     pipes.append(pipe)
     return pipe
 

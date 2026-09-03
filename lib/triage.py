@@ -1430,18 +1430,6 @@ def cluster_expansion_decisions(
     return decisions
 
 
-def cluster_expansion_decision(
-    crash_dir: Path, target_root: Path, *,
-    attacker_controls: list[str] | None = None,
-    deadline: float | None = None,
-) -> list[dict] | None:
-    """Single-crash form used by standalone callers and focused tests."""
-    return cluster_expansion_decisions(
-        [crash_dir], target_root,
-        attacker_controls=attacker_controls, deadline=deadline,
-    ).get(crash_dir)
-
-
 def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, str]:
     """Compare the report's self-declared trigger against the threat model.
 

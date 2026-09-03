@@ -107,11 +107,6 @@ _LABEL_H2_RE = re.compile(
     r"Reachability Notes|Triage decision):\s*$",
     re.MULTILINE,
 )
-# A bare label like `Boundary:` / `Trigger source:` at column 0 — used
-# to find paragraph-style metadata blocks the agent guide already
-# documents.
-_BARE_LABEL_RE = re.compile(r"^([A-Z][A-Za-z][A-Za-z0-9 _-]{0,40}):\s*(.*)$")
-
 # file:line references — accept common source-file extensions used
 # across the targets we audit. Kept as a prefix-friendly family rather
 # than an exhaustive enum (per project docs/development.md guidance).
