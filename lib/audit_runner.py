@@ -3124,8 +3124,16 @@ class SealedGateWorker:
     resume while it is still a `bin/probe` skeleton or holds a
     `.promotion_pending` marker — so an unfinished bundle is never sealed,
     and is first seen only once complete, by which point the chain that
-    completed it holds a tick no earlier. A finding names no slot, so it is
-    sealed only once it predates every chain still in flight. A chain is one slot's run of
+    completed it holds a tick no earlier. A finding names no slot, so a
+    session that ends is asked which artifacts its own commands and file
+    writes named (`audit_helpers.transcript_artifacts_touched`); a finding
+    is sealed once every session that touched it has ended — an in-flight
+    chain of that slot counts as still touching it unless it started after
+    the touching session ended. A finding nothing has touched, and one with
+    no report yet, falls back to the wide rule: sealed only once it predates
+    every chain still in flight. With many slots that wide rule waits for
+    the longest concurrent session; the touch rule is what lets findings
+    seal at the pace crashes do. A chain is one slot's run of
     sessions sharing in-flight work: a turn-capped session's continuation
     inherits its start, so nothing the cut session filed is sealed before the
     continuation ends. Time is a logical clock: a slot's launch takes a fresh
@@ -3150,6 +3158,9 @@ class SealedGateWorker:
         self._clock = 0
         self._chains: dict[int, int] = {}
         self._first_seen: dict[str, int] = {}
+        # artifact name -> {slot: tick at which a session of that slot ended
+        # having named the artifact}
+        self._touched: dict[str, dict[int, int]] = {}
         self._wake = threading.Event()
         self._stop = False
         self._thread: threading.Thread | None = None
@@ -3182,7 +3193,22 @@ class SealedGateWorker:
     @staticmethod
     def _unfinished(directory: Path) -> bool:
         """A bundle its owner's next session is told to finish first."""
-        return directory.name.startswith("CRASH-") and workqueue.crash_bundle_unfinished(directory)
+        if directory.name.startswith("CRASH-"):
+            return workqueue.crash_bundle_unfinished(directory)
+        # A finding directory without its report is still being created.
+        return not any(
+            (directory / name).is_file() for name in ("report.md", "REPORT.md")
+        )
+
+    def attribute(self, agent: int, raw_path: Path) -> set[str]:
+        """Record which artifacts a session that just ended named."""
+        touched = audit_helpers.transcript_artifacts_touched(raw_path)
+        if not touched:
+            return touched
+        with self._lock:
+            for name in touched:
+                self._touched.setdefault(name, {})[agent] = self._clock
+        return touched
 
     def _stamp(self, artifacts: list[Path]) -> dict[str, int | None]:
         """Record first-seen for what is complete; None for what is not."""
@@ -3280,23 +3306,39 @@ class SealedGateWorker:
             artifacts = self._artifacts()
             seen_at = self._stamp(artifacts)
             threshold = min(chains.values(), default=self._clock + 1)
+            touched = {name: dict(slots) for name, slots in self._touched.items()}
         findings: list[Path] = []
         crashes: list[Path] = []
         total_findings = total_crashes = 0
+
+        def touchers_done(name: str) -> bool:
+            """Every session that named this artifact has ended for good."""
+            return all(
+                agent not in chains or chains[agent] > ended_tick
+                for agent, ended_tick in touched.get(name, {}).items()
+            )
+
         for directory in artifacts:
             seen = seen_at[directory.name]
             if seen is None:
-                total_crashes += 1
+                if directory.name.startswith("FIND-"):
+                    total_findings += 1
+                else:
+                    total_crashes += 1
                 continue
             if directory.name.startswith("FIND-"):
                 total_findings += 1
-                if seen < threshold:
+                if directory.name in touched:
+                    sealed_now = touchers_done(directory.name)
+                else:
+                    sealed_now = seen < threshold
+                if sealed_now:
                     findings.append(directory)
                 continue
             total_crashes += 1
             owner = _crash_owner(directory.name)
             start = chains.get(owner) if owner is not None else threshold
-            if start is None or seen < start:
+            if (start is None or seen < start) and touchers_done(directory.name):
                 crashes.append(directory)
         return findings, crashes, total_findings, total_crashes
 
@@ -3482,7 +3524,10 @@ def run_agent_pool(
                         "launches this iteration, finishing in-flight sessions first",
                     )
             # Before any relaunch: what the finished sessions filed is on disk
-            # now, and must be seen before the next chain takes its tick.
+            # now, and must be seen, and its writers named, before the next
+            # chain takes its tick.
+            for result in finished:
+                gate_worker.attribute(result.agent, result.raw)
             gate_worker.observe()
             # Nothing in flight means the barrier is here: the iteration ends
             # whatever this slot would do next.
@@ -3854,7 +3899,10 @@ def run_continuous(state: BackendState) -> tuple[str, list[AgentResult]]:
             ended_since_tick.update(agent for agent, _ in finished)
             if finished:
                 # Before any relaunch: what just ended is on disk now and must
-                # be seen before the next chain takes its tick.
+                # be seen, and its writers named, before the next chain takes
+                # its tick.
+                for agent, result in finished:
+                    gate_worker.attribute(agent, result.raw)
                 gate_worker.observe()
             if (
                 time.monotonic() - last_steward >= interval

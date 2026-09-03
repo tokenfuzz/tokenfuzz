@@ -239,6 +239,103 @@ class SealTests(unittest.TestCase):
         self.assertEqual(worker.sweeps, 0)
 
 
+    def _transcript(self, name: str, lines: list[dict]) -> Path:
+        path = self.root / f"{name}.log.raw"
+        path.write_text("\n".join(json.dumps(row) for row in lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_attribution_reads_commands_and_file_writes_but_never_outputs(self) -> None:
+        codex = self._transcript("codex", [
+            {"type": "item.completed", "item": {"type": "command_execution",
+             "command": "mkdir -p $R/findings/FIND-004-mine && cat > $R/findings/FIND-004-mine/report.md",
+             "aggregated_output": "FIND-009-not-mine listed here\n"}},
+            {"type": "item.completed", "item": {"type": "file_change",
+             "changes": [{"path": "/r/crashes/CRASH-003-1/REPORT.md", "kind": "update"}]}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": "see FIND-010-prose"}},
+        ])
+        claude = self._transcript("claude", [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Write", "input": {"file_path": "/r/findings/FIND-005-theirs/report.md"}},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "bin/peek FIND-006-read/report.md"}},
+            ]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "content": "FIND-007-output FIND-008-output"},
+            ]}},
+        ])
+        self.assertEqual(
+            audit_runner.audit_helpers.transcript_artifacts_touched(codex),
+            {"FIND-004-mine", "CRASH-003-1"},
+        )
+        self.assertEqual(
+            audit_runner.audit_helpers.transcript_artifacts_touched(claude),
+            {"FIND-005-theirs", "FIND-006-read"},
+        )
+        self.assertEqual(
+            audit_runner.audit_helpers.transcript_artifacts_touched(self.root / "missing.raw"), set(),
+        )
+
+    def test_a_touched_finding_seals_when_its_touchers_end_not_the_oldest_chain(self) -> None:
+        worker = self._worker()
+        worker.launch(2, continuation=False)   # the long-running peer, older than everything
+        worker.launch(1, continuation=False)
+        mine = _artifact(self.results, "findings", "FIND-001-mine")
+        untouched = _artifact(self.results, "findings", "FIND-002-nobody")
+        raw = self._transcript("s1", [{"type": "command_execution",
+                                        "command": "cat > $R/findings/FIND-001-mine/report.md"}])
+        worker.attribute(1, raw)
+        worker.observe()
+        # Slot 1 still running: nothing sealed.
+        self.assertEqual(self._sealed(worker), (set(), set()))
+        worker.retire(1)
+        # Slot 1 ended: its finding seals although slot 2's older chain runs;
+        # the untouched finding still waits for that chain.
+        self.assertEqual(self._sealed(worker), ({mine.name}, set()))
+        # A fresh chain of slot 1 does not unseal it; a continuation would.
+        worker.launch(1, continuation=False)
+        self.assertEqual(self._sealed(worker), ({mine.name}, set()))
+        worker.retire(1)
+        worker.launch(2, continuation=False)
+        worker.retire(2)
+        self.assertEqual(self._sealed(worker), ({mine.name, untouched.name}, set()))
+
+    def test_a_continuation_of_a_toucher_keeps_its_finding_unsealed(self) -> None:
+        worker = self._worker()
+        worker.launch(1, continuation=False)
+        mine = _artifact(self.results, "findings", "FIND-003-cut")
+        raw = self._transcript("cut", [{"type": "command_execution",
+                                         "command": "mkdir $R/findings/FIND-003-cut"}])
+        worker.attribute(1, raw)
+        worker.observe()
+        worker.launch(1, continuation=True)    # turn-capped: same chain tick
+        self.assertEqual(self._sealed(worker), (set(), set()))
+        worker.retire(1)
+        self.assertEqual(self._sealed(worker), ({mine.name}, set()))
+
+    def test_a_finding_without_a_report_is_never_sealed(self) -> None:
+        worker = self._worker()
+        bare = self.results / "findings" / "FIND-004-bare"
+        bare.mkdir()
+        worker.observe()
+        self.assertEqual(self._sealed(worker), (set(), set()))
+        (bare / "report.md").write_text("# Issue\n", encoding="utf-8")
+        worker.observe()
+        self.assertEqual(self._sealed(worker), ({bare.name}, set()))
+
+    def test_a_peer_that_touched_a_crash_bundle_delays_its_seal(self) -> None:
+        worker = self._worker()
+        worker.launch(2, continuation=False)
+        bundle = _artifact(self.results, "crashes", "CRASH-001-1")
+        raw = self._transcript("peer", [{"type": "command_execution",
+                                          "command": "cp seed.bin $R/crashes/CRASH-001-1/testcase.bin"}])
+        worker.observe()
+        self.assertEqual(self._sealed(worker), (set(), {bundle.name}), "owner idle: sealed")
+        worker.attribute(2, raw)
+        worker.launch(2, continuation=True)
+        self.assertEqual(self._sealed(worker), (set(), set()), "the peer's chain still touches it")
+        worker.retire(2)
+        self.assertEqual(self._sealed(worker), (set(), {bundle.name}))
+
+
 class PoolIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="sealed-pool-")

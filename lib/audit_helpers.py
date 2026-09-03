@@ -378,6 +378,76 @@ def _may_name_a_sanitizer(line: str) -> bool:
     return any(f"{name}=" in line for name in _SANITIZER_OPTION_VARS)
 
 
+_ARTIFACT_NAME_RE = re.compile(r"\b(?:FIND|CRASH)-[A-Za-z0-9._-]+")
+_FILE_TOOL_PATH_KEYS = ("file_path", "path", "filePath", "notebook_path")
+
+
+def _file_tool_paths(ev) -> list[str]:
+    """Paths a raw-transcript event asked a file tool to touch.
+
+    Claude's Write/Edit/NotebookEdit carry `file_path`; Codex reports
+    `file_change` items with a `changes[].path` list; Gemini and OpenCode
+    file tools carry `path` or `file_path`. Only the request is read, never
+    a tool's output: a listing that names every artifact is not a touch.
+    """
+    paths: list[str] = []
+
+    def collect(params) -> None:
+        if not isinstance(params, dict):
+            return
+        for key in _FILE_TOOL_PATH_KEYS:
+            value = params.get(key)
+            if isinstance(value, str):
+                paths.append(value)
+
+    if ev.get("type") == "item.completed":
+        item = ev.get("item") or {}
+        if isinstance(item, dict) and item.get("type") == "file_change":
+            for change in item.get("changes") or []:
+                if isinstance(change, dict) and isinstance(change.get("path"), str):
+                    paths.append(change["path"])
+        return paths
+    if ev.get("type") == "tool_use":
+        opencode_tool = _opencode_tool_event(ev)
+        collect(opencode_tool["input"] if opencode_tool is not None else (ev.get("parameters") or ev.get("input")))
+        return paths
+    if ev.get("type") == "assistant" or "message" in ev:
+        for item in _claude_content_items(ev):
+            if isinstance(item, dict) and item.get("type") == "tool_use":
+                collect(item.get("input"))
+    return paths
+
+
+def transcript_artifacts_touched(raw_path) -> set[str]:
+    """Artifact directory names a session's own requests named.
+
+    Commands the session ran and paths it handed a file tool, on every
+    backend `_shell_command_text` and `_file_tool_paths` know; outputs are
+    never scanned. Over-attribution (a read named the path) only delays a
+    seal; what must not happen is a writer going unnamed, and a session that
+    writes a bundle names its path in the command or the file-tool call.
+    """
+    touched: set[str] = set()
+    try:
+        with open(raw_path, encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(ev, dict):
+                    continue
+                for text in (*_shell_command_text(ev), *_file_tool_paths(ev)):
+                    if text:
+                        touched.update(_ARTIFACT_NAME_RE.findall(text))
+    except OSError:
+        return set()
+    return touched
+
+
 def _shell_command_text(ev) -> list[str]:
     """Return the shell commands one raw-transcript event requested.
 

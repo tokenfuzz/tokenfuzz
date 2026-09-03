@@ -191,9 +191,10 @@ relaunches at once if it has work, and nothing waits for the slowest peer.
 While slots are busy, a background sweep adjudicates the artifacts no live
 session can still write — a completed crash bundle once the slot that filed
 it has no session in flight (a `bin/probe` skeleton or a held bundle stays
-with its owner until finished), a finding once every session still running
-started after it was filed. A turn-capped session's continuation counts as
-the same session. A steward tick every few minutes scores the generation,
+with its owner until finished), a finding once every session whose own
+commands or file writes named it has ended, or, when no session named it,
+once every session still running started after it was filed. A turn-capped
+session's continuation counts as the same session. A steward tick every few minutes scores the generation,
 rotates starved strategy lanes and re-ranks the queue without stopping
 anyone. The one full pass over the whole tree — including orphan-testcase
 enforcement and corpus promotion, which touch a slot's own scratch — runs
