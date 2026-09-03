@@ -186,14 +186,21 @@ instead.
 
 Triage decides whether an artifact is useful and in scope.
 
-It runs at the end of every iteration over the whole results tree, and it
-also runs earlier: while agent slots are still busy, a background sweep
-adjudicates the artifacts no live session can still write — a crash bundle
-once the slot that filed it has ended its session, a finding once every
-session still running started after it was filed. A turn-capped session's
-continuation counts as the same session. The end-of-iteration pass repeats
-the work over everything, reusing the cached verdicts, so what the sweep
-settled costs no further review and what it could not reach is judged there.
+An ordinary audit schedules continuously: a slot that finishes a session
+relaunches at once if it has work, and nothing waits for the slowest peer.
+While slots are busy, a background sweep adjudicates the artifacts no live
+session can still write — a completed crash bundle once the slot that filed
+it has no session in flight (a `bin/probe` skeleton or a held bundle stays
+with its owner until finished), a finding once every session still running
+started after it was filed. A turn-capped session's continuation counts as
+the same session. A steward tick every few minutes scores the generation,
+rotates starved strategy lanes and re-ranks the queue without stopping
+anyone. The one full pass over the whole tree — including orphan-testcase
+enforcement and corpus promotion, which touch a slot's own scratch — runs
+after the last slot drains, reusing the cached verdicts, so what the sweeps
+settled costs no further review and what they could not reach is judged
+there. Fixed-lane, delta and ensemble runs keep the older cohort model with
+a pass at the end of every iteration.
 
 **For crashes, the gates are strict:**
 

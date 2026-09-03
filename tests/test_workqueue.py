@@ -2773,6 +2773,34 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIn("H-1", resume)
         self.assertIn("## Queue Health", resume)
 
+    def test_stale_claim_release_keeps_a_live_agents_card(self) -> None:
+        # The claim's hypotheses are all terminal, which normally releases
+        # the card at once. While its agent has a session in flight the card
+        # stays leased, or a peer would be offered work its owner is between
+        # hypotheses on.
+        self.write_cards([self.card("WORK-A", "src/app.c")])
+        claimed = workqueue.claim_next_card(self.ctx, "1", "generic", "reproduce", claim=True)
+        self.assertEqual(claimed["id"], "WORK-A")
+        self.add_hypothesis(status="DISCARDED")
+        self.assertEqual(
+            workqueue.release_stale_claims(self.ctx, keep_agents=["1"]), [],
+        )
+        released = workqueue.release_stale_claims(self.ctx)
+        self.assertEqual([row["card_id"] for row in released], ["WORK-A"])
+
+    def test_resume_hands_back_a_bundle_held_under_audit_without_a_report(self) -> None:
+        # An interrupted in-place export leaves the hold under .audit/ and no
+        # root report yet. That bundle is unfinished, and the resume must say
+        # so rather than crash on the missing report.
+        self.write_cards([self.card("WORK-A", "src/app.c")])
+        crash = self.results / "crashes" / "CRASH-2-1"
+        (crash / ".audit").mkdir(parents=True)
+        (crash / ".audit" / ".promotion_pending").write_text("missing: REPORT.md\n")
+        self.assertTrue(workqueue.crash_bundle_unfinished(crash))
+        resume = workqueue.state_resume(self.ctx, "1", "generic")
+        self.assertIn("CRASH-2-1", resume)
+        self.assertIn("finish the oldest pending crash bundle", resume)
+
     def test_context_requires_explicit_identity_without_session_metadata(self) -> None:
         args = argparse.Namespace(
             script_root=str(ROOT), target_path="", target_slug="", results_dir="",

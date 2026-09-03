@@ -290,6 +290,122 @@ def _load_config(
     return config
 
 
+def _read_first_token(path: str) -> str:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            tokens = handle.read().split()
+        return tokens[0] if tokens else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _cgroup_cpu_limit() -> float:
+    """CPUs granted by a cgroup quota (Docker `--cpus`), or 0.0 when unlimited.
+
+    v2 `cpu.max` reads "quota period" or "max period"; v1 splits them into
+    `cpu.cfs_quota_us` (-1 when unlimited) and `cpu.cfs_period_us`.
+    """
+    try:
+        with open("/sys/fs/cgroup/cpu.max", encoding="utf-8") as handle:
+            quota, period = handle.read().split()[:2]
+        if quota != "max" and int(period) > 0:
+            return int(quota) / int(period)
+        return 0.0
+    except (OSError, ValueError, IndexError):
+        pass
+    for controller in ("cpu", "cpu,cpuacct"):
+        quota = _read_first_token(f"/sys/fs/cgroup/{controller}/cpu.cfs_quota_us")
+        period = _read_first_token(f"/sys/fs/cgroup/{controller}/cpu.cfs_period_us")
+        try:
+            if quota and period and int(quota) > 0 and int(period) > 0:
+                return int(quota) / int(period)
+        except ValueError:
+            continue
+    return 0.0
+
+
+def _cgroup_memory_limit_bytes() -> int:
+    """Bytes granted by a cgroup memory limit (Docker `-m`), or 0 when unlimited."""
+    for path in (
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ):
+        raw = _read_first_token(path)
+        if not raw or raw == "max":
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # v1 reports a huge sentinel when unlimited.
+        if 0 < value < (1 << 60):
+            return value
+    return 0
+
+
+def _machine_cpus() -> int:
+    """CPUs this process may actually use: affinity and cgroup quota, then host."""
+    host = os.cpu_count() or 4
+    try:
+        host = min(host, len(os.sched_getaffinity(0)))  # Linux only
+    except (AttributeError, OSError):
+        pass
+    quota = _cgroup_cpu_limit()
+    if quota > 0:
+        host = min(host, max(1, int(quota)))
+    return max(1, host)
+
+
+def _machine_memory_gb() -> float:
+    """RAM in GiB available to this process, or 0.0 when the platform will not say.
+
+    Inside a container the host figure is a lie; a cgroup limit wins over it.
+    """
+    physical = 0.0
+    try:
+        physical = (
+            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        ) / (1024 ** 3)
+    except (ValueError, OSError, AttributeError):
+        pass
+    limit = _cgroup_memory_limit_bytes()
+    if limit:
+        limited = limit / (1024 ** 3)
+        return min(physical, limited) if physical else limited
+    return physical
+
+
+def _auto_shell_agents() -> int:
+    """Default shell-worker count sized to the machine, not a fixed 3.
+
+    The old default of three predates continuous scheduling: it was a
+    round-robin cohort, so a fourth slot mostly added barrier idle. With slots
+    that refill to the wall, more of them is more coverage at the same budget,
+    up to what the machine can host. Each slot is one agent CLI plus the
+    occasional build or `bin/probe` it spawns, so the ceiling is CPU and RAM,
+    not the provider — a shared account limit is enforced by the provider and
+    surfaces as a capacity pause, which the loop already handles, so it is not
+    second-guessed here.
+
+    ``cpu_count`` bounds it because a build or sanitizer run is CPU-bound;
+    ``AGENT_MEMORY_GB`` (default 4) bounds it against RAM so a low-memory host
+    does not thrash; ``AGENT_POOL_MAX`` (default 8) is the safety ceiling.
+    ``NUM_AGENTS`` or ``SHELL_AGENTS`` still override this entirely.
+    """
+    cpus = _machine_cpus()
+    try:
+        per_agent_gb = max(0.5, float(os.environ.get("AGENT_MEMORY_GB", "4")))
+    except ValueError:
+        per_agent_gb = 4.0
+    try:
+        ceiling = max(1, int(os.environ.get("AGENT_POOL_MAX", "8")))
+    except ValueError:
+        ceiling = 8
+    memory_gb = _machine_memory_gb()
+    by_memory = int(memory_gb // per_agent_gb) if memory_gb else ceiling
+    return max(1, min(cpus, by_memory or 1, ceiling))
+
+
 def _agent_counts(config: target_config.Config, max_iterations: int) -> tuple[int, int, int]:
     page_browser = (
         config.is_browser in ("1", "true", "True")
@@ -307,10 +423,10 @@ def _agent_counts(config: target_config.Config, max_iterations: int) -> tuple[in
             max(0, int(os.environ.get("BROWSER_AGENTS", "1")))
             if page_browser else 0
         )
-        shell_default = "2" if page_browser else "3"
+        shell_default = "2" if page_browser else str(_auto_shell_agents())
         shell = max(0, int(os.environ.get("SHELL_AGENTS", shell_default)))
         return max(1, browser + shell), browser, shell
-    total = max(1, int(os.environ.get("SHELL_AGENTS", "3")))
+    total = max(1, int(os.environ.get("SHELL_AGENTS", str(_auto_shell_agents()))))
     return total, 0, total
 
 
@@ -1351,13 +1467,23 @@ def update_strategy_rotation(
     runtime: Runtime, context: prompt.PromptContext,
     after_progress: dict[int, AgentProgress],
     productive_agents: set[int],
+    agents: Collection[int] | None = None,
 ) -> None:
+    """Advance each agent's dry streak once and rotate a starved lane.
+
+    `agents` restricts the pass to slots that ended a session in this
+    generation; a slot mid-session earns neither a dry mark nor a rotation
+    for a generation it did not finish.
+    """
     if runtime.fixed_strategy:
         return
     counts = _eligible_strategy_counts(runtime)
     assigned = {context.strategy(agent) for agent in range(1, runtime.num_agents + 1)}
     ctx = _queue_context(runtime)
+    scored = set(agents) if agents is not None else set(range(1, runtime.num_agents + 1))
     for agent in range(1, runtime.num_agents + 1):
+        if agent not in scored:
+            continue
         after = after_progress[agent]
         productive = agent in productive_agents
         streak = 0 if productive else _read_streak(runtime, agent)
@@ -1399,11 +1525,15 @@ def update_strategy_rotation(
 def update_subsystem_dry_streaks(
     runtime: Runtime,
     productive_agents: set[int],
+    agents: Collection[int] | None = None,
 ) -> None:
     """Record one dry/productive outcome for each subsystem touched this pass."""
     ctx = _queue_context(runtime)
     outcomes: dict[str, bool] = {}
+    scored = set(agents) if agents is not None else set(range(1, runtime.num_agents + 1))
     for agent in range(1, runtime.num_agents + 1):
+        if agent not in scored:
+            continue
         subsystem = workqueue.agent_current_scopes(ctx, str(agent))[0]
         productive = agent in productive_agents
         if subsystem:
@@ -1461,8 +1591,24 @@ def sanitizer_run_budget(
 
 
 def reset_sanitizer_run_counters(runtime: Runtime) -> None:
+    """Renew each slot's sanitizer-launch budget.
+
+    Under the same lock `bin/run-sanitizer-multi` takes to add to the tally,
+    so a probe in flight beside the reset cannot write its old total back
+    over the zero and keep the exhausted budget for another generation.
+    """
     for agent in range(1, runtime.num_agents + 1):
-        (runtime.logs / f".sanitizer_runs_{agent}").write_text("0", encoding="utf-8")
+        counter = runtime.logs / f".sanitizer_runs_{agent}"
+        counter.parent.mkdir(parents=True, exist_ok=True)
+        with counter.open("a+", encoding="utf-8") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                stream.seek(0)
+                stream.truncate()
+                stream.write("0")
+                stream.flush()
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def reset_llm_decision_counters(runtime: Runtime) -> None:
@@ -2508,19 +2654,27 @@ def fixed_lane_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
     )
 
 
-def release_stale_card_claims(runtime: Runtime) -> int:
+def release_stale_card_claims(
+    runtime: Runtime, *, keep_agents: Collection[int] = (),
+) -> int:
     try:
-        return len(workqueue.release_stale_claims(_queue_context(runtime)))
+        return len(workqueue.release_stale_claims(
+            _queue_context(runtime), keep_agents=[str(agent) for agent in keep_agents],
+        ))
     except (OSError, ValueError):
         return 0
 
 
-def assign_build_configs(runtime: Runtime, context: prompt.PromptContext, iteration: int) -> None:
+def assign_build_configs(
+    runtime: Runtime, context: prompt.PromptContext, iteration: int,
+    *, skip_agents: Collection[int] = (),
+) -> None:
     """Keep a regular-build control while rotating one reproducer slot.
 
     Assignments are session state consumed automatically by bin/probe. A slot
     with active work stays on its current build so an investigation does not
-    change binaries mid-hypothesis.
+    change binaries mid-hypothesis; `skip_agents` (slots with a session in
+    flight) are left untouched for the same reason even before they open one.
     """
     state_dir = runtime.results / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -2547,6 +2701,8 @@ def assign_build_configs(runtime: Runtime, context: prompt.PromptContext, iterat
         else reproduce[0] if reproduce and iteration % 4 == 0 else 0
     )
     for agent in range(1, runtime.num_agents + 1):
+        if agent in skip_agents:
+            continue
         path = state_dir / f"build-config-{agent}"
         counts = structured_state.agent_counts(str(agent), runtime.results)
         current = path.read_text(encoding="utf-8").strip() if path.is_file() else ""
@@ -2583,6 +2739,9 @@ class BackendState:
     transient_streak: int = 0
     started_at: float = 0.0
     stopped: bool = False
+    # Continuous scheduler only: no slot refills once this many steward
+    # generations have opened (0 = unbounded); in-flight sessions finish.
+    max_generations: int = 0
 
 
 def _max_dry_sessions() -> int:
@@ -2994,6 +3153,7 @@ class SealedGateWorker:
         self._thread: threading.Thread | None = None
         self.sweeps = 0
         self.seconds = 0.0
+        self._sweep_started: float | None = None
         results = getattr(self.runtime, "results", None)
         self._results = Path(results) if results else None
         if self._results is None:
@@ -3020,9 +3180,7 @@ class SealedGateWorker:
     @staticmethod
     def _unfinished(directory: Path) -> bool:
         """A bundle its owner's next session is told to finish first."""
-        return directory.name.startswith("CRASH-") and bool(
-            cluster_common.promotion_pending_reasons(directory)
-        )
+        return directory.name.startswith("CRASH-") and workqueue.crash_bundle_unfinished(directory)
 
     def _stamp(self, artifacts: list[Path]) -> dict[str, int | None]:
         """Record first-seen for what is complete; None for what is not."""
@@ -3061,12 +3219,38 @@ class SealedGateWorker:
             self._wake.set()
 
     def close(self) -> None:
-        """Finish the sweep in flight, start no other, and return."""
+        """Finish the sweep in flight, start no other, and return.
+
+        From the moment the pool drained, a sweep still running is the
+        barrier by another name: nothing else is working. Its tail past that
+        moment is charged to housekeeping and recorded as blocked, so the
+        blocked share cannot hide review time behind a sweep that outlived
+        the last session.
+        """
         if self._thread is None:
             return
+        # Stop first: a sweep cannot start after this stamp and escape billing.
         self._stop = True
+        drained_at = time.monotonic()
         self._wake.set()
         self._thread.join()
+        started = self._sweep_started
+        if started is None or started > drained_at:
+            return
+        tail = time.monotonic() - drained_at
+        if tail <= 0:
+            return
+        self.state.housekeeping_seconds += tail
+        try:
+            (self.runtime.logs / ".housekeeping_secs").write_text(
+                f"{self.state.housekeeping_seconds:.6f}\n", encoding="utf-8",
+            )
+        except (OSError, AttributeError, TypeError):
+            pass
+        _record_phase_rows(
+            self.runtime, [{"phase": "gate_drain", "seconds": round(tail, 3)}],
+            iteration=self.state.iteration, blocked=True,
+        )
 
     def _run(self) -> None:
         while True:
@@ -3074,6 +3258,7 @@ class SealedGateWorker:
             self._wake.clear()
             if self._stop:
                 return
+            self._sweep_started = time.monotonic()
             try:
                 self._sweep()
             except Exception as exc:  # noqa: BLE001 - the barrier retries; a silent worker is the R08 failure
@@ -3082,6 +3267,9 @@ class SealedGateWorker:
                     "ERROR: background result gate failed: "
                     f"{type(exc).__name__}: {exc}; the barrier will retry it",
                 )
+            finally:
+                if not self._stop:
+                    self._sweep_started = None
 
     def sealed(self) -> tuple[list[Path], list[Path], int, int]:
         """Sealed findings and crashes, plus the totals they were drawn from."""
@@ -3435,6 +3623,298 @@ def refresh_fuzz_leads(runtime: Runtime) -> bool:
     return True
 
 
+def _steward_interval() -> int:
+    """Seconds between steward ticks: the continuous scheduler's generation.
+
+    A generation is what rotation and the dry-streak stop count, and what
+    the audit log and the benchmark curves show as an iteration. Five
+    minutes gives a lane a few chances before rotation retires it and keeps
+    the log legible; both stops are guarded by open hypotheses, so a long
+    session spanning ticks is never read as a dry lane.
+    """
+    try:
+        return max(1, int(os.environ.get("STEWARD_INTERVAL_SECS", "300")))
+    except ValueError:
+        return 300
+
+
+def _steward_steer(
+    state: BackendState, before: "ProgressSnapshot", filed_before: int,
+    *, live_agents: Collection[int] = (), ended_agents: Collection[int] = (),
+) -> tuple[str, "ProgressSnapshot", int]:
+    """Close one generation and open the next while the slots keep running.
+
+    Everything here is safe beside live sessions: card writes are atomic
+    under their own lock and claims lock a separate file, so a re-rank
+    never tears a claim; a claim held by a slot in flight is never released,
+    so no peer is offered a card its owner is still reading; strategy files
+    are read at launch, so rotating a running slot only steers its next
+    session; a live slot keeps its build assignment; the sealed gate worker
+    owns every artifact verdict. What is *not* safe beside a live session
+    stays with the final barrier: orphan-testcase enforcement and corpus
+    promotion run `bin/probe` against a slot's own scratch, and index
+    maintenance (`cluster-findings`, enrichment, rendering) rewrites every
+    report, which would silently drop a narrative an agent is still writing.
+
+    A generation is scored only when at least one session ended in it
+    (`ended_agents`), and only those slots earn a dry mark. Every threshold
+    counted in iterations — lane rotation, the subsystem decay, the
+    dry-streak stop — keeps a unit no finer than a session; a tick that only
+    saw long sessions still running refreshes the queue and nothing else.
+    The per-iteration budgets (sanitizer launches, harness decisions) and the
+    fuzz-lead index are likewise renewed once per scored generation, as the
+    cohort loop renewed them once per iteration.
+    """
+    runtime = state.runtime
+    ended = set(ended_agents)
+    if ended:
+        status, _results = _assess_generation(
+            state, before, filed_before, [], scored_agents=ended,
+        )
+        if status == "stalled":
+            return status, before, filed_before
+    refresh_work_cards(runtime)
+    released = release_stale_card_claims(runtime, keep_agents=live_agents)
+    if released:
+        index_log(runtime, f"queue: released {released} stale work-card claim(s)")
+    expand_work_cards_if_exhausted(runtime)
+    initialize_agent_strategies(runtime)
+    if not ended:
+        return "continue", before, filed_before
+    state.iteration += 1
+    refresh_fuzz_leads(runtime)
+    reset_sanitizer_run_counters(runtime)
+    reset_llm_decision_counters(runtime)
+    assign_build_configs(runtime, state.context, state.iteration, skip_agents=live_agents)
+    after = progress(runtime)
+    index_log(
+        runtime,
+        f"Iteration {state.iteration} starting: agents={runtime.num_agents} cold=false "
+        f"totals={after.findings} findings/{after.crashes} crashes",
+    )
+    return "continue", after, filed_artifact_count(runtime)
+
+
+def run_continuous(state: BackendState) -> tuple[str, list[AgentResult]]:
+    """Keep every slot busy to the wall; steer on a timer, never at a barrier.
+
+    The cohort model launched N sessions, refilled a finished slot only while
+    a peer of the same cohort still ran, then held everyone at a barrier for
+    housekeeping. On every measured cell the slow slot set the pace and the
+    fast ones idled 27-40% of the wall. Here a slot that finishes relaunches
+    at once if it has work, sealed artifacts are gated in the background as
+    they complete, and a steward tick every `STEWARD_INTERVAL_SECS` scores
+    the generation, rotates starved lanes and re-ranks the queue — all
+    without stopping a single session. The one full barrier is the final
+    pass after the last slot drains, which is also where the pool-empty gate
+    work is charged to housekeeping.
+
+    A provider halt (capacity, transient, rejected) stops further launches,
+    lets in-flight sessions finish, and returns that status so the caller's
+    pause-and-retry path runs exactly as it does for the cohort model.
+    """
+    runtime = state.runtime
+    context = state.context
+    _activate_runtime(runtime)
+    if _productive_wall_exhausted(state):
+        return "budget", []
+    refresh_fuzz_leads(runtime)
+    reset_sanitizer_run_counters(runtime)
+    reset_llm_decision_counters(runtime)
+    refresh_work_cards(runtime)
+    released = release_stale_card_claims(runtime)
+    if released:
+        index_log(runtime, f"queue: released {released} stale work-card claim(s)")
+    expand_work_cards_if_exhausted(runtime)
+    initialize_agent_strategies(runtime)
+    if state.iteration == 0:
+        _log_foreign_active_work(runtime)
+    state.iteration += 1
+    cold = _cold(runtime)
+    assign_build_configs(runtime, context, state.iteration)
+    gen_before = progress(runtime)
+    gen_filed_before = filed_artifact_count(runtime)
+    index_log(
+        runtime,
+        f"Iteration {state.iteration} starting: agents={runtime.num_agents} cold={str(cold).lower()} "
+        f"totals={gen_before.findings} findings/{gen_before.crashes} crashes",
+    )
+    results: list[AgentResult] = []
+    session_ceiling = _agent_timeout()
+    interval = _steward_interval()
+    gate_worker = SealedGateWorker(state)
+    halted = ""
+    stalled = False
+    retried: set[int] = set()
+    launched_now: set[int] = set()
+    # Clean relaunches a slot may take between two scored ticks. A sticky
+    # work source — a fuzz lead that stays listed, a PENDING hypothesis that
+    # never resolves — justifies a relaunch every time it is asked, so without
+    # a bound one slot could spin on it for the whole wall; the cohort model
+    # bounded that by its epoch, this bounds it by the steward's cadence.
+    clean_relaunch_cap = 2
+    clean_relaunches: dict[int, int] = {}
+
+    def session_limit() -> int:
+        wall = _productive_wall_remaining(state)
+        return max(1, session_ceiling if wall is None else min(session_ceiling, wall))
+
+    with ExitStack() as stack:
+        stack.callback(gate_worker.close)
+        pool = stack.enter_context(
+            concurrent.futures.ThreadPoolExecutor(max_workers=runtime.num_agents)
+        )
+        futures: dict[concurrent.futures.Future, int] = {}
+
+        def launch(agent: int, cold_launch: bool, *, continuation: bool = False) -> None:
+            gate_worker.launch(agent, continuation=continuation)
+            launched_now.add(agent)
+            future = pool.submit(
+                run_agent_guarded, runtime, context, agent, state.iteration,
+                cold_launch, session_limit(),
+            )
+            futures[future] = agent
+
+        def ceiling_reached() -> bool:
+            return bool(
+                state.max_generations and state.iteration >= state.max_generations
+            )
+
+        def wants_launch(
+            agent: int, result: AgentResult | None, *, initial: bool = False,
+        ) -> bool:
+            """Whether this slot should run another session right now."""
+            if halted or stalled:
+                return False
+            remaining = _productive_wall_remaining(state)
+            if remaining is not None and remaining <= 0:
+                return False
+            if not initial and ceiling_reached():
+                return False
+            if result is None:
+                return not should_skip_launch(runtime, context, agent)
+            outcome = _refill_outcome(result)
+            if outcome in ("provider", "deadline"):
+                index_log(runtime, f"slot {agent}: idle after {outcome} outcome rc={result.returncode}")
+                return False
+            if outcome == "failed":
+                if agent in retried:
+                    index_log(runtime, f"slot {agent}: idle; already retried once after rc={result.returncode}")
+                    return False
+                retried.add(agent)
+                return True
+            if outcome == "continue":
+                return True
+            if should_skip_launch(runtime, context, agent, primary_always_launches=False):
+                index_log(runtime, f"slot {agent}: idle; no active hypothesis, handoff, claimable card, or fuzz lead")
+                return False
+            if not _session_did_work(result):
+                index_log(runtime, f"slot {agent}: idle; its session made no tool call, so a replacement would repeat it")
+                return False
+            if clean_relaunches.get(agent, 0) >= clean_relaunch_cap:
+                index_log(
+                    runtime,
+                    f"slot {agent}: idle until the next steward tick; "
+                    f"{clean_relaunch_cap} clean relaunches already taken this generation",
+                )
+                return False
+            clean_relaunches[agent] = clean_relaunches.get(agent, 0) + 1
+            return True
+
+        for agent in range(1, runtime.num_agents + 1):
+            if wants_launch(agent, None, initial=True):
+                launch(agent, cold)
+        if not futures:
+            index_log(runtime, "SKIP_LAUNCH: no slot has a card, active hypothesis, or fuzz lead")
+        last_steward = time.monotonic()
+        ended_since_tick: set[int] = set()
+        idle_slots: set[int] = set()
+        while futures:
+            wait_for = max(1.0, min(30.0, interval - (time.monotonic() - last_steward)))
+            done, _ = concurrent.futures.wait(
+                futures, timeout=wait_for,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            finished: list[tuple[int, AgentResult]] = []
+            launched_now.clear()
+            for future in done:
+                agent = futures.pop(future)
+                result = future.result()
+                results.append(result)
+                finished.append((agent, result))
+                if result.provider_issue in _PROVIDER_HALT_ISSUES and not halted:
+                    halted = result.provider_issue
+                    index_log(
+                        runtime,
+                        f"slot {agent}: reported {halted}; no further launches, "
+                        "finishing in-flight sessions first",
+                    )
+            ended_since_tick.update(agent for agent, _ in finished)
+            if finished:
+                # Before any relaunch: what just ended is on disk now and must
+                # be seen before the next chain takes its tick.
+                gate_worker.observe()
+            if (
+                time.monotonic() - last_steward >= interval
+                and not halted and not ceiling_reached()
+            ):
+                # A slot that just ended turn-capped or failed relaunches as a
+                # continuation a few lines down: its claim and its build stay
+                # its own. A clean one relaunches fresh and may be re-assigned.
+                continuing = {
+                    agent for agent, result in finished
+                    if _refill_outcome(result) in ("continue", "failed")
+                }
+                status, gen_before, gen_filed_before = _steward_steer(
+                    state, gen_before, gen_filed_before,
+                    live_agents=set(futures.values()) | continuing,
+                    ended_agents=ended_since_tick,
+                )
+                last_steward = time.monotonic()
+                ended_since_tick = set()
+                clean_relaunches.clear()
+                if status == "stalled":
+                    stalled = True
+                else:
+                    # A slot that found nothing to do earlier may now: the
+                    # steward re-ranked and may have expanded the queue.
+                    gate_worker.observe()
+                    for agent in sorted(idle_slots):
+                        if wants_launch(agent, None):
+                            idle_slots.discard(agent)
+                            launch(agent, False)
+            for agent, result in finished:
+                if wants_launch(agent, result):
+                    outcome = _refill_outcome(result)
+                    launch(
+                        agent, False,
+                        continuation=outcome in ("continue", "failed"),
+                    )
+                else:
+                    idle_slots.add(agent)
+            for agent, _result in finished:
+                if agent not in launched_now:
+                    gate_worker.retire(agent)
+            if futures:
+                gate_worker.request_sweep()
+    # The only barrier: every slot has drained, so the whole tree is sealed.
+    # Full triage, orphan enforcement and corpus promotion run here, charged
+    # to housekeeping because nothing else was running.
+    _run_post_iteration(state)
+    if stalled:
+        # The tick that stalled already scored this span; scoring it again
+        # would count the same dry generation twice.
+        return "stalled", results
+    status, results = _assess_generation(state, gen_before, gen_filed_before, results)
+    if status in ("rejected", "capacity", "transient"):
+        return status, results
+    if state.stopped:
+        return "stalled", results
+    if _productive_wall_exhausted(state):
+        return "budget", results
+    return status, results
+
+
 def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     runtime = state.runtime
     context = state.context
@@ -3512,6 +3992,26 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     # Agents can file valid artifacts before another worker hits a provider
     # limit. Always triage the iteration before deciding whether to pause.
     _run_post_iteration(state)
+    return _assess_generation(state, before, filed_before, results)
+
+
+def _assess_generation(
+    state: BackendState, before: "ProgressSnapshot", filed_before: int,
+    results: list[AgentResult], *, scored_agents: Collection[int] | None = None,
+) -> tuple[str, list[AgentResult]]:
+    """Score one generation's progress and rotate starved lanes.
+
+    Shared by the barrier loop (`run_iteration`) and the continuous scheduler
+    (`run_continuous`). A generation is the span between two progress
+    snapshots; the continuous scheduler measures it between steward ticks
+    while the slots keep running, and passes ``results=[]`` because provider
+    health is handled by its own launch-halt path rather than by inspecting a
+    drained cohort. ``scored_agents`` names the slots that ended a session in
+    the generation; only they earn a dry mark, so a two-hour investigation
+    spanning many ticks is not read as many dry sessions.
+    """
+    runtime = state.runtime
+    context = state.context
     after = progress(runtime)
     after_agent_progress = {
         agent: agent_progress(runtime, agent, after)
@@ -3542,10 +4042,11 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
         state.dry_streak += 1
     state.transient_streak = 0
     update_subsystem_dry_streaks(
-        runtime, productive_agents
+        runtime, productive_agents, agents=scored_agents,
     )
     update_strategy_rotation(
-        runtime, context, after_agent_progress, productive_agents
+        runtime, context, after_agent_progress, productive_agents,
+        agents=scored_agents,
     )
     outcome = iteration_outcome_label(
         productive=productive,
@@ -3619,8 +4120,18 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         validate_model(runtime, guide)
         preflight_build(runtime)
         state = initialize_backend(runtime, args, guide, started_at=time.monotonic())
+        # Fixed-lane and delta audits are bounded, card-list-shaped work that
+        # wants the cohort barrier and an iteration count; open-ended
+        # discovery runs continuously and treats `max_iterations` as a
+        # ceiling on steward generations.
+        bounded = bool(
+            getattr(runtime, "fixed_strategy", "") or getattr(runtime, "delta", None)
+            or not getattr(runtime, "refill_workers", True)
+        )
+        drive = run_iteration if bounded else run_continuous
+        state.max_generations = 0 if bounded else args.max_iterations
         while args.max_iterations == 0 or state.iteration < args.max_iterations:
-            status, results = run_iteration(state)
+            status, results = drive(state)
             if status in ("budget", "stalled"):
                 break
             if _productive_wall_exhausted(state):

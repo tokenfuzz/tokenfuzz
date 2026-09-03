@@ -16,7 +16,9 @@ internally; those are not a supported interface and you should not need them.
 | --- | --- | --- |
 | `NUM_AGENTS` | unset | A flat pool of `N` workers. On a browser target this replaces the browser/shell split. |
 | `BROWSER_AGENTS` | `1` | Browser-mode workers. Only applies when `[runner].args` declares a `{PROFILE}` page route; a browser-mode script engine gets shell workers only. |
-| `SHELL_AGENTS` | `2` beside browser workers, `3` otherwise | Shell/generic workers when `NUM_AGENTS` is unset. |
+| `SHELL_AGENTS` | `2` beside browser workers, otherwise sized to the machine | Shell/generic workers when `NUM_AGENTS` is unset. The machine default is `min(CPUs, RAM ÷ AGENT_MEMORY_GB, AGENT_POOL_MAX)`, where CPUs and RAM honour a container's cgroup quota and limit (Docker `--cpus`, `-m`) and Linux CPU affinity, not just the host. |
+| `AGENT_MEMORY_GB` | `4` | RAM budgeted per worker when sizing the default pool: one agent CLI plus the builds and sanitizer runs it spawns. |
+| `AGENT_POOL_MAX` | `8` | Ceiling on the machine-sized default. A provider's own concurrency or quota limit is not modelled here — it surfaces as a capacity pause the loop already handles. |
 
 A one-iteration smoke test always launches one worker, whatever these say.
 
@@ -29,8 +31,9 @@ NUM_AGENTS=4 bin/audit --target <target> --backend <backend>
 | Variable | Default | Use it for |
 | --- | --- | --- |
 | `AUDIT_WALL_BUDGET_SECS` | `0` (off) | Wall-clock ceiling for a continuous run. The loop stops launching new iterations once it is spent — the simplest way to leave an overnight audit running with a hard stop. Provider quota pauses do not count against it. |
-| `AGENT_TIMEOUT` | `7200` seconds | Hard ceiling for one agent launch, and for one iteration's pool of them. An early-finished slot is relaunched while a cohort-era peer is still running (one overtime session per slot), so this also bounds how far those replacements can push post-iteration triage out: every session in the iteration is clamped to what remains of the ceiling measured from when the iteration's first sessions started. |
-| `POOL_OVERTIME` | `cohort-era` | Which in-flight peer lets a slot that finished after the initial cohort drained take its one extra session. `cohort-era`: only an initial session or a refill launched beside one, so an overtime session never justifies another. `any-peer`: any peer, including another slot's overtime — the per-slot cap and the `AGENT_TIMEOUT` clamp still bound the iteration at one extra session per slot. Measure it with the benchmark's Efficiency table (occupancy against confirmed per seat-hour) before making it a default. Any other value is refused. |
+| `STEWARD_INTERVAL_SECS` | `300` | Continuous runs only: seconds between steward ticks. A tick scores the generation, rotates starved strategy lanes, re-ranks the queue and refreshes indexes — without stopping any slot. Each tick is logged as an iteration. |
+| `AGENT_TIMEOUT` | `7200` seconds | Hard ceiling for one agent launch, and — in cohort mode (fixed-lane, delta and ensemble runs) — for one iteration's pool of them. An early-finished slot is relaunched while a cohort-era peer is still running (one overtime session per slot), so this also bounds how far those replacements can push post-iteration triage out: every session in the iteration is clamped to what remains of the ceiling measured from when the iteration's first sessions started. |
+| `POOL_OVERTIME` | `cohort-era` | Cohort mode only (fixed-lane, delta and ensemble runs); an ordinary run refills every slot to the wall. Which in-flight peer lets a slot that finished after the initial cohort drained take its one extra session. `cohort-era`: only an initial session or a refill launched beside one, so an overtime session never justifies another. `any-peer`: any peer, including another slot's overtime — the per-slot cap and the `AGENT_TIMEOUT` clamp still bound the iteration at one extra session per slot. Measure it with the benchmark's Efficiency table (occupancy against confirmed per seat-hour) before making it a default. Any other value is refused. |
 | `SHELL_SANITIZER_RUN_BUDGET` | `60` | Sanitizer runs one shell/generic agent may spend per iteration. |
 | `BROWSER_SANITIZER_RUN_BUDGET` | `25` | The same budget for browser-mode agents. |
 
@@ -48,7 +51,7 @@ so this section is mostly here to explain what you are reading.
 
 | Variable | Default | What it controls |
 | --- | --- | --- |
-| `MAX_DRY_SESSIONS` | `10` | A continuous run stops once this many iterations in a row produce nothing *and* no hypothesis is still open, logging `STALL_STOP`. Raise it for a hard target you expect to be slow; the harness ignores a value low enough to prevent fair strategy rotation. |
+| `MAX_DRY_SESSIONS` | `10` | A continuous run stops once this many generations (steward ticks, or cohort iterations in cohort mode) in a row produce nothing *and* no hypothesis is still open, logging `STALL_STOP`. Raise it for a hard target you expect to be slow; the harness ignores a value low enough to prevent fair strategy rotation. |
 | `TURN_SOFT_CAP` | `128` agent/tool turns | Rollover target for a long audit session. Claude, Grok, and current Google Gemini CLI versions use native turn limits; Gemini retains a completed-tool fallback for older versions. Codex and OpenCode use completed tool events as the safe termination boundary. Antigravity (`agy`) has neither a native turn flag nor a stable completed-tool event contract, so its prompt carries the same cooperative target but only `AGENT_TIMEOUT` can hard-stop it. Capped sessions continue from structured state; the log says `turn-capped; continuing from state`, and the transcript ends with `TURN_SOFT_CAP reached …`. Set `0` to disable. |
 
 Already checkpointed hypotheses and artifacts are preserved. The next

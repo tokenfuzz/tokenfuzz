@@ -9,6 +9,7 @@ Target-specific knowledge belongs in optional data files, not in this module.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Collection
 import contextlib
 import fcntl
 import hashlib
@@ -25,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
+import cluster_common
 import languages
 import verdict
 import report_identity
@@ -3527,8 +3529,14 @@ def release_stale_claims(
     ctx: Context,
     grace: timedelta | None = None,
     now: datetime | None = None,
+    keep_agents: Collection[str] = (),
 ) -> list[dict]:
     """Release claims whose hypotheses no longer justify the lease.
+
+    `keep_agents` names agents with a session in flight: their claims are
+    never released here, whatever their hypotheses say. A live session may
+    be between hypotheses on its card, or still reading it before opening
+    one; releasing then offers the same card to a peer, and both work it.
 
     A claim is "stale" if it is in `claimed` status AND any of:
       * The card has no active hypothesis (PENDING, INVESTIGATING,
@@ -3582,9 +3590,12 @@ def release_stale_claims(
             last_run_by_card[cid] = ts
 
     released: list[dict] = []
+    live = {str(agent) for agent in keep_agents}
     for cid, claim in latest.items():
         if claim.get("status", "") != "claimed":
             continue  # already released or terminal
+        if str(claim.get("agent", "")) in live:
+            continue
         hyps = hyps_by_card.get(cid, [])
         any_active = any(is_active_hypothesis_status(h.get("status", "")) for h in hyps)
         if any_active:
@@ -6013,12 +6024,30 @@ def _agent_crash_dirs(ctx: Context, agent: str) -> list[Path]:
 
 
 def _crash_report_unfinished(artifact_dir: Path) -> bool:
+    report = _report_path(artifact_dir)
+    if report is None:
+        # An in-place export can leave the bundle between moving files under
+        # .audit/ and installing REPORT.md; that is unfinished, not an error.
+        return True
     try:
-        return "_TODO (agent):" in _report_path(artifact_dir).read_text(
+        return "_TODO (agent):" in report.read_text(
             encoding="utf-8", errors="replace"
         )
     except OSError:
         return True
+
+
+def crash_bundle_unfinished(artifact_dir: Path) -> bool:
+    """Whether a crash bundle still needs its owning agent's next session.
+
+    One predicate for the resume brief that hands a bundle back to its owner
+    and for the sealed gate that must not touch it meanwhile: a missing or
+    skeleton report, or a triage hold (`.promotion_pending` at the root or
+    under `.audit/`, where export and pooling move sidecars).
+    """
+    return _crash_report_unfinished(artifact_dir) or bool(
+        cluster_common.promotion_pending_reasons(artifact_dir)
+    )
 
 
 def _unfinished_crash_reports_for_agent(ctx: Context, agent: str) -> list[Path]:
@@ -6032,8 +6061,7 @@ def _pending_crashes_for_agent(ctx: Context, agent: str) -> list[Path]:
     """Return this agent's unfinished crash bundles in filing order."""
     return [
         artifact_dir for artifact_dir in _agent_crash_dirs(ctx, agent)
-        if _crash_report_unfinished(artifact_dir)
-        or (artifact_dir / ".promotion_pending").is_file()
+        if crash_bundle_unfinished(artifact_dir)
     ]
 
 
