@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -82,6 +81,8 @@ def range_mode(raw: str, no_cap: bool) -> int:
 
     if start == 1 and end is None:
         return emit_file(path, "peek-range", no_cap)
+    import tempfile
+
     with tempfile.TemporaryDirectory(prefix="peek-range-") as directory:
         selected = Path(directory) / "range"
         with path.open("rb") as source, selected.open("wb") as target:

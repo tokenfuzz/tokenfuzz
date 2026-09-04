@@ -1297,13 +1297,13 @@ dirty_gemini.mkdir(parents=True)
 (dirty_gemini / "GEMINI.md").write_text("STALE\n")
 os.environ["LOGDIR"] = dirty_logdir
 inv._gemini_iso_home = None
-real_rmtree = inv.shutil.rmtree
+real_rmtree = shutil.rmtree
 try:
-    inv.shutil.rmtree = lambda *args, **kwargs: None
+    shutil.rmtree = lambda *args, **kwargs: None
     ok(inv.prepare_gemini_memory_isolation() is None,
        "failed cleanup returns no Gemini home rather than reusing stale memory")
 finally:
-    inv.shutil.rmtree = real_rmtree
+    shutil.rmtree = real_rmtree
     shutil.rmtree(dirty_logdir, ignore_errors=True)
 os.environ["LOGDIR"] = gem_logdir
 

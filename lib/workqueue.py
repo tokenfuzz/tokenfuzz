@@ -18,9 +18,7 @@ import math
 import os
 import re
 import shlex
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1590,6 +1588,8 @@ def _recent_touched_files(target_root: Path, days: int = 180, repo_type: str = "
     use that wrapper, not this function, so the VCS invocation only
     fires once per workqueue load.
     """
+    import subprocess
+
     if not target_root or not target_root.is_dir():
         return set()
     if repo_type == "hg":
@@ -2219,6 +2219,8 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
     tier and over the same cards, so the model promotes what it scored and
     nothing else.
     """
+    import subprocess
+
     if mode not in RERANK_MODES:
         raise ValueError(f"rerank mode must be one of {RERANK_MODES} (got {mode!r})")
     if timeout is None:
@@ -2451,6 +2453,8 @@ def severity_score(sev: str) -> int:
 
 
 def commit_files(ctx: Context, rev: str) -> list[str]:
+    import subprocess
+
     if not rev or rev == "NOT_FOUND" or ctx.repo_type == "none":
         return []
     cmd: list[str]
@@ -2471,6 +2475,8 @@ def commit_files(ctx: Context, rev: str) -> list[str]:
 
 def revision_exists(ctx: Context, rev: str) -> bool | None:
     """Return True/False for known VCS repos, None when metadata is unavailable."""
+    import subprocess
+
     if not rev or rev == "NOT_FOUND":
         return False
     if ctx.repo_type == "none":
@@ -2586,6 +2592,8 @@ def _git_is_shallow(target_root: Path) -> bool:
     .git/shallow exists, so the common non-shallow case spawns nothing.
     Worktrees / submodules (.git is a file) fall back to `git rev-parse`.
     """
+    import subprocess
+
     git_dir = target_root / ".git"
     if git_dir.is_dir():
         return (git_dir / "shallow").is_file()
@@ -2636,6 +2644,8 @@ class DeltaScope:
 
 
 def _vcs_lines(command: list[str], what: str) -> list[str]:
+    import subprocess
+
     try:
         out = subprocess.check_output(
             command, stderr=subprocess.STDOUT, text=True,
@@ -2960,6 +2970,8 @@ def vcs_log_rows(ctx: Context, limit: int,
     # since_rev bounds the scan to the commits REV does not reach
     # (REV..HEAD / only(., REV)) — the delta run's exact S1 range.
     # A positive lookback bounds the scan to commits on or after `since`, so the
+    import subprocess
+
     # window is min(most-recent `limit`, commits within lookback) — this is what
     # normalizes recall across commit velocity. `since` is an absolute date so
     # both VCSes parse it identically (git --since / hg -d ">…").
@@ -3106,6 +3118,8 @@ def _fsync_parent_dir(path: Path) -> None:
 
 
 def _write_jsonl_unlocked(path: Path, rows: list[dict]) -> None:
+    import tempfile
+
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = ""
     try:

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -157,6 +156,8 @@ def emit_section(
     ]
     cap_lines = int(options["cap_lines"])
     cap_bytes = int(options["cap_bytes"])
+    import tempfile
+
     with capture_command(command) as completed, tempfile.TemporaryDirectory(
         prefix="scratch-search-"
     ) as directory:

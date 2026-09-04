@@ -56,8 +56,11 @@ _MARKER_BODY = "attacker_controls set by bin/suggest-threat-model"
 # fully-rendered comment line. Keep that string spelled exactly once.
 _MARKER = "# " + _MARKER_BODY
 
+# Header budget for the prompt's API-surface excerpt.
+_MAX_API_HEADERS = 60
 
-def collect_api_surface(target_root: Path, max_headers: int = 60) -> str:
+
+def collect_api_surface(target_root: Path) -> str:
     """Newline-joined relative paths of the target's public C/C++ headers.
 
     Headers under test/build/vendored directories are skipped — they are
@@ -76,7 +79,7 @@ def collect_api_surface(target_root: Path, max_headers: int = 60) -> str:
     headers.sort(key=lambda h: (0 if "include/" in f"/{h}" else 1, h))
     if not headers:
         return ""
-    shown = headers[:max_headers]
+    shown = headers[:_MAX_API_HEADERS]
     extra = len(headers) - len(shown)
     text = "\n".join(shown)
     if extra > 0:

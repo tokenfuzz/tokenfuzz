@@ -55,7 +55,6 @@ import datetime as _dt
 import hashlib
 import os
 import re
-import shutil
 import sys
 
 import languages
@@ -450,6 +449,8 @@ def promote_corpus(
     hits_log: str, corpus_root: str, agent_num: str,
 ) -> dict[str, int]:
     """Promote clean coverage inputs and return the disposition tally."""
+    import shutil
+
     require_new_edges = os.environ.get("CORPUS_REQUIRE_NEW_EDGES", "1") != "0"
     tally = _empty_promotion_tally()
 

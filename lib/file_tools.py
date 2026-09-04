@@ -7,13 +7,15 @@ import argparse
 import hashlib
 import os
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+
+# shutil, subprocess and tempfile are imported inside _spill_output_file and
+# capture_command. They are the only users, and the bounded-rendering frontends
+# (peek, rg-safe, scratch-search) that agents spawn dozens of times per session
+# call neither — together the three cost ~40 ms of import per spawn.
 
 
 def reverse_lines(path: Path):
@@ -74,6 +76,9 @@ def _non_negative_int(env: Mapping[str, str], name: str, default: int) -> int:
 
 
 def _spill_output_file(path: Path, label: str, env: Mapping[str, str]) -> str:
+    import shutil
+    import tempfile
+
     configured = env.get("OUTCAP_SPILL_DIR")
     if configured:
         spill_dir = Path(configured)
@@ -192,6 +197,9 @@ def capture_command(
     capture_stderr: bool = True, **kwargs,
 ) -> Iterator[CapturedCommand]:
     """Run a command into temporary files and remove them after consumption."""
+    import subprocess
+    import tempfile
+
     if merge_stderr and not capture_stderr:
         raise ValueError("merge_stderr and capture_stderr=False are incompatible")
     with tempfile.TemporaryDirectory(prefix="command-capture-") as directory:

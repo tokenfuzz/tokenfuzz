@@ -46,9 +46,7 @@ import json
 import os
 import re
 import shlex
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -1175,6 +1173,9 @@ def execute_bootstrap_plan(
     recipe_path: Path,
 ) -> int:
     """Execute a registry bootstrap plan without shell expansion."""
+    import subprocess
+    import tempfile
+
     commands: list[list[str]] = plan.get("cmds") or []
     alternatives: list[list[str]] = plan.get("alternatives") or []
     env_pairs: list[list[str]] = plan.get("env") or []

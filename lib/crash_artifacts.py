@@ -8,7 +8,6 @@ import binascii
 import os
 import re
 import shlex
-import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
@@ -417,6 +416,8 @@ def _nonempty_file(path: Path) -> bool:
 
 
 def is_executable_binary(path: Path) -> bool:
+    import subprocess
+
     # X_OK on a directory means "searchable", not "runnable", so the regular-file
     # test has to come first: a build leaves `harness.dSYM/` beside `harness`.
     if not path.is_file() or not os.access(path, os.X_OK):

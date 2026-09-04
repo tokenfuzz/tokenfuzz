@@ -22,10 +22,7 @@ import os
 import plistlib
 import re
 import secrets
-import shutil
-import subprocess
 import sys
-import tempfile
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -756,6 +753,8 @@ def write_session_env(
     logdir: str,
 ) -> None:
     """Write a fresh .session-env (matches target_write_session_env)."""
+    import tempfile
+
     d = Path(slug_dir)
     d.mkdir(parents=True, exist_ok=True)
     started = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -829,6 +828,8 @@ def pin_session_config(
     A new audit rewrites ``.session-env`` without the digest before preflight,
     so a leftover snapshot can never leak into the next run.
     """
+    import tempfile
+
     directory = Path(session_dir)
     env_path = directory / ".session-env"
     payload = Path(source).read_bytes()
@@ -883,6 +884,8 @@ def detect_repo_type(target_root: str | os.PathLike) -> str:
     has direct VCS metadata. That avoids treating targets/foo as a git
     checkout only because /work/.git exists above it.
     """
+    import subprocess
+
     root = Path(target_root)
     if (root / ".hg").is_dir():
         return "hg"
@@ -901,6 +904,8 @@ def detect_repo_type(target_root: str | os.PathLike) -> str:
 
 
 def detect_rev(target_root: str | os.PathLike) -> str:
+    import subprocess
+
     # An empty root is "no target tree", not "the current directory". Path("")
     # is ".", so without this the harness checkout's own HEAD comes back and
     # gets published as the audited target revision.
@@ -972,6 +977,8 @@ def vcs_tracked_files(target_root: str | os.PathLike) -> "set[str] | None":
     non-UTF-8 tracked path is preserved and still matches the walker's key —
     it is not dropped, and it never raises a decode error.
     """
+    import subprocess
+
     root = Path(target_root)
     repo_type = detect_repo_type(root)
     if repo_type == "git":
@@ -1302,6 +1309,8 @@ _SANITIZER_RUNTIME_MARKER = {
 
 
 def _binary_uses_sanitizer(path: Path, sanitizer: str = "asan") -> bool:
+    import subprocess
+
     marker = _SANITIZER_RUNTIME_MARKER.get(sanitizer, "__asan_")
     try:
         out = subprocess.run(
@@ -2309,6 +2318,8 @@ def _java_home_for_bin(java_bin: Path) -> str:
 
 
 def _java_is_usable(java_bin: Path) -> bool:
+    import subprocess
+
     if not java_bin.is_file() or not os.access(java_bin, os.X_OK):
         return False
     try:
@@ -2325,6 +2336,8 @@ def _java_is_usable(java_bin: Path) -> bool:
 
 def _detect_java_runner() -> tuple[str, list[str]]:
     """Return a usable Java executable and env entries, if one is discoverable."""
+    import shutil
+
     for env_name in ("AUDIT_JAVA_HOME", "JAVA_HOME"):
         java_home = os.environ.get(env_name, "")
         if not java_home:
@@ -2517,6 +2530,8 @@ def _vcs_status_records(command: list[str], environment: dict) -> "list[str] | N
     Retried once: a transient failure would otherwise change how identity is
     computed, and a changed *scheme* looks exactly like changed source.
     """
+    import subprocess
+
     for _ in (1, 2):
         try:
             completed = subprocess.run(
@@ -3081,6 +3096,8 @@ def update_browser_mode(toml_path: str | os.PathLike, enabled: bool) -> bool:
 
 
 def _detect_upstream_url(target_root: Path) -> str:
+    import subprocess
+
     if (target_root / ".git").is_dir():
         try:
             out = subprocess.run(

@@ -8,9 +8,7 @@ import json
 import os
 import re
 import shlex
-import shutil
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -370,6 +368,9 @@ def record_primary_differential(
     primary_result: dict,
 ) -> dict | None:
     """Bind one forced-primary probe result to an alternate-config crash bundle."""
+    import shutil
+    import tempfile
+
     crash_dir = Path(crash_dir)
     context = verified_probe_context(crash_dir)
     sanitizer = Path(primary_sanitizer)
@@ -530,6 +531,8 @@ def restore_probe_context(sources: Sequence[Path], destination: Path) -> bool:
 
 def _restore_primary_differential(sources: Sequence[Path], destination: Path) -> None:
     """Best-effort restore of differential sidecars alongside restored context."""
+    import shutil
+
     candidates: dict[str, tuple[Path, Path]] = {}
     for source in sources:
         result = verified_primary_differential(source)
@@ -654,6 +657,8 @@ def materialize(
     build_config=None,
     build_recipe: str | os.PathLike[str] | None = None,
 ) -> tuple[str, str]:
+    import shutil
+
     testcase_path = Path(testcase)
     sanitizer_path = Path(sanitizer_output)
     harness_path = Path(harness) if harness else None

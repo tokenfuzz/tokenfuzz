@@ -13,8 +13,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Callable, Iterable
@@ -142,6 +140,9 @@ def render_md_sibling(md_path: Path, title: str | None = None) -> None:
     silent no-op when render-md or python3 is unavailable. Set
     ``CLUSTER_HTML=0`` to keep the markdown padding but skip HTML emission.
     """
+    import shutil
+    import subprocess
+
     here = Path(__file__).resolve().parent.parent / "bin"
     render = here / "render-md"
     if not render.is_file() or not os.access(render, os.X_OK):
@@ -169,6 +170,9 @@ def render_md_batch(md_paths: "list[Path]") -> None:
     5.5 s for 150 findings, all in subprocess wait) into a single spawn. Chunked
     so a very large finding set can never overflow ARG_MAX. Best-effort.
     """
+    import shutil
+    import subprocess
+
     if not md_paths:
         return
     here = Path(__file__).resolve().parent.parent / "bin"

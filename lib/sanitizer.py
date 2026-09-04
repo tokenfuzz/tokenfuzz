@@ -8,7 +8,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Mapping
 
@@ -228,6 +227,8 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
     whole benchmark run shipped address-only stacks while reporting itself
     clean. Anything that leaves a raw frame behind says so on stderr.
     """
+    import tempfile
+
     report = Path(path)
     if not report.is_file() or not report.stat().st_size or not SYMBOLIZER.is_file():
         return False

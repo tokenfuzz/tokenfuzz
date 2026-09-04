@@ -9,7 +9,6 @@ import hashlib
 import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 
 
@@ -112,6 +111,8 @@ def cached_roots(root: Path) -> list[Path]:
         cache_dir.mkdir(parents=True, exist_ok=True)
         roots = discover_seed_roots(root)
         if roots:
+            import tempfile
+
             temporary = None
             try:
                 with tempfile.NamedTemporaryFile(

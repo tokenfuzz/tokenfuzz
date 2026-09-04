@@ -20,9 +20,7 @@ import hashlib
 import itertools
 import json
 import os
-import shutil
 import sys
-import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -128,6 +126,8 @@ def interpreter() -> str:
     Memoised per process: a run resolves this once, and the callers that
     matter only ask when a rebuild is due.
     """
+    import shutil
+
     global _RESOLVED, _TOOLCHAIN
     if _RESOLVED is None:
         _RESOLVED = ""
@@ -326,6 +326,9 @@ def refresh(ctx: workqueue.Context) -> str:
     revision rather than once per iteration. Under the benchmark wall rules
     this is steering and its cost is counted; keying is what keeps it small.
     """
+    import shutil
+    import tempfile
+
     artifacts = _built_artifacts(ctx.target_root, ctx.results_dir)
     signature = cache_signature(ctx.target_root, ctx.results_dir, artifacts)
     existing = load(ctx.results_dir)

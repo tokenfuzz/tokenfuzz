@@ -2483,7 +2483,7 @@ class WorkQueueTests(unittest.TestCase):
             "ACTIVE_BACKEND": "", "LLM_DECIDE_MOCK_WORK_RERANK": '{"cards":[]}',
         }
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
-            workqueue.subprocess, "check_output", side_effect=decide,
+            subprocess, "check_output", side_effect=decide,
         ):
             out = workqueue.llm_rerank_cards(self.ctx, cards, top_n=2, timeout=5)
 
@@ -2516,7 +2516,7 @@ class WorkQueueTests(unittest.TestCase):
             "LLM_DECISION_TIMEOUT": "37",
         }
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
-            workqueue.subprocess, "check_output", side_effect=decide,
+            subprocess, "check_output", side_effect=decide,
         ):
             self.assertEqual(
                 workqueue.llm_rerank_cards(self.ctx, cards, top_n=1), cards,
@@ -2529,7 +2529,7 @@ class WorkQueueTests(unittest.TestCase):
         # shorter than a single observed call, so every rerank would time out.
         environment.pop("LLM_DECISION_TIMEOUT")
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
-            workqueue.subprocess, "check_output", side_effect=decide,
+            subprocess, "check_output", side_effect=decide,
         ):
             os.environ.pop("LLM_DECISION_TIMEOUT", None)
             # Fresh cards: an identical set would be served from the cache.
@@ -2589,7 +2589,7 @@ class WorkQueueTests(unittest.TestCase):
             raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
 
         with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
-            workqueue.subprocess, "check_output", side_effect=timed_out,
+            subprocess, "check_output", side_effect=timed_out,
         ):
             self.assertEqual(
                 workqueue.llm_rerank_cards(self.ctx, cards, top_n=2, timeout=5, mode="primary"),

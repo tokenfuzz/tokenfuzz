@@ -54,11 +54,9 @@ import fcntl
 import json
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from collections import deque
@@ -386,6 +384,8 @@ def _stage_clean_gemini_home(iso_root: Path) -> None:
     Wiping first means a stale throwaway GEMINI.md from a prior (e.g. killed)
     run under the same $LOGDIR cannot be read back on resume.
     """
+    import shutil
+
     if iso_root.exists():
         shutil.rmtree(iso_root)
     if iso_root.exists():
@@ -445,6 +445,9 @@ def _prepare_gemini_memory_isolation_locked() -> "str | None":
     cell with a different $LOGDIR stages its own clean home instead of
     inheriting the previous one's (which would leak that run's memory).
     """
+    import shutil
+    import tempfile
+
     global _gemini_iso_home
     if memory_enabled() or not use_gemini_cli():
         return None
@@ -566,6 +569,9 @@ def prepare_gemini_settings(
     model: str = "", max_session_turns: int = 0,
 ) -> "str | None":
     """Write Gemini CLI system settings for isolation, effort, and turn cap."""
+    import shutil
+    import tempfile
+
     if not use_gemini_cli():
         return None
     resolved_model = resolve_model_name("gemini", model).strip()
