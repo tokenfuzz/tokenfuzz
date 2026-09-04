@@ -4,4 +4,4 @@ mkdocs-material==9.7.7
 # Security floor: 11.0.0 fixes the pymdownx.b64 path traversal
 # (CVE-2026-61632) that affects every release through 10.21.3. The 11.x line
 # needs Python >= 3.10, so docs builds no longer run under 3.9.
-pymdown-extensions==11.0.1
+pymdown-extensions==11.0.2
