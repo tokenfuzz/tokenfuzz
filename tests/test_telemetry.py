@@ -279,6 +279,32 @@ class TelemetryTests(unittest.TestCase):
             "other": {"hypotheses": 1, "productive": 1},
         })
 
+    def test_coverage_counts_examined_and_concluded_cards_per_lane(self) -> None:
+        # Yield per lane says nothing about a lane nobody was handed; the
+        # examined share does. A card counts as examined once any session
+        # claimed it, and concluded once its latest claim closes it.
+        _write_jsonl(self.results / "work-cards.jsonl", [
+            {"id": "WORK-1", "strategy": "S3", "file": "src/app_parse.c"},
+            {"id": "WORK-2", "strategy": "S3", "file": "src/child.c"},
+            {"id": "WORK-3", "strategy": "s7-fuzz", "file": "src/app_parse.c"},
+            {"id": "WORK-4", "strategy": "S7", "file": "src/other.c"},
+        ])
+        _write_jsonl(self.results / "state" / "claims.jsonl", [
+            {"card_id": "WORK-1", "status": "claimed"},
+            {"card_id": "WORK-1", "status": "find"},
+            {"card_id": "WORK-3", "status": "claimed"},
+            {"card_id": "WORK-9", "status": "blocked"},
+        ])
+        self.assertEqual(telemetry.coverage(self.results), {
+            "cards": 4, "examined": 2, "examined_share": 0.5,
+            "lanes": {
+                "S3": {"cards": 2, "examined": 1, "concluded": 1,
+                       "files": 2, "files_examined": 1, "examined_share": 0.5},
+                "S7": {"cards": 2, "examined": 1, "concluded": 0,
+                       "files": 2, "files_examined": 1, "examined_share": 0.5},
+            },
+        })
+
     def test_execution_verdicts_and_exec_fail_share(self) -> None:
         _write_jsonl(self.results / "state" / "runs.jsonl", [
             {"verdict": "CLEAN"}, {"verdict": "EXEC_FAIL"}, {"verdict": "EXEC_FAIL"},
@@ -348,8 +374,11 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(
             set(summary),
             {"occupancy", "housekeeping", "finalization", "time_to_first",
-             "lanes", "execution", "duplicate_roots", "lineage_rows"},
+             "lanes", "coverage", "execution", "duplicate_roots", "lineage_rows"},
         )
+        self.assertEqual(summary["coverage"], {
+            "cards": 0, "examined": 0, "examined_share": None, "lanes": {},
+        })
         self.assertEqual(summary["lineage_rows"], 0)
 
 

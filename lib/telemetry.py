@@ -351,6 +351,63 @@ def lane_stats(results_dir: Path) -> dict[str, dict[str, int]]:
     return dict(sorted(stats.items()))
 
 
+#: Claim statuses that close a card for the run: the card was worked to a
+#: conclusion, not merely offered.
+_CONCLUDED_CARD_STATUSES = frozenset({"find", "crash", "discarded", "blocked"})
+
+
+def coverage(results_dir: Path) -> dict:
+    """How much of the ranked attack surface each lane examined.
+
+    Lanes and hypotheses say what a run produced; this says what it looked
+    at, so a queue or rotation change that starves a lane shows up as an
+    unexamined share rather than a quiet drop in yield. Cards come from the
+    rank window (``work-cards.jsonl``); a card is examined once any session
+    claimed it and concluded once its latest claim closes it.
+    """
+    results = Path(results_dir)
+    cards = _rows(results / "work-cards.jsonl")
+    latest_claim: dict[str, str] = {}
+    for row in _rows(results / "state" / "claims.jsonl"):
+        card_id = row.get("card_id")
+        if isinstance(card_id, str) and card_id:
+            latest_claim[card_id] = str(row.get("status") or "").lower()
+    lanes: dict[str, dict] = {}
+    for card in cards:
+        lane = lanes.setdefault(_strategy_key(card.get("strategy")), {
+            "cards": 0, "examined": 0, "concluded": 0,
+            "_files": set(), "_files_examined": set(),
+        })
+        card_id = str(card.get("id") or "")
+        file_name = str(card.get("file") or "")
+        lane["cards"] += 1
+        lane["_files"].add(file_name)
+        status = latest_claim.get(card_id)
+        if status is not None:
+            lane["examined"] += 1
+            lane["_files_examined"].add(file_name)
+            if status in _CONCLUDED_CARD_STATUSES:
+                lane["concluded"] += 1
+    out: dict[str, dict] = {}
+    for lane, stats in sorted(lanes.items()):
+        out[lane] = {
+            "cards": stats["cards"],
+            "examined": stats["examined"],
+            "concluded": stats["concluded"],
+            "files": len(stats["_files"]),
+            "files_examined": len(stats["_files_examined"]),
+            "examined_share": round(stats["examined"] / stats["cards"], 4),
+        }
+    total = sum(v["cards"] for v in out.values())
+    examined = sum(v["examined"] for v in out.values())
+    return {
+        "cards": total,
+        "examined": examined,
+        "examined_share": round(examined / total, 4) if total else None,
+        "lanes": out,
+    }
+
+
 def execution_verdicts(results_dir: Path) -> dict:
     """Probe verdict counts. EXEC_FAIL is a command that returned without
     completing cleanly — rejected input, loader, usage, or runner failure — a
@@ -454,6 +511,7 @@ def summary(results_dir: Path, origin: str = "") -> dict:
         "finalization": finalization(results),
         "time_to_first": time_to_first(results, origin),
         "lanes": lane_stats(results),
+        "coverage": coverage(results),
         "execution": execution_verdicts(results),
         "duplicate_roots": duplicate_roots(results),
         "lineage_rows": len(lineage(results)),
