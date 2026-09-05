@@ -249,6 +249,14 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
                 num_agents=1, agent_roles=("reproduce",), backend=backend,
             )
 
+        with mock.patch.dict(os.environ, {"USE_GEMINI_CLI": "0"}):
+            self.assertNotIn(
+                "read-only subagent", prompt.compact_suffix(context("gemini"), 1),
+                "the agy dialect has no measured delegate",
+            )
+        gemini_cli = mock.patch.dict(os.environ, {"USE_GEMINI_CLI": "1"})
+        gemini_cli.start()
+        self.addCleanup(gemini_cli.stop)
         for backend in ("claude", "gemini"):
             with self.subTest(backend=backend):
                 for rendered in (

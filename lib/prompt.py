@@ -279,10 +279,15 @@ _MAPPING_DELEGATES = {
 
 
 def mapping_delegate_directive(context: PromptContext) -> str:
+    import llm_invoke  # lazy: keeps prompt rendering free of the launcher otherwise
     import llm_usage  # lazy: keeps prompt rendering free of the usage reader otherwise
 
     delegate = _MAPPING_DELEGATES.get(context.backend)
     if not delegate or not llm_usage.child_spend_attributed(context.backend):
+        return ""
+    if context.backend == "gemini" and not llm_invoke.use_gemini_cli():
+        # `invoke_agent` is Google Gemini CLI's tool; the default agy dialect
+        # has no measured equivalent.
         return ""
     return render_template("mapping_delegate.md.j2", {"delegate_name": delegate})
 
