@@ -1353,6 +1353,29 @@ Generated score text.
         ):
             self.assertEqual(validator["main"](arguments), 2)
 
+        limit_marker = self.root / "provider-limit"
+
+        def invoke_quota(_backend, _prompt, _timeout, raw, **_kwargs):
+            Path(raw).write_text(json.dumps({
+                "type": "error",
+                "error": {"data": {
+                    "message": "account has reached its monthly usage limit",
+                    "statusCode": 429,
+                }},
+            }) + "\n", encoding="utf-8")
+            return 1
+
+        with mock.patch.dict(
+            os.environ, {"LLM_DECIDE_LIMIT_FILE": str(limit_marker)}, clear=False,
+        ), mock.patch.object(
+            validator["llm_invoke"], "run_agent_prompt",
+            side_effect=invoke_quota,
+        ), mock.patch.object(
+            validator["llm_usage"], "append_usage_event",
+        ):
+            self.assertEqual(validator["main"](arguments), 2)
+        self.assertTrue(limit_marker.is_file())
+
     def test_trigger_resolution_prompt_carries_the_prior_open_question(self) -> None:
         validator = runpy.run_path(str(ROOT / "bin" / "validate-finding"))
         first = self.finding / ".trigger-gate.json"

@@ -1475,6 +1475,35 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         ) == "transient",
         "an overload is still transient",
     )
+    ollama_quota = json.dumps({
+        "type": "error",
+        "error": {"name": "APIError", "data": {
+            "message": "account has reached its monthly usage limit",
+            "statusCode": 429,
+        }},
+    })
+    check(
+        audit_helpers._provider_issue_from_lines([ollama_quota])
+        == "capacity_limited",
+        "an OpenCode/Ollama statusCode quota error is capacity_limited",
+    )
+    check(
+        audit_helpers._provider_issue_from_lines([
+            json.dumps({"type": "assistant", "message": ollama_quota}),
+        ]) == "none",
+        "an OpenCode/Ollama statusCode is ignored outside a backend error event",
+    )
+    ollama_cell = root / "ollama-quota-cell"
+    ollama_raw = (
+        ollama_cell / "repo-root" / "output" / "demo" / "oss" / "logs"
+        / ".raw" / "session_1.log.raw"
+    )
+    ollama_raw.parent.mkdir(parents=True)
+    ollama_raw.write_text(ollama_quota + "\n", encoding="utf-8")
+    check(
+        benchmark_runner._provider_issue(ollama_cell) == "capacity_limited",
+        "benchmark classification sees an OpenCode/Ollama quota session",
+    )
 
     dialect_markers = (
         "aNtIgRaViTy ClI",

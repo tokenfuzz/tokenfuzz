@@ -937,7 +937,7 @@ _PROVIDER_API_ERROR_RE = re.compile(r'"api_error_status"[ \t]*:[ \t]*([0-9]{3})'
 # on a provider-CLI plain line — never in assistant prose or tool output, where
 # the model and target programs legitimately mention status codes.
 _PROVIDER_STATUS_CODE_RE = re.compile(
-    r'(?:status|code)\\?"[ \t]*:[ \t]*([0-9]{3})|'
+    r'(?:status|statusCode|code)\\?"[ \t]*:[ \t]*([0-9]{3})|'
     r'\b(?:status|code|HTTP)[ \t:]+([0-9]{3})\b|'
     r'Server returned ([0-9]{3})',
 )

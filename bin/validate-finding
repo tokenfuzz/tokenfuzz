@@ -15,11 +15,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import audit_helpers
+import crash_bundle
 import llm_decide
 import llm_invoke
 import llm_usage
 import prompt_render
-import crash_bundle
 import report_identity
 import triage_validate
 
@@ -475,15 +476,15 @@ def main(argv=None) -> int:
             kind="decision:trigger-validator-batch", prompt_text=prompt, raw_path=raw,
             usage_complete=status == 0,
         )
+        try:
+            raw_text = raw.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raw_text = ""
+        provider_failure = (
+            audit_helpers._provider_issue_from_lines(raw_text.splitlines()) != "none"
+        )
+        llm_decide.record_provider_limit(raw_text)
         transient = status not in (0, 1, 2)
-        if transient:
-            try:
-                import llm_decide as _llm_decide
-                _llm_decide.record_provider_limit(
-                    raw.read_text(encoding="utf-8", errors="replace")
-                )
-            except (ImportError, OSError):
-                pass
         # A wall-exhausted source review gets a narrower retry than other
         # backend failures: the caller splits only that batch into singleton
         # reviews. Provider/capacity failures remain 2 and are not hot-retried.
@@ -491,7 +492,7 @@ def main(argv=None) -> int:
         # written (the caller still retries any missing ids once).
         if status == 124:
             return 124
-        if transient:
+        if transient or provider_failure:
             return 2
         return 0 if parsed else 3
     finding = Path(args.finding)
