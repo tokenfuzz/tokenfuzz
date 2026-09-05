@@ -32,7 +32,10 @@ from prompt_render import render_template
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 
-_TRIGGER_PRIMARY_NAME = ".trigger-gate.json"
+#: The first provenance review's vote file; its presence is how the audit's
+#: background gate tells a reviewed finding from one still waiting.
+TRIGGER_PRIMARY_NAME = ".trigger-gate.json"
+_TRIGGER_PRIMARY_NAME = TRIGGER_PRIMARY_NAME
 _TRIGGER_SECOND_NAME = ".trigger-gate-2.json"
 _TRIGGER_RESOLUTION_NAME = ".trigger-gate-resolution.json"
 _TRIGGER_REVIEW_NAMES = (_TRIGGER_PRIMARY_NAME, _TRIGGER_SECOND_NAME)
@@ -2255,7 +2258,10 @@ def _unsettled_scope_fact(report: Path, vote_files: tuple[Path, ...]) -> str:
     return next(iter(observed)) if len(observed) == 1 else ""
 
 
-_TRIGGER_BATCH_SIZE = 4
+#: Findings per provenance-review session; the background gate holds
+#: unreviewed findings until this many are sealed.
+TRIGGER_BATCH_SIZE = 4
+_TRIGGER_BATCH_SIZE = TRIGGER_BATCH_SIZE
 
 
 def _trigger_review_seconds() -> int:

@@ -50,6 +50,9 @@ from timeout import run_timeout
 
 
 STRATEGIES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
+#: How long the background gate lets a sealed, unreviewed finding wait for
+#: batch company before reviewing it alone; see SealedGateWorker._hold_unreviewed.
+GATE_BATCH_HOLD_SECONDS = 180
 STRATEGY_DRY_THRESHOLD = 3
 STRATEGY_S1_DRY_THRESHOLD = 8
 STRATEGY_FORCE_EXTRA = 5
@@ -3050,6 +3053,9 @@ class SealedGateWorker:
         # artifact name -> {slot: tick at which a session of that slot ended
         # having named the artifact}
         self._touched: dict[str, dict[int, int]] = {}
+        # artifact name -> monotonic time it was first sealed without a
+        # trigger review, for the batch hold in _hold_unreviewed
+        self._sealed_since: dict[str, float] = {}
         self._wake = threading.Event()
         self._stop = False
         self._thread: threading.Thread | None = None
@@ -3231,6 +3237,34 @@ class SealedGateWorker:
                 crashes.append(directory)
         return findings, crashes, total_findings, total_crashes
 
+    def _hold_unreviewed(self, findings: list[Path], deadline: float | None) -> list[Path]:
+        """Findings whose first trigger review should wait for company.
+
+        Sessions end one at a time, so each sweep sealed one or two findings
+        and paid a full provenance-review session for each; one audit ran 68
+        reviews for about 140 artifacts. A four-item review costs about 1.4x
+        a singleton, so unreviewed findings wait until a batch is ready, the
+        oldest has waited GATE_BATCH_HOLD_SECONDS, or the productive wall is
+        about to end. Reviewed findings and crashes never wait, and the
+        barrier drains everything regardless, so a hold delays admission
+        only, never a verdict.
+        """
+        now = time.monotonic()
+        unreviewed = [
+            directory for directory in findings
+            if not (directory / triage.TRIGGER_PRIMARY_NAME).is_file()
+        ]
+        for directory in unreviewed:
+            self._sealed_since.setdefault(directory.name, now)
+        if not unreviewed or len(unreviewed) >= triage.TRIGGER_BATCH_SIZE:
+            return []
+        oldest = min(self._sealed_since[d.name] for d in unreviewed)
+        if now - oldest >= GATE_BATCH_HOLD_SECONDS:
+            return []
+        if deadline is not None and deadline - now <= GATE_BATCH_HOLD_SECONDS:
+            return []
+        return unreviewed
+
     def _sweep(self) -> None:
         findings, crashes, total_findings, total_crashes = self.sealed()
         if not findings and not crashes:
@@ -3238,6 +3272,11 @@ class SealedGateWorker:
         deadline = _productive_wall_deadline(self.state)
         if deadline is not None and time.monotonic() >= deadline:
             return
+        held = self._hold_unreviewed(findings, deadline)
+        if held:
+            findings = [d for d in findings if d not in held]
+            if not findings and not crashes:
+                return
         runtime = self.runtime
         started = time.monotonic()
         # The same phase rows the barrier writes, marked as not blocking the

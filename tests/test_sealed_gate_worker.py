@@ -60,6 +60,12 @@ class SealTests(unittest.TestCase):
         self.runtime = _runtime(self.root)
         self.results = self.runtime.results
         self.state = audit_runner.BackendState(self.runtime, mock.Mock(), iteration=1)
+        # These tests pin what is sealed, not when a review is batched: a
+        # lone finding is gated on the next sweep. The hold tests below
+        # restore the real hold themselves.
+        self._no_hold = mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 0)
+        self._no_hold.start()
+        self.addCleanup(self._no_hold.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -197,6 +203,65 @@ class SealTests(unittest.TestCase):
             sorted((row["phase"], row["blocked"], row["iteration"]) for row in rows),
             [("crash_triage", False, 1), ("result_gates", False, 1)],
         )
+
+    def _sweep_with_gates(self, worker) -> dict[str, dict]:
+        calls: dict[str, dict] = {}
+
+        def crash_gate(*_args, **kwargs):
+            calls["crash"] = kwargs
+            return {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0}
+
+        def find_gate(*_args, **kwargs):
+            calls["find"] = kwargs
+            return {"accepted": 0, "rejected": 0, "pending": 0}
+
+        def expand(_runtime, **kwargs):
+            return {"expanded": 0, "added": 0, "skipped": 0, "pending": 0}
+
+        with mock.patch.object(triage, "triage_crash_dirs", side_effect=crash_gate), \
+             mock.patch.object(triage, "validate_find_gate", side_effect=find_gate), \
+             mock.patch.object(audit_runner, "expand_new_crash_clusters", side_effect=expand):
+            worker._sweep()
+        return calls
+
+    def test_an_unreviewed_finding_waits_for_a_batch_or_its_age(self) -> None:
+        # One session ending sealed one finding and paid a whole review
+        # session for it; the hold waits for company, but never past its age.
+        lone = _artifact(self.results, "findings", "FIND-001-lone")
+        worker = self._worker()
+        with mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 180):
+            self.assertEqual(self._sweep_with_gates(worker), {})
+            self.assertEqual(worker.sweeps, 0)
+        calls = self._sweep_with_gates(worker)
+        self.assertEqual(calls["find"]["only"], [lone])
+
+    def test_a_full_batch_of_unreviewed_findings_is_reviewed_at_once(self) -> None:
+        names = [f"FIND-00{n}-batch" for n in range(1, triage.TRIGGER_BATCH_SIZE + 1)]
+        expected = [_artifact(self.results, "findings", name) for name in names]
+        worker = self._worker()
+        with mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 180):
+            calls = self._sweep_with_gates(worker)
+        self.assertEqual(calls["find"]["only"], expected)
+
+    def test_a_reviewed_finding_and_a_crash_never_wait(self) -> None:
+        reviewed = _artifact(self.results, "findings", "FIND-001-reviewed")
+        (reviewed / triage.TRIGGER_PRIMARY_NAME).write_text("{}", encoding="utf-8")
+        _artifact(self.results, "findings", "FIND-002-fresh")
+        crash = _artifact(self.results, "crashes", "CRASH-001-2")
+        worker = self._worker()
+        with mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 180):
+            calls = self._sweep_with_gates(worker)
+        self.assertEqual(calls["find"]["only"], [reviewed])
+        self.assertEqual(calls["crash"]["only"], [crash])
+
+    def test_the_hold_releases_when_the_productive_wall_is_about_to_end(self) -> None:
+        lone = _artifact(self.results, "findings", "FIND-001-lone")
+        worker = self._worker()
+        soon = time.monotonic() + 90
+        with mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 180), \
+             mock.patch.object(audit_runner, "_productive_wall_deadline", return_value=soon):
+            calls = self._sweep_with_gates(worker)
+        self.assertEqual(calls["find"]["only"], [lone])
 
     def test_a_failed_sweep_is_logged_and_the_worker_keeps_serving(self) -> None:
         _artifact(self.results, "findings", "FIND-001-old")
@@ -347,6 +412,9 @@ class PoolIntegrationTests(unittest.TestCase):
         self.state = audit_runner.BackendState(
             self.runtime, context, iteration=1, started_at=time.monotonic(),
         )
+        self._no_hold = mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 0)
+        self._no_hold.start()
+        self.addCleanup(self._no_hold.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()

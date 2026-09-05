@@ -111,6 +111,12 @@ class ContinuousSchedulerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="continuous-")
         self.root = Path(self.temp.name)
+        # Scheduling and accounting tests seed one finding and expect the
+        # next sweep to gate it; the batch hold is covered by the gate
+        # worker's own tests.
+        self._no_hold = mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 0)
+        self._no_hold.start()
+        self.addCleanup(self._no_hold.stop)
 
     def tearDown(self) -> None:
         self.temp.cleanup()
