@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMAND = ROOT / "lib" / "benchmark.py"
+OPERATOR_COMMAND = ROOT / "bin" / "benchmark"
 MANIFEST = ROOT / "output" / "canary" / ".ground-truth.json"
 sys.path.insert(0, str(ROOT / "lib"))
 
@@ -60,9 +61,9 @@ class BenchmarkScoringTests(unittest.TestCase):
         )
         return crash
 
-    def score(self, run, manifest=MANIFEST, members=None, conditions=None):
+    def score(self, run, manifest=MANIFEST, members=None, conditions=None, command=COMMAND):
         output = self.root / (run.name + "-score-" + str(len(list(self.root.glob("*-score-*")))) + ".json")
-        args = [sys.executable, str(COMMAND), "score", str(run),
+        args = [sys.executable, str(command), "score", str(run),
                 "--ground-truth", str(manifest), "--out", str(output)]
         if members is not None:
             args.extend(("--members", str(members)))
@@ -70,6 +71,31 @@ class BenchmarkScoringTests(unittest.TestCase):
             args.extend(("--conditions", conditions))
         proc = subprocess.run(args, capture_output=True, text=True)
         return proc, json.loads(output.read_text()) if output.is_file() else None
+
+    def test_bin_benchmark_score_is_the_library_scorer(self) -> None:
+        """`bin/benchmark score` and `lib/benchmark.py score` are one contract."""
+        proc, via_bin = self.score(self.pool, members=self.members, command=OPERATOR_COMMAND)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        _, via_lib = self.score(self.pool, members=self.members)
+        self.assertEqual(via_bin, via_lib)
+        self.assertEqual(via_bin["overall"]["recall"], 1.0)
+        # A bad manifest fails the same way, and neither spelling launches a run.
+        proc, _ = self.score(self.pool, manifest=self.root / "missing.json", command=OPERATOR_COMMAND)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("ground-truth manifest not found", proc.stderr)
+        help_proc = subprocess.run(
+            [sys.executable, str(OPERATOR_COMMAND), "score", "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(help_proc.returncode, 0, help_proc.stderr)
+        self.assertIn("--ground-truth", help_proc.stdout)
+        self.assertIn("--findings-dir", help_proc.stdout)
+        top_help = subprocess.run(
+            [sys.executable, str(OPERATOR_COMMAND), "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(top_help.returncode, 0, top_help.stderr)
+        self.assertIn("benchmark score", top_help.stdout)
 
     def test_overall_and_condition_scoring(self) -> None:
         self.assertTrue(MANIFEST.is_file())

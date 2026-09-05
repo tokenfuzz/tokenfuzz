@@ -627,7 +627,15 @@ def _nonnegative(value: str) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(prog="benchmark")
+    result = argparse.ArgumentParser(
+        prog="benchmark",
+        description="Run TokenFuzz harness-vs-model benchmark cells.",
+        epilog=(
+            "benchmark score <crashes-or-results-dir> --ground-truth <manifest> "
+            "scores a results or pool tree against a target's answer key "
+            "without running anything; see `benchmark score --help`."
+        ),
+    )
     result.add_argument("--target", default="")
     result.add_argument("--backend", default="codex", choices=("claude", "codex", "gemini", "grok", "oss"))
     result.add_argument("--model", default="")
@@ -3534,7 +3542,13 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
 
 
 def _main(argv: list[str] | None = None) -> int:
-    args = parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "score":
+        # The answer-key scorer is the one lib/benchmark.py verb an operator
+        # runs by hand. Route it through the library's own parser so the two
+        # spellings share one argument contract and cannot drift.
+        return metrics.main(arguments)
+    args = parser().parse_args(arguments)
     bench_root = Path(args.bench_root)
     if not bench_root.is_absolute():
         bench_root = (SCRIPT_ROOT / bench_root).resolve()
