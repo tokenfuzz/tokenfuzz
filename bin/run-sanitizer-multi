@@ -221,12 +221,12 @@ class MultiRun:
                     match = re.match(r"^(?:MISSED . closest reached: |EXEC_FAIL|NO_COVERAGE:? ?)(.*)$", line)
                     if match and not closest:
                         closest = match.group(1).strip()[:200]
-                    # hits names which of the three unrelated coverage
-                    # failures this was; the gate records that rather than one
-                    # label for all of them. The decision is unchanged.
+                    # hits names which of the unrelated coverage failures this
+                    # was; the gate records that rather than one label for all
+                    # of them. The decision is unchanged.
                     match = re.match(
                         r"^(COVERAGE_TIMEOUT|COVERAGE_NO_SANCOV|"
-                        r"COVERAGE_SYMBOLIZE_FAIL) - (.*)$", line)
+                        r"COVERAGE_SYMBOLIZE_FAIL|COVERAGE_HARNESS_ONLY) - (.*)$", line)
                     if match and not coverage_fail:
                         coverage_fail = match.group(1)
                         closest = closest or match.group(2).strip()[:200]

@@ -328,6 +328,43 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertEqual(
             list((self.results / ".hits-cache").glob("harness.c.*.cov")), twins)
 
+    def test_a_harness_that_never_enters_the_library_is_named_not_a_symbolizer_failure(self) -> None:
+        """A harness that drives the plain CLI as a subprocess measures nothing.
+
+        Its coverage twin executes only the harness's own frames, every one of
+        which the twin filter drops, and that read as "none of their PCs
+        resolved" — a toolchain diagnosis for a harness-shape problem. The gate
+        still falls open; the label now says which fix applies.
+        """
+        source, binary = self._harness_route()
+        plain_app = self.plain / "app"
+        source.write_text(
+            "#include <sys/wait.h>\n"
+            "#include <unistd.h>\n"
+            "int main(int argc, char **argv) {\n"
+            "    if (argc < 2) return 2;\n"
+            "    pid_t pid = fork();\n"
+            "    if (pid == 0) {\n"
+            f"        execl(\"{plain_app}\", \"{plain_app}\", argv[1], (char *)0);\n"
+            "        _exit(3);\n"
+            "    }\n"
+            "    int status = 0;\n"
+            "    waitpid(pid, &status, 0);\n"
+            "    return WIFEXITED(status) ? WEXITSTATUS(status) : 3;\n"
+            "}\n"
+        )
+        result = self._run_hits(
+            "app_parse",
+            environment={"ASAN_GENERIC_BIN": str(binary)},
+            extra=["--harness-source", str(source)],
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 3, output)
+        self.assertIn("COVERAGE_HARNESS_ONLY", output)
+        self.assertIn("subprocess", output)
+        self.assertNotIn("COVERAGE_SYMBOLIZE_FAIL", output)
+        self.assertNotIn("MISSED", output)
+
     def test_a_harness_named_like_a_target_file_keeps_target_frames(self) -> None:
         # The fixture library is lib.c; a harness also called lib.c must not
         # cost the target's frames, only its own.

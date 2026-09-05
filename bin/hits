@@ -177,6 +177,8 @@ class Hits:
         self.deadline_hit = False
         # Set when the symbolizer itself was killed at its deadline.
         self.symbolize_timed_out = False
+        # Set when every resolved PC belonged to the harness twin itself.
+        self.harness_only_coverage = False
         # When generic_binary is a coverage twin of a probe harness rather than
         # the configured CLI, the harness source it was compiled from: the twin
         # takes the harness's argv shape, and frames from that file are the
@@ -614,6 +616,11 @@ class Hits:
                 if own or (prefix and location.startswith(prefix)):
                     continue
                 kept.extend((function, location))
+            # Every PC resolved and every one was the harness's own: the twin
+            # never entered the instrumented library. That is a harness that
+            # drives the target some other way (a subprocess, a dlopen), not
+            # a symbolizer that failed, and the two need different fixes.
+            self.harness_only_coverage = bool(lines) and not kept
             lines = kept
         lines = self._target_relative(lines)
         return lines, lines
@@ -864,6 +871,14 @@ class Hits:
                 "the symbolizer was killed at its "
                 f"{sanitizer.SYMBOLIZE_TIMEOUT_SECONDS}s deadline with the "
                 "run's PCs still unresolved",
+            )
+        if self.harness_only_coverage:
+            return (
+                "COVERAGE_HARNESS_ONLY",
+                "every executed PC belongs to the harness itself; the twin "
+                "never called into the instrumented library, so a harness "
+                "that drives the target as a subprocess cannot be measured - "
+                "call the library directly, or probe through the runner",
             )
         return (
             "COVERAGE_SYMBOLIZE_FAIL",
