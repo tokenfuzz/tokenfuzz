@@ -45,12 +45,14 @@ class ContextTokensTests(unittest.TestCase):
                 + _assistant(120_000) + "\n" + "{\"type\": \"assistant\", \"partial",
                 encoding="utf-8",
             )
-            largest, offset = audit_helpers.context_tokens_delta(raw, 0)
+            largest, inflight, offset = audit_helpers.context_tokens_delta(raw, 0)
             self.assertEqual(largest, 120_000)
+            # Two dispatches, one result: one tool still running.
+            self.assertEqual(inflight, 1)
             # The unfinished last line is not consumed.
             self.assertEqual(offset, len(raw.read_bytes()) - len(b"{\"type\": \"assistant\", \"partial"))
-            again, offset2 = audit_helpers.context_tokens_delta(raw, offset)
-            self.assertEqual((again, offset2), (0, offset))
+            again, change, offset2 = audit_helpers.context_tokens_delta(raw, offset)
+            self.assertEqual((again, change, offset2), (0, 0, offset))
 
     def test_dialects_without_per_request_usage_report_nothing(self) -> None:
         self.assertEqual(audit_helpers._event_context_tokens(
@@ -99,6 +101,32 @@ class RolloverTests(unittest.TestCase):
         self.assertGreaterEqual(text.count('"type": "user"'), 3)
         self.assertLess(text.count('"type": "user"'), 5)
 
+    def test_a_tool_dispatched_by_the_over_cap_request_is_never_killed(self) -> None:
+        # The reviewer's scenario: an earlier tool completed, then the request
+        # that crossed the cap dispatched a slow tool. Killing at the earlier
+        # completion lands mid-command; the session must wait for the slow
+        # tool's result.
+        script = self.root / "slow_tool.py"
+        script.write_text(
+            "import json,time\n"
+            f"print({_assistant(40_000)!r}, flush=True)\n"
+            f"print({_tool_result()!r}, flush=True)\n"
+            f"print({_assistant(260_000)!r}, flush=True)\n"
+            "time.sleep(2.5)\n"
+            "open('tool-finished', 'w').write('yes')\n"
+            f"print({_tool_result()!r}, flush=True)\n"
+            "time.sleep(10)\n",
+            encoding="utf-8",
+        )
+        raw = self.root / "session.raw"
+        rc = llm_invoke._run_agent_process(
+            [sys.executable, str(script)], None, raw, self.root, os.environ.copy(),
+            turn_cap=0, context_cap=200_000,
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue((self.root / "tool-finished").is_file(), "killed mid-command")
+        self.assertTrue(llm_invoke.session_turn_capped(raw))
+
     def test_a_session_under_the_cap_runs_to_its_natural_end(self) -> None:
         script = self.root / "quick.py"
         script.write_text(
@@ -123,7 +151,7 @@ class RolloverTests(unittest.TestCase):
         def fake_process(*_args, **kwargs):
             seen.update(kwargs)
             return 0
-        for backend, expected in (("claude", 200_000), ("codex", 0)):
+        for backend, expected in (("claude", 200_000), ("codex", 0), ("gemini", 0), ("grok", 0), ("oss", 0)):
             with mock.patch.object(llm_invoke, "backend_bin", return_value="/bin/true"), \
                  mock.patch.object(llm_invoke, "_run_agent_process", side_effect=fake_process), \
                  mock.patch.object(llm_invoke, "agent_security_problem", return_value=""):
@@ -136,6 +164,9 @@ class RolloverTests(unittest.TestCase):
     def test_the_operator_setting_reaches_the_launch_and_the_prompt(self) -> None:
         with mock.patch.dict(os.environ, {"CONTEXT_SOFT_CAP": "150000"}):
             self.assertEqual(audit_runner._context_cap(), 150_000)
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CONTEXT_SOFT_CAP", None)
+            self.assertEqual(audit_runner._context_cap(), 0, "off unless an operator sets it")
         with mock.patch.dict(os.environ, {"CONTEXT_SOFT_CAP": "lots"}):
             with self.assertRaises(ValueError):
                 audit_runner._context_cap()

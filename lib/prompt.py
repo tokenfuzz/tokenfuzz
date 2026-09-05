@@ -93,9 +93,10 @@ DEFAULT_TURN_SOFT_CAP = 128
 # session that has grown past this is paying more per step than a fresh one
 # resumed from state; measured sessions confirmed most of their artifacts well
 # before it. Only backends that report per-request usage in the stream can be
-# measured (Claude does); the rest are bounded by the turn cap alone.
+# measured (Claude does), so a default that fires would bound one benchmark
+# condition and not the others; it is off unless an operator sets it.
 # lib/audit_runner.py resolves $CONTEXT_SOFT_CAP against it; 0 disables it.
-DEFAULT_CONTEXT_SOFT_CAP = 200_000
+DEFAULT_CONTEXT_SOFT_CAP = 0
 
 
 def agent_role(

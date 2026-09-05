@@ -293,15 +293,17 @@ class TelemetryTests(unittest.TestCase):
             {"card_id": "WORK-1", "status": "claimed"},
             {"card_id": "WORK-1", "status": "find"},
             {"card_id": "WORK-3", "status": "claimed"},
+            {"card_id": "WORK-4", "status": "done"},
             {"card_id": "WORK-9", "status": "blocked"},
         ])
         self.assertEqual(telemetry.coverage(self.results), {
-            "cards": 4, "examined": 2, "examined_share": 0.5,
+            "cards": 4, "examined": 3, "examined_share": 0.75,
             "lanes": {
                 "S3": {"cards": 2, "examined": 1, "concluded": 1,
                        "files": 2, "files_examined": 1, "examined_share": 0.5},
-                "S7": {"cards": 2, "examined": 1, "concluded": 0,
-                       "files": 2, "files_examined": 1, "examined_share": 0.5},
+                # `done` is terminal in the queue's own contract.
+                "S7": {"cards": 2, "examined": 2, "concluded": 1,
+                       "files": 2, "files_examined": 2, "examined_share": 1.0},
             },
         })
 

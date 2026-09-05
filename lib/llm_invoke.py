@@ -1473,7 +1473,7 @@ def _run_agent_process(
     enrichment_limit = None
     enrichment_deadline = None
     offset = total = 0
-    context_offset = context_seen = 0
+    context_offset = context_seen = context_inflight = 0
     feeder = watchdog = None
     with raw.open("w", encoding="utf-8") as sink:
         process = subprocess.Popen(
@@ -1512,15 +1512,20 @@ def _run_agent_process(
                 count, offset = audit_helpers.tool_call_delta(raw, offset)
                 total += count
                 if context_cap > 0:
-                    largest, context_offset = audit_helpers.context_tokens_delta(
-                        raw, context_offset,
+                    largest, inflight_change, context_offset = (
+                        audit_helpers.context_tokens_delta(raw, context_offset)
                     )
                     context_seen = max(context_seen, largest)
+                    context_inflight += inflight_change
                 if turn_cap > 0 and total >= turn_cap:
                     capped_detail = f"after {total} completed tool calls"
-                elif context_cap > 0 and context_seen >= context_cap and count:
-                    # Only at a completed tool call: the same safe boundary the
-                    # transcript cap uses, never mid-command.
+                elif (
+                    context_cap > 0 and context_seen >= context_cap
+                    and context_inflight <= 0
+                ):
+                    # Only when no tool is in flight: a completed earlier tool
+                    # must not stand in for one the over-cap request has just
+                    # dispatched, or the kill lands mid-command.
                     capped_detail = (
                         f"at {context_seen} context tokens "
                         f"(CONTEXT_SOFT_CAP {context_cap}) after {total} completed tool calls"

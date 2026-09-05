@@ -351,19 +351,20 @@ def lane_stats(results_dir: Path) -> dict[str, dict[str, int]]:
     return dict(sorted(stats.items()))
 
 
-#: Claim statuses that close a card for the run: the card was worked to a
-#: conclusion, not merely offered.
-_CONCLUDED_CARD_STATUSES = frozenset({"find", "crash", "discarded", "blocked"})
+#: Claim statuses that close a card for the run, from the queue's own
+#: contract so a new terminal status cannot go uncounted here.
+_CONCLUDED_CARD_STATUSES = frozenset(workqueue.TERMINAL_CARD_STATUSES)
 
 
 def coverage(results_dir: Path) -> dict:
     """How much of the ranked attack surface each lane examined.
 
-    Lanes and hypotheses say what a run produced; this says what it looked
-    at, so a queue or rotation change that starves a lane shows up as an
+    Lanes and hypotheses say what a run produced; this says what it was
+    handed, so a queue or rotation change that starves a lane shows up as an
     unexamined share rather than a quiet drop in yield. Cards come from the
-    rank window (``work-cards.jsonl``); a card is examined once any session
-    claimed it and concluded once its latest claim closes it.
+    rank window (``work-cards.jsonl``); "examined" is a claim-based proxy — a
+    session claimed the card — not proof it read the card's file, and
+    "concluded" means its latest claim carries a terminal status.
     """
     results = Path(results_dir)
     cards = _rows(results / "work-cards.jsonl")

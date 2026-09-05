@@ -261,11 +261,15 @@ class SealTests(unittest.TestCase):
         worker = self._worker()
         with mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 180):
             self._sweep_with_gates(worker)
-        self.assertTrue(worker._holding)
-        with mock.patch.object(worker._wake, "wait", return_value=True) as wait, \
+        self.assertIsNotNone(worker._hold_deadline)
+        # The reviewer's scenario: an unrelated wake 100 s in must not restart
+        # the hold; the next wait is for the remaining 80 s, not another 180.
+        with mock.patch.object(audit_runner.time, "monotonic",
+                               return_value=worker._hold_deadline - 80), \
+             mock.patch.object(worker._wake, "wait", return_value=True) as wait, \
              mock.patch.object(worker, "_sweep", side_effect=lambda: setattr(worker, "_stop", True)):
             worker._run()
-        self.assertEqual(wait.call_args.args, (audit_runner.GATE_BATCH_HOLD_SECONDS,))
+        self.assertAlmostEqual(wait.call_args.args[0], 80, places=3)
 
     def test_the_hold_releases_when_the_productive_wall_is_about_to_end(self) -> None:
         lone = _artifact(self.results, "findings", "FIND-001-lone")

@@ -327,10 +327,12 @@ replicates; an em dash means unrecorded, never zero.
 The same numbers sit in each cell's `metrics.json` under `telemetry`, and a
 `lineage.jsonl` beside it joins card, hypothesis, testcase, artifact, and
 signature, one row per hypothesis. `telemetry.coverage` records, per strategy
-lane, how many ranked work cards the run examined and concluded and the share
-of the ranked surface that is: yield per lane says what a run produced, the
-examined share says what it looked at, so a queue change that starves a lane
-shows as an unexamined share rather than a quiet drop in yield.
+lane, how many ranked work cards a session claimed (`examined`, a claim-based
+proxy: it says the card was handed out, not that its file was read) and how
+many reached a terminal claim status (`concluded`), with the claimed share of
+the ranked surface. Yield per lane says what a run produced; this says what it
+was handed, so a queue change that starves a lane shows as an unclaimed share
+rather than a quiet drop in yield.
 
 A direct backend that exits nonzero after writing substantive finding or crash
 evidence becomes an early terminal outcome rather than losing the entire cell.

@@ -164,9 +164,11 @@ trigger reviewer needs two disproof-backed Reject votes to remove a
 sanitizer-confirmed crash and otherwise fails open. Findings need two
 substance-gate accepts to confirm (or two rejects to quarantine), followed by
 source review of the trigger and exact claimed security consequence. A finding
-no probe reproduced publishes only after a second reviewer, reading through a
-reachability lens, agrees with the first; a split goes to the focused
-resolver. A finding is quarantined only when two anchored reviewers agree that the trigger is
+no probe reproduced gets a second reviewer, reading through a reachability
+lens, when one is available; agreement publishes, a split goes to the focused
+resolver whose answer stands, and when no second reviewer can run the first
+verdict stands as before. This is additional review, not mandatory
+corroboration. A finding is quarantined only when two anchored reviewers agree that the trigger is
 unreachable or the claimed consequence is affirmatively source-disproved;
 missing evidence fails open.
 

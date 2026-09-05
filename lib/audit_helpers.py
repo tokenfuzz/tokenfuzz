@@ -925,8 +925,31 @@ def _event_context_tokens(event: dict) -> int:
     return total
 
 
-def context_tokens_delta(log_file: str | os.PathLike[str], offset: int = 0) -> tuple[int, int]:
-    """Largest per-request context seen in newly completed lines, and the new offset."""
+def _event_inflight_delta(event: dict) -> int:
+    """Tool dispatches minus tool completions this event represents (Claude)."""
+    if event.get("type") == "assistant":
+        return sum(
+            1 for item in _claude_content_items(event)
+            if isinstance(item, dict) and item.get("type") == "tool_use"
+        )
+    if event.get("type") == "user":
+        return -sum(
+            1 for item in _claude_content_items(event)
+            if isinstance(item, dict) and item.get("type") == "tool_result"
+        )
+    return 0
+
+
+def context_tokens_delta(
+    log_file: str | os.PathLike[str], offset: int = 0,
+) -> tuple[int, int, int]:
+    """Largest per-request context in newly completed lines, the change in
+    tools still in flight (dispatched minus completed), and the new offset.
+
+    The in-flight count is what lets a context cap end a session only when no
+    tool is running: a completed earlier tool must not stand in for the one a
+    later, larger request has just dispatched.
+    """
     try:
         offset = max(0, int(offset))
     except (TypeError, ValueError):
@@ -939,11 +962,12 @@ def context_tokens_delta(log_file: str | os.PathLike[str], offset: int = 0) -> t
             f.seek(offset)
             chunk = f.read()
     except OSError:
-        return 0, offset
+        return 0, 0, offset
     last_newline = chunk.rfind(b"\n")
     if last_newline < 0:
-        return 0, offset
+        return 0, 0, offset
     largest = 0
+    inflight = 0
     for raw in chunk[: last_newline + 1].splitlines():
         if not raw:
             continue
@@ -953,7 +977,8 @@ def context_tokens_delta(log_file: str | os.PathLike[str], offset: int = 0) -> t
             continue
         if isinstance(event, dict):
             largest = max(largest, _event_context_tokens(event))
-    return largest, offset + last_newline + 1
+            inflight += _event_inflight_delta(event)
+    return largest, inflight, offset + last_newline + 1
 
 
 def _count_tools(path: str) -> dict[str, int]:
