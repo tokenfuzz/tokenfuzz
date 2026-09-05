@@ -238,6 +238,34 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
             with self.subTest(variant="compact", backend=backend or "unset"):
                 self.assertIn(marker, prompt.compact_fresh_prompt(context(backend), 1))
 
+    def test_mapping_delegates_are_offered_only_where_their_spend_is_counted(self) -> None:
+        # A delegate moves mapping reads out of the replayed transcript, but a
+        # cell whose accounting cannot see the delegate's spend must not be
+        # invited to use one.
+        def context(backend: str) -> prompt.PromptContext:
+            return prompt.PromptContext(
+                results_dir=self.results, target_root=self.target,
+                target_slug="sampleproj", reference_dir=self.references,
+                num_agents=1, agent_roles=("reproduce",), backend=backend,
+            )
+
+        for backend in ("claude", "gemini"):
+            with self.subTest(backend=backend):
+                for rendered in (
+                    prompt.compact_suffix(context(backend), 1),
+                    prompt._render_common_suffix(context(backend)),
+                ):
+                    self.assertIn("delegate it to a read-only subagent", rendered)
+                    self.assertIn("Never delegate probing", rendered)
+        for backend in ("codex", "grok", "oss", ""):
+            with self.subTest(backend=backend or "unset"):
+                self.assertNotIn(
+                    "read-only subagent", prompt.compact_suffix(context(backend), 1),
+                )
+                self.assertNotIn(
+                    "read-only subagent", prompt._render_common_suffix(context(backend)),
+                )
+
     def test_compact_prompt_defers_to_the_resumed_cards_strategy_gate(self) -> None:
         compact = prompt.compact_fresh_prompt(self.context(), 1)
 

@@ -716,6 +716,18 @@ _DELEGATION_UNOBSERVABLE = frozenset({"grok"})
 _CHILD_SPEND_UNATTRIBUTED = frozenset({"codex", "oss", "grok"})
 
 
+def child_spend_attributed(backend: str) -> bool:
+    """Whether a session's delegated work is counted in that session's usage.
+
+    The prompt invites mapping delegates only where this holds: a benchmark
+    cell must not be told to spend tokens its own accounting cannot see.
+    """
+    return (
+        backend not in _CHILD_SPEND_UNATTRIBUTED
+        and backend not in _DELEGATION_UNOBSERVABLE
+    )
+
+
 def _delegation_events_from_text(raw: str, backend: str) -> int:
     """Subagent spawns visible in a streamed transcript, one per call id.
 

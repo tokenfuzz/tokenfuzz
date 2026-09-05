@@ -1,0 +1,7 @@
+For a mapping question whose answer you need only as a summary — every
+caller of a function, how a value flows across files, where a configuration
+value is set — delegate it to a read-only subagent ({{ delegate_name }}) with
+one bounded question and build on what it returns, instead of paging through
+files in this session, where every read replays on every later turn. The
+delegate reads and reports; you decide. Never delegate probing, `bin/state`
+writes, testcase authoring, or a verdict.

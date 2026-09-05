@@ -257,6 +257,7 @@ def _render_common_suffix(context: PromptContext) -> str:
             "tool_call_deep_soft_target": str(context.soft_target(True)),
             "turn_budget_section": turn_budget_section(context),
             "session_rules_digest": session_rules_digest(context.reference_dir),
+            "mapping_delegate_directive": mapping_delegate_directive(context),
         },
     )
 
@@ -266,6 +267,24 @@ def common_suffix(context: PromptContext) -> str:
     if cache.is_file() and cache.stat().st_size:
         return cache.read_text(encoding="utf-8")
     return _render_common_suffix(context)
+
+
+#: Read-only delegates a backend's CLI offers an audit session. Only backends
+#: whose delegated spend lands in the session's own usage are listed; the
+#: prompt never invites work the benchmark accounting cannot see.
+_MAPPING_DELEGATES = {
+    "claude": "the `Explore` agent via the Agent tool",
+    "gemini": "`invoke_agent`",
+}
+
+
+def mapping_delegate_directive(context: PromptContext) -> str:
+    import llm_usage  # lazy: keeps prompt rendering free of the usage reader otherwise
+
+    delegate = _MAPPING_DELEGATES.get(context.backend)
+    if not delegate or not llm_usage.child_spend_attributed(context.backend):
+        return ""
+    return render_template("mapping_delegate.md.j2", {"delegate_name": delegate})
 
 
 def compact_suffix(context: PromptContext, agent: int) -> str:
@@ -283,6 +302,7 @@ def compact_suffix(context: PromptContext, agent: int) -> str:
             "tool_call_soft_target": str(context.soft_target(False)),
             "tool_call_deep_soft_target": str(context.soft_target(True)),
             "turn_budget_section": turn_budget_section(context),
+            "mapping_delegate_directive": mapping_delegate_directive(context),
         },
     )
 
