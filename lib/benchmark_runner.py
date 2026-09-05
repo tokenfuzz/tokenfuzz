@@ -426,6 +426,16 @@ def _evidence_scope(
 _REPLAY_DEMOTION_REASONS = {
     "clean": "sanitizer evidence did not reproduce through the configured target invocation",
     "mismatch": "configured-target replay crashed on a different fault than the one reported",
+    # The target ran the filed reproducer and never reached the fault: every
+    # run exited nonzero without a sanitizer report, or hit its deadline. No
+    # rate is written for that — a usage error says nothing about the crash —
+    # but for a direct-condition bundle no later pass will measure it, so the
+    # claim goes to the finding gate. Only a bundle no replay ever measured:
+    # a verdict already reached on a measured rate stands.
+    "inconclusive": (
+        "configured-target replay ran the filed reproducer without reaching "
+        "the reported fault (nonzero exits or timeouts; see .audit/reverify.log)"
+    ),
 }
 
 
@@ -435,9 +445,49 @@ _REPLAY_DEMOTION_REASONS = {
 # and a resolver that failed outright, none of which the crash chose. A
 # demotion is permanent, so it may not rest on a resolver's blind spot.
 _REPLAY_NON_VERDICTS = {
-    "unmeasured": "the replay produced no measurement; see .audit/reverify.log",
+    "unmeasured": "the replay never launched the target; see .audit/reverify.log",
     "no-contract": "no runnable replay contract resolved for the bundle",
 }
+
+
+# Contract gaps the bundle itself decides. Nothing on the host changes them,
+# so a replay withheld on one waited forever and the cell published an
+# unjudged remainder for every such crash. The claim is still real evidence:
+# it goes to the finding gate, where source review adjudicates it.
+_REPLAY_CONTRACT_DEMOTION_REASONS = {
+    "sanitizer-not-instrumented": (
+        "the report's sanitizer is not one this target builds, so the crash "
+        "cannot be replayed under the run's sanitizer policy"
+    ),
+    "source-harness-uncompiled": (
+        "the bundle holds driver source but no compiled driver for the "
+        "replay to run"
+    ),
+    "no-replay-evidence": (
+        "the bundle carries no input or driver a replay could run"
+    ),
+}
+
+
+def _replay_contract_reason(
+    crash_dir: Path, target_root: Path, target_slug: str,
+) -> str:
+    """The resolver's own REASON for producing no runnable contract, or ""."""
+    config_path = _benchmark_target_config_path(
+        crash_dir.parent.parent, target_root, target_slug,
+    )
+    try:
+        resolved = metrics.resolve_reverify_lines(
+            crash_dir, target_root, target_slug,
+            str(config_path) if config_path is not None else "",
+        )
+    except Exception:
+        return ""
+    for line in "\n".join(resolved or []).splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key == "REASON":
+            return value
+    return ""
 
 
 def triage_cell_crashes(
@@ -496,26 +546,48 @@ def triage_cell_crashes(
                 continue
             if status == "reproduced":
                 continue
+            measured_verdict_stands = (
+                _measured_crash_rate(crash_dir / "sanitizer.txt") is not None
+                and validation_receipt.claims_state(
+                    crash_dir, validation_receipt.FINAL_STATES,
+                )
+            )
+            if status == "inconclusive" and measured_verdict_stands:
+                # Every regenerate replays every bundle. A reproducer that
+                # measured 5/5 once and now times out under host load, or
+                # exits on a target CLI change, has not stopped being a
+                # crash; the demotion below is permanent, so it must not
+                # rest on today's run when an earlier one reached the fault.
+                log(
+                    f"WARN: model-direct replay could not settle "
+                    f"{crash_dir.name} ({_REPLAY_DEMOTION_REASONS[status]}) - "
+                    f"its measured verdict stands"
+                )
+                continue
             if status in _REPLAY_NON_VERDICTS:
+                if status == "no-contract":
+                    # A gap the bundle itself decides is permanent: no later
+                    # pass measures it, so withholding the verdict would hold
+                    # the crash unjudged for good. Demote it to a finding
+                    # with the reason, where the claim is still reviewed.
+                    gap = (
+                        "no-replay-evidence"
+                        if not crash_artifacts.carries_replay_evidence(crash_dir)
+                        else _replay_contract_reason(crash_dir, target, target_slug)
+                    )
+                    if gap in _REPLAY_CONTRACT_DEMOTION_REASONS:
+                        triage.demote_to_finding(
+                            crash_dir, results,
+                            _REPLAY_CONTRACT_DEMOTION_REASONS[gap],
+                        )
+                        pre_demoted += 1
+                        continue
                 # The replay never ran, so it says nothing about this crash —
                 # not that it is real, and not that it is not. Keep the
                 # artifact, withhold the verdict, and make the harness failure
                 # loud. It counts as unadjudicated, so a broken replay can
                 # neither destroy a crash nor inflate the condition.
-                if (
-                    status == "no-contract"
-                    and not crash_artifacts.carries_replay_evidence(crash_dir)
-                ):
-                    # Nothing resolved because the bundle carries nothing to
-                    # run. That is the completeness gate's call, not this
-                    # one's: leave it in place and let the gate hold it.
-                    continue
-                if (
-                    _measured_crash_rate(crash_dir / "sanitizer.txt") is not None
-                    and validation_receipt.claims_state(
-                        crash_dir, validation_receipt.FINAL_STATES,
-                    )
-                ):
+                if measured_verdict_stands:
                     # A replay that could not run today (host load, a temp
                     # failure) does not withdraw the verdict a measured replay
                     # already reached; ordinary triage re-reads that receipt.
@@ -571,7 +643,7 @@ def _verify_model_direct_crash(
         return "no-contract"
     fields, replay_args = resolved
     replayed = reverify_one_crash(crash_dir, target, target_slug)
-    if replayed in {"unmeasured", "no-contract", "mismatch"}:
+    if replayed in {"unmeasured", "inconclusive", "no-contract", "mismatch"}:
         return replayed
     rate = _measured_crash_rate(crash_dir / "sanitizer.txt")
     if rate is None or rate[0] == 0:
@@ -1116,10 +1188,8 @@ def _unadjudicated_warning(name: str, unjudged: int) -> str:
     return (
         f"WARN: {name} has {unjudged} finding(s) un-adjudicated after drain; "
         "they count as unconfirmed. `bin/benchmark --regenerate` retries the "
-        "ones whose review left no usable answer or needs focused resolution; "
-        "an unresolved final review stays unjudged until new evidence settles "
-        "it. Each "
-        "finding's validation.json says which, where one exists"
+        "ones whose review left no usable answer or needs focused resolution. "
+        "Each finding's validation.json says which, where one exists"
     )
 
 
@@ -1480,7 +1550,22 @@ def run_harness(
 
 def _run_tool(name: str, *args: str, env: dict | None = None, stdout=None) -> int:
     command = [str(SCRIPT_ROOT / "bin" / name), *map(str, args)]
-    return subprocess.run(command, env=env, stdout=stdout or subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode
+    completed = subprocess.run(
+        command, env=env, stdout=stdout or subprocess.DEVNULL,
+        stderr=subprocess.PIPE, text=True, errors="replace", check=False,
+    )
+    if completed.returncode:
+        # Every caller treats a nonzero exit as "skip this one", so the tool's
+        # own last line is the only record of why — an export refused because
+        # the evidence moved on, a scorer rejecting a tree. Discarding it left
+        # dozens of refused exports per rebuild with nothing in the log.
+        reason = next(
+            (line for line in reversed(completed.stderr.splitlines()) if line.strip()),
+            "no diagnostic on stderr",
+        )
+        subject = f" {args[0]}" if args else ""
+        log(f"WARN: {name}{subject} exited {completed.returncode}: {reason}")
+    return completed.returncode
 
 
 def _resolve_reverify_fields(
@@ -1548,6 +1633,9 @@ def _write_reverify_log(crash_dir: Path, measured: str) -> None:
 #: A replay that recorded a rate, whether or not the fault came back. Only
 #: these two leave `CRASH_RATE` on the artifact.
 _REVERIFY_MEASURED = frozenset({"reproduced", "not-reproduced"})
+# Replay outcomes that write no rate onto the artifact: nothing about them
+# says the fault is gone, so a harness crash keeps its recorded evidence.
+_REPLAY_UNRATED = frozenset({"unmeasured", "inconclusive", "mismatch"})
 
 
 def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> str:
@@ -1555,11 +1643,12 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
 
     Returns `reproduced` / `not-reproduced` (the replay ran and a rate is now
     on the artifact), `mismatch` (it ran and crashed, but on another fault),
-    `unmeasured` (nothing ran to completion), or `no-contract` (the resolver
-    could not produce a runnable contract). Neither of the last two establishes
-    anything about the crash, and callers must not read them as verdicts —
-    collapsing every outcome into one false return let a broken replay silently
-    disqualify real crashes.
+    `inconclusive` (the target ran but never reached the fault: nonzero exits
+    without a report, or deadlines), `unmeasured` (the target never launched),
+    or `no-contract` (the resolver could not produce a runnable contract).
+    None of the last three writes a rate: an invocation the target rejected
+    says nothing about the crash, and collapsing every outcome into one false
+    return once let a broken replay silently disqualify real crashes.
     """
     resolved = _resolve_reverify_fields(crash_dir, target_root, target_slug)
     if resolved is None:
@@ -1650,16 +1739,9 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
             measured = ""
         finally:
             temporary.unlink(missing_ok=True)
-        rate_match = re.search(r"^CRASH_RATE:\s*([0-9]+)/([0-9]+)", measured, re.MULTILINE)
-        crashes = int(rate_match.group(1)) if rate_match else 0
-        runs = int(rate_match.group(2)) if rate_match else 0
-        success_match = re.search(r"^\[run-sanitizer-multi\]\s+SUCCESS_RATE:\s*([0-9]+/[0-9]+)", measured, re.MULTILINE)
-        clean_runs = int(success_match.group(1).split("/", 1)[0]) if success_match else 0
-        if not rate_match or (crashes == 0 and clean_runs == 0):
-            # Nothing ran to completion: no summary at all, or a rate with
-            # neither a crash nor a clean exit behind it (a loader or exec
-            # failure).
-            return "unmeasured", 0, runs, measured
+        status, crashes, runs = _classify_replay_summary(measured)
+        if status in {"unmeasured", "inconclusive"}:
+            return status, 0, runs, measured
         if crashes:
             # Reproduction answers one question: did the same fault happen
             # again? `_same_fault` already requires the sanitizer family, the
@@ -1699,17 +1781,18 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
         # can settle it while the other did not run to completion.
         if legacy[0] == "reproduced":
             status, crashes, runs, measured = legacy
-        elif status == "unmeasured":
+        elif status in {"unmeasured", "inconclusive"}:
             pass
         elif legacy[0] == "unmeasured" or (
             legacy[0] == "mismatch" and status == "not-reproduced"
         ):
             status, crashes, runs, measured = legacy
-    if status in {"unmeasured", "mismatch"}:
+    if status in _REPLAY_UNRATED or len(attempted) > 1:
         # Keep every invocation, not just the one the verdict came from: a
         # fallback that died in the loader reads as "nothing ran" and hides
         # that the documented invocation measured a rate.
         _write_reverify_log(crash_dir, _replay_transcript(attempted))
+    if status in _REPLAY_UNRATED:
         return status
     rate = f"{crashes}/{runs}"
     note = (
@@ -1719,6 +1802,40 @@ def reverify_one_crash(crash_dir: Path, target_root: Path, target_slug: str) -> 
     with (crash_dir / "sanitizer.txt").open("a", encoding="utf-8") as output:
         output.write(f"\nCRASH_RATE: {rate}\n[run-sanitizer-multi] REVERIFY: {rate} - {note}\n")
     return status
+
+
+def _summary_count(measured: str, label: str) -> int:
+    """The numerator of one `[run-sanitizer-multi] LABEL: n/m` summary line."""
+    match = re.search(
+        rf"^\[run-sanitizer-multi\]\s+{label}:\s*([0-9]+)/[0-9]+", measured,
+        re.MULTILINE,
+    )
+    return int(match.group(1)) if match else 0
+
+
+def _classify_replay_summary(measured: str) -> tuple[str, int, int]:
+    """What one replay transcript established: (status, crashes, runs).
+
+    A clean exit measures the crash: the target processed the input and the
+    fault did not happen. A nonzero exit without a sanitizer report, or a run
+    that hit its deadline, is `inconclusive`: the target ran, but a usage
+    error or a driver that fuzzed instead of replaying says nothing about the
+    fault. `unmeasured` is reserved for a target that never launched — no
+    summary, or runs that neither reached it nor timed out. Folding the
+    middle case into the last one held direct-condition bundles unjudged for
+    good; folding it into the first would have written "fault gone" over a
+    bad invocation.
+    """
+    rate_match = re.search(r"^CRASH_RATE:\s*([0-9]+)/([0-9]+)", measured, re.MULTILINE)
+    if not rate_match:
+        return "unmeasured", 0, 0
+    crashes, runs = int(rate_match.group(1)), int(rate_match.group(2))
+    if crashes:
+        return "reproduced", crashes, runs
+    if _summary_count(measured, "SUCCESS_RATE"):
+        return "not-reproduced", 0, runs
+    ran = _summary_count(measured, "EXECUTION_RATE") or _summary_count(measured, "TIMEOUTS")
+    return ("inconclusive" if ran else "unmeasured"), 0, runs
 
 
 _REPLAY_RUN_SPLIT_RE = re.compile(r"^=== Run [0-9]+/[0-9]+ ===$", re.MULTILINE)
@@ -2137,35 +2254,109 @@ def _pool_receipt_problems(pool: Path) -> tuple[list[str], list[str]]:
     return stale_validation, stale_severity
 
 
-def _audit_pool_receipts(pool: Path, reason: str) -> None:
-    """Refuse to publish a pool whose receipts no longer cover its reports.
+def _quarantine_stale_receipts(
+    bench_dir: Path, pool: Path, reason: str,
+) -> dict[str, dict]:
+    """Publish a pool whose receipts no longer cover some reports, uncredited.
 
-    Both failures block. `count_confirmed_findings` does skip an artifact
-    whose receipt has gone stale, but the published aggregate does not: it
-    sums the per-cell totals recorded while those receipts were still fresh
-    (`benchmark.aggregate`) and counts every member of the unfiltered cluster
-    JSON. A warning would therefore leave a run crediting findings no current
-    review covers, with `unadjudicated_finding_total` reading 0 — which is the
-    one thing the benchmark must never do.
-
-    Both are recoverable by revalidating the named artifacts, and neither
-    should happen once reach fields converge before their receipt binds.
+    Both causes used to refuse publication outright. That kept the aggregate
+    honest — it sums per-cell totals booked while those receipts were fresh
+    and counts every member of the unfiltered cluster JSON, so a plain
+    warning would have credited findings no current review covers — but it
+    left a finished run reading `Pending` with the reason in console.log
+    alone. The unjudged remainder the benchmark already carries is the right
+    place for such an artifact: it is recorded here under `unjudged` in
+    pool-members.json, and `benchmark.aggregate` books it as unadjudicated
+    rather than confirmed, keeps it out of cluster attribution, and names it
+    beside the row. The pool is rebuilt from the cells on every regenerate,
+    so the record is recomputed each time rather than carried forward.
     """
     unvalidated, unscored = _pool_receipt_problems(pool)
-    problems = [
-        (unvalidated, "hold a final validation receipt that no longer matches "
-                      "their report; revalidate them"),
-        (unscored, "carry a severity the current scorer did not produce"),
-    ]
-    for names, why in problems:
+    causes = (
+        (unvalidated, "validation receipt no longer matches the report"),
+        (unscored, "severity was not produced by the current scorer"),
+    )
+    members_path = bench_dir / "pool-members.json"
+    try:
+        members = json.loads(members_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        members = {}
+    if not isinstance(members, dict):
+        members = {}
+    unjudged = members.get("unjudged")
+    if not isinstance(unjudged, dict):
+        unjudged = {}
+    for names, why in causes:
         if not names:
             continue
-        detail = (
-            f"{len(names)} pooled artifact(s) {why} ({reason}): "
-            f"{', '.join(names[:5])}"
+        for name in names:
+            *_, kind, member = name.split("/")
+            conditions = members.get(kind)
+            unjudged[member] = {
+                "kind": kind,
+                "condition": (
+                    conditions.get(member) if isinstance(conditions, dict) else None
+                ),
+                "why": why,
+            }
+        log(
+            f"WARN: {len(names)} pooled artifact(s) {why} ({reason}); "
+            f"published as unjudged, not credited: {', '.join(names)}"
         )
-        log(f"WARN: {detail}; refusing to publish")
-        raise RuntimeError(detail)
+    if unjudged:
+        members["unjudged"] = unjudged
+        _write_json(members_path, members)
+    return unjudged
+
+
+def _crash_exported(crash: Path) -> bool:
+    """Whether export-repro finished a bundle for this crash directory.
+
+    export-repro appends ``<ts>  exported  CRASH_ID=...  rev=...`` to
+    ``.audit/promotion.log`` as its last step, and nothing else writes there.
+    """
+    try:
+        lines = (crash / ".audit" / "promotion.log").read_text(
+            encoding="utf-8", errors="replace",
+        ).splitlines()
+    except OSError:
+        return False
+    return any(line.split()[1:2] == ["exported"] for line in lines)
+
+
+def _bundle_candidates(pool: Path) -> list[Path]:
+    """Pooled crashes that still need a reproducer bundle.
+
+    A cell exports every crash it promotes, so the pool bundles what arrived
+    without one, plus a bundle whose report predates the rate the pool's
+    reverification has since written to sanitizer.txt: export-repro is what
+    copies that rate into the report, and severity reads it from there. This
+    used to re-export every pooled crash whose report lacked a rate, on every
+    rebuild, so a crash reverification could not measure was rewritten each
+    time under a receipt bound to the earlier layout.
+    """
+    candidates = []
+    for crash in sorted((pool / "crashes").glob("CRASH-*")):
+        if not crash.is_dir():
+            continue
+        if not _crash_exported(crash) or (
+            _measured_crash_rate(crash / "sanitizer.txt") is not None
+            and not _report_carries_rate(crash)
+        ):
+            candidates.append(crash)
+    return candidates
+
+
+def _report_carries_rate(crash: Path) -> bool:
+    """Whether the report's Fields table already states a reproduction rate."""
+    report = report_identity.find_report(crash)
+    if report is None:
+        return False
+    try:
+        text = report.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return re.match(r"\d+\s*/\s*\d+", triage._field(text, "Reproduction rate")) is not None
 
 
 def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dry_run: bool, reason: str) -> None:
@@ -2224,16 +2415,16 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             reverify_pool_crash_rates(
                 pool, target, target_slug, reason, skip=set(blocked),
             )
-        bundle_candidates: list[Path] = []
-        for crash in sorted((pool / "crashes").glob("CRASH-*")):
-            reports = list(crash.glob("[Rr][Ee][Pp][Oo][Rr][Tt].md"))
-            canonical = any(
-                "## Expected sanitizer output" in (text := report.read_text(encoding="utf-8", errors="replace"))
-                and re.search(r"^CRASH_RATE:\s*[0-9]+/[0-9]+", text, re.MULTILINE)
-                for report in reports
-            )
-            if not canonical:
-                bundle_candidates.append(crash)
+        bundle_candidates = _bundle_candidates(pool)
+        # Export is a harness-owned rewrite of a directory a review may
+        # already have bound: it regenerates the report and files stragglers
+        # under .audit/. Capture each current receipt first and rebind it
+        # across a successful export, as reverification does across its
+        # rate annotation; a failed export leaves the receipt as it was.
+        prior_receipts = {
+            crash: validation_receipt.read_current(crash)
+            for crash in bundle_candidates
+        }
         # Bundling stays on when replay is skipped: a bundle reproduces from
         # source at the recorded revision and carries the crash's own saved
         # evidence, neither of which the current build's identity decides.
@@ -2259,9 +2450,16 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
             }
             for crash in bundle_candidates:
                 try:
-                    bundled += futures[crash].result() == 0
+                    exported = futures[crash].result() == 0
                 except (OSError, subprocess.SubprocessError):
                     log(f"WARN: reproducer bundle failed for {crash.name} ({reason})")
+                    continue
+                if not exported:
+                    continue
+                bundled += 1
+                prior = prior_receipts.get(crash)
+                if prior is not None:
+                    validation_receipt.rewrite_after_equivalent_transform(crash, prior)
     if bundled:
         log(f"reproducer bundles created: {bundled} ({reason})")
     # Score the pool on every path, including a dry run. Clustering below reads
@@ -2272,7 +2470,7 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
     # hold back.
     with (bench_dir / "severity.log").open("w", encoding="utf-8") as output:
         _run_tool("severity", "--batch", str(pool), env=environment, stdout=output)
-    _audit_pool_receipts(pool, reason)
+    _quarantine_stale_receipts(bench_dir, pool, reason)
     prior_cluster_validations = validation_receipt.snapshot_current_tree(pool)
     clustering_succeeded = True
     for kind, tool, output_name in (
@@ -2342,7 +2540,7 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
     # split_pool, per-condition index maintenance, rendering — rewrites
     # reports, so the pre-clustering audit cannot speak for the tree that
     # actually publishes, and it never saw the condition subtrees at all.
-    _audit_pool_receipts(pool, reason)
+    _quarantine_stale_receipts(bench_dir, pool, reason)
     live = bench_dir / "pool"
     old = bench_dir / ".pool.old"
     shutil.rmtree(old, ignore_errors=True)
@@ -3530,6 +3728,11 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 f"    {observed.get('cell')}: incomplete — observed "
                 f"{observed.get('crashes', 0)} crashes / "
                 f"{observed.get('findings', 0)} findings; excluded from aggregate"
+            )
+        for artifact in condition.get("pool_unjudged", []):
+            print(
+                f"    {artifact.get('name')}: published unjudged, not credited — "
+                f"{artifact.get('why')}"
             )
     print()
     log(f"Ledger: {ledger}")

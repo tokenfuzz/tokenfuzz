@@ -295,7 +295,11 @@ do not describe it as reachable from the input alone.
 For every CRASH:
 
   1. Create `{{ output_dir }}/crashes/CRASH-<n>/`  (n = 1, 2, 3, ...).
-  2. Save the triggering input inside that directory.
+  2. Save the triggering input inside that directory as `input` — exactly
+     that name, no extension — so the gate replays the file you mean rather
+     than guessing among the files you saved. Use the sanitizer build named
+     above: output from an instrumentation this target does not build cannot
+     be replayed, and the gate demotes such a crash to a finding.
   3. If you drove a CLI binary with any non-default arguments (flags, a
      subcommand, a pattern), save the exact argument list — everything
      after the binary — to `{{ output_dir }}/crashes/CRASH-<n>/repro.cmd`
@@ -311,8 +315,8 @@ For every CRASH:
      crash, so each can be rebuilt and reproduced on its own -- and leave
      the compiled driver beside it as
      `{{ output_dir }}/crashes/CRASH-<n>/harness`. The gate reruns that
-     compiled driver; a directory holding only source is left
-     unadjudicated, however well the driver reproduces.
+     compiled driver; a directory holding only source is demoted to a
+     finding, however well the driver reproduces.
   6. Write `{{ output_dir }}/crashes/CRASH-<n>/report.md`. Use the same
      `## Fields` table and the same "Report narrative" sections required for
      findings.

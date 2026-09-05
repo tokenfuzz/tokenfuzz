@@ -4491,13 +4491,30 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         return {}
 
     members = _reconcile_demoted_pool_crashes(bench_dir) if include_pool else {}
+    # Artifacts whose review receipt no longer matched when the pool was
+    # published (bin/benchmark records them under `unjudged`). They stay in
+    # their condition's pool so a reader can open them, but earn nothing:
+    # attribution skips them here, and the per-condition totals below re-book
+    # each one from confirmed to unadjudicated.
+    pool_unjudged = {
+        name: entry
+        for name, entry in (members.get("unjudged") or {}).items()
+        if isinstance(entry, dict)
+    } if isinstance(members.get("unjudged"), dict) else {}
+
+    def _credited(kind: str) -> dict:
+        return {
+            name: cond for name, cond in members.get(kind, {}).items()
+            if name not in pool_unjudged
+        }
+
     crash_attr = attribute_clusters(
         _load("clusters-crashes.json") if include_pool else {},
-        members.get("crashes", {}),
+        _credited("crashes"),
     )
     finding_attr = attribute_clusters(
         _load("clusters-findings.json") if include_pool else {},
-        members.get("findings", {}),
+        _credited("findings"),
     )
     # The rejected side is clustered by the same tools (bin/benchmark points
     # them at pool/<kind>-rejected), so "unique cut" is counted like "unique
@@ -4563,6 +4580,21 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 demoted_crashes_by_cell[key] = (
                     demoted_crashes_by_cell.get(key, 0) + 1
                 )
+    unjudged_by_cond: dict[str, dict[str, list[dict]]] = {}
+    unjudged_crashes_by_cell: dict[tuple[str, str], int] = {}
+    for _name, _entry in sorted(pool_unjudged.items()):
+        _cond = str(_entry.get("condition") or "")
+        _kind = "crashes" if _entry.get("kind") == "crashes" else "findings"
+        unjudged_by_cond.setdefault(_cond, {"crashes": [], "findings": []})
+        unjudged_by_cond[_cond][_kind].append({
+            "name": _name, "kind": _kind, "why": str(_entry.get("why") or ""),
+        })
+        _cell = crash_cells.get(_name)
+        if _kind == "crashes" and isinstance(_cell, str) and _cell:
+            key = (_cond, _cell)
+            unjudged_crashes_by_cell[key] = (
+                unjudged_crashes_by_cell.get(key, 0) + 1
+            )
 
     conditions = []
     token_usage = []
@@ -4697,16 +4729,33 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         # auto-rejected signature rows that never get a crash dir. Only re-book
         # the post-pool demotions: subtract them from accepted, add to rejected.
         demoted = demoted_crashes_by_cond.get(cond, 0)
-        if demoted:
+        # Same re-booking for artifacts published unjudged: out of accepted,
+        # into the unadjudicated remainder, by the cell that filed them.
+        unjudged_here = unjudged_by_cond.get(cond, {"crashes": [], "findings": []})
+        unjudged_pool_crashes = len(unjudged_here["crashes"])
+        unjudged_pool_findings = len(unjudged_here["findings"])
+        if demoted or unjudged_pool_crashes:
             crashes = list(crashes)
             for idx, cell in enumerate(done):
-                count = demoted_crashes_by_cell.get((cond, cell["cell"]), 0)
+                count = (
+                    demoted_crashes_by_cell.get((cond, cell["cell"]), 0)
+                    + unjudged_crashes_by_cell.get((cond, cell["cell"]), 0)
+                )
                 if count <= 0:
                     continue
                 removed = min(crashes[idx], count)
                 crashes[idx] -= removed
         crash_total = sum(crashes)
         rejected_crash_total = sum(rejected_crashes) + demoted
+        unadjudicated_crash_total = (
+            sum(unadjudicated_crashes) + unjudged_pool_crashes
+        )
+        confirmed_finding_total = max(
+            0, sum(confirmed_findings) - unjudged_pool_findings,
+        )
+        unadjudicated_finding_total = (
+            sum(unadjudicated_findings) + unjudged_pool_findings
+        )
         unique_rejected_crashes, rejected_crashes_upper_bound = _unique_rejected(
             rcb.get("unique_clusters", 0),
             pooled_rejected_crash_dirs.get(cond, 0),
@@ -4732,9 +4781,9 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "crash_total": crash_total,
                 "pending_crash_total": sum(pending_crashes),
                 "retained_crash_total": sum(retained_crashes),
-                "unadjudicated_crash_total": sum(unadjudicated_crashes),
+                "unadjudicated_crash_total": unadjudicated_crash_total,
                 "crash_total_is_floor": (
-                    sum(unadjudicated_crashes)
+                    unadjudicated_crash_total
                     > crash_total + rejected_crash_total
                 ),
                 "rejected_crash_total": rejected_crash_total,
@@ -4742,20 +4791,25 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "rejected_finding_total": sum(rejected_findings),
                 "model_refusal_total": sum(model_refusals),
                 "finding_total": sum(findings),
-                "confirmed_finding_total": sum(confirmed_findings),
+                "confirmed_finding_total": confirmed_finding_total,
                 # Findings the gate never adjudicated (drain cut short, e.g. a
                 # provider limit). Makes confirmed_finding_total=0 legible: 0
                 # confirmed with a non-zero remainder is "gate unfinished", not
                 # "nothing found". Mirrors the per-cell findings_unadjudicated.
-                "unadjudicated_finding_total": sum(unadjudicated_findings),
+                "unadjudicated_finding_total": unadjudicated_finding_total,
                 # A remainder that outnumbers the verdicts means review stopped
                 # partway down the queue, so the count is a lower bound on this
                 # condition rather than its measured yield. Kept as a flag on
                 # the number instead of a status: dropping the cell would take
                 # its confirmed crashes out of the comparison with it.
                 "finding_total_is_floor": (
-                    sum(unadjudicated_findings)
-                    > sum(confirmed_findings) + sum(rejected_findings)
+                    unadjudicated_finding_total
+                    > confirmed_finding_total + sum(rejected_findings)
+                ),
+                # Named so the ledgers can say which artifacts the remainder
+                # holds and why; the row's counts already exclude them.
+                "pool_unjudged": (
+                    unjudged_here["crashes"] + unjudged_here["findings"]
                 ),
                 "unique_crash_clusters": cb.get("unique_clusters", 0),
                 "novel_crash_clusters": cb.get("novel_clusters", 0),
@@ -5870,6 +5924,19 @@ def render_section(report: dict) -> str:
             )
     if any(c.get("incomplete_observed") for c in conditions):
         lines.append("")
+    for c in sorted(conditions, key=lambda item: item["condition"]):
+        for artifact in c.get("pool_unjudged", []):
+            lines.append(
+                "> **Published unjudged — `{name}` ({cond}): {why}; counted in "
+                "the unjudged remainder, not credited.** `bin/benchmark "
+                "--regenerate` re-reviews it once the cause is fixed.".format(
+                    name=artifact.get("name", "?"),
+                    cond=_condition_label(c["condition"], backend),
+                    why=artifact.get("why", "?"),
+                )
+            )
+    if any(c.get("pool_unjudged") for c in conditions):
+        lines.append("")
     baseline_label = _condition_label("model-direct", backend)
     # A run scored by a superseded scorer says so: the same artifacts yield a
     # different M+ once the scoring rules change, so the number cannot be read
@@ -6466,6 +6533,35 @@ def crosstab(bench_root: Path) -> str:
             )
         )
     lines.append("")
+    published_unjudged = [
+        (entry, artifact)
+        for entry in flat_rows if entry["cond"]
+        for artifact in entry["cond"].get("pool_unjudged", [])
+    ]
+    if published_unjudged:
+        lines.append(
+            "**Some artifacts were published unjudged.** Their review receipt "
+            "no longer matched the report when the run was published, so "
+            "each counts in its row's `unjudged` remainder and earns no "
+            "credit. `bin/benchmark --regenerate` re-reviews them once the "
+            "cause is fixed."
+        )
+        lines.append("")
+        for entry, artifact in published_unjudged:
+            run = entry["run"]
+            lines.append(
+                "- `{backend}` `{runid}` {cond}: `{name}` — {why}".format(
+                    backend=run.get("backend", "?"),
+                    runid=run.get("runid", "?"),
+                    cond=_condition_label(
+                        str(entry["cond"].get("condition", "?")),
+                        str(run.get("backend", "")), str(run.get("model", "")),
+                    ),
+                    name=artifact.get("name", "?"),
+                    why=artifact.get("why", "?"),
+                )
+            )
+        lines.append("")
     provisional_rows = [row for row in rows if row["provisional"]]
     if provisional_rows:
         lines.append("## Runs awaiting review")

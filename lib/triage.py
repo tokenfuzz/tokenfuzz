@@ -1469,6 +1469,28 @@ def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, 
 _UNSETTLED_REVIEW_DETAIL = (
     "source review did not settle whether the trigger is in the threat model"
 )
+_RESOLUTION_NO_CREDIT_DETAIL = (
+    "focused source review did not confirm the trigger is in the threat "
+    "model; no security credit"
+)
+
+
+def _resolution_left_unsettled(
+    report: Path, directory: Path, trigger_votes: "set[str | None] | frozenset[str | None]",
+) -> bool:
+    """A focused resolution ran and still did not settle the claim.
+
+    The resolution is the last review the gate asks for. Holding the artifact
+    `pending` past it waited for evidence no further pass produces — the
+    resolver is cached until the report or source changes — so every such
+    finding published as an unjudged remainder for good. The claim's burden
+    is unmet; it closes without credit, and the receipt says why.
+    """
+    return (
+        _cached_trigger_vote(report, directory / _TRIGGER_RESOLUTION_NAME)
+        is not None
+        and any(vote in {"Reject", "Uncertain"} for vote in trigger_votes)
+    )
 
 
 def _final_publication_state(
@@ -1477,6 +1499,7 @@ def _final_publication_state(
     review_facts: dict[str, str] | None = None,
     *,
     direct_trigger_proof: bool = False,
+    unsettled_resolution: bool = False,
 ) -> str:
     """Resolve a kept artifact to a security report, a retained defect, or neither.
 
@@ -1486,12 +1509,12 @@ def _final_publication_state(
     reviewers finding no added security boundary. A review that ran and did not
     settle the question establishes none of those, so the artifact stays
     `pending`: not security yield, and not a defect anyone showed is out of
-    scope. The benchmark then carries it as the unjudged remainder that marks
-    its counts a floor, where writing a negative would instead publish an
-    adjudication that never happened. An inconclusive first review or split is
-    re-asked once with the prior evidence; a resolver that remains uncertain is
-    cached, and content-addressing reopens it when the report, prior reviews,
-    evidence, or prompt version changes.
+    scope. An inconclusive first review or split is re-asked once with the
+    prior evidence. When that focused resolution still cannot settle it
+    (`unsettled_resolution`), the claim closes `not-reportable`: the resolver
+    is cached until the report or source changes, so waiting further would
+    publish the artifact as an unjudged remainder for good, and the burden of
+    showing the trigger is in the threat model lies with the report.
 
     Scope comes from `trigger_controls_fit` — the reviewer's own threat-model
     comparison, read from source and supplied by `_source_review_facts` only
@@ -1518,6 +1541,8 @@ def _final_publication_state(
         return "reportable"
     if fit == "outside":
         return "not-reportable"
+    if unsettled_resolution:
+        return "not-reportable"
     if any(vote in {"Reject", "Uncertain"} for vote in trigger_votes):
         return "pending"
     if fit == "within":
@@ -1535,6 +1560,7 @@ def _publication_detail(
     attacker_controls: list[str] | None = None,
     *,
     direct_trigger_proof: bool = False,
+    unsettled_resolution: bool = False,
 ) -> str:
     """The reason a receipt records, matching the decision it records.
 
@@ -1561,7 +1587,14 @@ def _publication_detail(
             f"attacker_controls={controls}"
         )
     fit = facts.get("trigger_controls_fit")
-    if fit in {"within", "outside"}:
+    if fit == "outside":
+        return (
+            f"source review placed the trigger {fit} "
+            f"attacker_controls={controls}"
+        )
+    if unsettled_resolution:
+        return _RESOLUTION_NO_CREDIT_DETAIL
+    if fit == "within":
         return (
             f"source review placed the trigger {fit} "
             f"attacker_controls={controls}"
@@ -2772,15 +2805,20 @@ def triage_one_crash(
             attacker_controls=attacker_controls,
         )
         return "pending"
+    unsettled_resolution = _resolution_left_unsettled(
+        report, crash_dir, trigger_votes,
+    )
     state = _final_publication_state(
         verdict, trigger_votes, review_facts,
         direct_trigger_proof=direct_trigger_proof,
+        unsettled_resolution=unsettled_resolution,
     )
     validation_receipt.write(
         crash_dir, kind="crash", state=state,
         detail=_publication_detail(
             state, verdict, detail, review_facts, attacker_controls,
             direct_trigger_proof=direct_trigger_proof,
+            unsettled_resolution=unsettled_resolution,
         ),
         attacker_controls=attacker_controls, review_facts=review_facts,
     )
@@ -3713,15 +3751,20 @@ def _finalize_accepted_finding(
         report, finding_dir,
     )
     direct_trigger_proof = _trigger_bypass_confirmed(finding_dir)
+    unsettled_resolution = _resolution_left_unsettled(
+        report, finding_dir, trigger_votes,
+    )
     state = _final_publication_state(
         reach_verdict, trigger_votes, review_facts,
         direct_trigger_proof=direct_trigger_proof,
+        unsettled_resolution=unsettled_resolution,
     )
     validation_receipt.write(
         finding_dir, kind="finding", state=state,
         detail=_publication_detail(
             state, reach_verdict, reach_detail, review_facts, controls,
             direct_trigger_proof=direct_trigger_proof,
+            unsettled_resolution=unsettled_resolution,
         ),
         attacker_controls=controls,
         review_facts=review_facts,

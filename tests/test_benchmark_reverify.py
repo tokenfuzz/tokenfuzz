@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import contextlib
 import inspect
+import io
 import json
 import os
 import shutil
@@ -436,8 +438,9 @@ class BenchmarkReverifyTests(unittest.TestCase):
             ("invalid", invalid), ("source", source_harness),
             ("measured", measured), ("missing", missing),
         ):
-            self.assertEqual(results[name], 0)
-            self.assertEqual((path / "sanitizer.txt").read_bytes(), unchanged[path])
+            with self.subTest(outcome=name):
+                self.assertEqual(results[name], 0)
+                self.assertEqual((path / "sanitizer.txt").read_bytes(), unchanged[path])
         self.assertIn("CRASH_RATE: 5/5", (with_args / "sanitizer.txt").read_text())
         self.assertIn("CRASH_RATE: 0/5", (without_args / "sanitizer.txt").read_text())
         self.assertIn("CRASH_RATE: 5/5", (normalized / "sanitizer.txt").read_text())
@@ -539,18 +542,111 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertEqual(held, {crash})
         self.assertEqual(counts["unreplayed"], 1)
 
-    def test_a_bundle_carrying_no_reproducer_is_left_to_the_completeness_gate(
-        self,
-    ) -> None:
-        # Nothing to replay because there is nothing in the bundle. That is the
-        # completeness gate's call — it holds before it rejects — so this gate
-        # must neither demote it nor withhold it from that gate.
+    def test_a_bundle_carrying_no_reproducer_becomes_a_finding(self) -> None:
+        # Nothing to replay because there is nothing in the bundle, and no
+        # later pass changes that: left to the completeness gate it was held
+        # for good. The claim is still reviewed, as a finding.
         crash = self.make_crash("no-contract-bare")
+        (crash / "report.md").write_text("# Bounds issue\n", encoding="utf-8")
         (crash / "poc.bin").unlink()
         counts, held = self.direct_triage(crash, "no-contract")
-        self.assertEqual(counts["demoted"], 0)
-        self.assertTrue(crash.is_dir())
+        self.assertEqual(counts["demoted"], 1)
+        self.assertFalse(crash.is_dir())
         self.assertEqual(held, set())
+        demoted = crash.parent.parent / "findings" / "FIND-0001"
+        self.assertIn(
+            "carries no input or driver a replay could run",
+            (demoted / "report.md").read_text(encoding="utf-8"),
+        )
+
+    def test_a_sanitizer_the_target_does_not_build_becomes_a_finding(self) -> None:
+        # A direct agent can build its own instrumentation and file its
+        # output. The run's policy cannot replay that, ever, so withholding
+        # the verdict published seventeen such crashes as unjudged in one
+        # cell. The claim goes to source review instead.
+        crash = self.make_crash("no-contract-policy")
+        (crash / "report.md").write_text("# Bounds issue\n", encoding="utf-8")
+        with mock.patch.object(
+            benchmark_runner, "_replay_contract_reason",
+            return_value="sanitizer-not-instrumented",
+        ):
+            counts, held = self.direct_triage(crash, "no-contract")
+        self.assertEqual(counts["demoted"], 1)
+        self.assertEqual(held, set())
+        demoted = crash.parent.parent / "findings" / "FIND-0001"
+        self.assertIn(
+            "not one this target builds",
+            (demoted / "report.md").read_text(encoding="utf-8"),
+        )
+
+    def test_replay_summaries_classify_by_whether_the_target_ran(self) -> None:
+        classify = benchmark_runner._classify_replay_summary
+        summary = (
+            "=== SUMMARY ===\nCRASH_RATE: {crashes}/5\n"
+            "[run-sanitizer-multi] EXECUTION_RATE: {executed}/5\n"
+            "[run-sanitizer-multi] SUCCESS_RATE: {clean}/5\n"
+        )
+        self.assertEqual(classify(""), ("unmeasured", 0, 0))
+        # Loader or exec failure: nothing reached the target.
+        self.assertEqual(
+            classify(summary.format(crashes=0, executed=0, clean=0)),
+            ("unmeasured", 0, 5),
+        )
+        # Nonzero exits without a sanitizer report: the target ran, but a
+        # usage error is not the fault being gone.
+        self.assertEqual(
+            classify(summary.format(crashes=0, executed=5, clean=0)),
+            ("inconclusive", 0, 5),
+        )
+        # Every run reached its deadline: the target ran.
+        self.assertEqual(
+            classify(
+                summary.format(crashes=0, executed=0, clean=0)
+                + "[run-sanitizer-multi] TIMEOUTS: 5/5 runs reached the deadline\n"
+            ),
+            ("inconclusive", 0, 5),
+        )
+        self.assertEqual(
+            classify(summary.format(crashes=0, executed=5, clean=5)),
+            ("not-reproduced", 0, 5),
+        )
+        self.assertEqual(
+            classify(summary.format(crashes=3, executed=5, clean=2)),
+            ("reproduced", 3, 5),
+        )
+
+    def test_an_inconclusive_direct_replay_becomes_a_finding(self) -> None:
+        # The filed reproducer ran and never reached the fault. No rate is
+        # written — the pool keeps a harness crash's evidence on the same
+        # outcome — but for a direct bundle it is permanent, so the claim is
+        # reviewed as a finding instead of held unjudged for good.
+        crash = self.make_crash("inconclusive-replay")
+        (crash / "report.md").write_text("# Bounds issue\n", encoding="utf-8")
+        counts, held = self.direct_triage(crash, "inconclusive")
+        self.assertEqual(counts["demoted"], 1)
+        self.assertEqual(held, set())
+        demoted = crash.parent.parent / "findings" / "FIND-0001"
+        self.assertIn(
+            "without reaching the reported fault",
+            (demoted / "report.md").read_text(encoding="utf-8"),
+        )
+
+    def test_an_inconclusive_replay_keeps_a_measured_verdict(self) -> None:
+        # Every regenerate replays every bundle. One that measured 5/5 and
+        # now times out under host load has not stopped being a crash, and
+        # the demotion is permanent, so the earlier measurement stands.
+        crash = self.make_crash(
+            "inconclusive-after-measured", footer="\nCRASH_RATE: 5/5\n",
+        )
+        (crash / "report.md").write_text("# Bounds issue\n", encoding="utf-8")
+        self.assertIsNotNone(validation_receipt.write(
+            crash, kind="crash", state="reportable", detail="fixture",
+        ))
+        counts, held = self.direct_triage(crash, "inconclusive")
+        self.assertEqual(counts["demoted"], 0)
+        self.assertEqual(held, set())
+        self.assertTrue(crash.is_dir())
+        self.assertFalse((crash.parent.parent / "findings").exists())
 
     def test_a_header_only_testcase_keeps_an_unresolved_replay_unjudged(
         self,
@@ -1328,14 +1424,97 @@ class BenchmarkReverifyTests(unittest.TestCase):
             (crash / ".audit" / "reverify.log").read_text(encoding="utf-8"),
         )
 
-    def test_pool_rebuild_requires_a_measured_canonical_report(self) -> None:
-        source = inspect.getsource(benchmark_runner.rebuild_pool)
-        self.assertIn('"## Expected sanitizer output"', source)
-        self.assertIn(r'r"^CRASH_RATE:\s*[0-9]+/[0-9]+"', source)
+    def test_a_pool_bundles_only_crashes_no_export_recorded(self) -> None:
+        # A cell exports every crash it promotes and export-repro records
+        # that. Re-exporting a bundled crash is refused once its evidence has
+        # been measured, and rewrites it under its receipt when it has not.
+        bench = self.root / "bundled-once"
+        crashes = bench / ".pool.staging" / "crashes"
+        bundled = crashes / "CRASH-0001" / ".audit"
+        bundled.mkdir(parents=True)
+        (bundled / "promotion.log").write_text(
+            "2026-01-01T00:00:00Z  exported  CRASH_ID=CRASH-001-2  rev=0badc0de\n",
+            encoding="utf-8",
+        )
+        (crashes / "CRASH-0002").mkdir()
+        # Bundled before the pool measured its rate: export-repro is what
+        # copies the rate into the report's Fields table, so it runs again.
+        for name, rate_row in (("CRASH-0003", ""), ("CRASH-0004", "| Reproduction rate | 5/5 |\n")):
+            audit = crashes / name / ".audit"
+            audit.mkdir(parents=True)
+            shutil.copy2(bundled / "promotion.log", audit / "promotion.log")
+            (crashes / name / "sanitizer.txt").write_text(
+                DIAGNOSTIC + "\nCRASH_RATE: 5/5\n", encoding="utf-8",
+            )
+            (crashes / name / "report.md").write_text(
+                "# Report\n\n| Field | Value |\n| --- | --- |\n" + rate_row,
+                encoding="utf-8",
+            )
+        exported = [args[0] for args in self.rebuild_export_argv(bench)]
+        self.assertEqual(exported, ["CRASH-0002", "CRASH-0003"])
+
+    def test_a_pool_export_keeps_a_bound_receipt_current(self) -> None:
+        # export-repro files stragglers under .audit/ and regenerates the
+        # report. A receipt bound before that names the old paths; the pool
+        # used to publish it stale or refuse to publish at all.
+        bench = self.root / "rebind"
+        crash = bench / ".pool.staging" / "crashes" / "CRASH-0001"
+        crash.mkdir(parents=True)
+        (crash / "report.md").write_text(
+            "# CRASH-0001\n\nSummary: fixture.\n", encoding="utf-8",
+        )
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "    #0 0x1 in app_parse sample.c:2\n",
+            encoding="utf-8",
+        )
+        (crash / "input.bin").write_bytes(b"AAAA")
+        self.assertIsNotNone(validation_receipt.write(
+            crash, kind="crash", state="reportable", detail="fixture",
+        ))
+
+        def export(directory: Path) -> None:
+            audit = directory / ".audit"
+            audit.mkdir()
+            (directory / "input.bin").rename(audit / "input.bin")
+            (audit / "promotion.log").write_text(
+                "2026-01-01T00:00:00Z  exported  CRASH_ID=CRASH-0001  rev=x\n",
+                encoding="utf-8",
+            )
+
+        self.rebuild_tool_calls(bench, on_export=export)
+        published = bench / "pool" / "crashes" / "CRASH-0001"
+        self.assertTrue((published / ".audit" / "input.bin").is_file())
+        self.assertIsNotNone(validation_receipt.read_current(published))
+
+    def test_a_failing_tool_reports_its_own_last_line(self) -> None:
+        # Every caller treats a nonzero exit as "skip this one"; without the
+        # tool's own diagnosis, dozens of refused exports leave no trace.
+        completed = subprocess.CompletedProcess(
+            ["export-repro"], 1, stdout=None,
+            stderr="[export-repro] x: the probe receipt does not match\n",
+        )
+        output = io.StringIO()
+        with mock.patch.object(
+            benchmark_runner.subprocess, "run", return_value=completed,
+        ), contextlib.redirect_stdout(output):
+            self.assertEqual(
+                benchmark_runner._run_tool(
+                    "export-repro", "CRASH-0001", "--crash-dir", "x",
+                ),
+                1,
+            )
+        self.assertIn(
+            "WARN: export-repro CRASH-0001 exited 1: [export-repro] x: "
+            "the probe receipt does not match",
+            output.getvalue(),
+        )
 
     def rebuild_tool_calls(
         self, bench: Path, *, dry_run: bool = False,
         cluster_failure: str = "",
+        on_export=None,
+        receipt_problems: tuple[list[str], list[str]] | None = None,
     ) -> list[tuple[str, tuple]]:
         """Tools rebuild_pool invokes, with everything but the tools stubbed."""
         calls: list[tuple[str, tuple]] = []
@@ -1343,6 +1522,8 @@ class BenchmarkReverifyTests(unittest.TestCase):
         def fake_run_tool(name, *args, **kwargs):
             calls.append((name, args))
             returncode = int(name == cluster_failure)
+            if name == "export-repro" and on_export is not None:
+                on_export(Path(args[args.index("--crash-dir") + 1]))
             if not returncode and "--json-out" in args:
                 output = Path(args[args.index("--json-out") + 1])
                 output.parent.mkdir(parents=True, exist_ok=True)
@@ -1353,17 +1534,28 @@ class BenchmarkReverifyTests(unittest.TestCase):
             calls.append(("maintain-indexes", (args, kwargs)))
             return True
 
-        with mock.patch.object(benchmark_runner.metrics, "build_pool"), \
-                mock.patch.object(benchmark_runner.metrics, "relocate_experiments"), \
-                mock.patch.object(benchmark_runner, "benchmark_target_config"), \
-                mock.patch.object(benchmark_runner, "_decision_environment"), \
-                mock.patch.object(benchmark_runner.triage, "fill_reach_fields_tree"), \
-                mock.patch.object(benchmark_runner, "reverify_pool_crash_rates"), \
-                mock.patch.object(benchmark_runner, "_run_tool", fake_run_tool), \
-                mock.patch.object(
-                    benchmark_runner.triage, "maintain_indexes",
-                    side_effect=fake_maintain,
-                ):
+        with contextlib.ExitStack() as stack:
+            for target, replacement in (
+                (benchmark_runner.metrics, "build_pool"),
+                (benchmark_runner.metrics, "relocate_experiments"),
+                (benchmark_runner, "benchmark_target_config"),
+                (benchmark_runner, "_decision_environment"),
+                (benchmark_runner.triage, "fill_reach_fields_tree"),
+                (benchmark_runner, "reverify_pool_crash_rates"),
+            ):
+                stack.enter_context(mock.patch.object(target, replacement))
+            stack.enter_context(
+                mock.patch.object(benchmark_runner, "_run_tool", fake_run_tool)
+            )
+            stack.enter_context(mock.patch.object(
+                benchmark_runner.triage, "maintain_indexes",
+                side_effect=fake_maintain,
+            ))
+            if receipt_problems is not None:
+                stack.enter_context(mock.patch.object(
+                    benchmark_runner, "_pool_receipt_problems",
+                    return_value=receipt_problems,
+                ))
             benchmark_runner.rebuild_pool(
                 bench, "slug", "codex", "model", dry_run, "test",
             )
@@ -1427,40 +1619,31 @@ class BenchmarkReverifyTests(unittest.TestCase):
         self.assertEqual(len(maintain), 1)
         self.assertTrue(maintain[0][1]["refresh_clusters"])
 
-    def test_a_stale_score_aborts_before_clustering_or_pool_swap(self) -> None:
+    def test_a_stale_score_publishes_the_artifact_unjudged(self) -> None:
+        # Refusing to publish kept the aggregate honest but left a finished
+        # run reading Pending, with the reason in console.log alone. The
+        # pool now publishes, and the artifact is recorded for aggregate to
+        # re-book from confirmed to unjudged.
         bench = self.root / "stale-severity"
         staging = bench / ".pool.staging"
-        staging.mkdir(parents=True)
-        live = bench / "pool"
-        live.mkdir()
-        (live / "sentinel").write_text("previous result", encoding="utf-8")
-        calls: list[str] = []
-
-        def fake_run_tool(name, *args, **kwargs):
-            calls.append(name)
-            return 0
-
-        with mock.patch.object(benchmark_runner.metrics, "build_pool"), \
-                mock.patch.object(benchmark_runner.metrics, "relocate_experiments"), \
-                mock.patch.object(benchmark_runner, "benchmark_target_config"), \
-                mock.patch.object(
-                    benchmark_runner, "_pool_receipt_problems",
-                    return_value=([], ["findings/FIND-0001"]),
-                ), \
-                mock.patch.object(benchmark_runner, "_run_tool", fake_run_tool):
-            with self.assertRaisesRegex(
-                RuntimeError, "current scorer did not produce",
-            ):
-                benchmark_runner.rebuild_pool(
-                    bench, "slug", "codex", "model", True, "test",
-                )
-
-        self.assertEqual(calls, ["severity"])
-        self.assertTrue(staging.is_dir())
-        self.assertEqual(
-            (live / "sentinel").read_text(encoding="utf-8"),
-            "previous result",
+        (staging / "findings" / "FIND-0001").mkdir(parents=True)
+        (bench / "pool-members.json").write_text(
+            json.dumps({"crashes": {}, "findings": {"FIND-0001": "harness"}}),
+            encoding="utf-8",
         )
+        calls = self.rebuild_tool_calls(
+            bench, dry_run=True, receipt_problems=([], ["findings/FIND-0001"]),
+        )
+        self.assertIn("cluster-findings", [name for name, _args in calls])
+        self.assertTrue((bench / "pool" / "findings" / "FIND-0001").is_dir())
+        self.assertFalse(staging.exists())
+        members = json.loads(
+            (bench / "pool-members.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(members["unjudged"], {"FIND-0001": {
+            "kind": "findings", "condition": "harness",
+            "why": "severity was not produced by the current scorer",
+        }})
 
     def test_a_rebuilt_pool_exports_the_revision_its_run_recorded(self) -> None:
         # A pool is rebuilt long after its run, against a slug whose live
@@ -2096,15 +2279,19 @@ class ReverifyDrivesTheRealRunnerTests(unittest.TestCase):
             (crash / "sanitizer.txt").read_text(encoding="utf-8"),
         )
 
-    def test_one_ambiguous_invocation_failing_to_run_stays_unmeasured(self) -> None:
+    def test_one_ambiguous_invocation_exiting_early_is_still_measured(self) -> None:
+        # The driver ran under both invocations and faulted under neither.
+        # Reading the early exit as "nothing ran" withheld the verdict, and a
+        # direct-condition crash then published as an unjudged remainder for
+        # good; a target that ran and never showed the fault is a measurement.
         crash = self.bundle(
-            "ambiguous-unmeasured",
+            "ambiguous-measured",
             "    if (argc == 1) return 2;",
             testcase="saved beside the driver\n",
         )
-        self.assertEqual("unmeasured", self.replay(crash))
-        self.assertNotIn(
-            "CRASH_RATE:",
+        self.assertEqual("not-reproduced", self.replay(crash))
+        self.assertIn(
+            "CRASH_RATE: 0/5",
             (crash / "sanitizer.txt").read_text(encoding="utf-8"),
         )
         # The kept log is the only account of why, and the verdict came from

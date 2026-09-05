@@ -21,7 +21,10 @@ SCHEMA_VERSION = 2
 SECURITY_STATES = frozenset({"reportable"})
 FINAL_STATES = SECURITY_STATES | {"not-reportable"}
 ALL_STATES = FINAL_STATES | {"pending", "rejected"}
-_FIXED_EVIDENCE_NAMES = (
+# Every consumer that rearranges a crash directory after a review has bound
+# it — export-repro's straggler migration above all — must leave these names
+# where they are: a receipt digests them by path relative to the artifact root.
+FIXED_EVIDENCE_NAMES = (
     "sanitizer.txt",
     "repro.cmd",
     "reproduce.sh",
@@ -97,7 +100,7 @@ def _artifact_paths(directory: Path) -> list[Path]:
     roots = (directory, directory / ".audit")
     paths: set[Path] = set()
     for root in roots:
-        for name in _FIXED_EVIDENCE_NAMES:
+        for name in FIXED_EVIDENCE_NAMES:
             path = root / name
             if path.is_file():
                 paths.add(path)

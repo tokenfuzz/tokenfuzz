@@ -1763,7 +1763,11 @@ Generated score text.
                 "rejected",
             )
 
-    def test_one_resolution_reject_cannot_quarantine_after_uncertainty(self) -> None:
+    def test_one_resolution_reject_closes_without_credit_not_quarantine(self) -> None:
+        # Rejection stays a two-review decision, so a lone resolver's Reject
+        # cannot move the finding out. It is the last review asked, though:
+        # holding the artifact pending past it published an unjudged
+        # remainder on every regenerate. The claim closes with no credit.
         first = self.finding / ".trigger-gate.json"
         resolution = self.finding / ".trigger-gate-resolution.json"
         first.write_text(json.dumps(trigger_vote(
@@ -1780,12 +1784,12 @@ Generated score text.
                 triage._finalize_accepted_finding(
                     self.finding, self.root, self.report, None, prepared=True,
                 ),
-                "pending",
+                "accepted",
             )
         self.assertTrue(self.finding.is_dir())
-        self.assertEqual(
-            validation_receipt.read_current(self.finding)["state"], "pending",
-        )
+        receipt = validation_receipt.read_current(self.finding)
+        self.assertEqual(receipt["state"], "not-reportable")
+        self.assertEqual(receipt["detail"], triage._RESOLUTION_NO_CREDIT_DETAIL)
 
     def test_find_gate_stabilizes_report_before_batched_trigger_vote(self) -> None:
         report_text = triage.read_report_bounded(self.report)
@@ -3450,6 +3454,79 @@ Generated score text.
             ),
             "not-reportable",
         )
+
+    def test_a_focused_resolution_that_cannot_settle_closes_without_credit(self) -> None:
+        """The resolution is the last review asked; after it, pending is forever.
+
+        The resolver is cached until the report or source changes, so a
+        finding it left unsettled published as an unjudged remainder on every
+        regenerate. The burden of placing the trigger in the threat model lies
+        with the report: an unsettled resolution closes it `not-reportable`,
+        and the receipt says so. A first-pass Uncertain still waits for that
+        resolution, and a scope the resolver did settle still decides.
+        """
+        resolve = triage._final_publication_state
+        for vote in ("Uncertain", "Reject"):
+            with self.subTest(vote=vote):
+                self.assertEqual(
+                    resolve("promote", {vote}, {}, unsettled_resolution=True),
+                    "not-reportable",
+                )
+                self.assertEqual(resolve("promote", {vote}, {}), "pending")
+        self.assertEqual(
+            resolve(
+                "promote", {"Reject"}, {"trigger_controls_fit": "within"},
+                unsettled_resolution=True,
+            ),
+            "not-reportable",
+        )
+        self.assertEqual(
+            resolve(
+                "out-of-model", {"Uncertain"}, {},
+                direct_trigger_proof=True, unsettled_resolution=True,
+            ),
+            "reportable",
+        )
+        self.assertEqual(
+            triage._RESOLUTION_NO_CREDIT_DETAIL,
+            triage._publication_detail(
+                "not-reportable", "promote", "trigger within attacker_controls=bytes",
+                {"trigger_controls_fit": "within"}, ["bytes"],
+                unsettled_resolution=True,
+            ),
+        )
+        # Only a current resolution vote makes the gate treat the claim as
+        # resolved; the vote files decide, not the caller.
+        vote_file = self.finding / ".trigger-gate.json"
+        vote_file.write_text(
+            json.dumps(trigger_vote(self.report, self.root, "Uncertain")),
+            encoding="utf-8",
+        )
+        self.assertFalse(
+            triage._resolution_left_unsettled(
+                self.report, self.finding, {"Uncertain"},
+            )
+        )
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        resolution_vote = trigger_vote(self.report, self.root, "Uncertain")
+        resolution_vote["decision_version"] = (
+            triage.triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION
+        )
+        resolution_vote["prior_review_sha256s"] = (
+            triage.triage_validate.prior_review_sha256s(
+                triage._trigger_resolution_sources(self.report, self.finding),
+            )
+        )
+        resolution.write_text(json.dumps(resolution_vote), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"TARGET_ROOT": str(self.root)}):
+            votes, _facts = triage._trigger_publication_evidence(
+                self.report, self.finding,
+            )
+            resolved = triage._resolution_left_unsettled(
+                self.report, self.finding, votes,
+            )
+        self.assertEqual(votes, {"Uncertain"})
+        self.assertTrue(resolved)
 
     def test_an_unsettled_review_still_delivers_the_scope_it_did_settle(self) -> None:
         """A reviewer can settle scope without settling the defect.

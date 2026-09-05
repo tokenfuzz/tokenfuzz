@@ -2642,6 +2642,13 @@ def _is_bundle_filename(name: str) -> bool:
     if name in {".llm-find-quality.json", ".severity_ok", ".severity_pending",
                 ".severity_failed"}:
         return True
+    # Evidence a validation receipt digests by path stays put. The crash gate
+    # writes .trigger-gate.json at the root *after* a cell's own export, and the
+    # receipt then binds it there; migrating it on a later export invalidates
+    # the receipt and, when .audit/ already holds the finding-era file of the
+    # same name, overwrites the review a source attestation points at.
+    if name in validation_receipt.FIXED_EVIDENCE_NAMES:
+        return True
     if name.startswith("input."):
         return True
     if name == ".audit":

@@ -404,30 +404,71 @@ class PooledReportsAreImmutableOnceReviewed(unittest.TestCase):
             )
 
 
-class PoolAuditBlocks(unittest.TestCase):
-    def test_stale_validation_blocks_publication(self) -> None:
+class PoolAuditQuarantines(unittest.TestCase):
+    def test_stale_validation_publishes_the_artifact_unjudged(self) -> None:
         # The published aggregate sums per-cell totals captured while the
-        # receipts were fresh, so a warning would let a run credit findings no
-        # current review covers.
+        # receipts were fresh, so the artifact must be re-booked as unjudged
+        # rather than credited — and the run must still publish: a finished
+        # run reading `Pending` hides the very thing that needs triage.
         with tempfile.TemporaryDirectory() as tmp:
-            pool = Path(tmp)
+            bench = Path(tmp)
+            pool = bench / ".pool.staging"
             directory = _artifact(pool, "findings", "FIND-0001")
+            _write_receipt(directory, "reportable")
+            (bench / "pool-members.json").write_text(
+                json.dumps({"findings": {"FIND-0001": "harness"}}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                validation_receipt, "read_current", return_value=None,
+            ):
+                unjudged = benchmark_runner._quarantine_stale_receipts(
+                    bench, pool, "test",
+                )
+            self.assertEqual(unjudged["FIND-0001"]["kind"], "findings")
+            self.assertEqual(unjudged["FIND-0001"]["condition"], "harness")
+            self.assertIn("no longer matches", unjudged["FIND-0001"]["why"])
+            members = json.loads(
+                (bench / "pool-members.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(members["unjudged"], unjudged)
+            # The member keeps its place in the pool: the artifact stays
+            # readable, it just earns nothing.
+            self.assertEqual(members["findings"], {"FIND-0001": "harness"})
+
+    def test_a_condition_subtree_names_the_same_member(self) -> None:
+        # After split_pool the audit also walks pool/<condition>/…, where the
+        # same artifact appears under a scoped name.
+        with tempfile.TemporaryDirectory() as tmp:
+            bench = Path(tmp)
+            pool = bench / ".pool.staging"
+            pool.mkdir()
+            directory = _artifact(pool / "harness", "findings", "FIND-0001")
             _write_receipt(directory, "reportable")
             with mock.patch.object(
                 validation_receipt, "read_current", return_value=None,
             ):
-                with self.assertRaisesRegex(RuntimeError, "revalidate them"):
-                    benchmark_runner._audit_pool_receipts(pool, "test")
+                unjudged = benchmark_runner._quarantine_stale_receipts(
+                    bench, pool, "test",
+                )
+            self.assertEqual(list(unjudged), ["FIND-0001"])
 
-    def test_clean_pool_publishes(self) -> None:
+    def test_clean_pool_records_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            pool = Path(tmp)
+            bench = Path(tmp)
+            pool = bench / ".pool.staging"
             directory = _artifact(pool, "findings", "FIND-0001")
             _write_receipt(directory, "pending")
             with mock.patch.object(
                 validation_receipt, "read_current", return_value=None,
             ):
-                benchmark_runner._audit_pool_receipts(pool, "test")
+                self.assertEqual(
+                    benchmark_runner._quarantine_stale_receipts(
+                        bench, pool, "test",
+                    ),
+                    {},
+                )
+            self.assertFalse((bench / "pool-members.json").exists())
 
 
 class SeverityUnratedLabel(unittest.TestCase):

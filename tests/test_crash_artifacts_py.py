@@ -283,18 +283,24 @@ with tempfile.TemporaryDirectory() as td:
         "find_repro_args: embedded testcase token does not add a duplicate",
     )
 
-    # Grok-style full bare invocation in the args-only file: strip the binary
-    # only for exact `BIN {TESTCASE}`. Other backends' flags and positional
-    # arguments must remain untouched.
+    # A full invocation in the args-only file: the leading binary is never an
+    # argument the target wants, whatever follows it. Passed through, a media
+    # tool read its own path as an output file and every replay run failed.
     (cd / "repro.cmd").write_text("app {TESTCASE}\n", encoding="utf-8")
     assert_eq([], ca.find_repro_args([cd], bin_names=["app"],
                                      testcase_name="input.txt"),
               "find_repro_args: exact leading configured binary is normalized")
     (cd / "repro.cmd").write_text("app --mode {TESTCASE}\n", encoding="utf-8")
-    assert_eq(["app", "--mode", ca.TESTCASE_TOKEN],
+    assert_eq(["--mode", ca.TESTCASE_TOKEN],
               ca.find_repro_args([cd], bin_names=["app"],
                                  testcase_name="input.txt"),
-              "find_repro_args: non-bare argv beginning with binary-like positional is preserved")
+              "find_repro_args: leading configured binary is dropped before flags")
+    (cd / "repro.cmd").write_text("build/app -v error -i {TESTCASE} -f null -\n",
+                                  encoding="utf-8")
+    assert_eq(["-v", "error", "-i", ca.TESTCASE_TOKEN, "-f", "null", "-"],
+              ca.find_repro_args([cd], bin_names=["app"],
+                                 testcase_name="input.txt"),
+              "find_repro_args: leading binary path is dropped by basename")
     (cd / "repro.cmd").write_text("other {TESTCASE}\n", encoding="utf-8")
     assert_eq(["other", ca.TESTCASE_TOKEN],
               ca.find_repro_args([cd], bin_names=["app"],

@@ -1269,6 +1269,74 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(unclustered["finding_class_histogram"], {})
         self.assertEqual(unclustered["unique_finding_classes"], 0)
 
+    def test_aggregate_re_books_artifacts_published_unjudged(self) -> None:
+        """A pooled artifact whose receipt went stale counts as unjudged, not credited."""
+        root = self.root / "published-unjudged"
+        bench = root / "codex" / "run1"
+        self.write_json(bench / "run.json", {
+            "runid": "run1", "target": "sample", "backend": "codex",
+            "model": "gpt-test", "replicates": 1, "budget_wall": 60,
+            "conditions": ["harness"],
+            "target_sha": "abc", "harness_sha": "def",
+        })
+        self.make_cell(bench, "harness-r1", "harness", 1, 2, findings=2)
+        self.write_json(bench / "pool-members.json", {
+            "crashes": {"CRASH-0001": "harness", "CRASH-0002": "harness"},
+            "crash_cells": {"CRASH-0001": "harness-r1", "CRASH-0002": "harness-r1"},
+            "crashes-rejected": {}, "findings-rejected": {},
+            "findings": {"FIND-0001": "harness", "FIND-0002": "harness"},
+            "unjudged": {
+                "CRASH-0002": {
+                    "kind": "crashes", "condition": "harness",
+                    "why": "validation receipt no longer matches the report",
+                },
+                "FIND-0002": {
+                    "kind": "findings", "condition": "harness",
+                    "why": "severity was not produced by the current scorer",
+                },
+            },
+        })
+        self.write_json(bench / "clusters-crashes.json", {"clusters": [
+            {"id": "CRASH-a", "members": ["CRASH-0001"], "severity_level": "High",
+             "severity_rank": 3, "severity_score": 8.0,
+             "member_severity": {"CRASH-0001": {"level": "High", "rank": 3, "score": 8.0}}},
+            {"id": "CRASH-b", "members": ["CRASH-0002"], "severity_level": "Critical",
+             "severity_rank": 4, "severity_score": 9.5,
+             "member_severity": {"CRASH-0002": {"level": "Critical", "rank": 4, "score": 9.5}}},
+        ]})
+        self.write_json(bench / "clusters-findings.json", {"clusters": [
+            {"id": "FINDING-a", "class": "dos", "members": ["FIND-0001"]},
+            {"id": "FINDING-b", "class": "auth", "members": ["FIND-0002"]},
+        ]})
+        for name, klass in (("FIND-0001", "dos"), ("FIND-0002", "auth")):
+            self.write_json(
+                bench / "pool" / "findings" / name / ".llm-find-quality.json",
+                {"accept": True, "class": klass},
+            )
+
+        report = benchmark.aggregate(bench)
+        condition = report["conditions"][0]
+        self.assertEqual(condition["crashes"], [1])
+        self.assertEqual(condition["crash_total"], 1)
+        self.assertEqual(condition["unadjudicated_crash_total"], 1)
+        self.assertEqual(condition["unique_crash_clusters"], 1)
+        self.assertEqual(condition["top_severity_level"], "High")
+        self.assertEqual(condition["confirmed_finding_total"], 1)
+        self.assertEqual(condition["unadjudicated_finding_total"], 1)
+        self.assertEqual(condition["unique_finding_clusters"], 1)
+        self.assertEqual(
+            [artifact["name"] for artifact in condition["pool_unjudged"]],
+            ["CRASH-0002", "FIND-0002"],
+        )
+        # Both ledgers name the artifact and the cause beside the counts.
+        section = benchmark.render_section(report)
+        self.assertIn("CRASH-0002", section)
+        self.assertIn("not credited", section)
+        self.write_json(bench / "report.json", report)
+        crosstab = benchmark.crosstab(root)
+        self.assertIn("published unjudged", crosstab)
+        self.assertIn("`FIND-0002` — severity was not produced", crosstab)
+
     def test_renderers_require_a_complete_cluster_class_histogram(self) -> None:
         """Legacy occurrence shares must not label a unique-cluster count."""
         run = self.root / "class-render" / "codex" / "run1"

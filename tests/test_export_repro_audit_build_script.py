@@ -91,6 +91,31 @@ class ExportReproducerAuditBuildTests(unittest.TestCase):
         self.assertNotIn("DCMAKE_BUILD_TYPE=RelWithDebInfo", script)
         self.assertIn("AUDIT_BUILD_SCRIPT_EOF", script)
 
+    def test_export_leaves_receipt_bound_evidence_where_a_review_bound_it(self) -> None:
+        # A validation receipt digests .trigger-gate.json by path. The crash
+        # gate writes it at the root after the cell's own export, so a later
+        # export must not sweep it under .audit/ — least of all over the
+        # finding-era vote already there, which a source attestation names.
+        output, results, _source = self.make_layout("evidence-test")
+        crash = self.write_crash(results, "CRASH-EVIDENCE-1")
+        (crash / ".audit").mkdir()
+        (crash / ".trigger-gate.json").write_text(
+            '{"id": "crash-vote"}\n', encoding="utf-8",
+        )
+        (crash / ".audit" / ".trigger-gate.json").write_text(
+            '{"id": "finding-vote"}\n', encoding="utf-8",
+        )
+        proc = self.export(output, crash.name)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(
+            (crash / ".trigger-gate.json").read_text(encoding="utf-8"),
+            '{"id": "crash-vote"}\n',
+        )
+        self.assertEqual(
+            (crash / ".audit" / ".trigger-gate.json").read_text(encoding="utf-8"),
+            '{"id": "finding-vote"}\n',
+        )
+
     def test_library_resolver_template_retains_canonical_suffix_fallback(self) -> None:
         source = EXPORT.read_text(encoding="utf-8")
         self.assertIn("Strip audit-side decoration", source)
