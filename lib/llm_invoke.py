@@ -1381,7 +1381,7 @@ TURN_CAP_MARKER = "TURN_SOFT_CAP reached"
 
 #: Dialects whose stream carries usage per request (see
 #: audit_helpers._event_context_tokens), so a context cap can be enforced.
-_PER_REQUEST_USAGE_BACKENDS = frozenset({"claude"})
+_PER_REQUEST_USAGE_BACKENDS = frozenset({"claude", "grok"})
 
 
 def _agent_has_unfinished_crash(environment: dict) -> bool:

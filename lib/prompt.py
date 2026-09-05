@@ -175,10 +175,12 @@ def safety_framing(context: PromptContext) -> str:
 # sentinel line in AGENTS.md and tools disabled, so the answer had to come
 # from context: codex answers it; claude under the audit's `--safe-mode`
 # loads neither AGENTS.md nor CLAUDE.md; gemini-cli answers only by reading
-# the file with a tool call. grok and oss could not be exercised (no
-# credentials) and are treated the same way. Every other backend therefore
-# gets the embedded copy in every session variant, not only the cold one.
-_GUIDE_AUTOLOADING_BACKENDS = frozenset({"codex"})
+# the file with a tool call; grok under the audit's `--no-memory` answers from
+# its "always applied workspace rules" without a read, so it loads AGENTS.md
+# too. oss could not be exercised (no credentials) and is treated as not
+# loading. Every other backend therefore gets the embedded copy in every
+# session variant, not only the cold one.
+_GUIDE_AUTOLOADING_BACKENDS = frozenset({"codex", "grok"})
 
 
 def guide_autoloaded(context: PromptContext) -> bool:

@@ -104,6 +104,47 @@ class UsageExtractionTests(unittest.TestCase):
         self.assertEqual(self.field("output_tokens", "gemini", self.gemini), "150")
         self.assertEqual(self.field("cached_input_tokens", "gemini", self.gemini), "800")
 
+    def test_grok_end_event_is_measured_with_its_reported_cost(self) -> None:
+        # Shape measured on grok CLI (2026-09): `end` carries the session
+        # usage, a per-model block and the cost.
+        raw = self.fixture("grok-end.raw", [
+            {"type": "text", "data": "done"},
+            {"type": "usage", "usage": {"input_tokens": 11733, "output_tokens": 70,
+             "cache_read_input_tokens": 1664, "cache_creation_input_tokens": 0}},
+            {"type": "end", "stopReason": "end_turn", "sessionId": "s",
+             "usage": {"input_tokens": 12008, "cache_read_input_tokens": 14976,
+                       "cache_creation_input_tokens": 0, "output_tokens": 104,
+                       "reasoning_tokens": 29, "total_tokens": 27088},
+             "num_turns": 2, "total_cost_usd": 0.032128,
+             "modelUsage": {"grok-4.6": {"inputTokens": 12008, "outputTokens": 104,
+                            "cacheReadInputTokens": 14976, "cacheCreationInputTokens": 0,
+                            "modelCalls": 2, "costUSD": 0.032128}}},
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="grok")
+        self.assertFalse(row["estimated"])
+        self.assertEqual(row["tokens"]["input"], 12008)
+        self.assertEqual(row["tokens"]["cached_input"], 14976)
+        self.assertEqual(row["tokens"]["output"], 104)
+        self.assertEqual(row["cost_source"], "backend-reported")
+        self.assertAlmostEqual(row["cost_usd"], 0.032128)
+
+    def test_a_capped_grok_session_sums_its_per_request_usage(self) -> None:
+        # Ended by the harness before `end`: each request's `usage` row is
+        # real, so their sum is a measurement rather than a one-turn floor.
+        raw = self.fixture("grok-capped.raw", [
+            {"type": "usage", "usage": {"input_tokens": 11733, "output_tokens": 70,
+             "cache_read_input_tokens": 1664, "cache_creation_input_tokens": 0}},
+            {"type": "tool_call", "toolCallId": "c1", "status": "pending"},
+            {"type": "tool_call_update", "toolCallId": "c1", "status": "completed"},
+            {"type": "usage", "usage": {"input_tokens": 275, "output_tokens": 34,
+             "cache_read_input_tokens": 13312, "cache_creation_input_tokens": 0}},
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="grok")
+        self.assertFalse(row["estimated"])
+        self.assertEqual(row["tokens"]["input"], 12008)
+        self.assertEqual(row["tokens"]["cached_input"], 14976)
+        self.assertEqual(row["tokens"]["output"], 104)
+
     def test_plain_text_and_grok_estimates(self) -> None:
         self.assertGreater(int(self.field("output_tokens", "gemini", self.plain)), 0)
         self.assertEqual(self.field("input_tokens", "gemini", self.plain), "0")

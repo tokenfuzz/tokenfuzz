@@ -54,6 +54,30 @@ class ContextTokensTests(unittest.TestCase):
             again, change, offset2 = audit_helpers.context_tokens_delta(raw, offset)
             self.assertEqual((again, change, offset2), (0, 0, offset))
 
+    def test_grok_usage_events_and_tool_updates_are_read(self) -> None:
+        # Shapes measured on grok CLI: one `usage` per request, `tool_call`
+        # dispatches, `tool_call_update` rows until a terminal status.
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "grok.raw"
+            rows = [
+                {"type": "usage", "usage": {"input_tokens": 11733, "output_tokens": 70,
+                 "cache_read_input_tokens": 1664, "cache_creation_input_tokens": 0}},
+                {"type": "tool_call", "toolCallId": "c1", "status": "pending",
+                 "toolName": "run_terminal_command"},
+                {"type": "tool_call_update", "toolCallId": "c1", "status": None},
+                {"type": "tool_call_update", "toolCallId": "c1", "status": "in_progress"},
+            ]
+            raw.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+            largest, inflight, offset = audit_helpers.context_tokens_delta(raw, 0)
+            self.assertEqual((largest, inflight), (13397, 1))
+            self.assertEqual(audit_helpers.tool_call_delta(raw, 0)[0], 0)
+            with raw.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({"type": "tool_call_update", "toolCallId": "c1",
+                                         "status": "completed"}) + "\n")
+            _largest, change, _offset = audit_helpers.context_tokens_delta(raw, offset)
+            self.assertEqual(change, -1)
+            self.assertEqual(audit_helpers.tool_call_delta(raw, 0)[0], 1)
+
     def test_dialects_without_per_request_usage_report_nothing(self) -> None:
         self.assertEqual(audit_helpers._event_context_tokens(
             {"type": "item.completed", "item": {"type": "command_execution"}}), 0)
@@ -151,7 +175,7 @@ class RolloverTests(unittest.TestCase):
         def fake_process(*_args, **kwargs):
             seen.update(kwargs)
             return 0
-        for backend, expected in (("claude", 200_000), ("codex", 0), ("gemini", 0), ("grok", 0), ("oss", 0)):
+        for backend, expected in (("claude", 200_000), ("codex", 0), ("gemini", 0), ("grok", 200_000), ("oss", 0)):
             with mock.patch.object(llm_invoke, "backend_bin", return_value="/bin/true"), \
                  mock.patch.object(llm_invoke, "_run_agent_process", side_effect=fake_process), \
                  mock.patch.object(llm_invoke, "agent_security_problem", return_value=""):

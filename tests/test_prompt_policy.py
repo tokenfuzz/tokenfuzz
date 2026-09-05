@@ -219,18 +219,21 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
                 guide_text=guide, backend=backend,
             )
 
-        codex_cold = prompt.cold_start_prompt(context("codex"), 1)
-        self.assertNotIn(marker, codex_cold)
-        self.assertIn("## AGENT GUIDE", codex_cold)
-        self.assertIn("already loaded", codex_cold)
-        self.assertIn("`AGENTS.md`", codex_cold)
-        for backend in ("claude", "gemini", "grok", "oss", ""):
+        # grok under --no-memory still applies the workspace AGENTS.md
+        # (measured with a sentinel), so it is on the auto-loading side too.
+        for backend in ("codex", "grok"):
+            cold = prompt.cold_start_prompt(context(backend), 1)
+            self.assertNotIn(marker, cold, backend)
+            self.assertIn("## AGENT GUIDE", cold)
+            self.assertIn("already loaded", cold)
+            self.assertIn("`AGENTS.md`", cold)
+            deep = prompt.deep_investigation_prompt(context(backend), 1)
+            self.assertNotIn(marker, deep, backend)
+            self.assertIn("Follow `AGENTS.md`", deep)
+        for backend in ("claude", "gemini", "oss", ""):
             with self.subTest(backend=backend or "unset"):
                 self.assertIn(marker, prompt.cold_start_prompt(context(backend), 1))
-        codex_deep = prompt.deep_investigation_prompt(context("codex"), 1)
-        self.assertNotIn(marker, codex_deep)
-        self.assertIn("Follow `AGENTS.md`", codex_deep)
-        for backend in ("claude", "gemini", "grok", "oss", ""):
+        for backend in ("claude", "gemini", "oss", ""):
             with self.subTest(variant="deep", backend=backend or "unset"):
                 deep = prompt.deep_investigation_prompt(context(backend), 1)
                 self.assertIn(marker, deep)

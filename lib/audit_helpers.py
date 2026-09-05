@@ -867,6 +867,11 @@ def _event_tool_counts(event: dict) -> tuple[int, int]:
     return 0, 0
 
 
+#: Grok Build `tool_call_update` statuses that end a call (measured: a shell
+#: call streams null and `in_progress` updates, then `completed`).
+_GROK_TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed", "error", "cancelled"})
+
+
 def _event_completed_tool_count(event: dict) -> int:
     """Return completed tool calls represented by one streaming event.
 
@@ -885,6 +890,11 @@ def _event_completed_tool_count(event: dict) -> int:
 
     if event.get("type") == "tool_result":
         return 1
+
+    if event.get("type") == "tool_call_update":
+        # Grok Build: a call is dispatched as `tool_call` and streams
+        # `tool_call_update` rows until one carries a terminal status.
+        return int(event.get("status") in _GROK_TERMINAL_TOOL_STATUSES)
 
     if event.get("type") == "tool_use":
         opencode_tool = _opencode_tool_event(event)
@@ -908,13 +918,21 @@ def _event_completed_tool_count(event: dict) -> int:
 def _event_context_tokens(event: dict) -> int:
     """Prompt tokens one streamed request carried, or 0 when not reported.
 
-    Claude Code stamps every assistant message with the request's usage; the
-    context that request replayed is its uncached input plus what it wrote to
-    and read from the cache. Other dialects report usage only at the end, so
-    they contribute nothing here.
+    Claude Code stamps every assistant message with the request's usage and
+    Grok Build emits a `usage` event per request; the context that request
+    replayed is its uncached input plus what it wrote to and read from the
+    cache. Other dialects report usage only at the end, so they contribute
+    nothing here.
     """
-    message = event.get("message") if event.get("type") == "assistant" else None
-    usage = message.get("usage") if isinstance(message, dict) else None
+    kind = event.get("type")
+    if kind == "assistant":
+        message = event.get("message")
+        usage = message.get("usage") if isinstance(message, dict) else None
+    elif kind == "usage":
+        # Grok Build stamps one `usage` event per request.
+        usage = event.get("usage")
+    else:
+        usage = None
     if not isinstance(usage, dict):
         return 0
     total = 0
@@ -926,7 +944,11 @@ def _event_context_tokens(event: dict) -> int:
 
 
 def _event_inflight_delta(event: dict) -> int:
-    """Tool dispatches minus tool completions this event represents (Claude)."""
+    """Tool dispatches minus tool completions this event represents."""
+    if event.get("type") == "tool_call":
+        return 1
+    if event.get("type") == "tool_call_update":
+        return -int(event.get("status") in _GROK_TERMINAL_TOOL_STATUSES)
     if event.get("type") == "assistant":
         return sum(
             1 for item in _claude_content_items(event)

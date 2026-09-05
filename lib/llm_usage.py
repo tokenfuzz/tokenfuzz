@@ -97,11 +97,16 @@ _OUTPUT_KEYS = ("output_tokens", "completion_tokens", "output")
 # taking only the last terminal event silently drops every earlier
 # invocation (observed as a ~100x undercount on a real multi-invocation
 # cell). These are CLI event-type names, not target-specific vocabulary.
-_TERMINAL_TYPES = ("result", "turn.completed", "step_finish", "step-finish")
+# Grok Build's streaming-json ends a session with `end`, carrying the session's
+# cumulative `usage`, a per-model `modelUsage` block and `total_cost_usd`
+# (measured on grok CLI in 2026-09; earlier builds reported nothing, which is
+# why the estimated path below still accepts grok).
+_TERMINAL_TYPES = ("result", "turn.completed", "step_finish", "step-finish", "end")
 
 # Rough chars-per-token ratio for the estimated path. ~4 is the common
-# heuristic for English + code; it is only ever used when a backend (agy/Grok)
-# refuses to report real usage, and the row is flagged `estimated`.
+# heuristic for English + code; it is only ever used when a backend (agy, or a
+# Grok build that predates usage reporting) refuses to report real usage, and
+# the row is flagged `estimated`.
 _CHARS_PER_TOKEN = 4
 
 
@@ -585,6 +590,38 @@ def extract_usage(
     return extract_usage_from_text(raw, prompt_text=prompt_text, backend=backend)
 
 
+def _grok_per_request_usage(raw: str) -> dict | None:
+    """Sum Grok Build's per-request `usage` events, or None if there are none.
+
+    A session the harness ends at a cap never reaches its `end` event, but
+    every request it made stamped a `usage` row first (measured: a two-request
+    session's rows sum to its `end` usage). Unlike Claude's per-message stub,
+    each row's `output_tokens` is the request's real count, so the sum is a
+    measurement, not a floor.
+    """
+    summed = {"input": 0, "cached_input": 0, "cache_creation": 0, "output": 0, "cache_creation_1h": 0}
+    seen = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict) or obj.get("type") != "usage":
+            continue
+        usage = obj.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        seen = True
+        summed["input"] += _first_int(usage, _INPUT_KEYS)
+        summed["cached_input"] += _cached_input_int(usage)
+        summed["cache_creation"] += _cache_write_int(usage)
+        summed["output"] += _first_int(usage, _OUTPUT_KEYS)
+    return summed if seen else None
+
+
 def _claude_per_request_usage(raw: str) -> tuple[dict, bool] | None:
     """Sum Claude's per-assistant-message usage, or None if the stream has none.
 
@@ -710,9 +747,10 @@ _DELEGATION_UNOBSERVABLE = frozenset({"grok"})
 # the same session and its terminal `modelUsage` carries them (measured: a
 # delegating run reported 3.5x the tokens of a plain one); Gemini CLI's
 # `invoke_agent` runs in-process and its `stats` is the session aggregate.
-# Grok reports no usage at all (its rows are character estimates), so a
-# subagent's spend there is unknown rather than merely unseen. A row for one
-# of these backends with any delegation is a spend floor.
+# Grok's terminal `end` carries a session `usage`, but whether a spawned
+# subagent's spend is folded into it has not been measured, so a row with
+# delegation there is still a floor. A row for one of these backends with any
+# delegation is a spend floor.
 _CHILD_SPEND_UNATTRIBUTED = frozenset({"codex", "oss", "grok"})
 
 
@@ -1035,6 +1073,12 @@ def extract_usage_from_text(
         tokens, output_estimated = per_request
         return with_reported_cost({
             "tokens": tokens, "probe": {}, "estimated": output_estimated,
+            "backend": backend,
+        })
+    grok_requests = _grok_per_request_usage(raw) if backend == "grok" else None
+    if grok_requests is not None:
+        return with_reported_cost({
+            "tokens": grok_requests, "probe": {}, "estimated": False,
             "backend": backend,
         })
 
