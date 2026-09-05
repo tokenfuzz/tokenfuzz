@@ -2407,8 +2407,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         # Rejected columns precede reportable ones; upper bounds are explicit.
         for expected in (
             "can appear on both sides if it was reportable in one write-up",
-            "Unique rejected findings | Security findings to report",
-            "Unique rejected crashes | Unique security crashes to report",
+            "Unique rejected findings | Security findings |",
+            "Unique rejected crashes | Unique security crashes |",
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, text)

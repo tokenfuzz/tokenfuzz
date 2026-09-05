@@ -5878,8 +5878,8 @@ def render_section(report: dict) -> str:
     # still includes reportable artifacts scored Low or left unscored.
     lines.append(
         "| Condition | Replicates | Wall (h) | Worker-h "
-        "| Unique rejected findings | Security findings to report "
-        "| Unique rejected crashes | Unique security crashes to report "
+        "| Unique rejected findings | Security findings "
+        "| Unique rejected crashes | Unique security crashes "
         "| Top crash severity |"
     )
     lines.append(
@@ -6000,8 +6000,8 @@ def render_section(report: dict) -> str:
         "**Unique rejected findings** "
         "are FIND reports that failed the independent validator gate and link "
         "to a table showing the reachability / guards / primitive booleans. "
-        "**Security findings to report** counts only reportable FIND reports. "
-        "Findings carry no on-disk crash; **Unique security crashes to report** counts only crash "
+        "**Security findings** counts only reportable FIND reports. "
+        "Findings carry no on-disk crash; **Unique security crashes** counts only crash "
         "directories with real sanitizer output on disk — an agent "
         "claiming a crash in prose never counts. The reportable columns are "
         "annotated `N (M "
@@ -6433,8 +6433,8 @@ def crosstab(bench_root: Path) -> str:
 
     lines.append(
         "| Target | Backend | Condition | Run | Wall (h) | Replicates "
-        "| Unique rejected findings | Security findings to report "
-        "| Unique rejected crashes | Unique security crashes to report "
+        "| Unique rejected findings | Security findings "
+        "| Unique rejected crashes | Unique security crashes "
         "| Top crash severity "
         "| Input | Output | Cost |"
     )
@@ -6742,7 +6742,7 @@ def crosstab(bench_root: Path) -> str:
         "duplicates merged. The linked index gives the reason for each."
     )
     lines.append(
-        "- **Security findings to report** — reports that survived review and an "
+        "- **Security findings** — reports that survived review and an "
         "agent's own investigation, with no reportable crash behind them, "
         "duplicates merged. Shown as `N (M M+, C classes)`: `N` distinct "
         "problems, `M` of them scored Medium or higher, spread across `C` bug "
@@ -6791,7 +6791,7 @@ def crosstab(bench_root: Path) -> str:
         "are merged by stack signature; `up to N` marks an upper bound."
     )
     lines.append(
-        "- **Unique security crashes to report** — crashes with sanitizer output and "
+        "- **Unique security crashes** — crashes with sanitizer output and "
         "reproducer material on disk, duplicates merged by stack signature. "
         "Shown as `N (M M+)`: `N` distinct crashes, `M` of them scored Medium "
         "or higher — the number to read first. A `K unjudged` remainder and "
