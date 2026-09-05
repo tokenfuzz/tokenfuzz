@@ -7,6 +7,10 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def invoke_main(
@@ -78,3 +82,24 @@ def run_main_captured(
             stdout.read().decode(encoding="utf-8", errors="replace"),
             stderr.read().decode(encoding="utf-8", errors="replace"),
         )
+
+
+def isolated_script_root(base: Path) -> Path:
+    """Build a harness root under ``base`` whose ``output/`` holds no targets.
+
+    Target-overlay resolution reads ``<root>/output/<name>/target.toml``: an
+    operator who has set up an ordinary target under an overlay's name keeps
+    that identity, so ``chromium`` stops meaning ``chromium/src`` on their
+    machine. A test that asserts the alias against the checkout's own
+    ``output/`` therefore samples that operator state. This root shares the
+    checkout's ``bin`` and ``lib`` (so overlays and imports resolve) but owns
+    empty ``output`` and ``targets`` trees, which is the host state the alias
+    behaviour is defined against.
+    """
+    root = Path(base) / "harness-root"
+    root.mkdir()
+    for shared in ("bin", "lib"):
+        (root / shared).symlink_to(REPO_ROOT / shared, target_is_directory=True)
+    (root / "output").mkdir()
+    (root / "targets").mkdir()
+    return root

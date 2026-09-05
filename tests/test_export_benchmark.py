@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 import urllib.parse
@@ -13,13 +15,17 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests"))
 COMMAND = ROOT / "bin" / "export-benchmark"
+
+from python_test_helpers import isolated_script_root  # noqa: E402
 
 
 class ExportBenchmarkTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="export-benchmark-")
         self.root = Path(self.temporary.name)
+        self.script_root = isolated_script_root(self.root)
         self.bench = self.root / "bench"
         self.make_run("codex", "20260101-000000", "sampleproj")
         self.make_run("gemini", "20260101-000001", "sampleproj")
@@ -56,10 +62,12 @@ class ExportBenchmarkTests(unittest.TestCase):
         (run / "cells" / "harness-r1" / "log").write_text(f"cell {ROOT}/cell\n")
 
     def export(self, output, *args):
+        environment = os.environ.copy()
+        environment["SCRIPT_ROOT"] = str(self.script_root)
         return subprocess.run(
             [str(COMMAND), "--bench-root", str(self.bench), "--format", "dir",
              *map(str, args), "--out", str(output)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=environment,
         )
 
     def assert_links_resolve(self, root):

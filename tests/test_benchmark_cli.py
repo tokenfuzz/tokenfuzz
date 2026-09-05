@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import benchmark
 import benchmark_runner
-from python_test_helpers import invoke_main
+from python_test_helpers import invoke_main, isolated_script_root
 
 
 class BenchmarkCliTests(unittest.TestCase):
@@ -309,7 +309,9 @@ class BenchmarkCliTests(unittest.TestCase):
             "--target", "chromium", "--reset",
             "--ledger", str(self.root / "overlay-ledger.md"),
         ])
-        self.assertEqual(benchmark_runner.run_single(args, self.bench_root), 0)
+        root = isolated_script_root(self.root)
+        with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", root):
+            self.assertEqual(benchmark_runner.run_single(args, self.bench_root), 0)
         self.assertEqual(args.target, "chromium/src")
 
     def test_relocate_experiments_rewrites_metadata_idempotently(self) -> None:

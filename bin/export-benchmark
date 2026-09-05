@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -65,7 +66,7 @@ import tempfile
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).absolute().parent
-SCRIPT_ROOT = SCRIPT_DIR.parent
+SCRIPT_ROOT = Path(os.environ.get("SCRIPT_ROOT") or SCRIPT_DIR.parent)
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import benchmark as B  # noqa: E402  (runtime sys.path adjustment)

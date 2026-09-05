@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests"))
 sys.path.insert(0, str(ROOT / "lib"))
 
 import audit_runner
@@ -23,6 +24,7 @@ import build_config
 import build_preflight
 import crash_bundle
 import target_config
+from python_test_helpers import isolated_script_root
 
 _BUILD_CONFIGS_LOADER = importlib.machinery.SourceFileLoader(
     "build_configs_command", str(ROOT / "bin" / "build-configs")
@@ -36,15 +38,18 @@ _BUILD_CONFIGS_LOADER.exec_module(build_configs)
 
 class BuildConfigTests(unittest.TestCase):
     def test_target_overlay_applies_before_build_config_paths(self) -> None:
-        args = build_configs.parse_args(["--target", "chromium", "--all"])
-        self.assertEqual(args.target, "chromium/src")
-        self.assertEqual(
-            Path(args.target_path), ROOT / "targets" / "chromium" / "src"
-        )
-        self.assertEqual(
-            Path(args.target_toml),
-            ROOT / "output" / "chromium" / "src" / "target.toml",
-        )
+        with tempfile.TemporaryDirectory(prefix="build-config-root-") as temporary:
+            root = isolated_script_root(Path(temporary))
+            with mock.patch.object(build_configs, "SCRIPT_ROOT", root):
+                args = build_configs.parse_args(["--target", "chromium", "--all"])
+            self.assertEqual(args.target, "chromium/src")
+            self.assertEqual(
+                Path(args.target_path), root / "targets" / "chromium" / "src"
+            )
+            self.assertEqual(
+                Path(args.target_toml),
+                root / "output" / "chromium" / "src" / "target.toml",
+            )
 
     def test_identity_preserves_argument_order_and_isolates_primary(self) -> None:
         first = build_config.BuildConfig("wide", "wide", ("-DA=1", "-DB=2"))
