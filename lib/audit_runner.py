@@ -287,122 +287,6 @@ def _load_config(
     return config
 
 
-def _read_first_token(path: str) -> str:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            tokens = handle.read().split()
-        return tokens[0] if tokens else ""
-    except (OSError, ValueError):
-        return ""
-
-
-def _cgroup_cpu_limit() -> float:
-    """CPUs granted by a cgroup quota (Docker `--cpus`), or 0.0 when unlimited.
-
-    v2 `cpu.max` reads "quota period" or "max period"; v1 splits them into
-    `cpu.cfs_quota_us` (-1 when unlimited) and `cpu.cfs_period_us`.
-    """
-    try:
-        with open("/sys/fs/cgroup/cpu.max", encoding="utf-8") as handle:
-            quota, period = handle.read().split()[:2]
-        if quota != "max" and int(period) > 0:
-            return int(quota) / int(period)
-        return 0.0
-    except (OSError, ValueError, IndexError):
-        pass
-    for controller in ("cpu", "cpu,cpuacct"):
-        quota = _read_first_token(f"/sys/fs/cgroup/{controller}/cpu.cfs_quota_us")
-        period = _read_first_token(f"/sys/fs/cgroup/{controller}/cpu.cfs_period_us")
-        try:
-            if quota and period and int(quota) > 0 and int(period) > 0:
-                return int(quota) / int(period)
-        except ValueError:
-            continue
-    return 0.0
-
-
-def _cgroup_memory_limit_bytes() -> int:
-    """Bytes granted by a cgroup memory limit (Docker `-m`), or 0 when unlimited."""
-    for path in (
-        "/sys/fs/cgroup/memory.max",
-        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
-    ):
-        raw = _read_first_token(path)
-        if not raw or raw == "max":
-            continue
-        try:
-            value = int(raw)
-        except ValueError:
-            continue
-        # v1 reports a huge sentinel when unlimited.
-        if 0 < value < (1 << 60):
-            return value
-    return 0
-
-
-def _machine_cpus() -> int:
-    """CPUs this process may actually use: affinity and cgroup quota, then host."""
-    host = os.cpu_count() or 4
-    try:
-        host = min(host, len(os.sched_getaffinity(0)))  # Linux only
-    except (AttributeError, OSError):
-        pass
-    quota = _cgroup_cpu_limit()
-    if quota > 0:
-        host = min(host, max(1, int(quota)))
-    return max(1, host)
-
-
-def _machine_memory_gb() -> float:
-    """RAM in GiB available to this process, or 0.0 when the platform will not say.
-
-    Inside a container the host figure is a lie; a cgroup limit wins over it.
-    """
-    physical = 0.0
-    try:
-        physical = (
-            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-        ) / (1024 ** 3)
-    except (ValueError, OSError, AttributeError):
-        pass
-    limit = _cgroup_memory_limit_bytes()
-    if limit:
-        limited = limit / (1024 ** 3)
-        return min(physical, limited) if physical else limited
-    return physical
-
-
-def _auto_shell_agents() -> int:
-    """Default shell-worker count sized to the machine, not a fixed 3.
-
-    The old default of three predates continuous scheduling: it was a
-    round-robin cohort, so a fourth slot mostly added barrier idle. With slots
-    that refill to the wall, more of them is more coverage at the same budget,
-    up to what the machine can host. Each slot is one agent CLI plus the
-    occasional build or `bin/probe` it spawns, so the ceiling is CPU and RAM,
-    not the provider — a shared account limit is enforced by the provider and
-    surfaces as a capacity pause, which the loop already handles, so it is not
-    second-guessed here.
-
-    ``cpu_count`` bounds it because a build or sanitizer run is CPU-bound;
-    ``AGENT_MEMORY_GB`` (default 4) bounds it against RAM so a low-memory host
-    does not thrash; ``AGENT_POOL_MAX`` (default 8) is the safety ceiling.
-    ``NUM_AGENTS`` or ``SHELL_AGENTS`` still override this entirely.
-    """
-    cpus = _machine_cpus()
-    try:
-        per_agent_gb = max(0.5, float(os.environ.get("AGENT_MEMORY_GB", "4")))
-    except ValueError:
-        per_agent_gb = 4.0
-    try:
-        ceiling = max(1, int(os.environ.get("AGENT_POOL_MAX", "8")))
-    except ValueError:
-        ceiling = 8
-    memory_gb = _machine_memory_gb()
-    by_memory = int(memory_gb // per_agent_gb) if memory_gb else ceiling
-    return max(1, min(cpus, by_memory or 1, ceiling))
-
-
 def _agent_counts(config: target_config.Config, max_iterations: int) -> tuple[int, int, int]:
     page_browser = (
         config.is_browser in ("1", "true", "True")
@@ -420,10 +304,15 @@ def _agent_counts(config: target_config.Config, max_iterations: int) -> tuple[in
             max(0, int(os.environ.get("BROWSER_AGENTS", "1")))
             if page_browser else 0
         )
-        shell_default = "2" if page_browser else str(_auto_shell_agents())
+        # A fixed 3, not a machine-sized pool: slots refill to the wall, so
+        # the pool multiplies token spend directly, and a shared provider
+        # quota is a hard stop for the account, not a pause. Sizing to CPUs
+        # once put 8 slots on a 16-core host and drained a weekly quota in
+        # under three hours.
+        shell_default = "2" if page_browser else "3"
         shell = max(0, int(os.environ.get("SHELL_AGENTS", shell_default)))
         return max(1, browser + shell), browser, shell
-    total = max(1, int(os.environ.get("SHELL_AGENTS", str(_auto_shell_agents()))))
+    total = max(1, int(os.environ.get("SHELL_AGENTS", "3")))
     return total, 0, total
 
 

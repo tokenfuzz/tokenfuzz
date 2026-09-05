@@ -17,9 +17,7 @@ should not need them.
 | --- | --- | --- |
 | `NUM_AGENTS` | unset | A flat pool of `N` workers. On a browser target this replaces the browser/shell split. |
 | `BROWSER_AGENTS` | `1` | Browser-mode workers. Only applies when `[runner].args` declares a `{PROFILE}` page route; a browser-mode script engine gets shell workers only. |
-| `SHELL_AGENTS` | `2` beside browser workers, otherwise sized to the machine | Shell/generic workers when `NUM_AGENTS` is unset. The machine default is `min(CPUs, RAM ÷ AGENT_MEMORY_GB, AGENT_POOL_MAX)`, where CPUs and RAM honour a container's cgroup quota and limit (Docker `--cpus`, `-m`) and Linux CPU affinity, not just the host. |
-| `AGENT_MEMORY_GB` | `4` | RAM budgeted per worker when sizing the default pool: one agent CLI plus the builds and sanitizer runs it spawns. |
-| `AGENT_POOL_MAX` | `8` | Ceiling on the machine-sized default. A provider's own concurrency or quota limit is not modelled here; it surfaces as a capacity pause the loop already handles. |
+| `SHELL_AGENTS` | `2` beside browser workers, `3` otherwise | Shell/generic workers when `NUM_AGENTS` is unset. The default is deliberately not sized to the machine: an ordinary run refills every slot to the wall, so the pool multiplies token spend directly, and a shared provider quota is a hard stop for the whole account rather than a pause. Raise it per run when the budget allows. |
 | `WORK_CARD_CLAIM_TTL_SECONDS` | `1800` | How long a work-card claim stays valid without its hypothesis closing. Thirty minutes is a safety net so a killed agent does not hold its card for a shift; raise it only for cards you know take longer. |
 
 A one-iteration smoke test always launches one worker, whatever these say.

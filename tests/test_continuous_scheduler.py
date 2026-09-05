@@ -12,7 +12,6 @@ machine-aware default and its container limits.
 from __future__ import annotations
 
 import contextlib
-import io
 import json
 import os
 import sys
@@ -364,22 +363,16 @@ class StewardTickTests(unittest.TestCase):
 
 
 class PoolSizingTests(unittest.TestCase):
-    def test_default_pool_is_sized_by_cpu_memory_and_ceiling(self) -> None:
-        with mock.patch.object(audit_runner, "_machine_cpus", return_value=16), \
-             mock.patch.object(audit_runner, "_machine_memory_gb", return_value=64.0), \
-             mock.patch.dict(os.environ, {"AGENT_POOL_MAX": "", "AGENT_MEMORY_GB": ""}, clear=False):
-            os.environ.pop("AGENT_POOL_MAX"); os.environ.pop("AGENT_MEMORY_GB")
-            self.assertEqual(audit_runner._auto_shell_agents(), 8)
-        with mock.patch.object(audit_runner, "_machine_cpus", return_value=4), \
-             mock.patch.object(audit_runner, "_machine_memory_gb", return_value=8.0):
-            self.assertEqual(audit_runner._auto_shell_agents(), 2, "8 GB at 4 GB per agent")
-        with mock.patch.object(audit_runner, "_machine_cpus", return_value=2), \
-             mock.patch.object(audit_runner, "_machine_memory_gb", return_value=0.0):
-            self.assertEqual(audit_runner._auto_shell_agents(), 2, "unknown RAM defers to CPU")
-        with mock.patch.object(audit_runner, "_machine_cpus", return_value=32), \
-             mock.patch.object(audit_runner, "_machine_memory_gb", return_value=256.0), \
-             mock.patch.dict(os.environ, {"AGENT_POOL_MAX": "12"}, clear=False):
-            self.assertEqual(audit_runner._auto_shell_agents(), 12)
+    def test_default_pool_is_a_fixed_three(self) -> None:
+        # Deliberately not sized to the machine: a 16-CPU host once defaulted
+        # to 8 slots, and 8 slots refilling to the wall drained a weekly
+        # provider quota in under three hours. The pool is the operator's
+        # visible choice; a shared account limit is not a graceful pause.
+        config = SimpleNamespace(is_browser="0")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NUM_AGENTS", None)
+            os.environ.pop("SHELL_AGENTS", None)
+            self.assertEqual(audit_runner._agent_counts(config, 0), (3, 0, 3))
 
     def test_explicit_counts_still_win(self) -> None:
         config = SimpleNamespace(is_browser="0")
@@ -389,34 +382,6 @@ class PoolSizingTests(unittest.TestCase):
             os.environ.pop("NUM_AGENTS", None)
             self.assertEqual(audit_runner._agent_counts(config, 0), (3, 0, 3))
         self.assertEqual(audit_runner._agent_counts(config, 1), (1, 0, 1), "a one-iteration smoke stays single")
-
-    def test_cgroup_limits_bound_the_host_figures(self) -> None:
-        def fake_open(path, *args, **kwargs):
-            data = {
-                "/sys/fs/cgroup/cpu.max": "200000 100000\n",
-                "/sys/fs/cgroup/memory.max": str(6 * 1024 ** 3) + "\n",
-            }
-            if path in data:
-                return io.StringIO(data[path])
-            raise OSError(path)
-
-        with mock.patch("builtins.open", side_effect=fake_open), \
-             mock.patch.object(os, "cpu_count", return_value=16):
-            self.assertEqual(audit_runner._cgroup_cpu_limit(), 2.0)
-            self.assertEqual(audit_runner._machine_cpus(), 2)
-            self.assertEqual(audit_runner._cgroup_memory_limit_bytes(), 6 * 1024 ** 3)
-            self.assertLessEqual(audit_runner._machine_memory_gb(), 6.0)
-
-        def unlimited(path, *args, **kwargs):
-            if path == "/sys/fs/cgroup/cpu.max":
-                return io.StringIO("max 100000\n")
-            if path == "/sys/fs/cgroup/memory.max":
-                return io.StringIO("max\n")
-            raise OSError(path)
-
-        with mock.patch("builtins.open", side_effect=unlimited):
-            self.assertEqual(audit_runner._cgroup_cpu_limit(), 0.0)
-            self.assertEqual(audit_runner._cgroup_memory_limit_bytes(), 0)
 
 
 if __name__ == "__main__":
