@@ -3069,6 +3069,7 @@ class SealedGateWorker:
         # artifact name -> monotonic time it was first sealed without a
         # trigger review, for the batch hold in _hold_unreviewed
         self._sealed_since: dict[str, float] = {}
+        self._holding = False
         self._wake = threading.Event()
         self._stop = False
         self._thread: threading.Thread | None = None
@@ -3190,7 +3191,11 @@ class SealedGateWorker:
 
     def _run(self) -> None:
         while True:
-            self._wake.wait()
+            # A hold is released by age, and age is only checked in a sweep,
+            # so wake on the hold clock too; otherwise a lone finding sealed
+            # by the last session to end before the wall waits for a sweep
+            # nothing requests.
+            self._wake.wait(GATE_BATCH_HOLD_SECONDS if self._holding else None)
             self._wake.clear()
             if self._stop:
                 return
@@ -3286,6 +3291,7 @@ class SealedGateWorker:
         if deadline is not None and time.monotonic() >= deadline:
             return
         held = self._hold_unreviewed(findings, deadline)
+        self._holding = bool(held)
         if held:
             findings = [d for d in findings if d not in held]
             if not findings and not crashes:

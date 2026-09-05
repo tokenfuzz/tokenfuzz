@@ -1337,7 +1337,13 @@ def run_agent_prompt(
                 backend == "gemini" and timeout_secs > 0
             ),
             watchdog_marker_dir=watchdog_marker_dir,
-            context_cap=max(0, int(context_cap)) if context_cap else 0,
+            # Only a dialect that stamps usage on each request can be
+            # measured; polling the others would cost a wake every half second
+            # for a cap that can never fire.
+            context_cap=(
+                max(0, int(context_cap))
+                if context_cap and backend in _PER_REQUEST_USAGE_BACKENDS else 0
+            ),
         )
     except OSError as exc:
         Path(raw_log).write_text(str(exc) + "\n", encoding="utf-8")
@@ -1372,6 +1378,10 @@ _CRASH_ENRICHMENT_GRACE_SECONDS = 300
 # A capped session exits 0, so this is the only signal separating "checkpointed
 # for continuation" from "finished on its own".
 TURN_CAP_MARKER = "TURN_SOFT_CAP reached"
+
+#: Dialects whose stream carries usage per request (see
+#: audit_helpers._event_context_tokens), so a context cap can be enforced.
+_PER_REQUEST_USAGE_BACKENDS = frozenset({"claude"})
 
 
 def _agent_has_unfinished_crash(environment: dict) -> bool:

@@ -115,6 +115,24 @@ class RolloverTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertFalse(llm_invoke.session_turn_capped(raw))
 
+    def test_the_cap_is_armed_only_for_dialects_that_report_usage(self) -> None:
+        raw = self.root / "session.raw"
+        raw.touch()
+        seen = {}
+
+        def fake_process(*_args, **kwargs):
+            seen.update(kwargs)
+            return 0
+        for backend, expected in (("claude", 200_000), ("codex", 0)):
+            with mock.patch.object(llm_invoke, "backend_bin", return_value="/bin/true"), \
+                 mock.patch.object(llm_invoke, "_run_agent_process", side_effect=fake_process), \
+                 mock.patch.object(llm_invoke, "agent_security_problem", return_value=""):
+                llm_invoke.run_agent_prompt(
+                    backend, "prompt", 0, raw, model="m", max_turns=8,
+                    turn_cap=8, context_cap=200_000, cwd=self.root,
+                )
+            self.assertEqual(seen["context_cap"], expected, backend)
+
     def test_the_operator_setting_reaches_the_launch_and_the_prompt(self) -> None:
         with mock.patch.dict(os.environ, {"CONTEXT_SOFT_CAP": "150000"}):
             self.assertEqual(audit_runner._context_cap(), 150_000)

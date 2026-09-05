@@ -254,6 +254,19 @@ class SealTests(unittest.TestCase):
         self.assertEqual(calls["find"]["only"], [reviewed])
         self.assertEqual(calls["crash"]["only"], [crash])
 
+    def test_a_held_finding_wakes_the_worker_on_the_hold_clock(self) -> None:
+        # Sweeps are requested only when a session ends; a hold released by
+        # age must not wait for one that never comes.
+        _artifact(self.results, "findings", "FIND-001-lone")
+        worker = self._worker()
+        with mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 180):
+            self._sweep_with_gates(worker)
+        self.assertTrue(worker._holding)
+        with mock.patch.object(worker._wake, "wait", return_value=True) as wait, \
+             mock.patch.object(worker, "_sweep", side_effect=lambda: setattr(worker, "_stop", True)):
+            worker._run()
+        self.assertEqual(wait.call_args.args, (audit_runner.GATE_BATCH_HOLD_SECONDS,))
+
     def test_the_hold_releases_when_the_productive_wall_is_about_to_end(self) -> None:
         lone = _artifact(self.results, "findings", "FIND-001-lone")
         worker = self._worker()

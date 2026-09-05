@@ -78,7 +78,8 @@ type, and breaking on one of them is the bug. All three must hold:
    taking ownership (a dangling pointer to a borrow API is misuse).
 2. **Untrusted boundary.** The input-shaped part is the documented untrusted
    boundary: file, packet, web content, pattern, media, archive, IPC or
-   message bytes, CLI input, or the fields of a public struct type.
+   message bytes, CLI input, the fields of a public struct type, or an
+   equivalent product input boundary.
 3. **No internal-state mutation by the testcase.** It does not write
    target-owned internals, include private or test-only target code, switch
    allocators after target allocations exist, return a docs-invalid length
@@ -88,7 +89,9 @@ type, and breaking on one of them is the bug. All three must hold:
    documented work under the ownership and lifetime rules.
    It is not legitimate for the testcase
    to free the active callback state itself; documentation silence does
-   not make that in-domain.
+   not make that in-domain. Prefer cases where normal callback work makes
+   target code release or replace an object, or where a documented public
+   operation legitimately invalidates a separately owned object.
 
 The question is: did the caller break a contract the docs state (caller
 misuse: `{{ results_dir }}/findings/` at most, often nothing), or did the
@@ -97,8 +100,9 @@ about (an API-hardening bug: `{{ results_dir }}/crashes/`)? API-hardening bugs
 are a large class in mature C/C++ libraries; never gate them out. If unsure
 whether a value is in-domain, it is. Normative wording ("must make sure",
 "should"), ownership and lifetime requirements, and stated valid argument or
-node types are contract terms even when unenforced. A recommendation that does
-not define accepted input remains advisory. Belonging in `crashes/` is a filing
+node types are contract terms even when unenforced; do not dismiss a validity
+requirement as advisory merely because it is politely phrased. A recommendation
+that does not define accepted input remains advisory. Belonging in `crashes/` is a filing
 rule, not credit: security credit needs a trigger inside this target's
 `attacker_controls`.
 
@@ -140,7 +144,9 @@ Trigger source: <fill in>
 Strategy: S<N>
 
 `Caller contract` is `obeyed`, `violated`, or `unspecified`; use `unspecified`
-(not `obeyed`) when the docs are silent about the precondition you depend on.
+(not `obeyed`) when the docs are silent about the precondition you depend on:
+call ordering, ownership/lifetime, or valid argument and node types.
+Defaulting to `obeyed` inflates verdicts.
 `Trigger source` lists what an external caller must supply, normalized to the
 `attacker_controls` vocabulary: `bytes` (`data`), `call-sequence`
 (`call-order`, `sequence`), `timing`, `race`, `protocol-state`, `env`,
@@ -161,8 +167,9 @@ the strategy actually in use when the testcase was filed (`S1`..`S8`, or `REF`
 when only the pattern library was used); findings carry the same field.
 
 Filing what you found is cheap; hunting a trigger the attacker cannot supply
-is not. A `NOT-REPORTABLE` row in `crashes/CRASH-CLUSTERS.md` is a mechanism
-that earned nothing, and another route to it earns nothing either; judge a
+is not. Before committing a session to one, check `crashes/CRASH-CLUSTERS.md`:
+a `NOT-REPORTABLE` row is a mechanism that earned nothing, and another route
+to it earns nothing either; judge a
 neighbouring path on its own trigger, not the neighbour's verdict.
 Source-only defects have no crash evidence to preserve: when the trigger is
 proven outside `attacker_controls` and the defect adds no independent
