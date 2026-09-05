@@ -13,9 +13,10 @@ Wasm runtime usually behaves like a generic shell.
 
 ## Enable browser mode
 
-`bin/setup-target` sets `is_browser = "1"` from a browser-specific build driver
-such as `mach`, independent of the target slug. GN also builds shells and
-general native projects, so select browser mode explicitly for a GN browser:
+`bin/setup-target` sets `is_browser = "1"` when it sees a browser-specific
+build driver such as `mach`, independent of the target slug. GN also builds
+shells and general native projects, so select browser mode explicitly for a GN
+browser:
 
 ```bash
 bin/setup-target my-gn-browser /path/to/source --browser --build
@@ -24,10 +25,10 @@ bin/setup-target my-gn-browser /path/to/source --browser --build
 Both browser and generic targets use `build-asan/` as the canonical build
 directory. `mach` writes its object directory there. CMake, autotools, and
 Meson configure and build out of tree there; the generated recipes do not
-claim to install the project under that directory.
-Inside `bin/audit-container-shell`, `AUDIT_BUILD_SUFFIX` makes the
-actual build directory `build-asan-<image-id>/`; relative `build-asan/`
-paths in `target.toml` resolve through that suffix.
+claim to install the project under that directory. Inside
+`bin/audit-container-shell`, `AUDIT_BUILD_SUFFIX` makes the actual build
+directory `build-asan-<image-id>/`, and relative `build-asan/` paths in
+`target.toml` resolve through that suffix.
 
 Build a supported browser through the normal target setup path:
 
@@ -43,12 +44,12 @@ before the first setup.
 
 The generated recipe is stored under the configured source root's `.audit/`
 directory, uses a clean release-mode sanitizer object directory, and is reused
-by audit preflight when the source moves. This distinction matters for layouts
-such as Chromium, whose configured source root may be nested below the target
-registration directory. `mach` and GN are native adapters; neither adapter
-branches on a target or product name. GN builds its graph's default target.
-Browser projects with another build system can use `--browser` and provide the
-same `.audit/build.sh <source> <build-dir>` contract.
+by audit preflight when the source moves. This matters for layouts such as
+Chromium, whose configured source root may be nested below the target
+registration directory. `mach` and GN are native adapters; neither branches on
+a target or product name. GN builds its graph's default target. Browser
+projects with another build system can use `--browser` and provide the same
+`.audit/build.sh <source> <build-dir>` contract.
 
 The browser runner's `{PROFILE}` argument is the page-route declaration. A
 browser-mode target without that token is treated as a script engine: it uses
@@ -57,7 +58,7 @@ only. This keeps `is_browser = "1"` useful for JIT- and GC-oriented runtimes
 without trying to feed them HTML or browser command-line flags.
 
 On non-bundle platforms, set the top-level `asan_bin` field when a browser
-build emits multiple instrumented top-level executables. Setup accepts a sole
+build emits several instrumented top-level executables. Setup accepts a sole
 executable or a target-named product under `dist`; it does not guess among
 ambiguous helpers by file size.
 
@@ -82,12 +83,12 @@ to the sanitizer run rather than claiming coverage was measured.
 
 Browser threat models typically include:
 
-- `bytes` — web content;
-- `call-sequence` — Web API call order;
-- `timing` — event-loop, GC, JIT tier-up.
+- `bytes`: web content;
+- `call-sequence`: Web API call order;
+- `timing`: event-loop, GC, JIT tier-up.
 
-Add `protocol-state` only if the target genuinely accepts adversarial
-network state.
+Add `protocol-state` only if the target genuinely accepts adversarial network
+state.
 
 Triage uses `attacker_controls` when deciding whether a reproducible defect is
 security-reportable through a normal product boundary. Keep it tight. A crash
@@ -96,8 +97,8 @@ as `not-reportable` engineering evidence, but it receives no security score.
 
 ## Keep reports product-reachable
 
-Browser targets expose rich controls, but a crash report still needs
-a product path. That means one of:
+Browser targets expose rich controls, but a crash report still needs a product
+path. That means one of:
 
 - web content bytes;
 - a Web API call sequence;

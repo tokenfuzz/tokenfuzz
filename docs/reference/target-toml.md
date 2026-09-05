@@ -13,12 +13,12 @@ bin/setup-target <target> <repo-url>
 bin/setup-target <target>
 ```
 
-`bin/audit --target <target>` also creates this file when it is
-missing. Runtime values such as `RESULTS_DIR` and `TARGET_REV` are
-written separately to `.session-env`.
+`bin/audit --target <target>` also creates this file when it is missing.
+Runtime values such as `RESULTS_DIR` and `TARGET_REV` are written separately
+to `.session-env`.
 
-Treat `target.toml` as **generated config plus a small review
-layer.** The tooling infers:
+Treat `target.toml` as **generated config plus a small review layer.** The
+tooling infers:
 
 - source metadata;
 - build system;
@@ -29,8 +29,8 @@ layer.** The tooling infers:
 - default sanitizer policy;
 - default threat model controls.
 
-Your job is to edit only values that remain unresolved or are
-wrong for this target.
+Your job is to edit only values that remain unresolved or are wrong for this
+target.
 
 At audit preflight this file is copied to
 `output/<target>/<backend>/results/.target.toml`. That session snapshot is
@@ -47,10 +47,10 @@ snapshot to retarget probes whose evidence is already being recorded.
 
 The config is also part of triage:
 
-- `attacker_controls` is read when deciding whether a crash
-  trigger is a legitimate product input.
-- Reproduction export uses the repository URL, revision, build
-  fields, and sanitizer paths to build a clean maintainer bundle.
+- `attacker_controls` is read when deciding whether a crash trigger is a
+  legitimate product input.
+- Reproduction export uses the repository URL, revision, build fields, and
+  sanitizer paths to build a clean maintainer bundle.
 
 ## A complete generic example
 
@@ -78,45 +78,42 @@ attacker_controls = ["bytes"]
 | `target` | Target slug. It should match `targets/<target>` and `output/<target>`. |
 | `upstream_url` | Source repository URL used as metadata in exported bundles. |
 | `build_system` | Informational build-system label such as `cmake`, `meson`, `autotools`, `mach`, or `gn`. |
-| `build_widening` | For ordinary native C/C++ targets, keep the canonical build and prepare one cached ASan sibling with compatible optional in-tree features enabled. Defaults to `true` when absent; set `false` to opt out. |
+| `build_widening` | For ordinary native C/C++ targets, keep the canonical build and prepare one cached ASan sibling with compatible optional in-tree features enabled. Defaults to `true` when absent on a non-browser native target; set `false` to opt out. |
 | `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. An executable in the matching ASan build (or an external executable whose ASan instrumentation can be verified) is kept as you set it; `bin/setup-target` re-detects this field only to fill it or to replace a missing or mismatched path. |
 | `asan_lib` | ASan library used when compiling C harness testcases. |
 | `includes` | Include directories for C harness builds. Relative paths resolve under `targets/<target>/`. |
-| `link_libs` | Extra linker inputs for C harness builds: system/library flags such as `-lm`, target-relative archives, or target-relative source files that must be compiled into the harness. |
+| `link_libs` | Extra linker inputs for C harness builds: system/library flags such as `-lm`, target-relative archives, or target-relative source files that must be compiled into the harness. A token containing `$` is passed verbatim and never resolved as a path. |
 | `is_browser` | `"1"` for browser mode, `"0"` for generic mode. |
 
-One related field is *not* seeded: `defines`, compiler define flags
-for C/C++ harness builds (such as `-DFOO=1`). Add it by hand when a
-harness build needs it — or run `bin/auto-repair-target-toml` to
-propose it after repeated harness build failures (see
+One related field is *not* seeded: `defines`, the compiler define flags for
+C/C++ harness builds (such as `-DFOO=1`). Add it by hand when a harness build
+needs it, or run `bin/auto-repair-target-toml` to propose it after repeated
+harness build failures (see
 [Target configuration](../guides/configure-target.md#c-harness-readiness)).
 
 Which fields you need depends on what the run will do:
 
 - A generic CLI audit needs `asan_bin`.
-- C harness testcases also need the selected sanitizer's library,
-  `includes`, `defines`, and `link_libs`.
-- ASan uses top-level `asan_lib`. UBSan / MSan / TSan harnesses
-  use `[sanitizer].ubsan_lib`, `msan_lib`, or `tsan_lib`.
+- C harness testcases also need the selected sanitizer's library, `includes`,
+  `defines`, and `link_libs`.
+- ASan uses top-level `asan_lib`. UBSan, MSan, and TSan harnesses use
+  `[sanitizer].ubsan_lib`, `msan_lib`, or `tsan_lib`.
 
-If only the executable path is correct, a CLI-first audit can
-still run. Leave the C harness fields unresolved until you
-actually need public API harnesses.
+If only the executable path is correct, a CLI-first audit can still run.
+Leave the C harness fields unresolved until you actually need public API
+harnesses.
 
 ### Header-only libraries
 
-Some C++ libraries ship only headers — no static archive to link
-against.
+Some C++ libraries ship only headers, with no static archive to link against.
 
-- Leave `asan_lib` as the generated `FILL_ME` comment placeholder,
-  or set it to an empty string.
-- `bin/export-repro` will emit a `reproduce.sh` that compiles the
-  harness directly against the target sources without a library
-  link.
+- Leave `asan_lib` as the generated `FILL_ME` comment placeholder, or set it
+  to an empty string.
+- `bin/export-repro` will emit a `reproduce.sh` that compiles the harness
+  directly against the target sources without a library link.
 - `includes`, `defines`, and `link_libs` still apply normally.
-- If the harness later starts needing a real archive, replace
-  `FILL_ME` with the path — the rest of the config does not
-  change.
+- If the harness later starts needing a real archive, replace `FILL_ME` with
+  the path. The rest of the config does not change.
 
 ## Optional fields
 
@@ -130,11 +127,11 @@ The canonical `build-asan` tree is always the regular-configuration control.
 Build configurations add isolated, content-addressed ASan siblings; they never
 replace that control or multiply the UBSan, MSan, and TSan build set.
 
-`build_widening = true` asks TokenFuzz to derive one compatible widened sibling
-from the working primary recipe. It enables advertised, in-tree optional
-features while retaining the primary recipe's sanitizer and build contract.
-If the project exposes no suitable options, no sibling is built and the audit
-continues on the primary.
+`build_widening = true` asks TokenFuzz to derive one compatible widened
+sibling from the working primary recipe. It enables advertised, in-tree
+optional features while retaining the primary recipe's sanitizer and build
+contract. If the project exposes no suitable options, no sibling is built and
+the audit continues on the primary.
 
 Declare configurations only for meaningful mutually exclusive modes that
 automatic widening cannot combine:
@@ -151,34 +148,32 @@ features = ["compact tables"]
 
 `name` must be a short lowercase identifier. `flags` are ordered configure
 arguments: order and duplicates are preserved in the configuration identity.
-`features` are human-readable surfaces shown to audit agents. A row uses either
-non-empty `flags` or `widen = true`, not both. Refreshing generated placeholders
-preserves operator-authored rows.
+`features` are human-readable surfaces shown to audit agents. A row uses
+either non-empty `flags` or `widen = true`, not both. Refreshing generated
+placeholders preserves operator-authored rows.
 
-`target.toml` is parsed as strict TOML. Invalid section headers
-or malformed arrays fail fast instead of silently falling back to
-top-level keys.
+`target.toml` is parsed as strict TOML. Invalid section headers or malformed
+arrays fail fast instead of silently falling back to top-level keys.
 
 ## Sanitizers
 
-The `[sanitizer]` section declares which sanitizer runners are
-intentionally enabled for this target, and where to find each
-sanitizer's optional suppression file.
+The `[sanitizer]` section declares which sanitizer runners are intentionally
+enabled for this target, and where to find each sanitizer's optional
+suppression file.
 
-Only ASan is enabled by default. The supported sanitizer slugs
-are `asan`, `ubsan`, `msan`, `tsan`, and `race`; everything except
-`asan` is opt-in per target. `race` (Go's runtime race detector) is
-valid only inside `enabled` — it routes through `[runner]` and takes
-none of the per-sanitizer `<name>_bin` / `<name>_lib` /
-`<name>_suppressions` keys below. For when to enable each one and the
-false-positive trade-offs, see
+Only ASan is enabled by default. The supported sanitizer slugs are `asan`,
+`ubsan`, `msan`, `tsan`, and `race`; everything except `asan` is opt-in per
+target. `race` (Go's runtime race detector) is valid only inside `enabled`. It
+routes through `[runner]` and takes none of the per-sanitizer `<name>_bin`,
+`<name>_lib`, or `<name>_suppressions` keys below. For when to enable each one
+and the false-positive trade-offs, see
 [Sanitizer policy](../guides/configure-target.md#sanitizer-policy).
 
 ### Findings-only mode (no sanitizer)
 
-For targets that have no sanitizer build — typical for
-interpreted languages (Python, Ruby, PHP, …) or JVM runtimes
-(Java, Kotlin) — set `enabled` to an explicit empty list:
+For targets that have no sanitizer build, typical for interpreted languages
+(Python, Ruby, PHP, and so on) or JVM runtimes (Java, Kotlin), set `enabled`
+to an explicit empty list:
 
 ```toml
 [sanitizer]
@@ -187,19 +182,18 @@ enabled = []
 
 With `enabled = []`:
 
-- `bin/probe` routes testcases through `[runner].bin` instead of
-  expecting an ASan binary.
-- `bin/run-asan generic` skips `ASAN_OPTIONS` injection so the
-  language runtime sees a clean environment.
+- `bin/probe` routes testcases through `[runner].bin` instead of expecting an
+  ASan binary.
+- `bin/run-asan generic` skips `ASAN_OPTIONS` injection so the language
+  runtime sees a clean environment.
 - Runtime diagnostics (Python tracebacks, Go panics, Ruby exceptions, Java
-  stack traces, Node fatal errors, Rust panics, …) route to `findings/`
-  instead of being published as sanitizer crashes. Genuine sanitizer-class
-  memory-safety signals (ASan, TSan, MSan, Go race detector)
+  stack traces, Node fatal errors, Rust panics, and so on) route to
+  `findings/` instead of being published as sanitizer crashes. Genuine
+  sanitizer-class memory-safety signals (ASan, TSan, MSan, Go race detector)
   still stay in `crashes/`.
 
-When `[sanitizer]` is **absent entirely** from `target.toml`, the
-default — `["asan"]` — kicks in. Only an explicit empty list opts the
-target out.
+When `[sanitizer]` is **absent entirely** from `target.toml`, the default,
+`["asan"]`, applies. Only an explicit empty list opts the target out.
 
 ### Per-sanitizer keys
 
@@ -224,46 +218,44 @@ msan_bin           = "build-msan/xmllint"
 msan_lib           = "build-msan/libxml2.a"
 ```
 
-UBSan and TSan follow the same shape — add the slug to `enabled` and
-set the matching `<name>_bin` / `<name>_lib` / `<name>_suppressions`
-keys.
+UBSan and TSan follow the same shape: add the slug to `enabled` and set the
+matching `<name>_bin`, `<name>_lib`, and `<name>_suppressions` keys.
 
 Notes:
 
 - Paths are relative to `targets/<target>/` unless absolute.
 - Relative paths whose first segment is `build-asan`, `build-ubsan`,
   `build-msan`, or `build-tsan` are `AUDIT_BUILD_SUFFIX`-aware. Inside
-  `bin/audit-container-shell`, those paths resolve to the per-image
-  suffixed build directory; outside the container the suffix is empty.
-- Unknown sanitizer slugs in `enabled` are logged on stderr and
-  dropped. The loader falls back to `["asan"]` if `[sanitizer]`
-  was absent and nothing valid remains.
-- An **explicit** empty list (`enabled = []`) is honoured as
-  findings-only mode and is *not* re-defaulted to `["asan"]`.
-- Runner scripts warn when invoked for a sanitizer that is not
-  listed in `enabled` but do not abort. That keeps one-off
-  reproduction and debugging commands usable.
+  `bin/audit-container-shell`, those paths resolve to the per-image suffixed
+  build directory; outside the container the suffix is empty.
+- Unknown sanitizer slugs in `enabled` are logged on stderr and dropped. The
+  loader falls back to `["asan"]` if `[sanitizer]` was absent and nothing
+  valid remains.
+- An **explicit** empty list (`enabled = []`) is honoured as findings-only
+  mode and is *not* re-defaulted to `["asan"]`.
+- Runner scripts warn when invoked for a sanitizer that is not listed in
+  `enabled` but do not abort. That keeps one-off reproduction and debugging
+  commands usable.
 
 ## Language runner
 
-The `[runner]` section is the language-agnostic invocation
-contract. It is used by `bin/probe` and `bin/run-asan generic`
-whenever no sanitizer binary is configured. Most commonly when
-`[sanitizer] enabled = []`, but also for compiled-language
-targets that want to plug in a custom driver script.
+The `[runner]` section is the language-agnostic invocation contract. It is
+used by `bin/probe` and `bin/run-asan generic` whenever no sanitizer binary is
+configured: most commonly when `[sanitizer] enabled = []`, but also for
+compiled-language targets that want to plug in a custom driver script.
 
 | Key | Meaning |
 | --- | --- |
-| `bin` | Interpreter or driver program (`python3`, `node`, `cargo`, `ruby`, an absolute path to a wrapper script, …). A bare name is resolved on `PATH` first, then as a path relative to `targets/<target>/` — which is how a config points at a binary the target's own build produced. It runs with `targets/<target>/` as its working directory, so a language whose dependency resolver reads the current directory (Go modules, for one) finds the audited package; testcase paths reach it absolute. |
+| `bin` | Interpreter or driver program (`python3`, `node`, `cargo`, `ruby`, an absolute path to a wrapper script, and so on). A bare name is resolved on `PATH` first, then as a path relative to `targets/<target>/`, which is how a config points at a binary the target's own build produced. It runs with `targets/<target>/` as its working directory, so a language whose dependency resolver reads the current directory (Go modules, for one) finds the audited package; testcase paths reach it absolute. |
 | `args` | Literal argument list, with the runner tokens below substituted at run time. |
-| `env` | Extra `KEY=VAL` strings layered on the runtime environment (e.g. `["GORACE=halt_on_error=1"]`, `["PYTHONDEVMODE=1"]`). The same tokens are substituted. |
+| `env` | Extra `KEY=VAL` strings layered on the runtime environment (for example `["GORACE=halt_on_error=1"]` or `["PYTHONDEVMODE=1"]`). The same tokens are substituted. |
 | `crash_patterns` | Additional regex strings the triager treats as crash signals beyond its built-in language-agnostic markers. Use sparingly. |
-| `success_codes` | Process exit codes from 0 through 123 that mean the runner completed normally. Defaults to `[0]`. `bin/setup-target` records the exit observed while validating the configured input route, accepting a nonzero code only after review confirms malformed-input rejection rather than startup or argv failure. 124 and above is where the timeout wrapper's own status, exec failures, and signal deaths live, so it is never accepted. A run whose output carries a sanitizer diagnostic is classified as a crash before its exit code is read, and calibration refuses an exit observed with one. |
+| `success_codes` | Process exit codes from 0 through 123 that mean the runner completed normally. Defaults to `[0]`. `bin/setup-target` records the exit observed while validating the configured input route, accepting a nonzero code only after review confirms malformed-input rejection rather than startup or argv failure. 124 and above is where the timeout wrapper's own status, exec failures, and signal deaths live, so it is never accepted. A run whose output carries a sanitizer diagnostic is classified as a crash before its exit code is read, and calibration refuses an exit observed with one. The set describes the configured program only; an agent-built harness keeps `0` as its only success. |
 
 Before model preflight or benchmark cells start, `bin/audit` and
 `bin/benchmark` resolve any configured `bin` and verify that it is executable.
 Standard language runners are also invoked with their version command, so an
-installed launcher with a missing runtime (e.g. a `java` stub with no JDK)
+installed launcher with a missing runtime (a `java` stub with no JDK, say)
 fails immediately rather than burning model budget. `bin` is optional: a
 findings-only target with no runner audits in code-review mode (testcase
 execution is disabled, and probes report that); only a *configured* runner
@@ -278,21 +270,21 @@ that is unusable is a fatal startup error.
 | `{RESULTS_DIR}` | This session's `results/` directory. |
 | `{TARGET_SLUG}` | The target slug. |
 | `{SANITIZER}` | The selected sanitizer slug (`asan`, `ubsan`, …). |
-| `{SWIFT_SANITIZER}` | The Swift spelling of that slug — `address`, `undefined`, or `thread`. Any other sanitizer is a hard error, not a silent empty value. |
+| `{SWIFT_SANITIZER}` | The Swift spelling of that slug: `address`, `undefined`, or `thread`. Any other sanitizer is a hard error, not a silent empty value. |
 | `{NULL_DEVICE}` | The platform's null device (`/dev/null`). |
 | `{PROFILE}` | A fresh temporary browser profile. Valid only in browser execution; elsewhere it is an error. |
 
 `{TESTCASE}` has one extra rule:
 
-- When `{TESTCASE}` appears in `args`, it is replaced in place
-  and the runner does *not* also append the testcase path.
-- When `{TESTCASE}` is absent, the runner adds the testcase path
-  after the expanded args, in the conventional last position.
+- When `{TESTCASE}` appears in `args`, it is replaced in place and the runner
+  does *not* also append the testcase path.
+- When `{TESTCASE}` is absent, the runner adds the testcase path after the
+  expanded args, in the conventional last position.
 
 ### Examples
 
 ```toml
-# Pure Python target — interpreter + dev-mode env.
+# Pure Python target: interpreter + dev-mode env.
 [runner]
 bin            = "python3"
 args           = ["{TESTCASE}"]
@@ -304,7 +296,7 @@ crash_patterns = []
 ```
 
 ```toml
-# Go target — findings-only driver via `go run`.
+# Go target: findings-only driver via `go run`.
 [runner]
 bin            = "go"
 args           = ["run", "{TESTCASE}"]
@@ -312,12 +304,11 @@ env            = ["GORACE=halt_on_error=1"]
 crash_patterns = []
 ```
 
-To enable the Go runtime race detector, set
-`[sanitizer] enabled = ["race"]` and use
-`args = ["run", "-race", "{TESTCASE}"]`.
+To enable the Go runtime race detector, set `[sanitizer] enabled = ["race"]`
+and use `args = ["run", "-race", "{TESTCASE}"]`.
 
 ```toml
-# Rust target — cargo run with stdin-fed testcase.
+# Rust target: cargo run with the testcase path as an argument.
 [runner]
 bin            = "cargo"
 args           = ["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]
@@ -326,7 +317,7 @@ crash_patterns = []
 ```
 
 ```toml
-# Swift package — runner compiles with the selected Swift sanitizer
+# Swift package: the runner compiles with the selected Swift sanitizer
 # (`address`, `undefined`, or `thread`). The argument before `{TESTCASE}`
 # names the executable product to run, and is what audit preflight builds;
 # replace `{TARGET_SLUG}` with the product's own name whenever the two
@@ -339,8 +330,8 @@ crash_patterns = []
 ```
 
 ```toml
-# Custom wrapper script — useful for Java/Kotlin builds that need
-# a classpath or a wrapper that pre-configures JNI agents.
+# Custom wrapper script: useful for Java/Kotlin builds that need a classpath
+# or a wrapper that pre-configures JNI agents.
 [runner]
 bin            = "./tools/run-testcase.sh"
 args           = ["{TESTCASE}"]
@@ -348,22 +339,21 @@ env            = []
 crash_patterns = ['^DEFENSIVE-ASSERT-FAILED:']
 ```
 
-`bin/setup-target` emits a starter `[runner]` block driven by
-the detected build system. The seeded values are commented when
-the build system is unknown so the file is safe to parse before
-the operator fills it in.
+`bin/setup-target` emits a starter `[runner]` block driven by the detected
+build system. The seeded values are commented when the build system is unknown
+so the file is safe to parse before the operator fills it in.
 
 ## Threat model
 
-`attacker_controls` describes what an external caller can
-legitimately control. Triage compares crash report
-`Trigger source` values against this list, then lets the source reviewer
-correct that comparison from the code. A settled review is reportable only when
-every required trigger component is in the list — crafted bytes deciding the
-fault is not enough when the fault also needs an application call order the
-list does not cover. A defect the reviewer confirms is outside the list is
-retained as `not-reportable`, with no security credit or numeric CVSS; one no
-review settled stays unadjudicated instead.
+`attacker_controls` describes what an external caller can legitimately
+control. Triage compares crash report `Trigger source` values against this
+list, then lets the source reviewer correct that comparison from the code. A
+settled review is reportable only when every required trigger component is in
+the list: crafted bytes deciding the fault is not enough when the fault also
+needs an application call order the list does not cover. A defect the
+reviewer confirms is outside the list is retained as `not-reportable`, with no
+security credit or numeric CVSS; one no review settled stays unadjudicated
+instead.
 
 | Token | Meaning |
 | --- | --- |
@@ -375,8 +365,8 @@ review settled stays unadjudicated instead.
 | `env` | Process environment variables. |
 | `fs-state` | Filesystem paths, presence, permissions, or layout. |
 
-Unknown tokens are logged on stderr and ignored; if the resulting list
-is empty, the loader defaults to `["bytes"]`. The synonym `call-order` is
+Unknown tokens are logged on stderr and ignored; if the resulting list is
+empty, the loader defaults to `["bytes"]`. The synonym `call-order` is
 normalised to `call-sequence`.
 
 Examples:
@@ -413,7 +403,7 @@ is_browser = "1"
 Browser mode enables:
 
 - browser and JS testcase assumptions;
-- coverage-gated browser or shell runs when available;
+- coverage-gated browser or shell runs when available.
 
 The browser binary and launch arguments are target metadata. For example:
 
@@ -447,22 +437,22 @@ It contains dynamic values:
 - `SESSION_STARTED`;
 - `TARGET_CONFIG_SHA256`.
 
-`bin/probe` discovers the nearest `.session-env` by walking upward
-from the testcase path and current directory. Scratch testcases under
-`results/` therefore do not need manual environment setup.
+`bin/probe` discovers the nearest `.session-env` by walking upward from the
+testcase path and current directory. Scratch testcases under `results/`
+therefore do not need manual environment setup.
 
 After preflight, `bin/audit` copies the target configuration to
-`output/<target>/<backend>/results/.target.toml` and records its digest
-as `TARGET_CONFIG_SHA256`. Every config consumer in that session — probes,
-sanitizer runners, severity, report enrichment — reads the snapshot, so an
-edit to the shared `output/<target>/target.toml` applies to the next run
-rather than retargeting probes already contributing to this one. Editing or
-removing the snapshot itself is a contract violation and fails loud.
+`output/<target>/<backend>/results/.target.toml` and records its digest as
+`TARGET_CONFIG_SHA256`. Every config consumer in that session (probes,
+sanitizer runners, severity, report enrichment) reads the snapshot, so an edit
+to the shared `output/<target>/target.toml` applies to the next run rather
+than retargeting probes already contributing to this one. Editing or removing
+the snapshot itself is a contract violation and fails loudly.
 
 ## Strategy hints: `[s6_peers]`
 
-`[s6_peers]` lists upstream peer projects to mine for S6
-(cross-project variant):
+`[s6_peers]` lists upstream peer projects to mine for S6 (cross-project
+variant):
 
 ```toml
 [s6_peers]
@@ -471,18 +461,18 @@ peers  = ["libexpat", "Xerces-C++", "rapidxml"]
 ```
 
 Empty or missing values are fine. The section only suggests additional
-strategy material. `bin/audit --new-target` can also
-LLM-bootstrap a real `[threat_model]` and `[s6_peers]` instead of the
-conservative defaults; you can re-run that derivation at any time:
+strategy material. `bin/audit --new-target` can also LLM-bootstrap a real
+`[threat_model]` and `[s6_peers]` instead of the conservative defaults; you
+can re-run that derivation at any time:
 
 ```bash
 bin/suggest-threat-model <slug> --apply --force   # re-derive attacker_controls
 bin/suggest-peers <slug> --apply --force          # re-derive [s6_peers]
 ```
 
-`bin/setup-target` accepts `--no-llm-config` to keep the deterministic
-seed and skip LLM enrichment — not recommended unless you have a
-specific reason to stay offline.
+`bin/setup-target` accepts `--no-llm-config` to keep the deterministic seed
+and skip LLM enrichment. Use it when setup must stay offline; otherwise let
+the suggestions run and review them.
 
 ## The audited revision
 

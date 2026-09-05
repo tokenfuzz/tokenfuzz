@@ -1,8 +1,8 @@
 # Target Configuration
 
-Use this guide after `bin/setup-target` or `bin/audit --target <target>` creates
-`output/<target>/target.toml`. Most targets need review, not a config written
-from scratch.
+Use this guide after `bin/setup-target` or `bin/audit --target <target>` has
+created `output/<target>/target.toml`. Most targets need a review, not a config
+written from scratch.
 
 The file answers three operational questions:
 
@@ -46,7 +46,7 @@ is_browser = "0"
 attacker_controls = ["bytes"]
 ```
 
-Relative paths resolve under the target root — `targets/<target>/`, or the
+Relative paths resolve under the target root: `targets/<target>/`, or the
 overlay's `source_subdir` for nested layouts such as Chromium's `src/`. A
 CLI-only audit can proceed with a correct `asan_bin`; the library fields matter
 only when `bin/probe` compiles an API harness.
@@ -93,7 +93,7 @@ artifacts:
 bin/setup-target <target>
 ```
 
-Then check:
+Then check that:
 
 - `asan_bin` starts the intended product, not a test helper or fuzzer binary;
 - `[runner].bin` and `args` load code from the target root, not an installed
@@ -109,10 +109,10 @@ preflight run a canary when the registry can prove target ownership. A runner
 that starts but imports only an installed package is rejected rather than
 silently auditing the wrong code.
 
-Use `bin/suggest-runner <target> --apply --force` only when the generated native
-CLI route is wrong. The helper selects from instrumented executables declared
-by the build, validates input-dependent behavior, and updates matching enabled
-sanitizer routes together.
+Use `bin/suggest-runner <target> --apply --force` only when the generated
+native CLI route is wrong. The helper selects from instrumented executables
+declared by the build, validates input-dependent behavior, and updates
+matching enabled sanitizer routes together.
 
 ## C harness readiness
 
@@ -134,7 +134,7 @@ bin/auto-repair-target-toml --toml output/<target>/target.toml \
 ```
 
 Drop `--dry-run` to write it; a timestamped backup is saved beside the config
-and the decision is logged. It is run by hand — nothing in an audit invokes it.
+and the decision is logged. Nothing in an audit runs this command for you.
 Review the proposal: a compile fix is not evidence that the harness is faithful
 to a public API contract.
 
@@ -144,15 +144,15 @@ authoritative extension table.
 
 ## Sanitizer policy
 
-`[sanitizer].enabled` is ordered. `bin/probe` selects the first enabled entry by
-default; a one-off `PROBE_SANITIZER=<name>` override can select another without
-changing persistent policy.
+`[sanitizer].enabled` is ordered. `bin/probe` selects the first enabled entry
+by default; a one-off `PROBE_SANITIZER=<name>` override can select another
+without changing persistent policy.
 
 | Slug | Use it when | Main cost |
 | --- | --- | --- |
 | `asan` | Native memory-safety work; the default. | Moderate runtime and memory overhead. |
 | `ubsan` | Undefined-behavior classes relevant to the target, such as bounds, vptr, object size, or shifts. | Mature projects may intentionally use patterns that need triage or suppressions. |
-| `msan` | A self-contained native library whose dependencies can all be instrumented. | Uninstrumented dependencies create noise; browser-scale use is usually impractical. |
+| `msan` | A self-contained native library whose dependencies can all be instrumented. | Uninstrumented dependencies create noise; browser-scale use is usually impractical. No Darwin runtime exists. |
 | `tsan` | Native concurrency work with a maintained suppression policy. | High overhead and frequent benign reports. |
 | `race` | A Go runner or binary built with `-race`. | Routes through `[runner]`; there is no `race_bin`, `race_lib`, or suppression key. |
 
@@ -170,12 +170,12 @@ ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"
 ```
 
 Ordinary non-browser C/C++ preflight converges every enabled native sanitizer.
-ASan is required for that route; optional sanitizer failures warn without
-destroying the canonical ASan build. Ecosystem bootstraps and Go `race` remain
-explicit `bin/setup-target <target> --build` work.
+ASan is required for that route; an optional sanitizer that fails to build
+warns without destroying the canonical ASan build. Ecosystem bootstraps and Go
+`race` remain explicit `bin/setup-target <target> --build` work.
 
-The exact keys, defaults, suffix-aware path rules, and runtime-option fields are
-in the [target config schema](../reference/target-toml.md#sanitizers).
+The exact keys, defaults, suffix-aware path rules, and runtime-option fields
+are in the [target config reference](../reference/target-toml.md#sanitizers).
 
 ## Review the threat model
 
@@ -221,8 +221,8 @@ token in `[runner].args` declares a page-capable browser route. Without it, the
 target is treated as a script engine: generic execution, shell agents, and no
 invented browser profile.
 
-Verify the product executable, temporary-profile argument, testcase position,
-and the controls the web or script surface really exposes. The
+Verify the product executable, the temporary-profile argument, the testcase
+position, and the controls the web or script surface really exposes. The
 [browser guide](browser-targets.md) covers `mach`, GN, Chromium, coverage, and
 product reachability.
 
@@ -240,13 +240,13 @@ Inspect `logs/index.log` if startup stops before `work-cards.jsonl` appears.
 
 | Symptom | Check |
 | --- | --- |
-| The wrong program runs | Fix `asan_bin` or re-run `bin/suggest-runner <target> --apply --force`. |
+| The wrong program runs | Fix `asan_bin`, or re-run `bin/suggest-runner <target> --apply --force`. |
 | Every probe reports `EXEC_FAIL` on input the CLI clearly read | Re-run `bin/setup-target <target>` (or `bin/suggest-runner <target> --apply`). It replays the configured argv and records the reviewed malformed-input exit in `[runner].success_codes`, without reselecting the CLI. |
 | Headers are missing | Add source or generated include directories to `includes`. |
 | Macros are missing | Add the required compiler arguments to `defines`. |
 | Harness linking fails | Check the selected sanitizer library and add required system, archive, or source inputs to `link_libs`. |
-| Every language probe misses the audited package | Fix `[runner]` cwd/import paths; do not accept a globally installed copy. |
+| Every language probe misses the audited package | Fix `[runner]` cwd or import paths; do not accept a globally installed copy. |
 | A real crash is `not-reportable` | Compare its actual trigger with `attacker_controls`; do not broaden the threat model unless the product exposes that control. |
 
 For field-by-field syntax, continue to the
-[target config schema](../reference/target-toml.md).
+[target config reference](../reference/target-toml.md).

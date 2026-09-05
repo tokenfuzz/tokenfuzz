@@ -1,7 +1,7 @@
 # Backends and Isolation
 
 TokenFuzz keeps the audit contract independent of the model CLI. Target config,
-work state, testcase execution, triage, and artifact layout remain the same
+work state, testcase execution, triage, and artifact layout stay the same
 whether an audit uses one hosted backend, rotates several, or runs a local
 model.
 
@@ -15,7 +15,7 @@ fit one of these four routes:
 | Broad hosted-model coverage | `--backend all`, after checking which backends the selected security mode can launch. |
 | Backend has no usable native sandbox | `external-bypass` inside a container or VM you administer. |
 
-The model backend changes who reasons about the source. It does not change the
+The backend changes who reasons about the source. It does not change the
 target config, work-state format, probe contract, triage gates, or artifact
 layout.
 
@@ -32,8 +32,8 @@ bin/audit --target <target> --backend all
 bin/audit --target <target> --backend oss --model <served-model-id>
 ```
 
-Each launch runs under an execution boundary chosen by
-`--agent-security`; see [Agent security modes](#agent-security-modes).
+Each launch runs under an execution boundary chosen by `--agent-security`; see
+[Agent security modes](#agent-security-modes).
 
 | Backend | CLI | Model behavior |
 | --- | --- | --- |
@@ -45,8 +45,8 @@ Each launch runs under an execution boundary chosen by
 | `all` | Installed hosted CLIs | Cycles `claude → codex → gemini → grok`; excludes `oss`, and skips any backend the selected [security mode](#agent-security-modes) cannot launch. |
 
 Use an explicit `--backend` and `--model` in any experiment or reproducibility
-record. Omitting `--backend` is the same as `--backend all` and is convenient
-for exploration, not for holding model choice constant.
+record. Omitting `--backend` is the same as `--backend all`: convenient for
+exploration, not for holding model choice constant.
 
 ### Models and reasoning effort
 
@@ -57,15 +57,22 @@ and backend-native reasoning effort. Model precedence is:
 2. the backend's `*_MODEL_DEFAULT` environment override;
 3. `config/models.toml`.
 
-The `[effort]` table is applied in the backend's native form — for example Codex
-model reasoning effort, Gemini thinking level, or the corresponding Claude and
-Grok flags. Edit the config when changing project defaults so normal audits,
-validation and direct model decisions stay aligned.
+The `[effort]` table is applied in each backend's native form: Codex model
+reasoning effort, Gemini thinking level, or the corresponding Claude and Grok
+flags. Edit the config when changing project defaults so normal audits,
+validation, and direct model decisions stay aligned.
 
 For the default `agy` Gemini path, `--model` accepts either the config slug or
 an exact label printed by `agy models`. Preflight rejects an unknown mapping
 before an agent starts. Under `USE_GEMINI_CLI=1`, the value is passed directly
 to Google Gemini CLI.
+
+Preflight also checks that the model you asked for is the model that answers.
+A CLI that quietly falls back to another model, or a model whose safeguards
+refuse the audit workload, fails the run before any agent starts, and the log
+names the substituted model or the refusing safeguard category. Usage rows
+carry `served_model` whenever the transcript shows a provider billing a session
+to a different model than the one requested.
 
 ### Install and authenticate
 
@@ -78,26 +85,25 @@ Install the chosen CLI through its upstream instructions:
 - [Grok Build](https://docs.x.ai/build/overview)
 - [OpenCode](https://opencode.ai/download)
 
-Run one direct, non-interactive check before an audit. A backend that is waiting
-for login can otherwise look like a stalled agent. Credentials remain owned by
-the CLI; do not put keys in `target.toml` or reports.
+Run one direct, non-interactive check before an audit. A backend that is
+waiting for login can otherwise look like a stalled agent. Credentials remain
+owned by the CLI; do not put keys in `target.toml` or reports.
 
 ## Agent security modes
 
 Every agent launch runs under one of two modes. Hosted backends default to
 `sandboxed`. OpenCode defaults to `external-bypass` because its permissions are
-an approval policy, not an OS sandbox; `sandboxed` therefore refuses `oss`.
+an approval policy, not an OS sandbox, so `sandboxed` refuses `oss`.
 
 `IS_SANDBOX=1` is how an outer container or VM announces itself. It is an
-assertion, not something TokenFuzz can measure, so its absence prints one
-warning naming what is left unconfined rather than refusing the run — the
-boundary is yours to administer and yours to skip. What is refused is a
-capability fact instead: a CLI whose own sandbox provably cannot host an
-audit, which no flag can grant it.
+assertion TokenFuzz cannot measure, so its absence prints one warning naming
+what is left unconfined rather than refusing the run: the boundary is yours to
+administer and yours to skip. What *is* refused is a capability fact: a CLI
+whose own sandbox provably cannot host an audit, which no flag can grant it.
 
 | Mode | What enforces the boundary | When to use it |
 | --- | --- | --- |
-| `sandboxed` (hosted default) | The backend CLI's own OS sandbox — Seatbelt on macOS, Landlock/seccomp or bubblewrap on Linux. Approval prompts are turned off, because a headless run cannot answer one and an approval the model can request is not a boundary. | Normal runs on a machine you also use for other things. |
+| `sandboxed` (hosted default) | The backend CLI's own OS sandbox: Seatbelt on macOS, Landlock/seccomp or bubblewrap on Linux. Approval prompts are turned off, because a headless run cannot answer one, and an approval the model can request is not a boundary. | Normal runs on a machine you also use for other things. |
 | `external-bypass` (`oss` default) | Nothing in the CLI. `IS_SANDBOX=1` asserts that an outer container or VM enforces filesystem, process, credential, and egress policy; without it, TokenFuzz warns but cannot create that boundary for you. | Inside a container or VM you administer, and for backends `sandboxed` refuses. |
 
 !!! warning "A default is not a boundary"
@@ -106,34 +112,34 @@ audit, which no flag can grant it.
     container or VM before launching it if the target or generated testcases
     must be contained.
 
-A third, classifier-reviewed `auto` mode is deliberately absent: it would add
+A third, classifier-reviewed `auto` mode is deliberately absent. It would add
 provider calls, latency, and variable decisions to the audit and benchmark
 contract without creating a stronger boundary.
 
 ### What the sandbox does and does not buy
 
 A native sandbox gives **integrity and process containment**: the agent cannot
-write outside its workspace or reach the network. It is **not a confidentiality
-boundary** — every one of these sandboxes still reads the whole filesystem, and
-whatever the model reads travels to its provider by design. If secrets on the
-machine are in scope, the boundary is a hardened outer container or VM with only
-the target mounted, entered before the audit starts.
+write outside its workspace or reach the network. It is **not a
+confidentiality boundary**. Every one of these sandboxes still reads the whole
+filesystem, and whatever the model reads travels to its provider by design. If
+secrets on the machine are in scope, the boundary is a hardened outer container
+or VM with only the target mounted, entered before the audit starts.
 
 ### Backend support
 
 This table is TokenFuzz's tested support policy, not a comparison of what each
 vendor CLI can do elsewhere. A backend is listed as supported only where its
-sandbox was measured doing the two things an audit needs — reading the target
-tree and writing results — while still containing the agent. Where it is not,
+sandbox was measured doing the two things an audit needs, reading the target
+tree and writing results, while still containing the agent. Where it is not,
 TokenFuzz refuses the launch rather than recording the run as contained.
 
 | Backend | `sandboxed` | What it enforces, or why it is refused |
 | --- | --- | --- |
-| Claude Code | Supported | Writes confined to the workspace (cwd plus `--add-dir`, each granted by its resolved path, since the sandbox matches resolved paths and the benchmark facade reaches the target tree by symlink); outbound network and DNS blocked; loopback kept open so local client/server harnesses still probe; web tools denied; unsandboxed commands denied and an unavailable sandbox is a hard error. |
-| Codex | Supported | `workspace-write` with `approval_policy="never"`: writes confined to the workspace roots the harness supplies, reads unrestricted, and **all** network blocked — including loopback, which it has no setting to re-open. |
+| Claude Code | Supported | Writes confined to the workspace (cwd plus `--add-dir`, each granted by its resolved path, since the sandbox matches resolved paths and the benchmark facade reaches the target tree by symlink); outbound network and DNS blocked; loopback kept open so local client/server harnesses still probe; web tools denied; unsandboxed commands denied, and an unavailable sandbox is a hard error. |
+| Codex | Supported | `workspace-write` with `approval_policy="never"`: writes confined to the workspace roots the harness supplies, reads unrestricted, and **all** network blocked, including loopback, which it has no setting to re-open. |
 | Antigravity (`agy`) | Refused | Its terminal sandbox runs commands in a scratch directory, refuses writes to the launch directory, denies reads outside it, and auto-denies its file-writing tool headless. An audit could neither read the target nor file a result. |
-| Google Gemini CLI | Refused | Its container mounts only the launch directory — `--include-directories` adds workspace context, not a mount — so a cell runs blind to the target. Its macOS profile allows outbound network. |
-| Grok Build | Refused | `workspace` reads the whole host, including `$HOME` (only writes to credential paths are blocked) and allows outbound network — measured, not inferred. Its one read-restricting profile sees nothing outside `--cwd`, which would leave a model-direct control blind to the target it is scored against. |
+| Google Gemini CLI | Refused | Its container mounts only the launch directory (`--include-directories` adds workspace context, not a mount), so a cell runs blind to the target. Its macOS profile allows outbound network. |
+| Grok Build | Refused | `workspace` reads the whole host, including `$HOME` (only writes to credential paths are blocked), and allows outbound network. Its one read-restricting profile sees nothing outside `--cwd`, which would leave a model-direct control blind to the target it is scored against. |
 | OpenCode (`oss`) | Refused | Its permissions are an approval policy, not an OS sandbox. Read-only decision calls still run, with external directories and web tools denied. |
 
 Refused backends stay fully available under `external-bypass`. On a plain host
@@ -143,38 +149,50 @@ rest and says which and why.
 ### Egress and socket-driving targets
 
 A target whose harness drives a real socket will fail its probes under
-`sandboxed` rather than report a finding — a silent recall loss, not an error
-visible in the counts. Claude Code keeps loopback for exactly this reason; Codex
-cannot. Audit such a target under `external-bypass` in a hardened environment,
-and do not publish sandboxed benchmark rows for it.
+`sandboxed` rather than report a finding: a silent recall loss, not an error
+visible in the counts. Claude Code keeps loopback for exactly this reason;
+Codex cannot. Audit such a target under `external-bypass` in a hardened
+environment, and do not publish sandboxed benchmark rows for it.
 
-Web tools are denied on every launch the harness makes — agent sessions in
-both security modes and one-shot decisions alike — so nothing reading an
-untrusted tree has egress through the model's own tools: Claude Code gets
-`--disallowedTools WebFetch,WebSearch` (a read-only plan mode gates the
-filesystem, not the network), Grok `--disable-web-search`, Codex
-`web_search="disabled"` (its default is on), Gemini CLI
-`config/gemini-no-web.policy.toml`, and OpenCode denies `webfetch`/`websearch`
-in every profile. Antigravity (`agy`) exposes no web switch. The same launch
-flags serve both benchmark conditions, so the model-direct control is
-egress-free too. Cross-project research (S6 peer fixes, advisories) is done by
-the harness's own tooling, not by agents. Two things stay uneven and are
-documented rather than fixed: Antigravity (`agy`) exposes no memory or home
-isolation and keeps its memory store beside its OAuth token, so cross-run memory
-cannot be isolated for that dialect — prefer `USE_GEMINI_CLI=1` for benchmark
-rows; and every backend keeps its CLI's default delegation in both conditions —
-a control that cannot delegate is not the product a user gets — with only the
-bounded validator reviews turning it off. What a session actually did is
-recorded on its usage row as `delegation_events` (Claude `Agent` calls,
-OpenCode `task` calls, Gemini CLI `invoke_agent` calls, Grok `subagent_start`
-events, Codex `spawn_agent` calls read from its rollout), summed per cell and
-shown in the report's token table. Claude and Gemini CLI run subagents inside
-the session, so their usage covers them; Codex and OpenCode run them as
-separate threads or sessions the parent's usage cannot see, so a delegating row
-on those backends is a spend floor; Grok reports no usage at all and its
-subagent events are hook names whose presence in the output stream is
-unconfirmed, so its fan-out is treated as unobservable. How the report marks a
-floor is on the [benchmark page](../concepts/benchmark.md).
+### One isolation policy for every launch
+
+Web tools are denied on every launch the harness makes, agent sessions in both
+security modes and one-shot decisions alike, so nothing reading an untrusted
+tree has egress through the model's own tools:
+
+| Backend | How web access is denied |
+| --- | --- |
+| Claude Code | `--disallowedTools WebFetch,WebSearch`. A read-only plan mode gates the filesystem, not the network. |
+| Codex | `web_search="disabled"` (its default is on). |
+| Google Gemini CLI | The admin policy in `config/gemini-no-web.policy.toml`. |
+| Grok Build | `--disable-web-search`. |
+| OpenCode | `webfetch` and `websearch` denied in every profile. |
+| Antigravity (`agy`) | Exposes no web switch. |
+
+The same launch flags serve both benchmark conditions, so the model-direct
+control is egress-free too. Cross-project research (S6 peer fixes, advisories)
+is done by the harness's own tooling, not by agents.
+
+Two things stay uneven and are documented rather than fixed:
+
+- **Cross-run memory.** Learned memory is off by default on every backend that
+  has a switch. Antigravity (`agy`) exposes no memory or home isolation and
+  keeps its memory store beside its OAuth token, so cross-run memory cannot be
+  isolated for that dialect. Prefer `USE_GEMINI_CLI=1` for benchmark rows.
+- **Delegation.** Every backend keeps its CLI's default subagent delegation in
+  both benchmark conditions, because a control that cannot delegate is not the
+  product a user gets. Only the bounded validator reviews turn it off.
+
+What a session actually did is recorded on its usage row as
+`delegation_events`: Claude `Agent` calls, OpenCode `task` calls, Gemini CLI
+`invoke_agent` calls, Grok `subagent_start` events, and Codex `spawn_agent`
+calls read from its rollout. Claude and Gemini CLI run subagents inside the
+session, so their usage covers them. Codex and OpenCode run them as separate
+threads or sessions the parent's usage cannot see, so a delegating row on those
+backends is a spend floor. Grok reports no usage at all, and its subagent
+events are hook names whose presence in the output stream is unconfirmed, so
+its fan-out is treated as unobservable. The
+[benchmark page](../concepts/benchmark.md) says how the report marks a floor.
 
 ### Using the modes
 
@@ -188,11 +206,11 @@ bin/audit --target <target> --backend grok --agent-security external-bypass 1
 
 The chosen mode is written to `state/run-config.json` and inherited by every
 subprocess of the run, including source-reading validators. `bin/benchmark`
-accepts the same flag, applies it to both model-direct and harness cells, writes
-it to `run.json`, refuses to resume a run under a different mode, and re-scores
-a `--regenerate` under the mode that run recorded. `--backend all` skips a
-backend the mode cannot launch and says so; a backend named on the command line
-is a hard error instead.
+accepts the same flag, applies it to both model-direct and harness cells,
+writes it to `run.json`, refuses to resume a run under a different mode, and
+re-scores a `--regenerate` under the mode that run recorded. `--backend all`
+skips a backend the mode cannot launch and says so; a backend named on the
+command line is a hard error instead.
 
 ### Grok Build
 
@@ -208,13 +226,13 @@ bin/audit --target <target> --backend grok --agent-security external-bypass 1
 TokenFuzz uses headless streaming JSON and applies the configured reasoning
 effort; every iteration is a fresh session. Nested Grok subagents stay at the
 CLI's default (see the delegation note above); only a bounded validator review
-disables them.
-Grok's stream may not expose measured token counts; when it does not, usage
-reports label estimates rather than presenting them as measured.
+disables them. Grok's stream may not expose measured token counts; when it
+does not, usage reports label the numbers as estimates rather than presenting
+them as measured.
 
 ## Containerised backend shell
 
-The supported container helper puts the hosted CLIs and repository in a
+The supported container helper puts the hosted CLIs and the repository in a
 repeatable Linux environment:
 
 ```bash
@@ -223,12 +241,15 @@ bin/audit-container-shell             # reuse the image
 ```
 
 It opens a shell at `/root/work`; it does not start an audit. Host credential
-directories (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.grok`) are not mounted.
-Authenticate in the disposable shell or pass `--forward-credentials` to forward
-supported API variables and read-only Google ADC files explicitly.
+directories (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.grok`,
+`~/.local/share/opencode`) are not mounted. Authenticate in the disposable
+shell or pass `--forward-credentials` to forward supported API variables and
+read-only Google ADC files explicitly. The container sets `IS_SANDBOX=1`
+because it is the boundary that `external-bypass` relies on.
 
 See [Where to run the audit](../getting-started/first-audit.md#where-to-run-the-audit)
-for the trust boundary and [Container runtime](../getting-started/prerequisites.md#container-runtime-recommended)
+for the trust boundary and
+[Container runtime](../getting-started/prerequisites.md#container-runtime-recommended)
 for Docker and gVisor setup.
 
 ## Ensemble mode
@@ -289,7 +310,7 @@ bin/audit --target <target> --backend oss \
 
 TokenFuzz passes the `opencode/` model reference through to the installed CLI,
 which retains OpenCode's credential and provider handling. No security flag is
-needed to select its default, but that default is `external-bypass`; see
+needed to select its default, but that default is `external-bypass`; read
 [Agent security modes](#agent-security-modes) before running it on a host.
 
 ### Local OpenAI-compatible models
@@ -302,11 +323,11 @@ the server's `/v1/models` response before launching agents.
 bin/audit --target <target> --backend oss --model <served-model-id> 1
 ```
 
-Install OpenCode, then choose a server:
+Install OpenCode, then choose a server.
 
 #### vLLM path
 
-vLLM is suited to GPU hosts and larger models:
+vLLM suits GPU hosts and larger models:
 
 ```bash
 python3 -m venv .venv-vllm
@@ -326,7 +347,7 @@ bin/audit --target <target> --backend oss --model audit-model 1
 
 #### Ollama path
 
-Ollama is convenient for a desktop or smaller local model:
+Ollama is convenient for a desktop or a smaller local model:
 
 ```bash
 ollama pull <model-tag>
@@ -341,9 +362,10 @@ Pass the exact tag reported by Ollama's OpenAI-compatible models endpoint. Set
 
 Local operation keeps model data flow on the selected machine only when the
 endpoint is actually local and OpenCode is not configured to call another
-provider. The model
-still receives the source excerpts, prompts, state, and reports required for
-the audit. Small models may need narrower target scopes and more human review.
+provider. The model still receives the source excerpts, prompts, state, and
+reports the audit needs. Small models may need narrower target scopes and more
+human review; the [environment reference](../reference/environment.md#local-model-endpoint)
+lists the timeouts a slow local model tends to hit.
 
 ## Inspect backend results
 
@@ -368,12 +390,13 @@ output.
 - Pin backend and model for reproducibility.
 - Review provider data-handling and spend before continuous runs.
 - Keep cross-run learned memory off unless cumulative learning is intentional;
-  it is off by default.
-- Diagnose startup in `logs/index.log`, then use the named trimmed session log.
-- Expect quota pauses on long runs rather than treating them as failures — see
+  it is off by default (`--enable-memory` turns it on).
+- Diagnose startup in `logs/index.log`, then use the trimmed session log it
+  names.
+- Expect quota pauses on long runs rather than treating them as failures; see
   [The run paused, or the backend went unavailable](../reference/troubleshooting.md#the-run-paused-or-the-backend-went-unavailable).
-- Evaluate results through findings, crashes, and rejected indexes — not the
-  style or length of the backend transcript.
+- Evaluate results through the findings, crashes, and rejected indexes, not
+  through the style or length of the backend transcript.
 
 For hosted defensive research, the provider-access links are collected under
 [Cyber access](../getting-started/prerequisites.md#cyber-access-for-security-research).

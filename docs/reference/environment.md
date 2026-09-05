@@ -6,9 +6,10 @@ for choices that belong to one run (`--target`, `--backend`, `--model`,
 
 The variables below are the operator-facing exceptions. Each one is here for
 the same reason: its default can produce something you would otherwise have to
-diagnose — a run that stops by itself, a session that restarts mid-thought, a
-local model that never finishes a decision. The harness reads other variables
-internally; those are not a supported interface and you should not need them.
+diagnose, such as a run that stops by itself, a session that restarts
+mid-thought, or a local model that never finishes a decision. The harness
+reads other variables internally; those are not a supported interface and you
+should not need them.
 
 ## Worker pool
 
@@ -18,7 +19,8 @@ internally; those are not a supported interface and you should not need them.
 | `BROWSER_AGENTS` | `1` | Browser-mode workers. Only applies when `[runner].args` declares a `{PROFILE}` page route; a browser-mode script engine gets shell workers only. |
 | `SHELL_AGENTS` | `2` beside browser workers, otherwise sized to the machine | Shell/generic workers when `NUM_AGENTS` is unset. The machine default is `min(CPUs, RAM ÷ AGENT_MEMORY_GB, AGENT_POOL_MAX)`, where CPUs and RAM honour a container's cgroup quota and limit (Docker `--cpus`, `-m`) and Linux CPU affinity, not just the host. |
 | `AGENT_MEMORY_GB` | `4` | RAM budgeted per worker when sizing the default pool: one agent CLI plus the builds and sanitizer runs it spawns. |
-| `AGENT_POOL_MAX` | `8` | Ceiling on the machine-sized default. A provider's own concurrency or quota limit is not modelled here — it surfaces as a capacity pause the loop already handles. |
+| `AGENT_POOL_MAX` | `8` | Ceiling on the machine-sized default. A provider's own concurrency or quota limit is not modelled here; it surfaces as a capacity pause the loop already handles. |
+| `WORK_CARD_CLAIM_TTL_SECONDS` | `1800` | How long a work-card claim stays valid without its hypothesis closing. Thirty minutes is a safety net so a killed agent does not hold its card for a shift; raise it only for cards you know take longer. |
 
 A one-iteration smoke test always launches one worker, whatever these say.
 
@@ -30,10 +32,10 @@ NUM_AGENTS=4 bin/audit --target <target> --backend <backend>
 
 | Variable | Default | Use it for |
 | --- | --- | --- |
-| `AUDIT_WALL_BUDGET_SECS` | `0` (off) | Wall-clock ceiling for a continuous run. The loop stops launching new iterations once it is spent — the simplest way to leave an overnight audit running with a hard stop. Provider quota pauses do not count against it. |
-| `STEWARD_INTERVAL_SECS` | `300` | Continuous runs only: seconds between steward ticks. A tick scores the generation, rotates starved strategy lanes, re-ranks the queue and refreshes indexes — without stopping any slot. Each tick is logged as an iteration. |
-| `AGENT_TIMEOUT` | `7200` seconds | Hard ceiling for one agent launch, and — in cohort mode (fixed-lane, delta and ensemble runs) — for one iteration's pool of them. An early-finished slot is relaunched while a cohort-era peer is still running (one overtime session per slot), so this also bounds how far those replacements can push post-iteration triage out: every session in the iteration is clamped to what remains of the ceiling measured from when the iteration's first sessions started. |
-| `POOL_OVERTIME` | `cohort-era` | Cohort mode only (fixed-lane, delta and ensemble runs); an ordinary run refills every slot to the wall. Which in-flight peer lets a slot that finished after the initial cohort drained take its one extra session. `cohort-era`: only an initial session or a refill launched beside one, so an overtime session never justifies another. `any-peer`: any peer, including another slot's overtime — the per-slot cap and the `AGENT_TIMEOUT` clamp still bound the iteration at one extra session per slot. Measure it with the benchmark's Efficiency table (occupancy against confirmed per seat-hour) before making it a default. Any other value is refused. |
+| `AUDIT_WALL_BUDGET_SECS` | `0` (off) | Wall-clock ceiling for a continuous run. The loop stops launching new iterations once it is spent, the simplest way to leave an overnight audit running with a hard stop. Provider quota pauses do not count against it. |
+| `STEWARD_INTERVAL_SECS` | `300` | Continuous runs only: seconds between steward ticks. A tick scores the generation, rotates starved strategy lanes, re-ranks the queue, and refreshes indexes without stopping any slot. Each tick is logged as an iteration. |
+| `AGENT_TIMEOUT` | `7200` seconds | Hard ceiling for one agent launch, and, in cohort mode (fixed-lane, delta, ensemble, and `--no-refill-workers` runs), for one iteration's pool of them. An early-finished slot is relaunched while a cohort-era peer is still running (one overtime session per slot), so this also bounds how far those replacements can push post-iteration triage out: every session in the iteration is clamped to what remains of the ceiling measured from when the iteration's first sessions started. |
+| `POOL_OVERTIME` | `cohort-era` | Cohort mode only; an ordinary run refills every slot to the wall. Decides which in-flight peer lets a slot that finished after the initial cohort drained take its one extra session. `cohort-era`: only an initial session or a refill launched beside one, so an overtime session never justifies another. `any-peer`: any peer, including another slot's overtime; the per-slot cap and the `AGENT_TIMEOUT` clamp still bound the iteration at one extra session per slot. Measure it with the benchmark's Efficiency table (occupancy against confirmed per seat-hour) before making it a default. Any other value is refused. |
 | `SHELL_SANITIZER_RUN_BUDGET` | `60` | Sanitizer runs one shell/generic agent may spend per iteration. |
 | `BROWSER_SANITIZER_RUN_BUDGET` | `25` | The same budget for browser-mode agents. |
 
@@ -51,7 +53,7 @@ so this section is mostly here to explain what you are reading.
 
 | Variable | Default | What it controls |
 | --- | --- | --- |
-| `MAX_DRY_SESSIONS` | `10` | A continuous run stops once this many generations (steward ticks, or cohort iterations in cohort mode) in a row produce nothing *and* no hypothesis is still open, logging `STALL_STOP`. Raise it for a hard target you expect to be slow; the harness ignores a value low enough to prevent fair strategy rotation. |
+| `MAX_DRY_SESSIONS` | `10` | A continuous run stops once this many generations (steward ticks, or cohort iterations in cohort mode) in a row produce nothing *and* no hypothesis is still open, logging `STALL_STOP`. Raise it for a hard target you expect to be slow; a value too low to let S1 finish its longer dry runway is raised to nine. |
 | `TURN_SOFT_CAP` | `128` agent/tool turns | Rollover target for a long audit session. Claude, Grok, and current Google Gemini CLI versions use native turn limits; Gemini retains a completed-tool fallback for older versions. Codex and OpenCode use completed tool events as the safe termination boundary. Antigravity (`agy`) has neither a native turn flag nor a stable completed-tool event contract, so its prompt carries the same cooperative target but only `AGENT_TIMEOUT` can hard-stop it. Capped sessions continue from structured state; the log says `turn-capped; continuing from state`, and the transcript ends with `TURN_SOFT_CAP reached …`. Set `0` to disable. |
 
 Already checkpointed hypotheses and artifacts are preserved. The next
@@ -83,11 +85,12 @@ for a shared shell, or a backend binary outside `PATH`.
 | `CODEX_MODEL_DEFAULT` | `config/models.toml` | Default Codex model. |
 | `GEMINI_MODEL_DEFAULT` | `config/models.toml` | Default Gemini model. |
 | `GROK_MODEL_DEFAULT` | `config/models.toml` | Default Grok model. |
-| `CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN` / `GROK_BIN` / `OPENCODE_BIN` | the CLI's own name (`agy` for Gemini) | Backend executable outside `PATH`. |
+| `CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN` / `GROK_BIN` / `OPENCODE_BIN` | the CLI's own name (`agy` for Gemini) | Backend executable outside `PATH`. `bin/audit --<backend>-bin` does the same for one run. |
 | `USE_GEMINI_CLI` | `0` | Use Google Gemini CLI instead of the default Antigravity CLI. |
-| `CLAUDE_CODE_PROMPT_CACHE_TTL` | unset | Claude Code's prompt-cache write tier (`5m` or `1h`). TokenFuzz sets `5m` on every Claude launch it makes — agent sessions, validators, and decision calls — because a harness prefix is almost never idle for five minutes and the one-hour write costs 60% more (measured: 20% cheaper over 122 sessions; see [cost model](../concepts/cost-model.md)). Set it yourself to override. Cost tier only; it never changes model behaviour. |
-| `AUDIT_MODEL_PREFLIGHT` | `1` | Before starting, launch the selected model once through the real agent path — same granted directories as an audit session — and require it to run a command that writes into the target tree. A backend that can reply but cannot act fails here rather than spending the run. Set `0` only for an intentionally offline or mock run. |
-| `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds (`300` for Google Gemini CLI) | Ceiling on that probe. Raise it when a slow local model loses the probe and the audit never reaches its first agent. |
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | unset | Claude Code's prompt-cache write tier (`5m` or `1h`). TokenFuzz sets `5m` on every Claude launch it makes (agent sessions, validators, and decision calls), because a harness prefix is almost never idle for five minutes and the one-hour write costs 60% more; see the [cost model](../concepts/cost-model.md#what-prompt-caching-can-reuse). Set it yourself to override. Cost tier only; it never changes model behaviour. |
+| `AUDIT_MODEL_PREFLIGHT` | `1` | Before starting, launch the selected model once through the real agent path, with the same granted directories as an audit session and the audit guide in the prompt, and require it to run a command that writes into the target tree. A backend that can reply but cannot act, a CLI that silently serves a different model, or a model whose safeguards refuse the audit workload fails here rather than spending the run. Set `0` only for an intentionally offline or mock run. |
+| `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds (`300` for Google Gemini CLI) | Ceiling on each preflight attempt. Raise it when a slow local model loses the probe and the audit never reaches its first agent. |
+| `AUDIT_MODEL_PREFLIGHT_ATTEMPTS` | `3` | How many times the preflight probe is retried on a transient failure before the run stops. |
 
 Model precedence is `--model`, then the matching `*_MODEL_DEFAULT`, then
 `config/models.toml`. The `oss` backend has no default: always pass the exact
@@ -104,16 +107,16 @@ used. Keep keys out of `target.toml`, reports, and committed shell files.
 | --- | --- | --- |
 | `AUDIT_LOCAL_BASE_URL` | `http://127.0.0.1:8000/v1` | OpenAI-compatible endpoint used by `--backend oss`. TokenFuzz appends `/v1` when omitted. |
 | `AUDIT_LOCAL_API_KEY` | `EMPTY` | Token for a local endpoint that requires authentication. |
-| `LLM_DECISION_TIMEOUT` | `180` seconds for `oss`, `45` hosted | Ceiling on each audit-time ranking, peer-mapping, triage, and validation decision. Setting it applies to *every* decision, including the two below. Stage deadlines may shorten it. |
+| `LLM_DECISION_TIMEOUT` | `45` seconds hosted, `180` for `oss` | Ceiling on each audit-time ranking, peer-mapping, triage, and validation decision. Setting it applies to *every* decision, including the two below. Stage deadlines may shorten it. |
 | `RANK_WORK_LLM_TIMEOUT` | unset | Override `LLM_DECISION_TIMEOUT` for work-card reranking only. The `bin/rank-work --llm-timeout` flag takes precedence over both. |
-| `RANK_WORK_LLM_MODE` | `boost` | How far the rerank verdict reaches. `boost` adds a bounded increment to the deterministic score; `primary` sorts the ranked window by the model's score, with the deterministic score breaking ties, inside each buildability tier. In both modes the model reorders the cards it was shown — it cannot add or drop one — and in `primary` mode it cannot lift a card across a buildability tier; on timeout or malformed output the deterministic order stands. The `bin/rank-work --llm-mode` flag takes precedence. |
+| `RANK_WORK_LLM_MODE` | `boost` | How far the rerank verdict reaches. `boost` adds a bounded increment to the deterministic score; `primary` sorts the ranked window by the model's score, with the deterministic score breaking ties, inside each buildability tier. In both modes the model reorders the cards it was shown (it cannot add or drop one), and in `primary` mode it cannot lift a card across a buildability tier; on timeout or malformed output the deterministic order stands. The `bin/rank-work --llm-mode` flag takes precedence. |
 
 Every decision launches a full agent CLI rather than a single chat completion,
 so its floor is a process launch plus a reasoning turn. A few decisions have
-been observed to complete well past the ceiling above and get a longer built-in
-default, scaled by the same hosted→`oss` ratio so a slow local-inference host
-gets proportionally more room. Setting `LLM_DECISION_TIMEOUT` replaces those
-defaults too.
+been observed to complete well past the ceiling above and get a longer
+built-in default, scaled by the same hosted-to-`oss` ratio so a slow
+local-inference host gets proportionally more room. Setting
+`LLM_DECISION_TIMEOUT` replaces those defaults too.
 
 For Ollama:
 
@@ -123,10 +126,10 @@ bin/audit --target <target> --backend oss --model <served-model>
 ```
 
 A slow local model is where these bite. If the audit never gets past startup,
-the model is losing the launch probe — raise `AUDIT_MODEL_PREFLIGHT_TIMEOUT`
-(60s by default). If agents work but findings sit unvalidated, decisions are
-timing out — raise `LLM_DECISION_TIMEOUT`. Both are normal on CPU inference or
-a large model on modest hardware, and neither means the model is misconfigured.
+the model is losing the launch probe: raise `AUDIT_MODEL_PREFLIGHT_TIMEOUT`.
+If agents work but findings sit unvalidated, decisions are timing out: raise
+`LLM_DECISION_TIMEOUT`. Both are normal on CPU inference or a large model on
+modest hardware, and neither means the model is misconfigured.
 
 ## LLVM selection
 
@@ -145,7 +148,7 @@ LLVM_PREFIX=/opt/homebrew/opt/llvm bin/audit --target <target> --backend <backen
 
 | Variable | Default | Use it for |
 | --- | --- | --- |
-| `FUZZ_SEED_CORPUS_DIR` | unset | A local directory of extra seed inputs (an OSS-Fuzz or ClusterFuzz corpus you staged) to fill an empty S4 corpus alongside the target's own test data. Local only — nothing is fetched over the network. |
+| `FUZZ_SEED_CORPUS_DIR` | unset | A local directory of extra seed inputs (an OSS-Fuzz or ClusterFuzz corpus you staged) to fill an empty S4 corpus alongside the target's own test data. Local only; nothing is fetched over the network. |
 
 The path is read only when a harness's corpus is empty, and its inputs are
 bounded by the same size and count limits as the in-tree seeds.
@@ -166,9 +169,10 @@ better in scripts because they are visible in the command under review.
 | `AUDIT_FORWARD_CREDENTIALS` | `--forward-credentials` | Set to `1` to forward supported credential variables and read-only Google ADC files into the container. Off by default. |
 
 Inside the container helper, `AUDIT_BUILD_SUFFIX` is set for you so each image
-gets its own `build-asan-<image-id>/` tree. `bin/benchmark --isolate-build` sets
-it the same way, to `+bench-<input-hash>`. It is runtime state — do not set it by
-hand.
+gets its own `build-asan-<image-id>/` tree, and `IS_SANDBOX=1` is set because
+the container is the boundary `--agent-security external-bypass` relies on.
+`bin/benchmark --isolate-build` sets the suffix the same way, to
+`+bench-<input-hash>`. Both are runtime state; do not set them by hand.
 
 ## Build leases and source pins
 
@@ -176,12 +180,12 @@ Every process that executes a sanitizer build holds a shared lease on it, and
 every rebuild takes the matching exclusive one, so a build is never replaced
 while a run is using it. A run additionally pins the source state it is
 auditing, which is what catches two runs reading one checkout at different
-states — something a per-build lock cannot see.
+states, something a per-build lock cannot see.
 
 Both are advisory kernel locks under `targets/<slug>/.audit/`
-(`build-locks/<build-dir>.lock` and `source-pins/<pid>.pin`), released when the
-holder exits and needing no cleanup. There is nothing to configure, and they bind
-only harness commands — a build tool invoked by hand is outside them.
+(`build-locks/<build-dir>.lock` and `source-pins/<pid>.pin`), released when
+the holder exits and needing no cleanup. There is nothing to configure, and
+they bind only harness commands; a build tool invoked by hand is outside them.
 
 ## One-off probe selection
 
@@ -192,8 +196,8 @@ deliberate one-off comparison:
 PROBE_SANITIZER=msan bin/probe output/<target>/<backend>/results/scratch-1/testcase
 ```
 
-Valid values are `asan`, `ubsan`, `msan`, `tsan`, `race`, and `runner`, and the
-sanitizer must be enabled for the target. Persistent policy belongs in
+Valid values are `asan`, `ubsan`, `msan`, `tsan`, `race`, and `runner`, and
+the sanitizer must be enabled for the target. Persistent policy belongs in
 `[sanitizer].enabled`, not in the environment.
 
 To compare ASan build configurations, select a ready named configuration or
@@ -209,13 +213,13 @@ alternate build is compared against the primary without any override.
 
 ## Probe output capture
 
-`bin/probe` classifies a diagnostic before limiting its saved size. By default,
-an output larger than 8 MiB is replaced with an explicit truncation marker plus
-its first and last 256 KiB. For a deliberate full-capture rerun:
+`bin/probe` classifies a diagnostic before limiting its saved size. By
+default, an output larger than 8 MiB is replaced with an explicit truncation
+marker plus its first and last 256 KiB. For a deliberate full-capture rerun:
 
 ```bash
 PROBE_ASAN_OUTPUT_MAX_BYTES=0 bin/probe .../scratch-1/testcase
 ```
 
-This can create a very large file. Use it only when the saved marker shows that
-the omitted middle contains context needed for review.
+This can create a very large file. Use it only when the saved marker shows
+that the omitted middle contains context needed for review.

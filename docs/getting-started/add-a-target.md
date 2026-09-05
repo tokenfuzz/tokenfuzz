@@ -9,9 +9,9 @@ output/<target>/<backend>/results/  evidence produced by an audit
 ```
 
 This guide gets those pieces to a one-iteration smoke test. The
-[target config schema](../reference/target-toml.md) documents every field;
-the [configuration guide](../guides/configure-target.md) explains the review
-decisions.
+[target config reference](../reference/target-toml.md) documents every field,
+and the [configuration guide](../guides/configure-target.md) explains the
+review decisions.
 
 ## Choose a useful target
 
@@ -62,9 +62,9 @@ the maintainer for a checkout path instead of inventing a clone URL.
 
 Re-running `bin/setup-target` preserves reviewed values unless generated
 placeholders remain. `--no-llm-config` skips the best-effort threat-model and
-peer suggestions when setup must stay offline. See the
+peer suggestions when setup must stay offline. Read the
 [command reference](../reference/commands.md#set-up-a-target) before using
-`--force`, because its behavior intentionally differs with and without
+`--force`, because it deliberately behaves differently with and without
 `--build`.
 
 ### Chromium and Chrome checkouts
@@ -81,10 +81,9 @@ target as `chromium/src`. An ordinary target already configured at
 `output/chromium/target.toml` keeps its existing identity.
 
 Chromium probes enable stderr logging, use a temporary profile, and pass
-`--no-sandbox` so child sanitizer logs remain writable inside the audit's own
-isolation boundary. On macOS they also use the mock Keychain. Chromium does not
-currently have a `bin/hits` coverage-gating route; its probes run the sanitizer
-directly.
+`--no-sandbox` so child sanitizer logs stay writable inside the audit's own
+isolation boundary. On macOS they also use the mock Keychain. Chromium has no
+`bin/hits` coverage-gating route yet; its probes run the sanitizer directly.
 
 ## 2. Establish an execution route
 
@@ -129,9 +128,9 @@ The native builder:
   Meson, and autotools targets, prepares one widened ASan sibling for optional
   in-tree features by default.
 
-A failed build is loud but does not erase source-review work. Disable alternate
-build exploration with `build_widening = false` in `target.toml` when it is not
-appropriate for the project.
+A failed build is loud but does not erase source-review work. Set
+`build_widening = false` in `target.toml` to disable alternate build
+exploration when it is not appropriate for the project.
 
 Inside `bin/audit-container-shell`, relative `build-asan/`, `build-ubsan/`,
 `build-msan/`, and `build-tsan/` paths resolve to image-specific directories
@@ -180,12 +179,12 @@ output/<target>/<backend>/results/.session-env
 ```
 
 Do not edit either file during the session. Change the shared
-`output/<target>/target.toml` between runs; the next invocation will pin the new
+`output/<target>/target.toml` between runs; the next invocation pins the new
 version.
 
-A schedulable smoke test creates `work-cards.jsonl`, `state/`, the result lanes,
-and a per-agent scratch directory even if it finds nothing. Continue with
-[First audit](first-audit.md) to inspect them.
+A schedulable smoke test creates `work-cards.jsonl`, `state/`, the result
+lanes, and a per-agent scratch directory even if it finds nothing. Continue
+with [First audit](first-audit.md) to inspect them.
 
 ## Ready checklist
 

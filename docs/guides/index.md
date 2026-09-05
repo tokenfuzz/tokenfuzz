@@ -11,7 +11,7 @@ Two rules apply throughout the handbook:
   later be classified `not-reportable` without being thrown away.
 
 Rejected artifacts are preserved under `findings-rejected/` and
-`crashes-rejected/`, with an HTML index explaining each decision.
+`crashes-rejected/`, each with an HTML index explaining the decision.
 
 ## All guide pages
 

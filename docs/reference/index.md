@@ -1,9 +1,9 @@
 # Reference
 
 Reference pages define exact command syntax, artifact paths, configuration
-fields, operator-facing environment variables, and shared vocabulary. Use
-them to look up a contract; use [Getting started](../getting-started/index.md)
-or the [Guides](../guides/index.md) to learn a workflow.
+fields, operator-facing environment variables, and shared vocabulary. Use them
+to look up a contract; use [Getting started](../getting-started/index.md) or
+the [Guides](../guides/index.md) to learn a workflow.
 
 All reference pages assume the normal TokenFuzz layout:
 

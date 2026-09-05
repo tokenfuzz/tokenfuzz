@@ -7,8 +7,8 @@ Most TokenFuzz failures fall into a small number of categories:
 - sanitizer binaries that do not run on their own;
 - backend CLIs that are not authenticated.
 
-This page is organised by symptom. Find the heading closest to what
-you see, and start there.
+This page is organised by symptom. Find the heading closest to what you see,
+and start there.
 
 For normal audit progress, the generated index pages under `crashes/`,
 `findings/`, `crashes-rejected/`, and `findings-rejected/` are the right first
@@ -26,13 +26,22 @@ FATAL: backend '<name>' is not installed or configured
 Fix:
 
 1. Install and log in to the named backend CLI, or pass a `--backend` that is.
-2. Re-run:
-
-   ```bash
-   bash tests/run-tests.sh
-   ```
-
+2. Re-run `bash tests/run-tests.sh` to confirm the harness itself is healthy.
 3. Start the audit again.
+
+Symptom:
+
+```text
+FATAL: model preflight refused for backend=<name>: requested model=<a> but the provider served <b>
+```
+
+The CLI answered, but with a different model than you asked for. Retrying
+cannot change which model is served, so the run stops before an agent starts
+rather than recording rows that name a model that never ran. Pick a model the
+provider will actually serve, or drop `--model` to use the configured default.
+A model whose safeguards refuse the audit workload reports the same way, with
+the refusing safeguard category named; use a different model or the local
+`oss` route for that target.
 
 Symptom (Google Gemini CLI only):
 
@@ -52,17 +61,16 @@ the cell counts as failed rather than measured.
 
 Common fixes:
 
-- Refresh with `bin/setup-target <target>` after the ASan build
-  exists.
+- Refresh with `bin/setup-target <target>` after the ASan build exists.
 - Remove placeholder values for fields needed by this run.
 - Quote string values. Keep arrays valid TOML.
-- Remove invalid section headers — the loader fails fast on them.
+- Remove invalid section headers; the loader fails fast on them.
 - Confirm `target` matches the directory slug.
 
 ## Sanitizer binary does not run
 
-Run the configured binary by hand from the repository root. For a typical
-ASan path:
+Run the configured binary by hand from the repository root. For a typical ASan
+path:
 
 ```bash
 targets/<target>/build-asan/path/to/binary
@@ -72,9 +80,8 @@ Common fixes:
 
 - Rebuild with `clang` and `-fsanitize=address`.
 - Refresh generated config with `bin/setup-target <target>`.
-- Set `asan_bin` to the actual executable, or set
-  `[sanitizer].<name>_bin` for opt-in UBSan, MSan, or TSan
-  runners.
+- Set `asan_bin` to the actual executable, or set `[sanitizer].<name>_bin` for
+  opt-in UBSan, MSan, or TSan runners.
 - Ensure runtime libraries are discoverable.
 - Install `llvm-symbolizer` so diagnostics are readable.
 
@@ -95,8 +102,28 @@ Common fixes:
 - Add generated include directories.
 - Add required compile-time defines.
 - Add required system libraries.
-- Use the selected sanitizer's static library, not a release
-  library or a different sanitizer build.
+- Use the selected sanitizer's static library, not a release library or a
+  different sanitizer build.
+
+`bin/auto-repair-target-toml --dry-run` can propose these edits from the
+failing build log; see
+[C harness readiness](../guides/configure-target.md#c-harness-readiness).
+
+## Every probe reports EXEC_FAIL
+
+Read the class the probe prints beside the verdict:
+
+| Class | Meaning | Fix |
+| --- | --- | --- |
+| `loader` | The binary could not start (missing shared library, wrong architecture). | Rebuild, or fix the runtime library path. |
+| `usage` | The program rejected its command line. | Fix `[runner].args` or re-run `bin/suggest-runner <target> --apply`. |
+| `input-rejected` | The program opened the input and refused it by contract. | Normal for malformed input. If the CLI exits nonzero for every rejected file, re-run `bin/setup-target <target>` so the reviewed exit lands in `[runner].success_codes`. |
+| `aborted` | The process died on a signal with no sanitizer report. | Read the saved output; a plain abort is not a sanitizer crash. |
+| `unverified-exit` | The process exited 0 but the runner's success marker never appeared, so nothing proves the input was processed. | Check that the testcase actually reaches the program's entry point and that the runner's argv is complete. |
+| `exit` | The process exited nonzero with no recognised diagnostic. | Read the tail of the saved output and compare the exit with the program's documented behaviour. |
+
+A run refused by the per-iteration sanitizer budget is a `NO_EXEC` with class
+`budget-exhausted`, not an `EXEC_FAIL`; it clears at the next iteration.
 
 ## Triage rejects a crash
 
@@ -109,10 +136,10 @@ output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
 Common reasons:
 
 - Report fields are missing.
-- The crash is OOM, an assertion-only abort, or a plain null
-  dereference (a timeout is a probe verdict and is never filed).
-- The testcase violates a caller contract that real product input
-  cannot violate.
+- The crash is OOM, an assertion-only abort, or a plain null dereference (a
+  timeout is a probe verdict and is never filed).
+- The testcase violates a caller contract that real product input cannot
+  violate.
 
 If the crash is still under `crashes/` with `.promotion_pending`, read that
 marker first. Triage is waiting for an enriched report, a valid sanitizer
@@ -120,13 +147,13 @@ diagnostic, a testcase, or a complete exported bundle. Fix the named artifact
 and rerun triage. The adjacent signature and count files are internal progress
 state; do not delete or edit them.
 
-A trigger source outside `attacker_controls` is **not** a rejection
-reason — such crashes stay in `crashes/` as `not-reportable` engineering
-defects, without security credit or numeric CVSS. See
+A trigger source outside `attacker_controls` is **not** a rejection reason.
+Such crashes stay in `crashes/` as `not-reportable` engineering defects,
+without security credit or numeric CVSS. See
 [Triage and review](../guides/triage-results.md#common-rejection-reasons).
 
-Fix the evidence if the result is genuinely in scope. Otherwise
-leave it rejected so future sessions do not repeat it.
+Fix the evidence if the result is genuinely in scope. Otherwise leave it
+rejected so future sessions do not repeat it.
 
 Do not copy the same rejected mechanism into `findings/`. A separate FIND is
 appropriate only when source review establishes a distinct security-boundary
@@ -142,17 +169,17 @@ output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
 
 Then open the FIND directory and read the marker file:
 
-- `.needs-content` — the FIND directory has no `report.md` or
+- `.needs-content`: the FIND directory has no `report.md` or
   `description.md`. Write one.
-- `.pending-drop` — a substance-gate pass ended with Reject votes below
+- `.pending-drop`: a substance-gate pass ended with Reject votes below
   quorum. Reaching quorum moves the directory to `findings-rejected/`, where
   `REJECTED-FINDINGS.html` records the reason. Nothing is deleted, so a reject
   you disagree with can be read and recovered.
 
-Add the missing concrete location, security impact, and
-reviewer-actionable rationale, then rerun triage. If a human has
-reviewed the terse report and wants to keep it as-is, `touch
-.reviewed` or `.keep` inside the FIND directory.
+Add the missing concrete location, security impact, and reviewer-actionable
+rationale, then rerun triage. If a human has reviewed the terse report and
+wants to keep it as-is, `touch .reviewed` or `.keep` inside the FIND
+directory.
 
 ## An agent looks stuck
 
@@ -163,11 +190,11 @@ ls -lt output/<target>/<backend>/logs/session_*.log | head -3
 tail -5 output/<target>/<backend>/logs/index.log
 ```
 
-A long-running sanitizer build or a slow backend turn can look like
-a hang for several minutes; that is normal. If an agent genuinely
-wedges or is killed, the run self-heals: work-card claims expire on
-a timer, so the next iteration reclaims its card and resumes from
-structured state. You do not need to clean anything up by hand.
+A long-running sanitizer build or a slow backend turn can look like a hang for
+several minutes; that is normal. If an agent genuinely wedges or is killed,
+the run self-heals: work-card claims expire on a timer, so the next iteration
+reclaims its card and resumes from structured state. You do not need to clean
+anything up by hand.
 
 ## The run paused, or the backend went unavailable
 
@@ -181,7 +208,7 @@ Provider capacity limited; pausing 1800s before retry
 What to expect:
 
 - The pause lasts until the provider's reported reset time, or 30 minutes if
-  the backend reports none. Waiting is capped at six hours.
+  the backend reports none. Waiting is capped at six hours per run.
 - Paused time does **not** count against `AUDIT_WALL_BUDGET_SECS`, so a quota
   pause never eats an overnight budget.
 - Transient (non-quota) failures are retried separately with backoff.
@@ -194,8 +221,8 @@ Nothing needs cleaning up. Rerunning the same command resumes from the run's
 saved state.
 
 A continuous run can also stop on its own without any provider problem. If
-`index.log` ends with `STALL_STOP`, ten iterations in a row produced nothing
-and no hypothesis was left open — the run decided it was done rather than
+`index.log` ends with `STALL_STOP`, ten generations in a row produced nothing
+and no hypothesis was left open, so the run decided it was done rather than
 burning budget. Raise `MAX_DRY_SESSIONS` if you expect the target to be that
 slow, or take it as a signal to revisit the threat model and work queue.
 
@@ -207,9 +234,9 @@ Check:
 output/<target>/<backend>/logs/
 ```
 
-Then run the backend CLI outside the harness to confirm authentication
-and basic execution. For local models, confirm the selected provider is
-running and serving the expected model:
+Then run the backend CLI outside the harness to confirm authentication and
+basic execution. For local models, confirm the selected provider is running
+and serving the expected model:
 
 ```bash
 curl http://127.0.0.1:8000/v1/models
@@ -235,20 +262,20 @@ it.
 | `pinned benchmark build is not usable: <route> changed ...` | A cell found that a route selected by the run snapshot no longer has the bytes its parent pinned. Cells verify and never build. | The message names the path. Stop the process rebuilding it, then start a new run id; this run remains valid only if that exact generation is restored. |
 | `target source changed during the cell` | The revision or tracked source differs at the end-of-cell boundary. Untracked testcases and generated output do not trigger this. Artifacts are kept; the cell leaves the headline comparison. | Check `cells/<cell>/source-drift.json` for the paths. Agents must not leave tracked target edits in place. |
 | `crash triage skipped ... <route> changed` | Replay would execute a different pinned target artifact, so finalization kept the original evidence untouched. | Restore the named artifact generation or rerun the cell in a new run. |
-| `is at a different source state than a live run` | A benchmark refused to start: another live run pinned a different source state. | Use a separate checkout, or wait for that run. `--isolate-build` cannot fix this — both runs read one checkout. |
-| `build-<san> is stale (changed: <paths>)` | A fresh run found source or a build recipe newer than the available native build. This check is never used for a pinned resume. | Remove an accidental generated path, or run `bin/setup-target <target> --build` for a real source/recipe change, then rerun the fresh benchmark. |
+| `is at a different source state than a live run` | A benchmark refused to start: another live run pinned a different source state. | Use a separate checkout, or wait for that run. `--isolate-build` cannot fix this; both runs read one checkout. |
+| `build-<san> is stale (changed: <paths>)` | A fresh run found source or a build recipe newer than the available native build. This check is never used for a pinned resume. | Remove an accidental generated path, or run `bin/setup-target <target> --build` for a real source or recipe change, then rerun the fresh benchmark. |
 | `<route> changed since this run pinned it (<path>)` | A `--run-id` resume found different bytes than its completed cells used. | Start a new run id, or restore the named artifact and build stamp. The refusal leaves the recorded pin unchanged. |
 | `<route> now selects ... instead of ...`, `<route> is no longer selected by target.toml` | The run-owned `target.toml` execution route no longer matches its build pin. A missing or unexecutable file is reported as that artifact instead, not as this. | Restore the run snapshot from the original run, or start a new run id with the new configuration. |
 | `bootstrap refused ... the configured runner is in use` | `bin/setup-target` would replace a runner an audit or benchmark is holding. It refuses immediately rather than waiting out the lease. | Wait for that run, or use a separate checkout. |
-| `target-tree artifacts have no benchmark owner` | An agent wrote substantive finding or crash evidence into the shared target checkout, where no run can prove ownership. The evidence remains unassigned and is excluded from the cell's metrics; independent cell evidence still counts. Empty/incomplete directories do not trigger this warning. | Move the report into the correct cell results directory only when its provenance is known; agents should always use `RESULTS_DIR`. |
+| `target-tree artifacts have no benchmark owner` | An agent wrote substantive finding or crash evidence into the shared target checkout, where no run can prove ownership. The evidence remains unassigned and is excluded from the cell's metrics; independent cell evidence still counts. Empty or incomplete directories do not trigger this warning. | Move the report into the correct cell results directory only when its provenance is known; agents should always use `RESULTS_DIR`. |
 | `model-direct backend exited ... after writing substantive evidence` | The direct backend stopped nonzero after producing valid report or sanitizer evidence. The cell is retained as an early terminal outcome with `run_quality=backend_terminated`, counted behind a `(Nt)` replicate marker and its shorter actual wall. A cell already excluded for a provider limit or drift keeps that stronger reason instead. | Inspect `backend.raw.log` for the cause. Regeneration can recover an older cell that was failed for this reason; a fresh run is optional, not required to count its evidence. |
 | `<setting> was X for this run and is now Y` | A resume changed something that defines the experiment (model, effort, budget, agents, target revision). | Resume with the original settings, or start a new run id. `--replicates` and `--conditions` may still change. |
 
 Initial build freshness conservatively includes non-ignored untracked files,
 because they may be build inputs; ignored output and reverted edits leave it
 fresh. A build reported stale names the paths that made it so, which is what
-separates a by-product a previous run wrote into the checkout — delete it — from
-a real source edit — rebuild. Once a benchmark pins a build, its cells and
+separates a by-product a previous run wrote into the checkout (delete it) from
+a real source edit (rebuild). Once a benchmark pins a build, its cells and
 resumes use only the run-owned config snapshot and exact recorded bytes. They
 do not call freshness, so those by-products cannot make an unchanged pinned
 build read as stale.

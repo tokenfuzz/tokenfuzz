@@ -6,7 +6,7 @@ state store, and output layout. It is not expected to find a vulnerability.
 
 Complete [Prerequisites](prerequisites.md) and
 [Add a target](add-a-target.md) first. Run the audit in a container or on an
-isolated host without long-lived credentials; target builds and agent-driven
+isolated host without long-lived credentials: target builds and agent-driven
 testcases execute code from the audited tree.
 
 Set short shell variables for the commands on this page. Use an explicit
@@ -36,11 +36,11 @@ The trailing `1` has special smoke-test behavior:
 
 For a hosted backend, choose a model explicitly with `--model <name>` when
 reproducibility matters. Otherwise its default model and reasoning effort come
-from `config/models.toml`; per-shell model overrides are listed under
+from `config/models.toml`; per-shell overrides are listed under
 [Model selection](../reference/environment.md#model-selection).
 
-For a focused plumbing test, add `--strategy S1` (or S2–S8). This pins the
-strategy and suspends normal rotation for the run.
+For a focused plumbing test, add `--strategy S1` (or any of S2 through S8).
+This pins the strategy and suspends normal rotation for the run.
 
 !!! warning "Do not edit the live session snapshot"
     Preflight copies the reviewed config to `$RESULTS/.target.toml` and binds
@@ -56,8 +56,9 @@ The startup timeline is written to:
 output/<target>/<backend>/logs/index.log
 ```
 
-It should identify the backend/model, target source and revision, worker pool,
-and result/log roots. The result tree should contain at least:
+It should identify the backend and model, the target source and revision, the
+worker pool, and the result and log roots. The result tree should contain at
+least:
 
 ```text
 results/
@@ -73,8 +74,8 @@ results/
 ```
 
 Whether `state/hypotheses.jsonl`, `state/runs.jsonl`, or a testcase appears
-depends on how far the agents get. Their absence is a reason to inspect
-the log, not proof that directory setup failed.
+depends on how far the agent got. Their absence is a reason to inspect the
+log, not proof that directory setup failed.
 
 Press Ctrl-C to stop a longer run. The orchestrator terminates the active
 backend process tree and leaves structured state for the next invocation.
@@ -99,9 +100,9 @@ Then check the generated review pages:
 | `output/$TARGET/CRASH-CLUSTERS.html` | Cross-backend crash summary. |
 
 An empty `findings/` or `crashes/` after one iteration is normal. A filed FIND
-is also not automatically a confirmed security result: read its Status and
-`validation.json`. To distinguish
-an uneventful iteration from a failed one, inspect in this order:
+is also not automatically a confirmed security result: read its Status column
+and its `validation.json`. To tell an uneventful iteration from a failed one,
+inspect in this order:
 
 1. `$LOGS/index.log` for preflight or backend failures.
 2. `bin/state --results-dir "$RESULTS" show-recent --agent 1` for claims and
@@ -111,9 +112,9 @@ an uneventful iteration from a failed one, inspect in this order:
 4. The two rejected pages, for candidates that reached triage but did not meet
    the bar.
 
-Use the trimmed session log named by `index.log` only when the structured views
-do not explain the run. Raw backend transcripts under `$LOGS/.raw/` are the
-last resort.
+Use the trimmed session log named by `index.log` only when the structured
+views do not explain the run. Raw backend transcripts under `$LOGS/.raw/` are
+the last resort.
 
 ## 3. Continue or reset
 
@@ -141,8 +142,8 @@ bin/cleanup_logs --target "$TARGET" --backend "$BACKEND" --dry-run
 
 Remove `--dry-run` only after checking the printed paths. Cleanup does not
 delete source under `targets/`. Omitting `--backend` from `bin/cleanup_state`
-selects every backend and aggregate result under that target, so use it only
-when you intend a target-wide reset.
+selects every backend and aggregate result under that target, so use that form
+only when you intend a target-wide reset.
 
 ## Auditing with UBSan, MSan, or TSan
 
@@ -162,7 +163,7 @@ ubsan_bin = "build-ubsan/path/to/binary"
 ubsan_lib = "build-ubsan/path/to/library.a"
 ```
 
-Build up front or let audit preflight refresh stale artifacts:
+Build up front, or let audit preflight refresh stale artifacts:
 
 ```bash
 bin/setup-target "$TARGET" --build
@@ -177,9 +178,9 @@ PROBE_SANITIZER=ubsan bin/probe "$RESULTS/scratch-1/testcase"
 
 The environment override affects that probe only; it does not change the
 session snapshot or future runs. See
-[Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for
-tradeoffs and
-[Target config reference](../reference/target-toml.md#sanitizers) for exact
+[Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for the
+trade-offs and the
+[target config reference](../reference/target-toml.md#sanitizers) for exact
 fields. Go's `race` detector uses the configured language runner rather than a
 `race_bin` or `race_lib`.
 
@@ -194,10 +195,11 @@ bin/audit-container-shell --rebuild   # first use
 bin/audit-container-shell             # later uses
 ```
 
-The helper installs backend CLIs into a Docker image and opens `/root/work`; it
-does not start the audit. It does not mount host CLI credential directories.
-Authenticate inside the disposable shell, or use `--forward-credentials` when
-you explicitly want supported credential variables forwarded.
+The helper installs backend CLIs into a Docker image and opens a shell at
+`/root/work`; it does not start the audit. It does not mount host CLI
+credential directories. Authenticate inside the disposable shell, or pass
+`--forward-credentials` when you explicitly want supported credential variables
+forwarded.
 
 For Docker installation, gVisor, and the container trust boundary, see
 [Container runtime](prerequisites.md#container-runtime-recommended). For all

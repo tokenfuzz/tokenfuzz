@@ -71,12 +71,12 @@ Review receipts are content-addressed. Changing the authored report, testcase,
 harness, diagnostic, invocation evidence, target revision, config, or threat
 model invalidates the old decision and reopens review. When the target checkout
 is available at the pinned revision, new receipts also carry host-normalized
-source attestations linked to the exact review artifact; moving or changing a
-cited line then reopens the review even if the recorded revision string did not
-change. Plain source trees use an opaque identity for the exact host checkout.
-A different checkout cannot invalidate that historical attestation.
-Generated cluster,
-severity, patch-rendering, and enrichment annotations do not.
+source attestations linked to the exact review artifact, so moving or changing
+a cited line reopens the review even if the recorded revision string did not
+change. Plain source trees use an opaque identity for the exact host checkout,
+and a different checkout cannot invalidate that historical attestation.
+Generated cluster, severity, patch-rendering, and enrichment annotations do not
+reopen anything.
 
 ## Publication state
 
@@ -89,9 +89,9 @@ Open `validation.json` when the index is not enough:
 | `pending` | no | Review did not settle the claim. It is neither credited nor written off. |
 | `rejected` | yes | The evidence did not hold. The artifact is preserved in a rejected tree. |
 
-“Filed,” “admitted,” and “reportable” are deliberately different. An agent can
-file a FIND; the substance gate can admit it; only a current final receipt says
-whether it is a security result to report.
+"Filed", "admitted", and "reportable" are deliberately different words. An
+agent can file a FIND; the substance gate can admit it; only a current final
+receipt says whether it is a security result to report.
 
 ### The finding Status column
 
@@ -122,7 +122,7 @@ Three non-reportable outcomes require different operator action:
 | Disposition | Typical reason | What happens |
 | --- | --- | --- |
 | Hard rejection | Near-null dereference, OOM only, assertion or panic only, plain stack overflow, a fault rooted in the audit harness, or two source-anchored reviews disproving the route | The directory moves to `crashes-rejected/` with the reason. A scratch-source fault counts as harness-rooted only when the leaf has an absolute path under this run's own `scratch-N/` and no target-source frame appears anywhere in the diagnostic; missing path ownership or any target allocation/free/context frame fails open and preserves the crash. |
-| Promotion pending | The testcase, saved diagnostic, report, required fields, or exported invocation is incomplete; source review may also remain unsettled | The directory stays under `crashes/` with a pending receipt. Repeatedly incomplete promotion work eventually ages into rejection. |
+| Promotion pending | The testcase, saved diagnostic, report, required fields, or exported invocation is incomplete; source review may also remain unsettled | The directory stays under `crashes/` with a pending receipt. Work that stays incomplete for ten triage passes ages into rejection. |
 | Retained `not-reportable` defect | The report admits a caller-contract violation or harness-only parameter, or source review places the required trigger outside `attacker_controls` | The reproducible engineering evidence stays under `crashes/`, final and unscored. |
 
 An out-of-model trigger is not itself a hard rejection. Keep a retained defect
@@ -160,8 +160,8 @@ CRASH-*/
   sanitizer.txt
   validation.json
   severity.json         # only for a currently reportable artifact
-  patch.diff             # optional candidate fix
-  .audit/                # audit-side originals
+  patch.diff            # optional candidate fix
+  .audit/               # audit-side originals
 ```
 
 Check that the saved output names a sanitizer class and faults in target code,
@@ -170,9 +170,9 @@ how a normal product entry reaches the fault. A confirmation rate is useful,
 but it does not turn harness-only state into attacker reachability.
 
 The maintainer-side procedure is in
-[Reproduce a crash](reproduce-a-crash.md). Treat `reproduce.sh` and the target's
-build system as untrusted code: inspect them and run them in an isolated
-environment without credentials.
+[Reproduce a crash](reproduce-a-crash.md). Treat `reproduce.sh` and the
+target's build system as untrusted code: inspect them and run them in an
+isolated environment without credentials.
 
 ## Review a finding
 
@@ -192,13 +192,13 @@ welcome but optional. Do not use symlinks inside a FIND bundle.
 
 The shared report narrative is Summary, Root Cause, Data Flow, Impact, and Fix
 Direction. The exact order and word budgets are in
-[Artifact layout](../reference/artifacts.md#report-narrative). Generated
+[Artifact layout](../reference/artifacts.md#report-narrative). The generated
 `report.html` is the easiest reading view; edit the Markdown source only.
 
 ## Structured report fields
 
-Triage parses bare-label fields from crash and finding reports. Important ones
-include:
+Triage parses bare-label fields from crash and finding reports. The important
+ones:
 
 ```text
 Location: path/to/file.ext:function:line
@@ -220,11 +220,11 @@ matters when a compiled harness supplies a value the external input does not
 directly choose.
 
 Two fields are classified by the harness from the report rather than
-authored, and each can only lower a score: `Disclosed content` grades what an
-information-disclosure report shows reaching the attacker, and `Availability
-loss` grades whether a source-argued resource-exhaustion report demonstrates
-the service dying (`total`, the only value that keeps the class's VA:H) or
-merely slowing in proportion to the attacker's own input (`degraded`).
+authored, and each can only lower a score. `Disclosed content` grades what an
+information-disclosure report shows reaching the attacker. `Availability loss`
+grades whether a source-argued resource-exhaustion report demonstrates the
+service dying (`total`, the only value that keeps the class's VA:H) or merely
+slowing in proportion to the attacker's own input (`degraded`).
 
 `Cluster`, `Dedup frames`, severity text, and patch rendering are written by
 the harness. Do not hand-author those generated sections.

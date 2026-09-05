@@ -2,19 +2,20 @@
 
 TokenFuzz is an open-source harness for evidence-driven, LLM-assisted security
 auditing. It turns model-led source review into a shared queue of concrete
-hypotheses, runs every testcase through one execution contract, and preserves
-the result as evidence a security team or upstream maintainer can inspect.
+hypotheses, runs every testcase through one execution contract, and keeps the
+result as evidence a security team or upstream maintainer can inspect.
 
-The important distinction is between discovery and proof. Agents can suggest
-where a bug may be; TokenFuzz records what was actually tested, keeps review
-decisions attached to the evidence they judged, and separates four outcomes:
+The distinction that matters is between discovery and proof. An agent can
+suggest where a bug may be. TokenFuzz records what was actually tested, keeps
+each review decision attached to the evidence it judged, and separates four
+outcomes:
 
 | Outcome | What it means |
 | --- | --- |
 | Finding | A concrete security claim with a source location and an actionable report. A reproducer is optional. |
 | Crash | A reproducible sanitizer or runtime-race diagnostic with its testcase and saved output. |
-| Not reportable | A real engineering defect that review found outside the configured security boundary. It stays visible but receives no security score. |
-| Rejected | Evidence that did not meet the relevant gate. It is preserved with the reason. |
+| Not reportable | A real engineering defect that review placed outside the configured security boundary. It stays visible and receives no security score. |
+| Rejected | Evidence that did not meet its gate. It is preserved with the reason. |
 
 Keeping that separation over a long run is what the harness is for:
 
@@ -25,23 +26,23 @@ Keeping that separation over a long run is what the harness is for:
   picks the runner, gates on coverage where it can, and records the verdict in
   structured state rather than in a transcript.
 - **Independent review.** Reports are judged by readers that never saw the
-  filing agent's context, and each decision is content-addressed to the evidence
-  it read, so editing a report reopens its review.
-- **Maintainer handoff.** An accepted crash becomes a self-contained bundle — a
+  filing agent's context. Each decision is content-addressed to the evidence it
+  read, so editing a report reopens its review.
+- **Maintainer handoff.** An accepted crash becomes a self-contained bundle: a
   report, the input, the saved sanitizer output, and a `reproduce.sh` that
   rebuilds and re-runs it from a clean checkout.
 
 ## Supported targets
 
 Native libraries and CLIs, browsers and JavaScript engines, and language-runner
-targets including Rust, Go, Python, Java, Kotlin, Swift, Ruby, PHP,
+targets in Rust, Go, Python, Java, Kotlin, Swift, Ruby, PHP,
 JavaScript/TypeScript, Perl, and R. ASan is the default for native targets;
-UBSan, MSan, TSan, and Go's `race` are opt-in per target. A project with no
-sanitizer build runs in findings-only mode, where runtime diagnostics and
-source-backed security issues go to `findings/` rather than `crashes/` — see
+UBSan, MSan, TSan, and Go's `race` detector are opt-in per target. A project
+with no sanitizer build runs in findings-only mode, where runtime diagnostics
+and source-backed security issues go to `findings/` rather than `crashes/`. See
 [Language runners](guides/multi-language.md).
 
-TokenFuzz can drive Claude Code, Codex CLI, Gemini through Antigravity or
+TokenFuzz drives Claude Code, Codex CLI, Gemini through the Antigravity CLI or
 Google Gemini CLI, Grok Build, and OpenCode with either a catalog provider or a
 local OpenAI-compatible endpoint. Hosted and local backends run the same audit
 contract.
@@ -70,8 +71,8 @@ bin/audit --target <target> --backend <backend> 1
 The final `1` runs a single-worker smoke test. It proves that setup, backend
 launch, structured state, and result paths work together; it is not a useful
 security budget. [Sample targets](getting-started/sample-targets.md) lists the
-sixteen synthetic targets shipped with the repository. After a healthy smoke
-test, run a bounded working session or omit the count for a continuous run:
+eighteen synthetic targets shipped with the repository. After a healthy smoke
+test, run a bounded working session, or omit the count for a continuous run:
 
 ```bash
 bin/audit --target <target> --backend <backend> 10
@@ -96,7 +97,7 @@ The complete walkthrough is in [First audit](getting-started/first-audit.md).
 
 ## Where results go
 
-TokenFuzz keeps source and audit evidence separate:
+TokenFuzz keeps source and audit evidence apart:
 
 ```text
 targets/<target>/                         source checkout and build artifacts
@@ -114,12 +115,11 @@ Start review with the generated HTML indexes, not model transcripts:
 | `results/crashes-rejected/REJECTED-CRASHES.html` | Crash candidates rejected with an explanation. |
 | `results/findings-rejected/REJECTED-FINDINGS.html` | Findings triage rejected, with the reason. |
 
-The backend-specific `results/` prefix is
-`output/<target>/<backend>/results/`. Cross-backend finding and crash summaries
-are written directly under `output/<target>/`.
+`results/` here means `output/<target>/<backend>/results/`. Cross-backend
+finding and crash summaries are written directly under `output/<target>/`.
 
-Read [Artifact layout](reference/artifacts.md) for every generated path and
-[Triage and review](guides/triage-results.md) for the review standard.
+[Artifact layout](reference/artifacts.md) lists every generated path, and
+[Triage and review](guides/triage-results.md) explains the review standard.
 
 ## The operating model
 
@@ -132,21 +132,23 @@ Read [Artifact layout](reference/artifacts.md) for every generated path and
 4. Triage validates reports, preserves rejections, clusters matching evidence,
    and exports accepted crashes as maintainer-facing bundles.
 
-See [Audit lifecycle](concepts/audit-lifecycle.md) for the detailed flow and
-[System architecture](concepts/system-architecture.md) for component boundaries.
+[Audit lifecycle](concepts/audit-lifecycle.md) walks through that flow, and
+[System architecture](concepts/system-architecture.md) describes the component
+boundaries.
 
 ## Boundaries and expectations
 
 - **It does not replace fuzzing, code review, or maintainer judgment.** It is
   another way to spend an audit budget, and the
-  [benchmark](concepts/benchmark.md) exists so you can check whether it is
-  earning that budget on your targets.
-- **It does not publish anything.** No advisory pipeline, no automatic upstream
-  filing. Disclosure stays yours, through the upstream project's process.
+  [benchmark](concepts/benchmark.md) exists so you can check whether it earns
+  that budget on your targets.
+- **It does not publish anything.** There is no advisory pipeline and no
+  automatic upstream filing. Disclosure stays yours, through the upstream
+  project's process.
 - **Its severity scores are advisory.** They are real CVSS v4.0 vectors,
-  computed offline from the report's own fields — but two metrics are
-  worst-case defaults the harness cannot know, and only you know what the asset
-  is worth. Read the generated `## Severity rationale` before citing a number.
+  computed offline from the report's own fields. Two metrics are worst-case
+  defaults the harness cannot know, and only you know what the asset is worth.
+  Read the generated `## Severity rationale` before citing a number.
 - **A finding is still a claim until a human checks it.** Automated review can
   admit, reject, or leave it unsettled. A fail-open gate preserves uncertain
   evidence; it does not certify it.
@@ -155,19 +157,19 @@ See [Audit lifecycle](concepts/audit-lifecycle.md) for the detailed flow and
 
 ## Responsible use
 
-Only run TokenFuzz on software you are authorised to test. Three facts are
-worth settling before the first long run:
+Only run TokenFuzz on software you are authorised to test. Settle three facts
+before the first long run:
 
 - **The audit executes untrusted code.** Target build scripts and
   agent-authored testcases run on the machine you start it on. Use a
-  disposable container or an isolated host without long-lived credentials —
-  see [Container runtime](getting-started/prerequisites.md#container-runtime-recommended).
+  disposable container or an isolated host without long-lived credentials; see
+  [Container runtime](getting-started/prerequisites.md#container-runtime-recommended).
 - **Hosted backends see the target.** Prompts, source excerpts, state, and
   reports go to the provider by design. Use the `oss` backend against a local
   endpoint when source must stay on the machine. The agent sandbox contains
-  writes and network, not what the model reads —
-  [Agent security modes](guides/backends.md#agent-security-modes) is explicit
-  about the difference.
+  writes and network, not what the model reads;
+  [Agent security modes](guides/backends.md#agent-security-modes) spells out
+  the difference.
 - **Disclosure stays yours.** Report target findings through the upstream
   project's coordinated-disclosure process, and review benchmark archives and
   research output before sharing them, as you would any other security

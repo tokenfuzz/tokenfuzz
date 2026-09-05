@@ -2,13 +2,12 @@
 
 Strategy S4 is the only TokenFuzz strategy that runs a fuzzer. Use it when a
 published API accepts a shape the threat model exposes and no existing harness
-drives that API. Use S7 instead for hand-written parser or decoder boundary
-inputs; it never builds a fuzz harness or campaign.
+drives that API. Use S7 for hand-written parser or decoder boundary inputs; S7
+never builds a fuzz harness or runs a campaign.
 
-For the agent-facing playbook see
-`.agents/references/strategies/S4-directed-fuzzing.md`. This page is for
-operators: what it will and will not do to your checkout, and how to give it
-coverage feedback.
+The agent-facing playbook is `.agents/references/strategies/S4-directed-fuzzing.md`.
+This page is for operators: what S4 will and will not do to your checkout, and
+how to give it coverage feedback.
 
 ## The workflow
 
@@ -42,15 +41,15 @@ must export it as above or pass `--results-dir`. Everything lands under
 `bin/fuzz candidates` admits a symbol when all three hold, each read from a
 structured source rather than guessed:
 
-1. **Published** — present in the sanitizer build's exported symbol table and
+1. **Published**: present in the sanitizer build's exported symbol table and
    not a reserved (`_`-prefixed) identifier. That second half matters for a
    target whose `<san>_lib` is a static archive: an archive has no export
    list, so `nm` reports every cross-file helper as global.
-2. **Untrusted-reachable** — its declaration in a public header carries a
+2. **Untrusted-reachable**: its declaration in a public header carries a
    parameter shape the target's `[threat_model].attacker_controls` can supply.
    `bytes` reaches a buffer+length, a string, or a stream; `fs-state` reaches
    a path; `call-sequence` reaches an opaque handle.
-3. **Uncovered** — no harness in the tree already drives it.
+3. **Uncovered**: no harness in the tree already drives it.
 
 Rejections are reported with their reason, so an empty result is diagnostic:
 
@@ -63,9 +62,9 @@ $ bin/fuzz candidates
     reachable by: bytes, call-sequence via buffer+length, opaque state handle
 ```
 
-Widening `attacker_controls` in `target.toml` widens what is admitted — which
-is the point. A target whose threat model is `bytes` should not get a harness
-that fuzzes filenames.
+Widening `attacker_controls` in `target.toml` widens what is admitted, which is
+the point. A target whose threat model is `bytes` should not get a harness that
+fuzzes filenames.
 
 ## Ground the harness in local callers
 
@@ -73,8 +72,8 @@ that fuzzes filenames.
 samples, and existing fuzz sources for the exact symbol, and records at most
 two source locations in the generated `S4-RECEIPT`. Read those callers before
 writing setup code. They commonly reveal constructors, related length and
-capacity arguments, ownership transfer, and teardown that a declaration
-cannot express.
+capacity arguments, ownership transfer, and teardown that a declaration cannot
+express.
 
 The caller is construction evidence, not reachability evidence. Test code may
 perform trusted setup unavailable to an attacker, so it cannot override the
@@ -83,7 +82,7 @@ template records `UNRESOLVED` and continues from the public declaration.
 
 Fill the receipt's `CONSTRUCTOR`, `ARG-RELATIONS`, `RESOURCE-FLOW`, and
 `TEARDOWN` fields with source-anchored facts. `bin/fuzz build` stores them in
-the binary manifest beside the exact harness digest, coverage-guidance and
+the binary manifest beside the exact harness digest, coverage-guidance, and
 sanitizer status. A field still reading `UNRESOLVED` lists itself as
 unresolved, so an answered field cannot be contradicted by a stale summary
 line. `bin/fuzz status` then joins that manifest with the campaign's
@@ -100,21 +99,21 @@ through any of those is a crash in the harness's fiction, and triaging one
 costs a reviewer a session.
 
 These are lints, not proofs. Passing them does not establish that a harness
-built its state legitimately or called only public APIs — they catch the
-common forgeries, and the reviewer still reads the harness.
+built its state legitimately or called only public APIs. They catch the common
+forgeries, and the reviewer still reads the harness.
 
 Every artifact a campaign produces is replayed with
 `bin/probe --confirm --harness <harness>`, so a fuzz crash is coverage-gated,
 confirmed across five runs, deduplicated, gated, and bundled exactly like a
 hand-written one. The generated harness template carries a standalone `main`
-under `#ifndef FUZZ_CAMPAIGN_BUILD` to make that replay possible — keep it.
+under `#ifndef FUZZ_CAMPAIGN_BUILD` to make that replay possible; keep it.
 
 ## Build isolation, and why it matters across backends
 
 **Nothing S4 does writes to the target checkout or to `build-<san>/`.**
 
 That is a hard requirement, not a style preference, and it is what lets a
-claude run and a codex run audit the same checkout at once:
+`claude` run and a `codex` run audit the same checkout at once:
 
 - Build freshness is derived from the checkout's VCS state **including
   untracked paths**. A harness file left in the tree changes the source
@@ -122,10 +121,9 @@ claude run and a codex run audit the same checkout at once:
 - A changed signature makes the shared `build-<san>/` read as stale for *every
   backend on that checkout*.
 - The rebuild that follows needs the exclusive build lease, which no live peer
-  will yield, so runs stall for up to `LEASE_WAIT_SECONDS` (15 minutes).
-- `build_lease.claim_source_pin` then refuses the divergent run outright,
-  because two runs reading one checkout at different source states are not
-  comparable.
+  will yield, so runs stall for up to the lease wait (15 minutes).
+- The source pin then refuses the divergent run outright, because two runs
+  reading one checkout at different source states are not comparable.
 
 So one stray harness file can stall a whole concurrent benchmark cell.
 `bin/fuzz build` refuses an in-tree source for that reason, a campaign holds
@@ -156,16 +154,17 @@ is providing guidance.
 The shared tree is never rebuilt for that. When ASan is available,
 `bin/setup-target <target> --build` and audit preflight automatically build the
 **sibling** `build-asan+fuzz`. The target's own `.audit/build.sh` is rerun with
-`CC`/`CXX` pointed at
-`.audit/coverage-toolchain/{cc,cxx}`, shims that add
+`CC`/`CXX` pointed at `.audit/coverage-toolchain/{cc,cxx}`: shims that add
 `-fsanitize=fuzzer-no-link -fsanitize-coverage=trace-pc-guard` and exec the
-LLVM compiler that links the harnesses. The sibling is verified — the
-configured binary must carry `__sancov_guards` and start — and stamped like
-the primary, so it is rebuilt when the source or recipe changes. A recipe
-that does not honour `CC`/`CXX` yields no instrumentation; setup reports the
-sibling unavailable with `.audit/build-materialize-asan+fuzz.log` and
-remembers that until the source, recipe, or toolchain changes (or
-`--build --force`).
+LLVM compiler that links the harnesses. The shim directory leads `PATH` for
+that build and answers to `cc`, `gcc`, `clang`, and their `++` forms, so a
+recipe that hardcodes a compiler name still gets instrumented. The sibling is
+verified (the configured binary must carry `__sancov_guards` and start) and
+stamped like the primary, so it is rebuilt when the source or recipe changes. A
+recipe that hardcodes an absolute compiler path yields no instrumentation;
+setup reports the sibling unavailable with
+`.audit/build-materialize-asan+fuzz.log` and remembers that until the source,
+recipe, or toolchain changes (or `--build --force`).
 
 Other sanitizers do not receive an automatic coverage sibling. An operator can
 provide a compatible isolated tree explicitly, but the ASan sibling is the
@@ -191,7 +190,7 @@ section `trace-pc-guard` adds is what lets `bin/hits --mode generic` dump
 [the audit lifecycle](../concepts/audit-lifecycle.md)). One sibling then serves
 both.
 
-Use that compiler and not the target's usual one — `bin/fuzz build` prints its
+Use that compiler and not the target's usual one; `bin/fuzz build` prints its
 exact path when it needs it. A sanitizer runtime is version-locked to the code
 it instrumented, and only one runtime can own a process, so a library built by
 a different toolchain either fails the harness link outright or forces the
@@ -202,7 +201,7 @@ differ by default.
 ## When the toolchains differ anyway
 
 `bin/fuzz build` links every harness with the sanitizer, then runs the binary
-once with `-help=1` — enough to load the libraries and start the runtime, and
+once with `-help=1`: enough to load the libraries and start the runtime, and
 not enough to execute an input. A binary that cannot start is a build error
 carrying the runtime's own message, rather than a campaign slice reported as
 `dead`.
@@ -220,6 +219,8 @@ sibling is safe for the same two reasons the plain tree is not: the
 `build-<san>+…` name is already pruned from the source walk that decides build
 freshness, so it cannot stale anything, and the build lease keys on the
 directory name, so building or reading it never contends with `build-<san>/`.
+A sibling whose stamp no longer matches the primary build is treated as stale
+and not linked; the campaign says so and falls back.
 
 ## Bounded on purpose
 
@@ -227,8 +228,8 @@ S4 shares an audit iteration with seven other strategies, so a campaign is a
 turn rather than a shift:
 
 - The default budget is five minutes; `--budget-seconds` changes it.
-- The budget covers the **whole** campaign — slices, artifact replays, and
-  corpus merges — not just the fuzzing. A slice that cannot finish inside the
+- The budget covers the **whole** campaign (slices, artifact replays, and
+  corpus merges), not just the fuzzing. A slice that cannot finish inside the
   remaining budget is never started, and a budget shorter than one slice
   shrinks the slice rather than overrunning.
 - Only one campaign runs per results tree at a time. A second agent assigned
@@ -239,19 +240,19 @@ turn rather than a shift:
 - The campaign ends early when every harness is quarantined, and reports how
   much of the budget it handed back.
 
-A harness is quarantined — and the budget moves to another — as soon as it
-stops paying:
+A harness is quarantined, and the budget moves to another, as soon as it stops
+paying:
 
 | Verdict | Meaning |
 | --- | --- |
 | `saturated` | No new coverage for three slices. Revived automatically when its corpus grows. |
 | `blocked-on-crash` | Crashing with no new coverage; libFuzzer stops at its first crash, so it cannot get past a filed bug. |
-| `dead` | No meaningful executions — usually the library failed to load. |
+| `dead` | No meaningful executions, usually because the library failed to load. |
 | `startup-crash` | Crashed before the initial corpus finished loading. If the crashing input is one of the seeds, that seed is removed and the campaign continues; otherwise the harness setup is broken. |
 | `noise-flood` | Only OOM/timeout/leak artifacts, which are auto-rejected downstream anyway. |
 
 Slices are allocated by measured new coverage per second with a UCB1 exploration
-term, so every harness runs before any runs twice and a quiet one is revisited
+term, so every harness runs before any runs twice, and a quiet one is revisited
 rather than written off. Corpora persist and are periodically minimised, which
 is what makes many short slices as good as one long run.
 
@@ -263,10 +264,10 @@ never fetches one over the network. A corpus the fuzzer has already built is
 left alone, and the project's own `.dict` is attached when one matches the
 harness name.
 
-Progress counts libFuzzer's `ft` as well as `cov`. Value profiling — switched
-on once a harness goes dry, which is when a magic-byte comparison is the
-likely wall — reports through `ft` alone, so a campaign watching edges only
-would call the harness mined out exactly when it started making progress.
+Progress counts libFuzzer's `ft` as well as `cov`. Value profiling, switched on
+once a harness goes dry (which is when a magic-byte comparison is the likely
+wall), reports through `ft` alone, so a campaign watching edges only would call
+the harness mined out exactly when it started making progress.
 
 The first slice is retained separately from later high-water totals: execution
 count, edge/feature deltas, artifacts, verdict, reason, and log path survive
