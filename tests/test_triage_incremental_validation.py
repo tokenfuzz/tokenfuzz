@@ -1609,11 +1609,21 @@ Generated score text.
             "reportable",
         )
 
-        # A Promote that did answer the scope question needs no resolver.
+        # A Promote that did answer the scope question needs no resolver,
+        # but the findings lane still waits for the second reader.
         first.write_text(json.dumps(trigger_vote(
             self.report, self.root, "Promote",
         )), encoding="utf-8")
         resolution.unlink()
+        self.assertFalse(triage._cached_trigger_resolution(
+            self.finding, self.report, second_lens=True,
+        ))
+        (self.finding / ".trigger-gate-2.json").write_text(json.dumps(
+            trigger_vote(self.report, self.root, "Promote"),
+        ), encoding="utf-8")
+        self.assertTrue(triage._cached_trigger_resolution(
+            self.finding, self.report, second_lens=True,
+        ))
         self.assertTrue(triage._cached_trigger_resolution(
             self.finding, self.report,
         ))
@@ -1813,10 +1823,11 @@ Generated score text.
             )
             return True
 
-        def batch(directories, *_args, **_kwargs):
+        def batch(directories, *_args, **kwargs):
             self.assertEqual(directories, [self.finding])
             self.assertIn("Boundary: public API", self.report.read_text())
-            (self.finding / ".trigger-gate.json").write_text(json.dumps(
+            vote_name = kwargs.get("vote_name", ".trigger-gate.json")
+            (self.finding / vote_name).write_text(json.dumps(
                 trigger_vote(self.report, self.root),
             ))
             return {self.finding}
@@ -1989,9 +2000,10 @@ Generated score text.
                 report_identity.content_sha1(self.report),
             )
         ))
-        (self.finding / ".trigger-gate.json").write_text(json.dumps(
-            trigger_vote(self.report, self.root),
-        ))
+        for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+            (self.finding / name).write_text(json.dumps(
+                trigger_vote(self.report, self.root),
+            ))
         unresolved = self.root / "findings" / "FIND-002"
         unresolved.mkdir()
         (unresolved / "report.md").write_text(
@@ -3258,9 +3270,10 @@ Generated score text.
             json.dumps(quality), encoding="utf-8",
         )
         payload = trigger_vote(self.report, self.root)
-        (self.finding / ".trigger-gate.json").write_text(
-            json.dumps(payload), encoding="utf-8",
-        )
+        for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+            (self.finding / name).write_text(
+                json.dumps(payload), encoding="utf-8",
+            )
         self.assertEqual(
             triage._missing_reach_fields(self.report.read_text()),
             {
@@ -4176,18 +4189,21 @@ class RevisionBoundTriggerVerdictTests(unittest.TestCase):
         ), encoding="utf-8")
         with self.env():
             os.environ.pop("TARGET_CONFIG_SHA256", None)
-            (self.finding / ".trigger-gate.json").write_text(json.dumps(
-                trigger_vote(self.report, self.root, "Promote"),
-            ), encoding="utf-8")
-            self.assertTrue(
-                triage._cached_trigger_resolution(self.finding, self.report),
-            )
+            for name in (".trigger-gate.json", ".trigger-gate-2.json"):
+                (self.finding / name).write_text(json.dumps(
+                    trigger_vote(self.report, self.root, "Promote"),
+                ), encoding="utf-8")
+            self.assertTrue(triage._cached_trigger_resolution(
+                self.finding, self.report, second_lens=True,
+            ))
             with self.env(TARGET_REV="revision-b"):
                 (self.root / "sample.c").write_text(
                     "int app_parse(void) { return 2; }\n", encoding="utf-8",
                 )
                 self.assertFalse(
-                    triage._cached_trigger_resolution(self.finding, self.report),
+                    triage._cached_trigger_resolution(
+                        self.finding, self.report, second_lens=True,
+                    ),
                     "a moved anchor may not finalize from cache",
                 )
                 with mock.patch.object(

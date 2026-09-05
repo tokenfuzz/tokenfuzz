@@ -77,6 +77,8 @@ def parse_args(argv=None):
     parser.add_argument("--prior-review", action="append", default=[],
                         help=argparse.SUPPRESS)
     parser.add_argument("--gate", choices=("finding", "trigger"), default="finding")
+    parser.add_argument("--lens", choices=("", "reachability"), default="",
+                        help="second-review lens for the trigger gate")
     parser.add_argument("--target-root-is-product", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--output")
@@ -270,6 +272,11 @@ def render_validator_prompt(args, facts: dict) -> str:
         "end as claims to verify, not as a conclusion to rubber-stamp."
     )
     template = "validate_trigger_provenance.md.j2" if args.gate == "trigger" else "validate_finding.md.j2"
+    lens_block = ""
+    if args.gate == "trigger" and args.lens and not resolving:
+        lens_block = prompt_render.render_template(
+            f"validate_trigger_lens_{args.lens}.md.j2", {},
+        )
     product_boundary_block = ""
     if args.target_root_is_product:
         product_boundary_block = (
@@ -286,6 +293,7 @@ def render_validator_prompt(args, facts: dict) -> str:
         "attacker_controls": os.environ.get("TARGET_ATTACKER_CONTROLS_CSV", "bytes"),
         "product_boundary_block": product_boundary_block,
         "reviewer_intro": reviewer_intro,
+        "lens_block": lens_block,
         "resolution_block": resolution,
         "skeptic_block": skeptic,
         "timeout_secs": str(args.timeout),

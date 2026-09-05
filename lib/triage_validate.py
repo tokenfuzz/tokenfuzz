@@ -43,6 +43,9 @@ def trigger_resolution_review_names(
         return (".trigger-gate.json",)
     if first_vote == "Reject" and second_vote in {"Promote", "Uncertain"}:
         return (".trigger-gate.json", ".trigger-gate-2.json")
+    if first_vote == "Promote" and second_vote in {"Reject", "Uncertain"}:
+        # The second reader, through the reachability lens, did not agree.
+        return (".trigger-gate.json", ".trigger-gate-2.json")
     return ()
 
 

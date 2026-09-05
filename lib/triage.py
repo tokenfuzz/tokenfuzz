@@ -35,6 +35,10 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 #: The first provenance review's vote file; its presence is how the audit's
 #: background gate tells a reviewed finding from one still waiting.
 TRIGGER_PRIMARY_NAME = ".trigger-gate.json"
+#: The lens the second review reads a finding through. One reviewer with one
+#: prompt promoted findings alone; a second reviewer with a different
+#: question (can an attacker actually get there?) is what a panel adds.
+TRIGGER_SECOND_LENS = "reachability"
 _TRIGGER_PRIMARY_NAME = TRIGGER_PRIMARY_NAME
 _TRIGGER_SECOND_NAME = ".trigger-gate-2.json"
 _TRIGGER_RESOLUTION_NAME = ".trigger-gate-resolution.json"
@@ -2252,6 +2256,7 @@ def _batch_finding_trigger_votes(
     target_root_is_product: bool,
     workers: int = 4,
     vote_name: str = ".trigger-gate.json",
+    lens: str = "",
 ) -> set[Path]:
     """Populate one round of independent keyed trigger votes in batches."""
     resolution = vote_name == _TRIGGER_RESOLUTION_NAME
@@ -2330,6 +2335,8 @@ def _batch_finding_trigger_votes(
         ]
         if resolution:
             command.append("--resolve-trigger")
+        if lens:
+            command += ["--lens", lens]
         if model:
             command += ["--model", model]
         if usage_index:
@@ -2404,7 +2411,7 @@ def _trigger_vote(
     target_root: Path, deadline: float | None = None,
     usage_index: str | os.PathLike[str] | None = None,
     target_root_is_product: bool = False,
-    *, resolve: bool = False,
+    *, resolve: bool = False, lens: str = "",
 ) -> int:
     """Run the recall-safe trigger-provenance reviewer (`validate-finding --gate
     trigger`) over a report. Returns 1 = disproof-backed Reject, 0 = keep
@@ -2436,6 +2443,8 @@ def _trigger_vote(
         command.append("--resolve-trigger")
         for prior in _trigger_resolution_sources(report, vote_file.parent):
             command += ["--prior-review", str(prior)]
+    if lens:
+        command += ["--lens", lens]
     if model:
         command += ["--model", model]
     if usage_index:
@@ -3441,6 +3450,45 @@ def _finding_trigger_disposition(
     if vote == "Promote" and not _promote_left_scope_open(
         report, finding_dir / ".trigger-gate.json",
     ):
+        # A finding no probe proved was published on one reviewer's word.
+        # Ask a second reviewer the reachability question; a split goes to
+        # the focused resolver, and rejection still needs two disproofs.
+        second = finding_dir / _TRIGGER_SECOND_NAME
+        if backend and target_root.is_dir():
+            _trigger_vote(
+                report, second, backend,
+                os.environ.get("MODEL", ""), target_root, deadline, usage_index,
+                target_root_is_product, lens=TRIGGER_SECOND_LENS,
+            )
+        second_vote = _cached_trigger_vote(report, second)
+        if second_vote not in {"Reject", "Uncertain"}:
+            # Agreed, or no second reviewer available: the first verdict
+            # stands, as it always has.
+            return "accepted"
+        resolution = finding_dir / _TRIGGER_RESOLUTION_NAME
+        if backend and target_root.is_dir():
+            _trigger_vote(
+                report, resolution, backend,
+                os.environ.get("MODEL", ""), target_root, deadline,
+                usage_index, target_root_is_product, resolve=True,
+            )
+        resolution_vote = _cached_trigger_vote(report, resolution)
+        if resolution_vote != "Reject" or second_vote != "Reject":
+            return (
+                "accepted"
+                if resolution_vote in {"Promote", "Uncertain", "Reject"}
+                else "pending"
+            )
+        rejection_files = (second, resolution)
+        facts = _source_review_facts(report, rejection_files, rejection_quorum=2)
+        if facts.get("rejection_kind") == "no-added-boundary":
+            return "not-reportable"
+        if _trigger_rejection_is_dispositive(
+            report, rejection_files, allow_consequence=True,
+        ):
+            if facts.get("rejection_kind") == _CONSEQUENCE_REJECTION_KIND:
+                return "rejected-consequence"
+            return "rejected"
         return "accepted"
     if vote in {"Uncertain", "Promote"}:
         resolution = finding_dir / _TRIGGER_RESOLUTION_NAME
@@ -3459,8 +3507,33 @@ def _finding_trigger_disposition(
     return "pending"
 
 
-def _cached_trigger_resolution(directory: Path, report: Path) -> bool:
-    """Whether trigger adjudication can finish without a provider call."""
+def _second_review_due(directory: Path, report: Path) -> bool:
+    """Whether a finding's first review calls for the second reviewer.
+
+    A Reject needs a second disproof before it can reject. A Promote on a
+    finding no probe proved needs a second reader through the reachability
+    lens before it publishes; a machine-proved byte path already answered
+    that question.
+    """
+    first = _cached_trigger_vote(report, directory / _TRIGGER_PRIMARY_NAME)
+    if first == "Reject":
+        return True
+    return (
+        first == "Promote"
+        and not _trigger_bypass_confirmed(directory)
+        and not _promote_left_scope_open(report, directory / _TRIGGER_PRIMARY_NAME)
+    )
+
+
+def _cached_trigger_resolution(
+    directory: Path, report: Path, *, second_lens: bool = False,
+) -> bool:
+    """Whether trigger adjudication can finish without a provider call.
+
+    ``second_lens`` is the findings lane: a Promote there needs the second
+    reader's agreement before it counts as adjudicated. A crash is machine
+    reproduced, so one review still settles it.
+    """
     if _trigger_bypass_confirmed(directory):
         return True
     first = _cached_trigger_vote(report, directory / ".trigger-gate.json")
@@ -3468,10 +3541,16 @@ def _cached_trigger_resolution(directory: Path, report: Path) -> bool:
         report, directory / _TRIGGER_RESOLUTION_NAME,
     )
     if first == "Promote":
-        return (
-            not _promote_left_scope_open(report, directory / ".trigger-gate.json")
-            or resolution in {"Promote", "Reject", "Uncertain"}
-        )
+        if _promote_left_scope_open(report, directory / ".trigger-gate.json"):
+            return resolution in {"Promote", "Reject", "Uncertain"}
+        if not second_lens:
+            return True
+        second = _cached_trigger_vote(report, directory / _TRIGGER_SECOND_NAME)
+        if second == "Promote":
+            return True
+        if second in {"Reject", "Uncertain"}:
+            return resolution in {"Promote", "Reject", "Uncertain"}
+        return False
     if first == "Uncertain":
         return resolution in {"Promote", "Reject", "Uncertain"}
     if first == "Reject":
@@ -3515,7 +3594,7 @@ def _finding_ready_for_cached_finalization(
     return (
         cache.get("accept") is True
         and reach_verdict != "incomplete"
-        and _cached_trigger_resolution(finding_dir, report)
+        and _cached_trigger_resolution(finding_dir, report, second_lens=True)
     )
 
 
@@ -4282,16 +4361,14 @@ def validate_find_gate(
             )
             second_trigger_directories = [
                 directory for directory in disposition_group
-                if _report(directory) is not None
-                and _cached_trigger_vote(
-                    _report(directory), directory / ".trigger-gate.json",
-                ) == "Reject"
+                if (report := _report(directory)) is not None
+                and _second_review_due(directory, report)
             ]
             second_trigger_attempted = (
                 _batch_finding_trigger_votes(
                     second_trigger_directories, results, group_deadline,
                     usage_index, target_root_is_product, workers,
-                    vote_name=".trigger-gate-2.json",
+                    vote_name=".trigger-gate-2.json", lens=TRIGGER_SECOND_LENS,
                 )
                 if second_trigger_directories else set()
             )
