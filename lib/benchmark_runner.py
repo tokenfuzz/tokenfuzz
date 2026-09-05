@@ -426,15 +426,15 @@ def _evidence_scope(
 _REPLAY_DEMOTION_REASONS = {
     "clean": "sanitizer evidence did not reproduce through the configured target invocation",
     "mismatch": "configured-target replay crashed on a different fault than the one reported",
-    # The target ran the filed reproducer and never reached the fault: every
-    # run exited nonzero without a sanitizer report, or hit its deadline. No
-    # rate is written for that — a usage error says nothing about the crash —
-    # but for a direct-condition bundle no later pass will measure it, so the
-    # claim goes to the finding gate. Only a bundle no replay ever measured:
-    # a verdict already reached on a measured rate stands.
+    # The target ran the filed reproducer and every run exited nonzero without
+    # a sanitizer report. No rate is written for that — a usage error says
+    # nothing about the crash — but the exit is the reproducer's own, so no
+    # later pass will measure it and the claim goes to the finding gate. Only
+    # a bundle no replay ever measured: a verdict already reached on a
+    # measured rate stands.
     "inconclusive": (
         "configured-target replay ran the filed reproducer without reaching "
-        "the reported fault (nonzero exits or timeouts; see .audit/reverify.log)"
+        "the reported fault (every run exited nonzero; see .audit/reverify.log)"
     ),
 }
 
@@ -445,7 +445,7 @@ _REPLAY_DEMOTION_REASONS = {
 # and a resolver that failed outright, none of which the crash chose. A
 # demotion is permanent, so it may not rest on a resolver's blind spot.
 _REPLAY_NON_VERDICTS = {
-    "unmeasured": "the replay never launched the target; see .audit/reverify.log",
+    "unmeasured": "the replay never ran the target to an exit; see .audit/reverify.log",
     "no-contract": "no runnable replay contract resolved for the bundle",
 }
 
@@ -1188,8 +1188,10 @@ def _unadjudicated_warning(name: str, unjudged: int) -> str:
     return (
         f"WARN: {name} has {unjudged} finding(s) un-adjudicated after drain; "
         "they count as unconfirmed. `bin/benchmark --regenerate` retries the "
-        "ones whose review left no usable answer or needs focused resolution. "
-        "Each finding's validation.json says which, where one exists"
+        "ones whose review left no usable answer or needs focused resolution; "
+        "an unresolved final review stays unjudged until new evidence settles "
+        "it. Each "
+        "finding's validation.json says which, where one exists"
     )
 
 
@@ -1817,14 +1819,14 @@ def _classify_replay_summary(measured: str) -> tuple[str, int, int]:
     """What one replay transcript established: (status, crashes, runs).
 
     A clean exit measures the crash: the target processed the input and the
-    fault did not happen. A nonzero exit without a sanitizer report, or a run
-    that hit its deadline, is `inconclusive`: the target ran, but a usage
-    error or a driver that fuzzed instead of replaying says nothing about the
-    fault. `unmeasured` is reserved for a target that never launched — no
-    summary, or runs that neither reached it nor timed out. Folding the
-    middle case into the last one held direct-condition bundles unjudged for
-    good; folding it into the first would have written "fault gone" over a
-    bad invocation.
+    fault did not happen. A nonzero exit without a sanitizer report is
+    `inconclusive`: the target ran, but a usage error or a driver that fuzzed
+    instead of replaying says nothing about the fault. `unmeasured` is a
+    target that never ran to an exit — no summary, a loader failure, or runs
+    that hit the deadline, which a loaded host produces as readily as a hang
+    does. Folding the middle case into the last one held direct-condition
+    bundles unjudged for good; folding it into the first would have written
+    "fault gone" over a bad invocation.
     """
     rate_match = re.search(r"^CRASH_RATE:\s*([0-9]+)/([0-9]+)", measured, re.MULTILINE)
     if not rate_match:
@@ -1834,7 +1836,7 @@ def _classify_replay_summary(measured: str) -> tuple[str, int, int]:
         return "reproduced", crashes, runs
     if _summary_count(measured, "SUCCESS_RATE"):
         return "not-reproduced", 0, runs
-    ran = _summary_count(measured, "EXECUTION_RATE") or _summary_count(measured, "TIMEOUTS")
+    ran = _summary_count(measured, "EXECUTION_RATE")
     return ("inconclusive" if ran else "unmeasured"), 0, runs
 
 
@@ -2328,35 +2330,38 @@ def _bundle_candidates(pool: Path) -> list[Path]:
     """Pooled crashes that still need a reproducer bundle.
 
     A cell exports every crash it promotes, so the pool bundles what arrived
-    without one, plus a bundle whose report predates the rate the pool's
-    reverification has since written to sanitizer.txt: export-repro is what
-    copies that rate into the report, and severity reads it from there. This
-    used to re-export every pooled crash whose report lacked a rate, on every
-    rebuild, so a crash reverification could not measure was rewritten each
-    time under a receipt bound to the earlier layout.
+    without one, plus a bundle whose report no longer states the rate the
+    pool's reverification measured into sanitizer.txt: export-repro is what
+    copies that rate into the report, and severity scores from there, so a
+    report left saying 5/5 over evidence that now says 0/5 would keep the
+    higher score. This used to re-export every pooled crash whose report
+    lacked a rate, on every rebuild, so a crash reverification could not
+    measure was rewritten each time under a receipt bound to the earlier
+    layout.
     """
     candidates = []
     for crash in sorted((pool / "crashes").glob("CRASH-*")):
         if not crash.is_dir():
             continue
+        measured = _measured_crash_rate(crash / "sanitizer.txt")
         if not _crash_exported(crash) or (
-            _measured_crash_rate(crash / "sanitizer.txt") is not None
-            and not _report_carries_rate(crash)
+            measured is not None and _report_rate(crash) != measured
         ):
             candidates.append(crash)
     return candidates
 
 
-def _report_carries_rate(crash: Path) -> bool:
-    """Whether the report's Fields table already states a reproduction rate."""
+def _report_rate(crash: Path) -> tuple[int, int] | None:
+    """The reproduction rate the report's Fields table states, if any."""
     report = report_identity.find_report(crash)
     if report is None:
-        return False
+        return None
     try:
         text = report.read_text(encoding="utf-8", errors="replace")
     except OSError:
-        return False
-    return re.match(r"\d+\s*/\s*\d+", triage._field(text, "Reproduction rate")) is not None
+        return None
+    match = re.match(r"(\d+)\s*/\s*(\d+)", triage._field(text, "Reproduction rate"))
+    return (int(match.group(1)), int(match.group(2))) if match else None
 
 
 def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dry_run: bool, reason: str) -> None:
@@ -2416,15 +2421,6 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                 pool, target, target_slug, reason, skip=set(blocked),
             )
         bundle_candidates = _bundle_candidates(pool)
-        # Export is a harness-owned rewrite of a directory a review may
-        # already have bound: it regenerates the report and files stragglers
-        # under .audit/. Capture each current receipt first and rebind it
-        # across a successful export, as reverification does across its
-        # rate annotation; a failed export leaves the receipt as it was.
-        prior_receipts = {
-            crash: validation_receipt.read_current(crash)
-            for crash in bundle_candidates
-        }
         # Bundling stays on when replay is skipped: a bundle reproduces from
         # source at the recorded revision and carries the crash's own saved
         # evidence, neither of which the current build's identity decides.
@@ -2457,9 +2453,6 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
                 if not exported:
                     continue
                 bundled += 1
-                prior = prior_receipts.get(crash)
-                if prior is not None:
-                    validation_receipt.rewrite_after_equivalent_transform(crash, prior)
     if bundled:
         log(f"reproducer bundles created: {bundled} ({reason})")
     # Score the pool on every path, including a dry run. Clustering below reads

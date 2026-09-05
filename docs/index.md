@@ -150,9 +150,8 @@ boundaries.
   defaults the harness cannot know, and only you know what the asset is worth.
   Read the generated `## Severity rationale` before citing a number.
 - **A finding is still a claim until a human checks it.** Automated review can
-  admit it, reject it, or close it without credit when a focused second look
-  still cannot place its trigger in the threat model. The artifact stays on
-  disk with the reason; the gate never certifies uncertain evidence.
+  admit, reject, or leave it unsettled. A fail-open gate preserves uncertain
+  evidence; it does not certify it.
 - **Clusters are a review aid, not a root-cause proof.** One defect can split
   across sinks, and two defects can share one.
 

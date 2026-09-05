@@ -941,6 +941,7 @@ class FinalizationDrainTests(unittest.TestCase):
         self.assertIn("--regenerate", warning)
         self.assertIn("retries", warning)
         self.assertIn("focused resolution", warning)
+        self.assertIn("unresolved final review", warning)
         self.assertNotIn("to finish the gate", warning)
         # A pending id may have no receipt at all, so the receipt is offered as
         # a place to look rather than asserted to exist.

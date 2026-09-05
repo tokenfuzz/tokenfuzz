@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -14,6 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPORT = ROOT / "bin" / "export-repro"
+sys.path.insert(0, str(ROOT / "lib"))
+import validation_receipt  # noqa: E402
 
 
 class ExportReproducerAuditBuildTests(unittest.TestCase):
@@ -105,6 +108,9 @@ class ExportReproducerAuditBuildTests(unittest.TestCase):
         (crash / ".audit" / ".trigger-gate.json").write_text(
             '{"id": "finding-vote"}\n', encoding="utf-8",
         )
+        self.assertIsNotNone(validation_receipt.write(
+            crash, kind="crash", state="reportable", detail="fixture",
+        ))
         proc = self.export(output, crash.name)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(
@@ -115,6 +121,9 @@ class ExportReproducerAuditBuildTests(unittest.TestCase):
             (crash / ".audit" / ".trigger-gate.json").read_text(encoding="utf-8"),
             '{"id": "finding-vote"}\n',
         )
+        # Export rebinds the receipt it found current across its own rewrite,
+        # so the pool needs no second rebinding layer over it.
+        self.assertIsNotNone(validation_receipt.read_current(crash))
 
     def test_library_resolver_template_retains_canonical_suffix_fallback(self) -> None:
         source = EXPORT.read_text(encoding="utf-8")

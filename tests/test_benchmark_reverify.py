@@ -598,13 +598,14 @@ class BenchmarkReverifyTests(unittest.TestCase):
             classify(summary.format(crashes=0, executed=5, clean=0)),
             ("inconclusive", 0, 5),
         )
-        # Every run reached its deadline: the target ran.
+        # Every run reached its deadline: a loaded host reads the same as a
+        # hang, so nothing about the reproducer is established.
         self.assertEqual(
             classify(
                 summary.format(crashes=0, executed=0, clean=0)
                 + "[run-sanitizer-multi] TIMEOUTS: 5/5 runs reached the deadline\n"
             ),
-            ("inconclusive", 0, 5),
+            ("unmeasured", 0, 5),
         )
         self.assertEqual(
             classify(summary.format(crashes=0, executed=5, clean=5)),
@@ -1437,55 +1438,27 @@ class BenchmarkReverifyTests(unittest.TestCase):
             encoding="utf-8",
         )
         (crashes / "CRASH-0002").mkdir()
-        # Bundled before the pool measured its rate: export-repro is what
-        # copies the rate into the report's Fields table, so it runs again.
-        for name, rate_row in (("CRASH-0003", ""), ("CRASH-0004", "| Reproduction rate | 5/5 |\n")):
+        # Bundled before the pool measured, or re-measured, its rate:
+        # export-repro is what copies the rate into the report's Fields
+        # table and severity scores from there, so a report that lacks the
+        # measured rate or still states an older one is bundled again.
+        for name, rate_row, measured in (
+            ("CRASH-0003", "", "5/5"),
+            ("CRASH-0004", "| Reproduction rate | 5/5 |\n", "5/5"),
+            ("CRASH-0005", "| Reproduction rate | 5/5 |\n", "0/5"),
+        ):
             audit = crashes / name / ".audit"
             audit.mkdir(parents=True)
             shutil.copy2(bundled / "promotion.log", audit / "promotion.log")
             (crashes / name / "sanitizer.txt").write_text(
-                DIAGNOSTIC + "\nCRASH_RATE: 5/5\n", encoding="utf-8",
+                DIAGNOSTIC + f"\nCRASH_RATE: {measured}\n", encoding="utf-8",
             )
             (crashes / name / "report.md").write_text(
                 "# Report\n\n| Field | Value |\n| --- | --- |\n" + rate_row,
                 encoding="utf-8",
             )
-        exported = [args[0] for args in self.rebuild_export_argv(bench)]
-        self.assertEqual(exported, ["CRASH-0002", "CRASH-0003"])
-
-    def test_a_pool_export_keeps_a_bound_receipt_current(self) -> None:
-        # export-repro files stragglers under .audit/ and regenerates the
-        # report. A receipt bound before that names the old paths; the pool
-        # used to publish it stale or refuse to publish at all.
-        bench = self.root / "rebind"
-        crash = bench / ".pool.staging" / "crashes" / "CRASH-0001"
-        crash.mkdir(parents=True)
-        (crash / "report.md").write_text(
-            "# CRASH-0001\n\nSummary: fixture.\n", encoding="utf-8",
-        )
-        (crash / "sanitizer.txt").write_text(
-            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
-            "    #0 0x1 in app_parse sample.c:2\n",
-            encoding="utf-8",
-        )
-        (crash / "input.bin").write_bytes(b"AAAA")
-        self.assertIsNotNone(validation_receipt.write(
-            crash, kind="crash", state="reportable", detail="fixture",
-        ))
-
-        def export(directory: Path) -> None:
-            audit = directory / ".audit"
-            audit.mkdir()
-            (directory / "input.bin").rename(audit / "input.bin")
-            (audit / "promotion.log").write_text(
-                "2026-01-01T00:00:00Z  exported  CRASH_ID=CRASH-0001  rev=x\n",
-                encoding="utf-8",
-            )
-
-        self.rebuild_tool_calls(bench, on_export=export)
-        published = bench / "pool" / "crashes" / "CRASH-0001"
-        self.assertTrue((published / ".audit" / "input.bin").is_file())
-        self.assertIsNotNone(validation_receipt.read_current(published))
+        exported = sorted(args[0] for args in self.rebuild_export_argv(bench))
+        self.assertEqual(exported, ["CRASH-0002", "CRASH-0003", "CRASH-0005"])
 
     def test_a_failing_tool_reports_its_own_last_line(self) -> None:
         # Every caller treats a nonzero exit as "skip this one"; without the
@@ -1513,7 +1486,6 @@ class BenchmarkReverifyTests(unittest.TestCase):
     def rebuild_tool_calls(
         self, bench: Path, *, dry_run: bool = False,
         cluster_failure: str = "",
-        on_export=None,
         receipt_problems: tuple[list[str], list[str]] | None = None,
     ) -> list[tuple[str, tuple]]:
         """Tools rebuild_pool invokes, with everything but the tools stubbed."""
@@ -1522,8 +1494,6 @@ class BenchmarkReverifyTests(unittest.TestCase):
         def fake_run_tool(name, *args, **kwargs):
             calls.append((name, args))
             returncode = int(name == cluster_failure)
-            if name == "export-repro" and on_export is not None:
-                on_export(Path(args[args.index("--crash-dir") + 1]))
             if not returncode and "--json-out" in args:
                 output = Path(args[args.index("--json-out") + 1])
                 output.parent.mkdir(parents=True, exist_ok=True)

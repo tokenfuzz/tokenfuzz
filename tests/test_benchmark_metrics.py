@@ -1313,12 +1313,46 @@ class BenchmarkMetricsTests(unittest.TestCase):
                 bench / "pool" / "findings" / name / ".llm-find-quality.json",
                 {"accept": True, "class": klass},
             )
+        # The ground-truth oracle walks the pool itself rather than reading
+        # the headline count, so it must decline the same artifacts.
+        for name in ("CRASH-0001", "CRASH-0002"):
+            crash = bench / "pool" / "crashes" / name
+            crash.mkdir(parents=True)
+            (crash / "sanitizer.txt").write_text(
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602\n"
+                "READ of size 1\n    #0 0x1 in app_parse sample.c:2\n"
+                "SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:2 in app_parse\n"
+                "CRASH_RATE: 5/5\n",
+                encoding="utf-8",
+            )
+        manifest = bench / "manifest.json"
+        self.write_json(manifest, {
+            "planted_bugs": [{
+                "id": "planted-1", "kind": "real",
+                "primitive": "heap-buffer-overflow", "signature_symbol": "app_parse",
+            }],
+            "false_positive_traps": [],
+        })
 
-        report = benchmark.aggregate(bench)
+        with mock.patch.object(
+            benchmark, "ground_truth_path_for", return_value=manifest,
+        ):
+            report = benchmark.aggregate(bench)
         condition = report["conditions"][0]
         self.assertEqual(condition["crashes"], [1])
         self.assertEqual(condition["crash_total"], 1)
         self.assertEqual(condition["unadjudicated_crash_total"], 1)
+        oracle = report["ground_truth_scoring"]["by_condition"]["harness"]
+        self.assertEqual(oracle["confirmed_crashes"], 1)
+        self.assertEqual(oracle["detected"], ["planted-1"])
+        # The security-decision lanes carry the same re-booking: the cell
+        # filed both as reports, and the pool moved one to the remainder.
+        lanes = condition["validation_waterfall"]
+        self.assertEqual(lanes["crashes"]["lanes"]["reportable"], 1)
+        self.assertEqual(lanes["crashes"]["lanes"]["pending"], 1)
+        self.assertEqual(lanes["crashes"]["reportable"], 1)
+        self.assertEqual(lanes["findings"]["lanes"]["reportable"], 1)
+        self.assertEqual(lanes["findings"]["lanes"]["pending"], 1)
         self.assertEqual(condition["unique_crash_clusters"], 1)
         self.assertEqual(condition["top_severity_level"], "High")
         self.assertEqual(condition["confirmed_finding_total"], 1)

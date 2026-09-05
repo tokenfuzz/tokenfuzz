@@ -2865,8 +2865,13 @@ def score_findings_ground_truth(
     members: dict | None = None,
     conditions: list | None = None,
     target_root: str = "",
+    skip: "set[str] | frozenset[str]" = frozenset(),
 ) -> dict:
     """Score confirmed findings against the manifest's findings-only bugs.
+
+    *skip* names pooled findings published unjudged; the oracle enumerates the
+    tree itself, so it must decline them here or credit what the headline
+    count withheld.
 
     The mirror of score_ground_truth for the artifacts the crash oracle
     cannot grade: a planted bug marked ``findings_only`` surfaces under
@@ -2913,6 +2918,8 @@ def score_findings_ground_truth(
     _count, names = count_confirmed_findings(findings_dir)
     evidence: list[tuple[str, str, str]] = []
     for name in names:
+        if name in skip:
+            continue
         text = _finding_report_text(findings_dir / name)
         file, func = finding_signature.extract_location(text, target_root)
         evidence.append((name, file, func))
@@ -3245,8 +3252,13 @@ def score_ground_truth(
     manifest: dict,
     members: dict | None = None,
     conditions: list | None = None,
+    skip: "set[str] | frozenset[str]" = frozenset(),
 ) -> dict:
     """Score confirmed crashes in a tree against a ground-truth manifest.
+
+    *skip* names pooled crashes published unjudged; the oracle enumerates the
+    tree itself, so it must decline them here or credit what the headline
+    count withheld.
 
     *crashes_dir* may be a `crashes/` directory or a results/pool dir that
     contains one. *members* optionally maps each crash dir name to the
@@ -3282,6 +3294,8 @@ def score_ground_truth(
     if crashes_dir.is_dir():
         for child in sorted(crashes_dir.iterdir()):
             if not child.is_dir() or child.name.startswith("."):
+                continue
+            if child.name in skip:
                 continue
             # Membership in the scored set is the oracle's own gate (the same
             # one that produces the headline crash count). Attribution is then
@@ -4734,6 +4748,17 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         unjudged_here = unjudged_by_cond.get(cond, {"crashes": [], "findings": []})
         unjudged_pool_crashes = len(unjudged_here["crashes"])
         unjudged_pool_findings = len(unjudged_here["findings"])
+        # The security-decision lanes are cell sums too, and the cell filed
+        # each of these as a security report: move it to pending, where the
+        # remainder is counted, so no table credits what the headline withheld.
+        for waterfall, count in (
+            (crash_waterfall, unjudged_pool_crashes),
+            (finding_waterfall, unjudged_pool_findings),
+        ):
+            moved = min(count, waterfall["lanes"]["reportable"])
+            waterfall["lanes"]["reportable"] -= moved
+            waterfall["lanes"]["pending"] += moved
+            waterfall["reportable"] = max(0, waterfall["reportable"] - moved)
         if demoted or unjudged_pool_crashes:
             crashes = list(crashes)
             for idx, cell in enumerate(done):
@@ -4925,6 +4950,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 manifest,
                 members.get("crashes", {}),
                 conditions=[c["condition"] for c in conditions],
+                skip=set(pool_unjudged),
             )
         pool_findings = bench_dir / "pool" / "findings"
         if (
@@ -4940,6 +4966,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 manifest,
                 members.get("findings", {}),
                 conditions=[c["condition"] for c in conditions],
+                skip=set(pool_unjudged),
             )
 
     return report
