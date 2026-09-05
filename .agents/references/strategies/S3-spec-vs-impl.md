@@ -1,5 +1,32 @@
 # Strategy S3: Rule-vs-Implementation Audit
 
+<!-- brief:start -->
+**Method.** Hold the rule and the implementation in context together and prove
+where they diverge. The rule is a security invariant, a published spec
+requirement, or the equivalence contract between a general path and an
+optimized one. For each: state the exact rule; identify the code that must
+enforce it; trace caller-controlled input and the object or state consumed
+later; show the missing, misordered, partial, or wrong-object check; record the
+nearest counterevidence and why it does not close this path. When the card's
+"Why ranked" names a security decision (access control, identity/origin,
+credential verification, query/template, outbound request, path effect,
+injection, deserialization, external entity), audit that decision first.
+
+**Precision rules.** Counterevidence is part of the result: "the check at line
+N validates object A, but line M consumes caller-selected object B" is a
+finding; "no check found" is a lead. A safe sibling never closes the family:
+inspect sibling routes, handlers, validators, and parser instances one by one.
+Work high-impact controls before hygiene. Raw socket/TLS endpoints are S7
+work; protocol state transitions and rollback are S5 work.
+
+**Filing.** A source-proven mismatch is already a finding: file (or augment)
+`findings/FIND-*` first, then pursue the probe.
+
+**Review gate.** After 5 distinct enforcement sites relevant to the card have
+been checked and all satisfy their rules, rotate strategy. Do not stop while a
+mismatch still needs a testcase or differential probe.
+<!-- brief:end -->
+
 **LLM-native — hold the rule and the implementation in context together, then
 prove where they diverge.**
 

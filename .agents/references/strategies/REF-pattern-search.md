@@ -1,5 +1,14 @@
 # Pattern Search Reference (P)
 
+<!-- brief:start -->
+**Not a strategy.** A grep-pattern library for use beside the assigned
+strategy: integer and size math, type-conversion chains, sentinel collisions,
+two-pass TOCTOU, FFI boundaries, destructor and allocation patterns, ignored
+returns, entropy misuse, truncation-unsafe sinks, and dangerous-API sinks. The
+value is reasoning about the results, not running the greps; form concrete
+hypotheses under the assigned strategy's gates.
+<!-- brief:end -->
+
 **This is NOT a strategy — it's a grep-pattern library.** Use these patterns alongside
 any strategy when you need to find specific code patterns in a subsystem. The LLM's
 value is reasoning about results, not running the greps.

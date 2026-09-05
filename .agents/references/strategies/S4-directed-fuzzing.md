@@ -1,5 +1,28 @@
 # Strategy S4: Boundary-Directed Fuzzing
 
+<!-- brief:start -->
+**Method.** The only strategy that runs a fuzzer. Build a fuzz target only where
+untrusted input reaches a published API directly, run it in short slices, and
+hand every artifact to `bin/probe --confirm`. Workflow: `bin/fuzz inventory`,
+`bin/fuzz candidates` (admits a symbol only when it is published, reachable by
+this target's `attacker_controls` shape, and uncovered by an existing harness),
+`bin/fuzz template <symbol>`, fill the `S4-RECEIPT` fields from local callers
+read with `bin/peek`, `bin/fuzz build` (refuses byte-to-struct casts, private
+headers, and hand-declared symbols), `bin/fuzz run --budget-seconds N`,
+`bin/fuzz status`. Improving an existing harness usually beats writing a new
+one. Harness sources live under `${RESULTS_DIR}/fuzz/src/`, never in the
+target checkout. Keep both `LLVMFuzzerTestOneInput` and the standalone `main`
+working. Never file a fuzz artifact by hand.
+
+**Review gate.** One campaign per iteration: when `bin/fuzz run` returns, S4 is
+done for this iteration; read the summary, record a dry result with
+`bin/state add-note`, and go back to the queue. At most one source-grounded
+derivative harness, and only for the next iteration. S4 is the wrong strategy
+when the target has no native sanitizer build, nothing is admitted, the bug
+needs a specific multi-step setup (S5), or the API sits behind a format check
+with no coverage build (seed first, or S7).
+<!-- brief:end -->
+
 Build a fuzz target **only** where untrusted input reaches a published API
 directly, run it in short slices, and hand every artifact back to `bin/probe`.
 

@@ -39,14 +39,46 @@ def session_rules_digest(reference_dir: Path) -> str:
         return f"(session-rules digest missing - read {reference_dir / 'session-rules.md'} once if needed)"
 
 
+_BRIEF_START = "<!-- brief:start -->"
+_BRIEF_END = "<!-- brief:end -->"
+
+
+def playbook_brief(path: Path) -> str:
+    """The playbook's own marked brief: its method and every gate, in ~2 KB.
+
+    Rendered into the prompt, where it is cached, instead of having every
+    session re-read the whole playbook (10-24 KB) and then replay it on every
+    later turn. The playbook stays the single source: the brief is a marked
+    block inside it, and tests hold the two together.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    start = text.find(_BRIEF_START)
+    end = text.find(_BRIEF_END, start)
+    if start < 0 or end < 0:
+        return ""
+    return text[start + len(_BRIEF_START):end].strip()
+
+
 def strategy_brief(strategy: str, reference_dir: Path) -> str:
     strategy = strategy.upper()
     if strategy not in _STRATEGIES:
         return ""
     filename, summary = _STRATEGIES[strategy]
+    playbook = reference_dir / "strategies" / filename
+    brief = playbook_brief(playbook)
+    if not brief:
+        return (
+            f"Strategy brief ({strategy}): {summary}\n"
+            f"Full playbook: `{playbook}`. Open it before committing to hypotheses."
+        )
     return (
-        f"Strategy brief ({strategy}): {summary}\n"
-        f"Full playbook: `{reference_dir / 'strategies' / filename}`. Open it before committing to hypotheses."
+        f"Strategy brief ({strategy}): {summary}\n\n{brief}\n\n"
+        f"Full playbook: `{playbook}`. The gates above are complete; open the "
+        "playbook only for the one technique section your hypothesis needs, "
+        "with `bin/peek` on that section."
     )
 
 

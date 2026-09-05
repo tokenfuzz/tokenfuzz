@@ -1,5 +1,20 @@
 # Strategy S6: Cross-Project Variant Mining
 
+<!-- brief:start -->
+**Method.** Mine peer projects (same spec, format, protocol, or algorithm;
+never merely the same language) for fixed bug classes, then look for the
+unfixed analogue in the target. This is not S1, which mines the target's own
+history. Pull peer fixes from the last 3 years, prefer security-tagged or
+advisory-linked commits, distill each into a neutral bug class ("length field
+from input sizes an allocation without a remaining-bytes check"), map the class
+to the target's analogous subsystem, then inspect the closest analogue and its
+bounded siblings before opening a hypothesis.
+
+**Review gate.** After 5 source-verified peer fixes analyzed with 0 target
+analogues, rotate. Do not stop while a target analogue still needs mapping or
+a testcase.
+<!-- brief:end -->
+
 **Target:** unfixed analogues in the audit target of bug *classes* fixed in
 peer projects. Independent implementations of the same spec, format, or
 algorithm hit the same bug classes independently — a fix in peer A is a free

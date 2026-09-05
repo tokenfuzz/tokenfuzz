@@ -1,5 +1,31 @@
 # Strategy S8: Property-Based Oracles
 
+<!-- brief:start -->
+**Method.** Sanitizer-free oracles for silent corruption: inverse (round trip),
+idempotence, injectivity, numerical domain, format compliance, and semantic
+equivalence. Infer the property from the target's own signatures, docs, and
+naming, then write a testcase whose oracle is the property. Read one function
+pair per hypothesis; shrink every counter-example before filing.
+
+**Consumer gate (first).** Pick the target by its security consumer: the
+property is in scope only when the function's output reaches a security
+decision (a sanitizer, ACL/SOP/CSP/auth check, cache or signature lookup,
+allocation size, or resource limit). Output that reaches only display, logging,
+or another pure-data path makes a counter-example a correctness bug: record it
+with `bin/state add-note`, do not file it. If a card has no such pair, block the
+S8 angle with `bin/state update-card --card-id <id> --status blocked --note
+<proof>`. Before testing a boundary value, quote the callee's input contract
+and trace the value from the caller-controlled boundary through a real caller;
+violating a concrete precondition is harness misuse, not a counter-example.
+
+**Managed runtimes.** Catch only documented input-rejection exceptions; a
+wrong exception type or one uncaught request is robustness, not durable denial
+of service.
+
+**Review gate.** When the card floor is complete, discard the card and end the
+session instead of claiming the next card.
+<!-- brief:end -->
+
 **Sanitizer-free oracles for silent-corruption bugs.** ASan catches memory-safety
 violations; UBSan catches undefined behaviour; TSan catches races. None of them
 catch *semantic* corruption: encode then decode and get back something different,

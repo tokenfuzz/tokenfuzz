@@ -236,6 +236,35 @@ class StrategyValidationTests(unittest.TestCase):
         self.assertIn("Property oracle", prompt.strategy_brief("S8", REFERENCES))
         self.assertIn("S4", audit_runner.STRATEGIES)
 
+    def test_every_playbook_carries_a_brief_the_prompt_renders_whole(self) -> None:
+        """Sessions re-read whole playbooks; the brief replaces that read.
+
+        The brief is a marked block inside the playbook so the two cannot
+        drift apart silently, bounded so it stays cheaper than the read it
+        replaces, and it must carry the strategy's gates.
+        """
+        for strategy, (filename, _summary) in prompt._STRATEGIES.items():
+            with self.subTest(strategy=strategy):
+                playbook = REFERENCES / "strategies" / filename
+                brief = prompt.playbook_brief(playbook)
+                self.assertTrue(brief, f"{filename} has no brief block")
+                self.assertLessEqual(len(brief.encode()), 2600, filename)
+                if strategy != "REF":
+                    self.assertIn("gate", brief.lower(), filename)
+                rendered = prompt.strategy_brief(strategy, REFERENCES)
+                self.assertIn(brief, rendered)
+                self.assertIn(str(playbook), rendered)
+                self.assertNotIn("Open it before committing", rendered)
+
+    def test_a_playbook_without_a_brief_falls_back_to_open_it(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            references = Path(tmp)
+            (references / "strategies").mkdir()
+            (references / "strategies" / "S1-prior-fix-review.md").write_text("# S1\n")
+            rendered = prompt.strategy_brief("S1", references)
+        self.assertIn("Open it before committing", rendered)
+
     def test_s4_is_assignable_from_one_campaign_card_not_per_file(self) -> None:
         """S4 must be assignable without competing for per-file cards.
 

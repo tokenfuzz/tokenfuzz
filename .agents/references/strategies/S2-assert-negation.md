@@ -1,5 +1,23 @@
 # Strategy S2: Invariant Negation
 
+<!-- brief:start -->
+**Method.** Collect the target subsystem's invariants from four sources: debug
+assertions that vanish in release builds, algorithm assumptions stated in
+comments or a single assert, multi-precondition gates (code behind 3+
+simultaneous conditions), and IDL/binding attribute contracts. Classify each as
+bounds / size / type / state / null and ask: can untrusted input make the
+assumption false? If yes, production code continues with the violated
+invariant; write the testcase. Priority: bounds > size > type > state > null;
+skip null-only (usually DoS).
+
+**Filing.** A source-proven, security-relevant defect is filed under
+`findings/FIND-*` before the reproducer is built; the testcase is confirmation.
+
+**Review gate.** After 20 invariants classified with 0 reachable from untrusted
+input with security impact, rotate strategy. Do not stop while a reachable
+invariant still needs a testcase.
+<!-- brief:end -->
+
 **The most mechanical strategy. Developers, algorithms, and preconditions all declare
 assumptions. You break them.** In release/optimized builds, debug assertions are removed —
 if the assertion was the ONLY check, the violated invariant reaches production code.

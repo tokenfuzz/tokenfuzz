@@ -1,5 +1,21 @@
 # Strategy S1: Prior-Fix & Regression Variant Analysis
 
+<!-- brief:start -->
+**Method.** Mine the target's own fixes and large refactors for incomplete
+patches, reverted fixes, and unfixed siblings. Read one patch at a time; never
+bulk-load patch summaries. For each fix check five things: partial coverage
+(path A fixed, path B not), reverted or backed-out fix, missing sibling handler
+with the same pattern, multi-file change with one file left unpatched, and a
+scope-limited fix that handles only the PoC input. For refactors, diff for
+bounds/null/type checks that disappeared, asserts removed without replacement,
+error paths simplified, and widened parameter types.
+
+**Review gate.** After 10+ patches across both fix and refactor categories
+with 0 unfixed analogues, rotate strategy. Do not rotate away from an active
+analogue with a plausible guard gap: turn it into a testcase or a
+NEEDS_TESTCASE row first.
+<!-- brief:end -->
+
 **Highest-signal strategy. 3/7 historical findings came from this.**
 
 Mine prior fixes AND large refactors for incomplete patches, reverted fixes, and

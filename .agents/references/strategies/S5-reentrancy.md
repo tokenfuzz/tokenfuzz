@@ -1,5 +1,27 @@
 # Strategy S5: Lifetime & State Violation (Re-entrancy, Error Paths, Races, State Machines)
 
+<!-- brief:start -->
+**Method.** Find an object lifetime or state invariant that unexpected control
+flow violates: a callback fires while a raw reference is held (Class 1), an
+error path skips part of its rollback (Class 2), threads race on shared state
+(Class 3), API calls arrive in an order the implementation does not verify
+(Class 4, forward search), or a chain of legitimate calls builds a chosen
+primitive (Class 5, backward planning: declare the primitive, find the sink,
+plan each prerequisite call backwards to the initial state, then check
+reachability, caller control, and side-effect collisions at every step). Write
+the chain as numbered step comments in the testcase; the chain is the
+hypothesis and the testcase is the verification.
+
+**Rules.** Do not manufacture the transition by freeing the active callback
+state in the testcase; that is trusted-caller ordering, not externally driven
+re-entrancy. File (or augment) `findings/FIND-*` as soon as a chain is
+source-proven and security-relevant, before running the testcase.
+
+**Review gate.** After 8 paths examined across these classes with 0 testcase
+leads, rotate strategy. Do not stop while a reachable state sequence still
+needs a probe.
+<!-- brief:end -->
+
 **Target:** Object lifetime or state invariant violated by unexpected control flow —
 a callback fires, an error path skips cleanup, a thread races, or API calls arrive
 in an order the implementation doesn't handle.

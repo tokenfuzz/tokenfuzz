@@ -1,5 +1,38 @@
 # Strategy S7: Adversarial Input Engineering
 
+<!-- brief:start -->
+**Method.** Write targeted adversarial inputs by hand, delivered through the
+normal `bin/probe` pipeline: reason backwards from parser or decoder code to
+the one input that reaches a specific error path (truncation at each parse
+phase, size and length fields, encoding boundaries, format confusion, resource
+limits). No fuzzer, harness generation, or corpus under S7; that is an S4 card.
+Create only the final H-prefixed testcase in `scratch-N`.
+
+**Route gate.** Before committing a hypothesis, verify from the configured
+runner and build metadata that `bin/probe` can invoke the card's exact parse or
+decode surface with the crafted testcase. A runner fixed to another subcommand
+does not make a surface reachable because the binary contains it. If no route
+exists, `bin/state update-card --card-id <id> --status blocked --note <proof>`
+and do not create a hypothesis or substitute a wrapper, trusted setup, or
+source-only audit. A one-shot API harness is a valid route only when it calls
+a documented public library boundary and no `[runner] bin` is configured; with
+a runner, probe through the runner or hand the API to S4. Startup or teardown
+code that runs for every testcase is not an input route.
+
+**Direct-input gate.** The trigger must occur during one documented parse or
+decode operation on the crafted input; never add a dump, encode, or round trip
+to reach an output-only surface. Managed runtimes: catch only the documented
+rejection exception around the one target call; a normal rejection is CLEAN
+evidence, and an unexpected exception is not a finding without a concrete
+security impact.
+
+**Review gate.** After 6 targeted inputs with 0 crashes and no
+HIT/NEEDS_TESTCASE lead, rotate strategy. Do not stop while an input is
+reaching closer to the intended path. DISCARDED closes one named input shape,
+not every effect at that function. When the card floor is complete, discard
+the card and end the session instead of claiming the next card.
+<!-- brief:end -->
+
 Write targeted adversarial inputs that stress parsers and decoders at boundary
 conditions, delivered through the normal sanitizer pipeline. No fuzzer and no
 fuzz harness: reason backwards from parser code to the input that reaches one
