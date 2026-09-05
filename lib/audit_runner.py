@@ -1627,6 +1627,9 @@ def run_agent(
     prompt_path = runtime.raw / f"{stem}.prompt.md"
     base = prompt.cold_start_prompt(context, agent) if cold else prompt.deep_investigation_prompt(context, agent)
     turn_cap = context.turn_soft_cap
+    context_cap = getattr(context, "context_soft_cap", prompt.DEFAULT_CONTEXT_SOFT_CAP)
+    if not isinstance(context_cap, int):
+        context_cap = prompt.DEFAULT_CONTEXT_SOFT_CAP
     rendered = _session_files(base, context.scratch_dir(agent))
     # Neutralize classifier-hot vocabulary in the assembled prompt, then strip the
     # NOVOCAB sentinels, so a safety classifier does not refuse a benign audit
@@ -1663,7 +1666,7 @@ def run_agent(
             cwd=runtime.root, extra_env=extra_env,
             watchdog_marker_dir=context.scratch_dir(agent),
             turn_cap=turn_cap,
-            context_cap=context.context_soft_cap,
+            context_cap=context_cap,
             agent_security=runtime.agent_security,
         )
 
@@ -1732,7 +1735,7 @@ def run_agent(
         "agent": agent, "role": role, "backend": runtime.backend, "model": runtime.model,
         "resolved_effort": llm_invoke.default_effort(runtime.backend),
         "usage_complete": usage_complete, "turn_capped": turn_capped,
-        "turn_soft_cap": turn_cap, "context_soft_cap": context.context_soft_cap,
+        "turn_soft_cap": turn_cap, "context_soft_cap": context_cap,
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
         "tool_calls": tools, "transcript_events": events,
         # Where the session's wall went, from state: reasoning before the
