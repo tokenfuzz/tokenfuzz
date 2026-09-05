@@ -1230,6 +1230,7 @@ def run_agent_prompt(
     turn_cap: int | None = None,
     allow_subagents: bool = True,
     agent_security: str | None = None,
+    context_cap: int | None = None,
 ) -> int:
     """Launch a tool-using backend and write its combined raw transcript."""
     agent_security = resolve_agent_security(agent_security, backend)
@@ -1336,6 +1337,7 @@ def run_agent_prompt(
                 backend == "gemini" and timeout_secs > 0
             ),
             watchdog_marker_dir=watchdog_marker_dir,
+            context_cap=max(0, int(context_cap)) if context_cap else 0,
         )
     except OSError as exc:
         Path(raw_log).write_text(str(exc) + "\n", encoding="utf-8")
@@ -1424,6 +1426,7 @@ def _run_agent_process(
     checkpoint_on_native_limit: bool = False,
     health_watchdog: bool = False,
     watchdog_marker_dir: str | os.PathLike[str] | None = None,
+    context_cap: int = 0,
 ) -> int:
     """Run one agent CLI, optionally under a turn cap and a health watchdog.
 
@@ -1432,6 +1435,10 @@ def _run_agent_process(
     by the audit caller. A capped session exits 0 and is continued from
     `bin/state resume`, not treated as a failure.
 
+    A context cap ends a session the same way once a request's reported
+    prompt tokens reach it — on the dialects that report usage per request —
+    so a native-cap backend is still bounded by what each turn replays.
+
     The health watchdog is Gemini's sustained-quota-stall detector; it needs
     the transcript streamed live, which the polling loop already provides.
     """
@@ -1439,7 +1446,7 @@ def _run_agent_process(
     import process_tree
 
     raw = Path(raw_log)
-    if turn_cap <= 0 and not health_watchdog:
+    if turn_cap <= 0 and context_cap <= 0 and not health_watchdog:
         with raw.open("w", encoding="utf-8") as sink:
             completed = subprocess.run(
                 launch_command, input=input_text,
@@ -1452,9 +1459,11 @@ def _run_agent_process(
         )
 
     capped = False
+    capped_detail = ""
     enrichment_limit = None
     enrichment_deadline = None
     offset = total = 0
+    context_offset = context_seen = 0
     feeder = watchdog = None
     with raw.open("w", encoding="utf-8") as sink:
         process = subprocess.Popen(
@@ -1484,7 +1493,7 @@ def _run_agent_process(
             if input_text is not None:
                 feeder = _feed_stdin(process, input_text)
             while process.poll() is None:
-                if turn_cap <= 0:
+                if turn_cap <= 0 and context_cap <= 0:
                     time.sleep(0.5)
                     continue
                 # stdout is a regular file, so flushing Python's handle is
@@ -1492,7 +1501,21 @@ def _run_agent_process(
                 sink.flush()
                 count, offset = audit_helpers.tool_call_delta(raw, offset)
                 total += count
-                if total >= turn_cap:
+                if context_cap > 0:
+                    largest, context_offset = audit_helpers.context_tokens_delta(
+                        raw, context_offset,
+                    )
+                    context_seen = max(context_seen, largest)
+                if turn_cap > 0 and total >= turn_cap:
+                    capped_detail = f"after {total} completed tool calls"
+                elif context_cap > 0 and context_seen >= context_cap and count:
+                    # Only at a completed tool call: the same safe boundary the
+                    # transcript cap uses, never mid-command.
+                    capped_detail = (
+                        f"at {context_seen} context tokens "
+                        f"(CONTEXT_SOFT_CAP {context_cap}) after {total} completed tool calls"
+                    )
+                if capped_detail:
                     unfinished = _agent_has_unfinished_crash(environment)
                     if enrichment_limit is None and unfinished:
                         # Confirmation can land on the nominal last call.
@@ -1540,7 +1563,7 @@ def _run_agent_process(
             if feeder is not None:
                 feeder.join(timeout=1)
     if capped:
-        _mark_turn_capped(raw, f"after {total} completed tool calls")
+        _mark_turn_capped(raw, capped_detail)
         return 0
     return _normalize_native_turn_limit(
         raw, process.returncode, checkpoint_on_native_limit,

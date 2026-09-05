@@ -905,6 +905,57 @@ def _event_completed_tool_count(event: dict) -> int:
     return 0
 
 
+def _event_context_tokens(event: dict) -> int:
+    """Prompt tokens one streamed request carried, or 0 when not reported.
+
+    Claude Code stamps every assistant message with the request's usage; the
+    context that request replayed is its uncached input plus what it wrote to
+    and read from the cache. Other dialects report usage only at the end, so
+    they contribute nothing here.
+    """
+    message = event.get("message") if event.get("type") == "assistant" else None
+    usage = message.get("usage") if isinstance(message, dict) else None
+    if not isinstance(usage, dict):
+        return 0
+    total = 0
+    for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            total += int(value)
+    return total
+
+
+def context_tokens_delta(log_file: str | os.PathLike[str], offset: int = 0) -> tuple[int, int]:
+    """Largest per-request context seen in newly completed lines, and the new offset."""
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        with open(log_file, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            if offset > size:
+                offset = 0
+            f.seek(offset)
+            chunk = f.read()
+    except OSError:
+        return 0, offset
+    last_newline = chunk.rfind(b"\n")
+    if last_newline < 0:
+        return 0, offset
+    largest = 0
+    for raw in chunk[: last_newline + 1].splitlines():
+        if not raw:
+            continue
+        try:
+            event = json.loads(raw.decode("utf-8", "replace"))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(event, dict):
+            largest = max(largest, _event_context_tokens(event))
+    return largest, offset + last_newline + 1
+
+
 def _count_tools(path: str) -> dict[str, int]:
     counts = {"command_execution": 0, "all_tools": 0}
     for event in _iter_json_events(path):

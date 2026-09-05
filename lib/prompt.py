@@ -88,6 +88,15 @@ def strategy_brief(strategy: str, reference_dir: Path) -> str:
 # same number. lib/audit_runner.py resolves $TURN_SOFT_CAP against it.
 DEFAULT_TURN_SOFT_CAP = 128
 
+# Context-size rollover for one session, in prompt tokens as the backend
+# reports them per request. Every turn replays the whole transcript, so a
+# session that has grown past this is paying more per step than a fresh one
+# resumed from state; measured sessions confirmed most of their artifacts well
+# before it. Only backends that report per-request usage in the stream can be
+# measured (Claude does); the rest are bounded by the turn cap alone.
+# lib/audit_runner.py resolves $CONTEXT_SOFT_CAP against it; 0 disables it.
+DEFAULT_CONTEXT_SOFT_CAP = 200_000
+
 
 def agent_role(
     agent: int, num_agents: int, agent_roles: "tuple[str, ...]" = (),
@@ -120,6 +129,7 @@ class PromptContext:
     tool_call_soft_target: int = 80
     tool_call_deep_soft_target: int = 150
     turn_soft_cap: int = DEFAULT_TURN_SOFT_CAP
+    context_soft_cap: int = DEFAULT_CONTEXT_SOFT_CAP
     config: target_config.Config | None = None
     backend: str = ""
 
@@ -220,8 +230,18 @@ def turn_budget_section(context: PromptContext) -> str:
         if context.turn_soft_cap > 0
         else "turn_budget_disabled.md.j2"
     )
+    context_line = (
+        "The session also rolls over, at the next completed tool call, once "
+        f"its context reaches ~{context.context_soft_cap:,} prompt tokens on a "
+        "backend that reports per-request usage; the same checkpoint "
+        "discipline covers it."
+        if context.context_soft_cap > 0 else ""
+    )
     return render_template(
-        template, {"turn_soft_cap": str(context.turn_soft_cap)},
+        template, {
+            "turn_soft_cap": str(context.turn_soft_cap),
+            "context_budget_line": context_line,
+        },
     )
 
 

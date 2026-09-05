@@ -269,6 +269,7 @@ class Runtime:
             guide_text=guide,
             fixed_strategy=self.fixed_strategy,
             turn_soft_cap=_turn_cap(),
+            context_soft_cap=_context_cap(),
             config=self.config,
             backend=self.backend,
         )
@@ -1526,6 +1527,14 @@ def _turn_cap() -> int:
     return int(raw)
 
 
+def _context_cap() -> int:
+    """Context-size rollover for one audit-agent session; 0 disables it."""
+    raw = os.environ.get("CONTEXT_SOFT_CAP", str(prompt.DEFAULT_CONTEXT_SOFT_CAP))
+    if not raw.isdigit():
+        raise ValueError(f"CONTEXT_SOFT_CAP must be a non-negative integer (got {raw!r})")
+    return int(raw)
+
+
 def _scan_transcript(
     raw_path: Path, quota_marker: Path | None = None,
 ) -> tuple[str, int, int]:
@@ -1654,6 +1663,7 @@ def run_agent(
             cwd=runtime.root, extra_env=extra_env,
             watchdog_marker_dir=context.scratch_dir(agent),
             turn_cap=turn_cap,
+            context_cap=context.context_soft_cap,
             agent_security=runtime.agent_security,
         )
 
@@ -1722,7 +1732,7 @@ def run_agent(
         "agent": agent, "role": role, "backend": runtime.backend, "model": runtime.model,
         "resolved_effort": llm_invoke.default_effort(runtime.backend),
         "usage_complete": usage_complete, "turn_capped": turn_capped,
-        "turn_soft_cap": turn_cap,
+        "turn_soft_cap": turn_cap, "context_soft_cap": context.context_soft_cap,
         "returncode": rc, "provider_issue": issue, "prompt_chars": len(rendered),
         "tool_calls": tools, "transcript_events": events,
         # Where the session's wall went, from state: reasoning before the
