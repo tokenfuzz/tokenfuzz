@@ -181,7 +181,8 @@ The minimum useful report contains:
 
 - exactly one bare `Location:` naming the root-cause operation, endpoint,
   config key, or protocol step;
-- an explicit security issue class;
+- an explicit security issue class: one canonical
+  [bug class](../reference/bug-classes.md) token in the `Class` field;
 - the boundary, caller-controlled input, trusted setup, caller contract, and
   trigger source;
 - a short explanation of what is wrong and what capability or data is lost;
@@ -202,6 +203,7 @@ ones:
 
 ```text
 Location: path/to/file.ext:function:line
+Class: <canonical bug class, e.g. heap-buffer-overflow|auth-bypass|ssrf>
 Surface: network|library-api|file-format|cli|dev-tool|internal|unknown
 Reproducer carrier: network|library-api|file-format|cli|harness|runner|unknown
 Trigger source: bytes|both|call-sequence|timing|race|protocol-state|env|fs-state
@@ -212,6 +214,11 @@ Trusted caller actions:
 Parameter control: direct|indirect|application-supplied|trusted|harness-only
 Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
 ```
+
+`Class` is one token from the [bug class reference](../reference/bug-classes.md);
+the quality gate re-labels an accepted finding with the class its reviewers
+establish, and severity scores a source-argued finding from that class when no
+sanitizer diagnostic or `Primitive` field is stronger.
 
 `Surface` names the vulnerable product boundary; `Reproducer carrier` names
 the program or harness used to reach it. `Trigger source` records what actually

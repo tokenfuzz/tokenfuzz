@@ -318,7 +318,11 @@ def _make_clusters(sigs: list[dict], display_key: str = "id") -> list[dict]:
         strategies = sorted({m.get("strategy", "") for m in members if m.get("strategy")})
         clusters.append({
             "id": cid,
-            "class": canonical.get("class", "") or "other",
+            # The canonical bug class (lib/bug_classes.py) is the table label
+            # and the metrics axis; the merge key used its family, which the
+            # Signature column shows.
+            "class": canonical.get("bug_class", "") or "other",
+            "family": canonical.get("class", "") or "other",
             # key_kind/key drive the canonical's "Signature" display + the
             # cluster stamp; merged_via is how the CLUSTER was formed.
             "key_kind": canonical["kind"],
@@ -482,17 +486,18 @@ def _signature_display(c: dict) -> str:
     finding_dedup merges two findings on either an identical (class, file,
     line) site or an identical crash state. The Signature column shows the
     signals present on the canonical member so it reflects the actual
-    algorithm: `(class, file, line)`, and ` or <crash state>` appended when
-    the report embeds a sanitizer stack (the rare case for findings). The site
-    term needs both file and line, as its merge edge does. Falls back to the
-    canonical display key when no merge signal is present, so the cell is
-    never blank."""
+    algorithm: `(family, file, line)` — the class family that keys the merge,
+    not the canonical class the Class column shows — and ` or <crash state>`
+    appended when the report embeds a sanitizer stack (the rare case for
+    findings). The site term needs both file and line, as its merge edge does.
+    Falls back to the canonical display key when no merge signal is present,
+    so the cell is never blank."""
     parts: list[str] = []
     file = c.get("file", "")
     line = str(c.get("line", "") or "")
     if file and line:
-        cls = c.get("class", "") or "other"
-        parts.append(f"`({cls}, {file}, {line})`")
+        family = c.get("family") or c.get("class", "") or "other"
+        parts.append(f"`({family}, {file}, {line})`")
     state = c.get("crash_state") or ()
     if state:
         parts.append("`" + " → ".join(state) + "`")

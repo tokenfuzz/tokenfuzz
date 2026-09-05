@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 
+import bug_classes
 import callgraph
 import structured_state
 import target_config
@@ -223,6 +224,7 @@ def find_first_directive(context: PromptContext) -> str:
             # so the narrative contract lands exactly once per prompt —
             # including the compact variant, which has no common suffix.
             "report_prose": render_template("report_prose.md.j2", {}),
+            "bug_class_menu": bug_classes.prompt_menu(),
         },
     )
 

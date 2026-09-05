@@ -439,7 +439,7 @@ A FIND is ANY concrete security issue in the target. A sanitizer reproducer, run
 
 Required content (whatever file you put it in — `report.md` / `description.md`):
 1. Concrete location — `file:function:line`, endpoint, config key, or equivalent
-2. Issue class named explicitly (memory-safety / auth / injection / info-disclosure / crypto / race / boundary-violation / logic / …)
+2. Issue class named explicitly — one canonical bug-class token in the `Class` field (`heap-buffer-overflow`, `use-after-free`, `auth-bypass`, `ssrf`, `toctou`, …; the full list is in the FIND section of your session prompt), `other` when nothing fits
 3. Rationale a reviewer can act on — what is wrong, impact, caller control
 
 ### File FIND first, reproduce second

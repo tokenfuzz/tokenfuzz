@@ -223,21 +223,16 @@ substantive content (not its hedging) makes it clear the issue is
 purely correctness / data-integrity / robustness with no security
 boundary crossing.
 
-If you accept, also CLASSIFY the issue. Use the form
-"<top-level>:<sub-label>". The top-level MUST be one of:
-memory-safety, auth, injection, info-disclosure, crypto, race, boundary,
-deserialization, config, logic, side-channel, dos, protocol, supply-chain,
-other. The sub-label is freeform and should name the concrete mechanism — e.g.
-"memory-safety:bounds", "memory-safety:lifetime", "auth:bypass",
-"auth:session-fixation", "injection:sql", "injection:command",
-"info-disclosure:pii", "crypto:weak-hash", "crypto:reused-iv",
-"race:toctou", "boundary:csp-bypass", "boundary:sandbox-escape",
-"deserialization:unsafe", "config:permissive-default",
-"logic:business-rule", "side-channel:timing", "dos:algorithmic",
-"protocol:request-smuggling", or "supply-chain:dependency-confusion".
-Invent a new sub-label when needed. If no top-level fits, use
-"other:<specific-sub-label>"; do not invent a new top-level or force-fit the
-issue into a more dramatic class.
+If you accept, also CLASSIFY the issue with exactly one canonical bug-class
+token. The vocabulary is the one public disclosure ledgers file under, grouped
+here by family:
+{{ bug_class_menu }}.
+Name the class the evidence establishes, not the worst class it could become:
+a source-argued bounds violation of unknown direction is `buffer-overflow`,
+not `oob-write`; a race argued from source is `toctou`, `data-race` only with a
+race-detector diagnostic; an authentication defeat is `auth-bypass`, an
+authorization one `broken-access-control`. Use `other` when no token fits —
+never force-fit a more dramatic class or invent a token.
 
 Also pick a coarse severity hint: one of info, low, medium, high,
 critical. This is advisory only.
@@ -245,7 +240,7 @@ critical. This is advisory only.
 Output a single JSON object (no prose, no fences) with keys:
   accept     boolean   true if there is concrete security substance
   reason     string    <= 140 chars, plain-English why
-  class      string    freeform "top:sub" label; empty string if accept=false
+  class      string    one canonical bug-class token; empty string if accept=false
   severity   string    one of: info, low, medium, high, critical;
                        empty string if accept=false
 

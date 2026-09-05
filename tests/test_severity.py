@@ -992,16 +992,75 @@ class SeverityTests(unittest.TestCase):
         self.assertEqual(self.score(worded)["primitive_key"], "info_leak")
         self.assertEqual(self.score(worded)["score"], self.score(neutral)["score"])
 
+    def test_dashboard_class_tokens_classify_from_prose(self) -> None:
+        # A privilege escalation is full compromise of the vulnerable system,
+        # not the read-or-edit-a-peer's-data row authorization bypass scores;
+        # certificate and signature checks that are skipped have their own
+        # integrity shapes rather than the confidentiality-only crypto row.
+        for text, expected in (
+            ("Class: privilege-escalation", "privilege_escalation"),
+            ("local privilege escalation to root", "privilege_escalation"),
+            ("Class: broken-access-control", "authz_bypass"),
+            ("Class: auth-bypass", "authn_bypass"),
+            ("hostname verification is skipped for the pinned host",
+             "improper_cert_validation"),
+            # Background mentions and negations stay unclassified.
+            ("parsed with hostname verification enabled, then drops the token",
+             "unknown"),
+            ("crypto:timing is scored through crypto, see below", "unknown"),
+            ("the JWT signature verification bypass accepts alg=none",
+             "signature_bypass"),
+            ("Class: crypto-failure", "crypto_weakness"),
+            ("Class: code-injection", "code_execution"),
+            ("Class: path-traversal", "path_traversal"),
+            ("Class: null-deref", "null_deref"),
+            # A direction word in prose is not a primitive: "is not an
+            # out-of-bounds write" must not mint heap_write. The reviewed
+            # class carries the write tier instead (see the alias test).
+            ("Class: oob-write", "unknown"),
+            ("the inverted check is not an out-of-bounds write", "unknown"),
+            # Negated mentions still do not classify.
+            ("no privilege escalation is possible here", "unknown"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(severity._detect_primitive(text)[0], expected)
+        for primitive, expected in (
+            ("privilege_escalation", ("H", "H", "H")),
+            ("improper_cert_validation", ("H", "H", "N")),
+            ("signature_bypass", ("N", "H", "N")),
+            ("segv", ("N", "N", "H")),
+        ):
+            with self.subTest(primitive=primitive):
+                self.assertEqual(
+                    severity.CVSS4_CLASS[primitive][:3], expected,
+                )
+        self.assertEqual(severity.CVSS4_CLASS["improper_cert_validation"][6], "P")
+        self.assertIn("segv", severity.TRANSIENT_CRASH_PRIMITIVES)
+
     def test_validated_class_aliases_preserve_consequence(self) -> None:
+        # Canonical classes and the legacy `top:sub` labels earlier gates wrote
+        # both reach the primitive the class establishes; a legacy label keeps
+        # the consequence its top named even when its sub-label alone reads as
+        # a plain traversal.
         aliases = {
+            "path-traversal": "path_traversal",
             "boundary:path-traversal": "path_traversal",
-            "boundary:path-traversal-read": "arbitrary_file_read",
+            "boundary:path-traversal-read": "path_traversal",
             "filesystem:path-traversal-write": "arbitrary_file_write",
             "file-write:path-traversal": "arbitrary_file_write",
             "boundary:sandbox-escape": "sandbox_escape",
-            "injection:command": "code_execution",
+            "injection:command": "command_injection",
+            "info-disclosure:xxe": "xxe",
             "memory-safety:allocator-mismatch": "allocator_mismatch",
-            "memory-safety:alignment": "bus",
+            "memory-safety:alignment": "segv",
+            "memory-safety:bounds": "heap_read_small",
+            "oob-write": "heap_write",
+            "toctou": "race_condition",
+            "race:toctou": "race_condition",
+            "privilege-escalation": "privilege_escalation",
+            "improper-cert-validation": "improper_cert_validation",
+            "dos:memory-leak": "dos_amplification",
+            "crypto:timing": "crypto_weakness",
         }
         for label, expected in aliases.items():
             with self.subTest(label=label):
@@ -1013,7 +1072,8 @@ class SeverityTests(unittest.TestCase):
         # accepted finding unscored avoids manufacturing either high or low
         # impact from a descriptive class alone.
         for ambiguous in (
-            "auth:token-confusion", "config:permissive-default", "race:toctou",
+            "auth:token-confusion", "config:permissive-default", "memory-safety",
+            "cors-misconfig", "other",
         ):
             with self.subTest(ambiguous=ambiguous):
                 self.assertEqual(
@@ -1026,7 +1086,7 @@ class SeverityTests(unittest.TestCase):
                 "memory-safety:allocator-mismatch",
                 "allocator_mismatch",
             ),
-            ("FIND-ALIGNMENT", "memory-safety:alignment", "bus"),
+            ("FIND-ALIGNMENT", "memory-safety:alignment", "segv"),
         ):
             with self.subTest(finding_class=finding_class):
                 report = self.make_report(

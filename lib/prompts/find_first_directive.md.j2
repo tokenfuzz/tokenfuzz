@@ -22,7 +22,7 @@ agent rotates, the iteration ends, or the testcase hits a coverage/build wall.
 
 **Required FIND content** (anything missing → not a FIND, keep as a state note):
 1. `file:function:line` (or endpoint/config key for non-code defects)
-2. Named issue class (memory-safety / auth / injection / info-disclosure / crypto / race / boundary-violation / logic / …)
+2. Named issue class — one canonical bug-class token in the `Class` field, grouped by family: {{ bug_class_menu }}. Name what the evidence establishes (`buffer-overflow` for a bounds violation of unknown direction, `toctou` for a race argued from source); `other` when nothing fits.
 3. Rationale — what is wrong, impact, caller control. A reviewer can act on it.
 
 **Skip filing** when the issue is pure correctness, data-integrity,

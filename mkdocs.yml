@@ -141,6 +141,7 @@ nav:
       - Artifact layout: reference/artifacts.md
       - Target config reference: reference/target-toml.md
       - Environment variables: reference/environment.md
+      - Bug classes: reference/bug-classes.md
       - Glossary: reference/glossary.md
       - Troubleshooting: reference/troubleshooting.md
   - Getting help: getting-help.md

@@ -254,11 +254,15 @@ For every FINDING:
 
          | Field    | Value |
          |:---------|:------|
-         | Class    | <one bug-class token, e.g. heap-buffer-overflow / use-after-free / command-injection / xss / integer-overflow / logic> |
+         | Class    | <one canonical bug-class token from the list below> |
          | Severity | <your best estimate: Critical / High / Medium / Low — rate what the evidence proves, not the bug class at its worst> |
          | File     | `<path/to/file.c>` |
          | Function | `<function_name>` |
          | Line     | <line number> |
+
+     `Class` takes exactly one token, grouped here by family:
+     {{ bug_class_menu }}. Name what the evidence establishes, not the
+     worst class it could become; `other` when nothing fits.
 
      Then, below the table, write the prose sections defined under "Report
      narrative" at the end of this prompt. The `## Fields` table is in

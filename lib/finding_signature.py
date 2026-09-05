@@ -3,11 +3,15 @@
 Every finding is reduced to a few fields parsed from its report alone, all
 deterministic and LLM-free:
 
-  class — a normalized issue class (memory-safety, auth, injection, ...).
-          Mechanism labels collapse into their consequence: any
-          "*overflow*" label (integer-overflow, buffer-overflow, ...) maps
-          to memory-safety, so a finding's mechanism and its consequence
-          form one cluster, not two.
+  class — the class family (memory-safety, auth, injection, ...) from
+          lib/bug_classes.py. Mechanism labels collapse into their
+          consequence: heap-buffer-overflow, integer-overflow and
+          use-after-free all key as memory-safety, so a finding's mechanism
+          and its consequence form one cluster, not two.
+
+  bug_class — the canonical bug class (heap-buffer-overflow, auth-bypass,
+          ...) the report or the quality gate named. Display and metrics
+          only; never part of the key.
 
   (file, line) — the source site the report pins, normalized to a
           target-relative path. The line is the discriminator that keeps a
@@ -35,133 +39,32 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import bug_classes
 import languages
 import report_identity
 
 
 # ── Class normalization ───────────────────────────────────────────
-# Reports come from two vocabularies:
-#   * Neutral 6 (from AGENTS.md): bounds / lifetime / type / size /
-#     uninit / state. All of these are sub-classes of memory-safety.
-#   * LLM "top:sub" labels: memory-safety:bounds, auth:bypass, etc.
-#
-# We collapse to a small top-level enum so the key doesn't fragment over
-# label drift ("uaf" vs "memory-safety" vs "lifetime"). The sub-label is
-# dropped from the key — two findings of one root cause at the same line
-# share the top-level class even when their sub-labels disagree, so they
-# still land in one (class, file, line) bucket.
-
-_TOP_LEVEL_CLASSES = (
-    "memory-safety",
-    "auth",
-    "injection",
-    "info-disclosure",
-    "crypto",
-    "race",
-    "boundary",
-    "deserialization",
-    "config",
-    "logic",
-    "side-channel",
-    "dos",
-    "protocol",
-    "supply-chain",
-    "other",
-)
-
-_NEUTRAL_TO_TOP = {
-    "bounds": "memory-safety",
-    "lifetime": "memory-safety",
-    "type": "memory-safety",
-    "size": "memory-safety",
-    "uninit": "memory-safety",
-    "state": "memory-safety",
-    "uaf": "memory-safety",
-    "use-after-free": "memory-safety",
-    "heap-use-after-free": "memory-safety",
-    "double-free": "memory-safety",
-    "out-of-bounds": "memory-safety",
-    "oob": "memory-safety",
-    "memory_safety": "memory-safety",
-    "memory-safety-class": "memory-safety",
-    "authz": "auth",
-    "authn": "auth",
-    "authorization": "auth",
-    "authentication": "auth",
-    "xss": "injection",
-    "sqli": "injection",
-    "sql-injection": "injection",
-    "rce": "injection",
-    "info_disclosure": "info-disclosure",
-    "info-leak": "info-disclosure",
-    "information-disclosure": "info-disclosure",
-    "toctou": "race",
-    "data-race": "race",
-    "csp-bypass": "boundary",
-    "sandbox-escape": "boundary",
-    "boundary-violation": "boundary",
-    "unsafe-deserialization": "deserialization",
-    "misconfiguration": "config",
-    "permissive-default": "config",
-    "business-logic": "logic",
-    "timing": "side-channel",
-    "algorithmic": "dos",
-    "cache-poisoning": "protocol",
-    "request-smuggling": "protocol",
-    "protocol-downgrade": "protocol",
-    "dependency-confusion": "supply-chain",
-    "supply_chain": "supply-chain",
-    "typosquat": "supply-chain",
-    "typosquatting": "supply-chain",
-}
+# Reports label the class in several vocabularies: the canonical bug classes
+# (lib/bug_classes.py), the neutral six from AGENTS.md (bounds / lifetime /
+# type / size / uninit / state), legacy "top:sub" quality-gate labels, and
+# sanitizer class names. The cluster key uses the class *family* so a finding
+# labelled by its mechanism and one labelled by its consequence at the same
+# line share one (family, file, line) bucket; the canonical class rides along
+# as the display and metrics label.
 
 
 def normalize_class(raw: str) -> str:
-    """Map any class label to a small canonical token.
+    """Map any class label to its cluster-key family.
 
     "memory-safety:bounds"      → "memory-safety"
     "state" (neutral vocab)     → "memory-safety"
+    "heap-buffer-overflow"      → "memory-safety"
     "auth:bypass"               → "auth"
-    "network:dns-response-…"    → "network"     (legacy top retained)
-    "input-validation:hostname" → "input-validation"
-    "" or None                  → "other"
-
-    Unknown labels keep their top segment instead of collapsing to "other"
-    for compatibility with older votes and hand-authored reports. Current
-    prompts constrain new model votes to ``_TOP_LEVEL_CLASSES``.
+    "toctou"                    → "race"
+    "" or None or unknown       → "other"
     """
-    if not raw:
-        return "other"
-    s = str(raw).strip().lower()
-    if not s or s in ("null", "none"):
-        return "other"
-    # "top:sub" → "top"
-    top = s.split(":", 1)[0].strip()
-    top = re.sub(r"[^a-z0-9\-]+", "-", top).strip("-")
-    if not top:
-        return "other"
-    # An overflow is a mechanism; memory-safety is its consequence. Collapse
-    # the whole "*overflow*" family (integer-overflow, buffer-overflow,
-    # stack-overflow, ...) so a finding labelled by its mechanism and one
-    # labelled by its consequence land in the same class — the single noisiest
-    # split we see between re-discoveries of one bug.
-    if "overflow" in top:
-        return "memory-safety"
-    if top in _TOP_LEVEL_CLASSES:
-        return top
-    # Neutral-6 and common synonyms
-    if top in _NEUTRAL_TO_TOP:
-        return _NEUTRAL_TO_TOP[top]
-    # Substring rescue for well-known classes (catches "memory_safety",
-    # "auth-bypass", "info_disclosure" etc.)
-    for alias, top_level in _NEUTRAL_TO_TOP.items():
-        if alias in top:
-            return top_level
-    for top_level in _TOP_LEVEL_CLASSES:
-        if top_level in top:
-            return top_level
-    # Keep the LLM's own top label — better than "other" for clustering.
-    return top
+    return bug_classes.family_of(raw)
 
 
 # ── Class extraction from a report body ────────────────────────────
@@ -549,6 +452,7 @@ def finding_signature(
     display anchors, never fused (bias-to-separate)."""
     cls_raw = llm_class or extract_class(report_text)
     cls = normalize_class(cls_raw)
+    bug_class = bug_classes.canonical_class(cls_raw)
     file, func = extract_location(report_text, target_root=target_root)
     line = extract_line(report_text)
     if file and line:
@@ -563,6 +467,7 @@ def finding_signature(
     return {
         "class": cls,
         "class_raw": cls_raw,
+        "bug_class": bug_class,
         "file": file,
         "func": func,
         "line": line,
@@ -647,7 +552,7 @@ def main(argv: list[str]) -> int:
     else:
         print(f"id        : {sig['id']}")
         print(f"cluster   : {sig['cluster']}")
-        print(f"class     : {sig['class']} (raw={sig['class_raw']!r})")
+        print(f"class     : {sig['bug_class']} (family={sig['class']}, raw={sig['class_raw']!r})")
         print(f"file      : {sig['file']}")
         print(f"func      : {sig['func']}")
         print(f"line      : {sig['line']}")

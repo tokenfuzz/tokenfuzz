@@ -118,8 +118,8 @@ duplicate.
 
 Two findings merge if they share **either** of:
 
-- **`(class, file, line)`**: the same normalized issue class at the same
-  source line;
+- **`(class, file, line)`**: the same class family at the same source
+  line;
 - **crash state**: the same normalized top stack frames, for the minority of
   findings that embed a sanitizer stack.
 
@@ -136,13 +136,16 @@ causes, and the same input always produces the same clusters.
 
 The same defect is legitimately both its *mechanism* and its *consequence*: an
 integer overflow that leads to an out-of-bounds write is filed by one reviewer
-as `integer-overflow` and by another as `memory-safety`. Left raw, that
+as `integer-overflow` and by another as `oob-write`. Left raw, that
 disagreement would split a true duplicate at one line into two clusters.
 
-So the class is **normalized before it becomes part of the key.** A canonical
-vocabulary (`memory-safety`, `auth`, `injection`, `info-disclosure`, `crypto`,
-`race`, `dos`, `logic`, and so on) and common aliases absorb label drift, and
-any `*overflow*` label folds into `memory-safety`.
+So the class is **normalized to its family before it becomes part of the
+key.** Every canonical [bug class](../reference/bug-classes.md) belongs to one
+family (`memory-safety`, `auth`, `injection`, `info-disclosure`, `crypto`,
+`race`, `dos`, `boundary`, and so on); common aliases and legacy `top:sub`
+labels resolve to a class first, and any unknown `*overflow*` label lands in
+`memory-safety`. The canonical class itself is kept as the cluster's display
+label and the metrics axis; only the family enters the key.
 
 ### Why location merges by line, never by function
 
@@ -163,8 +166,8 @@ two clusters to mentally join (cheap); wrongly merging hides a real bug
 
 ### The display label
 
-Each cluster reports a **class** (its canonical member's, normalized) for the
-table's Class column. A second display field, **`(class, file, func)`**, fills
+Each cluster reports a **class** (its canonical member's canonical bug class)
+for the table's Class column. A second display field, **`(class, file, func)`**, fills
 the Signature column when a finding has no line. It can contribute to the id,
 but it is never a merge edge.
 
@@ -174,8 +177,8 @@ but it is never a merge edge.
 
 ```text
   FIND-d  class=integer-overflow  src/calc.c:88
-  FIND-e  class=memory-safety     src/calc.c:88
-→ integer-overflow normalizes to memory-safety, so both key on
+  FIND-e  class=oob-write         src/calc.c:88
+→ both classes belong to the memory-safety family, so both key on
   (memory-safety, src/calc.c, 88) → ONE cluster. The mechanism-vs-consequence
   split is absorbed before the key is built.
 ```
@@ -183,8 +186,8 @@ but it is never a merge edge.
 **Same function, different lines: two real bugs, kept apart.**
 
 ```text
-  FIND-p1  src/parse.c:114   class=memory-safety
-  FIND-p2  src/parse.c:152   class=memory-safety
+  FIND-p1  src/parse.c:114   class=heap-buffer-overflow
+  FIND-p2  src/parse.c:152   class=heap-buffer-overflow
 → same file and function, but different lines → TWO clusters. Merging on
   file:func would have fused two distinct bugs; the line keeps them apart.
 ```
@@ -201,7 +204,7 @@ but it is never a merge edge.
 **A siteless, stackless finding stays its own cluster.**
 
 ```text
-  FIND-z  class=config   (no file/line, no stack)
+  FIND-z  class=cors-misconfig   (no file/line, no stack)
 → nothing to key on but the title → a singleton, never force-merged.
 ```
 

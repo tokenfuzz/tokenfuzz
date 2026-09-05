@@ -22,4 +22,5 @@ output/<target>/<backend>/logs/
 | [Target config reference](target-toml.md) | Every supported `target.toml` field, token, default, and path rule. |
 | [Environment variables](environment.md) | The small set of operator overrides: worker capacity, spend ceilings, backend and model paths, local endpoints, LLVM, and one-off probe selection. |
 | [Troubleshooting](troubleshooting.md) | Symptom-indexed fixes for preflight, target config, backend auth, missing results, triage rejects, and logs. |
+| [Bug classes](bug-classes.md) | The canonical class vocabulary findings are labelled, clustered, counted, and scored with, and what each maps to. |
 | [Glossary](glossary.md) | Shared vocabulary for the audit lifecycle, artifacts, triage, strategies, and harness internals. |

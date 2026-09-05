@@ -2654,10 +2654,12 @@ Generated score text.
         def klass_of(directory: Path) -> str:
             return triage._finding_review_rank(directory)[0]
 
-        # Every class the cell filed appears in the first three reviewed.
+        # Every class the cell filed appears in the first three reviewed. Lanes
+        # are canonical classes (lib/bug_classes.py): the neutral `uninit` and
+        # the bare `overflow` resolve to theirs, and an unknown label is `other`.
         self.assertEqual(
             {klass_of(directory) for directory in ordered[:3]},
-            {"uninit", "overflow", "credential"},
+            {"uninitialized-read", "buffer-overflow", "other"},
         )
 
     def test_review_order_puts_the_settleable_report_first(self) -> None:

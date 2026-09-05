@@ -100,6 +100,12 @@ boundary violation, not attacker reachability, which decides *reportability*
 instead: a crash whose trigger needs a control outside `attacker_controls`
 stays here as `not-reportable`.
 
+**Bug class.** The canonical token a finding's `Class` field carries, from
+the [bug class reference](bug-classes.md): the vocabulary public disclosure
+ledgers use (`heap-buffer-overflow`, `auth-bypass`, `ssrf`, …) plus a few
+harness-native classes. Each class belongs to one *family*, which is what
+finding clusters key on.
+
 **Finding (`findings/FIND-*`).** A filed security report naming a concrete
 location, issue class, and reviewer-actionable rationale. It may or may not
 have a reproducer; validation determines whether the filed report becomes a

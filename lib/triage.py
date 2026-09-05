@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import benchmark
+import bug_classes
 import cluster_common
 import crash_artifacts
 import crash_bundle
@@ -3169,7 +3170,9 @@ def _quality_vote(
     report_text: str, timeout: int,
     usage_index: str | os.PathLike[str] | None = None,
 ) -> dict | None:
-    prompt = render_template("triage_find_quality.md.j2", {"body": report_text})
+    prompt = render_template("triage_find_quality.md.j2", {
+        "body": report_text, "bug_class_menu": bug_classes.prompt_menu(),
+    })
     return llm_decide.llm_decide(
         "find_quality", "accept,reason,class,severity", prompt, timeout,
         usage_index=usage_index,
@@ -3270,9 +3273,9 @@ def _batch_quality_votes(
         if _quality_terminal(payload, quorum, accept_quorum):
             reports.pop(directory, None)
     active = set(reports)
-    instructions = render_template("triage_find_quality.md.j2", {"body": ""}).split(
-        "Output a single JSON object", 1,
-    )[0]
+    instructions = render_template("triage_find_quality.md.j2", {
+        "body": "", "bug_class_menu": bug_classes.prompt_menu(),
+    }).split("Output a single JSON object", 1)[0]
 
     def unconditional_rounds(directory: Path) -> int:
         """Votes this report needs before any verdict is even possible.
@@ -4175,7 +4178,9 @@ def _finding_review_rank(directory: Path) -> tuple[str, int, str]:
         r"^(?:Class\s*:\s*|\|\s*Class\s*\|\s*)([^|\n]+)",
         text, re.IGNORECASE | re.MULTILINE,
     )
-    klass = " ".join((match.group(1) if match else "").split()).lower()
+    # Canonical class, so one lane holds every spelling of a class rather than
+    # one lane per label variant.
+    klass = bug_classes.canonical_class(match.group(1) if match else "")
     missing = len(_missing_reach_fields(text))
     return klass, missing, directory.name
 

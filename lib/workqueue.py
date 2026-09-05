@@ -3207,10 +3207,11 @@ def is_active_hypothesis_status(status: str) -> bool:
 
 
 # Canonical hypothesis bug-class taxonomy (the sanitizer-oriented `diagnostic`
-# field). This is the sink axis — distinct from bin/severity's security-impact
-# primitive classes (heap_write, uaf_read, …), which score an already-confirmed
-# crash. It backs bin/state add-hyp's --diagnostic choices (a human-input
-# guardrail); keep in sync with bin/probe / safety_framing.
+# field). This is the sink axis — distinct from the finding bug classes in
+# lib/bug_classes.py, which label a filed report, and from bin/severity's
+# security-impact primitive classes (heap_write, uaf_read, …), which score an
+# already-confirmed crash. It backs bin/state add-hyp's --diagnostic choices (a
+# human-input guardrail); keep in sync with bin/probe / safety_framing.
 HYPOTHESIS_DIAGNOSTIC_CATEGORIES = ("bounds", "lifetime", "type", "size", "uninit", "state")
 
 

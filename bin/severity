@@ -34,6 +34,7 @@ sys.path.insert(0, str(HERE.parent / "lib"))
 
 import cvss4  # noqa: E402
 import crash_bundle  # noqa: E402
+import bug_classes  # noqa: E402
 import crash_artifacts  # noqa: E402
 import report_identity  # noqa: E402
 import severity_receipt  # noqa: E402
@@ -139,6 +140,10 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     "null_deref":        ("N", "N", "H", "N", "N", "N", None),
     "stack_exhaustion":  ("N", "N", "H", "N", "N", "N", None),
     "bus":               ("N", "N", "H", "N", "N", "N", None),
+    # A source-argued fault at an unknown address: the process dies, nothing
+    # more is established. Sanitizer-observed SEGVs classify by address into
+    # null_deref / wild_read / wild_write above and never land here.
+    "segv":              ("N", "N", "H", "N", "N", "N", None),
     # OOM exploitation is inherently conditional on the allocator actually
     # being in a failing state (memory pressure / a failing hook) — a
     # precondition outside the attacker's byte control — so AT:P, the same
@@ -177,6 +182,18 @@ CVSS4_CLASS: dict[str, tuple[str, str, str, str, str, str, str | None]] = {
     "open_redirect":     ("N", "N", "N", "L", "N", "N", None),
     "csrf":              ("N", "L", "N", "N", "N", "N", None),
     "crypto_weakness":   ("H", "N", "N", "N", "N", "N", "P"),    # exploitation conditional
+    # Accepting an unverified or forged certificate hands a network-position
+    # attacker both directions of the channel; holding that position is the
+    # precondition → AT:P.
+    "improper_cert_validation": ("H", "H", "N", "N", "N", "N", "P"),
+    # A forged or unverified signature is accepted: the integrity the signature
+    # guaranteed is gone; it discloses nothing by itself.
+    "signature_bypass":  ("N", "H", "N", "N", "N", "N", None),
+    # Gaining a higher privilege level on the vulnerable system is full CIA
+    # there; the subsequent system is untouched (a sandbox escape is scored
+    # below). Distinct from authz_bypass, which reads or edits what a peer
+    # principal owns without becoming a more privileged one.
+    "privilege_escalation": ("H", "H", "H", "N", "N", "N", None),
     "injection":         ("L", "L", "N", "N", "N", "N", None),
     # A sandbox/VM/interpreter escape fully compromises both the sandboxed
     # vulnerable system and the escaped-to host (the subsequent system).
@@ -243,7 +260,7 @@ NON_SHIPPING_SURFACES = frozenset({"dev_tool", "internal"})
 # accumulating resource cost. Resource-exhaustion DoS that grows across
 # requests (oom, memory_leak) is deliberately excluded — its recovery is not
 # automatic and may need operator action (R:U).
-TRANSIENT_CRASH_PRIMITIVES = frozenset({"stack_exhaustion", "null_deref", "bus"})
+TRANSIENT_CRASH_PRIMITIVES = frozenset({"stack_exhaustion", "null_deref", "bus", "segv"})
 
 _SEVERITY_RANK = {"None": 0, "Unknown": 0, "Needs review": 0, "Low": 1, "Medium": 2,
                   "High": 3, "Critical": 4}
@@ -1275,7 +1292,7 @@ def _detect_primitive(report_text: str) -> tuple[str, str]:
         return "null_deref", "null/SEGV (near-null address)"
 
     # Non-memory-safety crashes (DoS-shaped).
-    if "null deref" in t or re.search(r"\bsegv\b", t) or "null pointer" in t:
+    if re.search(r"\bnull[- ]deref|\bsegv\b|\bnull pointer\b", t):
         return "null_deref", "null/SEGV"
     if re.search(r"\bbus\b", t) or "sigbus" in t:
         return "bus", "BUS"
@@ -1333,7 +1350,8 @@ _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # RCE-shaped
     (re.compile(r"\b(?:os|shell|command)[- ]?injection\b"),
      "command_injection", "command injection"),
-    (re.compile(r"\barbitrary code execution\b|\brce\b|\bremote code execution\b"),
+    (re.compile(r"\barbitrary code execution\b|\brce\b|\bremote code execution\b|"
+                r"\bcode[- ]injection\b"),
      "code_execution", "code execution"),
     (re.compile(r"\b(?:insecure )?deserialization\b|\bunsafe deserialization\b|"
                 r"\bpickle deserialization\b|\bunserialize\b"),
@@ -1343,12 +1361,14 @@ _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     (re.compile(r"\bserver[- ]side template injection\b|\bssti\b|\btemplate injection\b"),
      "ssti", "server-side template injection"),
     # Auth / access control
-    (re.compile(r"\bauthentication bypass\b|\bauthn[- ]bypass\b|\blogin bypass\b|"
+    (re.compile(r"\bauthentication bypass\b|\bauth(?:n)?[- ]bypass\b|\blogin bypass\b|"
                 r"\bsession (?:fixation|hijack(?:ing)?)\b"),
      "authn_bypass", "authentication bypass"),
+    (re.compile(r"\bprivilege[- ]escalation\b|\bprivesc\b"),
+     "privilege_escalation", "privilege escalation"),
     (re.compile(r"\bauthorization bypass\b|\bauthz[- ]bypass\b|"
-                r"\bprivilege escalation\b|\baccess[- ]control bypass\b|"
-                r"\bbroken access control\b"),
+                r"\baccess[- ]control[- ]bypass\b|"
+                r"\bbroken[- ]access[- ]control\b"),
      "authz_bypass", "authorization bypass"),
     (re.compile(r"\b(?:insecure direct object reference|idor)\b"),
      "idor", "insecure direct object reference"),
@@ -1365,7 +1385,7 @@ _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
      "arbitrary_file_write", "arbitrary file write"),
     (re.compile(r"\barbitrary file (?:read|disclosure)\b"),
      "arbitrary_file_read", "arbitrary file read"),
-    (re.compile(r"\b(?:path|directory) traversal\b"),
+    (re.compile(r"\b(?:path|directory)[- ]traversal\b"),
      "path_traversal", "path traversal"),
     (re.compile(r"\b(?:xml external entity|xxe)\b"),
      "xxe", "XML external entity"),
@@ -1384,8 +1404,20 @@ _WEB_VULN_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
     # Misc
     (re.compile(r"\b(?:redos|regex(?:p)? dos|catastrophic backtracking)\b"),
      "regex_dos", "regex DoS"),
+    (re.compile(r"\bimproper[- ]cert(?:ificate)?[- ]validation\b|"
+                r"\bcert(?:ificate)?[- ](?:validation|verification|pinning) "
+                r"(?:bypass(?:ed)?|disabled|missing|skipped)\b|"
+                r"\bhostname verification (?:is |was )?"
+                r"(?:disabled|skipped|bypassed|missing|omitted)\b|"
+                r"\b(?:skips?|disables?|omits?) hostname verification\b|"
+                r"\b(?:tls|ssl) (?:certificate )?verification "
+                r"(?:bypass(?:ed)?|disabled|skipped)\b"),
+     "improper_cert_validation", "improper certificate validation"),
+    (re.compile(r"\bsignature[- ](?:verification[- ])?(?:bypass|forgery|forged)\b"),
+     "signature_bypass", "signature bypass"),
     (re.compile(r"\bweak (?:hash|crypto|cipher|prng|rng)\b|\binsecure (?:random|cipher|hash)\b|"
-                r"\bbroken (?:cryptography|crypto|cipher|hash)\b"),
+                r"\bbroken (?:cryptography|crypto|cipher|hash)\b|"
+                r"\bcrypto(?:graphic)?[- ]failure\b"),
      "crypto_weakness", "weak/broken cryptography"),
     # Generic injection fallback (only when explicitly named — see anchor)
     (re.compile(r"\b(?:crlf|header|http header|response splitting|xpath|ldap|nosql)[- ]?injection\b"),
@@ -1509,85 +1541,95 @@ _NARRATIVE_ONLY_PRIMITIVES = frozenset({
     "path_traversal", "arbitrary_file_read", "arbitrary_file_write", "xxe",
     "secrets_exposure", "prototype_pollution", "xss", "open_redirect",
     "csrf", "regex_dos", "crypto_weakness", "injection",
+    "improper_cert_validation", "signature_bypass", "privilege_escalation",
     "protocol_state", "dos_amplification", "logic_regression",
     "race_condition",
 })
 
 
-# The finding-quality gate emits a free-form but structured ``top:sub`` class.
-# Severity owns the one canonical translation from that schema to CVSS impact
-# primitives. Exact subclasses come first; only broad classes with one
-# conservative impact shape receive a fallback. Ambiguous labels stay
-# review-needed instead of being forced into a score.
-_VALIDATED_CLASS_PRIMITIVES = {
-    "boundary:context-confusion": "logic_regression",
-    "boundary:arbitrary-file-write": "arbitrary_file_write",
-    "boundary:path-traversal": "path_traversal",
-    "boundary:path-traversal-read": "arbitrary_file_read",
-    "boundary:path-traversal-write": "arbitrary_file_write",
-    "boundary:resource-substitution": "logic_regression",
-    "boundary:sandbox-escape": "sandbox_escape",
-    "boundary:uri-filter-bypass": "path_traversal",
-    "deserialization:unsafe": "deserialization",
-    "dos:amplification": "dos_amplification",
-    "dos:crash": "dos_amplification",
-    "dos:decompression": "dos_amplification",
-    "dos:hash-collision": "dos_amplification",
-    "dos:memory-leak": "memory_leak",
-    "dos:regex-complexity": "regex_dos",
-    "dos:resource-amplification": "dos_amplification",
-    "dos:resource-exhaustion": "dos_amplification",
-    "dos:stack-exhaustion": "stack_exhaustion",
-    "info-disclosure:local-file": "info_leak",
-    "info-disclosure:arbitrary-file-read": "arbitrary_file_read",
-    "info-disclosure:path-traversal": "path_traversal",
-    "info-disclosure:path-traversal-read": "arbitrary_file_read",
-    "info-disclosure:xxe": "xxe",
-    "injection:code-execution": "code_execution",
-    "injection:command": "code_execution",
-    "injection:mutation-xss": "xss",
-    "injection:python-code": "code_execution",
-    "injection:terminal": "injection",
-    "injection:terminal-escape": "injection",
-    "logic:identifier-truncation": "logic_regression",
-    "logic:validation-bypass": "logic_regression",
-    "memory-safety:bounds": "heap_read_small",
-    "memory-safety:allocator-mismatch": "allocator_mismatch",
-    "memory-safety:alignment": "bus",
-    "memory-safety:integer-overflow": "integer_overflow",
-    "memory-safety:lifetime": "uaf_read",
-    "memory-safety:null-deref": "null_deref",
-    "memory-safety:type-confusion": "type_confusion",
-    "memory-safety:uninit": "info_leak",
-    "memory-safety:use-after-free": "uaf_read",
-    "race:resource-selection": "protocol_state",
-    # Historical accepted labels from open-vocabulary quality votes. These are
-    # exact consequence-bearing aliases; broad filesystem/integrity fallbacks
-    # would be ambiguous and therefore remain intentionally absent.
-    "file-write:path-traversal": "arbitrary_file_write",
-    "filesystem:path-traversal-read": "arbitrary_file_read",
-    "filesystem:path-traversal-write": "arbitrary_file_write",
-    "integrity:path-traversal": "arbitrary_file_write",
+# The finding-quality gate names one canonical bug class (lib/bug_classes.py).
+# Severity owns the one translation from that vocabulary to CVSS impact
+# primitives. A source-argued class is scored at the impact its name
+# establishes and no higher: a bounds violation of unknown direction is the
+# small-read tier, a class the reviewers spelled as a write is the write tier.
+# Classes whose impact varies with deployment stay review-needed ("") rather
+# than being forced into a score.
+_CLASS_PRIMITIVES: dict[str, str] = {
+    "heap-buffer-overflow": "heap_read_small",
+    "stack-buffer-overflow": "stack_read",
+    "global-buffer-overflow": "global_read",
+    "buffer-overflow": "heap_read_small",
+    "oob-read": "heap_read_small",
+    "oob-write": "heap_write",
+    "arbitrary-write": "wild_write",
+    "off-by-one": "heap_read_small",
+    "use-after-free": "uaf_read",
+    "double-free": "double_free",
+    "invalid-free": "allocator_mismatch",
+    "type-confusion": "type_confusion",
+    "integer-overflow": "integer_overflow",
+    "integer-underflow": "integer_overflow",
+    "null-deref": "null_deref",
+    "segv": "segv",
+    "uninitialized-read": "info_leak",
+    "stack-overflow": "stack_exhaustion",
+    "denial-of-service": "dos_amplification",
+    "uncaught-exception": "dos_amplification",
+    "sql-injection": "sqli",
+    "command-injection": "command_injection",
+    "code-injection": "code_execution",
+    "rce": "code_execution",
+    "ssti": "ssti",
+    "xss": "xss",
+    "xxe": "xxe",
+    "deserialization": "deserialization",
+    "prototype-pollution": "prototype_pollution",
+    "auth-bypass": "authn_bypass",
+    "session-fixation": "authn_bypass",
+    "broken-access-control": "authz_bypass",
+    "idor": "idor",
+    "confused-deputy": "authz_bypass",
+    "privilege-escalation": "privilege_escalation",
+    "csrf": "csrf",
+    "crypto-failure": "crypto_weakness",
+    "improper-cert-validation": "improper_cert_validation",
+    "signature-bypass": "signature_bypass",
+    "info-disclosure": "info_leak",
+    "toctou": "race_condition",
+    # compute_severity redirects a source-only data_race to race_condition.
+    "data-race": "data_race",
+    "path-traversal": "path_traversal",
+    "symlink-following": "path_traversal",
+    "arbitrary-file-write": "arbitrary_file_write",
+    "ssrf": "ssrf",
+    "open-redirect": "open_redirect",
+    "sandbox-escape": "sandbox_escape",
+    "logic-error": "logic_regression",
+    # Review-needed: the impact depends on what the misconfiguration exposes.
+    "cors-misconfig": "",
+    "other": "",
+}
+
+# A label that pins only the family (lib/bug_classes.py FAMILIES) scores when
+# the family has one conservative impact shape; memory-safety, auth, race,
+# boundary and config do not, so those stay review-needed.
+_FAMILY_PRIMITIVES: dict[str, str] = {
+    "dos": "dos_amplification",
+    "info-disclosure": "info_leak",
+    "injection": "injection",
+    "logic": "logic_regression",
+    "crypto": "crypto_weakness",
+    "deserialization": "deserialization",
 }
 
 
 def _primitive_from_validated_class(value: object) -> str:
-    if not isinstance(value, str):
+    if not isinstance(value, str) or not value.strip():
         return ""
-    label = value.strip().lower().replace("_", "-")
-    if not label:
-        return ""
-    exact = _VALIDATED_CLASS_PRIMITIVES.get(label)
-    if exact:
-        return exact
-    return {
-        "dos": "dos_amplification",
-        "info-disclosure": "info_leak",
-        "injection": "injection",
-        "logic": "logic_regression",
-        "crypto": "crypto_weakness",
-        "deserialization": "deserialization",
-    }.get(label.split(":", 1)[0], "")
+    label = bug_classes.canonical_class(value)
+    if label in _CLASS_PRIMITIVES:
+        return _CLASS_PRIMITIVES[label]
+    return _FAMILY_PRIMITIVES.get(label, "")
 
 
 def _accepted_finding_primitive(report_dir: Path) -> tuple[str, str]:

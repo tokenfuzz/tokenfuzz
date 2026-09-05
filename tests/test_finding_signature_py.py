@@ -2,7 +2,7 @@
 """Regression tests for lib/finding_signature.py.
 
 Exercises:
-  * normalize_class — neutral vocab, "top:sub" labels, *overflow* → memory-safety
+  * normalize_class — canonical classes, neutral vocab, legacy "top:sub" labels → family
   * extract_class   — every layout we've seen in real reports
   * extract_location — explicit Location:, inline file:func:line, no func
   * extract_line — | Line | Fields row, inline fallback, none → ""
@@ -59,24 +59,31 @@ assert_eq("race", fs.normalize_class("toctou"), "toctou → race")
 assert_eq("boundary", fs.normalize_class("boundary:csp-bypass"), "boundary:csp-bypass")
 assert_eq("config", fs.normalize_class("config:permissive-default"), "config")
 assert_eq("logic", fs.normalize_class("logic:business-rule"), "logic")
-assert_eq("side-channel", fs.normalize_class("side-channel:cache-timing"), "side-channel")
+# A side channel is scored and clustered by what it discloses; request
+# smuggling, cache poisoning and supply-chain confusion have no impact shape
+# of their own and land in `other`, as the disclosure dashboard files them.
+assert_eq("info-disclosure", fs.normalize_class("side-channel:cache-timing"),
+          "side-channel folds into info-disclosure")
 assert_eq("dos", fs.normalize_class("dos:algorithmic"), "dos:algorithmic")
-assert_eq("protocol", fs.normalize_class("protocol:request-smuggling"), "protocol top-level")
-assert_eq("protocol", fs.normalize_class("cache-poisoning"), "protocol alias")
-assert_eq("supply-chain", fs.normalize_class("supply-chain:dependency-confusion"),
-          "supply-chain top-level")
-assert_eq("supply-chain", fs.normalize_class("typosquatting"), "supply-chain alias")
+assert_eq("other", fs.normalize_class("protocol:request-smuggling"), "protocol → other")
+assert_eq("other", fs.normalize_class("cache-poisoning"), "cache-poisoning → other")
+assert_eq("other", fs.normalize_class("supply-chain:dependency-confusion"),
+          "supply-chain → other")
 # Any *overflow* label is a memory-safety mechanism — collapse the whole family
 # so a finding's mechanism and its consequence cluster together.
 assert_eq("memory-safety", fs.normalize_class("integer-overflow"), "integer-overflow → memory-safety")
 assert_eq("memory-safety", fs.normalize_class("buffer-overflow"), "buffer-overflow → memory-safety")
-assert_eq("memory-safety", fs.normalize_class("stack-overflow"), "stack-overflow → memory-safety")
+# ASan's `stack-overflow` is recursion: bin/severity scores it as stack
+# exhaustion, so it clusters with the availability family, not bounds.
+assert_eq("dos", fs.normalize_class("stack-overflow"), "stack-overflow → dos")
 assert_eq("memory-safety", fs.normalize_class("integer-overflow:arithmetic"),
           "integer-overflow:sub → memory-safety")
-assert_eq("network", fs.normalize_class("network:dns-response-validation"),
-          "legacy top retained (network)")
-assert_eq("input-validation", fs.normalize_class("input-validation:hostname"),
-          "legacy top retained (input-validation)")
+# A legacy top that names no family or class is `other`: keeping an open
+# vocabulary here is what let one defect fragment across label spellings.
+assert_eq("other", fs.normalize_class("network:dns-response-validation"),
+          "unknown legacy top → other")
+assert_eq("other", fs.normalize_class("input-validation:hostname"),
+          "unknown legacy top → other")
 assert_eq("other", fs.normalize_class(""), "empty → other")
 assert_eq("other", fs.normalize_class(None), "None → other")
 assert_eq("other", fs.normalize_class("null"), "literal 'null' → other")
@@ -389,6 +396,10 @@ ok(sig_title["key"][2].startswith("csp-allows"),
 # Class extracted from LLM cache overrides extract_class.
 sig_class_override = fs.finding_signature(text_loc, llm_class="logic:override")
 assert_eq("logic", sig_class_override["class"], "LLM class overrides report class")
+assert_eq("logic-error", sig_class_override["bug_class"], "canonical class from the LLM label")
+sig_canonical = fs.finding_signature(text_loc, llm_class="memory-safety:lifetime")
+assert_eq("use-after-free", sig_canonical["bug_class"], "legacy sub-label → canonical class")
+assert_eq("memory-safety", sig_canonical["class"], "…while the key still uses the family")
 
 
 # ── Same site → same key; different site → different key ───────────

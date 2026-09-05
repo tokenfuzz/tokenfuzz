@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import audit_helpers
+import bug_classes
 import cluster_common
 import crash_artifacts
 import crash_bundle
@@ -1276,9 +1277,11 @@ def confirmed_finding_class_histogram(
     nothing and gates nothing.
 
     The reviewed class from the quality gate is preferred over the report's own
-    free-text field, which varies per report for the same defect. A finding
-    with neither is counted under its own name, so it reads as its own class
-    rather than merging with every other unlabelled finding.
+    free-text field, which varies per report for the same defect. Either label
+    is folded to its canonical bug class (lib/bug_classes.py) first, so
+    ``memory-safety:bounds`` and ``buffer-overflow`` are one class, not two. A
+    finding with neither is counted under its own name, so it reads as its own
+    class rather than merging with every other unlabelled finding.
     """
     classes: dict[str, int] = {}
     for name in names:
@@ -1310,7 +1313,10 @@ def confirmed_finding_class_histogram(
                 )
                 value = match.group(1) if match else ""
         normalized = " ".join(value.split()).lower()
-        key = normalized if normalized and normalized not in {"—", "-"} else name
+        key = (
+            bug_classes.canonical_class(normalized)
+            if normalized and normalized not in {"—", "-"} else name
+        )
         classes[key] = classes.get(key, 0) + 1
     return classes
 

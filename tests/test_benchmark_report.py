@@ -176,12 +176,20 @@ class BenchmarkReportTests(unittest.TestCase):
             "the attacker controls the **input**, not your command",
             # Shared bug contract: resource exhaustion needs amplification.
             "resource exhaustion you cannot size",
+            # The `Class` field takes the same closed canonical vocabulary the
+            # harness prompt and the quality gate use, so class breadth is a
+            # measurement, never a prompt artifact. It labels; it does not
+            # constrain what to look for, and `other` closes it.
+            "`Class` takes exactly one token", "heap-buffer-overflow, stack-buffer-overflow",
+            "auth-bypass, broken-access-control", "; other.",
         ):
             self.assertIn(required, body)
         for forbidden in (
             "unsupported claim", "falsification attempt", "symlink facade",
-            "writable facade of", "info-leak",
-            "protocol-state", "denial-of-service",
+            "writable facade of",
+            # The search brief must not narrow FINDINGs to example classes;
+            # the class vocabulary above is a labelling contract, not a brief.
+            "logic, an injection", "info-leak", "protocol-state",
             "Mode switch after ~5 FINDs", "roughly five plausible candidates",
             # No pace or count target: it is satisfied by whichever bug shape
             # is cheapest to restate, which is never the strongest one.
@@ -725,16 +733,22 @@ class FindingClassConcentrationTests(unittest.TestCase):
         return name
 
     def test_histogram_counts_each_class_and_names_the_dominant_one(self) -> None:
+        # Three spellings of one class are one class: the histogram counts
+        # canonical bug classes, and a label that pins only a family (`auth`)
+        # counts under that family.
         names = [
             self._finding(f"FIND-{index:03d}", klass)
             for index, klass in enumerate(
-                ["dos"] * 6 + ["info-disclosure"] * 3 + ["auth"]
+                ["dos"] * 3 + ["dos:algorithmic"] * 2 + ["denial-of-service"]
+                + ["info-disclosure"] * 3 + ["auth"]
             )
         ]
         histogram = benchmark.confirmed_finding_class_histogram(
             self.findings, names,
         )
-        self.assertEqual(histogram, {"dos": 6, "info-disclosure": 3, "auth": 1})
+        self.assertEqual(
+            histogram, {"denial-of-service": 6, "info-disclosure": 3, "auth": 1},
+        )
         # The distinct-class count stays what it always was.
         self.assertEqual(
             benchmark.confirmed_finding_class_count(self.findings, names), 3,

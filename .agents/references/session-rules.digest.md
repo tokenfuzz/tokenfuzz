@@ -224,9 +224,9 @@ that does not define accepted input does not. Silence is `unspecified`.
 A FIND is ANY concrete security issue. Reproducer not required.
 
 Required: concrete location (`file:function:line` or equivalent),
-explicit issue class (memory-safety / auth / injection / info-disclosure
-/ crypto / race / boundary-violation / logic), reviewer-actionable
-rationale.
+explicit issue class (one canonical bug-class token in the `Class`
+field — the list is in the FIND section of your prompt; `other` when
+nothing fits), reviewer-actionable rationale.
 
 NOT a FIND: pure correctness / data-integrity / robustness /
 spec-deviation. Harness gate deletes non-security FINDs — don't file.

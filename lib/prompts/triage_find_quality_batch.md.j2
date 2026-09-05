@@ -4,7 +4,7 @@ result for every input id. Do not let one finding's verdict influence another.
 {{ instructions }}
 
 Output one JSON object and no prose:
-{"items":[{"id":"<input id>","accept":true,"reason":"<= 140 chars","class":"top:sub or empty","severity":"info|low|medium|high|critical or empty"}]}
+{"items":[{"id":"<input id>","accept":true,"reason":"<= 140 chars","class":"<canonical bug-class token> or empty","severity":"info|low|medium|high|critical or empty"}]}
 
 Findings:
 {{ items_json }}

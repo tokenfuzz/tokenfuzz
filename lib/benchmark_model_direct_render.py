@@ -557,6 +557,7 @@ def render(
         Config = None  # type: ignore
         load_toml_into = None  # type: ignore
         SANITIZER_RUNNER_BUILD_SYSTEMS = frozenset()  # type: ignore
+    import bug_classes  # type: ignore
     from audit_scope import non_audit_dirs_for_prompt  # type: ignore
     from prompt_render import render_template  # type: ignore
 
@@ -643,6 +644,9 @@ def render(
         # session prompt renders. Report readability must not be a
         # condition difference either.
         "report_prose": render_template("report_prose.md.j2", {}),
+        # The same canonical class vocabulary the harness prompt and the
+        # quality gate use, so class breadth is never a prompt artifact.
+        "bug_class_menu": bug_classes.prompt_menu(),
         "target_path": target_path,
         "output_dir": output_dir,
         "crash_objective": _build_crash_objective(

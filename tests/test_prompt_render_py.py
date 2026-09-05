@@ -304,10 +304,13 @@ for single_name, batch_name in SCHEMA_PAIRS:
 
 # ─── Closed class vocabulary and threat-model semantics ────────────
 print("\nclass vocabulary and threat-model semantics")
-rc, fq = render_named("triage_find_quality.md.j2", {"body": "sample finding"})
+rc, fq = render_named("triage_find_quality.md.j2", {
+    "body": "sample finding", "bug_class_menu": "memory-safety: heap-buffer-overflow; other",
+})
 ok(rc == 0, "finding-quality prompt renders")
-ok("protocol, supply-chain, other" in fq, "quality taxonomy includes protocol and supply-chain")
-ok("do not invent a new top-level" in fq, "quality taxonomy closes top-level label drift")
+ok("memory-safety: heap-buffer-overflow; other" in fq, "quality prompt carries the canonical class menu")
+ok("never force-fit a more dramatic class or invent a token" in fq,
+   "quality taxonomy closes label drift")
 # A disclosure claim that never says where the bytes come from is unfalsifiable:
 # source review can neither confirm nor refute it, so the reports that named
 # their allocation were rejected while the vague ones survived.
