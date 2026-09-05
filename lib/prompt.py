@@ -124,14 +124,17 @@ def safety_framing(context: PromptContext) -> str:
 
 # Backends whose CLI already loads the repo-root AGENTS.md as its project
 # document, so a prompt that also embeds it puts the same bytes in context
-# twice. Only codex qualifies today: `project_root_markers=[]` makes the launch
+# twice. Only codex qualifies: `project_root_markers=[]` makes the launch
 # directory its project root, and the audit launches every session with that
 # directory as cwd, so the guide is loaded before the prompt is read (measured:
 # a codex call at the repo root carries ~5.5k tokens that the same call with
-# project docs disabled does not — the size of AGENTS.md). Claude reads
-# CLAUDE.md rather than AGENTS.md and the Gemini dialects read GEMINI.md, so
-# each of those still needs the embedded copy; grok and oss are left out
-# because nothing here has measured what they load.
+# project docs disabled does not — the size of AGENTS.md). Measured with a
+# sentinel line in AGENTS.md and tools disabled, so the answer had to come
+# from context: codex answers it; claude under the audit's `--safe-mode`
+# loads neither AGENTS.md nor CLAUDE.md; gemini-cli answers only by reading
+# the file with a tool call. grok and oss could not be exercised (no
+# credentials) and are treated the same way. Every other backend therefore
+# gets the embedded copy in every session variant, not only the cold one.
 _GUIDE_AUTOLOADING_BACKENDS = frozenset({"codex"})
 
 
@@ -143,7 +146,11 @@ def guide_autoloaded(context: PromptContext) -> bool:
 def guide_section(context: PromptContext, cold: bool) -> str:
     if not context.guide_text:
         return ""
-    if cold and not guide_autoloaded(context):
+    if not guide_autoloaded(context):
+        # A session that is not cold has no memory of the guide either: it
+        # is a fresh CLI process, and its CLI does not load the file. Telling
+        # it to "follow" a document it has never seen ran 39 of 41 deep
+        # sessions on one backend without the audit contract.
         return f"\n## AGENT GUIDE\n\n{context.guide_text}\n"
     if cold:
         # Deep and compact sessions have always run on the auto-loaded copy

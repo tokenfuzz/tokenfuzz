@@ -205,8 +205,9 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         # Codex loads the repo-root AGENTS.md itself as its project document
         # (project_root_markers=[] with the launch dir as cwd), so a cold
         # prompt that also embeds the guide replays the same bytes in every
-        # request of the session. Claude reads CLAUDE.md, not AGENTS.md, so it
-        # still needs the embedded copy; deep sessions never embedded it.
+        # request of the session. No other backend loads it (claude under
+        # --safe-mode loads nothing; gemini only reads it with a tool), so
+        # every one of their session variants embeds the copy.
         marker = "GUIDE BODY MARKER app_parse child_free"
         guide = f"# Guide\n\n{marker}\n"
 
@@ -226,11 +227,16 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         for backend in ("claude", "gemini", "grok", "oss", ""):
             with self.subTest(backend=backend or "unset"):
                 self.assertIn(marker, prompt.cold_start_prompt(context(backend), 1))
-        for backend in ("codex", "claude"):
-            with self.subTest(variant="deep", backend=backend):
+        codex_deep = prompt.deep_investigation_prompt(context("codex"), 1)
+        self.assertNotIn(marker, codex_deep)
+        self.assertIn("Follow `AGENTS.md`", codex_deep)
+        for backend in ("claude", "gemini", "grok", "oss", ""):
+            with self.subTest(variant="deep", backend=backend or "unset"):
                 deep = prompt.deep_investigation_prompt(context(backend), 1)
-                self.assertNotIn(marker, deep)
-                self.assertIn("Follow `AGENTS.md`", deep)
+                self.assertIn(marker, deep)
+                self.assertNotIn("Follow `AGENTS.md`", deep)
+            with self.subTest(variant="compact", backend=backend or "unset"):
+                self.assertIn(marker, prompt.compact_fresh_prompt(context(backend), 1))
 
     def test_compact_prompt_defers_to_the_resumed_cards_strategy_gate(self) -> None:
         compact = prompt.compact_fresh_prompt(self.context(), 1)
