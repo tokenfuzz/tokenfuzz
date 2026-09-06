@@ -70,6 +70,7 @@ SCRIPT_ROOT = Path(os.environ.get("SCRIPT_ROOT") or SCRIPT_DIR.parent)
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import benchmark as B  # noqa: E402  (runtime sys.path adjustment)
+import benchmark_page  # noqa: E402
 import target_profile  # noqa: E402
 
 # Run-level subtrees / files never shipped, plus each crash dir's internal
@@ -245,8 +246,10 @@ def rebuild_crosstab(staging: Path) -> Path:
     crosstab_md = staging / "benchmark-result.md"
     with B._render_relative_to(staging):
         md = B.crosstab(staging)
-    crosstab_md.write_text(md, encoding="utf-8")
-    render_html_sibling(crosstab_md)
+        crosstab_md.write_text(md, encoding="utf-8")
+        # the result page links into pool/ trees the same way, so it stays
+        # portable once the bundle is unzipped
+        benchmark_page.write(staging, crosstab_md.with_suffix(".html"))
     return crosstab_md
 
 

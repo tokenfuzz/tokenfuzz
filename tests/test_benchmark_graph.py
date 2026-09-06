@@ -9,9 +9,7 @@ A graph that disagrees with the table beside it is worse than no graph.
 from __future__ import annotations
 
 import json
-import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -379,124 +377,6 @@ class RejectedApproximationTests(unittest.TestCase):
         series = self._series(upper_bound=True)
         self.assertTrue(series["rejected_upper_bound"])
         self.assertTrue(series["approx_timing"])
-
-
-class RenderTests(unittest.TestCase):
-    def _data(self) -> dict:
-        return {
-            "target_groups": [{"target": "sample", "target_sha": "abc1234"}],
-            "series": [{
-                "target": "sample", "target_sha": "abc1234", "backend": "codex",
-                "model": "gpt-5.6-sol",
-                "condition": "harness", "run_id": "20260101-000000",
-                "version": "deadbee", "replicates": 2, "wall_h": 3.0,
-                "find": {"accepted": 2, "rejected": 5, "medium_plus": 1,
-                         "accepted_times": [0.5, 1.5],
-                         "accepted_sites": ["src/app_parse.c:91", "src/app_io.c:12"],
-                         "rejected_times": [0.2, 0.3],
-                         "rejected_upper_bound": True},
-                "crash": {"accepted": 0, "rejected": 0, "medium_plus": 0,
-                          "accepted_times": [], "accepted_sites": [],
-                          "rejected_times": []},
-            }],
-        }
-
-    def test_empty_data_renders_nothing(self) -> None:
-        self.assertEqual(benchmark_graph.render({"series": []}), "")
-
-    def test_row_label_uses_the_model_name(self) -> None:
-        # the row is named by the model that ran it; the backend is only the
-        # fallback for runs recorded before the model was captured
-        html = benchmark_graph.render(self._data())
-        self.assertIn('"model":"gpt-5.6-sol"', html)
-        self.assertIn("r.model||r.backend", html)
-
-    def test_curve_runs_flat_to_the_cell_wall(self) -> None:
-        # a cell that stops finding early kept auditing to its wall; the curve
-        # must carry the count flat to wall_h, not stop at the last discovery
-        html = benchmark_graph.render(self._data())
-        self.assertIn("[[r.wall_h,end[1]]]", html)
-
-    def test_points_are_interactive(self) -> None:
-        # every point carries a hover tooltip; the fragment ships the tooltip
-        # container, the hover wiring, and the reader-facing hint
-        html = benchmark_graph.render(self._data())
-        self.assertIn("ttd-tip", html)
-        self.assertIn("mouseenter", html)
-        self.assertIn("Hover any point", html)
-
-    @unittest.skipUnless(shutil.which("node"), "node not installed")
-    def test_the_chart_script_parses(self) -> None:
-        # The chart is one inline script: a syntax slip anywhere in it silently
-        # costs the whole graph, and the surrounding page still renders fine.
-        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as script:
-            script.write(benchmark_graph._JS)
-            path = script.name
-        self.addCleanup(Path(path).unlink)
-        checked = subprocess.run(
-            ["node", "--check", path], capture_output=True, text=True, check=False)
-        self.assertEqual(checked.returncode, 0, checked.stderr)
-
-    def test_a_point_names_the_source_site_it_lands_in(self) -> None:
-        # the site travels in the payload and is read back per point, so a
-        # reader can tell what a step is about without opening the run
-        html = benchmark_graph.render(self._data())
-        self.assertIn('"accepted_sites":["src/app_parse.c:91","src/app_io.c:12"]', html)
-        self.assertIn("m.accepted_sites", html)
-        self.assertIn("sites(m,i)", html)
-        self.assertGreaterEqual(
-            html.count("sites(m,null)"), 2,
-            "model-direct and final-total aggregate points both name sites",
-        )
-        self.assertIn("its source site or sites, when known", html)
-
-    def test_metadata_is_inserted_with_text_content_only(self) -> None:
-        data = self._data()
-        data["series"][0]["model"] = '<img src=x onerror="alert(1)">'
-        data["target_groups"][0]["target"] = "<script>alert(2)</script>"
-        data["series"][0]["target"] = "<script>alert(2)</script>"
-        html = benchmark_graph.render(data)
-        self.assertNotIn("innerHTML", html)
-        self.assertIn("tip.replaceChildren", html)
-        self.assertIn("heading.textContent=title", html)
-        self.assertNotIn("<script>alert(2)</script>", html)
-
-    def test_all_supported_backends_have_distinct_colours(self) -> None:
-        html = benchmark_graph.render(self._data())
-        backends = ("codex", "claude", "gemini", "grok", "oss")
-        colours = dict(re.findall(
-            rf'({"|".join(backends)}):"(#[0-9a-fA-F]{{6}})"', html
-        ))
-        self.assertEqual(set(colours), set(backends))
-        self.assertEqual(len(set(colours.values())), len(backends))
-
-    def test_fragment_is_self_contained(self) -> None:
-        html = benchmark_graph.render(self._data())
-        self.assertIn('id="ttd-data"', html)
-        self.assertIn('id="ttd-rows"', html)
-        # No external assets — the report is opened straight off disk, often
-        # offline. (The SVG namespace URI is not a fetch, so match asset loads.)
-        for fetch in ('src="http', "src='http", 'href="http', "href='http",
-                      "@import", "fetch("):
-            with self.subTest(fetch=fetch):
-                self.assertNotIn(fetch, html)
-        self.assertIn('"rejected_upper_bound":true', html)
-        self.assertNotIn("% kept", html)
-        # the rejected magnitude lives in the chip and the crosstab; the old
-        # per-row rejected mini-strip was redundant and is gone
-        self.assertNotIn("REJECTED BY THE GATE", html)
-
-    def test_inject_places_the_graph_after_the_table(self) -> None:
-        page = (
-            "<body>\n<h1>x</h1>\n<div class=\"table-wrap\">\n<table>\n"
-            "<tr><td>1</td></tr>\n</table>\n</div>\n<p>after</p>\n</body>"
-        )
-        out = benchmark_graph.inject(page, ROOT / "does-not-exist")
-        # no runs -> unchanged, never a broken page
-        self.assertEqual(out, page)
-
-    def test_inject_is_a_noop_without_the_table_marker(self) -> None:
-        self.assertEqual(benchmark_graph.inject("<body>x</body>", ROOT), "<body>x</body>")
 
 
 if __name__ == "__main__":

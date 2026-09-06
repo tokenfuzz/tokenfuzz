@@ -263,11 +263,13 @@ differ, most visibly in egress (see
 cross-backend row as two products under their own boundaries, and compare runs
 only against runs that recorded the same profile.
 
-The root `benchmark-result.html` is the cross-backend comparison. You can open
-it while the run is going: it refreshes as cells finish, under a
-**Provisional** banner, and a cell contributes nothing until its own triage
-and validation are done. The full pooled comparison (revalidation, bundling,
-clustering) is computed once at the end.
+The root `benchmark-result.html` is the cross-backend comparison, described
+under [Reading the result page](#reading-the-result-page). You can open it
+while the run is going: it refreshes as cells finish, under a provisional
+banner, and a cell contributes nothing to the counts until its own triage and
+validation are done. The full pooled comparison (revalidation, bundling,
+clustering) is computed once at the end. `benchmark-result.md` beside it is
+the same scoreboard as a Markdown table, for terminals and diffs.
 
 Each backend also has a ledger,
 `output/benchmark/<backend>/benchmark-results.html`, with one section per run.
@@ -353,15 +355,52 @@ The count cells are links. They point into the condition-specific crash,
 finding, rejected-crash, rejected-finding, and cluster reports that produced
 the number.
 
-**Time to discovery**, below the table, plots those same numbers over time:
-one row per target revision, findings and crashes side by side. Each step is
-one deduplicated reportable result placed at the hour it was found, so the
-curve only climbs and ends exactly on the security-report count. The chip
-above each curve shows what the gate made reportable and rejected. When a
-result's discovery time cannot be recovered, the panel flags the timing as
-approximate rather than faking precision. Reportable and rejected results are
-deduplicated separately, and an `up to` rejected count is a conservative upper
-bound. Neither figure is *precision*, which needs the answer key described
+## Reading the result page
+
+`output/benchmark/benchmark-result.html` is one self-contained page over every
+run under the benchmark root. Every count on it comes from the run's
+`report.json`, so it cannot disagree with the ledger; what it adds is the
+comparison the ledger's table cannot draw. It opens from `file://`, survives
+`bin/export-benchmark`, and renders as plain tables without script.
+
+**At a glance** is one card per run: each side's distinct findings and
+crashes, its Medium-or-higher count, its top crash severity, its wall, and how
+the two sides overlap — problems only the harness reached, problems both
+reached, problems only the direct control reached. A floor or an unjudged
+remainder is carried onto the card rather than smoothed away.
+
+**Scoreboard** is the ledger table: one row per target, backend, condition,
+and run, sortable by any column, every count linked to the cluster report or
+rejected index that produced it. The labels and marks (`M+`, `classes`,
+`unjudged`, `retained`, `≥`, `up to`, `~`, `‡`) mean exactly what they mean
+in the ledger, and the page's own reading guide restates them.
+
+**Run by run** then gives each run five views of the same evidence:
+
+- *What each side found* — one dot per merged cluster: row is the bug class
+  (crashes get their own row), column is who reached it, colour is severity,
+  shape says crash or finding; rejected clusters sit in a fourth column with
+  the reviewer's reason on hover. Click a dot to open its report. A shared
+  cluster is coloured by its strongest report and names each side's own
+  severity on hover, because the aggregate credits each side for what it
+  filed.
+- *When it was found* — cumulative distinct results on the cell's clock, one
+  step per merged result at the hour it was first seen, so the curve only
+  climbs and ends exactly on the scoreboard's number; solid for the harness,
+  dashed for the control, ticks under the axis for rejected results. When a
+  discovery time cannot be recovered the panel says *timing approximate*
+  rather than faking precision.
+- *How the run thought* — the cell's own state streams in quarter-hour bins:
+  hypotheses opened per strategy lane, sanitizer probes per verdict, artifacts
+  filed and gated, and model output tokens, with the run's first filed, first
+  confirmed crash, and first admitted artifact marked. Activity stops at the
+  cell's wall; what follows is review, which the page reports as measurement.
+- *What survived review* — claimed, evidence complete, validated, reportable,
+  per side and per kind: the gap a raw count would have hidden.
+- *Where the ideas came from* and *What it took* — per-lane hypothesis yield,
+  and the efficiency medians the ledger also reports.
+
+None of these figures is *precision*, which needs the answer key described
 below.
 
 **Token usage** compares what each condition actually cost. The bold row per

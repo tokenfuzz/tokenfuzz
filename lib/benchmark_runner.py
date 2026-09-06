@@ -26,7 +26,7 @@ from pathlib import Path
 
 import audit_helpers
 import benchmark as metrics
-import benchmark_graph
+import benchmark_page
 import benchmark_model_direct_render
 import build_lease
 import build_preflight
@@ -2593,35 +2593,19 @@ def _render_root_result(bench_root: Path) -> Path:
             ) as output:
                 temporary_md = Path(output.name)
                 output.write(metrics.crosstab(bench_root))
-            temporary_html = temporary_md.with_suffix(".html")
-            render = SCRIPT_ROOT / "bin" / "render-md"
-            if render.is_file():
-                rendered = subprocess.run(
-                    [str(render), str(temporary_md), "--html", str(temporary_html),
-                     "--title", "benchmark-result"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-                if rendered.returncode or not temporary_html.is_file():
-                    raise RuntimeError("render-md did not produce benchmark-result HTML")
-                # Graph goes straight after the table it visualises. A failure
-                # here must not cost us the table: the numbers are the report.
-                try:
-                    temporary_html.write_text(
-                        benchmark_graph.inject(
-                            temporary_html.read_text(encoding="utf-8"), bench_root,
-                        ),
-                        encoding="utf-8",
-                    )
-                except Exception as exc:  # noqa: BLE001 - dashboard is best-effort
-                    log(f"WARN: time-to-discovery graph skipped: {exc}")
             temporary_md.chmod(0o644)
             os.replace(temporary_md, crosstab)
             temporary_md = None
-            if temporary_html.is_file():
-                temporary_html.chmod(0o644)
-                os.replace(temporary_html, html)
-                temporary_html = None
+            # The page reads the same report.json the Markdown does, so the two
+            # cannot disagree; it is written beside the Markdown, not derived
+            # from it, because the comparison it draws (overlap, timing,
+            # activity) has no table form. The Markdown is already in place, so
+            # a page failure costs the page and never the numbers.
+            temporary_html = crosstab.with_suffix(".html.tmp")
+            benchmark_page.write(bench_root, temporary_html)
+            temporary_html.chmod(0o644)
+            os.replace(temporary_html, html)
+            temporary_html = None
         finally:
             if temporary_md is not None:
                 temporary_md.unlink(missing_ok=True)
