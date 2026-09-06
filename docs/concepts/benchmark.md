@@ -379,6 +379,26 @@ in the ledger, and the page's own reading guide restates them.
 harness and plain model together — by Medium-or-higher problems, then by
 distinct problems, with cost and cost per confirmed result beside them.
 
+**Model versus model** is one comparison per target revision, every run of
+every model joined problem by problem:
+
+- *The race* — every condition's discovery curve on one clock, with a replay
+  slider that also drives every run section of that target.
+- *How each model behaves* — the same dimensions for every condition, each
+  bar scaled to the best value on the target in that dimension's own
+  direction: distinct problems, Medium-or-higher share, bug classes, the share
+  of claims that held up, time to the first admitted artifact, hypotheses
+  opened and the share that became artifacts, median idea lifetime,
+  subsystems explored, probes per crash, cost per confirmed result, and budget
+  spent. A dimension a condition cannot report is a dash, never a zero.
+- *Who found what* — every distinct problem any run reported, joined by the
+  clusterers' own key, against every condition: a dot with its hour for a
+  find; *looked · N* when the harness opened N hypotheses on that file and
+  filed nothing there, a miss with a trace behind it; a dash when it never
+  looked. The control leaves no trace, so its empty cell is unknowable, not a
+  miss. Clicking a row opens the problem's story across models: who found it
+  and when, and what the ones that looked and missed were thinking.
+
 **Run by run** then gives each run several views of the same evidence, and a
 **replay** control: drag the slider, or press play, and every panel in the run
 shows only what existed by that hour — the dots found so far, the curves, the

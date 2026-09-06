@@ -238,6 +238,7 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
             title = _artifact_title(run_dir / "pool" / sub / canonical) if canonical else ""
             out[kind].append({
                 "id": cid,
+                "join": _join_key(detail, kind, cid),
                 "kind": kind,
                 # crash clusters carry no finding class; they are their own row
                 "class": "sanitizer crash" if kind == "crash" else str(
@@ -255,6 +256,33 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
                 "strategy": str(detail.get("strategy") or ""),
             })
     return out
+
+
+def _join_key(detail: dict, kind: str, cluster_id: str) -> str:
+    """The identity a cluster keeps across runs of the same target revision.
+
+    It is the clusterers' own deduplication key — (class, file, line) for a
+    finding, the leading frames of the crash signature for a crash — so two
+    runs that filed the same problem join exactly where the ledger would have
+    merged them, and nowhere looser. A cluster without a key stays its own.
+    """
+    if kind == "find":
+        key = detail.get("key")
+        kind_of_key = detail.get("key_kind")
+        if not (isinstance(key, list) and len(key) == 3 and kind_of_key):
+            # older cluster files carry the location without the composed key
+            key = [detail.get("class"), detail.get("file"), detail.get("line")]
+            kind_of_key = "loc"
+        # Only a located key is a merge edge for the clusterer; a function or
+        # title anchor is where it keeps distinct problems apart, so joining
+        # on one would count two bugs in one function as one problem.
+        if kind_of_key == "loc" and key[1] and str(key[2] or "").isdigit():
+            return "find:" + "|".join(str(part) for part in key)
+    else:
+        frames = [f for f in str(detail.get("signature") or "").split(" -> ") if f][:3]
+        if frames:
+            return "crash:" + " -> ".join(frames)
+    return f"{kind}:{cluster_id}"
 
 
 def _rejected_clusters(run_dir: Path, bench_dir: Path | None) -> dict[str, list[dict]]:
@@ -555,6 +583,10 @@ def _trace(cell_dir: Path, meta: dict) -> dict | None:
         t1 = max([t0, hours(row.get("updated_at"), clamp=True) or t0] + [p["t"] for p in mine])
         status = str(row.get("status") or "").strip().upper()
         artifact = artifacts.get(hid, "")
+        outcome = _outcome(status, artifact)
+        if outcome == "open" and wall_h is not None:
+            # never resolved: it was still open when the wall ended
+            t1 = round(wall_h, 4)
         hyps.append({
             "id": hid,
             "agent": str(row.get("agent") or "?"),
@@ -565,7 +597,7 @@ def _trace(cell_dir: Path, meta: dict) -> dict | None:
             "t0": t0,
             "t1": t1,
             "status": status,
-            "outcome": _outcome(status, artifact),
+            "outcome": outcome,
             "artifact": artifact,
             "text": _clip(row.get("hypothesis"), _TEXT_CAP["hypothesis"]),
             "guard_gap": _clip(row.get("guard_gap"), _TEXT_CAP["guard_gap"]),
@@ -619,14 +651,20 @@ def _stamp_clusters(run: dict, series: dict[str, dict]) -> None:
     keeps a shared cluster at the moment either side reached it.
     """
     when: dict[str, float] = {}
-    for entry in series.values():
+    by_condition: dict[str, dict[str, float]] = {}
+    for cond, entry in series.items():
         for kind in ("find", "crash"):
             block = entry.get(kind) or {}
             for key_ids, key_times in (("accepted_ids", "accepted_times"),
                                        ("rejected_ids", "rejected_times")):
                 for cid, hours in zip(block.get(key_ids) or [], block.get(key_times) or []):
-                    if cid and (cid not in when or hours < when[cid]):
+                    if not cid:
+                        continue
+                    if cid not in when or hours < when[cid]:
                         when[cid] = hours
+                    mine = by_condition.setdefault(cid, {})
+                    if cond not in mine or hours < mine[cond]:
+                        mine[cond] = hours
     walls = [c["wall_h"] or 0.0 for c in run["conditions"]]
     wall = max(walls) if walls else None
     for bucket in (run["clusters"], run["rejected"]):
@@ -636,6 +674,8 @@ def _stamp_clusters(run: dict, series: dict[str, dict]) -> None:
                 # of its own; it lands at the wall like the padding does, so
                 # it never plays back as found before everything else
                 cluster["t"] = when.get(cluster["id"], wall if series else None)
+                # each side's own hour, for the side-by-side matrix
+                cluster["t_by"] = by_condition.get(cluster["id"], {})
 
 
 def _attention(run: dict) -> list[dict]:
@@ -668,6 +708,192 @@ def _attention(run: dict) -> list[dict]:
             slot(_subsystem(cluster["site"]))["rejected"] += 1
     return sorted(rows.values(), key=lambda r: (
         -(r["hypotheses"] + r["harness"] + r["direct"]), r["subsystem"]))
+
+
+# ── model versus model: every run of one target revision, joined problem by problem ──
+
+def _site_path(site: str) -> str:
+    return str(site or "").split(":", 1)[0].strip()
+
+
+def _same_file(problem_path: str, hyp_path: str) -> bool:
+    """Whether a hypothesis names the file a problem lives in.
+
+    Crash sites carry a bare file name from the stack frame, finding sites a
+    repo-relative path; either side may lack the directory, so a bare name
+    matches on the name alone and two full paths must agree.
+    """
+    if not problem_path or not hyp_path:
+        return False
+    if "/" in problem_path and "/" in hyp_path:
+        return problem_path == hyp_path
+    return problem_path.rsplit("/", 1)[-1] == hyp_path.rsplit("/", 1)[-1]
+
+
+def _looked(problem_path: str, traces: list[dict]) -> dict | None:
+    """The hypotheses a harness condition opened on the problem's file."""
+    hits = []
+    for trace in traces:
+        for hyp in trace["hyps"]:
+            if _same_file(problem_path, _site_path(hyp["file"])):
+                hits.append(hyp)
+    if not hits:
+        return None
+    order = {"hit": 0, "confirmed": 1, "open": 2, "refuted": 3, "blocked": 4, "dropped": 5}
+    hits.sort(key=lambda h: (order.get(h["outcome"], 9), h["t0"]))
+    return {
+        "n": len(hits),
+        # hypotheses on this file that did become artifacts — at other sites
+        # in it, since this problem's own key was not filed by this side
+        "filed_nearby": sum(h["outcome"] == "hit" for h in hits),
+        "hyps": [{"outcome": h["outcome"], "lane": h["lane"], "t0": h["t0"],
+                  "text": _clip(h["text"], 200)} for h in hits[:4]],
+    }
+
+
+def _ratio(num: float | None, den: float | None) -> float | None:
+    if num is None or not den:
+        return None
+    return round(float(num) / float(den), 3)
+
+
+def _fingerprint(cond: dict) -> dict:
+    """A condition's behaviour on dimensions that compare across models.
+
+    Every value is one the page already carries; the profile only lines them
+    up so a model that finds few problems but holds every claim, or many but
+    mostly Low, is visible as such. A dimension a condition cannot report is
+    None and stays a dash, never a zero.
+    """
+    f, c, eff = cond["find"], cond["crash"], cond["efficiency"]
+    unique = f["unique"] + c["unique"]
+    mplus = f["mplus"] + c["mplus"]
+    waterfall = [w for w in (f["waterfall"], c["waterfall"]) if w]
+    claimed = sum(w["candidates"] for w in waterfall) if waterfall else None
+    held = sum(w["reportable"] for w in waterfall) if waterfall else None
+    traces = cond.get("traces") or []
+    hyps = [h for t in traces for h in t["hyps"]]
+    probes = sum(len(h["probes"]) for h in hyps)
+    subsystems = {h["subsystem"] for h in hyps if h["subsystem"]}
+    medians = [t["median_minutes"] for t in traces if t["median_minutes"] is not None]
+    return {
+        "unique": unique if not cond["provisional"] else None,
+        "mplus_share": _ratio(mplus, unique) if not cond["provisional"] else None,
+        "classes": f["classes"] or None,
+        "held": _ratio(held, claimed),
+        "first_admitted_min": eff["first_admitted_min"],
+        "hypotheses": len(hyps) or None,
+        "hit_rate": _ratio(sum(h["outcome"] == "hit" for h in hyps), len(hyps)),
+        "idea_minutes": round(sum(medians) / len(medians), 1) if medians else None,
+        "subsystems": len(subsystems) or None,
+        "probes_per_crash": _ratio(probes, c["unique"]) if probes else None,
+        "cost_per_confirmed": eff["cost_per_confirmed"],
+        "wall_share": _ratio(cond["wall_h"], cond["budget_h"]),
+    }
+
+
+# Dimension, label, direction the reader wants, and how to print it.
+FINGERPRINT_ROWS = (
+    ("unique", "Distinct problems", "more", "int"),
+    ("mplus_share", "Medium+ share", "more", "pct"),
+    ("classes", "Bug classes", "more", "int"),
+    ("held", "Claims that held up", "more", "pct"),
+    ("first_admitted_min", "First admitted", "less", "min"),
+    ("hypotheses", "Hypotheses opened", "info", "int"),
+    ("hit_rate", "Hypotheses that became artifacts", "more", "pct"),
+    ("idea_minutes", "Median idea lifetime", "info", "min"),
+    ("subsystems", "Subsystems explored", "info", "int"),
+    ("probes_per_crash", "Probes per crash", "less", "num"),
+    ("cost_per_confirmed", "Cost per confirmed", "less", "usd"),
+    ("wall_share", "Budget spent", "info", "pct"),
+)
+
+
+def _condition_key(run: dict, cond: dict) -> str:
+    return f'{run["key"]}/{cond["token"]}'
+
+
+def _condition_name(run: dict, cond: dict) -> str:
+    who = run["model"] or run["backend"]
+    return f'{who} · {"tokenfuzz" if cond["token"] == "harness" else "direct"}'
+
+
+def _target_groups(runs: list[dict]) -> list[dict]:
+    """One comparison per target revision: its conditions and its problems.
+
+    A problem is the union of every run's reportable clusters, joined by the
+    clusterers' own key. For each condition it records whether that side found
+    it (and when), looked at its file without filing it, or never looked —
+    the three answers a raw count folds into one "did not find".
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for run in runs:
+        groups.setdefault((run["target"], run["target_sha"]), []).append(run)
+    out = []
+    for (target, sha), members in sorted(groups.items()):
+        conditions = []
+        for run in members:
+            for cond in run["conditions"]:
+                conditions.append({
+                    "key": _condition_key(run, cond),
+                    "run_key": run["key"],
+                    "run_id": run["run_id"],
+                    "backend": run["backend"],
+                    "token": cond["token"],
+                    "name": _condition_name(run, cond),
+                    "label": cond["label"],
+                    "provisional": run["provisional"],
+                    "traced": bool(cond.get("traces")),
+                    "wall_h": cond["wall_h"],
+                    "budget_h": cond["budget_h"],
+                    "find": {k: cond["find"][k] for k in ("unique", "times", "approx")},
+                    "crash": {k: cond["crash"][k] for k in ("unique", "times", "approx")},
+                    "fingerprint": _fingerprint(cond),
+                })
+        problems: dict[str, dict] = {}
+        for run in members:
+            for kind in ("find", "crash"):
+                for cluster in run["clusters"][kind]:
+                    problem = problems.setdefault(cluster["join"], {
+                        "key": cluster["join"], "kind": kind, "class": cluster["class"],
+                        "title": "", "site": "", "severity": "", "rank": 0,
+                        "found": {}, "looked": {},
+                    })
+                    if cluster["rank"] > problem["rank"] or not problem["title"]:
+                        problem["title"] = cluster["title"] or problem["title"]
+                        problem["site"] = cluster["site"] or problem["site"]
+                    if cluster["rank"] > problem["rank"]:
+                        problem["severity"], problem["rank"] = cluster["severity"], cluster["rank"]
+                    for token in cluster["conditions"]:
+                        cond = next((c for c in run["conditions"] if c["token"] == token), None)
+                        if cond is None:
+                            continue
+                        problem["found"][_condition_key(run, cond)] = {
+                            "t": (cluster.get("t_by") or {}).get(token, cluster.get("t")),
+                            # this side's own score; unscored stays unscored
+                            "severity": (cluster.get("severity_by") or {}).get(token, ""),
+                            "href": cluster["href"],
+                            "lane": cluster.get("strategy") or "",
+                            "title": cluster["title"],
+                        }
+        for problem in problems.values():
+            path = _site_path(problem["site"])
+            for run in members:
+                for cond in run["conditions"]:
+                    key = _condition_key(run, cond)
+                    if key in problem["found"] or not cond.get("traces"):
+                        continue
+                    looked = _looked(path, cond["traces"])
+                    if looked:
+                        problem["looked"][key] = looked
+        ordered = sorted(problems.values(), key=lambda p: (
+            -len(p["found"]), -p["rank"], p["kind"], p["class"], p["site"]))
+        out.append({
+            "target": target, "target_sha": sha, "key": f"{target}@{sha}",
+            "conditions": conditions, "problems": ordered,
+            "runs": len(members),
+        })
+    return out
 
 
 # ── per-condition summary ────────────────────────────────────────────────────
@@ -989,6 +1215,7 @@ def build(bench_root: Path) -> dict:
         "scorer": severity_receipt.SCORER_DECISION_VERSION,
         "lane_names": LANE_NAMES,
         "runs": runs,
+        "targets": _target_groups(runs),
     }
 
 
@@ -1036,15 +1263,15 @@ def _harness_of(run: dict) -> dict | None:
 
 def _scoreboard(runs: list[dict]) -> str:
     head = (
-        "<tr><th data-sort=\"text\">Target</th><th data-sort=\"text\">Backend</th>"
-        "<th data-sort=\"text\">Condition</th><th data-sort=\"text\">Run</th>"
+        "<tr><th data-sort=\"text\">Target · backend</th>"
+        "<th data-sort=\"text\">Condition · run</th>"
         "<th class=\"num\" data-sort=\"num\">Wall (h)</th>"
-        "<th class=\"num\" data-sort=\"num\">Replicates</th>"
+        "<th class=\"num\" data-sort=\"num\">Reps</th>"
         "<th class=\"num\" data-sort=\"num\">Rejected findings</th>"
         "<th class=\"num\" data-sort=\"num\">Security findings</th>"
         "<th class=\"num\" data-sort=\"num\">Rejected crashes</th>"
         "<th class=\"num\" data-sort=\"num\">Security crashes</th>"
-        "<th data-sort=\"num\">Top crash severity</th>"
+        "<th data-sort=\"num\">Top crash</th>"
         "<th class=\"num\" data-sort=\"num\">Input</th>"
         "<th class=\"num\" data-sort=\"num\">Output</th>"
         "<th class=\"num\" data-sort=\"num\">Cost</th></tr>"
@@ -1060,10 +1287,12 @@ def _scoreboard(runs: list[dict]) -> str:
             if run["outdated_scorers"] else "")
         conditions = run["conditions"] or [None]
         for cond in conditions:
+            identity = (f'<td data-v="{target}"><span class="tname">{target}</span> {sha}'
+                        f'<span class="tbk">{backend}</span></td>')
             if cond is None:
                 rows.append(
                     f'<tr data-run="{_e(run["key"])}" data-backend="{_e(run["backend"])}">'
-                    f'<td>{target} {sha}</td><td>{backend}</td><td>—</td><td class="mono">{run_label}</td>'
+                    + identity + f'<td>— <span class="trun">{run_label}</span></td>'
                     + "<td class=\"num\">—</td>" * 10 + "</tr>")
                 continue
             reps = cond["replicates"]
@@ -1083,12 +1312,9 @@ def _scoreboard(runs: list[dict]) -> str:
             cost_num = tokens["cost_raw"] if tokens["cost_raw"] is not None else -1
             rows.append(
                 f'<tr data-run="{_e(run["key"])}" data-backend="{_e(run["backend"])}" '
-                f'data-cond="{_e(cond["token"])}">'
-                f'<td data-v="{target}">{target} {sha}</td>'
-                f'<td data-v="{_e(run["backend"])}">{backend}</td>'
-                f'<td data-v="{_e(cond["label"])}"><span class="cond cond-{_e(cond["token"])}">'
-                f'{_e(cond["label"])}</span></td>'
-                f'<td class="mono" data-v="{_e(run["run_id"])}">{run_label}</td>'
+                f'data-cond="{_e(cond["token"])}">' + identity
+                + f'<td data-v="{_e(cond["label"])}"><span class="cond cond-{_e(cond["token"])}">'
+                f'{_e(cond["label"])}</span><span class="trun">{run_label}</span></td>'
                 f'<td class="num" data-v="{cond["wall_h"] or 0}">{_e(cond["wall_label"])}</td>'
                 f'<td class="num" data-v="{reps["done"]}">{reps_label} {" ".join(marks)}</td>'
                 f'<td class="num" data-v="{find["rejected"] if find["rejected"] is not None else -1}">'
@@ -1380,8 +1606,8 @@ def _leaderboard(runs: list[dict]) -> str:
             pending = run["provisional"]
             width = 100.0 * row["mplus"] / top
             mplus_cell = "Pending" if pending else (
-                f'<span class="mini wide"><span style="width:{width:.0f}%"></span></span> '
-                f'{row["mplus"]}')
+                f'<span class="barcell"><span class="mini wide"><span style="width:{width:.0f}%">'
+                f'</span></span> {row["mplus"]}</span>')
             cost_per = "—" if row["cost_per"] is None else f'${row["cost_per"]:,.0f}'
             body.append(
                 f'<tr data-run="{_e(run["key"])}" data-backend="{_e(run["backend"])}">'
@@ -1489,6 +1715,130 @@ def _attention_panel(run: dict) -> str:
         + "</tbody></table></div></div>")
 
 
+def _fmt_dim(value: float | None, unit: str) -> str:
+    if value is None:
+        return "—"
+    if unit == "pct":
+        return f"{value * 100:.0f}%"
+    if unit == "min":
+        return _fmt_min(value)
+    if unit == "usd":
+        return f"${value:,.0f}"
+    if unit == "int":
+        return f"{int(value)}"
+    return f"{value:g}"
+
+
+def _fingerprint_table(group: dict) -> str:
+    conditions = group["conditions"]
+    head = "".join(
+        f'<th class="num"><span class="be be-{_e(c["backend"])}">{_e(c["backend"])}</span> '
+        f'{_e(c["name"])}</th>' for c in conditions)
+    rows = []
+    for key, label, direction, unit in FINGERPRINT_ROWS:
+        values = [c["fingerprint"].get(key) for c in conditions]
+        if all(v is None for v in values):
+            continue
+        present = [v for v in values if v is not None]
+        top = max(present, default=0) or 0
+        low = min(present, default=0) or 0
+        cells = []
+        for value in values:
+            if value is None:
+                cells.append('<td class="num dim">—</td>')
+                continue
+            # the fullest bar is always the best value in the row's own direction
+            if direction == "less":
+                width = 100.0 * low / value if value else 100.0
+            else:
+                width = 100.0 * value / top if top else 0
+            cells.append(
+                f'<td class="num"><span class="barcell"><span class="mini"><span style="width:{width:.0f}%">'
+                f'</span></span> {_fmt_dim(value, unit)}</span></td>')
+        arrow = {"more": "more is better", "less": "less is better", "info": "context"}[direction]
+        rows.append(f'<tr><td>{_e(label)} <span class="dim fine">{arrow}</span></td>' + "".join(cells) + "</tr>")
+    return (
+        '<div class="tablewrap"><table class="fp"><thead><tr><th>Behaviour</th>' + head
+        + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+
+
+def _convergence(group: dict) -> str:
+    conditions = group["conditions"]
+    problems = group["problems"]
+    if not problems:
+        return '<p class="empty">No reportable problems on this target yet.</p>'
+    head = "".join(
+        f'<th><span class="be be-{_e(c["backend"])}">{_e(c["backend"])}</span> {_e(c["name"])}</th>'
+        for c in conditions)
+    rows = []
+    for index, problem in enumerate(problems):
+        cells = []
+        for cond in conditions:
+            found = problem["found"].get(cond["key"])
+            looked = problem["looked"].get(cond["key"])
+            if found:
+                sev = found["severity"].lower() if found["severity"] in _SEVERITY_RANK else "none"
+                when = "" if found["t"] is None else f'{found["t"]:.1f}h'
+                cells.append(
+                    f'<td class="cv found"><span class="dot dot-{problem["kind"]} sev-{sev} demo"></span> '
+                    f'{when}</td>')
+            elif looked:
+                nearby = f' · {looked["filed_nearby"]} filed nearby' if looked["filed_nearby"] else ""
+                cells.append(f'<td class="cv looked">looked · {looked["n"]}{nearby}</td>')
+            elif cond["traced"]:
+                cells.append('<td class="cv never">—</td>')
+            else:
+                cells.append('<td class="cv none"></td>')
+        n_found = len(problem["found"])
+        rows.append(
+            f'<tr class="prow" data-target="{_e(group["key"])}" data-problem="{index}">'
+            f'<td class="pt-cell"><span class="ptitle">{_e(_clip(problem["title"], 110) or problem["site"] or problem["key"])}</span>'
+            f'<span class="psite">{_e(problem["site"])} · {_e(problem["class"])}</span></td>'
+            f'<td>{_severity_pill(problem["severity"])}</td>' + "".join(cells)
+            + f'<td class="num">{n_found}/{len(conditions)}</td></tr>')
+    return (
+        '<div class="tablewrap"><table class="conv"><thead><tr><th>Problem</th><th>Severity</th>'
+        + head + '<th class="num">Found by</th></tr></thead><tbody>' + "".join(rows)
+        + "</tbody></table></div>")
+
+
+def _target_section(group: dict) -> str:
+    walls = [c["wall_h"] or 0 for c in group["conditions"]] + [c["budget_h"] or 0 for c in group["conditions"]]
+    wall = max(walls + [0])
+    ticks = int(round(wall * 100))
+    replay = (
+        f'<div class="replay treplay" data-target="{_e(group["key"])}" data-wall="{wall:.3f}">'
+        '<button type="button" class="play">▶ Replay every run</button>'
+        f'<input type="range" min="0" max="{ticks}" value="{ticks}" step="1" aria-label="hours into the runs">'
+        f'<span class="rt">{wall:.2f}h</span><span class="rn">whole runs</span></div>'
+        if ticks > 0 else "")
+    return (
+        f'<section class="target" id="target-{_e(_slug(group["key"]))}" data-target="{_e(group["key"])}">'
+        f'<div class="rh"><h2>{_e(group["target"])} <span class="sha">{_e(group["target_sha"][:7])}</span>'
+        f' <span class="mono dim">{group["runs"]} run{"s" if group["runs"] != 1 else ""} · '
+        f'{len(group["conditions"])} conditions</span></h2></div>'
+        '<div class="panel"><div class="pt">The race</div>'
+        '<p class="pd">Every condition of every run on this revision on one clock. Colour is the '
+        'backend, solid is tokenfuzz, dashed is the model on its own; each step is one distinct '
+        'problem that held up. Drag the slider to see what each model had found by that hour — it '
+        'also replays every run section below.</p>'
+        f'<div class="chart race" data-target="{_e(group["key"])}"></div>' + replay + "</div>"
+        '<div class="panel"><div class="pt">How each model behaves</div>'
+        '<p class="pd">The same dimensions for every condition, each bar scaled to the best on this '
+        'target. Read it as a profile, not a score: a model that files few problems but holds every '
+        'claim and one that files many mostly-Low problems are different researchers, and this is '
+        'where the difference shows. A dash is a dimension that condition cannot report, or one with nothing to divide by.</p>'
+        + _fingerprint_table(group) + "</div>"
+        '<div class="panel"><div class="pt">Who found what</div>'
+        '<p class="pd">Every distinct problem any run reported on this revision, joined by the '
+        'clusterers\' own key, against every condition. A dot is a find, with its hour; '
+        '<i>looked · N</i> means the harness opened N hypotheses on that file and did not file '
+        'this problem — a miss with a trace behind it; <i>filed nearby</i> counts the ones that '
+        'became artifacts at other sites in the same file; a dash means it never looked. The control leaves '
+        'no trace, so its empty cell is unknowable, not a miss. Click a row for the problem\'s '
+        'story across models.</p>' + _convergence(group) + "</div></section>")
+
+
 def _run_section(run: dict) -> str:
     anchor = _slug(run["key"])
     identity = " · ".join(filter(None, [
@@ -1500,7 +1850,7 @@ def _run_section(run: dict) -> str:
     ]))
     parts = [
         f'<section class="run" id="run-{_e(anchor)}" data-run="{_e(run["key"])}" '
-        f'data-backend="{_e(run["backend"])}">',
+        f'data-backend="{_e(run["backend"])}" data-target="{_e(run["target"])}@{_e(run["target_sha"])}">',
         f'<div class="rh"><h2>{_e(run["target"])} <span class="sha">{_e(run["target_sha"][:7])}</span>'
         f' <span class="be be-{_e(run["backend"])}">{_e(run["backend"])}</span>'
         f' <span class="mono dim">{_e(run["run_id"])}</span></h2><div class="ident">{identity}</div></div>',
@@ -1649,6 +1999,9 @@ def render(data: dict) -> str:
             'distinct problems. The harness and the plain model are ranked together on purpose: '
             'the question is what finds real bugs, not which product wins.</p>'
             + _leaderboard(runs) + "</section>"
+            '<section class="sec"><h2>Model versus model</h2><p class="pd">One comparison per '
+            'target revision: every run of every model, joined problem by problem.</p>'
+            + "".join(_target_section(g) for g in (data.get("targets") or [])) + "</section>"
             '<section class="sec"><h2>Scoreboard</h2><p class="pd">One row per target, backend, '
             'condition, and run; re-runs keep their own rows. Click a heading to sort; click a '
             'count to open its evidence.</p>' + _scoreboard(runs) + "</section>"
@@ -1699,7 +2052,17 @@ def _payload(data: dict) -> dict:
             "provisional": run["provisional"],
             "conditions": conditions,
         })
-    return {"runs": runs, "lane_names": data.get("lane_names") or LANE_NAMES}
+    targets = []
+    for group in data.get("targets") or []:
+        targets.append({
+            "key": group["key"], "target": group["target"],
+            "conditions": [{k: c[k] for k in ("key", "run_key", "backend", "token", "name",
+                                                "provisional", "traced", "wall_h", "budget_h",
+                                                "find", "crash")}
+                           for c in group["conditions"]],
+            "problems": group["problems"],
+        })
+    return {"runs": runs, "targets": targets, "lane_names": data.get("lane_names") or LANE_NAMES}
 
 
 def write(bench_root: Path, path: Path) -> Path:
@@ -1726,19 +2089,19 @@ _CSS = r"""
  --bg:#0d0d0d;--surf:#1a1a19;--surf2:#232321;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;
  --grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);--link:#86b6ef;
  --codex:#3987e5;--claude:#d95926;--gemini:#9085e9;--grok:#199e70;--oss:#c98500;--opencode:#d55181;
- --harness:#fff;--direct:#898781;--low:#5598e7;--none:#383835;
+ --harness:#fff;--direct:#898781;--low:#5598e7;--none:#55554f;
  --S1:#3987e5;--S2:#d95926;--S3:#199e70;--S4:#c98500;--S5:#d55181;--S6:#008300;--S7:#9085e9;--S8:#e66767}}
 :root[data-theme="dark"]{color-scheme:dark;
  --bg:#0d0d0d;--surf:#1a1a19;--surf2:#232321;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;
  --grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);--link:#86b6ef;
  --codex:#3987e5;--claude:#d95926;--gemini:#9085e9;--grok:#199e70;--oss:#c98500;--opencode:#d55181;
- --harness:#fff;--direct:#898781;--low:#5598e7;--none:#383835;
+ --harness:#fff;--direct:#898781;--low:#5598e7;--none:#55554f;
  --S1:#3987e5;--S2:#d95926;--S3:#199e70;--S4:#c98500;--S5:#d55181;--S6:#008300;--S7:#9085e9;--S8:#e66767}
 *{box-sizing:border-box}
 html{background:var(--bg)}
 body{margin:0;font:15px/1.55 var(--sans);color:var(--ink);background:var(--bg)}
 a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
-.page{max-width:1280px;margin:0 auto;padding:28px 22px 60px}
+.page{max-width:1400px;margin:0 auto;padding:28px 22px 60px}
 .mono{font-family:var(--mono);font-size:.9em}.dim{color:var(--muted)}
 .hero{padding:6px 0 18px}
 .kick{font-size:.72em;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--ink2);margin:0 0 8px}
@@ -1780,9 +2143,13 @@ span.be{display:inline-block;color:#fff;font-size:.6em;font-weight:700;padding:2
 .tablewrap{overflow-x:auto;background:var(--surf);border:1px solid var(--ring);border-radius:12px}
 table{border-collapse:collapse;width:100%;font-size:.86em}
 th,td{padding:7px 8px;text-align:left;vertical-align:top;border-bottom:1px solid var(--grid)}
-th{font-size:.78em;text-transform:uppercase;letter-spacing:.05em;color:var(--ink2);background:var(--surf2);white-space:nowrap;position:sticky;top:0}
+th{font-size:.78em;text-transform:uppercase;letter-spacing:.05em;color:var(--ink2);background:var(--surf2);position:sticky;top:0}
 th[data-sort]{cursor:pointer;user-select:none}th[data-sort]:hover{color:var(--ink)}th.sorted::after{content:" ▾";color:var(--muted)}th.sorted.asc::after{content:" ▴"}
-td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+th{white-space:normal;line-height:1.3}
+td.num .count,td.num a{white-space:normal}
+.tname{font-weight:600}.tbk,.trun{display:block;font-family:var(--mono);font-size:.78em;color:var(--muted);margin-top:2px}
+.score td:first-child{min-width:120px}.score .cond{margin-bottom:0}
 tbody tr:hover{background:var(--surf2)}tr.total td{font-weight:700;border-top:2px solid var(--axis)}
 tr[hidden]{display:none}
 .count{font-weight:700}
@@ -1840,8 +2207,16 @@ abbr.mark{text-decoration:none;cursor:help;color:var(--muted);border-bottom:1px 
 .guide summary{cursor:pointer;font-weight:700;padding:8px 0}
 .gbody{font-size:.93em;color:var(--ink2);max-width:76em}.gbody h3{font-size:.95em;color:var(--ink);margin:14px 0 4px}
 .gbody code{font-family:var(--mono);font-size:.9em;background:var(--surf2);padding:0 4px;border-radius:4px}
+.target{background:var(--surf);border:1px solid var(--ring);border-radius:16px;padding:18px 20px;margin:16px 0;scroll-margin-top:64px}
+.target[hidden]{display:none}
+.fp td:first-child{white-space:nowrap}.fine{font-size:.78em}
+.fp th,.conv th{min-width:96px}.conv .cv{white-space:normal}.conv .pt-cell{min-width:220px}
+.conv .pt-cell{min-width:260px}.ptitle{display:block;font-weight:600}.psite{display:block;font-family:var(--mono);font-size:.78em;color:var(--muted)}
+.conv .cv{font-variant-numeric:tabular-nums}.conv .looked{color:var(--ink2);font-size:.86em}.conv .never{color:var(--muted)}
+.conv .prow{cursor:pointer}.conv .prow:hover td{background:var(--surf2)}
+.conv .found .dot.demo{cursor:pointer}
 .lb{margin:10px 0 16px}.lbt{font-weight:700;margin:0 0 6px}
-.mini.wide{width:110px}
+.mini.wide{width:110px}.barcell{white-space:nowrap}
 .replay{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--surf2);border-radius:10px;padding:10px 12px}
 .replay .play{font:inherit;font-size:.86em;font-weight:700;border:1px solid var(--axis);background:var(--surf);color:var(--ink);border-radius:8px;padding:5px 12px;cursor:pointer}
 .replay input[type=range]{flex:1;min-width:200px;accent-color:var(--ink)}
@@ -2027,6 +2402,58 @@ function drawActivity(host){var run=runOf(host.dataset.run);if(!run)return;host.
   host.appendChild(s)})}
 function PROBEsum(A){var t=0;for(var k in A.probe)A.probe[k].forEach(function(x){t+=x});return t}
 function ktok(n){return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?Math.round(n/1e3)+"k":String(n)}
+// ── the race: every condition of one target on one clock ────────────────────
+function groupOf(key){for(var i=0;i<D.targets.length;i++)if(D.targets[i].key===key)return D.targets[i];return null}
+function drawRace(host){var G=groupOf(host.dataset.target);if(!G)return;var kind=host.dataset.kind||"find",cut=host.dataset.cut===""||host.dataset.cut==null?Infinity:+host.dataset.cut;
+ host.replaceChildren();
+ var seg=h("div","seg");[["find","Findings"],["crash","Crashes"]].forEach(function(k){var b=h("button",null,k[1]);b.setAttribute("aria-pressed",k[0]===kind?"true":"false");
+  b.addEventListener("click",function(){host.dataset.kind=k[0];drawRace(host)});seg.appendChild(b)});host.appendChild(seg);
+ var conds=G.conditions.filter(function(c){return !c.provisional});
+ var legend=h("div","legend");conds.forEach(function(c){var k=h("span","k"),i=h("i");i.style.borderTopColor=hue(c.backend);if(c.token!=="harness")i.className="dash";k.appendChild(i);k.appendChild(tx(c.name+" — "+c[kind].unique));legend.appendChild(k)});host.appendChild(legend);
+ var W=900,ml=46,mr=150,pw=W-ml-mr,mt=16,ph=240,H=mt+ph+50,maxY=1,maxX=.5;
+ conds.forEach(function(c){maxY=Math.max(maxY,c[kind].unique);maxX=Math.max(maxX,c.wall_h||0,c.budget_h||0);c[kind].times.forEach(function(t){maxX=Math.max(maxX,t)})});
+ var ys=nice(maxY*1.12,4,true),xs=nice(maxX*1.02,5),X=function(x){return ml+(x/xs.top)*pw},Y=function(y){return mt+ph-(y/ys.top)*ph};
+ var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"cumulative "+noun(kind,2)+" per condition"});
+ axes(s,X,Y,ys,xs,ml,mt,pw,ph,"distinct "+noun(kind,2));
+ var ends=[];
+ conds.forEach(function(c){var m=c[kind],col=hue(c.backend),direct=c.token!=="harness",pts=steps(m.times),end=pts[pts.length-1];
+  if((c.wall_h||0)>end[0]){pts=pts.concat([[c.wall_h,end[1]]]);end=pts[pts.length-1]}
+  var d=pts.map(function(p,i){return (i?"L":"M")+X(p[0]).toFixed(2)+","+Y(p[1]).toFixed(2)}).join(" ");
+  var path=el("path",{d:d,fill:"none",stroke:col,"stroke-width":direct?2:2.5,"stroke-dasharray":direct?"6 5":null,"stroke-linejoin":"round","stroke-linecap":"round"});
+  s.appendChild(path);
+  var hit=el("path",{d:d,fill:"none",stroke:"transparent","stroke-width":12});s.appendChild(hit);
+  hover(hit,function(){return[{text:c.name,b:true},{text:m.unique+" "+noun(kind,m.unique)+" kept over "+hrs(c.wall_h)},m.approx?{text:"discovery timing approximate",dim:true}:null]});
+  ends.push({x:X(end[0]),y:Y(end[1]),label:c.name+" "+m.unique,col:col})});
+ // end labels, nudged apart so two curves that finish together stay readable
+ ends.sort(function(a,b){return a.y-b.y});for(var i=1;i<ends.length;i++)if(ends[i].y-ends[i-1].y<12)ends[i].y=ends[i-1].y+12;
+ for(var j=ends.length-1;j>=0;j--){var lim=mt+ph-2-(ends.length-1-j)*12;if(ends[j].y>lim)ends[j].y=lim}
+ ends.forEach(function(e){s.appendChild(el("text",{x:e.x+8,y:e.y+4,"font-size":10.5,"font-weight":700,fill:v("--ink")},[tx(e.label)]))});
+ if(cut<Infinity){var cx=X(Math.min(cut,xs.top));s.appendChild(el("rect",{x:cx,y:mt,width:Math.max(0,ml+pw-cx),height:ph,fill:v("--bg"),opacity:.7}));playhead(s,cx,mt,mt+ph)}
+ host.appendChild(s)}
+// the target replay drives the race and every run section of that target
+document.querySelectorAll(".treplay").forEach(function(bar){var key=bar.dataset.target,range=bar.querySelector("input"),play=bar.querySelector(".play"),out=bar.querySelector(".rt"),note=bar.querySelector(".rn"),max=+range.max,timer=null,pending=false,G=groupOf(key);
+ function kept(cut){return (G?G.conditions:[]).filter(function(c){return !c.provisional}).map(function(c){return c.name+" "+c.find.times.filter(function(t){return t<=cut}).length+" / "+c.crash.times.filter(function(t){return t<=cut}).length}).join(" · ")}
+ function apply(){pending=false;var val=+range.value,cut=val>=max?"":String(val/100);
+  out.textContent=(val>=max?max/100:val/100).toFixed(2)+"h";note.textContent=val>=max?"whole runs":"findings / crashes so far: "+kept(val/100);
+  document.querySelectorAll('.race[data-target="'+key+'"]').forEach(function(r){r.dataset.cut=cut;drawRace(r)});
+  document.querySelectorAll('.run[data-target="'+key+'"]').forEach(function(run){var rr=run.querySelector(".replay input");
+   if(rr){rr.value=cut===""?rr.max:Math.min(+rr.max,Math.round(+cut*100));rr.dispatchEvent(new Event("input"))}else{run.dataset.cut=cut;redraw(run)}})}
+ range.addEventListener("input",function(){if(!pending){pending=true;requestAnimationFrame(apply)}});
+ function stop(){if(timer)cancelAnimationFrame(timer);timer=null;play.textContent="▶ Replay every run"}
+ play.addEventListener("click",function(){if(timer){stop();return}if(+range.value>=max)range.value=0;var from=+range.value,start=null,dur=Math.max(3000,(max-from)/max*18000),last=-1;play.textContent="❚❚ Pause";
+  (function step(ts){if(start==null)start=ts;var p=Math.min(1,(ts-start)/dur),val=Math.round(from+(max-from)*p);if(val!==last){last=val;range.value=val;apply()}if(p<1)timer=requestAnimationFrame(step);else stop()})(performance.now())})});
+// ── the problem passport: one problem's story across every model ────────────
+function openPassport(G,P){dtitle.textContent=P.title||P.site||P.key;dbody.replaceChildren();
+ dbody.appendChild(h("p","meta",(P.kind==="crash"?"sanitizer crash":"finding")+" · "+P.class+(P.severity?" · "+P.severity:"")+(P.site?" · "+P.site:"")));
+ G.conditions.forEach(function(c){var f=P.found[c.key],l=P.looked[c.key];dbody.appendChild(h("h4",null,c.name));
+  if(f){var line=h("p",null,"found"+(f.t!=null?" "+hrs(f.t)+" into the run":"")+(f.lane?" · lane "+f.lane:"")+(f.severity?" · "+f.severity+" as this side filed it":""));
+   if(f.href){var a=document.createElement("a");a.href=f.href;a.textContent=" open the report";line.appendChild(a)}dbody.appendChild(line)}
+  else if(l){dbody.appendChild(h("p",null,"looked at this file: "+l.n+" hypothes"+(l.n===1?"is":"es")+(l.filed_nearby?", "+l.filed_nearby+" became artifacts at other sites in it":"")+", none matched this problem"));var ul=h("ul");
+   l.hyps.forEach(function(x){ul.appendChild(h("li",null,x.outcome+" · "+x.lane+" · "+hrs(x.t0)+" — "+x.text))});dbody.appendChild(ul)}
+  else if(c.traced)dbody.appendChild(h("p","dim","never opened a hypothesis on this file"));
+  else dbody.appendChild(h("p","dim",c.provisional?"still running":c.token==="harness"?"no trace on disk for this cell":"no trace — the control records only what it reports"))});
+ drawer.hidden=false}
+document.querySelectorAll(".conv .prow").forEach(function(row){row.addEventListener("click",function(e){if(e.target.tagName==="A")return;var G=groupOf(row.dataset.target);if(G&&G.problems[+row.dataset.problem])openPassport(G,G.problems[+row.dataset.problem])})});
 // ── the mind trace: one row per agent, one bar per hypothesis ────────────────
 function traceOf(run,cell){var h=run.conditions.filter(function(c){return c.token==="harness"})[0];
  return ((h&&h.traces)||[]).filter(function(t){return t.cell===cell})[0]||null}
@@ -2064,8 +2491,9 @@ function openDrawer(run,hp){dtitle.textContent=hp.file||hp.id;dbody.replaceChild
  var meta=h("p","meta",hp.lane+" "+(D.lane_names[hp.lane]||"")+" · agent "+hp.agent+" · "+hp.outcome+(hp.status?" ("+hp.status+")":"")+(hp.artifact?" · filed as "+hp.artifact:"")+(hp.diagnostic?" · "+hp.diagnostic:"")+" · opened "+hrs(hp.t0)+(hp.t1>hp.t0?", resolved "+hrs(hp.t1):"")+" into the run");
  dbody.appendChild(meta);
  section("Hypothesis",hp.text);section("Guard gap",hp.guard_gap);section("Input shape",hp.input_shape);section("Agent's conclusion",hp.note);
- if(hp.probes.length){dbody.appendChild(h("h4",null,hp.probes.length+" sanitizer probe"+(hp.probes.length===1?"":"s")));var ul=h("ul");
-  hp.probes.forEach(function(p){ul.appendChild(h("li",null,hrs(p.t)+" · "+p.verdict+(p.s?" · "+p.s+"s":"")))});dbody.appendChild(ul)}
+ if(hp.probes.length){dbody.appendChild(h("h4",null,hp.probes.length+" sanitizer probe"+(hp.probes.length===1?"":"s")));var ul=h("ul"),shown=hp.probes.slice(0,40);
+  shown.forEach(function(p){ul.appendChild(h("li",null,hrs(p.t)+" · "+p.verdict+(p.s?" · "+p.s+"s":"")))});
+  if(hp.probes.length>shown.length)ul.appendChild(h("li","dim","… and "+(hp.probes.length-shown.length)+" more"));dbody.appendChild(ul)}
  if(hp.notes.length){dbody.appendChild(h("h4",null,"Notes"));var nl=h("ul");hp.notes.forEach(function(n){nl.appendChild(h("li",null,(n.kind?n.kind+": ":"")+n.text))});dbody.appendChild(nl)}
  drawer.hidden=false}
 drawer.querySelector(".dclose").addEventListener("click",function(){drawer.hidden=true});
@@ -2074,7 +2502,7 @@ document.addEventListener("keydown",function(e){if(e.key==="Escape")drawer.hidde
 function redraw(run){run.querySelectorAll(".ttd").forEach(drawTTD);run.querySelectorAll(".act").forEach(drawActivity);run.querySelectorAll(".trace").forEach(drawTrace);
  var cut=run.dataset.cut==null||run.dataset.cut===""?Infinity:+run.dataset.cut;
  run.querySelectorAll(".dot[data-t]").forEach(function(d){d.classList.toggle("future",+d.dataset.t>cut)})}
-document.querySelectorAll(".replay").forEach(function(bar){var run=bar.closest(".run"),range=bar.querySelector("input"),play=bar.querySelector(".play"),out=bar.querySelector(".rt"),note=bar.querySelector(".rn"),max=+range.max,timer=null,pending=false;
+document.querySelectorAll(".replay:not(.treplay)").forEach(function(bar){var run=bar.closest(".run"),range=bar.querySelector("input"),play=bar.querySelector(".play"),out=bar.querySelector(".rt"),note=bar.querySelector(".rn"),max=+range.max,timer=null,pending=false;
  var R=runOf(run.dataset.run);
  function kept(cut){var parts=[];(R?R.conditions:[]).forEach(function(c){var f=c.find.times.filter(function(t){return t<=cut}).length,k=c.crash.times.filter(function(t){return t<=cut}).length;parts.push(c.label+" "+f+" / "+k)});return parts.join(" · ")}
  function apply(){pending=false;var val=+range.value;if(val>=max){run.dataset.cut="";out.textContent=(max/100).toFixed(2)+"h";note.textContent="whole run"}
@@ -2087,8 +2515,12 @@ document.querySelectorAll(".replay").forEach(function(bar){var run=bar.closest("
   var last=-1;
   (function step(ts){if(start==null)start=ts;var p=Math.min(1,(ts-start)/dur),val=Math.round(from+(max-from)*p);
    if(val!==last){last=val;range.value=val;apply()}if(p<1)timer=requestAnimationFrame(step);else stop()})(performance.now())})});
-document.querySelectorAll(".ttd").forEach(drawTTD);
-document.querySelectorAll(".act").forEach(drawActivity);
-document.querySelectorAll(".trace").forEach(drawTrace);
+function drawAll(){document.querySelectorAll(".race").forEach(drawRace);document.querySelectorAll(".ttd").forEach(drawTTD);
+ document.querySelectorAll(".act").forEach(drawActivity);document.querySelectorAll(".trace").forEach(drawTrace)}
+drawAll();
+// chart colours are read from the stylesheet at draw time, so a theme change
+// while the page is open redraws everything in the new palette
+if(window.matchMedia)matchMedia("(prefers-color-scheme: dark)").addEventListener("change",drawAll);
+new MutationObserver(drawAll).observe(document.documentElement,{attributes:true,attributeFilter:["data-theme"]});
 })();
 """

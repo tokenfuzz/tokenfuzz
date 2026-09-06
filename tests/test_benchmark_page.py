@@ -151,7 +151,8 @@ class Fixture:
              "class": "memory-safety", "file": "src/app_parse.c", "line": "91",
              "strategy": "S3"},
             {"id": "FCL-2", "canonical": "FIND-0002", "members": ["FIND-0002", "FIND-0004"],
-             "class": "memory-safety", "file": "src/app_io.c", "line": "12"},
+             "class": "memory-safety", "file": "src/app_io.c", "line": "12",
+             "key": ["memory-safety", "src/app_io.c", "12"], "key_kind": "loc"},
             {"id": "FCL-3", "canonical": "FIND-0003", "members": ["FIND-0003"],
              "class": "dos", "file": "src/app_alloc.c", "line": "40"},
             {"id": "FCL-4", "canonical": "FIND-0005", "members": ["FIND-0005"],
@@ -200,6 +201,9 @@ class Fixture:
             {"id": "H-3", "agent": "1", "strategy": "S3", "file": "src/app_alloc.c:app_grow:40",
              "hypothesis": "growth is unbounded", "status": "PENDING",
              "created_at": "2026-01-01T04:00:00Z"},
+            {"id": "H-5", "agent": "1", "strategy": "S2", "file": "src/app_alloc.c:app_grow:40",
+             "hypothesis": "still being probed at the wall", "status": "PROBED",
+             "created_at": "2026-01-01T02:45:00Z"},
             {"id": "H-4", "agent": "2", "strategy": "S5", "file": "src/app_io.c:app_close:80",
              "hypothesis": "close runs twice on the error path", "status": "DISCARDED",
              "note": f"build tree at {ROOT}/targets/sampleproj/build-asan is pinned",
@@ -330,8 +334,10 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(trace["cell"], "harness-r1")
         self.assertEqual(trace["agents"], ["1", "2"])
         # the hypothesis after the wall is not part of the run's reasoning
-        self.assertEqual([h["id"] for h in trace["hyps"]], ["H-1", "H-2", "H-4"])
-        hit, refuted, dropped = trace["hyps"]
+        self.assertEqual([h["id"] for h in trace["hyps"]], ["H-1", "H-2", "H-4", "H-5"])
+        hit, refuted, dropped, still_open = trace["hyps"]
+        # never resolved inside the wall: open until the wall, not a sliver
+        self.assertEqual((still_open["outcome"], still_open["t0"], still_open["t1"]), ("open", 2.75, 3.0))
         # resolved by teardown after the wall: still open at the wall, so the
         # bar runs to the wall rather than collapsing to its opening instant
         self.assertEqual((dropped["t0"], dropped["t1"]), (2.5, 3.0))
@@ -356,7 +362,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(trace["summary"]["hit"], 1)
         self.assertEqual(trace["summary"]["refuted"], 1)
         self.assertEqual(trace["summary"]["dropped"], 1)
-        self.assertEqual(trace["summary"]["open"], 0)
+        self.assertEqual(trace["summary"]["open"], 1)
         # 20, 20, 30 minutes resolved: the middle value
         self.assertEqual(trace["median_minutes"], 20.0)
         self.assertEqual(self._cond("model-direct")["traces"], [])
@@ -372,7 +378,7 @@ class BuildTests(unittest.TestCase):
     def test_attention_places_hypotheses_and_results_by_subsystem(self) -> None:
         rows = {r["subsystem"]: r for r in self.run["attention"]}
         src = rows["src"]
-        self.assertEqual(src["hypotheses"], 3)
+        self.assertEqual(src["hypotheses"], 4)
         self.assertEqual(src["probes"], 3)
         self.assertEqual(src["hits"], 1)
         self.assertEqual(src["harness"], 3)
@@ -385,6 +391,75 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(benchmark_page._outcome("CONFIRMED-NO-CRASH", ""), "refuted")
         self.assertEqual(benchmark_page._outcome("PROBED", ""), "open")
         self.assertEqual(benchmark_page._outcome("DISCARDED", "CRASH-001"), "hit")
+
+    def test_target_group_joins_problems_across_conditions(self) -> None:
+        groups = self.data["targets"]
+        self.assertEqual(len(groups), 1)
+        group = groups[0]
+        self.assertEqual(group["key"], "sampleproj@abcdef0123456789")
+        self.assertEqual([c["name"] for c in group["conditions"]],
+                         ["gpt-5.6-sol · tokenfuzz", "gpt-5.6-sol · direct"])
+        harness_key, direct_key = (c["key"] for c in group["conditions"])
+        problems = {p["key"]: p for p in group["problems"]}
+        # joined by the clusterers' own key, so the shared cluster is one problem
+        shared = problems["find:memory-safety|src/app_io.c|12"]
+        self.assertEqual(set(shared["found"]), {harness_key, direct_key})
+        self.assertEqual(shared["found"][harness_key]["severity"], "Low")
+        self.assertEqual(shared["found"][direct_key]["severity"], "Medium")
+        # each side's own discovery hour, not the earliest across both: the
+        # harness parks at its 3h wall, the control at its 1.5h wall
+        self.assertEqual(shared["found"][harness_key]["t"], 3.0)
+        self.assertEqual(shared["found"][direct_key]["t"], 1.5)
+        self.assertTrue(group["conditions"][0]["traced"])
+        self.assertFalse(group["conditions"][1]["traced"])
+        # only a located key is a merge edge; function and title anchors stay apart
+        self.assertEqual(benchmark_page._join_key(
+            {"key": ["dos", "src/a.c", "parse"], "key_kind": "loc"}, "find", "FCL-x"), "find:FCL-x")
+        self.assertEqual(benchmark_page._join_key(
+            {"key": ["dos", "", "a-title"], "key_kind": "title"}, "find", "FCL-y"), "find:FCL-y")
+        self.assertEqual(benchmark_page._join_key(
+            {"class": "dos", "file": "src/a.c", "line": "9"}, "find", "FCL-z"), "find:dos|src/a.c|9")
+        self.assertEqual(benchmark_page._join_key(
+            {"class": "dos", "file": "src/a.c", "line": ""}, "find", "FCL-w"), "find:FCL-w")
+        self.assertEqual(shared["severity"], "Medium")
+        self.assertEqual(group["problems"][0]["key"], shared["key"], "found-by-most first")
+        # a crash joins on its leading frames
+        crash = problems["crash:child_free child.c:91 -> app_parse parse.c:12"]
+        self.assertEqual(list(crash["found"]), [harness_key])
+        # the direct-only auth finding: the harness never opened a hypothesis on
+        # that file, and the control's own process is not observable
+        auth = problems["find:auth|src/app_auth.c|7"]
+        self.assertEqual(list(auth["found"]), [direct_key])
+        self.assertEqual(auth["looked"], {})
+        # the harness looked at the freed-buffer file and filed elsewhere: H-2
+        # and H-4 both name src/app_io.c, so a direct-only problem there would
+        # show as looked; here the harness found it, so looked stays empty
+        self.assertEqual(shared["looked"], {})
+        self.assertTrue(benchmark_page._same_file("child.c", "src/child.c"))
+        self.assertFalse(benchmark_page._same_file("src/a.c", "lib/a.c"))
+        self.assertIsNone(benchmark_page._looked("src/none.c", self._cond("harness")["traces"]))
+        looked = benchmark_page._looked("src/app_io.c", self._cond("harness")["traces"])
+        self.assertEqual(looked["n"], 2)
+        self.assertEqual([h["outcome"] for h in looked["hyps"]], ["refuted", "dropped"])
+        self.assertEqual(looked["filed_nearby"], 0)
+        parse = benchmark_page._looked("src/app_parse.c", self._cond("harness")["traces"])
+        self.assertEqual((parse["n"], parse["filed_nearby"]), (1, 1))
+
+    def test_fingerprint_lines_up_comparable_dimensions(self) -> None:
+        group = self.data["targets"][0]
+        harness, direct = (c["fingerprint"] for c in group["conditions"])
+        self.assertEqual(harness["unique"], 4)
+        self.assertEqual(harness["mplus_share"], 0.75)
+        self.assertEqual(harness["held"], 0.8)
+        self.assertEqual(harness["hypotheses"], 4)
+        self.assertEqual(harness["hit_rate"], 0.25)
+        self.assertEqual(harness["subsystems"], 1)
+        self.assertEqual(harness["probes_per_crash"], 3.0)
+        self.assertEqual(harness["wall_share"], 1.0)
+        # the control cannot report what it never records
+        self.assertIsNone(direct["hypotheses"])
+        self.assertIsNone(direct["hit_rate"])
+        self.assertEqual(direct["wall_share"], 0.5)
 
     def test_lane_yield_and_waterfall_reach_the_condition(self) -> None:
         harness = self._cond("harness")
@@ -478,6 +553,14 @@ class RenderTests(unittest.TestCase):
         self.assertIn('<table class="attn">', html)
         self.assertIn('id="drawer"', html)
         self.assertIn('data-t="', html)
+        # the cross-model section: race, fingerprints, and the convergence matrix
+        self.assertIn('class="chart race" data-target="sampleproj@abcdef0123456789"', html)
+        self.assertIn('class="replay treplay"', html)
+        self.assertIn('<table class="fp">', html)
+        self.assertIn("Claims that held up", html)
+        self.assertIn('<table class="conv">', html)
+        self.assertIn('data-problem="0"', html)
+        self.assertIn('data-target="sampleproj@abcdef0123456789"', html)
 
     def test_relative_rendering_emits_no_absolute_paths(self) -> None:
         with benchmark._render_relative_to(self.fixture.root):
