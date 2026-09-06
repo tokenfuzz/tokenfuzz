@@ -946,6 +946,54 @@ assert_in(".", _include_case("component-layout", ["component/api.h"]),
 assert_eq(False, "." in _include_case("include-layout", ["include/pub.h"]),
           "_detect_include_dirs: a named layout does not also pull in the root")
 
+# Generated install metadata identifies public component include roots without
+# adding their private siblings. This is the shape used by modular CMake
+# libraries: including <sample/core.hpp> requires modules/core/include.
+component_root = TEST_TMPDIR / "cmake-component-includes"
+component_build = component_root / "build-asan"
+component_public = component_root / "modules" / "core" / "include" / "sample" / "core.hpp"
+component_private = component_root / "modules" / "core" / "src" / "private.hpp"
+component_public.parent.mkdir(parents=True)
+component_private.parent.mkdir(parents=True)
+component_build.mkdir(parents=True)
+component_public.write_text("int sample_core(void);\n", encoding="utf-8")
+component_private.write_text("int sample_private(void);\n", encoding="utf-8")
+(component_build / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/include/sample" TYPE FILE OPTIONAL FILES\n'
+    f'  "{component_public}"\n)\n',
+    encoding="utf-8",
+)
+component_includes = tc._detect_include_dirs(component_root, "build-asan")
+assert_in("modules/core/include", component_includes,
+          "_detect_include_dirs: CMake-installed component headers add their include root")
+assert_eq(False, "modules/core/src" in component_includes,
+          "_detect_include_dirs: private component headers stay off the search path")
+
+# Persisted include entries stay canonical in a container, while discovery
+# must read generated metadata from that container image's physical build.
+suffix_root = TEST_TMPDIR / "cmake-component-includes-suffix"
+suffix_public = suffix_root / "parts" / "api" / "include" / "sample" / "api.h"
+suffix_build = suffix_root / "build-asan+image1"
+suffix_public.parent.mkdir(parents=True)
+suffix_build.mkdir(parents=True)
+suffix_public.write_text("int sample_api(void);\n", encoding="utf-8")
+(suffix_build / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/include/sample" TYPE FILE '
+    f'FILES "{suffix_public}")\n', encoding="utf-8",
+)
+_saved_build_suffix = os.environ.get("AUDIT_BUILD_SUFFIX")
+os.environ["AUDIT_BUILD_SUFFIX"] = "+image1"
+try:
+    assert_in(
+        "parts/api/include", tc._detect_include_dirs(suffix_root, "build-asan"),
+        "_detect_include_dirs: canonical config reads the active suffixed build metadata",
+    )
+finally:
+    if _saved_build_suffix is None:
+        os.environ.pop("AUDIT_BUILD_SUFFIX", None)
+    else:
+        os.environ["AUDIT_BUILD_SUFFIX"] = _saved_build_suffix
+
 # `refresh_detected_build_fields` keeps a configured value that is a usable
 # artifact. Re-detection can diagnose a library/header mismatch, but remains a
 # weaker signal than an operator choice and must not write past that rule.
@@ -1153,6 +1201,50 @@ try:
     ), "browser refresh replaces a configured background helper")
 finally:
     tc._binary_uses_sanitizer = _saved_uses
+
+# The generated install plan also distinguishes public libraries from an
+# uninstalled test-support archive. Static-first discovery previously chose
+# the helper and left every public API harness with undefined symbols.
+cmake_public_lib_root = TEST_TMPDIR / "cmake-public-library"
+cmake_public_build = cmake_public_lib_root / "build-asan"
+(cmake_public_build / "lib").mkdir(parents=True)
+_public_shared = cmake_public_build / "lib" / f"libcmakepubliclibrary{_sh_ext}"
+_private_archive = cmake_public_build / "lib" / "libtestsupport.a"
+_public_shared.write_bytes(b"\x7fELF")
+_private_archive.write_bytes(b"!<arch>\n")
+(cmake_public_build / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE SHARED_LIBRARY OPTIONAL FILES\n'
+    f'  "{_public_shared}"\n)\n',
+    encoding="utf-8",
+)
+assert_eq(
+    f"build-asan/lib/libcmakepubliclibrary{_sh_ext}",
+    tc._detect_sanitizer_lib(cmake_public_build, cmake_public_lib_root),
+    "_detect_sanitizer_lib: CMake-installed library outranks uninstalled support archive",
+)
+
+cmake_modules_root = TEST_TMPDIR / "cmake-modular-library"
+cmake_modules_build = cmake_modules_root / "build-asan"
+(cmake_modules_build / "lib").mkdir(parents=True)
+(cmake_modules_build / "CMakeCache.txt").write_text(
+    "CMAKE_PROJECT_NAME:STATIC=Sample\n", encoding="utf-8",
+)
+_module_core = cmake_modules_build / "lib" / f"libsample_core{_sh_ext}"
+_module_codec = cmake_modules_build / "lib" / f"libsample_io{_sh_ext}"
+_module_core.write_bytes(b"\x7fELF")
+_module_codec.write_bytes(b"\x7fELF")
+(cmake_modules_build / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE SHARED_LIBRARY '
+    f'FILES "{_module_codec}")\n'
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE SHARED_LIBRARY '
+    f'FILES "{_module_core}")\n',
+    encoding="utf-8",
+)
+assert_eq(
+    f"build-asan/lib/libsample_core{_sh_ext}",
+    tc._detect_sanitizer_lib(cmake_modules_build, cmake_modules_root),
+    "_detect_sanitizer_lib: a modular project's installed core library is the default",
+)
 assert_in('asan_bin      = "build-asan/Product.app/Contents/MacOS/Product"',
           browser_refresh_toml.read_text(encoding="utf-8"),
           "browser refresh adopts the foreground product executable")

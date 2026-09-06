@@ -1388,6 +1388,15 @@ def _is_shared_lib(name: str) -> bool:
     return name.endswith((".so", ".dylib")) or ".so." in name
 
 
+def _is_canonical_library_name(name: str) -> bool:
+    """Whether ``name`` is a linker name rather than a versioned SONAME."""
+    if ".so." in name:
+        return False
+    if name.endswith(".dylib") and re.search(r"\.\d+(?:\.\d+)*\.dylib$", name):
+        return False
+    return name.endswith((".a", ".so", ".dylib"))
+
+
 # Build subdirectories that hold artifacts which are never the audited
 # project's own library or CLI: CMake's CMakeFiles/ (compiler-probe
 # binaries like CMakeDetermineCompilerABI_C.bin, object trees), unit-test
@@ -1430,7 +1439,7 @@ def _pick_shared_lib(san_dir: Path, root: Path) -> str:
               and not _is_aux_build_path(s, san_dir)]
     if not shared:
         return ""
-    shared.sort(key=lambda s: (not s.name.endswith((".so", ".dylib")),
+    shared.sort(key=lambda s: (not _is_canonical_library_name(s.name),
                                len(s.name), str(s)))
     return str(shared[0]).removeprefix(str(root) + "/")
 
@@ -1444,8 +1453,6 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     the same archive-then-shared rule holds for asan/ubsan/msan/tsan."""
     if not san_dir.is_dir():
         return ""
-    archives = [a for a in _find_under(san_dir, name=None)
-                if a.suffix == ".a" and not _is_aux_build_path(a, san_dir)]
     # A same-named product archive is stronger evidence than alphabetical
     # order when a build emits several public libraries (for example a core
     # C++ library beside a C wrapper). Normalize punctuation so target slugs
@@ -1469,13 +1476,47 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
                 project_name = re.sub(r"[^a-z0-9]", "", value.lower())
             break
 
-    def archive_name(archive: Path) -> str:
-        name = archive.name
+    def library_name(library: Path) -> str:
+        name = library.name
         if name.startswith("lib"):
             name = name[3:]
-        if name.endswith(".a"):
-            name = name[:-2]
+        name = re.split(r"(?:\.so(?:\.|$)|(?:\.[0-9.]+)?\.dylib$|\.a$)", name)[0]
         return re.sub(r"[^a-z0-9]", "", name.lower())
+
+    installed = _cmake_installed_build_libraries(san_dir)
+    if installed is not None:
+        # Generated install metadata is authoritative about which artifacts
+        # are products.  A stray static test-support archive must not outrank
+        # the shared libraries a project actually publishes.
+        candidates = [
+            path for path in installed
+            if path.is_file() and (
+                path.suffix == ".a" or _is_shared_lib(path.name)
+            ) and "posix" not in path.name
+        ]
+        def product_affinity(library: Path) -> int:
+            name = library_name(library)
+            if name == project_name:
+                return 0
+            # `core` and `base` conventionally name a modular project's
+            # foundational public library; no other suffix makes that claim.
+            if name in (project_name + "core", project_name + "base"):
+                return 1
+            return 2 if name.startswith(project_name) else 3
+
+        candidates.sort(key=lambda library: (
+            product_affinity(library),
+            library.suffix != ".a",
+            not _is_canonical_library_name(library.name),
+            len(library.relative_to(san_dir).parts),
+            len(library.name),
+            str(library),
+        ))
+        return (str(candidates[0]).removeprefix(str(root) + "/")
+                if candidates else "")
+
+    archives = [a for a in _find_under(san_dir, name=None)
+                if a.suffix == ".a" and not _is_aux_build_path(a, san_dir)]
 
     # Then shallowest first. `_find_under` walks alphabetically depth-first,
     # so a nested helper whose directory sorts first otherwise beats the
@@ -1484,7 +1525,7 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     # keeps any usable operator-selected library. A stable sort preserves the
     # existing deterministic order within one level.
     archives.sort(key=lambda archive: (
-        archive_name(archive) != project_name,
+        library_name(archive) != project_name,
         len(archive.relative_to(san_dir).parts),
     ))
     for a in archives[:3]:
@@ -1494,6 +1535,91 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     if archives:
         return str(archives[0]).removeprefix(str(root) + "/")
     return _pick_shared_lib(san_dir, root)
+
+
+_CMAKE_GENERATED_INSTALL = re.compile(
+    r'\bfile\s*\(\s*INSTALL\b(?P<body>(?:"(?:\\.|[^"\\])*"|[^)])*)\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _cmake_generated_install_entries(
+    san_dir: Path,
+) -> "list[tuple[str, Path]] | None":
+    """Resolved ``(TYPE, FILE)`` rows from CMake's generated install plan.
+
+    ``None`` means no published install rule exists.  Commands can span lines
+    and can name several files; parsing the generated form avoids interpreting
+    source CMake or guessing whether a build artifact is public.
+    """
+    scripts = _find_under(san_dir, name="cmake_install.cmake")
+    if not scripts:
+        return None
+    entries: list[tuple[str, Path]] = []
+    installs_anything = False
+    for script in scripts:
+        try:
+            text = script.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for command in _CMAKE_GENERATED_INSTALL.finditer(text):
+            body = command.group("body")
+            kind_match = re.search(r"\bTYPE\s+([A-Z_]+)\b", body, re.IGNORECASE)
+            files_match = re.search(r"\bFILES\b(.*)", body, re.IGNORECASE | re.DOTALL)
+            if not kind_match or not files_match:
+                continue
+            values = re.findall(r'"([^"\r\n]+)"', files_match.group(1))
+            if not values:
+                continue
+            installs_anything = True
+            kind = kind_match.group(1).upper()
+            for value in values:
+                if "$" in value:
+                    continue
+                candidate = Path(value)
+                if not candidate.is_absolute():
+                    candidate = san_dir / candidate
+                entries.append((kind, candidate))
+    return entries if installs_anything else None
+
+
+def _cmake_installed_build_paths(
+    san_dir: Path, kinds: "set[str]",
+) -> "list[Path] | None":
+    entries = _cmake_generated_install_entries(san_dir)
+    if entries is None:
+        return None
+    found: list[Path] = []
+    seen: set[str] = set()
+    for kind, candidate in entries:
+        if kind not in kinds:
+            continue
+        # Re-anchor on san_dir: the script records the path configure-time
+        # saw, and callers name artifacts relative to the tree they scan. The
+        # directories are compared resolved, because targets/<slug> may be a
+        # symlink; the basename is kept as written, because a shared library's
+        # linker name is itself a symlink to its versioned file.
+        try:
+            relative = Path(os.path.realpath(candidate.parent)).relative_to(
+                os.path.realpath(san_dir)
+            )
+        except (OSError, ValueError):
+            continue
+        candidate = san_dir / relative / candidate.name
+        if _is_aux_build_path(candidate, san_dir):
+            continue
+        key = str(candidate)
+        if key not in seen:
+            seen.add(key)
+            found.append(candidate)
+    return found
+
+
+def _cmake_installed_build_libraries(san_dir: Path) -> "list[Path] | None":
+    """Libraries CMake publishes from this build, or ``None`` without a plan."""
+    return _cmake_installed_build_paths(
+        san_dir, {"STATIC_LIBRARY", "SHARED_LIBRARY"},
+    )
 
 
 def _cmake_installed_build_executables(san_dir: Path) -> "list[Path] | None":
@@ -1511,51 +1637,7 @@ def _cmake_installed_build_executables(san_dir: Path) -> "list[Path] | None":
     declaring a library-only product. Reading it as one would delete the sole
     execution route of every uninstalled CLI, so it answers ``None`` too.
     """
-    scripts = _find_under(san_dir, name="cmake_install.cmake")
-    if not scripts:
-        return None
-    # CMake writes `TYPE <kind>` and `FILES` on one line, with OPTIONAL,
-    # MESSAGE_*, PERMISSIONS and RENAME allowed between them, so the span
-    # between the two is skipped rather than assumed empty.
-    installed_files = re.compile(
-        r"\bTYPE\s+EXECUTABLE\b[^\n]*?\bFILES\s+"
-        r"(?P<files>(?:\"[^\"\r\n]+\"\s*)+)",
-        re.IGNORECASE,
-    )
-    published = re.compile(r'\bTYPE\s+[A-Z_]+\b[^\n]*?\bFILES\s+"', re.IGNORECASE)
-    found: list[Path] = []
-    seen: set[str] = set()
-    installs_anything = False
-    for script in scripts:
-        try:
-            text = script.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        installs_anything = installs_anything or bool(published.search(text))
-        for match in installed_files.finditer(text):
-            for value in re.findall(r'"([^"\r\n]+)"', match.group("files")):
-                if "$" in value:
-                    continue
-                candidate = Path(value)
-                if not candidate.is_absolute():
-                    candidate = san_dir / candidate
-                # Re-anchor on san_dir: the script records the absolute path
-                # configure-time saw, and callers name artifacts relative to
-                # the tree they are scanning.
-                try:
-                    relative = candidate.resolve().relative_to(
-                        san_dir.resolve()
-                    )
-                except (OSError, ValueError):
-                    continue
-                candidate = san_dir / relative
-                if _is_aux_build_path(candidate, san_dir):
-                    continue
-                key = str(candidate)
-                if key not in seen:
-                    seen.add(key)
-                    found.append(candidate)
-    return found if installs_anything else None
+    return _cmake_installed_build_paths(san_dir, {"EXECUTABLE"})
 
 
 def _cli_candidates(san_dir: Path, root: Path, build_system: str,
@@ -2092,6 +2174,45 @@ def detected_harness_inputs(
 _HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx", ".H")
 
 
+def _cmake_installed_source_include_dirs(
+    target_root: Path, san_dir: Path,
+) -> list[str]:
+    """Source include roots that CMake's generated plan publishes.
+
+    Projects with modules often keep public headers below paths such as
+    ``component/include/namespace``.  The nearest ``include`` ancestor is the
+    search path their own includes expect.  Only installed header files count,
+    so private component headers never enter a generated harness command.
+    """
+    entries = _cmake_generated_install_entries(san_dir)
+    if entries is None:
+        return []
+    root = target_root.resolve()
+    build = san_dir.resolve()
+    found: set[str] = set()
+    for kind, candidate in entries:
+        if kind != "FILE" or candidate.suffix not in _HEADER_SUFFIXES:
+            continue
+        try:
+            resolved = candidate.resolve()
+            relative = resolved.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if resolved == build or build in resolved.parents:
+            continue
+        include = next(
+            (parent for parent in resolved.parents if parent.name == "include"),
+            None,
+        )
+        if include is None:
+            continue
+        try:
+            found.add(include.relative_to(root).as_posix())
+        except ValueError:
+            continue
+    return sorted(found)
+
+
 def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
     """Return public-header search paths relative to target_root.
 
@@ -2138,6 +2259,11 @@ def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
     # whole library route unusable.
     if "include" not in out and _has_headers(target_root / "lib", recursive=False):
         out.append("lib")
+    for component in _cmake_installed_source_include_dirs(
+        target_root, _resolve_target_path(target_root, asan_dir_name),
+    ):
+        if component not in out:
+            out.append(component)
     if not out:
         # No conventional header directory, which is what a project that
         # publishes `<component>/header.h` and includes it from its own root
