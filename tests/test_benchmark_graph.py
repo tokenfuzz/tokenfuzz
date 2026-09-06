@@ -27,24 +27,25 @@ class ReconcileTests(unittest.TestCase):
         # the clusterers merge a little more than the raw key: table wins
         self.assertEqual(
             benchmark_graph._reconcile(
-                [(0.1, "a.c:1"), (0.2, "b.c:2"), (0.9, "c.c:3")], 2, 3.0),
-            [(0.1, "a.c:1"), (0.2, "b.c:2")],
+                [(0.1, "a.c:1", "CL-a"), (0.2, "b.c:2", "CL-b"), (0.9, "c.c:3", "CL-c")],
+                2, 3.0),
+            [(0.1, "a.c:1", "CL-a"), (0.2, "b.c:2", "CL-b")],
         )
 
     def test_unresolved_results_land_at_the_end_not_dropped(self) -> None:
         # endpoint must still equal the table's count, and a padded step claims
         # no source site it was never given
         self.assertEqual(
-            benchmark_graph._reconcile([(0.5, "a.c:1")], 3, 3.0),
-            [(0.5, "a.c:1"), (3.0, ""), (3.0, "")],
+            benchmark_graph._reconcile([(0.5, "a.c:1", "CL-a")], 3, 3.0),
+            [(0.5, "a.c:1", "CL-a"), (3.0, "", ""), (3.0, "", "")],
         )
 
     def test_zero_count_is_empty(self) -> None:
-        self.assertEqual(benchmark_graph._reconcile([(0.4, "a.c:1")], 0, 3.0), [])
+        self.assertEqual(benchmark_graph._reconcile([(0.4, "a.c:1", "CL-a")], 0, 3.0), [])
 
     def test_curve_length_always_equals_the_table_count(self) -> None:
         for times, count in (([], 4), ([0.2] * 9, 3), ([0.1, 0.2], 2), ([], 0)):
-            entries = [(t, "a.c:1") for t in times]
+            entries = [(t, "a.c:1", "CL-a") for t in times]
             with self.subTest(times=len(times), count=count):
                 out = benchmark_graph._reconcile(entries, count, 3.0)
                 self.assertEqual(len(out), count)
@@ -284,8 +285,8 @@ class ClusterMembershipTimingTests(unittest.TestCase):
         }}
         times, approx = benchmark_graph._cluster_times(
             self.run, "harness", "crash", False, index, members, 3.0)
-        # each step carries its cluster's own crash site alongside its time
-        self.assertEqual(times, [(0.1, "a.c:1"), (0.9, "c.c:3")])
+        # each step carries its cluster's own crash site and id alongside its time
+        self.assertEqual(times, [(0.1, "a.c:1", "CL-a"), (0.9, "c.c:3", "CL-b")])
         self.assertFalse(approx)
 
     def test_unplaceable_cluster_is_marked_approximate(self) -> None:
@@ -297,7 +298,7 @@ class ClusterMembershipTimingTests(unittest.TestCase):
             self.run, "harness", "crash", False, {"crash": {}},
             {"crashes": {"CRASH-0001": "harness"}}, 3.0)
         # parked at the end, never dropped; its site is still known
-        self.assertEqual(times, [(3.0, "a.c:1")])
+        self.assertEqual(times, [(3.0, "a.c:1", "CL-a")])
         self.assertTrue(approx)
 
     def test_other_conditions_do_not_leak_into_a_curve(self) -> None:

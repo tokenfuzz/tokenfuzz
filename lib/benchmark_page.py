@@ -445,6 +445,231 @@ def _condition_activity(bench_dir: Path | None, condition: str, wall_h: float) -
     return activity
 
 
+# ── the mind trace: every hypothesis an agent opened, and what became of it ──
+
+# Terminal statuses the audit writes on a hypothesis, folded to what a reader
+# needs to know: did the idea pay off, fail on evidence, get dropped untested,
+# or stall on the environment. Anything else is still open.
+_OUTCOME = {
+    "CONFIRMED": "confirmed",
+    "REFUTED": "refuted", "DISPROVED": "refuted", "CONFIRMED-NO-CRASH": "refuted",
+    "DISCARDED": "dropped", "CLOSED": "dropped",
+    "ENV-BLOCKED": "blocked", "BLOCKED": "blocked",
+}
+OUTCOMES = ("hit", "confirmed", "refuted", "dropped", "blocked", "open")
+_TEXT_CAP = {"hypothesis": 480, "guard_gap": 280, "input_shape": 200, "note": 320}
+
+
+def _outcome(status: str, artifact: str) -> str:
+    if artifact or status.startswith(("FIND-", "CRASH-")):
+        return "hit"
+    return _OUTCOME.get(status, "open")
+
+
+def _subsystem(path: str) -> str:
+    """The top-level directory a hypothesis or cluster site names, or ""."""
+    location = str(path or "").split(":", 1)[0].strip().lstrip("./")
+    if "/" not in location:
+        return ""
+    return location.split("/", 1)[0]
+
+
+def _clip(text: object, cap: int) -> str:
+    """Agent free text, on one line, without the host's paths, cut to *cap*.
+
+    Notes quote build lines and absolute checkout paths; the pooled reports
+    already have those collapsed to repo-relative form, and the page must not
+    put them back — it is what gets exported.
+    """
+    value = benchmark._scrub_local_paths(re.sub(r"\s+", " ", str(text or "")).strip())
+    return value if len(value) <= cap else value[:cap - 1].rstrip() + "…"
+
+
+def _trace(cell_dir: Path, meta: dict) -> dict | None:
+    """One cell's hypotheses on its own clock, each with the probes it drove.
+
+    This is the run's reasoning as the audit recorded it: what each agent
+    thought was wrong, where, which strategy lane framed it, what it ran to
+    check, and how it ended. The text is the agent's own, clipped for the page;
+    nothing is summarised on its behalf.
+    """
+    results = benchmark.cell_results_dir(meta)
+    if results is None or not results.is_dir():
+        return None
+    origin = benchmark_graph._cell_start(cell_dir)
+    if origin is None:
+        return None
+    elapsed = _float(meta.get("wall_seconds")) or 0.0
+    wall_h = elapsed / 3600.0 if elapsed > 0 else None
+    state = results / "state"
+
+    def hours(stamp: object, clamp: bool = False) -> float | None:
+        """Hours into the cell, or None when the stamp falls outside its wall.
+
+        With *clamp*, a stamp past the wall reads as the wall: a hypothesis
+        resolved by teardown was still open when the wall ended, and a bar
+        that collapses to its opening instant would say it was dropped at
+        once.
+        """
+        when = _epoch(stamp)
+        if when is None:
+            return None
+        value = (when - origin) / 3600.0
+        if value < 0:
+            return None
+        if wall_h is not None and value > wall_h:
+            return round(wall_h, 4) if clamp else None
+        return round(value, 4)
+
+    artifacts: dict[str, str] = {}
+    for row in _iter_jsonl(cell_dir / "lineage.jsonl"):
+        if row.get("artifact") and row.get("hypothesis_id"):
+            artifacts[str(row["hypothesis_id"])] = str(row["artifact"])
+    probes: dict[str, list] = {}
+    for row in _iter_jsonl(state / "runs.jsonl"):
+        when = hours(row.get("created_at"))
+        hid = str(row.get("hypothesis_id") or "")
+        if when is None or not hid:
+            continue
+        probes.setdefault(hid, []).append({
+            "t": when,
+            "verdict": str(row.get("verdict") or "other"),
+            "s": round(_float(row.get("duration_seconds")) or 0.0, 1),
+        })
+    notes: dict[str, list] = {}
+    for row in _iter_jsonl(state / "notes.jsonl"):
+        hid = str(row.get("hypothesis_id") or "")
+        text = _clip(row.get("text"), 240)
+        if not hid or not text:
+            continue
+        notes.setdefault(hid, []).append({
+            "t": hours(row.get("created_at")), "kind": str(row.get("kind") or ""), "text": text,
+        })
+    hyps: list[dict] = []
+    for row in _iter_jsonl(state / "hypotheses.jsonl"):
+        hid = str(row.get("id") or "")
+        t0 = hours(row.get("created_at"))
+        if not hid or t0 is None:
+            continue
+        mine = sorted(probes.get(hid, []), key=lambda p: p["t"])
+        t1 = max([t0, hours(row.get("updated_at"), clamp=True) or t0] + [p["t"] for p in mine])
+        status = str(row.get("status") or "").strip().upper()
+        artifact = artifacts.get(hid, "")
+        hyps.append({
+            "id": hid,
+            "agent": str(row.get("agent") or "?"),
+            "lane": strategies.normalize(str(row.get("strategy") or "")) or "other",
+            "file": str(row.get("file") or ""),
+            "subsystem": _subsystem(row.get("file")),
+            "diagnostic": str(row.get("diagnostic") or ""),
+            "t0": t0,
+            "t1": t1,
+            "status": status,
+            "outcome": _outcome(status, artifact),
+            "artifact": artifact,
+            "text": _clip(row.get("hypothesis"), _TEXT_CAP["hypothesis"]),
+            "guard_gap": _clip(row.get("guard_gap"), _TEXT_CAP["guard_gap"]),
+            "input_shape": _clip(row.get("input_shape"), _TEXT_CAP["input_shape"]),
+            "note": _clip(row.get("note"), _TEXT_CAP["note"]),
+            "probes": mine,
+            "notes": notes.get(hid, []),
+        })
+    if not hyps:
+        return None
+    hyps.sort(key=lambda h: (h["t0"], h["agent"]))
+    summary = {outcome: 0 for outcome in OUTCOMES}
+    for hyp in hyps:
+        summary[hyp["outcome"]] += 1
+    resolved = sorted(
+        (h["t1"] - h["t0"]) * 60 for h in hyps if h["outcome"] not in ("open",))
+    middle = len(resolved) // 2
+    median = None
+    if resolved:
+        median = resolved[middle] if len(resolved) % 2 else (
+            resolved[middle - 1] + resolved[middle]) / 2
+    return {
+        "cell": cell_dir.name,
+        "wall_h": round(wall_h, 3) if wall_h else None,
+        "agents": sorted({h["agent"] for h in hyps}, key=lambda a: (len(a), a)),
+        "hyps": hyps,
+        "summary": summary,
+        "median_minutes": round(median, 1) if median is not None else None,
+    }
+
+
+def _traces(bench_dir: Path | None, condition: str) -> list[dict]:
+    if bench_dir is None:
+        return []
+    traces = []
+    for cell_dir in sorted((bench_dir / "cells").glob("*")):
+        meta = _read_json(cell_dir / "cell.json", None)
+        if not isinstance(meta, dict) or meta.get("condition") != condition:
+            continue
+        trace = _trace(cell_dir, meta)
+        if trace:
+            traces.append(trace)
+    return traces
+
+
+def _stamp_clusters(run: dict, series: dict[str, dict]) -> None:
+    """Give every cluster the hour it was first seen, for the replay.
+
+    The timing builder already joins clusters to the event stream and parks
+    the unplaceable ones at the wall; taking the earliest across conditions
+    keeps a shared cluster at the moment either side reached it.
+    """
+    when: dict[str, float] = {}
+    for entry in series.values():
+        for kind in ("find", "crash"):
+            block = entry.get(kind) or {}
+            for key_ids, key_times in (("accepted_ids", "accepted_times"),
+                                       ("rejected_ids", "rejected_times")):
+                for cid, hours in zip(block.get(key_ids) or [], block.get(key_times) or []):
+                    if cid and (cid not in when or hours < when[cid]):
+                        when[cid] = hours
+    walls = [c["wall_h"] or 0.0 for c in run["conditions"]]
+    wall = max(walls) if walls else None
+    for bucket in (run["clusters"], run["rejected"]):
+        for kind in ("find", "crash"):
+            for cluster in bucket[kind]:
+                # a cluster the builder trimmed or could not join has no hour
+                # of its own; it lands at the wall like the padding does, so
+                # it never plays back as found before everything else
+                cluster["t"] = when.get(cluster["id"], wall if series else None)
+
+
+def _attention(run: dict) -> list[dict]:
+    """Where each side looked, and where the merged results were.
+
+    Looking is only observable for the harness — its hypotheses name a file —
+    so the direct control has a "found" column and nothing else, which is
+    itself the honest picture: its process left no trace to draw.
+    """
+    rows: dict[str, dict] = {}
+
+    def slot(name: str) -> dict:
+        return rows.setdefault(name or "(no path)", {
+            "subsystem": name or "(no path)", "hypotheses": 0, "probes": 0,
+            "hits": 0, "harness": 0, "direct": 0, "rejected": 0})
+
+    harness = _harness_of(run)
+    for trace in (harness or {}).get("traces") or []:
+        for hyp in trace["hyps"]:
+            row = slot(hyp["subsystem"])
+            row["hypotheses"] += 1
+            row["probes"] += len(hyp["probes"])
+            row["hits"] += hyp["outcome"] == "hit"
+    for kind in ("find", "crash"):
+        for cluster in run["clusters"][kind]:
+            row = slot(_subsystem(cluster["site"]))
+            for cond in cluster["conditions"]:
+                row["harness" if cond == "harness" else "direct"] += 1
+        for cluster in run["rejected"][kind]:
+            slot(_subsystem(cluster["site"]))["rejected"] += 1
+    return sorted(rows.values(), key=lambda r: (
+        -(r["hypotheses"] + r["harness"] + r["direct"]), r["subsystem"]))
+
+
 # ── per-condition summary ────────────────────────────────────────────────────
 
 def _int(value: object) -> int:
@@ -693,6 +918,7 @@ def _condition(condition: dict, run: dict, bench_dir: Path | None,
         "efficiency": _efficiency(condition),
         "lanes": _lanes(condition),
         "activity": _condition_activity(bench_dir, cond, wall_h or budget_h or 0.0),
+        "traces": _traces(bench_dir, cond) if cond == "harness" else [],
         "cells": _cells(condition, bench_dir, provisional_reason),
         "unjudged_published": [
             {"name": str(a.get("name") or "?"), "why": str(a.get("why") or "?")}
@@ -755,6 +981,8 @@ def build(bench_root: Path) -> dict:
                 "clusters": clusters,
                 "rejected": rejected,
             })
+            _stamp_clusters(runs[-1], series)
+            runs[-1]["attention"] = _attention(runs[-1])
     runs.sort(key=lambda r: (r["target"], r["backend"], r["run_id"]))
     return {
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
@@ -997,6 +1225,7 @@ def _cluster_map(run: dict) -> str:
                     f'data-who="{_e(who)}" data-size="{cluster["size"]}" '
                     f'data-reason="{_e(cluster.get("reason") or "")}" '
                     f'data-strategy="{_e(cluster.get("strategy") or "")}" '
+                    + (f'data-t="{cluster["t"]}" ' if cluster.get("t") is not None else "") +
                     f'title="{_e(cluster["title"] or cluster["site"] or cluster["id"])}"></{tag}>')
             out.append("</div>")
         out.append("</div>")
@@ -1119,6 +1348,147 @@ def _cells_table(run: dict) -> str:
         + "".join(rows) + "</tbody></table></div>")
 
 
+def _leaderboard(runs: list[dict]) -> str:
+    """Every condition of every finished run on one target, strongest first.
+
+    Ranked by Medium-or-higher yield, then distinct problems: the two numbers
+    the guide says to read first. Marks travel with the labels, so a floor or
+    an unjudged remainder ranks with its mark, never as a clean count.
+    """
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for run in runs:
+        groups.setdefault((run["target"], run["target_sha"]), []).append(run)
+    out = []
+    for (target, sha), members in sorted(groups.items()):
+        rows = []
+        for run in members:
+            for cond in run["conditions"]:
+                f, c = cond["find"], cond["crash"]
+                eff, tok = cond["efficiency"], cond["tokens"]
+                rows.append({
+                    "run": run, "cond": cond,
+                    "mplus": f["mplus"] + c["mplus"],
+                    "unique": f["unique"] + c["unique"],
+                    "cost_per": eff["cost_per_confirmed"], "cost": tok["cost"],
+                })
+        rows.sort(key=lambda r: (r["run"]["provisional"], -r["mplus"], -r["unique"],
+                                 r["cond"]["label"]))
+        top = max([r["mplus"] for r in rows] + [1])
+        body = []
+        for rank, row in enumerate(rows, 1):
+            run, cond = row["run"], row["cond"]
+            pending = run["provisional"]
+            width = 100.0 * row["mplus"] / top
+            mplus_cell = "Pending" if pending else (
+                f'<span class="mini wide"><span style="width:{width:.0f}%"></span></span> '
+                f'{row["mplus"]}')
+            cost_per = "—" if row["cost_per"] is None else f'${row["cost_per"]:,.0f}'
+            body.append(
+                f'<tr data-run="{_e(run["key"])}" data-backend="{_e(run["backend"])}">'
+                f'<td class="num">{"—" if pending else rank}</td>'
+                f'<td><span class="cond cond-{_e(cond["token"])}">{_e(cond["label"])}</span>'
+                f' <span class="be be-{_e(run["backend"])}">{_e(run["backend"])}</span></td>'
+                f'<td class="mono dim">{_e(run["run_id"])}</td>'
+                f'<td class="num">{mplus_cell}</td>'
+                f'<td class="num">{_link(cond["find"]["label"], cond["find"]["href"], "count")}</td>'
+                f'<td class="num">{_link(cond["crash"]["label"], cond["crash"]["href"], "count")}</td>'
+                f'<td>{_severity_pill(cond["top_severity"])}</td>'
+                f'<td class="num">{_e(cond["wall_label"])}</td>'
+                f'<td class="num">{_e(row["cost"])}</td>'
+                f'<td class="num">{cost_per}</td></tr>')
+        out.append(
+            f'<div class="lb"><div class="lbt">{_e(target)} <span class="sha">{_e(sha[:7])}</span></div>'
+            '<div class="tablewrap"><table class="board"><thead><tr><th class="num">#</th>'
+            '<th>Condition</th><th>Run</th><th class="num">Medium+ problems</th>'
+            '<th class="num">Security findings</th><th class="num">Security crashes</th>'
+            '<th>Top crash</th><th class="num">Wall</th><th class="num">Cost</th>'
+            '<th class="num">$ / confirmed</th></tr></thead><tbody>' + "".join(body)
+            + "</tbody></table></div></div>")
+    return "".join(out)
+
+
+def _replay_bar(run: dict) -> str:
+    walls = [c["wall_h"] or 0 for c in run["conditions"]] + [
+        t["wall_h"] or 0 for c in run["conditions"] for t in c["traces"]]
+    wall = max(walls + [0])
+    if wall <= 0:
+        return ""
+    ticks = int(round(wall * 100))
+    return (
+        f'<div class="replay" data-wall="{wall:.3f}">'
+        '<button type="button" class="play">▶ Replay the run</button>'
+        f'<input type="range" min="0" max="{ticks}" value="{ticks}" step="1" '
+        'aria-label="hours into the run">'
+        f'<span class="rt">{wall:.2f}h</span><span class="rn">whole run</span></div>')
+
+
+def _trace_panel(run: dict) -> str:
+    harness = _harness_of(run)
+    if harness is None or not harness["traces"]:
+        return ""
+    parts = ['<div class="panel"><div class="pt">How the harness reasoned</div>'
+             '<p class="pd">Every hypothesis an agent opened, as a bar from the moment it was '
+             'written to the moment it was resolved, one row per agent. Colour is the outcome; '
+             'the ticks above a bar are the sanitizer probes it drove, coloured by verdict; a '
+             'dot at the end marks a hypothesis that became a filed artifact. Hover for the '
+             'idea in the agent\'s own words; click to read its reasoning, guard gap, input '
+             'shape, probes, and notes. The control leaves no such trace: it reports, and '
+             'nothing records what it considered and discarded.</p>'
+             '<div class="legend">'
+             '<span class="k"><b class="o-hit"></b>became an artifact</span>'
+             '<span class="k"><b class="o-confirmed"></b>confirmed, not filed</span>'
+             '<span class="k"><b class="o-refuted"></b>refuted by evidence</span>'
+             '<span class="k"><b class="o-dropped"></b>dropped untested</span>'
+             '<span class="k"><b class="o-blocked"></b>blocked by the environment</span>'
+             '<span class="k"><b class="o-open"></b>still open</span></div>']
+    for trace in harness["traces"]:
+        summary = trace["summary"]
+        total = sum(summary.values())
+        bits = [f'{total} hypotheses']
+        for outcome in OUTCOMES:
+            if summary[outcome]:
+                bits.append(f'{summary[outcome]} {outcome}')
+        if trace["median_minutes"] is not None:
+            bits.append(f'median {trace["median_minutes"]:g} min from opened to resolved')
+        parts.append(
+            f'<div class="tsum"><span class="mono">{_e(trace["cell"])}</span> · '
+            + _e(" · ".join(bits)) + "</div>"
+            f'<div class="chart trace" data-run="{_e(run["key"])}" data-cell="{_e(trace["cell"])}"></div>')
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _attention_panel(run: dict) -> str:
+    rows = run.get("attention") or []
+    if not rows:
+        return ""
+    direct = _direct_of(run) is not None
+    top = max([r["hypotheses"] for r in rows] + [1])
+    body = []
+    for row in rows:
+        width = 100.0 * row["hypotheses"] / top
+        body.append(
+            f'<tr><td class="mono">{_e(row["subsystem"])}</td>'
+            f'<td class="num"><span class="mini wide"><span style="width:{width:.0f}%"></span></span> '
+            f'{row["hypotheses"] or "—"}</td>'
+            f'<td class="num">{row["probes"] or "—"}</td>'
+            f'<td class="num">{row["hits"] or "—"}</td>'
+            f'<td class="num">{row["harness"] or "—"}</td>'
+            + (f'<td class="num">{row["direct"] or "—"}</td>' if direct else "")
+            + f'<td class="num">{row["rejected"] or "—"}</td></tr>')
+    return (
+        '<div class="panel"><div class="pt">Where they looked, where they found</div>'
+        '<p class="pd">The harness\'s hypotheses name a file, so its attention can be placed by '
+        'top-level directory beside the merged results that landed there. The control\'s '
+        'attention is not observable — only what it reported is — so it has a found column and '
+        'nothing else.</p><div class="tablewrap"><table class="attn"><thead><tr>'
+        '<th>Subsystem</th><th class="num">Hypotheses</th><th class="num">Probes</th>'
+        '<th class="num">Became artifacts</th><th class="num">Kept · tokenfuzz</th>'
+        + ('<th class="num">Kept · direct</th>' if direct else "")
+        + '<th class="num">Rejected</th></tr></thead><tbody>' + "".join(body)
+        + "</tbody></table></div></div>")
+
+
 def _run_section(run: dict) -> str:
     anchor = _slug(run["key"])
     identity = " · ".join(filter(None, [
@@ -1151,6 +1521,13 @@ def _run_section(run: dict) -> str:
             'so each of these counts in its row\'s unjudged remainder and earns no credit.</p>'
             f'<ul class="unjudged">{items}</ul>')
     if not run["provisional"]:
+        replay = _replay_bar(run)
+        if replay:
+            parts.append(
+                '<div class="panel"><div class="pt">Replay</div>'
+                '<p class="pd">Drag, or press play, to watch the run unfold: every panel below '
+                'shows only what existed by that hour — the problems found so far, the curves, '
+                'the activity, and the hypotheses the agents had opened.</p>' + replay + "</div>")
         parts.append(
             '<div class="panel"><div class="pt">What each side found</div>'
             '<p class="pd">One dot per distinct problem after duplicate merging. Row is the bug '
@@ -1169,6 +1546,7 @@ def _run_section(run: dict) -> str:
             'that found nothing new. Solid is tokenfuzz, dashed is the model on its own. Ticks below '
             'the axis are rejected results, placed the same way.</p>'
             f'<div class="chart ttd" data-run="{_e(run["key"])}"></div></div>')
+    parts.append(_trace_panel(run))
     if any(cond["activity"] for cond in run["conditions"]):
         parts.append(
             '<div class="panel"><div class="pt">How the run thought</div>'
@@ -1177,6 +1555,7 @@ def _run_section(run: dict) -> str:
             'and model output tokens. The direct control writes no hypotheses or probe records, '
             'so its strip shows only what it filed and what it generated.</p>'
             f'<div class="chart act" data-run="{_e(run["key"])}"></div></div>')
+    parts.append(_attention_panel(run))
     funnel = _funnel(run)
     if funnel:
         parts.append(
@@ -1222,6 +1601,8 @@ _GUIDE = """
 <p><b>Wall</b> is <code>spent/granted</code> hours, the median across finished repeats; time parked on a provider reset counts as neither. The harness usually spends the whole grant; the control stops when the model decides it is done, so a short numerator beside a count means that count came from a shorter experiment. <b>Replicates</b> is <code>done/total</code>; <code>(Np)</code> repeats never came back and are excluded, <code>(Nt)</code> repeats stopped early on a terminal backend exit but are counted. The wall contains every second the harness spent deciding what to look at next — housekeeping between iterations is steering, not overhead — and only provider-withheld capacity is subtracted.</p>
 <h3>Tokens and cost</h3>
 <p>Token columns are normalised so backends can be compared: <b>Input</b> is tokens charged at the full input rate (Claude's fresh input plus cache writes; running totals from Codex and Gemini have cache reads subtracted back out). <b>Output</b> includes tool-call payloads where reported. <b>Cost</b> prices each backend's own billing buckets at its published list rates and rounds to whole dollars; a <code>~</code> prefix marks a figure estimated from character counts because the backend reported no usage. Each backend's own ledger keeps the cents.</p>
+<h3>What makes this comparable</h3>
+<p>There is no answer key. Planted-bug suites score a model on re-finding a known defect at a known site; every target here is live, unfixed code, so a result is a problem nobody had filed, held to the same evidence bar on both sides — a reproducing sanitizer crash, or a source-backed report that names a boundary and a caller that crosses it — and merged so the same problem counts once however many times it was written up. The control is the same model with the same budget and a plain prompt, so the difference between the two rows is the harness and nothing else. The trace panels show the process that produced the numbers, from the audit's own state streams, so a reader can see not only what was found but what was tried, refuted, and dropped along the way.</p>
 <h3>Timing and activity</h3>
 <p>Discovery times come from the audit's own event stream, joined to the merged clusters, and placed on the cell's start clock; a result that cannot be placed lands at the end of the run and the panel says <i>timing approximate</i>. The activity strip reads the hypothesis, probe, event, and usage streams each cell wrote while it ran; events after the wall are review, not activity, and are not drawn. Multiple repeats are summed.</p>
 </div></details>
@@ -1263,6 +1644,11 @@ def render(data: dict) -> str:
             '<button class="chip toggle" id="show-rejected" aria-pressed="true">Show rejected</button>'
             '</div>'
             '<section class="sec"><h2>At a glance</h2>' + _verdict_cards(runs) + "</section>"
+            '<section class="sec"><h2>Leaderboard</h2><p class="pd">Every condition of every '
+            'run on the same target revision, ranked by Medium-or-higher problems and then by '
+            'distinct problems. The harness and the plain model are ranked together on purpose: '
+            'the question is what finds real bugs, not which product wins.</p>'
+            + _leaderboard(runs) + "</section>"
             '<section class="sec"><h2>Scoreboard</h2><p class="pd">One row per target, backend, '
             'condition, and run; re-runs keep their own rows. Click a heading to sort; click a '
             'count to open its evidence.</p>' + _scoreboard(runs) + "</section>"
@@ -1275,6 +1661,9 @@ def render(data: dict) -> str:
         "<title>benchmark-result</title>\n<style>" + _CSS + "</style>\n</head>\n<body>\n"
         '<main class="page">' + head + body + _GUIDE + "</main>\n"
         '<div class="tip" id="tip" role="tooltip"></div>\n'
+        '<aside class="drawer" id="drawer" hidden><div class="dh"><b id="dtitle"></b>'
+        '<button type="button" class="dclose" aria-label="close">×</button></div>'
+        '<div class="db" id="dbody"></div></aside>\n'
         f'<script type="application/json" id="bench-data">{payload}</script>\n'
         "<script>" + _JS + "</script>\n</body>\n</html>\n"
     )
@@ -1296,6 +1685,7 @@ def _payload(data: dict) -> dict:
                 "crash": {k: cond["crash"][k] for k in
                           ("unique", "times", "sites", "rejected_times", "approx", "rejected", "rejected_upper")},
                 "activity": cond["activity"],
+                "traces": cond["traces"],
                 "first_filed_min": cond["efficiency"]["first_filed_min"],
                 "first_crash_min": cond["efficiency"]["first_crash_min"],
                 "first_admitted_min": cond["efficiency"]["first_admitted_min"],
@@ -1450,6 +1840,30 @@ abbr.mark{text-decoration:none;cursor:help;color:var(--muted);border-bottom:1px 
 .guide summary{cursor:pointer;font-weight:700;padding:8px 0}
 .gbody{font-size:.93em;color:var(--ink2);max-width:76em}.gbody h3{font-size:.95em;color:var(--ink);margin:14px 0 4px}
 .gbody code{font-family:var(--mono);font-size:.9em;background:var(--surf2);padding:0 4px;border-radius:4px}
+.lb{margin:10px 0 16px}.lbt{font-weight:700;margin:0 0 6px}
+.mini.wide{width:110px}
+.replay{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--surf2);border-radius:10px;padding:10px 12px}
+.replay .play{font:inherit;font-size:.86em;font-weight:700;border:1px solid var(--axis);background:var(--surf);color:var(--ink);border-radius:8px;padding:5px 12px;cursor:pointer}
+.replay input[type=range]{flex:1;min-width:200px;accent-color:var(--ink)}
+.replay .rt{font-variant-numeric:tabular-nums;font-weight:700;min-width:4.5em}.replay .rn{font-size:.84em;color:var(--ink2)}
+.dot.future{opacity:.12}
+.tsum{font-size:.84em;color:var(--ink2);margin:10px 0 2px}
+.legend .k b.o-hit{background:var(--codex)}.legend .k b.o-confirmed{background:var(--good)}.legend .k b.o-refuted{background:var(--muted)}
+.legend .k b.o-dropped{background:var(--none)}.legend .k b.o-blocked{background:var(--med)}.legend .k b.o-open{background:var(--surf);border:1.5px solid var(--ink2)}
+.run[data-backend=claude] .legend .k b.o-hit{background:var(--claude)}.run[data-backend=gemini] .legend .k b.o-hit{background:var(--gemini)}
+.run[data-backend=grok] .legend .k b.o-hit{background:var(--grok)}.run[data-backend=oss] .legend .k b.o-hit{background:var(--oss)}
+.run[data-backend=opencode] .legend .k b.o-hit{background:var(--opencode)}
+.chart.trace svg .hyp{cursor:pointer}.chart.trace svg .hyp:hover{stroke:var(--ink);stroke-width:1.5}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(520px,100vw);z-index:70;background:var(--surf);border-left:1px solid var(--ring);
+ box-shadow:-4px 0 24px rgba(0,0,0,.18);display:flex;flex-direction:column}
+.drawer[hidden]{display:none}
+.dh{display:flex;align-items:flex-start;gap:10px;padding:14px 16px;border-bottom:1px solid var(--grid)}
+.dh b{flex:1;font-family:var(--mono);font-size:.9em;word-break:break-all}
+.dclose{font:inherit;font-size:1.3em;line-height:1;border:0;background:none;color:var(--ink2);cursor:pointer}
+.db{overflow:auto;padding:6px 16px 24px;font-size:.9em;line-height:1.55}
+.db h4{font-size:.76em;text-transform:uppercase;letter-spacing:.06em;color:var(--ink2);margin:14px 0 3px}
+.db p{margin:0;color:var(--ink)}.db ul{margin:2px 0 0;padding-left:18px;color:var(--ink2)}.db li{margin:2px 0}
+.db .meta{font-size:.84em;color:var(--ink2)}
 .tip{position:fixed;z-index:60;display:none;pointer-events:none;max-width:320px;background:var(--ink);color:var(--surf);
  font-size:.8em;line-height:1.5;padding:8px 10px;border-radius:9px;box-shadow:0 2px 10px rgba(0,0,0,.3)}
 .tip b{display:block;font-weight:700}.tip .src{font-family:var(--mono);word-break:break-all;color:var(--low)}.tip .dim{opacity:.75}
@@ -1512,6 +1926,9 @@ function binH(i,bw){return (i*bw).toFixed(2)+"–"+((i+1)*bw).toFixed(2)+"h"}
 function noun(kind,n){return kind==="crash"?(n===1?"crash":"crashes"):(n===1?"finding":"findings")}
 function steps(times){var p=[[0,0]];times.forEach(function(t,i){p.push([t,i]);p.push([t,i+1])});return p}
 function runOf(key){for(var i=0;i<D.runs.length;i++)if(D.runs[i].key===key)return D.runs[i];return null}
+// the replay cut: hours into the run that the section is showing, Infinity for all of it
+function cutOf(host){var r=host.closest(".run"),c=r?r.dataset.cut:"";return c==null||c===""?Infinity:+c}
+function playhead(s,x,y1,y2){s.appendChild(el("line",{x1:x,x2:x,y1:y1,y2:y2,stroke:v("--ink"),"stroke-width":1.5,"stroke-dasharray":"4 3"}))}
 function axes(s,X,Y,ys,xs,ml,mt,pw,ph,ylabel){
  for(var yv=0;yv<=ys.top+1e-9;yv+=ys.step){var q=Math.round(yv*1e6)/1e6;
   s.appendChild(el("line",{x1:ml,x2:ml+pw,y1:Y(q),y2:Y(q),stroke:q?v("--grid"):v("--axis"),"stroke-width":q?1:1.5}));
@@ -1521,7 +1938,7 @@ function axes(s,X,Y,ys,xs,ml,mt,pw,ph,ylabel){
   s.appendChild(el("text",{x:X(r),y:mt+ph+16,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(fmtH(r))]))}
  s.appendChild(el("text",{x:ml,y:mt+ph+30,"font-size":10,"font-weight":700,fill:v("--muted")},[tx("hours since the cell started →")]))}
 // ── time to discovery ──────────────────────────────────────────────────────
-function drawTTD(host){var run=runOf(host.dataset.run);if(!run)return;var kind=host.dataset.kind||"find",showRej=host.dataset.rejected!=="0";
+function drawTTD(host){var run=runOf(host.dataset.run);if(!run)return;var kind=host.dataset.kind||"find",showRej=host.dataset.rejected!=="0",cut=cutOf(host);
  host.replaceChildren();
  var seg=h("div","seg");[["find","Findings"],["crash","Crashes"]].forEach(function(k){var b=h("button",null,k[1]);b.setAttribute("aria-pressed",k[0]===kind?"true":"false");
   b.addEventListener("click",function(){host.dataset.kind=k[0];drawTTD(host)});seg.appendChild(b)});host.appendChild(seg);
@@ -1544,7 +1961,7 @@ function drawTTD(host){var run=runOf(host.dataset.run);if(!run)return;var kind=h
   if(!direct&&m.unique)s.appendChild(el("polygon",{points:pts.map(function(p){return X(p[0]).toFixed(2)+","+Y(p[1]).toFixed(2)}).concat([X(end[0]).toFixed(2)+","+Y(0),X(0)+","+Y(0)]).join(" "),fill:col,"fill-opacity":.08}));
   s.appendChild(el("path",{d:d,fill:"none",stroke:col,"stroke-width":direct?2:2.5,"stroke-dasharray":direct?"6 5":null,"stroke-linejoin":"round","stroke-linecap":"round"}));
   m.times.forEach(function(t,i){var px=X(t),py=Y(i+1);
-   var dot=el("circle",{cx:px,cy:py,r:direct?3.2:3.8,fill:direct?v("--surf"):col,stroke:direct?col:v("--surf"),"stroke-width":2});
+   var dot=el("circle",{cx:px,cy:py,r:direct?3.2:3.8,fill:direct?v("--surf"):col,stroke:direct?col:v("--surf"),"stroke-width":2,opacity:t>cut?.15:null});
    var hit=el("circle",{cx:px,cy:py,r:10,fill:"transparent",style:"cursor:pointer"});s.appendChild(dot);s.appendChild(hit);
    hover(hit,function(){return[{text:name+" · "+noun(kind,1)+" "+(i+1)+" of "+m.unique,b:true},{text:m.sites[i]||"",src:true},{text:"first seen "+hrs(t)+" into the run"},
     {text:"one distinct problem after duplicate merging; the same problem written up more than once counts once",dim:true}]})});
@@ -1557,6 +1974,7 @@ function drawTTD(host){var run=runOf(host.dataset.run);if(!run)return;var kind=h
    if(m.approx)l.push({text:"discovery timing approximate",dim:true});return l});
   s.appendChild(el("text",{x:ex+10,y:ey+4,"font-size":11.5,"font-weight":700,fill:v("--ink")},[tx(m.unique)]))});
  if(approx)s.appendChild(el("text",{x:ml+pw,y:mt+12,"text-anchor":"end","font-size":9.5,"font-style":"italic",fill:v("--muted")},[tx("timing approximate — one or more discovery times unavailable")]));
+ if(cut<Infinity){var cx=X(Math.min(cut,xs.top));s.appendChild(el("rect",{x:cx,y:mt,width:Math.max(0,ml+pw-cx),height:ph,fill:v("--bg"),opacity:.7}));playhead(s,cx,mt,mt+ph)}
  host.appendChild(s)}
 // ── activity ───────────────────────────────────────────────────────────────
 function drawActivity(host){var run=runOf(host.dataset.run);if(!run)return;host.replaceChildren();
@@ -1564,6 +1982,7 @@ function drawActivity(host){var run=runOf(host.dataset.run);if(!run)return;host.
  var legend=h("div","legend");LANES.forEach(function(l){if(!conds.some(function(c){return c.activity.hyp[l]}))return;var k=h("span","k");var b=h("b");b.style.background=v("--"+l);k.appendChild(b);k.appendChild(tx(l+" "+(D.lane_names[l]||l)));legend.appendChild(k)});
  ["CRASH","CLEAN","TIMEOUT","EXEC_FAIL"].forEach(function(vd){var k=h("span","k");var b=h("b");b.style.background=VERD[vd];k.appendChild(b);k.appendChild(tx("probe "+vd));legend.appendChild(k)});
  host.appendChild(legend);
+ var cut=cutOf(host);
  conds.forEach(function(c){var A=c.activity,n=A.bins,bw=A.bin_h,wall=n*bw;
   var W=900,ml=92,mr=24,pw=W-ml-mr,rows=[],hasHyp=Object.keys(A.hyp).length>0,hasProbe=PROBEsum(A)>0,hasTok=A.out_tokens.some(function(x){return x>0});
   if(hasHyp)rows.push("hyp");if(hasProbe)rows.push("probe");rows.push("filed");if(hasTok)rows.push("tokens");
@@ -1604,10 +2023,72 @@ function drawActivity(host){var run=runOf(host.dataset.run);if(!run)return;host.
    s.appendChild(el("line",{x1:x,x2:x,y1:mt,y2:y-gap+6,stroke:v("--ink2"),"stroke-width":1,"stroke-dasharray":"3 3",opacity:.6}));
    s.appendChild(el("text",{x:x+3,y:y-gap+16+(j%2)*10,"font-size":9,fill:v("--ink2")},[tx(m[1]+" "+fmtH(Math.round(mins/60*100)/100))]))});
   for(var xv=0,xs=nice(wall,6);xv<=wall+1e-9;xv+=xs.step){var q=Math.round(xv*1e6)/1e6;s.appendChild(el("text",{x:X(q),y:H-6,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(fmtH(q))]))}
+  if(cut<Infinity&&cut<wall){var cx=X(cut);s.appendChild(el("rect",{x:cx,y:mt,width:ml+pw-cx,height:y-gap-mt+6,fill:v("--bg"),opacity:.7}));playhead(s,cx,mt,y-gap+6)}
   host.appendChild(s)})}
 function PROBEsum(A){var t=0;for(var k in A.probe)A.probe[k].forEach(function(x){t+=x});return t}
 function ktok(n){return n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?Math.round(n/1e3)+"k":String(n)}
+// ── the mind trace: one row per agent, one bar per hypothesis ────────────────
+function traceOf(run,cell){var h=run.conditions.filter(function(c){return c.token==="harness"})[0];
+ return ((h&&h.traces)||[]).filter(function(t){return t.cell===cell})[0]||null}
+function drawTrace(host){var run=runOf(host.dataset.run),T=run&&traceOf(run,host.dataset.cell);if(!T)return;host.replaceChildren();
+ var cut=cutOf(host),wall=T.wall_h||Math.max.apply(null,T.hyps.map(function(x){return x.t1}).concat([1]));
+ var col=hue(run.backend),OUT={hit:{fill:col},confirmed:{fill:v("--good")},refuted:{fill:v("--muted")},dropped:{fill:v("--none")},blocked:{fill:v("--med")},open:{fill:v("--surf"),stroke:v("--ink2")}};
+ // pack each agent's hypotheses into sub-rows so overlapping ideas stay legible
+ var subs={};T.agents.forEach(function(a){subs[a]=[]});
+ T.hyps.forEach(function(hp){var rows=subs[hp.agent]||(subs[hp.agent]=[]),i=0;for(;i<rows.length;i++)if(rows[i]<=hp.t0)break;
+  if(i>=rows.length){if(rows.length>=6)i=rows.length-1;else rows.push(0)}rows[i]=Math.max(rows[i]||0,hp.t1+wall*.004);hp._row=i});
+ var W=900,ml=70,mr=16,pw=W-ml-mr,rowH=13,gap=3,agentGap=16,mt=10,y=mt,ys={};
+ Object.keys(subs).forEach(function(a){ys[a]=y;y+=Math.max(1,subs[a].length)*(rowH+gap)+agentGap});
+ var H=y+18,X=function(x){return ml+(x/wall)*pw};
+ var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"hypotheses over time"});
+ for(var xv=0,xs=nice(wall,6);xv<=wall+1e-9;xv+=xs.step){var q=Math.round(xv*1e6)/1e6;
+  s.appendChild(el("line",{x1:X(q),x2:X(q),y1:mt-4,y2:y-agentGap+4,stroke:v("--grid")}));
+  s.appendChild(el("text",{x:X(q),y:H-3,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(fmtH(q))]))}
+ Object.keys(subs).forEach(function(a){s.appendChild(el("text",{x:ml-8,y:ys[a]+10,"text-anchor":"end","font-size":10.5,"font-weight":700,fill:v("--ink2")},[tx("agent "+a)]))});
+ T.hyps.forEach(function(hp){if(hp.t0>cut)return;var y0=ys[hp.agent]+hp._row*(rowH+gap),x0=X(hp.t0),x1=X(Math.min(hp.t1,cut)),w=Math.max(3,x1-x0),o=OUT[hp.outcome]||OUT.open;
+  var r=el("rect",{x:x0.toFixed(1),y:y0+3,width:w.toFixed(1),height:rowH-4,rx:2,fill:o.fill,stroke:o.stroke||null,"stroke-width":o.stroke?1.2:null,"class":"hyp"});
+  s.appendChild(r);
+  hp.probes.forEach(function(p){if(p.t>cut)return;s.appendChild(el("rect",{x:(X(p.t)-1).toFixed(1),y:y0,width:2,height:3,fill:VERD[p.verdict]||VERD.other}))});
+  if(hp.outcome==="hit"&&hp.t1<=cut)s.appendChild(el("circle",{cx:X(hp.t1),cy:y0+3+(rowH-4)/2,r:3.5,fill:col,stroke:v("--surf"),"stroke-width":1.5,"pointer-events":"none"}));
+  hover(r,function(){var n=hp.probes.length;return[{text:hp.file||hp.id,b:true},
+   {text:hp.lane+" "+(D.lane_names[hp.lane]||"")+" · "+hp.outcome+(hp.status?" ("+hp.status+")":"")+" · "+n+" probe"+(n===1?"":"s")},
+   {text:hp.text.length>240?hp.text.slice(0,239)+"…":hp.text},
+   {text:"opened "+hrs(hp.t0)+(hp.t1>hp.t0?" · resolved "+hrs(hp.t1):""),dim:true},{text:"click to read the reasoning",dim:true}]});
+  r.addEventListener("click",function(){openDrawer(run,hp)})});
+ if(cut<Infinity&&cut<wall)playhead(s,X(cut),mt-6,y-agentGap+6);
+ host.appendChild(s)}
+// ── the reasoning drawer ────────────────────────────────────────────────────
+var drawer=document.getElementById("drawer"),dtitle=document.getElementById("dtitle"),dbody=document.getElementById("dbody");
+function section(title,text){if(!text)return;dbody.appendChild(h("h4",null,title));dbody.appendChild(h("p",null,text))}
+function openDrawer(run,hp){dtitle.textContent=hp.file||hp.id;dbody.replaceChildren();
+ var meta=h("p","meta",hp.lane+" "+(D.lane_names[hp.lane]||"")+" · agent "+hp.agent+" · "+hp.outcome+(hp.status?" ("+hp.status+")":"")+(hp.artifact?" · filed as "+hp.artifact:"")+(hp.diagnostic?" · "+hp.diagnostic:"")+" · opened "+hrs(hp.t0)+(hp.t1>hp.t0?", resolved "+hrs(hp.t1):"")+" into the run");
+ dbody.appendChild(meta);
+ section("Hypothesis",hp.text);section("Guard gap",hp.guard_gap);section("Input shape",hp.input_shape);section("Agent's conclusion",hp.note);
+ if(hp.probes.length){dbody.appendChild(h("h4",null,hp.probes.length+" sanitizer probe"+(hp.probes.length===1?"":"s")));var ul=h("ul");
+  hp.probes.forEach(function(p){ul.appendChild(h("li",null,hrs(p.t)+" · "+p.verdict+(p.s?" · "+p.s+"s":"")))});dbody.appendChild(ul)}
+ if(hp.notes.length){dbody.appendChild(h("h4",null,"Notes"));var nl=h("ul");hp.notes.forEach(function(n){nl.appendChild(h("li",null,(n.kind?n.kind+": ":"")+n.text))});dbody.appendChild(nl)}
+ drawer.hidden=false}
+drawer.querySelector(".dclose").addEventListener("click",function(){drawer.hidden=true});
+document.addEventListener("keydown",function(e){if(e.key==="Escape")drawer.hidden=true});
+// ── replay: one cut per run, every panel redrawn from it ────────────────────
+function redraw(run){run.querySelectorAll(".ttd").forEach(drawTTD);run.querySelectorAll(".act").forEach(drawActivity);run.querySelectorAll(".trace").forEach(drawTrace);
+ var cut=run.dataset.cut==null||run.dataset.cut===""?Infinity:+run.dataset.cut;
+ run.querySelectorAll(".dot[data-t]").forEach(function(d){d.classList.toggle("future",+d.dataset.t>cut)})}
+document.querySelectorAll(".replay").forEach(function(bar){var run=bar.closest(".run"),range=bar.querySelector("input"),play=bar.querySelector(".play"),out=bar.querySelector(".rt"),note=bar.querySelector(".rn"),max=+range.max,timer=null,pending=false;
+ var R=runOf(run.dataset.run);
+ function kept(cut){var parts=[];(R?R.conditions:[]).forEach(function(c){var f=c.find.times.filter(function(t){return t<=cut}).length,k=c.crash.times.filter(function(t){return t<=cut}).length;parts.push(c.label+" "+f+" / "+k)});return parts.join(" · ")}
+ function apply(){pending=false;var val=+range.value;if(val>=max){run.dataset.cut="";out.textContent=(max/100).toFixed(2)+"h";note.textContent="whole run"}
+  else{var cut=val/100;run.dataset.cut=String(cut);out.textContent=cut.toFixed(2)+"h";note.textContent="findings / crashes kept so far: "+kept(cut)}redraw(run)}
+ range.addEventListener("input",function(){if(!pending){pending=true;requestAnimationFrame(apply)}});
+ function stop(){if(timer)cancelAnimationFrame(timer);timer=null;play.textContent="▶ Replay the run"}
+ play.addEventListener("click",function(){if(timer){stop();return}if(+range.value>=max)range.value=0;
+  var from=+range.value,start=null,dur=Math.max(3000,(max-from)/max*18000);
+  play.textContent="❚❚ Pause";
+  var last=-1;
+  (function step(ts){if(start==null)start=ts;var p=Math.min(1,(ts-start)/dur),val=Math.round(from+(max-from)*p);
+   if(val!==last){last=val;range.value=val;apply()}if(p<1)timer=requestAnimationFrame(step);else stop()})(performance.now())})});
 document.querySelectorAll(".ttd").forEach(drawTTD);
 document.querySelectorAll(".act").forEach(drawActivity);
+document.querySelectorAll(".trace").forEach(drawTrace);
 })();
 """

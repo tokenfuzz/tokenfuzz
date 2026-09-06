@@ -247,13 +247,14 @@ def _cluster_times(
     membership and taking each cluster's earliest member gives the right curve
     and the right length at once.
 
-    Returns ([(time, site)], approximate) — approximate when any cluster had no
-    member we could place on the timeline.
+    Returns ([(time, site, cluster_id)], approximate) — approximate when any
+    cluster had no member we could place on the timeline. The id lets the page
+    replay a run: it joins each step back to the dot it becomes.
     """
     sub = ("crashes" if kind == "crash" else "findings") + ("-rejected" if rejected else "")
     owner = members.get(sub, {}) or {}
     pool_dir = run_dir / "pool" / sub
-    times: list[tuple[float, str]] = []
+    times: list[tuple[float, str, str]] = []
     approximate = False
     for cluster in _load_clusters(run_dir / f"clusters-{sub}.json"):
         mine = [m for m in (cluster.get("members") or []) if owner.get(m) == cond]
@@ -273,7 +274,7 @@ def _cluster_times(
             best = fallback
             approximate = True
         when = min(max(0.0, best), fallback) if fallback else max(0.0, best)
-        times.append((when, _cluster_site(cluster, kind)))
+        times.append((when, _cluster_site(cluster, kind), str(cluster.get("id") or "")))
     return sorted(times), approximate
 
 
@@ -299,8 +300,8 @@ def _is_batch_quantized(times: list[float]) -> bool:
 
 
 def _reconcile(
-    times: list[tuple[float, str]], count: int, wall: float,
-) -> list[tuple[float, str]]:
+    times: list[tuple[float, str, str]], count: int, wall: float,
+) -> list[tuple[float, str, str]]:
     """Make the curve land exactly on the count the table reports.
 
     The clusterers merge a little more than the raw signature key does, so a
@@ -314,7 +315,7 @@ def _reconcile(
         return []
     if len(times) > count:
         return times[:count]
-    return times + [(wall, "")] * (count - len(times))
+    return times + [(wall, "", "")] * (count - len(times))
 
 
 def build(bench_root: Path) -> dict:
@@ -400,17 +401,19 @@ def build(bench_root: Path) -> dict:
                         or rejected_upper_bound
                         or len(acc_times) != n_accepted
                         or len(rej_times) != n_rejected
-                        or _is_batch_quantized([t for t, _ in accepted])
+                        or _is_batch_quantized([t for t, _, _ in accepted])
                     ),
                     "accepted": n_accepted,
                     "rejected": n_rejected,
                     "rejected_upper_bound": rejected_upper_bound,
                     "medium_plus": condition.get(mplus, 0),
-                    "accepted_times": [round(t, 4) for t, _ in accepted],
+                    "accepted_times": [round(t, 4) for t, _, _ in accepted],
                     # parallel to accepted_times: the source site behind each
-                    # step, "" where the cluster carried none
-                    "accepted_sites": [site for _, site in accepted],
-                    "rejected_times": [round(t, 4) for t, _ in rejected],
+                    # step and the cluster it is, "" where unknown
+                    "accepted_sites": [site for _, site, _ in accepted],
+                    "accepted_ids": [cid for _, _, cid in accepted],
+                    "rejected_times": [round(t, 4) for t, _, _ in rejected],
+                    "rejected_ids": [cid for _, _, cid in rejected],
                 }
             series.append(entry)
             target_groups.add((target, target_sha))

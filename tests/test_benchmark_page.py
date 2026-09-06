@@ -189,14 +189,37 @@ class Fixture:
         self._report("pool/model-direct/findings/FIND-0005", "# x\n", "report.html")
         # harness state streams: two hypotheses in the wall, one after it
         self._jsonl(self.harness / "state" / "hypotheses.jsonl", [
-            {"id": "H-1", "strategy": "S3-spec", "created_at": "2026-01-01T00:20:00Z"},
-            {"id": "H-2", "strategy": "s7", "created_at": "2026-01-01T01:50:00Z"},
-            {"id": "H-3", "strategy": "S3", "created_at": "2026-01-01T04:00:00Z"},
+            {"id": "H-1", "agent": "1", "strategy": "S3-spec", "file": "src/app_parse.c:app_parse:91",
+             "hypothesis": "the length field is trusted before the bounds check",
+             "guard_gap": "no check between read and use", "input_shape": "a short header",
+             "note": "confirmed with a two-byte header", "status": "FIND-001",
+             "created_at": "2026-01-01T00:20:00Z", "updated_at": "2026-01-01T00:40:00Z"},
+            {"id": "H-2", "agent": "2", "strategy": "s7", "file": "src/app_io.c:app_read:12",
+             "hypothesis": "a second read reuses the freed buffer", "status": "REFUTED",
+             "created_at": "2026-01-01T01:50:00Z", "updated_at": "2026-01-01T02:10:00Z"},
+            {"id": "H-3", "agent": "1", "strategy": "S3", "file": "src/app_alloc.c:app_grow:40",
+             "hypothesis": "growth is unbounded", "status": "PENDING",
+             "created_at": "2026-01-01T04:00:00Z"},
+            {"id": "H-4", "agent": "2", "strategy": "S5", "file": "src/app_io.c:app_close:80",
+             "hypothesis": "close runs twice on the error path", "status": "DISCARDED",
+             "note": f"build tree at {ROOT}/targets/sampleproj/build-asan is pinned",
+             "created_at": "2026-01-01T02:30:00Z", "updated_at": "2026-01-01T03:20:00Z"},
         ])
         self._jsonl(self.harness / "state" / "runs.jsonl", [
-            {"id": "RUN-1", "verdict": "CLEAN", "created_at": "2026-01-01T00:25:00Z"},
-            {"id": "RUN-2", "verdict": "CRASH", "created_at": "2026-01-01T00:26:00Z"},
-            {"id": "RUN-3", "verdict": "PROPERTY", "created_at": "2026-01-01T00:27:00Z"},
+            {"id": "RUN-1", "hypothesis_id": "H-1", "verdict": "CLEAN",
+             "duration_seconds": 2.5, "created_at": "2026-01-01T00:25:00Z"},
+            {"id": "RUN-2", "hypothesis_id": "H-1", "verdict": "CRASH",
+             "duration_seconds": 1.0, "created_at": "2026-01-01T00:26:00Z"},
+            {"id": "RUN-3", "hypothesis_id": "H-2", "verdict": "PROPERTY",
+             "created_at": "2026-01-01T00:27:00Z"},
+        ])
+        self._jsonl(self.harness / "lineage.jsonl", [
+            {"hypothesis_id": "H-1", "artifact": "FIND-001", "status": "FIND-001", "agent": "1"},
+            {"hypothesis_id": "H-2", "artifact": None, "status": "REFUTED", "agent": "2"},
+        ])
+        self._jsonl(self.harness / "state" / "notes.jsonl", [
+            {"hypothesis_id": "H-1", "kind": "decision", "text": "drive the parser directly",
+             "created_at": "2026-01-01T00:30:00Z"},
         ])
         self._jsonl(self.harness / "state" / "events.jsonl", [
             {"type": "finding_created", "id": "FIND-001", "mtime": "2026-01-01T00:30:00+00:00",
@@ -300,6 +323,69 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(direct["hyp"], {})
         self.assertEqual(sum(direct["filed_find"]), 1)
 
+    def test_trace_carries_each_hypothesis_with_its_probes_and_outcome(self) -> None:
+        harness = self._cond("harness")
+        self.assertEqual(len(harness["traces"]), 1)
+        trace = harness["traces"][0]
+        self.assertEqual(trace["cell"], "harness-r1")
+        self.assertEqual(trace["agents"], ["1", "2"])
+        # the hypothesis after the wall is not part of the run's reasoning
+        self.assertEqual([h["id"] for h in trace["hyps"]], ["H-1", "H-2", "H-4"])
+        hit, refuted, dropped = trace["hyps"]
+        # resolved by teardown after the wall: still open at the wall, so the
+        # bar runs to the wall rather than collapsing to its opening instant
+        self.assertEqual((dropped["t0"], dropped["t1"]), (2.5, 3.0))
+        self.assertEqual(dropped["outcome"], "dropped")
+        # the agent's note names the checkout; the page must not
+        self.assertNotIn(str(ROOT), dropped["note"])
+        self.assertIn("build-asan is pinned", dropped["note"])
+        self.assertEqual(hit["outcome"], "hit")
+        self.assertEqual(hit["artifact"], "FIND-001")
+        self.assertEqual(hit["lane"], "S3")
+        self.assertEqual(hit["subsystem"], "src")
+        self.assertEqual((hit["t0"], hit["t1"]), (0.3333, 0.6667))
+        self.assertEqual([p["verdict"] for p in hit["probes"]], ["CLEAN", "CRASH"])
+        self.assertEqual(hit["probes"][0]["s"], 2.5)
+        self.assertEqual(hit["notes"][0]["text"], "drive the parser directly")
+        self.assertEqual(hit["text"], "the length field is trusted before the bounds check")
+        self.assertEqual(refuted["outcome"], "refuted")
+        self.assertEqual(refuted["lane"], "S7")
+        # a probe filed before the hypothesis still belongs to it, and the bar
+        # runs to the later of its last update and its last probe
+        self.assertEqual(refuted["probes"][0]["verdict"], "PROPERTY")
+        self.assertEqual(trace["summary"]["hit"], 1)
+        self.assertEqual(trace["summary"]["refuted"], 1)
+        self.assertEqual(trace["summary"]["dropped"], 1)
+        self.assertEqual(trace["summary"]["open"], 0)
+        # 20, 20, 30 minutes resolved: the middle value
+        self.assertEqual(trace["median_minutes"], 20.0)
+        self.assertEqual(self._cond("model-direct")["traces"], [])
+
+    def test_clusters_are_stamped_with_their_discovery_hour(self) -> None:
+        stamped = {c["id"]: c["t"] for c in self.run["clusters"]["find"]}
+        # every cluster the table counts has an hour; the timing builder parks
+        # the ones it cannot place at the wall
+        self.assertEqual(set(stamped), {"FCL-1", "FCL-2", "FCL-3", "FCL-4"})
+        self.assertTrue(all(t is not None for t in stamped.values()))
+        self.assertTrue(all(0 <= t <= 3.0 for t in stamped.values()))
+
+    def test_attention_places_hypotheses_and_results_by_subsystem(self) -> None:
+        rows = {r["subsystem"]: r for r in self.run["attention"]}
+        src = rows["src"]
+        self.assertEqual(src["hypotheses"], 3)
+        self.assertEqual(src["probes"], 3)
+        self.assertEqual(src["hits"], 1)
+        self.assertEqual(src["harness"], 3)
+        self.assertEqual(src["direct"], 2)
+        self.assertEqual(src["rejected"], 1)
+        # a crash site with no directory lands in its own row, never in a fake one
+        self.assertEqual(rows["(no path)"]["harness"], 1)
+        self.assertEqual(benchmark_page._subsystem("libx/y.c:fn:3"), "libx")
+        self.assertEqual(benchmark_page._subsystem("y.c:3"), "")
+        self.assertEqual(benchmark_page._outcome("CONFIRMED-NO-CRASH", ""), "refuted")
+        self.assertEqual(benchmark_page._outcome("PROBED", ""), "open")
+        self.assertEqual(benchmark_page._outcome("DISCARDED", "CRASH-001"), "hit")
+
     def test_lane_yield_and_waterfall_reach_the_condition(self) -> None:
         harness = self._cond("harness")
         self.assertEqual(harness["lanes"]["S3"], {"hypotheses": 4, "productive": 2})
@@ -382,11 +468,22 @@ class RenderTests(unittest.TestCase):
         self.assertIn("1 both", html)
         self.assertIn("How to read this page", html)
         self.assertIn(".card[hidden]{display:none}", html)
+        # leaderboard ranks the harness first here (2 M+ findings + 1 crash vs 1)
+        board = html[html.index('<table class="board">'):html.index("</table>", html.index('<table class="board">'))]
+        self.assertLess(board.index("tokenfuzz"), board.index("gpt-5.6-sol-direct"))
+        # replay, trace, attention, and the drawer are all on the page
+        self.assertIn('class="replay" data-wall="3.000"', html)
+        self.assertIn('data-cell="harness-r1"', html)
+        self.assertIn("1 hit · 1 refuted", html)
+        self.assertIn('<table class="attn">', html)
+        self.assertIn('id="drawer"', html)
+        self.assertIn('data-t="', html)
 
     def test_relative_rendering_emits_no_absolute_paths(self) -> None:
         with benchmark._render_relative_to(self.fixture.root):
             html = benchmark_page.render(benchmark_page.build(self.fixture.root))
         self.assertNotIn(str(self.fixture.root), html)
+        self.assertNotIn(str(ROOT), html)
         self.assertNotIn("file://", html)
         hrefs = re.findall(r'href="([^"]+)"', html)
         self.assertIn("codex/20260101-000000/pool/harness/findings/FINDING-CLUSTERS.html", hrefs)

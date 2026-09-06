@@ -375,7 +375,14 @@ rejected index that produced it. The labels and marks (`M+`, `classes`,
 `unjudged`, `retained`, `≥`, `up to`, `~`, `‡`) mean exactly what they mean
 in the ledger, and the page's own reading guide restates them.
 
-**Run by run** then gives each run five views of the same evidence:
+**Leaderboard** ranks every condition of every run on one target revision —
+harness and plain model together — by Medium-or-higher problems, then by
+distinct problems, with cost and cost per confirmed result beside them.
+
+**Run by run** then gives each run several views of the same evidence, and a
+**replay** control: drag the slider, or press play, and every panel in the run
+shows only what existed by that hour — the dots found so far, the curves, the
+activity, and the hypotheses the agents had opened.
 
 - *What each side found* — one dot per merged cluster: row is the bug class
   (crashes get their own row), column is who reached it, colour is severity,
@@ -390,11 +397,23 @@ in the ledger, and the page's own reading guide restates them.
   dashed for the control, ticks under the axis for rejected results. When a
   discovery time cannot be recovered the panel says *timing approximate*
   rather than faking precision.
+- *How the harness reasoned* — every hypothesis an agent opened, as a bar
+  from the moment it was written to the moment it was resolved, one row per
+  agent, coloured by outcome (became an artifact, confirmed but not filed,
+  refuted by evidence, dropped untested, blocked by the environment, still
+  open), with the sanitizer probes it drove ticked above it. Hover shows the
+  idea in the agent's own words; click opens its reasoning, guard gap, input
+  shape, probes, and notes. The control leaves no such trace, and the panel
+  says so rather than inventing one.
 - *How the run thought* — the cell's own state streams in quarter-hour bins:
   hypotheses opened per strategy lane, sanitizer probes per verdict, artifacts
   filed and gated, and model output tokens, with the run's first filed, first
   confirmed crash, and first admitted artifact marked. Activity stops at the
   cell's wall; what follows is review, which the page reports as measurement.
+- *Where they looked, where they found* — the harness's hypotheses and probes
+  by top-level directory, beside the merged results that landed there for
+  each side, so a subsystem that drew most of the attention and none of the
+  yield is visible as such.
 - *What survived review* — claimed, evidence complete, validated, reportable,
   per side and per kind: the gap a raw count would have hidden.
 - *Where the ideas came from* and *What it took* — per-lane hypothesis yield,
