@@ -539,6 +539,25 @@ class WorkQueueTests(unittest.TestCase):
             any(line.endswith("|MISSED|app_parse|") for line in rows), listing,
         )
 
+    def test_agent_views_print_results_relative_paths(self) -> None:
+        # A benchmark cell's results dir runs past 150 characters; every
+        # digest row repeating it is replayed on each later turn. `bin/probe`
+        # resolves `scratch-N/<file>` against RESULTS_DIR, so the short form
+        # is what the agent should copy. Paths elsewhere stay verbatim.
+        self.add_run(index=1)
+        self.add_run(index=2, testcase="/elsewhere/scratch-1/testcase-2.bin")
+        listing = workqueue.recent_runs(self.ctx, limit=5, agent="1")
+        self.assertIn("|scratch-1/testcase-1.bin|", listing)
+        self.assertIn("|/elsewhere/scratch-1/testcase-2.bin|", listing)
+        self.assertNotIn(str(self.results), listing)
+        tried = self.results / "tried-inputs-1.log"
+        tried.write_text(
+            "2026-01-01T00:00:00Z verdict=CLEAN mode=generic hash=abc "
+            f"hypothesis=H-1 target=app.c:app_parse:10 closest=<none> "
+            f"testcase={self.results}/scratch-1/testcase-1.bin\n"
+        )
+        self.assertIn("|scratch-1/testcase-1.bin|", workqueue.recent_tried(self.ctx, agent="1"))
+
     def test_probe_span_stats_decompose_a_session_from_state(self) -> None:
         from datetime import datetime, timedelta, timezone
         started = datetime.now(timezone.utc) - timedelta(seconds=30)
@@ -1573,10 +1592,10 @@ class WorkQueueTests(unittest.TestCase):
         (finding / "repro.py").write_text("pass\n")
         crash_row = workqueue.show_crash(self.ctx, "CRASH-1")
         self.assertEqual(crash_row["cluster"], "CL-one")
-        self.assertIn("reproduce.sh", crash_row["repro"])
+        self.assertEqual(crash_row["repro"], "crashes/CRASH-1/reproduce.sh")
         finding_row = workqueue.show_finding(self.ctx, "FIND-1")
         self.assertEqual(finding_row["cluster"], "FCL-one")
-        self.assertIn("repro.py", finding_row["repro"])
+        self.assertEqual(finding_row["repro"], "findings/FIND-1/repro.py")
         self.assertEqual(finding_row["status"], "PENDING REVIEW")
 
         import validation_receipt

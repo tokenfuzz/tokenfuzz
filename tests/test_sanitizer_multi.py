@@ -495,6 +495,53 @@ print("[run-asan] CRASH DETECTED: ASan error found")
         self.assertIn("small body line 1", self.output(short))
         self.assertIn("small body line 2", self.output(short))
 
+    def test_identical_non_crash_repeats_collapse_to_one_line(self) -> None:
+        # A --confirm of a clean or failing testcase used to replay every
+        # run's full log; only run 1 carries information the verdict lacks.
+        self.flood_runner(count=50)
+        output_file = self.root / "repeat.txt"
+        clean = self.run_multi("generic", runs=4, environment={
+            "ASAN_OUTPUT_FILE": str(output_file),
+        })
+        output = self.output(clean)
+        self.assertEqual(output.count("MIDDLE_LINE_25 parseJob"), 1)
+        self.assertEqual(output.count("VERIFIED - clean (matches run 1)"), 3)
+        self.assertEqual(output_file.read_text().count("MIDDLE_LINE_25 parseJob"), 4)
+        self.assertIn("SUCCESS_RATE: 4/4", output)
+
+        self.write_runner(
+            "print('TESTCASE_EXECUTED')\nprint('BODY_LINE target failed')\n"
+            "print('[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=7)')\n"
+            "raise SystemExit(7)\n"
+        )
+        failed = self.run_multi("generic", runs=3)
+        output = self.output(failed)
+        self.assertEqual(output.count("BODY_LINE target failed"), 1)
+        self.assertEqual(output.count("REPEATED - execution failed (matches run 1)"), 2)
+
+        # A run that diverges from run 1 still prints its own digest.
+        counter = self.root / "flip-counter"
+        counter.write_text("0")
+        self.write_runner(
+            """counter = pathlib.Path(os.environ["MOCK_RUN_COUNTER"])
+run = int(counter.read_text() or "0") + 1
+counter.write_text(str(run))
+print(f"BODY_LINE run {run}")
+if run == 2:
+    print("TESTCASE_EXECUTED")
+    print("[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=7)")
+    raise SystemExit(7)
+print("TESTCASE_EXECUTED")
+print("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)")
+"""
+        )
+        flipped = self.run_multi("generic", runs=3, environment={"MOCK_RUN_COUNTER": str(counter)})
+        output = self.output(flipped)
+        self.assertIn("Run 2/3: DIVERGED - result differs from run 1", output)
+        self.assertIn("BODY_LINE run 2", output)
+        self.assertNotIn("BODY_LINE run 3", output)
+        self.assertIn("Run 3/3: VERIFIED - clean (matches run 1)", output)
+
     def test_generic_coverage_unavailable_falls_open_and_crash_signature_dedup(self) -> None:
         # Generic coverage is gated when an instrumented sibling exists; with
         # none, hits exits 4 and the gate must proceed to the sanitizer,

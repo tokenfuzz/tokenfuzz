@@ -62,7 +62,8 @@ descriptions in the testcase — keep mechanism reasoning in structured state no
 ## CRASH PROMOTION GATE — LEGITIMATE CRASHES ONLY
 
 File a reproducing sanitizer diagnostic under `{{ results_dir }}/crashes/CRASH-*`
-only when it is a legitimate crash testcase. The gate is not "the caller used
+(the results dir; `crashes/` and `findings/` below are relative to it) only
+when it is a legitimate crash testcase. The gate is not "the caller used
 only the inputs the docs show in examples": absent an explicit documented
 precondition, a public API accepts every value of its declared parameter
 type, and breaking on one of them is the bug. All three must hold:
@@ -94,9 +95,9 @@ type, and breaking on one of them is the bug. All three must hold:
    operation legitimately invalidates a separately owned object.
 
 The question is: did the caller break a contract the docs state (caller
-misuse: `{{ results_dir }}/findings/` at most, often nothing), or did the
+misuse: `findings/` at most, often nothing), or did the
 implementation fail to validate an in-domain typed value the docs are silent
-about (an API-hardening bug: `{{ results_dir }}/crashes/`)? API-hardening bugs
+about (an API-hardening bug: `crashes/`)? API-hardening bugs
 are a large class in mature C/C++ libraries; never gate them out. If unsure
 whether a value is in-domain, it is. Normative wording ("must make sure",
 "should"), ownership and lifetime requirements, and stated valid argument or
@@ -122,7 +123,7 @@ filed.
 **Debug-only assert aborts are not crashes:** `assert(...)` (`__assert_rtn`
 or `__assert_fail` in the trace), any `[A-Z_]*(?:ASSERT|CHECK)` macro the
 project compiles out in release, or Rust `debug_assert!`. Such a hit goes to
-`{{ results_dir }}/findings/` at most, and only when you can name the unchecked
+`findings/` at most, and only when you can name the unchecked
 OOB, UAF, type confusion, or boundary cross that follows once the assert is
 compiled out. The same rule applies to FINDINGs.
 
@@ -134,7 +135,7 @@ available). Never `RelWithDebInfo`, `debugoptimized`, project `*_DEBUG=ON`
 toggles, or `-DDEBUG` / `-DDEBUGBUILD` / `-UNDEBUG`: those enable the asserts
 you must not promote.
 
-Every `{{ results_dir }}/crashes/CRASH-*/report.md` must include these exact fields:
+Every `crashes/CRASH-*/report.md` must include these exact fields:
 
 Boundary:
 Caller controls:
@@ -155,7 +156,7 @@ this target's `attacker_controls` (`output/<slug>/target.toml`), a source
 reviewer reads the code and decides in triage whether the crash is a security
 report or a retained defect that crosses no security boundary, with no CVSS
 and no credit; the crash **stays in
-`{{ results_dir }}/crashes/`**. Never route a reproducing crash to `findings/`,
+`crashes/`**. Never route a reproducing crash to `findings/`,
 mark it DISCARDED, or pre-demote a `call-sequence`/`env`/`race` crash at
 discovery because the target is bytes-only: file it and let triage do that math
 once. If the crash needs a non-default mode, module, codec, filter, or option

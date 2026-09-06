@@ -173,8 +173,9 @@ can dump tens of KB of JSONL into the transcript; use
   `list-findings` first. Read the full `REPORT.md` only when editing that
   report or reproducing that specific artifact.
 - For broad source/repo searches, use `bin/rg-safe <rg args>` instead of bare
-  `rg`. It caps output at a ~50 KiB head+tail spill and excludes log paths by
-  default. Override with `--no-cap` / `RG_BYTES=0` or `--include-logs` only when
+  `rg`. It caps output at ~20 KiB, then lists every file's hit count so you
+  can narrow by path, and excludes log paths by default. Override with
+  `--cap-bytes=N` / `--no-cap` / `RG_BYTES=0` or `--include-logs` only when
   you really need them.
 - For viewing source ranges, prefer `bin/peek <FILE>:<start>-<end>` or
   `bin/peek -A N -B M PATTERN FILE` over `sed -n 'X,Yp'` and `grep -A 95`.

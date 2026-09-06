@@ -5952,6 +5952,25 @@ def _first_existing_artifact_path(artifact_dir: Path, names: Iterable[str]) -> s
     return ""
 
 
+def results_relative(results_dir: Path, path: str | Path) -> str:
+    """Render a path under the results dir results-relative for agent views.
+
+    A benchmark cell's results dir is 150+ characters, and a 40-row digest
+    repeating it costs the agent thousands of tokens on every later turn.
+    `bin/probe` resolves `scratch-N/<file>` against `RESULTS_DIR`; the compact
+    contract tells agents to prefix `crashes/...` and `findings/...` with
+    `$RESULTS_DIR/`, which every agent shell exports. Paths outside the
+    results dir are returned unchanged.
+    """
+    text = str(path)
+    if not text:
+        return ""
+    try:
+        return Path(text).relative_to(Path(results_dir)).as_posix()
+    except ValueError:
+        return text
+
+
 def _compact_crash(ctx: Context, row: dict[str, str]) -> dict:
     cid = row.get("id", "")
     artifact_dir = ctx.results_dir / "crashes" / cid
@@ -5985,7 +6004,7 @@ def _compact_crash(ctx: Context, row: dict[str, str]) -> dict:
         "severity": row.get("severity", "") or fields.get("severity", ""),
         "location": _clip_model_field(location, 180),
         "status": status,
-        "repro": _first_existing_artifact_path(artifact_dir, ["reproduce.sh", "input.*", "harness.c"]),
+        "repro": results_relative(ctx.results_dir, _first_existing_artifact_path(artifact_dir, ["reproduce.sh", "input.*", "harness.c"])),
     }
 
 
@@ -6124,7 +6143,7 @@ def _compact_finding(ctx: Context, row: dict[str, str]) -> dict:
         "severity": row.get("severity", "") or fields.get("severity", "") or llm_severity,
         "location": _clip_model_field(location, 180),
         "status": status,
-        "repro": _first_existing_artifact_path(artifact_dir, ["reproduce.sh", "repro.*", "input.*", "*.driver"]),
+        "repro": results_relative(ctx.results_dir, _first_existing_artifact_path(artifact_dir, ["reproduce.sh", "repro.*", "input.*", "*.driver"])),
         "class": row.get("class", "") or fields.get("class", "") or llm_class,
     }
 
@@ -6216,7 +6235,7 @@ def state_resume(
     ]
     if pending_crashes:
         for crash_dir in pending_crashes:
-            lines.append(f"- `{crash_dir.name}`: `{_report_path(crash_dir)}`")
+            lines.append(f"- `{crash_dir.name}`: `{results_relative(ctx.results_dir, _report_path(crash_dir) or '')}`")
         lines.extend([
             "",
             "Next action: finish the oldest pending crash bundle before any hypothesis or work card. Read `.promotion_pending` when present and replace every `_TODO (agent):` report field; after the report is complete, close its hypothesis/card in structured state.",
@@ -6514,7 +6533,7 @@ def recent_runs(
         "execution_failure_class"
     ]
     for r in rows:
-        tc = (r.get("testcase") or "").replace("|", "/").replace("\n", " ")
+        tc = results_relative(ctx.results_dir, r.get("testcase") or "").replace("|", "/").replace("\n", " ")
         closest = (r.get("closest") or "").replace("|", "/").replace("\n", " ")
         if len(closest) > 120:
             closest = closest[:117] + "..."
@@ -7170,7 +7189,7 @@ def recent_tried(
         closest = (r.get("closest") or "").replace("|", "/").replace("\n", " ")
         if len(closest) > 120:
             closest = closest[:117] + "..."
-        tc = (r.get("testcase") or "").replace("|", "/").replace("\n", " ")
+        tc = results_relative(ctx.results_dir, r.get("testcase") or "").replace("|", "/").replace("\n", " ")
         out.append(
             f"{r.get('timestamp','')}|{r.get('verdict','')}|{r.get('mode','')}|"
             f"{r.get('hash','')}|{r.get('hypothesis','')}|{tgt}|{closest}|{tc}|"

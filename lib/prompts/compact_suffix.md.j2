@@ -25,8 +25,11 @@ substitute the fallback default when the queue assigned something else.
 - A Cargo library with no binary takes a direct `.rs` public-API testcase, or
   a `HARNESS: <name>.rs` driver for opaque bytes; `bin/probe` compiles either
   against the audited crate. Do not send opaque bytes to `cargo run`.
-- Run `bin/probe "{{ scratch_dir }}/<testcase>"` immediately; after a first
-  diagnostic, run the same path with `--confirm`. For opaque bytes, preserve
+- Run `bin/probe {{ scratch_name }}/<testcase>` immediately; after a
+  first diagnostic, run the same path with `--confirm`. Every path a
+  `bin/state` view prints is relative to the results dir: `bin/probe` resolves
+  `scratch-N/<file>` itself; prefix any other (`crashes/...`, `findings/...`)
+  with `$RESULTS_DIR/`. For opaque bytes, preserve
   them exactly and pass `--hypothesis-id H-...`; under S8 add
   `--property <kind>`.
 - If target code must generate, transform, or inspect a seed, perform that

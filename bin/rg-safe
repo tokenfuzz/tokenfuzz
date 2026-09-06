@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Run ripgrep with audit-log exclusions and bounded stdout."""
+"""Run ripgrep with audit-log exclusions and bounded stdout.
+
+A capped search is a broad pattern, and the head and tail of its hit list
+rarely tell the agent where the hits are. The cap therefore appends a
+per-file hit digest from a second `rg --count` pass, so the next call can
+narrow by path instead of paging through a spill file.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +18,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 from file_tools import cap_output_file, capture_command
 from command_tools import find_executable
+
+# Audit transcripts showed the shared 50 KiB cap filling with grep noise that
+# every later turn replays; 20 KiB still holds a few hundred match lines.
+DEFAULT_CAP_BYTES = 20480
+DIGEST_FILES = 30
 
 
 def error(message: str) -> int:
@@ -26,9 +37,46 @@ def real_rg() -> str | None:
     return find_executable("rg", skip=(wrapper,))
 
 
+def file_hit_digest(executable: str, argv: list[str]) -> bytes:
+    """Per-file hit counts for a capped search, or b"" when rg cannot count."""
+    import subprocess
+
+    try:
+        completed = subprocess.run(
+            [executable, "--count", "--with-filename", "--no-messages", *argv],
+            capture_output=True, text=True, errors="replace", timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return b""
+    if completed.returncode not in (0, 1):
+        return b""
+    counts: list[tuple[int, str]] = []
+    for line in completed.stdout.splitlines():
+        path, separator, count = line.rpartition(":")
+        if separator and count.isdigit() and path:
+            counts.append((int(count), path))
+    if not counts:
+        return b""
+    counts.sort(key=lambda item: (-item[0], item[1]))
+    lines = [
+        f"[rg-safe] {sum(count for count, _ in counts):,} matching lines in "
+        f"{len(counts):,} files; hits per file, most first:"
+    ]
+    lines.extend(f"  {count:>6}  {path}" for count, path in counts[:DIGEST_FILES])
+    if len(counts) > DIGEST_FILES:
+        lines.append(f"  (+{len(counts) - DIGEST_FILES:,} more files)")
+    lines.append(
+        "[rg-safe] Narrow with a path, --glob, -w, or a tighter pattern; "
+        "--cap-bytes=N or --no-cap widens."
+    )
+    return ("\n".join(lines) + "\n").encode()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     byte_value = os.environ.get("RG_BYTES")
+    if byte_value is None and "OUTCAP_MAX_BYTES" not in os.environ:
+        byte_value = str(DEFAULT_CAP_BYTES)
     include_logs = os.environ.get("RG_INCLUDE_LOGS", "0") == "1"
     passthrough: list[str] = []
     index = 0
@@ -77,6 +125,10 @@ def main(argv: list[str] | None = None) -> int:
             print(exc, file=sys.stderr)
             return 2
         sys.stdout.buffer.write(output)
+        if b"[output_cap: rg-safe truncated" in output:
+            sys.stdout.buffer.write(
+                file_hit_digest(executable, [*prefix, *passthrough])
+            )
         return completed.returncode
 
 

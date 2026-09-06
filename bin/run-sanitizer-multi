@@ -579,9 +579,6 @@ class MultiRun:
                     sys.stdout.flush()
                     self.write_digest(data)
                     baseline = outcome
-                elif outcome.signature is None or baseline.signature is None:
-                    sys.stdout.flush()
-                    self.write_digest(data)
                 elif self.no_digest or outcome != baseline:
                     if outcome != baseline:
                         if outcome.crashed and not baseline.crashed:
@@ -590,6 +587,14 @@ class MultiRun:
                             self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - clean where run 1 crashed")
                         else:
                             self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - result differs from run 1")
+                    sys.stdout.flush()
+                    self.write_digest(data)
+                elif outcome.crashed and (outcome.signature is None or baseline.signature is None):
+                    # A crash the signature parser could not read is only
+                    # provably the same crash by its report, so keep printing
+                    # it. A clean, failed, or timed-out repeat has no report to
+                    # compare: its one-line verdict below is the whole story,
+                    # and the raw log keeps every run for --confirm.
                     sys.stdout.flush()
                     self.write_digest(data)
                 elif outcome.crashed:

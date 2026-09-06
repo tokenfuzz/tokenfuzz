@@ -82,14 +82,14 @@ class RipgrepSafeTests(unittest.TestCase):
             "match", self.huge, RG_BYTES=65536
         ).stdout)
         capped = self.run_rg("match", self.huge, RG_BYTES=8192).stdout
-        self.assertLessEqual(len(capped.encode()), 9000)
+        self.assertLessEqual(len(capped.encode()), 9400)
         self.assertIn("output_cap: rg-safe truncated", capped)
         self.assertLessEqual(len(self.run_rg(
             "--cap-bytes", "4096", "match", self.huge, RG_BYTES=8192
-        ).stdout.encode()), 5000)
+        ).stdout.encode()), 5400)
         self.assertLessEqual(len(self.run_rg(
             "--cap-bytes=2048", "match", self.huge
-        ).stdout.encode()), 3000)
+        ).stdout.encode()), 3400)
         for args, env in (
             (("match", self.huge), {"RG_BYTES": 0}),
             (("--no-cap-bytes", "match", self.huge), {}),
@@ -109,6 +109,30 @@ class RipgrepSafeTests(unittest.TestCase):
         proc = self.run_rg("--cap-bytes", "notanumber", "match", self.big)
         self.assertIn("non-numeric --cap-bytes", proc.stdout + proc.stderr)
         self.assertNotEqual(self.run_rg("--cap-bytes").returncode, 0)
+
+    def test_capped_search_digests_hits_per_file(self) -> None:
+        for number in range(40):
+            self.write(
+                f"tree/f{number:02d}.c",
+                "".join(f"int size_{n} = count; // match {n}\n" for n in range(30 * (number + 1))),
+            )
+        # The default cap is 20 KiB: broad patterns used to fill the shared
+        # 50 KiB cap with hit noise that every later turn replayed.
+        proc = self.run_rg("-n", "match", self.root / "tree")
+        output = proc.stdout
+        self.assertEqual(proc.returncode, 0)
+        self.assertLessEqual(len(output.encode()), 20480 + 4096)
+        self.assertIn("output_cap: rg-safe truncated", output)
+        self.assertIn("matching lines in 40 files", output)
+        self.assertRegex(output, r"\n    1200  \S*f39\.c\n    1170  \S*f38\.c\n")
+        self.assertIn("(+10 more files)", output)
+        self.assertIn("Narrow with a path", output)
+        # Ordinary bounded output carries no digest, and neither does an
+        # uncapped one: the digest only replaces hits the cap hid.
+        self.assertNotIn("hits per file", self.run_rg("-n", "match 7$", self.root / "tree").stdout)
+        self.assertNotIn("hits per file", self.run_rg("--no-cap", "match", self.root / "tree").stdout)
+        single = self.run_rg("match", self.huge, RG_BYTES=8192).stdout
+        self.assertIn("matching lines in 1 files", single)
 
     def make_log_tree(self):
         tree = self.root / "logtree"
