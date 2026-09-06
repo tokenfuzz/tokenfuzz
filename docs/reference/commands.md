@@ -277,9 +277,8 @@ workflow and the build-isolation rules.
 
 `bin/hits` provides coverage diagnostics for browser, JS, and generic CLI
 builds. `--mode generic` replays a native testcase in an instrumented ASan
-sibling (`build-asan+fuzz`, produced by `bin/setup-target --build` or audit
-preflight from the target's own recipe, or a compatible hand-built
-`build-asan+cov`) and reports the source files it reached. The configured ASan
+sibling (`build-asan+cov`, produced by `bin/setup-target --build` or audit
+preflight from the target's own recipe) and reports the source files it reached. The configured ASan
 CLI is replayed from the sibling directly. A `// HARNESS:` route instead uses
 a coverage twin of that harness, linked against the sibling's `asan_lib`.
 

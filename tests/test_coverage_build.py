@@ -2,7 +2,7 @@
 """tests/test_coverage_build.py — the coverage sibling is built, verified, held.
 
 The property, constructed rather than sampled: a target's canonical recipe,
-rerun with CC/CXX pointed at the coverage shim, yields `build-asan+fuzz` with
+rerun with CC/CXX pointed at the coverage shim, yields `build-asan+cov` with
 trace-pc-guard instrumentation and its own freshness stamp, while the shared
 `build-asan` tree and the source signature it is measured against stay
 untouched. A recipe that ignores CC yields a tree without guards, which is
@@ -33,13 +33,17 @@ import coverage_build  # noqa: E402
 import sanitizer  # noqa: E402
 import target_config  # noqa: E402
 
-APP_C = """\
-#include <stdio.h>
+LIB_C = """\
 int app_parse(const char *s, int n) {
     int acc = 0;
     for (int i = 0; i < n; i++) { if (s[i] == 'x') acc++; else acc--; }
     return acc;
 }
+"""
+
+APP_C = """\
+#include <stdio.h>
+int app_parse(const char *s, int n);
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     FILE *f = fopen(argv[1], "rb");
@@ -58,7 +62,9 @@ RECIPE_HONOURING_CC = """\
 set -eu
 src="$1"; build="$2"
 mkdir -p "$build"
-"${CC:-clang}" -g -O0 -fsanitize=address -o "$build/app" "$src/src.c"
+"${CC:-clang}" -g -O0 -fsanitize=address -c "$src/lib.c" -o "$build/libapp.o"
+ar rcs "$build/libapp.a" "$build/libapp.o"
+"${CC:-clang}" -g -O0 -fsanitize=address -o "$build/app" "$src/src.c" "$build/libapp.a"
 """
 
 # Ignores CC/CXX and reaches for a compiler by bare name, the way a
@@ -69,7 +75,9 @@ RECIPE_BARE_COMPILER_NAME = """\
 set -eu
 src="$1"; build="$2"
 mkdir -p "$build"
-cc -g -O0 -fsanitize=address -o "$build/app" "$src/src.c"
+cc -g -O0 -fsanitize=address -c "$src/lib.c" -o "$build/libapp.o"
+ar rcs "$build/libapp.a" "$build/libapp.o"
+cc -g -O0 -fsanitize=address -o "$build/app" "$src/src.c" "$build/libapp.a"
 """
 
 RECIPE_IGNORING_CC = """\
@@ -77,7 +85,9 @@ RECIPE_IGNORING_CC = """\
 set -eu
 src="$1"; build="$2"
 mkdir -p "$build"
-%s -g -O0 -fsanitize=address -o "$build/app" "$src/src.c"
+%s -g -O0 -fsanitize=address -c "$src/lib.c" -o "$build/libapp.o"
+ar rcs "$build/libapp.a" "$build/libapp.o"
+%s -g -O0 -fsanitize=address -o "$build/app" "$src/src.c" "$build/libapp.a"
 """
 
 TARGET_TOML = """\
@@ -85,6 +95,7 @@ target = "sampleproj"
 upstream_url = "https://example.invalid/sampleproj"
 build_system = "cmake"
 asan_bin = "build-asan/app"
+asan_lib = "build-asan/libapp.a"
 is_browser = "0"
 [threat_model]
 attacker_controls = ["bytes"]
@@ -109,6 +120,7 @@ class CoverageSiblingBuildTests(unittest.TestCase):
         (self.target / ".audit").mkdir(parents=True)
         (self.target / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.16)\n")
         (self.target / "src.c").write_text(APP_C)
+        (self.target / "lib.c").write_text(LIB_C)
         self.recipe = self.target / ".audit" / "build.sh"
         self._write_recipe(RECIPE_HONOURING_CC)
         toml = root / "output" / "sampleproj" / "target.toml"
@@ -128,7 +140,8 @@ class CoverageSiblingBuildTests(unittest.TestCase):
             self.skipTest(f"cannot build the primary fixture: {built.stderr[-200:]}")
         target_config.build_write_stamp(self.target, "asan")
         os.environ.pop("AUDIT_BUILD_SUFFIX", None)
-        self.sibling = self.target / "build-asan+fuzz"
+        self.sibling = self.target / "build-asan+cov"
+        self.fuzz_sibling = self.target / "build-asan+fuzz"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -168,17 +181,50 @@ class CoverageSiblingBuildTests(unittest.TestCase):
 
         # bin/hits selects it for the configured CLI route.
         self.assertEqual(
-            coverage_build.sibling_path(self.config, "build-asan/app", "asan", "+fuzz"),
+            coverage_build.sibling_path(self.config, "build-asan/app", "asan", "+cov"),
             binary,
         )
 
+    def test_fuzz_sibling_uses_counters_without_rejected_trace_guards(self) -> None:
+        """The library must make it through current libFuzzer startup."""
+        result = coverage_build.materialize(
+            self.target, self.config, sibling=coverage_build.FUZZ_SUFFIX,
+        )
+        self.assertEqual(result.status, "built", result)
+        library = self.fuzz_sibling / "libapp.a"
+        undefined = coverage_build.native_symbols.undefined_symbols(library)
+        self.assertTrue(any(
+            "sanitizer_cov_8bit_counters_init" in name for name in undefined
+        ))
+        self.assertFalse(any(
+            "sanitizer_cov_trace_pc_guard" in name for name in undefined
+        ))
+        source = Path(self._tmp.name) / "fuzz.c"
+        source.write_text(
+            "extern int app_parse(const char *, int);\n"
+            "int LLVMFuzzerTestOneInput(const unsigned char *p, unsigned long n) {\n"
+            "  return app_parse((const char *)p, (int)n), 0;\n}\n",
+            encoding="utf-8",
+        )
+        binary = Path(self._tmp.name) / "fuzzer"
+        linked = subprocess.run(
+            [self.clang, "-fsanitize=fuzzer,address", str(source), str(library),
+             "-o", str(binary)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(linked.returncode, 0, linked.stderr)
+        started = subprocess.run(
+            [str(binary), "-help=1"], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
+
     def test_a_recipe_that_ignores_cc_is_unavailable_and_remembered(self) -> None:
-        self._write_recipe(RECIPE_IGNORING_CC % self.clang)
+        self._write_recipe(RECIPE_IGNORING_CC % (self.clang, self.clang))
         target_config.build_write_stamp(self.target, "asan")
         result = coverage_build.materialize(self.target, self.config)
         self.assertEqual(result.status, "failed", result)
         self.assertFalse((self.sibling / ".audit-build-stamp").exists())
-        log = (self.target / ".audit" / "build-materialize-asan+fuzz.log").read_text()
+        log = (self.target / ".audit" / "build-materialize-asan+cov.log").read_text()
         self.assertIn("__sancov_guards", log)
         self.assertIn("honour CC/CXX", log)
         # The primary's own log is not where a sibling failure lands.
@@ -247,7 +293,7 @@ class CoverageSiblingBuildTests(unittest.TestCase):
         holder = subprocess.Popen(
             [sys.executable, "-c", (
                 "import sys, time; sys.path.insert(0, %r); import build_lease\n"
-                "with build_lease.shared(%r, 'build-asan+fuzz') as held:\n"
+                "with build_lease.shared(%r, 'build-asan+cov') as held:\n"
                 "    assert held\n"
                 "    print('held', flush=True)\n"
                 "    time.sleep(30)\n"
@@ -261,6 +307,7 @@ class CoverageSiblingBuildTests(unittest.TestCase):
         finally:
             holder.kill()
             holder.wait()
+            holder.stdout.close()
 
 
 class CoveragePreflightTests(unittest.TestCase):
@@ -293,9 +340,12 @@ class CoveragePreflightTests(unittest.TestCase):
                     root, target, "sample", config, root / "logs", "codex", "",
                     messages.append, include_alternates=False,
                 )
-            built.assert_called_once()
-            self.assertEqual(built.call_args.args[:2], (target, config))
+            self.assertEqual(
+                [call.args[:2] + (call.kwargs["sibling"],) for call in built.call_args_list],
+                [(target, config, "+cov"), (target, config, "+fuzz")],
+            )
             self.assertTrue(any("coverage sibling built" in line for line in messages))
+            self.assertTrue(any("fuzz sibling built" in line for line in messages))
 
             # A tree outside targets/ is the operator's to build.
             external = root / "elsewhere" / "sample"
@@ -319,6 +369,7 @@ class CoveragePreflightTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)
             (target / "build-asan").mkdir()
+            (target / "build-asan+cov").mkdir()
             (target / "build-asan+fuzz").mkdir()
             config = SimpleNamespace(
                 sanitizers_explicitly_disabled=False, sanitizers_enabled=["asan"],
@@ -332,7 +383,7 @@ class CoveragePreflightTests(unittest.TestCase):
             ):
                 unleased = build_preflight.hold_builds(target, config, print)
             self.assertEqual(unleased, [])
-            self.assertEqual(held, ["build-asan", "build-asan+fuzz"])
+            self.assertEqual(held, ["build-asan", "build-asan+cov", "build-asan+fuzz"])
 
 
 if __name__ == "__main__":

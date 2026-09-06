@@ -153,22 +153,20 @@ is providing guidance.
 
 The shared tree is never rebuilt for that. When ASan is available,
 `bin/setup-target <target> --build` and audit preflight automatically build the
-**sibling** `build-asan+fuzz`. The target's own `.audit/build.sh` is rerun with
-`CC`/`CXX` pointed at `.audit/coverage-toolchain/{cc,cxx}`: shims that add
-`-fsanitize=fuzzer-no-link -fsanitize-coverage=trace-pc-guard` and exec the
-LLVM compiler that links the harnesses. The shim directory leads `PATH` for
-that build and answers to `cc`, `gcc`, `clang`, and their `++` forms, so a
-recipe that hardcodes a compiler name still gets instrumented. The sibling is
-verified (the configured binary must carry `__sancov_guards` and start) and
-stamped like the primary, so it is rebuilt when the source or recipe changes. A
+**siblings** `build-asan+fuzz` and `build-asan+cov`. The target's own
+`.audit/build.sh` is rerun with `CC`/`CXX` pointed at isolated toolchain shims.
+The fuzz shim adds `-fsanitize=fuzzer-no-link`; the replay shim adds
+`-fsanitize-coverage=trace-pc-guard`. Their directories lead `PATH` and answer
+to `cc`, `gcc`, `clang`, and their `++` forms, so a recipe that hardcodes a
+compiler name still gets instrumented. Each sibling is verified and stamped
+like the primary, so it is rebuilt when the source or recipe changes. A
 recipe that hardcodes an absolute compiler path yields no instrumentation;
-setup reports the sibling unavailable with
-`.audit/build-materialize-asan+fuzz.log` and remembers that until the source,
+setup reports the sibling unavailable with its own
+`build-materialize-asan+fuzz.log` or `build-materialize-asan+cov.log` under
+`.audit/`, and remembers that until the source,
 recipe, or toolchain changes (or `--build --force`).
 
-Other sanitizers do not receive an automatic coverage sibling. An operator can
-provide a compatible isolated tree explicitly, but the ASan sibling is the
-route setup and preflight materialize today.
+Other sanitizers do not receive automatic instrumentation siblings.
 
 To build one by hand instead, for example against a different toolchain:
 
@@ -178,17 +176,16 @@ To build one by hand instead, for example against a different toolchain:
 cmake -S targets/<slug>/src -B targets/<slug>/src/build-asan+fuzz \
   -DCMAKE_C_COMPILER=/path/to/llvm/bin/clang \
   -DCMAKE_CXX_COMPILER=/path/to/llvm/bin/clang++ \
-  -DCMAKE_C_FLAGS="-fsanitize=address,fuzzer-no-link -fsanitize-coverage=trace-pc-guard -g -O1" \
-  -DCMAKE_CXX_FLAGS="-fsanitize=address,fuzzer-no-link -fsanitize-coverage=trace-pc-guard -g -O1"
+  -DCMAKE_C_FLAGS="-fsanitize=address,fuzzer-no-link -g -O1" \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,fuzzer-no-link -g -O1"
 cmake --build targets/<slug>/src/build-asan+fuzz
 ```
 
-`trace-pc-guard` rides alongside `fuzzer-no-link` on purpose: libFuzzer guides
-itself on the counters `fuzzer-no-link` emits, and the `__sancov_guards`
-section `trace-pc-guard` adds is what lets `bin/hits --mode generic` dump
-`.sancov` coverage for a native CLI testcase (see the coverage gate in
-[the audit lifecycle](../concepts/audit-lifecycle.md)). One sibling then serves
-both.
+Current libFuzzer rejects target objects carrying `trace-pc-guard` before it
+reads a seed. Keeping those hooks in `build-asan+cov` lets
+`bin/hits --mode generic` dump `.sancov` coverage, while `build-asan+fuzz`
+keeps the inline counters libFuzzer guides on (see the coverage gate in
+[the audit lifecycle](../concepts/audit-lifecycle.md)).
 
 Use that compiler and not the target's usual one; `bin/fuzz build` prints its
 exact path when it needs it. A sanitizer runtime is version-locked to the code

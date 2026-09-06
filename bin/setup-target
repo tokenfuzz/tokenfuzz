@@ -983,19 +983,20 @@ class Setup:
         if self.args.build and build_errors:
             raise RuntimeError("; ".join(build_errors))
 
-        # The coverage sibling is the primary's twin, so it follows the
-        # detected <san>_bin/<san>_lib above and never gates setup: a target
-        # without one audits exactly as before, with coverage reported
-        # unavailable per probe.
+        # The replay and fuzz siblings twin the detected <san>_bin/<san>_lib
+        # above and never gate setup: a target without one audits exactly as
+        # before, with the missing feedback reported to the operator.
         if self.args.build and sanitizers:
             refreshed = target_config.Config(target_root=str(self.target_root))
             target_config.load_toml_into(refreshed, self.toml)
-            coverage_build.report(
-                coverage_build.materialize(
-                    self.target_root, refreshed, force=self.args.force,
-                ),
-                "asan", lambda message: log(f"bootstrap: {message}"),
-            )
+            for sibling in coverage_build.SIBLING_SUFFIXES:
+                coverage_build.report(
+                    coverage_build.materialize(
+                        self.target_root, refreshed, force=self.args.force,
+                        sibling=sibling,
+                    ),
+                    "asan", lambda message: log(f"bootstrap: {message}"), sibling,
+                )
 
         # Keep build-asan as the regular control, then materialize cached ASan
         # alternates. Alternate failure is intentionally additive/fail-open.

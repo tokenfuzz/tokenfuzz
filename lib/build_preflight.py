@@ -51,23 +51,23 @@ def _refresh_alternates(
 
 
 def _refresh_coverage(root: Path, target_root: Path, config, logger) -> None:
-    """Build the ASan coverage sibling beside fresh primaries, fail-open.
+    """Build the ASan replay and fuzz siblings beside fresh primaries.
 
-    Native coverage feedback exists only when `build-asan+fuzz` does, and no
-    agent builds it: this is where an audit pays for it, once, before any
-    session starts. A tree outside targets/ is the operator's to build, the
-    same rule the primary follows.
+    Native replay coverage needs `build-asan+cov`; libFuzzer feedback needs
+    `build-asan+fuzz`. No agent builds either: an audit pays once before any
+    session starts. A tree outside targets/ is the operator's to build.
     """
     try:
         target_root.relative_to(root / "targets")
     except ValueError:
         return
-    try:
-        result = coverage_build.materialize(target_root, config)
-    except OSError as exc:
-        logger(f"WARN: coverage sibling preflight could not run; continuing: {exc}")
-        return
-    coverage_build.report(result, "asan", logger)
+    for sibling in coverage_build.SIBLING_SUFFIXES:
+        try:
+            result = coverage_build.materialize(target_root, config, sibling=sibling)
+        except OSError as exc:
+            logger(f"WARN: coverage sibling preflight could not run; continuing: {exc}")
+            return
+        coverage_build.report(result, "asan", logger, sibling)
 
 
 def enabled_sanitizers(config) -> list[str]:
@@ -402,9 +402,12 @@ def hold_builds(target_root: Path, config, logger) -> list[str]:
         target_config.build_dir_name(name)
         for name in enabled_sanitizers(config)
     ]
-    # The coverage sibling is replayed by the same run, so it is held by the
-    # same rule; a run that has none simply has nothing to hold.
-    directories.append(coverage_build.tree_name("asan"))
+    # Both instrumentation siblings are read by the same run, so they follow
+    # the same lease rule; absent trees simply have nothing to hold.
+    directories.extend(
+        coverage_build.tree_name("asan", sibling)
+        for sibling in coverage_build.SIBLING_SUFFIXES
+    )
     routes = _artifact_routes(target_root, config)
     if "runner-bin" in routes and \
             _target_owned(routes["runner-bin"][1], target_root):

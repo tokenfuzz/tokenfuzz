@@ -166,7 +166,7 @@ Common outcomes:
 | Sanitizer diagnostic | The input might be a crash candidate. | Confirm by re-running, minimise, and file under `crashes/`. |
 
 Browser and JS modes use their configured coverage artifacts. A native target
-is measured in the `build-asan+fuzz` sibling that `bin/setup-target --build`
+is measured in the `build-asan+cov` sibling that `bin/setup-target --build`
 and audit preflight build from the target's ASan recipe, replaying the
 configured CLI or a coverage twin of the testcase's `// HARNESS:`. If that
 sibling is absent, coverage is reported unavailable and the sanitizer run

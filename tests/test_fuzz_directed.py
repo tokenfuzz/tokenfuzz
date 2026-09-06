@@ -1656,13 +1656,13 @@ class ToolchainMismatchTests(unittest.TestCase):
         for variable in ("CC=", "CXX=", "CFLAGS/CXXFLAGS"):
             self.assertIn(variable, recipe)
 
-    def test_the_recipe_emits_trace_pc_guard_for_native_coverage(self) -> None:
-        # The one sibling serves both consumers: libFuzzer's counters and the
-        # __sancov_guards section bin/hits --mode generic needs for .sancov.
-        # Without this flag native CLI coverage silently reports unavailable.
+    def test_the_fuzz_recipe_excludes_libfuzzer_rejected_trace_guards(self) -> None:
+        # Current libFuzzer exits before reading a seed when target objects
+        # carry legacy trace-pc-guard hooks. Native replay has a separate
+        # +cov tree, so the +fuzz recipe contains only its inline counters.
         recipe = fuzz_harness.rebuild_recipe()
         self.assertIn("fuzzer-no-link", recipe)
-        self.assertIn("-fsanitize-coverage=trace-pc-guard", recipe)
+        self.assertNotIn("-fsanitize-coverage=trace-pc-guard", recipe)
 
     def test_an_ordinary_compile_error_is_left_alone(self) -> None:
         self.assertEqual(fuzz_harness.toolchain_mismatch(

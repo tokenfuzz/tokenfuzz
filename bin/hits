@@ -33,14 +33,13 @@ import target_config
 from timeout import TIMEOUT_RC, run_timeout
 
 # Sibling build trees a native testcase can be replayed against for coverage.
-# `+fuzz` is the SanitizerCoverage sibling bin/setup-target builds beside the
-# primary; `+cov` is an accepted alias for a hand-built one. ASan's
-# `coverage=1` .sancov dump needs the trace-pc-guard __sancov_guards section,
-# so the same sibling serves both libFuzzer's campaign and this probe. A
-# sibling that exists but lacks the section is skipped at selection time so
-# coverage reports unavailable (never a miss, never a hard error), rather than
-# being chosen and then rejected by probe_sancov.
-GENERIC_COVERAGE_SUFFIXES = coverage_build.ACCEPTED_SUFFIXES
+# ASan's `coverage=1` .sancov dump needs the trace-pc-guard __sancov_guards
+# section, which only the `+cov` sibling carries: libFuzzer rejects that hook,
+# so the `+fuzz` sibling `bin/fuzz` links against cannot serve here. A sibling
+# that exists but lacks the section is skipped at selection time so coverage
+# reports unavailable (never a miss, never a hard error), rather than being
+# chosen and then rejected by probe_sancov.
+GENERIC_COVERAGE_SUFFIXES = (coverage_build.COVERAGE_SUFFIX,)
 
 # `atos -fullPath` answers one line per address: `symbol (in module) (file:line)`.
 # Anything else — a bare address, a symbol with no source behind it — resolved

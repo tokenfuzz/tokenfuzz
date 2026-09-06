@@ -78,7 +78,7 @@ Default workflow: `bin/probe <testcase>` chooses the right runner.
 For browser/js targets, `run-sanitizer-multi asan` runs `bin/hits` first (cheap, no launch
 lock) and only invokes ASan when the testcase reached the target. This prevents
 0/5 variants from burning browser launches per dead-end. Native C/C++ targets
-are measured in the `build-asan+fuzz` coverage sibling (the configured CLI, or
+are measured in the `build-asan+cov` coverage sibling (the configured CLI, or
 a twin of your `// HARNESS:` source): the HIT/MISSED verdict and closest frame
 are recorded, and the sanitizer runs either way, so a MISSED there is feedback
 to act on, never a skipped run.

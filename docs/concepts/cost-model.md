@@ -140,7 +140,7 @@ For browser and JS-shell targets with a sancov-instrumented build:
 
 A native target gets the same measurement as **feedback rather than a gate**.
 `bin/setup-target --build` and audit preflight build a coverage sibling,
-`build-asan+fuzz`, by rerunning the target's own ASan recipe with
+`build-asan+cov`, by rerunning the target's own ASan recipe with
 `-fsanitize-coverage=trace-pc-guard`; it never replaces the shared
 `build-asan`. When a testcase names a `WANT` symbol, `bin/hits --mode generic`
 replays it there (the configured CLI, or for a `// HARNESS:` route a twin of

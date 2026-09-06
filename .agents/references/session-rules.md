@@ -82,7 +82,7 @@ bin/probe "${RESULTS_DIR}/scratch-N/tc.xml" -- 8 100       # trailing args go to
   targets: the sanitizer still ran; the `.asan.txt` carries
   `COVERAGE_GATE: MISSED … (closest: <frame>)` — mutate toward that frame.
 - Native C/C++ targets get HIT/MISSED coverage automatically when the
-  `build-asan+fuzz` sibling exists (preflight builds it): the configured CLI,
+  `build-asan+cov` sibling exists (preflight builds it): the configured CLI,
   or a coverage twin of your `// HARNESS:` source. `COVERAGE_UNAVAILABLE`
   means the sibling is missing for this route; the run still counts.
   `bin/state show-recent` lists each run's `coverage` and `closest` frame, so

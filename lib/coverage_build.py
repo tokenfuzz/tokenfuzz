@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""The SanitizerCoverage sibling of a sanitizer build: build it, find it, prove it.
+"""The SanitizerCoverage siblings of a sanitizer build: build, find, prove them.
 
 `build-<san>` is what every recorded probe was measured against, so it is never
-rebuilt with different flags. Execution coverage needs the same recipe compiled
-with SanitizerCoverage, and that lives in a sibling tree, `build-<san>+fuzz`:
-a name target_config already prunes from build freshness, a name the build
-lease keys on its own, the tree `bin/fuzz` links campaigns against and the one
-`bin/hits` replays native testcases in. One sibling serves both.
+rebuilt with different flags. Coverage-instrumented twins live beside it, one
+per consumer: `build-<san>+cov` carries trace-pc-guard, the only hook ASan's
+`coverage=1` `.sancov` dump reads, and is what `bin/hits` replays native
+testcases in; `build-<san>+fuzz` carries the inline counters libFuzzer guides
+on, and is what `bin/fuzz` links harnesses against. They cannot be one tree:
+libFuzzer exits at startup when any object it loads carries trace-pc-guard.
 
-The sibling is produced by the target's own canonical recipe, run with CC and
-CXX pointed at a shim that adds the coverage flags and hands off to the LLVM
-toolchain that ships libFuzzer. Recipes honour CC/CXX by contract (the
-generated ones spell `${CC:-clang}`); one that does not yields a tree without
-guards, which verification reports and `bin/hits` then declines to select, so
+Each sibling is produced by the target's own canonical recipe, run with CC and
+CXX pointed at a shim that adds its flags and hands off to the LLVM toolchain
+that ships libFuzzer. Recipes honour CC/CXX by contract (the generated ones
+spell `${CC:-clang}`); one that does not yields a tree without instrumentation,
+which verification reports and the consumers then decline to select, so
 coverage reads unavailable rather than measuring the wrong binary.
 """
 
@@ -24,21 +25,40 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 import build_config
 import build_materialize
 import fuzz_harness
+import native_symbols
 import runner_preflight
 import target_config
 
-COVERAGE_SUFFIX = fuzz_harness.COVERAGE_TREE_SUFFIX
-# `+cov` is the accepted name for a sibling an operator built by hand.
-ACCEPTED_SUFFIXES = (COVERAGE_SUFFIX, "+cov")
-_SHIM_DIR = Path(".audit") / "coverage-toolchain"
-_FLAGS_CACHE: dict[str, list[str]] = {}
+COVERAGE_SUFFIX = "+cov"
+FUZZ_SUFFIX = fuzz_harness.COVERAGE_TREE_SUFFIX
+
+
+@dataclass(frozen=True)
+class Sibling:
+    label: str
+    flags: tuple[str, ...]
+    shim_dir: str
+    feedback: str
+
+
+_SIBLINGS = {
+    COVERAGE_SUFFIX: Sibling(
+        "coverage sibling", ("-fsanitize-coverage=trace-pc-guard",),
+        "coverage-toolchain", "native replay coverage is on",
+    ),
+    FUZZ_SUFFIX: Sibling(
+        "fuzz sibling", ("-fsanitize=fuzzer-no-link",),
+        "fuzz-toolchain", "libFuzzer feedback is on",
+    ),
+}
+SIBLING_SUFFIXES = tuple(_SIBLINGS)
 #: Compiler names a build may invoke instead of honouring ``CC``/``CXX``.
 #: A hand-written configure is free to ignore the environment and pick its own
 #: default — ffmpeg's records `CC=gcc` even when `CC=clang` is exported — and
@@ -52,9 +72,10 @@ _MASQUERADE_NAMES = (
 )
 
 
-def tree_name(san: str = "asan", *, suffix: "str | None" = None) -> str:
-    """Directory name of the coverage sibling, honouring AUDIT_BUILD_SUFFIX."""
-    return target_config.build_dir_name(san, suffix=suffix) + COVERAGE_SUFFIX
+def tree_name(san: str = "asan", sibling: str = COVERAGE_SUFFIX, *,
+              suffix: "str | None" = None) -> str:
+    """Directory name of a sibling, honouring AUDIT_BUILD_SUFFIX."""
+    return target_config.build_dir_name(san, suffix=suffix) + sibling
 
 
 def sibling_path(config, raw: str, san: str, sibling_suffix: str) -> "Path | None":
@@ -107,38 +128,14 @@ def sancov_section_present(binary: Path) -> "tuple[bool, str]":
     return True, ""
 
 
-def coverage_flags(compiler: str) -> "list[str]":
-    """The instrumentation one sibling needs for both of its consumers.
-
-    ``trace-pc-guard`` is what ASan's ``coverage=1`` dump reads. ``fuzzer-no-
-    link`` adds the counters libFuzzer guides on and is included only when this
-    compiler accepts it: a platform clang without libFuzzer rejects the flag,
-    and a sibling that still serves `bin/hits` beats no sibling at all.
-    """
-    cached = _FLAGS_CACHE.get(compiler)
-    if cached is not None:
-        return list(cached)
-    flags = ["-fsanitize-coverage=trace-pc-guard"]
-    with tempfile.TemporaryDirectory(prefix="coverage-flags-") as directory:
-        source = Path(directory) / "probe.c"
-        source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
-        probe = subprocess.run(
-            [compiler, "-fsanitize=fuzzer-no-link", *flags, "-c",
-             str(source), "-o", str(Path(directory) / "probe.o")],
-            capture_output=True, check=False,
-        )
-    if probe.returncode == 0:
-        flags.insert(0, "-fsanitize=fuzzer-no-link")
-    _FLAGS_CACHE[compiler] = list(flags)
-    return flags
-
-
-def toolchain_shims(root: Path) -> "tuple[Path, Path]":
-    """Write `.audit/coverage-toolchain/{cc,cxx}` and return their paths.
+def toolchain_shims(root: Path, sibling: str = COVERAGE_SUFFIX) -> "tuple[Path, Path]":
+    """Write `.audit/<sibling shim dir>/{cc,cxx}` and return their paths.
 
     Each execs the LLVM compiler `bin/fuzz` links harnesses with, plus the
-    coverage flags. Rewritten on every build so a toolchain upgrade is picked
-    up; written atomically because parallel setups share the directory.
+    sibling's flags. Rewritten on every build so a toolchain upgrade is picked
+    up; written atomically because parallel setups share the directory. A
+    compiler that is not there is an OSError, so the caller can skip rather
+    than record a doomed build as this target's failure.
 
     ``-Wno-error`` trails the recipe's own flags: this compiler is deliberately
     not the one the primary was built with, and a newer clang's new warnings
@@ -146,16 +143,19 @@ def toolchain_shims(root: Path) -> "tuple[Path, Path]":
     build of code that already compiles would fail. Warnings never change
     what the sibling executes.
     """
-    directory = Path(root) / _SHIM_DIR
+    spec = _SIBLINGS[sibling]
+    directory = Path(root) / ".audit" / spec.shim_dir
     directory.mkdir(parents=True, exist_ok=True)
     shims = []
     for name, real in (
         ("cc", fuzz_harness.fuzzing_compiler()),
         ("cxx", fuzz_harness.fuzzing_compiler(cxx=True)),
     ):
+        if not shutil.which(real):
+            raise OSError(f"compiler not found: {real}")
         path = directory / name
         text = (
-            "#!/bin/sh\nexec " + shlex.join([real, *coverage_flags(real)])
+            "#!/bin/sh\nexec " + shlex.join([real, *spec.flags])
             + ' "$@" -Wno-error\n'
         )
         temporary = path.with_name(f".{name}.{os.getpid()}.tmp")
@@ -178,14 +178,20 @@ def toolchain_shims(root: Path) -> "tuple[Path, Path]":
 
 
 def verify_tree(config, san: str, tree: Path) -> bool:
-    """True when the sibling can serve coverage; raises with the reason otherwise.
+    """True when the sibling can serve its consumer; raises with the reason otherwise.
 
-    The configured executable must carry guards and start, because that is the
-    file `bin/hits` replays; the configured library must carry guards because
-    harness twins and `bin/fuzz` link it. A tree with neither has nothing a
-    coverage consumer would select.
+    In the coverage sibling the configured executable must carry guards and
+    start, because that is the file `bin/hits` replays, and the configured
+    library must carry guards because harness twins link it. In the fuzz
+    sibling the library must carry the counters libFuzzer guides on and none
+    of the guards it refuses. A tree with nothing to check has nothing a
+    consumer would select.
     """
+    # Inside the sibling's selected build suffix the computed suffix is empty,
+    # so the consumer is read off the directory name.
     suffix = tree.name[len(target_config.build_dir_name(san)):]
+    if tree.name.endswith(FUZZ_SUFFIX):
+        return _verify_fuzz_tree(config, san, suffix)
     checked = False
     binary = sibling_path(config, config.sanitizer_bin(san), san, suffix)
     if binary is not None:
@@ -223,34 +229,59 @@ def verify_tree(config, san: str, tree: Path) -> bool:
     return True
 
 
-def applicable(config, san: str = "asan") -> str:
-    """Why this target has no coverage sibling to build, or "" when it does."""
+def _verify_fuzz_tree(config, san: str, suffix: str) -> bool:
+    library = sibling_path(config, config.sanitizer_lib(san), san, suffix)
+    if library is None:
+        raise RuntimeError(f"target.toml names no {san}_lib to instrument for fuzzing")
+    if not library.is_file():
+        raise RuntimeError(f"fuzz sibling produced no {library.name}: {library}")
+    undefined = native_symbols.undefined_symbols(library)
+    if not any("sanitizer_cov_8bit_counters_init" in name for name in undefined):
+        raise RuntimeError(
+            f"inline 8-bit counters not present in {library}; the build recipe "
+            "must honour CC/CXX for the fuzz sibling to be instrumented"
+        )
+    if any("sanitizer_cov_trace_pc_guard" in name for name in undefined):
+        raise RuntimeError(
+            f"{library} also carries trace-pc-guard, which current libFuzzer "
+            "rejects at startup"
+        )
+    return True
+
+
+def applicable(config, san: str = "asan", sibling: str = COVERAGE_SUFFIX) -> str:
+    """Why this target has no such sibling to build, or "" when it does."""
     if config.is_browser in ("1", "true", "True"):
         return "browser targets carry their own coverage build"
     if config.sanitizers_explicitly_disabled:
         return "sanitizers are disabled for this target"
-    if not any(
-        sibling_path(config, raw, san, COVERAGE_SUFFIX) is not None
-        for raw in (config.sanitizer_bin(san), config.sanitizer_lib(san))
-    ):
+    # Only a library is ever linked into a libFuzzer harness; the coverage
+    # sibling also serves the configured CLI.
+    raws, fields = [config.sanitizer_lib(san)], f"{san}_lib"
+    if sibling != FUZZ_SUFFIX:
+        raws.insert(0, config.sanitizer_bin(san))
+        fields = f"{san}_bin or {san}_lib"
+    if not any(sibling_path(config, raw, san, sibling) is not None for raw in raws):
         return (
-            f"target.toml names no {san}_bin or {san}_lib under "
+            f"target.toml names no {fields} under "
             f"{target_config.build_dir_name(san)}/"
         )
     return ""
 
 
-def freshness(root: Path, config, san: str = "asan") -> str:
+def freshness(root: Path, config, san: str = "asan",
+              sibling: str = COVERAGE_SUFFIX) -> str:
     """The sibling's freshness, classified exactly like the primary's."""
     recipe = target_config.build_recipe_path(Path(root), san)
     with build_config.selected_suffix(
-        os.environ.get("AUDIT_BUILD_SUFFIX", "") + COVERAGE_SUFFIX
+        os.environ.get("AUDIT_BUILD_SUFFIX", "") + sibling
     ):
         return target_config.build_freshness(root, san, recipe_path=recipe)
 
 
-def _unavailable_marker(root: Path, san: str) -> Path:
-    return Path(root) / ".audit" / f"coverage-{tree_name(san)}.unavailable"
+def _unavailable_marker(root: Path, san: str, sibling: str) -> Path:
+    name = target_config.build_dir_name(san) + sibling
+    return Path(root) / ".audit" / f"coverage-{name}.unavailable"
 
 
 def _identity(root: Path, recipe: Path, shims: "tuple[Path, Path]") -> str:
@@ -301,8 +332,9 @@ def stale_reason(root: Path, san: str, suffix: str) -> str:
 
 def materialize(
     root: Path, config, san: str = "asan", *, force: bool = False,
+    sibling: str = COVERAGE_SUFFIX,
 ) -> build_materialize.MaterializeResult:
-    """Build or refresh ``build-<san>+fuzz`` from the canonical recipe.
+    """Build or refresh ``build-<san><sibling>`` from the canonical recipe.
 
     Statuses: ``skip`` (nothing to instrument, no recipe, or the primary is
     not fresh — the sibling is its twin and is built only beside a working
@@ -312,7 +344,7 @@ def materialize(
     build again; a change to any of them, or ``force``, retries.
     """
     root = Path(root)
-    reason = applicable(config, san)
+    reason = applicable(config, san, sibling)
     if reason:
         return build_materialize.MaterializeResult("skip", None, reason)
     recipe = target_config.build_recipe_path(root, san)
@@ -326,14 +358,14 @@ def materialize(
             "skip", None, f"{target_config.build_dir_name(san)} is {primary}"
         )
     try:
-        shims = toolchain_shims(root)
+        shims = toolchain_shims(root, sibling)
     except OSError as exc:
         # No LLVM clang to instrument with: the sibling has nothing to build
         # from, and a primary that just built must not be failed for it.
         return build_materialize.MaterializeResult(
             "skip", None, f"no coverage toolchain available ({exc})"
         )
-    marker = _unavailable_marker(root, san)
+    marker = _unavailable_marker(root, san, sibling)
     identity = _identity(root, recipe, shims)
     if force:
         marker.unlink(missing_ok=True)
@@ -345,12 +377,12 @@ def materialize(
         if remembered:
             return build_materialize.MaterializeResult(
                 "failed",
-                root / ".audit" / f"build-materialize-{san}{COVERAGE_SUFFIX}.log",
+                root / ".audit" / f"build-materialize-{san}{sibling}.log",
                 "unavailable for this source, recipe and toolchain; retry with "
                 "bin/setup-target --build --force",
             )
     with build_config.selected_suffix(
-        os.environ.get("AUDIT_BUILD_SUFFIX", "") + COVERAGE_SUFFIX
+        os.environ.get("AUDIT_BUILD_SUFFIX", "") + sibling
     ):
         # Captured inside the suffix, so the recipe sees the tree it builds.
         # PATH leads with the shim directory as well as naming it in CC/CXX:
@@ -368,7 +400,7 @@ def materialize(
         result = build_materialize.materialize(
             root, san, recipe, recipe,
             lambda tree: verify_tree(config, san, tree),
-            force=force, env=environment, log_label=f"{san}{COVERAGE_SUFFIX}",
+            force=force, env=environment, log_label=f"{san}{sibling}",
         )
     if result.status == "failed":
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -379,19 +411,20 @@ def materialize(
 
 
 def report(result: build_materialize.MaterializeResult, san: str,
-           logger: Callable[[str], None]) -> None:
+           logger: Callable[[str], None], sibling: str = COVERAGE_SUFFIX) -> None:
     """One line per outcome, in the caller's log voice."""
-    name = tree_name(san)
+    name = tree_name(san, sibling)
+    label = _SIBLINGS[sibling].label
     if result.status == "built":
-        logger(f"coverage sibling built: {name} (native coverage feedback is on)")
+        logger(f"{label} built: {name} ({_SIBLINGS[sibling].feedback})")
     elif result.status == "fresh":
-        logger(f"coverage sibling fresh: {name}")
+        logger(f"{label} fresh: {name}")
     elif result.status == "held":
-        logger(f"coverage sibling {name} not replaced ({result.reason})")
+        logger(f"{label} {name} not replaced ({result.reason})")
     elif result.status == "failed":
         logger(
-            f"WARN: coverage sibling {name} unavailable; native coverage stays "
+            f"WARN: {label} {name} unavailable; its feedback stays "
             f"unavailable for this target ({result.reason}) | log={result.log_path}"
         )
     else:
-        logger(f"coverage sibling not applicable: {result.reason}")
+        logger(f"{label} not applicable: {result.reason}")

@@ -91,7 +91,7 @@ What happens next depends on the target:
 
 | Target shape | What to do |
 | --- | --- |
-| Ordinary native C/C++ | Nothing up front. Audit preflight builds or refreshes the enabled sanitizer builds from the generated recipe, plus the `build-asan+fuzz` sibling that gives probes HIT/MISSED feedback. Run `bin/setup-target <target> --build` to prove the build before launching a model; add `.audit/build.sh` when the project needs a custom route. |
+| Ordinary native C/C++ | Nothing up front. Audit preflight builds or refreshes the enabled sanitizer builds from the generated recipe, plus `build-asan+cov` for probe HIT/MISSED feedback and `build-asan+fuzz` for libFuzzer guidance. Run `bin/setup-target <target> --build` to prove the build before launching a model; add `.audit/build.sh` when the project needs a custom route. |
 | Rust, Go, Swift, Python extensions, or another registered ecosystem build | Run `bin/setup-target <target> --build` when the runner needs compiled code, installed packages, or a primed toolchain cache. Audit preflight runs that bootstrap only when the target carries a `.audit/build.sh` recipe; without one it is yours to run. |
 | Findings-only script or managed runtime | No sanitizer build is needed. Setup writes `[sanitizer] enabled = []` and a language runner when it can identify one. |
 | Browser | `mach` is detected as browser-specific. Pass `--browser` for GN, which also builds non-browser programs. Other browser build systems need a reusable `.audit/build.sh`. |

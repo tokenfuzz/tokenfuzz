@@ -1282,14 +1282,12 @@ def rebuild_recipe(destination: "str | os.PathLike" = "") -> str:
     Both compilers and both flag variables, because a C++ target ignores CC
     and CFLAGS entirely and would come back with the same mismatch.
     """
-    # -fsanitize-coverage=trace-pc-guard rides alongside fuzzer-no-link so the
-    # one sibling serves both consumers: libFuzzer guides on the 8-bit counters
-    # fuzzer-no-link emits, and the __sancov_guards section trace-pc-guard adds
-    # is what ASan's `coverage=1` dump needs for bin/hits' native .sancov probe.
-    # Redundant coverage kinds are legal to combine and only cost a little size.
+    # Current libFuzzer rejects target objects carrying trace-pc-guard at
+    # startup. Native `.sancov` replay therefore has its own `+cov` sibling;
+    # this `+fuzz` recipe carries only the inline counters libFuzzer consumes.
     return (
         f"    CC={fuzzing_compiler()} CXX={fuzzing_compiler(cxx=True)}\n"
-        f"    CFLAGS/CXXFLAGS += -fsanitize=fuzzer-no-link -fsanitize-coverage=trace-pc-guard\n"
+        f"    CFLAGS/CXXFLAGS += -fsanitize=fuzzer-no-link\n"
         + (f"    build into {destination}/\n" if destination else "")
     )
 
