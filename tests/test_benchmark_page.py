@@ -450,11 +450,18 @@ class BuildTests(unittest.TestCase):
         harness, direct = group["conditions"]
         # unique is relative to every other condition, the control included
         self.assertEqual(harness["yield"], {"found": 4, "unique": 3, "shared": 1,
-                                            "coverage": 0.8, "mplus": 3, "unique_mplus": 3})
+                                            "coverage": 0.8, "mplus": 3, "unique_mplus": 3,
+                                            "unjudged": 0, "floor": False})
+        # the ledger's unjudged remainder travels with the count
         self.assertEqual(direct["yield"], {"found": 2, "unique": 1, "shared": 1,
-                                           "coverage": 0.4, "mplus": 1, "unique_mplus": 0})
+                                           "coverage": 0.4, "mplus": 1, "unique_mplus": 0,
+                                           "unjudged": 1, "floor": False})
         self.assertEqual(harness["vs_control"], 2)
         self.assertIsNone(direct["vs_control"])
+        # a shared problem links each side into its own pool copy
+        shared = next(p for p in group["problems"] if len(p["found"]) == 2)
+        self.assertIn("/pool/harness/findings/FIND-0002/", shared["found"][harness["key"]]["href"])
+        self.assertIn("/pool/model-direct/findings/FIND-0004/", shared["found"][direct["key"]]["href"])
         cp = group["checkpoints"]
         self.assertEqual(cp["hours"], [1, 2, 3])
         counts = {r["name"]: r["counts"] for r in cp["rows"]}
@@ -468,6 +475,15 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(att["traced"], [harness["key"]])
         self.assertEqual(group["lane_mix"][harness["key"]]["S3"], {"hyp": 1, "hit": 1})
         self.assertNotIn(direct["key"], group["lane_mix"])
+
+    def test_a_floor_keeps_its_mark_and_is_never_subtracted(self) -> None:
+        report = json.loads((self.fixture.run / "report.json").read_text(encoding="utf-8"))
+        report["conditions"][1]["finding_total_is_floor"] = True
+        (self.fixture.run / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        group = benchmark_page.build(self.fixture.root)["targets"][0]
+        harness, direct = group["conditions"]
+        self.assertTrue(direct["yield"]["floor"])
+        self.assertIsNone(harness["vs_control"])
 
     def test_checkpoints_reach_a_wall_that_overran_its_budget(self) -> None:
         # a wall is measured around the whole call and runs seconds past the
@@ -592,6 +608,11 @@ class RenderTests(unittest.TestCase):
         # leaderboard ranks the harness first here (2 M+ findings + 1 crash vs 1)
         board = html[html.index('<table class="board">'):html.index("</table>", html.index('<table class="board">'))]
         self.assertLess(board.index("tokenfuzz"), board.index("gpt-5.6-sol-direct"))
+        # the ledger's caveats reach the leaderboard: the direct row's unjudged remainder
+        self.assertIn("1 unique · 1 shared · 1 unjudged", board)
+        self.assertNotIn("≥", board)
+        self.assertNotIn("‡", board)
+        self.assertIn('id="guide-limits"', html)
         # replay, trace, attention, and the drawer are all on the page
         self.assertIn('class="replay" data-wall="3.000"', html)
         self.assertIn('data-cell="harness-r1"', html)
@@ -607,6 +628,17 @@ class RenderTests(unittest.TestCase):
         self.assertIn('<table class="conv">', html)
         self.assertIn('data-problem="0"', html)
         self.assertIn('data-target="sampleproj@abcdef0123456789"', html)
+
+    def test_leaderboard_marks_a_floor_and_a_superseded_scorer(self) -> None:
+        report = json.loads((self.fixture.run / "report.json").read_text(encoding="utf-8"))
+        report["conditions"][1]["finding_total_is_floor"] = True
+        report["severity_scorers"] = ["superseded-scorer"]
+        (self.fixture.run / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        html = benchmark_page.render(benchmark_page.build(self.fixture.root))
+        board = html[html.index('<table class="board">'):html.index("</table>", html.index('<table class="board">'))]
+        self.assertIn(">≥</abbr>2</b>", board)
+        self.assertNotIn("vs direct", board)
+        self.assertEqual(board.count(">‡</abbr>"), 2)
 
     def test_relative_rendering_emits_no_absolute_paths(self) -> None:
         with benchmark._render_relative_to(self.fixture.root):

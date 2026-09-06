@@ -219,22 +219,19 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
             }
             if not canonical and member_list:
                 canonical = member_list[0]
-            href = ""
+            # One link per condition, into that side's own pool copy: a shared
+            # cluster's canonical report belongs to one side, and handing its
+            # link to both would open the opponent's report as this side's
+            # evidence. The cluster-level href is any member's report, for the
+            # per-run map where the cluster is one dot.
+            href_by: dict[str, str] = {}
             if bench_dir is not None and canonical:
-                # the per-condition pool copy carries the same canonical name
                 for cond in conditions:
-                    if cond == "model-direct" and owner.get(canonical) != cond:
-                        # canonical may belong to the other side; find a member
-                        # this condition filed
-                        mine = [m for m in member_list if owner.get(m) == cond]
-                        artifact = mine[0] if mine else canonical
-                    else:
-                        artifact = canonical
-                    href = _artifact_href(
-                        benchmark._condition_pool_dir(bench_dir, cond, sub) / artifact
-                    )
-                    if href:
-                        break
+                    mine = [m for m in member_list if owner.get(m) == cond]
+                    artifact = canonical if owner.get(canonical) == cond or not mine else mine[0]
+                    href_by[cond] = _artifact_href(
+                        benchmark._condition_pool_dir(bench_dir, cond, sub) / artifact)
+            href = next((h for h in href_by.values() if h), "")
             title = _artifact_title(run_dir / "pool" / sub / canonical) if canonical else ""
             out[kind].append({
                 "id": cid,
@@ -252,6 +249,7 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
                 "site": benchmark_graph._cluster_site(detail, kind),
                 "title": title,
                 "href": href,
+                "href_by": href_by,
                 "size": int(cluster.get("size") or len(member_list) or 1),
                 "strategy": str(detail.get("strategy") or ""),
             })
@@ -264,7 +262,10 @@ def _join_key(detail: dict, kind: str, cluster_id: str) -> str:
     It is the clusterers' own deduplication key — (class, file, line) for a
     finding, the leading frames of the crash signature for a crash — so two
     runs that filed the same problem join exactly where the ledger would have
-    merged them, and nowhere looser. A cluster without a key stays its own.
+    merged them, and nowhere looser. A cluster without a located key joins on
+    its id, which is safe for the same reason: both clusterers derive the id
+    as a hash of that key (`FCL-`/`CL-` + sha1), so two runs share an id only
+    where the ledger itself would have merged them.
     """
     if kind == "find":
         key = detail.get("key")
@@ -843,11 +844,12 @@ def _target_groups(runs: list[dict]) -> list[dict]:
                     "name": _condition_name(run, cond),
                     "label": cond["label"],
                     "provisional": run["provisional"],
+                    "outdated_scorers": run["outdated_scorers"],
                     "traced": bool(cond.get("traces")),
                     "wall_h": cond["wall_h"],
                     "budget_h": cond["budget_h"],
-                    "find": {k: cond["find"][k] for k in ("unique", "times", "approx")},
-                    "crash": {k: cond["crash"][k] for k in ("unique", "times", "approx")},
+                    "find": {k: cond["find"][k] for k in ("unique", "times", "approx", "unjudged", "floor")},
+                    "crash": {k: cond["crash"][k] for k in ("unique", "times", "approx", "unjudged", "floor")},
                     "fingerprint": _fingerprint(cond),
                     "source": {
                         "find": {"label": cond["find"]["label"], "href": cond["find"]["href"]},
@@ -879,7 +881,8 @@ def _target_groups(runs: list[dict]) -> list[dict]:
                             "t": (cluster.get("t_by") or {}).get(token, cluster.get("t")),
                             # this side's own score; unscored stays unscored
                             "severity": (cluster.get("severity_by") or {}).get(token, ""),
-                            "href": cluster["href"],
+                            # unlinked rather than the other side's report
+                            "href": cluster["href_by"].get(token, ""),
                             "lane": cluster.get("strategy") or "",
                             "title": cluster["title"],
                         }
@@ -915,9 +918,13 @@ def _yield_split(conditions: list[dict], problems: list[dict]) -> None:
     shared, because the plain model would have found it too. Coverage is the
     share of every problem any run reported — the union is the closest thing
     to an answer key a live target has, and it grows as more models run.
+
+    The ledger's own caveats travel with the count: artifacts the review never
+    reached are an unjudged remainder the count omits, and when that remainder
+    outnumbers the verdicts the count is a floor — shown with its mark, and
+    never subtracted from a control, because a floor minus a count is nothing.
     """
     total = len(problems)
-    by_key = {c["key"]: c for c in conditions}
     for cond in conditions:
         found = [p for p in problems if cond["key"] in p["found"]]
         unique = [p for p in found if len(p["found"]) == 1]
@@ -930,6 +937,8 @@ def _yield_split(conditions: list[dict], problems: list[dict]) -> None:
             "mplus": mplus,
             "unique_mplus": sum(
                 _SEVERITY_RANK.get(p["found"][cond["key"]]["severity"], 0) >= 2 for p in unique),
+            "unjudged": cond["find"]["unjudged"] + cond["crash"]["unjudged"],
+            "floor": cond["find"]["floor"] or cond["crash"]["floor"],
         }
     for cond in conditions:
         # the benchmark's own pairing: the harness against the same model's control
@@ -938,7 +947,8 @@ def _yield_split(conditions: list[dict], problems: list[dict]) -> None:
         cond["vs_control"] = (
             cond["yield"]["found"] - partner["yield"]["found"]
             if partner and cond["token"] == "harness" and not cond["provisional"]
-            and not partner["provisional"] else None)
+            and not partner["provisional"] and not cond["yield"]["floor"]
+            and not partner["yield"]["floor"] else None)
 
 
 def _checkpoints(conditions: list[dict]) -> dict:
@@ -1669,14 +1679,22 @@ def _leaderboard(groups: list[dict]) -> str:
             if pending:
                 yield_cell = '<td class="num">Pending</td><td class="num">—</td><td class="num">—</td>'
             else:
+                # the ledger's marks, so a floor never ranks as a clean count
+                floor = ('<abbr class="mark" title="The unjudged remainder outnumbers the '
+                         'verdicts: a lower bound, not a result to compare.">≥</abbr>'
+                         if y["floor"] else "")
+                unjudged = f' · {y["unjudged"]} unjudged' if y["unjudged"] else ""
+                scorer = ('<abbr class="mark" title="Severities came from a superseded scorer; '
+                          'Medium+ is not on the current scale.">‡</abbr>'
+                          if cond["outdated_scorers"] else "")
                 yield_cell = (
                     f'<td><span class="barcell"><span class="ybar">'
                     f'<span class="yu" style="width:{unique_w:.0f}%"></span>'
                     f'<span class="ys" style="width:{shared_w:.0f}%"></span></span> '
-                    f'<b>{y["found"]}</b></span>'
-                    f'<span class="ysplit">{y["unique"]} unique · {y["shared"]} shared</span></td>'
+                    f'<b>{floor}{y["found"]}</b></span>'
+                    f'<span class="ysplit">{y["unique"]} unique · {y["shared"]} shared{unjudged}</span></td>'
                     f'<td class="num">{_fmt_pct(y["coverage"])}</td>'
-                    f'<td class="num"><b>{y["mplus"]}</b><span class="ysplit">{y["unique_mplus"]} unique</span></td>')
+                    f'<td class="num"><b>{y["mplus"]}</b>{scorer}<span class="ysplit">{y["unique_mplus"]} unique</span></td>')
             vs = cond["vs_control"]
             vs_cell = "—" if vs is None else (f"+{vs}" if vs > 0 else str(vs)) + " vs direct"
             body.append(
@@ -1800,13 +1818,11 @@ def _trace_panel(run: dict) -> str:
     if harness is None or not harness["traces"]:
         return ""
     parts = ['<div class="panel"><div class="pt">How the harness reasoned</div>'
-             '<p class="pd">Every hypothesis an agent opened, as a bar from the moment it was '
-             'written to the moment it was resolved, one row per agent. Colour is the outcome; '
-             'the ticks above a bar are the sanitizer probes it drove, coloured by verdict; a '
-             'dot at the end marks a hypothesis that became a filed artifact. Hover for the '
-             'idea in the agent\'s own words; click to read its reasoning, guard gap, input '
-             'shape, probes, and notes. The control leaves no such trace: it reports, and '
-             'nothing records what it considered and discarded.</p>'
+             '<p class="pd">Every hypothesis an agent opened, as a bar from written to resolved, '
+             'one row per agent. Colour is the outcome; ticks above a bar are the sanitizer probes '
+             'it drove, coloured by verdict; a dot at the end marks one that became a filed '
+             'artifact. Hover for the idea in the agent\'s words; click for its reasoning, probes, '
+             'and notes. The control leaves no such trace.</p>'
              '<div class="legend">'
              '<span class="k"><b class="o-hit"></b>became an artifact</span>'
              '<span class="k"><b class="o-confirmed"></b>confirmed, not filed</span>'
@@ -1851,10 +1867,10 @@ def _attention_panel(run: dict) -> str:
             + f'<td class="num">{row["rejected"] or "—"}</td></tr>')
     return (
         '<div class="panel"><div class="pt">Where they looked, where they found</div>'
-        '<p class="pd">The harness\'s hypotheses name a file, so its attention can be placed by '
+        '<p class="pd">The harness\'s hypotheses name a file, so its attention is placed by '
         'top-level directory beside the merged results that landed there. The control\'s '
-        'attention is not observable — only what it reported is — so it has a found column and '
-        'nothing else.</p><div class="tablewrap"><table class="attn"><thead><tr>'
+        'attention is not observable, so it has a found column and nothing else.</p>'
+        '<div class="tablewrap"><table class="attn"><thead><tr>'
         '<th>Subsystem</th><th class="num">Hypotheses</th><th class="num">Probes</th>'
         '<th class="num">Became artifacts</th><th class="num">Kept · tokenfuzz</th>'
         + ('<th class="num">Kept · direct</th>' if direct else "")
@@ -1967,28 +1983,24 @@ def _target_section(group: dict) -> str:
         f' <span class="mono dim">{group["runs"]} run{"s" if group["runs"] != 1 else ""} · '
         f'{len(group["conditions"])} conditions</span></h2></div>'
         '<div class="panel"><div class="pt">The race</div>'
-        '<p class="pd">Every condition on one clock. Colour is the backend, solid is tokenfuzz, dashed '
-        'is the model on its own; each step is one distinct problem that held up. Drag the slider to '
-        'see what each model had surfaced by that hour — it also replays every run section below. '
-        'Where one curve climbs early and another late, the trace panels below say what each was '
-        'doing at the time.</p>'
+        '<p class="pd">Every condition on one clock: colour is the backend, solid is tokenfuzz, '
+        'dashed is the model on its own, each step one distinct problem that held up. Drag the '
+        'slider to see what each had surfaced by that hour; it replays every run section below too.</p>'
         f'<div class="chart race" data-target="{_e(group["key"])}"></div>' + replay
         + _checkpoint_table(group) + "</div>"
         '<div class="panel"><div class="pt">Who found what</div>'
-        '<p class="pd">Every distinct problem any run reported on this revision, joined by the '
-        'clusterers\' own key, against every condition. A dot is a find, with its hour; '
-        '<i>looked · N</i> means the harness opened N hypotheses on that file and did not file '
-        'this problem — a miss with a trace behind it; <i>filed nearby</i> counts the ones that '
-        'became artifacts at other sites in the same file; a dash means it never looked. The control '
-        'leaves no trace, so its empty cell is unknowable, not a miss. Click a row for the problem\'s '
-        'story across models.</p>' + _convergence(group) + "</div>"
+        '<p class="pd">Every distinct problem any run reported on this revision, against every '
+        'condition. A dot is a find, with its hour. <i>looked · N</i>: the harness opened N '
+        'hypotheses on that file and did not file this problem — a miss with a trace behind it. '
+        '<i>filed nearby</i>: it filed other problems in the same file. A dash: it never looked. '
+        'The control leaves no trace, so its empty cell is unknowable, not a miss. Click a row for '
+        'the problem\'s story.</p>' + _convergence(group) + "</div>"
         + ('<div class="panel"><div class="pt">Where each model looked, and where it found</div>'
-           '<p class="pd">Hypotheses opened per subsystem, shaded by how much of that model\'s '
-           'attention the subsystem drew, with the problems it kept there. Two models that look in '
-           'the same places and surface different things differ in judgement; two that look in different '
-           'places differ in strategy — and a subsystem that drew much attention and no yield from '
-           'every model is a candidate for a different approach altogether. A control has no looked '
-           'count, only found.</p>' + heat + "</div>"
+           '<p class="pd">Hypotheses opened per subsystem, shaded by the share of that model\'s '
+           'attention, with the problems it kept there. Same places, different yield is a '
+           'difference in judgement; different places is a difference in strategy; much attention '
+           'and no yield from every model marks a subsystem for a different approach. A control '
+           'shows found only.</p>' + heat + "</div>"
            if heat else "")
         + ('<div class="panel"><div class="pt">Which strategies each model reached for</div>'
            '<p class="pd">The harness offers every model the same strategy lanes; the mix it '
@@ -1996,10 +2008,9 @@ def _target_section(group: dict) -> str:
            'own. Hover a segment for its lane.</p>' + lanes + "</div>" if lanes else "")
         + '<div class="panel"><div class="pt">How each model behaves</div>'
         '<p class="pd">The same dimensions for every condition, each bar scaled to the best on this '
-        'target. Read it as a profile, not a score: a model that files few problems but holds every '
-        'claim and one that files many mostly-Low problems are different kinds of researcher, and '
-        'both are worth understanding; this is where the difference shows. A dash is a dimension that '
-        'condition cannot report, or one with nothing to divide by.</p>'
+        'target. Read it as a profile, not a score: a model that files few problems and holds every '
+        'claim and one that files many mostly-Low ones are different kinds of researcher. A dash is '
+        'a dimension that condition cannot report.</p>'
         + _fingerprint_table(group) + "</div></section>")
 
 
@@ -2054,10 +2065,10 @@ def _run_section(run: dict) -> str:
     if any(cond["activity"] for cond in run["conditions"]):
         parts.append(
             '<div class="panel"><div class="pt">How the run thought</div>'
-            '<p class="pd">What the agents were doing, in quarter-hour bins on the same clock: '
-            'hypotheses opened by strategy lane, sanitizer probes by verdict, artifacts filed, '
-            'and model output tokens. The direct control writes no hypotheses or probe records, '
-            'so its strip shows only what it filed and what it generated.</p>'
+            '<p class="pd">What the agents were doing, in quarter-hour bins on the run\'s clock: '
+            'hypotheses by strategy lane, probes by verdict, artifacts filed, and output tokens. '
+            'The control writes no hypotheses or probes, so its strip shows only what it filed '
+            'and generated.</p>'
             f'<div class="chart act" data-run="{_e(run["key"])}"></div></div>')
     parts.append(_attention_panel(run))
     more: list[str] = []
@@ -2066,10 +2077,10 @@ def _run_section(run: dict) -> str:
     if has_timing and not run["provisional"]:
         more.append(
             '<div class="panel"><div class="pt">When it was found</div>'
-            '<p class="pd">Cumulative distinct results on the run\'s clock. Each step is one '
-            'problem that held up, placed at the hour it was first seen; a flat tail is audit time '
-            'that found nothing new. Solid is tokenfuzz, dashed is the model on its own. Ticks below '
-            'the axis are rejected results, placed the same way.</p>'
+            '<p class="pd">Cumulative distinct results on the run\'s clock: each step is one '
+            'problem that held up, at the hour it was first seen; a flat tail found nothing new. '
+            'Solid is tokenfuzz, dashed the model on its own; ticks below the axis are rejected '
+            'results.</p>'
             f'<div class="chart ttd" data-run="{_e(run["key"])}"></div></div>')
     funnel = _funnel(run)
     if funnel:
@@ -2112,7 +2123,7 @@ _GUIDE = """
 <h3>The comparison</h3>
 <p>The page is built for studying how language models discover security problems: across models, and within each model the harness against a plain prompt. Each run audits one target at one commit with one model and one wall-clock budget, twice: <b>tokenfuzz</b> is the full harness — a ranked work queue, several agents, sanitizer probes, review, duplicate merging, exported reproducers — and <b>&lt;model&gt;-direct</b> is the control: the same model and budget given one plain request to find vulnerabilities and none of that machinery. Both sides are then held to the same evidence bar, so the two counts mean the same thing. Every target is audited on live, unfixed code; there is no planted bug to re-find.</p>
 <h3>Findings and crashes</h3>
-<p>A <b>crash</b> counts only when sanitizer output and reproducer material are on disk; what an agent claimed is not evidence. A <b>finding</b> is a security issue reported without a crash behind it — real and possibly serious, but the evidence is an argument, so read one as a lead until its report names a concrete boundary and shows how a caller crosses it. Both are merged so one problem reported several times counts once. Labels read <code>N (M M+, C classes)</code>: N distinct problems, M scored Medium or higher, spread across C bug classes. One mechanism at thirty sites is thirty findings and one class; that is not the same result as thirty classes.</p>
+<p>A <b>crash</b> counts only when sanitizer output and reproducer material are on disk; what an agent claimed is not evidence. A <b>finding</b> is a security issue reported without a crash behind it — real and possibly serious, but the evidence is an argument, so read one as a lead until its report names a concrete boundary and shows how a caller crosses it. Both are merged so one problem reported several times counts once, but findings and crashes are merged separately, as the ledger counts them: a crash whose site was also written up as a finding is one problem in each lane, not one problem. Labels read <code>N (M M+, C classes)</code>: N distinct problems, M scored Medium or higher, spread across C bug classes. One mechanism at thirty sites is thirty findings and one class; that is not the same result as thirty classes.</p>
 <p>A <code>K unjudged</code> term means K reports never reached a verdict before the run was published; they earn no credit, so read the cell as a floor. A leading <code>≥</code> means the unjudged remainder outnumbers the verdicts and the count is a lower bound, not a result to compare. <code>K retained</code> counts reproduced crashes a reviewer placed outside the declared attacker controls: real defects, kept on disk, no security credit. <code>up to N</code> on a rejected count is an upper bound where duplicates could not be merged. <code>bin/benchmark --regenerate</code> finishes an unfinished gate.</p>
 <p>The rejected and accepted columns are merged separately, so one problem can be reportable in one write-up and rejected in another. Do not divide them into a pass rate.</p>
 <h3>Severity</h3>
@@ -2125,7 +2136,7 @@ _GUIDE = """
 <p>A problem is <b>unique</b> to a condition when no other condition on the same target revision reached it — the model's own control included, because a problem the plain prompt also found is not the harness's contribution. <b>Coverage</b> is a condition's share of every distinct problem any run has reported on the revision: the union of all runs is the closest thing to an answer key a live target has, and it grows as more models run, so coverage is comparable within a revision and only there.</p>
 <h3>What makes this comparable</h3>
 <p>There is no answer key. Planted-bug suites score a model on re-finding a known defect at a known site; every target here is live, unfixed code, so a result is a problem nobody had filed, held to the same evidence bar on both sides — a reproducing sanitizer crash, or a source-backed report that names a boundary and a caller that crosses it — and merged so the same problem counts once however many times it was written up. The control is the same model with the same budget and a plain prompt, so the difference between the two rows is the harness and nothing else. The trace panels show the process that produced the numbers, from the audit's own state streams, so a reader can see not only what was found but what was tried, refuted, and dropped along the way.</p>
-<h3>What this does not settle</h3>
+<h3 id="guide-limits">What this does not settle</h3>
 <p>A run is one sample: models vary between runs, budgets and revisions change what is reachable, and a difference between two rows on one run is a lead to test with another run, not a ranking. The pool of known problems is only what these runs have surfaced, so unique and coverage move as more models and repeats are added. Findings without a crash remain arguments until a maintainer confirms them, unjudged and retained remainders are shown rather than resolved, and no figure here is <i>precision</i> — that needs a ground-truth key this kind of target cannot have. The page is a fair, evidence-backed record to reason from, alongside conventional fuzzing, code review, and the judgement of the people who know the code.</p>
 <h3>Timing and activity</h3>
 <p>Discovery times come from the audit's own event stream, joined to the merged clusters, and placed on the cell's start clock; a result that cannot be placed lands at the end of the run and the panel says <i>timing approximate</i>. The activity strip reads the hypothesis, probe, event, and usage streams each cell wrote while it ran; events after the wall are review, not activity, and are not drawn. Multiple repeats are summed.</p>
@@ -2146,16 +2157,11 @@ def render(data: dict) -> str:
         '<header class="hero"><p class="kick">TokenFuzz benchmark</p>'
         '<h1>How do language models discover security bugs — and what does each one contribute?</h1>'
         '<p class="lede">Every model audits the same live, unfixed target for the same time budget, '
-        'twice: inside the tokenfuzz harness, and as a plain prompt that serves as its own control. '
-        'This page is a record for studying that process: what each model surfaced, what it surfaced '
-        'that no other did, how much of the problems known on the target it reached, when it reached '
-        'them, and — from the audit\'s own state streams — how it reasoned along the way. Every count '
-        'is a distinct problem that survived review, merged across duplicate reports, and every number '
-        'links to its evidence, so any pattern you notice here can be followed to the report behind it. '
-        'Read it with its limits in view: each run is one sample on one revision, a model without a run '
-        'here has simply not been measured, a finding is a lead until a maintainer confirms it, and none '
-        'of this replaces conventional fuzzing, code review, or the judgement of the people who know the '
-        'code. What it offers is a fair, evidence-backed starting point for the questions worth asking next.</p>'
+        'twice: inside the tokenfuzz harness, and as a plain prompt that is its own control. '
+        'Below: what each surfaced, what no other did, when, and how it reasoned — every count a '
+        'reviewed, duplicate-merged problem linked to its evidence. One run is one sample, and a '
+        'finding is a lead until a maintainer confirms it; '
+        '<a href="#guide-limits">what this does not settle</a> has the rest.</p>'
         f'<p class="meta">Generated {_e(data["generated_at"])} · '
         f'{len(runs)} run{"s" if len(runs) != 1 else ""} · '
         f'{len(targets)} target revision{"s" if len(targets) != 1 else ""} · '
@@ -2171,25 +2177,22 @@ def render(data: dict) -> str:
     else:
         body = (
             f'<div class="filters"><span class="fl">Backends</span>{chips}'
+            '<span class="fine dim">hides rows and run sections; side-by-side panels keep every model</span>'
             '<span class="fsp"></span>'
             '<button class="chip toggle" id="show-rejected" aria-pressed="true">Show rejected</button>'
             '</div>'
             '<section class="sec"><h2>What each model surfaced</h2><p class="pd">Every condition '
-            'of every run on a target revision, ordered by distinct problems and then by '
-            'Medium-or-higher — a starting point for the questions below, not a verdict. The bar '
-            'splits each model\'s problems into the ones no other condition reached and the ones '
-            'others reached too: a model\'s unique share is what the pool of known problems would '
-            'lack without it, and the shared share is where models converge. Coverage is its share '
-            'of every problem any run has reported on this revision. Both are relative to the runs on '
-            'this page and shift as more models and repeats are added, so read them as this revision\'s '
-            'current picture rather than a fixed property of a model. The harness and the plain prompt '
-            'sit in one list on purpose, so what each approach adds can be read side by side.</p>'
+            'on a revision, harness and plain prompt in one list, ordered by distinct problems and '
+            'then Medium-or-higher — a starting point, not a verdict. The bar splits each row into '
+            'problems no other condition reached (<b>unique</b>) and problems others reached too '
+            '(<b>shared</b>); <b>coverage</b> is its share of every problem any run has reported '
+            'here. Both are relative to the runs on this page and move as models and repeats are '
+            'added.</p>'
             + _leaderboard(data.get("targets") or []) + "</section>"
             '<section class="sec"><h2>Models side by side</h2><p class="pd">One comparison per '
-            'target revision: every run of every model, joined problem by problem — when each '
-            'surfaced what, where each looked, and which strategies each reached for. This is where '
-            'the differences between models become questions worth investigating — and with one run '
-            'per model, a difference is a hypothesis to test with another run before it is a trait.</p>'
+            'target revision, joined problem by problem: when each model surfaced what, where each '
+            'looked, and which strategies each reached for. With one run per model, a difference '
+            'here is a hypothesis to test with another run, not yet a trait.</p>'
             + "".join(_target_section(g) for g in (data.get("targets") or [])) + "</section>"
             '<section class="sec"><h2>Run by run</h2><p class="pd">Each run in full: replay it, '
             'see what each side surfaced, and read the harness\'s reasoning hypothesis by hypothesis — '
@@ -2395,7 +2398,7 @@ abbr.mark{text-decoration:none;cursor:help;color:var(--muted);border-bottom:1px 
 .tl{font-size:.74em;color:var(--ink2);text-transform:uppercase;letter-spacing:.05em}
 .tv{font-size:1.25em;font-weight:700;margin-top:2px;line-height:1.2}.tn{font-size:.74em;color:var(--muted);margin-top:2px}
 .guide{margin:34px 0 0;scroll-margin-top:64px;background:var(--surf);border:1px solid var(--ring);border-radius:14px;padding:6px 18px}
-.guide summary{cursor:pointer;font-weight:700;padding:8px 0}
+.guide summary{cursor:pointer;font-weight:700;padding:8px 0}.guide h3{scroll-margin-top:64px}
 .gbody{font-size:.93em;color:var(--ink2);max-width:76em}.gbody h3{font-size:.95em;color:var(--ink);margin:14px 0 4px}
 .gbody code{font-family:var(--mono);font-size:.9em;background:var(--surf2);padding:0 4px;border-radius:4px}
 .target{background:var(--surf);border:1px solid var(--ring);border-radius:16px;padding:18px 20px;margin:16px 0;scroll-margin-top:64px}
@@ -2704,6 +2707,8 @@ function openDrawer(run,hp){dtitle.textContent=hp.file||hp.id;dbody.replaceChild
  drawer.hidden=false}
 drawer.querySelector(".dclose").addEventListener("click",function(){drawer.hidden=true});
 document.addEventListener("keydown",function(e){if(e.key==="Escape")drawer.hidden=true});
+function openGuideFor(hash){var t=hash&&document.getElementById(hash.slice(1)),g=t&&t.closest("details.guide");if(g)g.open=true}
+window.addEventListener("hashchange",function(){openGuideFor(location.hash)});openGuideFor(location.hash);
 // ── replay: one cut per run, every panel redrawn from it ────────────────────
 function redraw(run){run.querySelectorAll(".ttd").forEach(drawTTD);run.querySelectorAll(".act").forEach(drawActivity);run.querySelectorAll(".trace").forEach(drawTrace);
  var cut=run.dataset.cut==null||run.dataset.cut===""?Infinity:+run.dataset.cut;

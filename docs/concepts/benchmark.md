@@ -376,7 +376,9 @@ Medium-or-higher. Each row splits its problems into the ones *unique* to it
 and the ones others reached too; *coverage* is its share of every distinct
 problem any run has reported on the revision, the closest thing to an answer
 key a live target has. A harness row also carries its delta against the same
-model's control.
+model's control. The ledger's marks travel with the count: an unjudged
+remainder is named beside it, a floor keeps its `≥` and is never subtracted
+from a control, and `‡` flags severities from a superseded scorer.
 
 **Models side by side** is one comparison per target revision:
 
