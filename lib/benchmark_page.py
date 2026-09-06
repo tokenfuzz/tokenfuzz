@@ -1734,7 +1734,9 @@ def _checkpoint_table(group: dict) -> str:
         cells = "".join(f'<td class="num">{n}</td>' for n in row["counts"])
         body.append(
             f'<tr><td><span class="be be-{_e(row["backend"])}">{_e(row["backend"])}</span> '
-            f'{_e(row["name"])}{"<span class=\"dim\"> ≈</span>" if row["approx"] else ""}</td>{cells}</tr>')
+            f'{_e(row["name"])}'
+            + ('<span class="dim"> ≈</span>' if row["approx"] else "")
+            + f'</td>{cells}</tr>')
     return (
         '<div class="tablewrap"><table class="cp"><thead><tr><th>Distinct problems by hour</th>'
         + head + "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
