@@ -445,6 +445,43 @@ class BuildTests(unittest.TestCase):
         parse = benchmark_page._looked("src/app_parse.c", self._cond("harness")["traces"])
         self.assertEqual((parse["n"], parse["filed_nearby"]), (1, 1))
 
+    def test_yield_split_checkpoints_attention_and_lane_mix(self) -> None:
+        group = self.data["targets"][0]
+        harness, direct = group["conditions"]
+        # unique is relative to every other condition, the control included
+        self.assertEqual(harness["yield"], {"found": 4, "unique": 3, "shared": 1,
+                                            "coverage": 0.8, "mplus": 3, "unique_mplus": 3})
+        self.assertEqual(direct["yield"], {"found": 2, "unique": 1, "shared": 1,
+                                           "coverage": 0.4, "mplus": 1, "unique_mplus": 0})
+        self.assertEqual(harness["vs_control"], 2)
+        self.assertIsNone(direct["vs_control"])
+        cp = group["checkpoints"]
+        self.assertEqual(cp["hours"], [1, 2, 3])
+        counts = {r["name"]: r["counts"] for r in cp["rows"]}
+        # every harness discovery is parked at its 3h wall; the control's at 1.5h
+        self.assertEqual(counts["gpt-5.6-sol · tokenfuzz"], [0, 0, 4])
+        self.assertEqual(counts["gpt-5.6-sol · direct"], [0, 2, 2])
+        att = group["attention"]
+        self.assertEqual(att["subsystems"][0], "src")
+        self.assertEqual(att["cells"][harness["key"]]["src"], {"hyp": 4, "hits": 1, "found": 3})
+        self.assertEqual(att["cells"][direct["key"]]["src"], {"hyp": 0, "hits": 0, "found": 2})
+        self.assertEqual(att["traced"], [harness["key"]])
+        self.assertEqual(group["lane_mix"][harness["key"]]["S3"], {"hyp": 1, "hit": 1})
+        self.assertNotIn(direct["key"], group["lane_mix"])
+
+    def test_checkpoints_reach_a_wall_that_overran_its_budget(self) -> None:
+        # a wall is measured around the whole call and runs seconds past the
+        # grant; a result parked there must still land in a column
+        report = json.loads((self.fixture.run / "report.json").read_text(encoding="utf-8"))
+        report["conditions"][0]["wall_median"] = 10805
+        (self.fixture.run / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        shutil.rmtree(self.fixture.run / "cells")
+        group = benchmark_page.build(self.fixture.root)["targets"][0]
+        cp = group["checkpoints"]
+        self.assertEqual(cp["hours"], [1, 2, 3, 4])
+        counts = {r["name"]: r["counts"] for r in cp["rows"]}
+        self.assertEqual(counts["gpt-5.6-sol · tokenfuzz"], [0, 0, 0, 4])
+
     def test_fingerprint_lines_up_comparable_dimensions(self) -> None:
         group = self.data["targets"][0]
         harness, direct = (c["fingerprint"] for c in group["conditions"])
@@ -539,8 +576,17 @@ class RenderTests(unittest.TestCase):
         self.assertIn("sanitizer crash", html)
         self.assertIn("Spec vs. implementation", html)
         self.assertIn('id="run-codex-20260101-000000"', html)
-        self.assertIn("1 only direct", html)
-        self.assertIn("1 both", html)
+        # the leaderboard splits each side's yield into unique and shared
+        self.assertIn("3 unique · 1 shared", html)
+        self.assertIn("1 unique · 1 shared", html)
+        self.assertIn("+2 vs direct", html)
+        self.assertIn('<table class="cp">', html)
+        self.assertIn('<table class="heat">', html)
+        self.assertIn('class="lbar"', html)
+        self.assertIn('<details class="more">', html)
+        # the ledger comes after the runs; the leaderboard comes first
+        self.assertLess(html.index("What each model surfaced"), html.index("Models side by side"))
+        self.assertLess(html.index("Run by run"), html.index("<h2>Ledger</h2>"))
         self.assertIn("How to read this page", html)
         self.assertIn(".card[hidden]{display:none}", html)
         # leaderboard ranks the harness first here (2 M+ findings + 1 crash vs 1)
@@ -608,7 +654,7 @@ class RenderTests(unittest.TestCase):
     def test_write_places_the_page_beside_the_ledger(self) -> None:
         out = self.fixture.root / "benchmark-result.html"
         benchmark_page.write(self.fixture.root, out)
-        self.assertIn("Scoreboard", out.read_text(encoding="utf-8"))
+        self.assertIn("<h2>Ledger</h2>", out.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

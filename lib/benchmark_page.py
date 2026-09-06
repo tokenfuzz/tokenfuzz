@@ -849,6 +849,13 @@ def _target_groups(runs: list[dict]) -> list[dict]:
                     "find": {k: cond["find"][k] for k in ("unique", "times", "approx")},
                     "crash": {k: cond["crash"][k] for k in ("unique", "times", "approx")},
                     "fingerprint": _fingerprint(cond),
+                    "source": {
+                        "find": {"label": cond["find"]["label"], "href": cond["find"]["href"]},
+                        "crash": {"label": cond["crash"]["label"], "href": cond["crash"]["href"]},
+                        "top_severity": cond["top_severity"],
+                        "wall_label": cond["wall_label"],
+                        "tokens": {"cost": cond["tokens"]["cost"]},
+                    },
                 })
         problems: dict[str, dict] = {}
         for run in members:
@@ -888,11 +895,128 @@ def _target_groups(runs: list[dict]) -> list[dict]:
                         problem["looked"][key] = looked
         ordered = sorted(problems.values(), key=lambda p: (
             -len(p["found"]), -p["rank"], p["kind"], p["class"], p["site"]))
+        _yield_split(conditions, ordered)
         out.append({
             "target": target, "target_sha": sha, "key": f"{target}@{sha}",
             "conditions": conditions, "problems": ordered,
             "runs": len(members),
+            "checkpoints": _checkpoints(conditions),
+            "attention": _cross_attention(conditions, ordered, members),
+            "lane_mix": _lane_mix(conditions, members),
         })
+    return out
+
+
+def _yield_split(conditions: list[dict], problems: list[dict]) -> None:
+    """What each condition found that nobody else did, and how much of all of it.
+
+    "Unique" is relative to every other condition on the revision, its own
+    control included: a problem the harness and its control both reached is
+    shared, because the plain model would have found it too. Coverage is the
+    share of every problem any run reported — the union is the closest thing
+    to an answer key a live target has, and it grows as more models run.
+    """
+    total = len(problems)
+    by_key = {c["key"]: c for c in conditions}
+    for cond in conditions:
+        found = [p for p in problems if cond["key"] in p["found"]]
+        unique = [p for p in found if len(p["found"]) == 1]
+        mplus = sum(_SEVERITY_RANK.get(p["found"][cond["key"]]["severity"], 0) >= 2 for p in found)
+        cond["yield"] = {
+            "found": len(found),
+            "unique": len(unique),
+            "shared": len(found) - len(unique),
+            "coverage": _ratio(len(found), total),
+            "mplus": mplus,
+            "unique_mplus": sum(
+                _SEVERITY_RANK.get(p["found"][cond["key"]]["severity"], 0) >= 2 for p in unique),
+        }
+    for cond in conditions:
+        # the benchmark's own pairing: the harness against the same model's control
+        partner = next((c for c in conditions if c["run_key"] == cond["run_key"]
+                        and c["token"] != cond["token"]), None)
+        cond["vs_control"] = (
+            cond["yield"]["found"] - partner["yield"]["found"]
+            if partner and cond["token"] == "harness" and not cond["provisional"]
+            and not partner["provisional"] else None)
+
+
+def _checkpoints(conditions: list[dict]) -> dict:
+    """Distinct problems each condition had by each whole hour of its budget.
+
+    The hours span the latest discovery as well as the grant: a cell's wall is
+    measured around the whole harness call and runs a few seconds past its
+    budget, and a result parked at that wall must still land in a column, or
+    the table would read below the leaderboard beside it.
+    """
+    latest = max([c["budget_h"] or 0 for c in conditions]
+                 + [c["wall_h"] or 0 for c in conditions]
+                 + [t for c in conditions for t in c["find"]["times"] + c["crash"]["times"]]
+                 + [0])
+    hours = list(range(1, int(math.ceil(latest - 1e-9)) + 1)) if latest > 0 else []
+    rows = []
+    for cond in conditions:
+        if cond["provisional"]:
+            continue
+        times = sorted(cond["find"]["times"] + cond["crash"]["times"])
+        rows.append({
+            "key": cond["key"], "name": cond["name"], "backend": cond["backend"],
+            "token": cond["token"],
+            "counts": [sum(1 for t in times if t <= h) for h in hours],
+            "approx": cond["find"]["approx"] or cond["crash"]["approx"],
+        })
+    return {"hours": hours, "rows": rows}
+
+
+def _cross_attention(conditions: list[dict], problems: list[dict], runs: list[dict]) -> dict:
+    """Hypotheses and results by subsystem, for every condition side by side.
+
+    The per-run attention table says where one harness looked; across models
+    the interesting question is whether they looked in the same places and
+    found different things there — or looked in different places entirely.
+    """
+    traces = {}
+    for run in runs:
+        for cond in run["conditions"]:
+            traces[_condition_key(run, cond)] = cond.get("traces") or []
+    cells: dict[str, dict[str, dict]] = {c["key"]: {} for c in conditions}
+    totals: dict[str, int] = {}
+
+    def slot(key: str, sub: str) -> dict:
+        return cells[key].setdefault(sub, {"hyp": 0, "hits": 0, "found": 0})
+
+    for key, cell_traces in traces.items():
+        for trace in cell_traces:
+            for hyp in trace["hyps"]:
+                sub = hyp["subsystem"] or "(no path)"
+                slot(key, sub)["hyp"] += 1
+                slot(key, sub)["hits"] += hyp["outcome"] == "hit"
+                totals[sub] = totals.get(sub, 0) + 1
+    for problem in problems:
+        sub = _subsystem(problem["site"]) or "(no path)"
+        for key in problem["found"]:
+            if key in cells:
+                slot(key, sub)["found"] += 1
+                totals[sub] = totals.get(sub, 0) + 1
+    subsystems = sorted(totals, key=lambda name: (-totals[name], name))[:12]
+    return {"subsystems": subsystems, "cells": cells,
+            "traced": [c["key"] for c in conditions if traces.get(c["key"])]}
+
+
+def _lane_mix(conditions: list[dict], runs: list[dict]) -> dict:
+    """Which strategy lanes each harness condition reached for, and which paid off."""
+    out: dict[str, dict[str, dict]] = {}
+    for run in runs:
+        for cond in run["conditions"]:
+            key = _condition_key(run, cond)
+            lanes: dict[str, dict] = {}
+            for trace in cond.get("traces") or []:
+                for hyp in trace["hyps"]:
+                    lane = lanes.setdefault(hyp["lane"], {"hyp": 0, "hit": 0})
+                    lane["hyp"] += 1
+                    lane["hit"] += hyp["outcome"] == "hit"
+            if lanes:
+                out[key] = lanes
     return out
 
 
@@ -1333,61 +1457,6 @@ def _scoreboard(runs: list[dict]) -> str:
     )
 
 
-def _verdict_cards(runs: list[dict]) -> str:
-    cards = []
-    for run in runs:
-        harness, direct = _harness_of(run), _direct_of(run)
-        title = f'{_e(run["target"])}'
-        sub = f'{_e(run["model"] or run["backend"])} · {_e(run["backend"])} · {_e(run["run_id"])}'
-        if run["provisional"]:
-            body = ('<p class="pending">Still running or awaiting review — counts arrive when the '
-                    'run\'s own review finishes.</p>')
-        elif harness is None or direct is None:
-            only = harness or direct
-            body = (f'<p class="pending">One condition only ({_e(only["label"]) if only else "—"}); '
-                    'no comparison to draw.</p>')
-        else:
-            def side(cond: dict) -> str:
-                f, c = cond["find"], cond["crash"]
-                return (
-                    f'<div class="side side-{_e(cond["token"])}">'
-                    f'<div class="who">{_e(cond["label"])}</div>'
-                    f'<div class="big">{"≥" if f["floor"] and f["unique"] else ""}{f["unique"]}<small>findings</small></div>'
-                    f'<div class="big">{"≥" if c["floor"] and c["unique"] else ""}{c["unique"]}<small>crashes</small></div>'
-                    f'<div class="fine">{f["mplus"] + c["mplus"]} Medium+ · top crash '
-                    f'{_severity_pill(cond["top_severity"])} · {_e(cond["wall_label"])}</div>'
-                    + (f'<div class="fine warn">{f["unjudged"] + c["unjudged"]} unjudged — a floor, not a yield</div>'
-                       if f["unjudged"] or c["unjudged"] else "")
-                    + "</div>")
-            uniq = _overlap_counts(run)
-            body = (
-                '<div class="sides">' + side(harness) + '<div class="vs">vs</div>' + side(direct) + "</div>"
-                f'<div class="overlap"><span class="sw sw-harness"></span>{uniq["harness"]} only tokenfuzz'
-                f' · <span class="sw sw-both"></span>{uniq["both"]} both'
-                f' · <span class="sw sw-direct"></span>{uniq["direct"]} only direct'
-                '</div>'
-            )
-        cards.append(
-            f'<a class="card" href="#run-{_e(_slug(run["key"]))}" data-backend="{_e(run["backend"])}">'
-            f'<div class="ct">{title} <span class="sha">{_e(run["target_sha"][:7])}</span></div>'
-            f'<div class="cs">{sub}</div>{body}</a>')
-    return '<div class="cards">' + "".join(cards) + "</div>"
-
-
-def _overlap_counts(run: dict) -> dict:
-    out = {"harness": 0, "both": 0, "direct": 0}
-    for kind in ("find", "crash"):
-        for cluster in run["clusters"][kind]:
-            conds = set(cluster["conditions"])
-            if "harness" in conds and "model-direct" in conds:
-                out["both"] += 1
-            elif "harness" in conds:
-                out["harness"] += 1
-            elif "model-direct" in conds:
-                out["direct"] += 1
-    return out
-
-
 def _slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-")
 
@@ -1574,63 +1643,141 @@ def _cells_table(run: dict) -> str:
         + "".join(rows) + "</tbody></table></div>")
 
 
-def _leaderboard(runs: list[dict]) -> str:
-    """Every condition of every finished run on one target, strongest first.
+def _leaderboard(groups: list[dict]) -> str:
+    """What each model surfaced: every condition on a revision, ordered by what it found.
 
-    Ranked by Medium-or-higher yield, then distinct problems: the two numbers
-    the guide says to read first. Marks travel with the labels, so a floor or
-    an unjudged remainder ranks with its mark, never as a clean count.
+    The split that matters for "uniquely" is right in the row: problems only
+    this condition reached against problems others reached too, and the share
+    of everything known on the revision. Rank is by distinct problems, then
+    Medium-or-higher — the two numbers the guide says to read first. Marks
+    travel with the labels, so a floor or an unjudged remainder ranks with its
+    mark, never as a clean count.
     """
-    groups: dict[tuple[str, str], list[dict]] = {}
-    for run in runs:
-        groups.setdefault((run["target"], run["target_sha"]), []).append(run)
     out = []
-    for (target, sha), members in sorted(groups.items()):
-        rows = []
-        for run in members:
-            for cond in run["conditions"]:
-                f, c = cond["find"], cond["crash"]
-                eff, tok = cond["efficiency"], cond["tokens"]
-                rows.append({
-                    "run": run, "cond": cond,
-                    "mplus": f["mplus"] + c["mplus"],
-                    "unique": f["unique"] + c["unique"],
-                    "cost_per": eff["cost_per_confirmed"], "cost": tok["cost"],
-                })
-        rows.sort(key=lambda r: (r["run"]["provisional"], -r["mplus"], -r["unique"],
-                                 r["cond"]["label"]))
-        top = max([r["mplus"] for r in rows] + [1])
+    for group in groups:
+        conditions = group["conditions"]
+        total = len(group["problems"])
+        rows = sorted(conditions, key=lambda c: (
+            c["provisional"], -c["yield"]["found"], -c["yield"]["mplus"], -c["yield"]["unique"], c["name"]))
+        top = max([c["yield"]["found"] for c in conditions] + [1])
         body = []
-        for rank, row in enumerate(rows, 1):
-            run, cond = row["run"], row["cond"]
-            pending = run["provisional"]
-            width = 100.0 * row["mplus"] / top
-            mplus_cell = "Pending" if pending else (
-                f'<span class="barcell"><span class="mini wide"><span style="width:{width:.0f}%">'
-                f'</span></span> {row["mplus"]}</span>')
-            cost_per = "—" if row["cost_per"] is None else f'${row["cost_per"]:,.0f}'
+        for rank, cond in enumerate(rows, 1):
+            y = cond["yield"]
+            pending = cond["provisional"]
+            unique_w = 100.0 * y["unique"] / top
+            shared_w = 100.0 * y["shared"] / top
+            if pending:
+                yield_cell = '<td class="num">Pending</td><td class="num">—</td><td class="num">—</td>'
+            else:
+                yield_cell = (
+                    f'<td><span class="barcell"><span class="ybar">'
+                    f'<span class="yu" style="width:{unique_w:.0f}%"></span>'
+                    f'<span class="ys" style="width:{shared_w:.0f}%"></span></span> '
+                    f'<b>{y["found"]}</b></span>'
+                    f'<span class="ysplit">{y["unique"]} unique · {y["shared"]} shared</span></td>'
+                    f'<td class="num">{_fmt_pct(y["coverage"])}</td>'
+                    f'<td class="num"><b>{y["mplus"]}</b><span class="ysplit">{y["unique_mplus"]} unique</span></td>')
+            vs = cond["vs_control"]
+            vs_cell = "—" if vs is None else (f"+{vs}" if vs > 0 else str(vs)) + " vs direct"
             body.append(
-                f'<tr data-run="{_e(run["key"])}" data-backend="{_e(run["backend"])}">'
+                f'<tr data-run="{_e(cond["run_key"])}" data-backend="{_e(cond["backend"])}">'
                 f'<td class="num">{"—" if pending else rank}</td>'
                 f'<td><span class="cond cond-{_e(cond["token"])}">{_e(cond["label"])}</span>'
-                f' <span class="be be-{_e(run["backend"])}">{_e(run["backend"])}</span></td>'
-                f'<td class="mono dim">{_e(run["run_id"])}</td>'
-                f'<td class="num">{mplus_cell}</td>'
-                f'<td class="num">{_link(cond["find"]["label"], cond["find"]["href"], "count")}</td>'
-                f'<td class="num">{_link(cond["crash"]["label"], cond["crash"]["href"], "count")}</td>'
-                f'<td>{_severity_pill(cond["top_severity"])}</td>'
-                f'<td class="num">{_e(cond["wall_label"])}</td>'
-                f'<td class="num">{_e(row["cost"])}</td>'
-                f'<td class="num">{cost_per}</td></tr>')
+                f' <span class="be be-{_e(cond["backend"])}">{_e(cond["backend"])}</span>'
+                f'<span class="trun">{_e(cond["name"].split(" · ")[0])} · {_e(cond["run_id"])}</span></td>'
+                + yield_cell
+                + f'<td class="num">{vs_cell}</td>'
+                f'<td class="num">{_link(cond["source"]["find"]["label"], cond["source"]["find"]["href"], "count")}</td>'
+                f'<td class="num">{_link(cond["source"]["crash"]["label"], cond["source"]["crash"]["href"], "count")}</td>'
+                f'<td>{_severity_pill(cond["source"]["top_severity"])}</td>'
+                f'<td class="num">{_e(cond["source"]["wall_label"])}</td>'
+                f'<td class="num">{_e(cond["source"]["tokens"]["cost"])}</td></tr>')
         out.append(
-            f'<div class="lb"><div class="lbt">{_e(target)} <span class="sha">{_e(sha[:7])}</span></div>'
+            f'<div class="lb"><div class="lbt">{_e(group["target"])} <span class="sha">{_e(group["target_sha"][:7])}</span>'
+            f' <span class="dim fine">{total} distinct problem{"s" if total != 1 else ""} known on this '
+            f'revision across {group["runs"]} run{"s" if group["runs"] != 1 else ""}</span></div>'
             '<div class="tablewrap"><table class="board"><thead><tr><th class="num">#</th>'
-            '<th>Condition</th><th>Run</th><th class="num">Medium+ problems</th>'
+            '<th>Model · condition</th><th>Distinct problems <span class="fine dim">unique to it ▮ · shared ▯</span></th>'
+            '<th class="num">Coverage of all known</th><th class="num">Medium+</th>'
+            '<th class="num">Harness vs its control</th>'
             '<th class="num">Security findings</th><th class="num">Security crashes</th>'
-            '<th>Top crash</th><th class="num">Wall</th><th class="num">Cost</th>'
-            '<th class="num">$ / confirmed</th></tr></thead><tbody>' + "".join(body)
-            + "</tbody></table></div></div>")
+            '<th>Top crash</th><th class="num">Wall</th><th class="num">Cost</th></tr></thead><tbody>'
+            + "".join(body) + "</tbody></table></div></div>")
     return "".join(out)
+
+
+def _checkpoint_table(group: dict) -> str:
+    cp = group["checkpoints"]
+    if not cp["hours"] or not cp["rows"]:
+        return ""
+    head = "".join(f'<th class="num">{h}h</th>' for h in cp["hours"])
+    body = []
+    for row in cp["rows"]:
+        cells = "".join(f'<td class="num">{n}</td>' for n in row["counts"])
+        body.append(
+            f'<tr><td><span class="be be-{_e(row["backend"])}">{_e(row["backend"])}</span> '
+            f'{_e(row["name"])}{"<span class=\"dim\"> ≈</span>" if row["approx"] else ""}</td>{cells}</tr>')
+    return (
+        '<div class="tablewrap"><table class="cp"><thead><tr><th>Distinct problems by hour</th>'
+        + head + "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
+        + ('<p class="fn">≈ marks a condition with one or more discovery times parked at its wall.</p>'
+           if any(r["approx"] for r in cp["rows"]) else ""))
+
+
+def _attention_heatmap(group: dict) -> str:
+    att = group["attention"]
+    if not att["subsystems"]:
+        return ""
+    conditions = group["conditions"]
+    traced = set(att["traced"])
+    top = max([cell["hyp"] for key in att["cells"] for cell in att["cells"][key].values()] + [1])
+    head = "".join(
+        f'<th><span class="be be-{_e(c["backend"])}">{_e(c["backend"])}</span> {_e(c["name"])}</th>'
+        for c in conditions)
+    rows = []
+    for sub in att["subsystems"]:
+        cells = []
+        for cond in conditions:
+            cell = att["cells"].get(cond["key"], {}).get(sub)
+            if cond["key"] in traced:
+                hyp = cell["hyp"] if cell else 0
+                found = cell["found"] if cell else 0
+                alpha = 0.08 + 0.72 * hyp / top if hyp else 0
+                text = f'{hyp} looked' + (f' · <b>{found} found</b>' if found else "")
+                cells.append(f'<td class="hm" style="--a:{alpha:.2f}">{text if hyp or found else "·"}</td>')
+            else:
+                found = cell["found"] if cell else 0
+                cells.append(f'<td class="hm none">{f"<b>{found} found</b>" if found else "·"}</td>')
+        rows.append(f'<tr><td class="mono">{_e(sub)}</td>{"".join(cells)}</tr>')
+    return (
+        '<div class="tablewrap"><table class="heat"><thead><tr><th>Subsystem</th>' + head
+        + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+
+
+def _lane_mix_panel(group: dict) -> str:
+    mix = group["lane_mix"]
+    if not mix:
+        return ""
+    parts = []
+    for cond in group["conditions"]:
+        lanes = mix.get(cond["key"])
+        if not lanes:
+            continue
+        total = sum(v["hyp"] for v in lanes.values()) or 1
+        segs = []
+        notes = []
+        for lane in sorted(lanes, key=lambda k: (k not in LANE_NAMES, k)):
+            v = lanes[lane]
+            width = 100.0 * v["hyp"] / total
+            segs.append(f'<span class="lseg lane-{_e(lane)}" style="width:{width:.1f}%" '
+                        f'title="{_e(lane)} {_e(LANE_NAMES.get(lane, lane))}: {v["hyp"]} hypotheses, {v["hit"]} became artifacts"></span>')
+            notes.append(f'<span class="k"><span class="lane lane-{_e(lane)}">{_e(lane)}</span> '
+                         f'{v["hyp"]} → {v["hit"]}</span>')
+        parts.append(
+            f'<div class="lm"><div class="lmt"><span class="be be-{_e(cond["backend"])}">{_e(cond["backend"])}</span> '
+            f'{_e(cond["name"])} <span class="dim fine">{total} hypotheses</span></div>'
+            f'<div class="lbar">{"".join(segs)}</div><div class="legend">{"".join(notes)}</div></div>')
+    return "".join(parts)
 
 
 def _replay_bar(run: dict) -> str:
@@ -1812,31 +1959,48 @@ def _target_section(group: dict) -> str:
         f'<input type="range" min="0" max="{ticks}" value="{ticks}" step="1" aria-label="hours into the runs">'
         f'<span class="rt">{wall:.2f}h</span><span class="rn">whole runs</span></div>'
         if ticks > 0 else "")
+    heat = _attention_heatmap(group)
+    lanes = _lane_mix_panel(group)
     return (
         f'<section class="target" id="target-{_e(_slug(group["key"]))}" data-target="{_e(group["key"])}">'
         f'<div class="rh"><h2>{_e(group["target"])} <span class="sha">{_e(group["target_sha"][:7])}</span>'
         f' <span class="mono dim">{group["runs"]} run{"s" if group["runs"] != 1 else ""} · '
         f'{len(group["conditions"])} conditions</span></h2></div>'
         '<div class="panel"><div class="pt">The race</div>'
-        '<p class="pd">Every condition of every run on this revision on one clock. Colour is the '
-        'backend, solid is tokenfuzz, dashed is the model on its own; each step is one distinct '
-        'problem that held up. Drag the slider to see what each model had found by that hour — it '
-        'also replays every run section below.</p>'
-        f'<div class="chart race" data-target="{_e(group["key"])}"></div>' + replay + "</div>"
-        '<div class="panel"><div class="pt">How each model behaves</div>'
-        '<p class="pd">The same dimensions for every condition, each bar scaled to the best on this '
-        'target. Read it as a profile, not a score: a model that files few problems but holds every '
-        'claim and one that files many mostly-Low problems are different researchers, and this is '
-        'where the difference shows. A dash is a dimension that condition cannot report, or one with nothing to divide by.</p>'
-        + _fingerprint_table(group) + "</div>"
+        '<p class="pd">Every condition on one clock. Colour is the backend, solid is tokenfuzz, dashed '
+        'is the model on its own; each step is one distinct problem that held up. Drag the slider to '
+        'see what each model had surfaced by that hour — it also replays every run section below. '
+        'Where one curve climbs early and another late, the trace panels below say what each was '
+        'doing at the time.</p>'
+        f'<div class="chart race" data-target="{_e(group["key"])}"></div>' + replay
+        + _checkpoint_table(group) + "</div>"
         '<div class="panel"><div class="pt">Who found what</div>'
         '<p class="pd">Every distinct problem any run reported on this revision, joined by the '
         'clusterers\' own key, against every condition. A dot is a find, with its hour; '
         '<i>looked · N</i> means the harness opened N hypotheses on that file and did not file '
         'this problem — a miss with a trace behind it; <i>filed nearby</i> counts the ones that '
-        'became artifacts at other sites in the same file; a dash means it never looked. The control leaves '
-        'no trace, so its empty cell is unknowable, not a miss. Click a row for the problem\'s '
-        'story across models.</p>' + _convergence(group) + "</div></section>")
+        'became artifacts at other sites in the same file; a dash means it never looked. The control '
+        'leaves no trace, so its empty cell is unknowable, not a miss. Click a row for the problem\'s '
+        'story across models.</p>' + _convergence(group) + "</div>"
+        + ('<div class="panel"><div class="pt">Where each model looked, and where it found</div>'
+           '<p class="pd">Hypotheses opened per subsystem, shaded by how much of that model\'s '
+           'attention the subsystem drew, with the problems it kept there. Two models that look in '
+           'the same places and surface different things differ in judgement; two that look in different '
+           'places differ in strategy — and a subsystem that drew much attention and no yield from '
+           'every model is a candidate for a different approach altogether. A control has no looked '
+           'count, only found.</p>' + heat + "</div>"
+           if heat else "")
+        + ('<div class="panel"><div class="pt">Which strategies each model reached for</div>'
+           '<p class="pd">The harness offers every model the same strategy lanes; the mix it '
+           'actually opens hypotheses in, and how many of each became artifacts, is the model\'s '
+           'own. Hover a segment for its lane.</p>' + lanes + "</div>" if lanes else "")
+        + '<div class="panel"><div class="pt">How each model behaves</div>'
+        '<p class="pd">The same dimensions for every condition, each bar scaled to the best on this '
+        'target. Read it as a profile, not a score: a model that files few problems but holds every '
+        'claim and one that files many mostly-Low problems are different kinds of researcher, and '
+        'both are worth understanding; this is where the difference shows. A dash is a dimension that '
+        'condition cannot report, or one with nothing to divide by.</p>'
+        + _fingerprint_table(group) + "</div></section>")
 
 
 def _run_section(run: dict) -> str:
@@ -1886,16 +2050,6 @@ def _run_section(run: dict) -> str:
             'reproducer, <span class="dot dot-find sev-high demo"></span> a source-backed '
             'finding. Hover for the site; click to open the report.</p>'
             + _cluster_map(run) + "</div>")
-    has_timing = any(
-        cond[k]["times"] or cond[k]["unique"] for cond in run["conditions"] for k in ("find", "crash"))
-    if has_timing and not run["provisional"]:
-        parts.append(
-            '<div class="panel"><div class="pt">When it was found</div>'
-            '<p class="pd">Cumulative distinct results on the run\'s clock. Each step is one '
-            'problem that held up, placed at the hour it was first seen; a flat tail is audit time '
-            'that found nothing new. Solid is tokenfuzz, dashed is the model on its own. Ticks below '
-            'the axis are rejected results, placed the same way.</p>'
-            f'<div class="chart ttd" data-run="{_e(run["key"])}"></div></div>')
     parts.append(_trace_panel(run))
     if any(cond["activity"] for cond in run["conditions"]):
         parts.append(
@@ -1906,9 +2060,20 @@ def _run_section(run: dict) -> str:
             'so its strip shows only what it filed and what it generated.</p>'
             f'<div class="chart act" data-run="{_e(run["key"])}"></div></div>')
     parts.append(_attention_panel(run))
+    more: list[str] = []
+    has_timing = any(
+        cond[k]["times"] or cond[k]["unique"] for cond in run["conditions"] for k in ("find", "crash"))
+    if has_timing and not run["provisional"]:
+        more.append(
+            '<div class="panel"><div class="pt">When it was found</div>'
+            '<p class="pd">Cumulative distinct results on the run\'s clock. Each step is one '
+            'problem that held up, placed at the hour it was first seen; a flat tail is audit time '
+            'that found nothing new. Solid is tokenfuzz, dashed is the model on its own. Ticks below '
+            'the axis are rejected results, placed the same way.</p>'
+            f'<div class="chart ttd" data-run="{_e(run["key"])}"></div></div>')
     funnel = _funnel(run)
     if funnel:
-        parts.append(
+        more.append(
             '<div class="panel"><div class="pt">What survived review</div>'
             '<p class="pd">Every claim, then how far it got: evidence on disk, a validation '
             'verdict, and finally reportable under the declared attacker controls. The gap '
@@ -1916,22 +2081,27 @@ def _run_section(run: dict) -> str:
             + funnel + "</div>")
     lanes = _lane_table(run)
     if lanes:
-        parts.append(
+        more.append(
             '<div class="panel"><div class="pt">Where the ideas came from</div>'
             '<p class="pd">Hypotheses the harness opened per strategy lane, and how many led to '
             'an admitted artifact. tokenfuzz only — the control has no lanes.</p>' + lanes + "</div>")
-    parts.append(
+    more.append(
         '<div class="panel"><div class="pt">What it took</div>'
         '<p class="pd">Medians over completed repeats. A dash is unrecorded, never zero; '
         '≤ marks a seat count that is a floor because the backend delegated or cannot show '
         'its fan-out.</p>' + _effort(run) + "</div>")
     cells = _cells_table(run)
     if cells:
-        parts.append(
+        more.append(
             '<div class="panel"><div class="pt">Cells</div>'
             '<p class="pd">One row per repeat. Raw counts include candidates later rejected '
-            'and count each report once; the reviewed numbers are in the scoreboard.</p>'
+            'and count each report once; the reviewed numbers are in the ledger.</p>'
             + cells + "</div>")
+    if more:
+        parts.append(
+            '<details class="more"><summary>Reference detail: this run\'s own discovery curve, '
+            'what survived review, lane yield, effort, and cells</summary>'
+            + "".join(more) + "</details>")
     parts.append("</section>")
     return "".join(parts)
 
@@ -1940,7 +2110,7 @@ _GUIDE = """
 <details class="guide" id="guide"><summary>How to read this page</summary>
 <div class="gbody">
 <h3>The comparison</h3>
-<p>Each run audits one target at one commit with one model and one wall-clock budget, twice: <b>tokenfuzz</b> is the full harness — a ranked work queue, several agents, sanitizer probes, review, duplicate merging, exported reproducers — and <b>&lt;model&gt;-direct</b> is the control: the same model and budget given one plain request to find vulnerabilities and none of that machinery. Both sides are then held to the same evidence bar, so the two counts mean the same thing. Every target is audited on live, unfixed code; there is no planted bug to re-find.</p>
+<p>The page is built for studying how language models discover security problems: across models, and within each model the harness against a plain prompt. Each run audits one target at one commit with one model and one wall-clock budget, twice: <b>tokenfuzz</b> is the full harness — a ranked work queue, several agents, sanitizer probes, review, duplicate merging, exported reproducers — and <b>&lt;model&gt;-direct</b> is the control: the same model and budget given one plain request to find vulnerabilities and none of that machinery. Both sides are then held to the same evidence bar, so the two counts mean the same thing. Every target is audited on live, unfixed code; there is no planted bug to re-find.</p>
 <h3>Findings and crashes</h3>
 <p>A <b>crash</b> counts only when sanitizer output and reproducer material are on disk; what an agent claimed is not evidence. A <b>finding</b> is a security issue reported without a crash behind it — real and possibly serious, but the evidence is an argument, so read one as a lead until its report names a concrete boundary and shows how a caller crosses it. Both are merged so one problem reported several times counts once. Labels read <code>N (M M+, C classes)</code>: N distinct problems, M scored Medium or higher, spread across C bug classes. One mechanism at thirty sites is thirty findings and one class; that is not the same result as thirty classes.</p>
 <p>A <code>K unjudged</code> term means K reports never reached a verdict before the run was published; they earn no credit, so read the cell as a floor. A leading <code>≥</code> means the unjudged remainder outnumbers the verdicts and the count is a lower bound, not a result to compare. <code>K retained</code> counts reproduced crashes a reviewer placed outside the declared attacker controls: real defects, kept on disk, no security credit. <code>up to N</code> on a rejected count is an upper bound where duplicates could not be merged. <code>bin/benchmark --regenerate</code> finishes an unfinished gate.</p>
@@ -1951,8 +2121,12 @@ _GUIDE = """
 <p><b>Wall</b> is <code>spent/granted</code> hours, the median across finished repeats; time parked on a provider reset counts as neither. The harness usually spends the whole grant; the control stops when the model decides it is done, so a short numerator beside a count means that count came from a shorter experiment. <b>Replicates</b> is <code>done/total</code>; <code>(Np)</code> repeats never came back and are excluded, <code>(Nt)</code> repeats stopped early on a terminal backend exit but are counted. The wall contains every second the harness spent deciding what to look at next — housekeeping between iterations is steering, not overhead — and only provider-withheld capacity is subtracted.</p>
 <h3>Tokens and cost</h3>
 <p>Token columns are normalised so backends can be compared: <b>Input</b> is tokens charged at the full input rate (Claude's fresh input plus cache writes; running totals from Codex and Gemini have cache reads subtracted back out). <b>Output</b> includes tool-call payloads where reported. <b>Cost</b> prices each backend's own billing buckets at its published list rates and rounds to whole dollars; a <code>~</code> prefix marks a figure estimated from character counts because the backend reported no usage. Each backend's own ledger keeps the cents.</p>
+<h3>Unique, shared, and coverage</h3>
+<p>A problem is <b>unique</b> to a condition when no other condition on the same target revision reached it — the model's own control included, because a problem the plain prompt also found is not the harness's contribution. <b>Coverage</b> is a condition's share of every distinct problem any run has reported on the revision: the union of all runs is the closest thing to an answer key a live target has, and it grows as more models run, so coverage is comparable within a revision and only there.</p>
 <h3>What makes this comparable</h3>
 <p>There is no answer key. Planted-bug suites score a model on re-finding a known defect at a known site; every target here is live, unfixed code, so a result is a problem nobody had filed, held to the same evidence bar on both sides — a reproducing sanitizer crash, or a source-backed report that names a boundary and a caller that crosses it — and merged so the same problem counts once however many times it was written up. The control is the same model with the same budget and a plain prompt, so the difference between the two rows is the harness and nothing else. The trace panels show the process that produced the numbers, from the audit's own state streams, so a reader can see not only what was found but what was tried, refuted, and dropped along the way.</p>
+<h3>What this does not settle</h3>
+<p>A run is one sample: models vary between runs, budgets and revisions change what is reachable, and a difference between two rows on one run is a lead to test with another run, not a ranking. The pool of known problems is only what these runs have surfaced, so unique and coverage move as more models and repeats are added. Findings without a crash remain arguments until a maintainer confirms them, unjudged and retained remainders are shown rather than resolved, and no figure here is <i>precision</i> — that needs a ground-truth key this kind of target cannot have. The page is a fair, evidence-backed record to reason from, alongside conventional fuzzing, code review, and the judgement of the people who know the code.</p>
 <h3>Timing and activity</h3>
 <p>Discovery times come from the audit's own event stream, joined to the merged clusters, and placed on the cell's start clock; a result that cannot be placed lands at the end of the run and the panel says <i>timing approximate</i>. The activity strip reads the hypothesis, probe, event, and usage streams each cell wrote while it ran; events after the wall are review, not activity, and are not drawn. Multiple repeats are summed.</p>
 </div></details>
@@ -1970,11 +2144,18 @@ def render(data: dict) -> str:
         for b in backends)
     head = (
         '<header class="hero"><p class="kick">TokenFuzz benchmark</p>'
-        '<h1>Does the harness beat the same model asked directly?</h1>'
-        '<p class="lede">Same target, same model, same time budget — one side with the audit '
-        'harness around it, one side with a plain prompt. Every count below is a distinct security '
-        'problem that survived review, merged across duplicate reports, and every number links to '
-        'the evidence behind it.</p>'
+        '<h1>How do language models discover security bugs — and what does each one contribute?</h1>'
+        '<p class="lede">Every model audits the same live, unfixed target for the same time budget, '
+        'twice: inside the tokenfuzz harness, and as a plain prompt that serves as its own control. '
+        'This page is a record for studying that process: what each model surfaced, what it surfaced '
+        'that no other did, how much of the problems known on the target it reached, when it reached '
+        'them, and — from the audit\'s own state streams — how it reasoned along the way. Every count '
+        'is a distinct problem that survived review, merged across duplicate reports, and every number '
+        'links to its evidence, so any pattern you notice here can be followed to the report behind it. '
+        'Read it with its limits in view: each run is one sample on one revision, a model without a run '
+        'here has simply not been measured, a finding is a lead until a maintainer confirms it, and none '
+        'of this replaces conventional fuzzing, code review, or the judgement of the people who know the '
+        'code. What it offers is a fair, evidence-backed starting point for the questions worth asking next.</p>'
         f'<p class="meta">Generated {_e(data["generated_at"])} · '
         f'{len(runs)} run{"s" if len(runs) != 1 else ""} · '
         f'{len(targets)} target revision{"s" if len(targets) != 1 else ""} · '
@@ -1993,20 +2174,30 @@ def render(data: dict) -> str:
             '<span class="fsp"></span>'
             '<button class="chip toggle" id="show-rejected" aria-pressed="true">Show rejected</button>'
             '</div>'
-            '<section class="sec"><h2>At a glance</h2>' + _verdict_cards(runs) + "</section>"
-            '<section class="sec"><h2>Leaderboard</h2><p class="pd">Every condition of every '
-            'run on the same target revision, ranked by Medium-or-higher problems and then by '
-            'distinct problems. The harness and the plain model are ranked together on purpose: '
-            'the question is what finds real bugs, not which product wins.</p>'
-            + _leaderboard(runs) + "</section>"
-            '<section class="sec"><h2>Model versus model</h2><p class="pd">One comparison per '
-            'target revision: every run of every model, joined problem by problem.</p>'
+            '<section class="sec"><h2>What each model surfaced</h2><p class="pd">Every condition '
+            'of every run on a target revision, ordered by distinct problems and then by '
+            'Medium-or-higher — a starting point for the questions below, not a verdict. The bar '
+            'splits each model\'s problems into the ones no other condition reached and the ones '
+            'others reached too: a model\'s unique share is what the pool of known problems would '
+            'lack without it, and the shared share is where models converge. Coverage is its share '
+            'of every problem any run has reported on this revision. Both are relative to the runs on '
+            'this page and shift as more models and repeats are added, so read them as this revision\'s '
+            'current picture rather than a fixed property of a model. The harness and the plain prompt '
+            'sit in one list on purpose, so what each approach adds can be read side by side.</p>'
+            + _leaderboard(data.get("targets") or []) + "</section>"
+            '<section class="sec"><h2>Models side by side</h2><p class="pd">One comparison per '
+            'target revision: every run of every model, joined problem by problem — when each '
+            'surfaced what, where each looked, and which strategies each reached for. This is where '
+            'the differences between models become questions worth investigating — and with one run '
+            'per model, a difference is a hypothesis to test with another run before it is a trait.</p>'
             + "".join(_target_section(g) for g in (data.get("targets") or [])) + "</section>"
-            '<section class="sec"><h2>Scoreboard</h2><p class="pd">One row per target, backend, '
-            'condition, and run; re-runs keep their own rows. Click a heading to sort; click a '
-            'count to open its evidence.</p>' + _scoreboard(runs) + "</section>"
-            '<section class="sec"><h2>Run by run</h2>' + "".join(_run_section(r) for r in runs)
-            + "</section>"
+            '<section class="sec"><h2>Run by run</h2><p class="pd">Each run in full: replay it, '
+            'see what each side surfaced, and read the harness\'s reasoning hypothesis by hypothesis — '
+            'the ideas that paid off and the ones that did not, in the agents\' own words.</p>'
+            + "".join(_run_section(r) for r in runs) + "</section>"
+            '<section class="sec"><h2>Ledger</h2><p class="pd">The reference table: one row per '
+            'target, backend, condition, and run; re-runs keep their own rows. Click a heading to '
+            'sort; click a count to open its evidence.</p>' + _scoreboard(runs) + "</section>"
         )
     return (
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
@@ -2215,7 +2406,22 @@ abbr.mark{text-decoration:none;cursor:help;color:var(--muted);border-bottom:1px 
 .conv .cv{font-variant-numeric:tabular-nums}.conv .looked{color:var(--ink2);font-size:.86em}.conv .never{color:var(--muted)}
 .conv .prow{cursor:pointer}.conv .prow:hover td{background:var(--surf2)}
 .conv .found .dot.demo{cursor:pointer}
-.lb{margin:10px 0 16px}.lbt{font-weight:700;margin:0 0 6px}
+.lb{margin:10px 0 16px}
+.ybar{display:inline-flex;width:130px;height:10px;background:var(--surf2);border-radius:4px;overflow:hidden;vertical-align:middle;margin-right:6px}
+.ybar .yu{display:block;height:100%;background:var(--ink)}.ybar .ys{display:block;height:100%;background:var(--axis);box-shadow:-2px 0 0 var(--surf2)}
+.ysplit{display:block;font-size:.78em;color:var(--muted)}
+.cp{margin-top:10px}.cp td,.cp th{padding:5px 8px}
+.heat td.hm{background:rgba(42,120,214,var(--a,0));font-variant-numeric:tabular-nums;font-size:.86em}
+:root[data-theme="dark"] .heat td.hm{background:rgba(57,135,229,var(--a,0))}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]) .heat td.hm{background:rgba(57,135,229,var(--a,0))}}
+.heat td.none{color:var(--ink2);font-size:.86em}
+.lm{margin:10px 0 14px}.lmt{font-size:.88em;font-weight:700;margin-bottom:5px}
+.lbar{display:flex;height:16px;border-radius:5px;overflow:hidden;background:var(--surf2);gap:2px}
+.lseg{display:block;height:100%;background:var(--other)}
+.lseg.lane-S1{background:var(--S1)}.lseg.lane-S2{background:var(--S2)}.lseg.lane-S3{background:var(--S3)}.lseg.lane-S4{background:var(--S4)}
+.lseg.lane-S5{background:var(--S5)}.lseg.lane-S6{background:var(--S6)}.lseg.lane-S7{background:var(--S7)}.lseg.lane-S8{background:var(--S8)}
+details.more{margin:18px 0 0;padding-top:12px;border-top:1px solid var(--grid)}
+details.more>summary{cursor:pointer;font-weight:700;color:var(--ink2)}details.more>summary:hover{color:var(--ink)}.lbt{font-weight:700;margin:0 0 6px}
 .mini.wide{width:110px}.barcell{white-space:nowrap}
 .replay{display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--surf2);border-radius:10px;padding:10px 12px}
 .replay .play{font:inherit;font-size:.86em;font-weight:700;border:1px solid var(--axis);background:var(--surf);color:var(--ink);border-radius:8px;padding:5px 12px;cursor:pointer}

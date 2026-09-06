@@ -360,84 +360,70 @@ the number.
 `output/benchmark/benchmark-result.html` is one self-contained page over every
 run under the benchmark root. Every count on it comes from the run's
 `report.json`, so it cannot disagree with the ledger; what it adds is the
-comparison the ledger's table cannot draw. It opens from `file://`, survives
-`bin/export-benchmark`, and renders as plain tables without script.
+comparison the ledger's table cannot draw: what each model surfaced, what each
+surfaced that no other did, how much of everything known on the target each
+reaches, when, and — from the audit's own state streams — what it was thinking
+on the way. It opens from `file://`, survives `bin/export-benchmark`, and
+renders as plain tables without script. It is built to invite study rather than
+to settle it: each run is one sample on one revision, unique and coverage are
+relative to the runs on the page, a finding stays a lead until a maintainer
+confirms it, and the page's own guide says so. Sections, in order:
 
-**At a glance** is one card per run: each side's distinct findings and
-crashes, its Medium-or-higher count, its top crash severity, its wall, and how
-the two sides overlap — problems only the harness reached, problems both
-reached, problems only the direct control reached. A floor or an unjudged
-remainder is carried onto the card rather than smoothed away.
+**What each model surfaced** orders every condition of every run on a target
+revision — harness and plain model together — by distinct problems, then by
+Medium-or-higher. Each row splits its problems into the ones *unique* to it
+(no other condition on the revision reached them, its own control included)
+and the ones others reached too; *coverage* is its share of every distinct
+problem any run has reported on the revision, the closest thing to an answer
+key a live target has. A harness row also carries its delta against the same
+model's control.
 
-**Scoreboard** is the ledger table: one row per target, backend, condition,
-and run, sortable by any column, every count linked to the cluster report or
-rejected index that produced it. The labels and marks (`M+`, `classes`,
-`unjudged`, `retained`, `≥`, `up to`, `~`, `‡`) mean exactly what they mean
-in the ledger, and the page's own reading guide restates them.
+**Models side by side** is one comparison per target revision:
 
-**Leaderboard** ranks every condition of every run on one target revision —
-harness and plain model together — by Medium-or-higher problems, then by
-distinct problems, with cost and cost per confirmed result beside them.
-
-**Model versus model** is one comparison per target revision, every run of
-every model joined problem by problem:
-
-- *The race* — every condition's discovery curve on one clock, with a replay
-  slider that also drives every run section of that target.
+- *The race* — every condition's discovery curve on one clock, a replay slider
+  that also drives every run section, and a table of distinct problems each
+  condition had by each whole hour of the budget.
+- *Who found what* — every distinct problem any run reported, joined by the
+  clusterers' own located key, against every condition: a dot with its hour
+  for a find; *looked · N* when the harness opened N hypotheses on that file
+  and did not file this problem, with how many of those became artifacts
+  elsewhere in the file; a dash when it never looked. The control leaves no
+  trace, so its empty cell is unknowable, not a miss. A row opens the
+  problem's story across models.
+- *Where each model looked, and where it found* — hypotheses per subsystem
+  for every harness condition, shaded by attention, beside the problems each
+  side kept there: models that look in the same places and find different
+  things differ in judgement; models that look in different places differ in
+  strategy.
+- *Which strategies each model reached for* — each harness condition's
+  hypotheses by strategy lane, and how many in each lane became artifacts.
 - *How each model behaves* — the same dimensions for every condition, each
   bar scaled to the best value on the target in that dimension's own
   direction: distinct problems, Medium-or-higher share, bug classes, the share
   of claims that held up, time to the first admitted artifact, hypotheses
   opened and the share that became artifacts, median idea lifetime,
   subsystems explored, probes per crash, cost per confirmed result, and budget
-  spent. A dimension a condition cannot report is a dash, never a zero.
-- *Who found what* — every distinct problem any run reported, joined by the
-  clusterers' own key, against every condition: a dot with its hour for a
-  find; *looked · N* when the harness opened N hypotheses on that file and
-  filed nothing there, a miss with a trace behind it; a dash when it never
-  looked. The control leaves no trace, so its empty cell is unknowable, not a
-  miss. Clicking a row opens the problem's story across models: who found it
-  and when, and what the ones that looked and missed were thinking.
+  spent. A dash is a dimension that condition cannot report, never a zero.
 
-**Run by run** then gives each run several views of the same evidence, and a
-**replay** control: drag the slider, or press play, and every panel in the run
-shows only what existed by that hour — the dots found so far, the curves, the
-activity, and the hypotheses the agents had opened.
+**Run by run** gives each run a replay control and, in order: *what each side
+found* (one dot per merged cluster: row is the bug class, column is who
+reached it, colour is severity, shape says crash or finding, rejected clusters
+in a fourth column with the reviewer's reason); *how the harness reasoned*
+(every hypothesis an agent opened as a bar from written to resolved, one row
+per agent, coloured by outcome, with the probes it drove ticked above it —
+hover for the idea in the agent's own words, click for its reasoning, guard
+gap, input shape, probes, and notes; a hypothesis never resolved runs to the
+wall); *how the run thought* (the cell's state streams in quarter-hour bins:
+hypotheses by lane, probes by verdict, artifacts filed, output tokens); and
+*where they looked, where they found* by subsystem. Reference detail — the
+run's own discovery curve, the review funnel, lane yield, effort tiles, and
+cells — sits under a collapsed heading.
 
-- *What each side found* — one dot per merged cluster: row is the bug class
-  (crashes get their own row), column is who reached it, colour is severity,
-  shape says crash or finding; rejected clusters sit in a fourth column with
-  the reviewer's reason on hover. Click a dot to open its report. A shared
-  cluster is coloured by its strongest report and names each side's own
-  severity on hover, because the aggregate credits each side for what it
-  filed.
-- *When it was found* — cumulative distinct results on the cell's clock, one
-  step per merged result at the hour it was first seen, so the curve only
-  climbs and ends exactly on the scoreboard's number; solid for the harness,
-  dashed for the control, ticks under the axis for rejected results. When a
-  discovery time cannot be recovered the panel says *timing approximate*
-  rather than faking precision.
-- *How the harness reasoned* — every hypothesis an agent opened, as a bar
-  from the moment it was written to the moment it was resolved, one row per
-  agent, coloured by outcome (became an artifact, confirmed but not filed,
-  refuted by evidence, dropped untested, blocked by the environment, still
-  open), with the sanitizer probes it drove ticked above it. Hover shows the
-  idea in the agent's own words; click opens its reasoning, guard gap, input
-  shape, probes, and notes. The control leaves no such trace, and the panel
-  says so rather than inventing one.
-- *How the run thought* — the cell's own state streams in quarter-hour bins:
-  hypotheses opened per strategy lane, sanitizer probes per verdict, artifacts
-  filed and gated, and model output tokens, with the run's first filed, first
-  confirmed crash, and first admitted artifact marked. Activity stops at the
-  cell's wall; what follows is review, which the page reports as measurement.
-- *Where they looked, where they found* — the harness's hypotheses and probes
-  by top-level directory, beside the merged results that landed there for
-  each side, so a subsystem that drew most of the attention and none of the
-  yield is visible as such.
-- *What survived review* — claimed, evidence complete, validated, reportable,
-  per side and per kind: the gap a raw count would have hidden.
-- *Where the ideas came from* and *What it took* — per-lane hypothesis yield,
-  and the efficiency medians the ledger also reports.
+**Ledger** is the reference table at the end: one row per target, backend,
+condition, and run, sortable, every count linked to the cluster report or
+rejected index that produced it, with the same labels and marks (`M+`,
+`classes`, `unjudged`, `retained`, `≥`, `up to`, `~`, `‡`) as the Markdown
+ledger.
 
 None of these figures is *precision*, which needs the answer key described
 below.
