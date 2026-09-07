@@ -746,6 +746,86 @@ raise SystemExit(23)
         benchmark_runner.cleanup_model_direct_scratch(cell)
         self.assertTrue(junk.is_file())
 
+    def _cached_build(self, cache: Path, stem: str) -> None:
+        (cache / f"{stem}.bin").write_bytes(b"\x00" * 10)
+        (cache / f"{stem}.bin.o").write_bytes(b"\x00" * 5)
+        bundle = cache / f"{stem}.bin.dSYM" / "Contents"
+        bundle.mkdir(parents=True)
+        (bundle / "Info").write_bytes(b"\x00" * 20)
+
+    def test_prune_keeps_every_cached_build_the_evidence_names(self) -> None:
+        bench = self.work / "prune-run"
+        cell_dir = bench / "cells" / "harness-r1"
+        results = cell_dir / "repo-root" / "output" / "sampleproj" / "codex" / "results"
+        cache = results / "scratch-1" / ".harness-cache"
+        cache.mkdir(parents=True)
+        named_by_crash = "app_parse.c." + "a" * 40
+        named_by_pool = "app_parse.c." + "b" * 40
+        orphan = "app_parse.c." + "c" * 40
+        for stem in (named_by_crash, named_by_pool, orphan):
+            self._cached_build(cache, stem)
+        failed = "other.c." + "d" * 40
+        (cache / f"{failed}.build.log").write_text("error\n", encoding="utf-8")
+        (cache / f"{failed}.lock").mkdir()
+        # A sanitizer frame names one build; the pooled copy's probe context
+        # names another. Both are what a replay or re-symbolization opens.
+        crash = results / "crashes" / "CRASH-1"
+        crash.mkdir(parents=True)
+        (crash / "sanitizer.txt").write_text(
+            f"    #0 0x10 in app_parse ({cache}/{named_by_crash}.bin:arm64+0x10)\n",
+            encoding="utf-8",
+        )
+        pooled = bench / "pool" / "crashes" / "CRASH-1" / ".audit"
+        pooled.mkdir(parents=True)
+        (pooled / ".probe-context.json").write_text(
+            json.dumps({"binary": {"path": str(cache / f"{named_by_pool}.bin")}}),
+            encoding="utf-8",
+        )
+        (cell_dir / "cell.json").write_text(json.dumps({
+            "condition": "harness", "status": "done", "results_dir": str(results),
+        }), encoding="utf-8")
+        direct = self.work / "prune-direct-results"
+        direct_cache = direct / "scratch-1" / ".harness-cache"
+        direct_cache.mkdir(parents=True)
+        self._cached_build(direct_cache, orphan)
+        direct_cell = bench / "cells" / "model-direct-r1"
+        direct_cell.mkdir()
+        (direct_cell / "cell.json").write_text(json.dumps({
+            "condition": "model-direct", "status": "done", "results_dir": str(direct),
+        }), encoding="utf-8")
+        before = benchmark.harvest_fuzz_campaign(results)
+        self.assertEqual(before["probe_harnesses_observed"], 3)
+
+        benchmark_runner.prune_run_caches(bench)
+
+        for stem in (named_by_crash, named_by_pool):
+            for suffix in (".bin", ".bin.o", ".bin.dSYM/Contents/Info"):
+                self.assertTrue((cache / f"{stem}{suffix}").exists(), stem + suffix)
+        self.assertEqual(
+            sorted(path.name for path in cache.iterdir() if orphan in path.name or failed in path.name),
+            [],
+        )
+        # The receipt keeps the run's count; the recount would say 2.
+        self.assertEqual(benchmark.harvest_fuzz_campaign(results), before)
+        self.assertTrue((results / benchmark.FUZZ_ACTIVITY_RECEIPT).is_file())
+        self.assertTrue((direct_cache / f"{orphan}.bin").is_file())
+
+    def test_prune_leaves_a_cell_whose_processes_never_died(self) -> None:
+        bench = self.work / "prune-unreaped"
+        cell_dir = bench / "cells" / "harness-r1"
+        results = cell_dir / "results"
+        cache = results / "scratch-1" / ".harness-cache"
+        cache.mkdir(parents=True)
+        self._cached_build(cache, "app_parse.c." + "e" * 40)
+        cell_dir.mkdir(parents=True, exist_ok=True)
+        (cell_dir / "cell.json").write_text(json.dumps({
+            "condition": "harness", "status": "done", "results_dir": str(results),
+        }), encoding="utf-8")
+        (cell_dir / ".processes-unreaped").write_text("marker still live\n")
+        benchmark_runner.prune_run_caches(bench)
+        self.assertTrue((cache / ("app_parse.c." + "e" * 40 + ".bin")).is_file())
+        self.assertFalse((results / benchmark.FUZZ_ACTIVITY_RECEIPT).exists())
+
     def test_an_unreaped_cell_is_noncomparable_and_outranks_other_reasons(self) -> None:
         """Its wall did not contain its work, so it cannot be scored against one.
 

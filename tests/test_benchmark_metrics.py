@@ -1425,6 +1425,26 @@ class BenchmarkMetricsTests(unittest.TestCase):
         condition["finding_class_histogram"] = {"dos": 3}
         self.assertNotIn("class", benchmark.render_section(report))
 
+    def test_s4_counts_survive_the_prune_through_their_receipt(self) -> None:
+        """--regenerate reads the counts again after the cache is gone.
+
+        The receipt is the run's answer: written once, and never replaced by
+        a recount over whatever a prune left behind.
+        """
+        results = self.root / "s4-receipt" / "results"
+        cache = results / "scratch-1" / ".harness-cache"
+        cache.mkdir(parents=True)
+        (cache / "harness.c.abcdef.bin").write_bytes(b"\x00")
+        self.assertEqual(benchmark.harvest_fuzz_campaign(results)["probe_harnesses_observed"], 1)
+
+        recorded = benchmark.record_fuzz_campaign(results)
+        self.assertEqual(recorded["probe_harnesses_observed"], 1)
+        (cache / "harness.c.abcdef.bin").unlink()
+        self.assertEqual(benchmark.harvest_fuzz_campaign(results), recorded)
+
+        (cache / "harness.c.012345.bin").write_bytes(b"\x00")
+        self.assertEqual(benchmark.record_fuzz_campaign(results), recorded)
+
     def test_s4_reports_what_it_did_as_separate_facts(self) -> None:
         """S4 can file a crash without the campaign machinery ever starting.
 

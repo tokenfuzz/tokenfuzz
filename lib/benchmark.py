@@ -584,6 +584,28 @@ def _finding_class_count(condition: dict) -> int:
 #: as though today's rules produced it.
 UNKNOWN_SCORER = "unknown"
 
+#: `harvest_fuzz_campaign`'s answer, frozen beside the results before the
+#: build cache it counts is pruned. Once on disk, it is the answer.
+FUZZ_ACTIVITY_RECEIPT = "fuzz-activity.json"
+_FUZZ_ACTIVITY_FIELDS = (
+    "harnesses_authored", "builds_attempted", "builds_with_debug_output",
+    "campaign_invoked", "campaign_slices_recorded", "probe_harnesses_observed",
+)
+
+
+def record_fuzz_campaign(results_dir: Path) -> dict:
+    """Freeze `harvest_fuzz_campaign` before the files it counts are pruned.
+
+    Written once: a receipt already on disk is the run's answer, and a later
+    call must not replace it with a count taken over a pruned cache.
+    """
+    results_dir = Path(results_dir)
+    activity = harvest_fuzz_campaign(results_dir)
+    receipt = results_dir / FUZZ_ACTIVITY_RECEIPT
+    if not receipt.is_file():
+        _write_json(receipt, activity)
+    return activity
+
 
 def harvest_fuzz_campaign(results_dir: Path) -> dict:
     """What S4 actually did, as separate facts rather than one verdict.
@@ -602,9 +624,15 @@ def harvest_fuzz_campaign(results_dir: Path) -> dict:
 
     Read only. `bin/fuzz run` is the sole writer of the campaign state keyed
     on here, so this reports what happened rather than adding a runtime path
-    that could fail an audit.
+    that could fail an audit. The receipt `record_fuzz_campaign` freezes is
+    the one thing read first: the cached harnesses counted here are pruned
+    once a benchmark run is settled, and --regenerate must still report the
+    number the run built rather than the number the prune left.
     """
     results_dir = Path(results_dir)
+    recorded = _read_json_object(results_dir / FUZZ_ACTIVITY_RECEIPT)
+    if all(field in recorded for field in _FUZZ_ACTIVITY_FIELDS):
+        return {field: recorded[field] for field in _FUZZ_ACTIVITY_FIELDS}
     fuzz = results_dir / "fuzz"
     authored = sorted(
         path.name for path in (fuzz / "src").glob("*")

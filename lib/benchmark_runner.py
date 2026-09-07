@@ -769,6 +769,11 @@ def parser() -> argparse.ArgumentParser:
         "--rebuild-report", action="store_true",
         help="rebuild benchmark-result.md/html from existing run state only",
     )
+    postprocess.add_argument(
+        "--prune-cache", action="store_true",
+        help="drop cached harness builds no evidence names from runs already "
+             "on disk, without regenerating them",
+    )
     result.add_argument(
         "--dry-run", action="store_true",
         help="plan the cells and write run metadata without launching any backend",
@@ -1161,6 +1166,127 @@ def cleanup_model_direct_scratch(cell_dir: Path) -> None:
     count = sum(1 for path in scratch.rglob("*") if path.is_file())
     shutil.rmtree(scratch, ignore_errors=True)
     log(f"Cell {cell_dir.name}: reclaimed scratch/ ({count} file(s))")
+
+
+# One entry of bin/probe's harness cache: `<source>.<sha1>.bin` and the
+# object, debug bundle, build log and lock that share its stem.
+_CACHE_STEM_RE = re.compile(r"^(?P<stem>.+\.[0-9a-f]{40})\.")
+# A cache path named anywhere in evidence: a probe context, a sanitizer
+# frame, a validation receipt, a report, or the debug map inside a pooled
+# binary. Scanned as bytes so a binary counts as a reference too.
+_CACHE_REFERENCE_RE = re.compile(rb"\.harness-cache/([^\s\"'()\[\]:,]+)")
+
+
+def _referenced_cache_stems(roots: list[Path]) -> set[str]:
+    stems: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in root.rglob("*"):
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            for match in _CACHE_REFERENCE_RE.finditer(data):
+                stem = _CACHE_STEM_RE.match(match.group(1).decode("utf-8", "replace"))
+                if stem:
+                    stems.add(stem.group("stem"))
+    return stems
+
+
+def _tree_bytes(path: Path) -> int:
+    if path.is_dir() and not path.is_symlink():
+        return sum(_tree_bytes(child) for child in path.iterdir())
+    try:
+        return path.lstat().st_size
+    except OSError:
+        return 0
+
+
+def prune_harness_cache(results_dir: Path, keep: set[str], dry_run: bool = False) -> dict:
+    """Remove the cached harness builds no evidence names.
+
+    Every entry is rebuildable from the source its cache key hashes, but a
+    build named by evidence is not interchangeable with a rebuild: the probe
+    context records its path, size, mtime and hash, and a report's frames
+    symbolize against it. Those stay whole, object and debug bundle included;
+    only stems nothing names go. A failure to remove is counted and logged,
+    never hidden: the operator reading "pruned" must be able to trust it.
+    """
+    pruned = {"removed": 0, "bytes": 0, "kept": 0, "failed": 0}
+    for cache in sorted(results_dir.glob("scratch-*/.harness-cache")):
+        groups: dict[str, list[Path]] = {}
+        for entry in cache.iterdir():
+            match = _CACHE_STEM_RE.match(entry.name)
+            if match:
+                groups.setdefault(match.group("stem"), []).append(entry)
+        for stem, entries in sorted(groups.items()):
+            if stem in keep:
+                pruned["kept"] += 1
+                continue
+            for entry in entries:
+                size = _tree_bytes(entry)
+                try:
+                    if dry_run:
+                        pass
+                    elif entry.is_dir() and not entry.is_symlink():
+                        shutil.rmtree(entry)
+                    else:
+                        entry.unlink()
+                except OSError as error:
+                    pruned["failed"] += 1
+                    log(f"WARN: could not prune {entry}: {error}")
+                    continue
+                pruned["bytes"] += size
+            pruned["removed"] += 1
+    return pruned
+
+
+def prune_run_caches(bench_dir: Path, dry_run: bool = False) -> None:
+    """Drop the harness cells' rebuildable build caches once a run is settled.
+
+    Runs after pooling and adjudication, when the artifact set is frozen and
+    nothing the run still does can need a binary its evidence does not name.
+    A cell that did not finish is wiped and rerun by a same-run-id resume, so
+    its cache has no future either; what keeps a cache is a process this
+    runner could not reap, which may still be executing from it.
+
+    The fuzz-activity receipt is frozen first: `harvest_fuzz_campaign` counts
+    cached builds, and --regenerate reads it again.
+    """
+    pool_keep = _referenced_cache_stems([bench_dir / "pool"])
+    for cell_json in sorted((bench_dir / "cells").glob("*/cell.json")):
+        try:
+            cell = json.loads(cell_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if cell.get("condition") != "harness":
+            continue
+        results = metrics.cell_results_dir(cell)
+        if results is None or not results.is_dir():
+            continue
+        name = cell_json.parent.name
+        if (cell_json.parent / ".processes-unreaped").is_file():
+            log(f"Cell {name}: harness cache kept — cell processes never reaped")
+            continue
+        if not dry_run:
+            metrics.record_fuzz_campaign(results)
+        # Rejected evidence counts: --regenerate re-adjudicates a stale
+        # trigger rejection against its probe context and sanitizer report.
+        keep = pool_keep | _referenced_cache_stems([
+            results / "crashes", results / "crashes-rejected",
+            results / "findings", results / "findings-rejected", results / "state",
+        ])
+        pruned = prune_harness_cache(results, keep, dry_run=dry_run)
+        if pruned["removed"] or pruned["failed"]:
+            log(
+                f"Cell {name}: {'would prune' if dry_run else 'pruned'} "
+                f"{pruned['removed']} cached harness build(s) "
+                f"({pruned['bytes'] / 2**20:.0f} MiB); kept {pruned['kept']} named by evidence"
+                + (f"; {pruned['failed']} could not be removed" if pruned["failed"] else "")
+            )
 
 
 def _provider_issue(cell_dir: Path, model: str = "") -> str:
@@ -2709,6 +2835,48 @@ def _regenerate_all(args: argparse.Namespace, bench_root: Path) -> int:
     return 1 if failures else 0
 
 
+def _prune_all(args: argparse.Namespace, bench_root: Path) -> int:
+    """--prune-cache: the end-of-run cache prune, over runs already on disk.
+
+    Only settled runs: a held lock is a live runner, and a cell that is not
+    done belongs either to a runner that died — whose agents may still be
+    building from the cache — or to a resume that will wipe and rerun it.
+    `--target` and `--run-id` narrow the set; `--dry-run` only reports.
+    """
+    targets = {item.strip() for item in args.target.split(",") if item.strip()}
+    runs = 0
+    for run_json in sorted(bench_root.glob("*/*/run.json")):
+        bench_dir = run_json.parent
+        run_id = bench_dir.name
+        target = str(_recorded_run(bench_dir).get("target") or "")
+        if (targets and target not in targets) or (args.run_id and run_id != args.run_id):
+            continue
+        unfinished = []
+        for cell_json in sorted((bench_dir / "cells").glob("*/cell.json")):
+            try:
+                status = json.loads(cell_json.read_text(encoding="utf-8")).get("status")
+            except (OSError, ValueError):
+                status = None
+            if status != "done":
+                unfinished.append(cell_json.parent.name)
+        if unfinished:
+            log(f"Prune: skipped {run_id} — cell(s) not done: {', '.join(unfinished)}")
+            continue
+        try:
+            with BenchmarkLock(bench_dir.parent / f".run-{target_key(run_id)}.lock"):
+                log(f"Prune: target={target} backend={bench_dir.parent.name} run={run_id}")
+                prune_run_caches(bench_dir, dry_run=args.dry_run)
+        except (RuntimeError, OSError) as error:
+            log(f"Prune: skipped {run_id} — {error}")
+            continue
+        runs += 1
+    if not runs:
+        print(f"FATAL: --prune-cache: no runs found under {bench_root}", file=sys.stderr)
+        return 1
+    log(f"Prune: {runs} run(s) checked")
+    return 0
+
+
 def replace_namespace(namespace: argparse.Namespace, **changes) -> argparse.Namespace:
     values = vars(namespace).copy()
     values.update(changes)
@@ -3747,6 +3915,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     print()
     log(f"Ledger: {ledger}")
     if not args.dry_run:
+        prune_run_caches(bench_dir)
         collected = _collect_isolated_builds(target_root, bench_root, build_suffix)
         if collected:
             log(f"Collected {collected} isolated build tree(s) no run refers to")
@@ -3773,6 +3942,8 @@ def _main(argv: list[str] | None = None) -> int:
         artifact = _render_root_result(bench_root)
         log(f"Benchmark report rebuilt: {artifact} ({artifact.resolve().as_uri()})")
         return 0
+    if args.prune_cache:
+        return _prune_all(args, bench_root)
     if args.regenerate and not args.target:
         return _regenerate_all(args, bench_root)
     targets = [item.strip() for item in args.target.split(",") if item.strip()]

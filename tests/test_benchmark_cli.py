@@ -94,6 +94,10 @@ class BenchmarkCliTests(unittest.TestCase):
                 "not allowed with argument --regenerate",
             ),
             (
+                ("--regenerate", "--prune-cache"),
+                "not allowed with argument --regenerate",
+            ),
+            (
                 ("--target", "samples/sample-python", "--backend", "grok", "--dry-run"),
                 "cannot use agent security 'sandboxed'",
             ),
@@ -229,6 +233,48 @@ class BenchmarkCliTests(unittest.TestCase):
             self.assertTrue((run / "pool").is_dir())
             self.assertFalse((run / ".pool.staging").exists())
             self.assertFalse((run / ".pool.old").exists())
+
+    def test_prune_cache_sweeps_finished_runs_and_skips_a_live_one(self) -> None:
+        backend = self.bench_root / "codex"
+        caches = {}
+        for run_id in ("settled-run", "live-run"):
+            run = backend / run_id
+            results = run / "cells" / "harness-r1" / "results"
+            cache = results / "scratch-1" / ".harness-cache"
+            cache.mkdir(parents=True)
+            (cache / ("app_parse.c." + "a" * 40 + ".bin")).write_bytes(b"\x00")
+            (run / "run.json").write_text(json.dumps({
+                "runid": run_id, "target": "sampleproj", "backend": "codex",
+            }) + "\n", encoding="utf-8")
+            (run / "cells" / "harness-r1" / "cell.json").write_text(json.dumps({
+                "condition": "harness", "status": "done", "results_dir": str(results),
+            }) + "\n", encoding="utf-8")
+            caches[run_id] = cache
+        live_lock = backend / f".run-{benchmark_runner.target_key('live-run')}.lock"
+        live_lock.write_text(f"{os.getpid()} now\n", encoding="utf-8")
+        unfinished = backend / "unfinished-run"
+        (unfinished / "cells" / "harness-r1").mkdir(parents=True)
+        (unfinished / "run.json").write_text(json.dumps({
+            "runid": "unfinished-run", "target": "sampleproj", "backend": "codex",
+        }) + "\n", encoding="utf-8")
+        (unfinished / "cells" / "harness-r1" / "cell.json").write_text(json.dumps({
+            "condition": "harness", "status": "incomplete",
+        }) + "\n", encoding="utf-8")
+
+        preview = self.run_cli("--prune-cache", "--dry-run", "--bench-root", str(self.bench_root))
+        self.assertEqual(preview.returncode, 0, preview.stdout)
+        self.assertIn("would prune 1 cached harness build", preview.stdout)
+        self.assertEqual(len(list(caches["settled-run"].iterdir())), 1)
+        self.assertFalse((caches["settled-run"].parent.parent / benchmark.FUZZ_ACTIVITY_RECEIPT).exists())
+
+        pruned = self.run_cli("--prune-cache", "--bench-root", str(self.bench_root))
+        self.assertEqual(pruned.returncode, 0, pruned.stdout)
+        self.assertIn("pruned 1 cached harness build", pruned.stdout)
+        self.assertIn("Prune: skipped live-run", pruned.stdout)
+        self.assertIn("Prune: skipped unfinished-run", pruned.stdout)
+        self.assertEqual(list(caches["settled-run"].iterdir()), [])
+        self.assertEqual(len(list(caches["live-run"].iterdir())), 1)
+        self.assertTrue(live_lock.is_file())
 
     def test_rebuild_report_reads_surviving_state_without_processing_runs(self) -> None:
         backend = self.bench_root / "codex"

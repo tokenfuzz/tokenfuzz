@@ -404,6 +404,7 @@ is not part of routine target auditing:
 bin/benchmark --target "$TARGET" --backend "$BACKEND"
 bin/benchmark --target "$TARGET" --backend "$BACKEND" --agent-security sandboxed
 bin/benchmark --rebuild-report
+bin/benchmark --prune-cache
 bin/export-benchmark --target "$TARGET" --backend "$BACKEND" --format zip
 bin/benchmark score "$RESULTS" --ground-truth "output/$TARGET/.ground-truth.json"
 ```
