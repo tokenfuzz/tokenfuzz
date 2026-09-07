@@ -514,9 +514,8 @@ class HarnessBuilder:
             if kind == "rust":
                 completed = self._build_rust(binary)
             else:
-                command = self._command(kind, compiler, flags, binary, sanitizer_lib)
-                completed = subprocess.run(
-                    command, capture_output=True, check=False,
+                completed = fuzz_harness.run_build_steps(
+                    self._command(kind, compiler, flags, binary, sanitizer_lib),
                     cwd=self.probe.config.target_root if kind == "go" else None,
                 )
             if completed.returncode:
@@ -713,7 +712,7 @@ class HarnessBuilder:
             return ""
         return library
 
-    def _command(self, kind: str, compiler: str, flags: list[str], binary: Path, library: str) -> list[str]:
+    def _command(self, kind: str, compiler: str, flags: list[str], binary: Path, library: str) -> list[list[str]]:
         if kind == "cc":
             sanitizer_flag = COMPILE_SANITIZERS.get(self.probe.sanitizer)
             if not sanitizer_flag:
@@ -723,9 +722,9 @@ class HarnessBuilder:
                 self.probe.config, library, flags,
             )
         if kind == "go":
-            return [compiler, "build", "-o", str(binary), *flags, str(self.source)]
+            return [[compiler, "build", "-o", str(binary), *flags, str(self.source)]]
         if kind == "swift":
-            return [compiler, "-gline-tables-only", "-O0", *flags, "-o", str(binary), str(self.source)]
+            return [[compiler, "-gline-tables-only", "-O0", *flags, "-o", str(binary), str(self.source)]]
         if kind == "kotlin":
             jar = Path(str(binary) + ".jar")
             command = [compiler, *flags, str(self.source), "-include-runtime", "-d", str(jar)]
@@ -736,7 +735,7 @@ class HarnessBuilder:
                 "#!/usr/bin/env python3\nimport os,sys\nos.execvp(" + repr(os.environ.get("JAVA", "java")) + ", [" + repr(os.environ.get("JAVA", "java")) + ", '-jar', " + repr(str(jar)) + ", *sys.argv[1:]])\n"
             )
             binary.chmod(0o755)
-            return ["true"]
+            return []
         raise ValueError(f"unknown build kind: {kind}")
 
     def _acquire(self, lock: Path, binary: Path, failed: Path) -> None:

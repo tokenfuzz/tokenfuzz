@@ -86,7 +86,7 @@ class ProbeCppHarnessTests(unittest.TestCase):
         return self.executable(name,
             "import os, pathlib, stat, sys, time\nargs = sys.argv[1:]\n"
             "log = os.environ.get('FAKE_CXX_ARGS')\n"
-            "pathlib.Path(log).write_text('\\n'.join(args) + '\\n') if log else None\n"
+            "open(log, 'a').write('\\n'.join(args) + '\\n\\n') if log else None\n"
             "count = os.environ.get('FAKE_CXX_COUNT')\n"
             "open(count, 'a').write('1\\n') if count else None\n"
             + ("\n".join(
@@ -118,6 +118,41 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertNotIn("built harness:", second.stdout + second.stderr)
         binaries = list((self.scratch / ".harness-cache").glob("harness.cpp.*.bin"))
         self.assertEqual(len([path for path in binaries if os.access(str(path), os.X_OK)]), 1)
+        # Compile and link are separate steps, so no toolchain ever runs
+        # dsymutil over the binary: the library's DWARF would land in a
+        # .dSYM beside every harness. The object stays so the debug map the
+        # binary carries instead can still be followed.
+        cache_entries = sorted(path.name for path in (self.scratch / ".harness-cache").iterdir())
+        self.assertFalse([name for name in cache_entries if name.endswith(".dSYM")], cache_entries)
+        self.assertTrue(binaries[0].with_name(binaries[0].name + ".o").is_file(), cache_entries)
+
+    def test_a_link_libs_source_builds_with_the_target_includes_and_defines(self) -> None:
+        (self.target / "include").mkdir()
+        (self.target / "include" / "support.h").write_text(
+            "int support_value(void);\n", encoding="utf-8",
+        )
+        (self.target / "support.c").write_text(
+            '#include "support.h"\n#ifndef PROBE_SUPPORT_VALUE\n#error missing define\n#endif\n'
+            "int support_value(void) { return PROBE_SUPPORT_VALUE; }\n",
+            encoding="utf-8",
+        )
+        (self.slug_dir / "target.toml").write_text(
+            'target = "testproject"\nasan_lib = "build/libtarget.a"\n'
+            'includes = ["include"]\ndefines = ["-DPROBE_SUPPORT_VALUE=7"]\n'
+            'link_libs = ["support.c"]\n[sanitizer]\nenabled = ["asan"]\n'
+        )
+        # The harness's compiler builds the support source too, as the single
+        # invocation always did, so a C++ harness sees a C++ symbol.
+        self.harness.write_text(
+            "int support_value(void);\n"
+            "int main(int, char **) { return support_value() == 7 ? 0 : 1; }\n"
+        )
+        proc = self.run_probe()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertRegex(proc.stdout + proc.stderr, r"built harness: .*harness\.cpp\..*\.bin")
+        cache_entries = sorted(path.name for path in (self.scratch / ".harness-cache").iterdir())
+        self.assertFalse([name for name in cache_entries if name.endswith(".dSYM")], cache_entries)
+        self.assertTrue([name for name in cache_entries if name.endswith(".link0.o")], cache_entries)
 
     def _pin_s7(self) -> None:
         state = self.results / "state"
@@ -189,7 +224,9 @@ class ProbeCppHarnessTests(unittest.TestCase):
         ) for _ in range(2)]
         outputs = [process.communicate(timeout=15) for process in processes]
         self.assertEqual([process.returncode for process in processes], [0, 0], outputs)
-        self.assertEqual(len(count.read_text().splitlines()), 1)
+        # One build is a compile and a link; the second probe waited on the
+        # lock and reused the binary instead of adding its own two.
+        self.assertEqual(len(count.read_text().splitlines()), 2)
         binary = next((self.scratch / ".harness-cache").glob("race-harness.cpp.*.bin"))
         self.assertTrue(os.access(str(binary), os.X_OK))
         lock = Path(str(binary)[:-4] + ".lock")
@@ -226,6 +263,14 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertRegex(args, r"(?m)^-DPROBE_TARGET_DEFINE=1$")
         self.assertRegex(args, r"(?m)^-DSECOND_DEFINE=2$")
         self.assertIn(str(support), args.splitlines())
+        # A source among link_libs is compiled on its own, with the target's
+        # defines and includes, and only its object reaches the link.
+        invocations = [block.splitlines() for block in args.strip().split("\n\n")]
+        support_compile = [block for block in invocations if str(support) in block]
+        self.assertEqual(len(support_compile), 1, invocations)
+        self.assertIn("-c", support_compile[0])
+        self.assertIn("-DPROBE_TARGET_DEFINE=1", support_compile[0])
+        self.assertNotIn(str(support), invocations[-1])
         for sanitizer, upper, flag in (
             ("ubsan", "UBSAN", "undefined"), ("msan", "MSAN", "memory"),
             ("tsan", "TSAN", "thread"),

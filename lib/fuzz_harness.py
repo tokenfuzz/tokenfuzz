@@ -1565,17 +1565,38 @@ def build_command(source: Path, binary: Path, san: str, config,
     ]
 
 
+# Source inputs a target may list among `link_libs` (target_config accepts
+# them as link inputs, any case); each is compiled beside the harness before
+# the link. Assembly included: it is preprocessed against the same defines.
+_SOURCE_LINK_INPUT_SUFFIXES = frozenset({
+    ".asm", ".c", ".cc", ".cpp", ".cxx", ".m", ".mm", ".s",
+})
+
+
 def probe_compile_command(compiler: str, sanitizer_flag: str, source: Path,
                           binary: Path, config, library: str,
                           flags: "list[str]",
-                          coverage: bool = False) -> "list[str]":
-    """bin/probe's compile of one C/C++ harness, shared with its coverage twin.
+                          coverage: bool = False) -> "list[list[str]]":
+    """bin/probe's build of one C/C++ harness, shared with its coverage twin.
 
     ``-O0`` and ``-g1`` because a probe binary exists to reproduce and name a
     frame, not to run fast. ``coverage`` adds trace-pc-guard so the same
     source, linked against the coverage sibling's library, dumps the
     ``.sancov`` `bin/hits` reads; everything else is identical on purpose,
     so the twin executes the route the sanitizer run executed.
+
+    Compile steps first, then one link, rather than a single clang call:
+    handed a source file and debug flags together, clang on macOS also runs
+    dsymutil, which copies the whole linked library's DWARF into a ``.dSYM``
+    beside every harness — tens of MiB per build, more than the binary
+    itself, and the largest thing a long audit leaves on disk. Linking
+    objects leaves a debug map instead, which atos (the symbolizer the
+    harness runs on macOS) resolves from the objects kept beside the binary
+    and the archive still on disk. Linux has no dsymutil step, so the split
+    changes nothing there. A source file among ``link_libs`` gets its own
+    compile step, with the same includes and defines the harness gets: left
+    in the link step it would lose both, and with debug flags it would bring
+    dsymutil back.
     """
     includes = [
         value for path in config.includes
@@ -1584,14 +1605,48 @@ def probe_compile_command(compiler: str, sanitizer_flag: str, source: Path,
     library_args = [library] if library else []
     if library and Path(library).parent != Path("."):
         library_args.append(f"-Wl,-rpath,{Path(library).parent}")
-    return [
+    compile_prefix = [
         compiler, f"-fsanitize={sanitizer_flag}",
         *(("-fsanitize-coverage=trace-pc-guard",) if coverage else ()),
-        "-g1", "-O0", *flags,
-        *config.defines, *includes, str(source), *library_args,
-        *config.resolved_link_libs(),
-        *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary),
+        "-g1", "-O0", *flags, *config.defines, *includes,
     ]
+    harness_object = binary.with_name(binary.name + ".o")
+    objects = [(source, harness_object)]
+    link_inputs = []
+    for index, value in enumerate(config.resolved_link_libs()):
+        if Path(value).suffix.lower() in _SOURCE_LINK_INPUT_SUFFIXES:
+            linked_object = binary.with_name(f"{binary.name}.link{index}.o")
+            objects.append((Path(value), linked_object))
+            link_inputs.append(str(linked_object))
+        else:
+            link_inputs.append(value)
+    return [
+        *([*compile_prefix, "-c", str(src), "-o", str(obj)] for src, obj in objects),
+        [
+            compiler, f"-fsanitize={sanitizer_flag}", *flags, str(harness_object),
+            *library_args, *link_inputs,
+            *shlex.split(os.environ.get("LDFLAGS", "")), "-o", str(binary),
+        ],
+    ]
+
+
+def run_build_steps(steps: "list[list[str]]",
+                    cwd: "str | os.PathLike[str] | None" = None) -> subprocess.CompletedProcess:
+    """Run build steps in order, stopping at the first failure.
+
+    The result carries every step's output so a failed link still shows the
+    compile's warnings; ``args`` is the step that failed, or the last one.
+    """
+    stdout = b""
+    stderr = b""
+    completed = subprocess.CompletedProcess([], 0, stdout, stderr)
+    for step in steps:
+        completed = subprocess.run(step, capture_output=True, check=False, cwd=cwd)
+        stdout += completed.stdout
+        stderr += completed.stderr
+        if completed.returncode:
+            break
+    return subprocess.CompletedProcess(completed.args, completed.returncode, stdout, stderr)
 
 
 def build_identity(source: Path, san: str, config, library: str,

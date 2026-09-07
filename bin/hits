@@ -336,7 +336,7 @@ class Hits:
         twin = cache_dir() / f"{source.name}.{digest}.cov"
         log = cache_dir() / f"{source.name}.{digest}.cov.build.log"
         lock = cache_dir() / f"{source.name}.{digest}.cov.lock"
-        command = fuzz_harness.probe_compile_command(
+        steps = fuzz_harness.probe_compile_command(
             compiler_path, "address", source, twin, self.config, str(library),
             flags, coverage=True,
         )
@@ -350,11 +350,14 @@ class Hits:
                         f"{label}: coverage twin did not compile; log: {log}"
                     )
                 if not os.access(twin, os.X_OK):
-                    completed = subprocess.run(command, capture_output=True, check=False)
+                    completed = fuzz_harness.run_build_steps(steps)
                     text = (completed.stdout + completed.stderr).decode(errors="replace")
                     if completed.returncode or not os.access(twin, os.X_OK):
                         twin.unlink(missing_ok=True)
-                        log.write_text(shlex.join(command) + "\n\n" + text, encoding="utf-8")
+                        log.write_text(
+                            "\n".join(shlex.join(step) for step in steps) + "\n\n" + text,
+                            encoding="utf-8",
+                        )
                         return None, None, (
                             f"{label}: coverage twin did not compile "
                             f"(rc={completed.returncode}); log: {log}"
