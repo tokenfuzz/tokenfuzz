@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -96,9 +98,11 @@ class Setup:
         self.source = args.source
         self.workspace_root = SCRIPT_ROOT / "targets" / self.requested_name
         self.target_root = SCRIPT_ROOT / "targets" / self.name
+        self.checkout_root = self.target_root
         self.config_dir = SCRIPT_ROOT / "output" / self.name
         self.toml = self.config_dir / "target.toml"
         self.seeded_full = False
+        self.validated_runner = ""
         if self.profile is not None and self.args.browser is None:
             self.args.browser = self.profile.browser
 
@@ -152,6 +156,47 @@ class Setup:
             raise ValueError(f"targets/{self.name} does not exist; pass a repo URL to clone it")
         repo_type = self.args.repo_type if self.args.repo_type != "auto" else self.detect_type()
         self.clone(repo_type)
+
+    def sync_git_submodules(self) -> None:
+        """Materialize dependencies recorded by a normal git checkout."""
+        if (
+            not self.args.build or self.profile is not None
+            or target_config.detect_repo_type(self.checkout_root) != "git"
+            or not (self.checkout_root / ".gitmodules").is_file()
+        ):
+            return
+        log(f"Syncing git submodules for targets/{self.name}")
+        run([
+            "git", "-C", str(self.checkout_root), "submodule", "sync",
+            "--recursive",
+        ])
+        run([
+            "git", "-C", str(self.checkout_root), "submodule", "update",
+            "--init", "--recursive",
+        ])
+
+    def select_source_root(self) -> None:
+        """Bind setup to an unambiguous buildable project in the checkout."""
+        if self.profile is not None:
+            return
+        relative = target_config.discover_source_subdir(
+            self.checkout_root, self.name,
+        )
+        if not relative:
+            return
+        self.target_root = target_config.resolve_source_root(
+            self.checkout_root, relative,
+        )
+        log(f"Selected source subdirectory: {relative}")
+
+    def load_config(self, *, results_dir: str = "") -> target_config.Config:
+        root = getattr(self, "checkout_root", self.target_root)
+        config = target_config.Config(
+            slug=getattr(self, "name", ""), target_root=str(root),
+            results_dir=results_dir,
+        )
+        target_config.load_toml_into(config, self.toml)
+        return config
 
     def depot_tool(self, name: str) -> Path:
         found = shutil.which(name)
@@ -344,15 +389,21 @@ class Setup:
             return
         log(f"Fetching git updates for targets/{self.name}")
         if self.args.ref:
-            fetched = subprocess.run(["git", "-C", str(self.target_root), "fetch", "--tags", "origin", self.args.ref])
+            fetched = subprocess.run(["git", "-C", str(self.target_root), "fetch", "origin", self.args.ref])
             if fetched.returncode:
-                run(["git", "-C", str(self.target_root), "fetch", "--tags", "origin"])
+                run(["git", "-C", str(self.target_root), "fetch", "origin"])
             run(["git", "-C", str(self.target_root), "checkout", self.args.ref])
         else:
-            run(["git", "-C", str(self.target_root), "fetch", "--tags", "origin"])
+            run(["git", "-C", str(self.target_root), "fetch", "origin"])
         upstream = subprocess.run(["git", "-C", str(self.target_root), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if upstream.returncode == 0:
-            run(["git", "-C", str(self.target_root), "pull", "--ff-only"])
+            # The fetch above already refreshed the tracking ref. Merge it
+            # locally so one requested update performs one network operation;
+            # `git pull` here would fetch the same remote a second time.
+            run([
+                "git", "-C", str(self.target_root),
+                "merge", "--ff-only", "@{u}",
+            ])
         else:
             log("No upstream tracking branch; fetched updates without changing HEAD")
 
@@ -380,12 +431,30 @@ class Setup:
                 reason = (
                     "requested" if self.args.force else
                     "placeholders" if target_config.config_has_live_placeholder(
-                        self.toml, self.target_root
+                        self.toml, self.checkout_root
                     ) else ""
                 )
-        keep_for_build = self.args.build and reason in (
-            "placeholders", "requested"
-        )
+        if parsed and self.args.build:
+            detected_build_system = target_config._detect_build_system(
+                self.checkout_root
+            )
+            configured_build_system = str(parsed.get("build_system", ""))
+            runner = parsed.get("runner", {})
+            has_runner = isinstance(runner, dict) and bool(
+                runner.get("bin") or runner.get("args")
+            )
+            has_native_artifact = any(
+                isinstance(parsed.get(field), str) and parsed.get(field)
+                for sanitizer in ("asan", "ubsan", "msan", "tsan")
+                for field in (f"{sanitizer}_bin", f"{sanitizer}_lib")
+            )
+            if (
+                detected_build_system
+                and detected_build_system != configured_build_system
+                and not has_runner and not has_native_artifact
+            ):
+                reason = "stale-detection"
+        keep_for_build = self.args.build and reason == "placeholders"
         if (
             reason in ("", "placeholders") or keep_for_build
         ) and self.args.browser is not None:
@@ -401,7 +470,7 @@ class Setup:
                     f"{1 if self.args.browser else 0}"
                 )
         if keep_for_build:
-            log(f"Keeping output/{self.name}/target.toml as-is (--build does not re-seed; run 'bin/setup-target {self.name}' without --build to regenerate it)")
+            log(f"Keeping output/{self.name}/target.toml as-is (--build does not re-seed generated placeholders without --force)")
             return
         if not reason:
             log(f"Keeping reviewed output/{self.name}/target.toml (pass --force to regenerate)")
@@ -409,7 +478,7 @@ class Setup:
         if reason == "placeholders":
             log(f"Refreshing output/{self.name}/target.toml to fill placeholders (preserving curated [threat_model] / [s6_peers])")
             target_config.seed_toml(
-                self.target_root, self.toml, self.source,
+                self.checkout_root, self.toml, self.source,
                 preserve_curated=True, browser_mode=self.args.browser,
                 target_slug=self.name,
             )
@@ -418,6 +487,11 @@ class Setup:
             log(f"Seeding output/{self.name}/target.toml")
         elif reason == "invalid":
             log(f"Refreshing output/{self.name}/target.toml because it no longer parses as TOML")
+        elif reason == "stale-detection":
+            log(
+                f"Refreshing output/{self.name}/target.toml because source "
+                "discovery changed before a runnable route was configured"
+            )
         else:
             log(f"Regenerating output/{self.name}/target.toml (--force)")
         # Carry the curated sections across even here. A full re-seed drops
@@ -429,7 +503,7 @@ class Setup:
         # path and overwrite what they derive. `missing` and `invalid` reach
         # the same call with nothing to carry, and preserving is a no-op there.
         target_config.seed_toml(
-            self.target_root, self.toml, self.source,
+            self.checkout_root, self.toml, self.source,
             preserve_curated=True, browser_mode=self.args.browser,
             target_slug=self.name,
         )
@@ -437,8 +511,17 @@ class Setup:
 
     def backend_candidates(self) -> list[str]:
         requested = os.environ.get("ACTIVE_BACKEND", os.environ.get("BACKEND", os.environ.get("AUDIT_BACKEND", "")))
+        hint_path = self.target_root / ".audit" / "config-backend"
+        try:
+            remembered = hint_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            remembered = ""
+        if remembered not in {"claude", "codex", "gemini", "grok", "oss"}:
+            remembered = ""
         result: list[str] = []
-        for candidate in ([requested] if requested and requested != "all" else []) + ["claude", "codex", "gemini", "grok"]:
+        preferred = [requested] if requested and requested != "all" else []
+        preferred += [remembered] if remembered else []
+        for candidate in preferred + ["claude", "codex", "gemini", "grok"]:
             if candidate and candidate not in result:
                 result.append(candidate)
         if requested == "oss" or os.environ.get("MODEL", os.environ.get("AUDIT_MODEL", "")):
@@ -460,6 +543,13 @@ class Setup:
                 [str(executable), *helper_args], env=environment
             )
             if completed.returncode == 0:
+                hint_path = self.target_root / ".audit" / "config-backend"
+                hint_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = hint_path.with_name(
+                    f".{hint_path.name}.{os.getpid()}.tmp"
+                )
+                temporary.write_text(backend + "\n", encoding="utf-8")
+                os.replace(temporary, hint_path)
                 log(
                     f"config bootstrap: {helper} succeeded on "
                     f"backend={backend} - updated output/{self.name}/target.toml"
@@ -504,8 +594,7 @@ class Setup:
             or os.environ.get("LLM_DECIDE_DISABLE", "0") == "1"
         ):
             return
-        config = target_config.Config(target_root=str(self.target_root))
-        target_config.load_toml_into(config, self.toml)
+        config = self.load_config()
         raw_runner = target_config.parse_toml(self.toml).get("runner", {})
         runner_is_calibrated = (
             isinstance(raw_runner, dict) and "success_codes" in raw_runner
@@ -523,10 +612,8 @@ class Setup:
         if config.first_executable_sanitizer() is None:
             return
         helper_args = [self.name, "--apply"]
-        # --force re-selects a reviewed runner; beside --build it only
-        # rematerializes, and a runner that lacks its exit calibration is
-        # calibrated in place rather than replaced by a fresh selection.
-        if self.args.force and not self.args.build:
+        # A forced config regeneration re-selects any inferred native runner.
+        if self.args.force:
             helper_args.append("--force")
         self.run_config_helper("suggest-runner", helper_args)
 
@@ -556,6 +643,17 @@ class Setup:
         plan = languages.bootstrap_plan_for_target(self.target_root, config.build_system)
         if not plan.get("cmds"):
             return
+        if config.build_system in {"maven", "gradle", "kotlin"}:
+            java_home = [
+                value.split("=", 1)
+                for value in config.runner_env
+                if value.startswith("JAVA_HOME=") and value.partition("=")[2]
+            ]
+            if java_home:
+                plan["env"] = [
+                    pair for pair in plan.get("env", [])
+                    if pair[0] != "JAVA_HOME"
+                ] + java_home[:1]
         audit_dir = self.target_root / ".audit"
         refusal = (
             f"bootstrap refused for {self.name}: the configured runner "
@@ -579,6 +677,100 @@ class Setup:
         if status:
             raise RuntimeError(f"bootstrap failed for {self.name} (see {audit_dir / 'bootstrap.log'})")
         languages.write_bootstrap_stamp(self.target_root)
+        if config.build_system in {"maven", "gradle"} and self.seeded_full:
+            languages.write_java_runner_argfile(
+                self.target_root, config.build_system,
+            )
+            target_config.seed_toml(
+                self.checkout_root, self.toml, self.source,
+                preserve_curated=True, browser_mode=self.args.browser,
+                target_slug=self.name,
+            )
+            log("Refreshed the Java runner classpath from compiled build metadata")
+
+    def prepare_native_python_build_tools(
+        self, config: target_config.Config,
+    ) -> None:
+        """Install declared PEP 517 tools used by a native build driver."""
+        manifest = self.target_root / "pyproject.toml"
+        if not self.args.build or config.build_system not in {
+            "cmake", "meson", "autotools", "make",
+        } or not manifest.is_file():
+            return
+        try:
+            parsed = target_config.parse_toml(manifest)
+        except ValueError:
+            return
+        build_system = parsed.get("build-system", {})
+        requirements = (
+            build_system.get("requires", [])
+            if isinstance(build_system, dict) else []
+        )
+        requirements = [
+            value for value in requirements if isinstance(value, str) and value
+        ]
+        if not requirements:
+            return
+        project = parsed.get("project", {})
+        requires_python = (
+            str(project.get("requires-python", ""))
+            if isinstance(project, dict) else ""
+        )
+        candidates = [str(Path(sys.executable).resolve())]
+        versioned: set[Path] = set()
+        for directory in os.environ.get("PATH", "").split(os.pathsep):
+            try:
+                versioned.update(
+                    path.resolve() for path in Path(directory).glob("python3.*")
+                    if path.is_file() and os.access(path, os.X_OK)
+                    and re.fullmatch(r"python3\.\d+", path.name)
+                )
+            except OSError:
+                continue
+        candidates.extend(
+            str(path) for path in sorted(versioned, reverse=True)
+            if str(path) not in candidates
+        )
+        compatible = ""
+        check = (
+            "import sys; from pip._vendor.packaging.specifiers import "
+            "SpecifierSet; print(int(not sys.version.split()[0] in "
+            "SpecifierSet(sys.argv[1])))"
+        )
+        for candidate in candidates:
+            result = subprocess.run(
+                [candidate, "-c", check, requires_python],
+                capture_output=True, text=True, check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip() == "0":
+                compatible = candidate
+                break
+        if not compatible:
+            raise RuntimeError(
+                f"no installed Python satisfies requires-python={requires_python!r}"
+            )
+        tools = self.target_root / ".audit" / "build-tools"
+        stamp = tools / ".requirements.json"
+        wanted = {"python": str(Path(compatible).resolve()), "requires": requirements}
+        try:
+            current = json.loads(stamp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            current = None
+        python = tools / "bin" / "python"
+        if current != wanted or not python.is_file():
+            shutil.rmtree(tools, ignore_errors=True)
+            log(
+                "Installing declared native build tools from "
+                "pyproject.toml into .audit/build-tools"
+            )
+            run([compatible, "-m", "venv", str(tools)])
+            run([
+                str(python), "-m", "pip", "install", "--", *requirements,
+            ])
+            stamp.write_text(json.dumps(wanted, sort_keys=True), encoding="utf-8")
+        os.environ["PATH"] = (
+            f"{tools / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+        )
 
     def require_launchable(
         self, config: target_config.Config, binary: Path, sanitizer_name: str,
@@ -600,6 +792,301 @@ class Setup:
                 f"startup:\n{failure}"
             )
 
+    def declared_python_runtime_requirements(self) -> dict[str, list[str]]:
+        """Return runtime requirements indexed by their import-like name."""
+        manifest = self.target_root / "pyproject.toml"
+        try:
+            parsed = target_config.parse_toml(manifest)
+        except (OSError, ValueError):
+            parsed = {}
+        project = parsed.get("project", {})
+        values = (
+            list(project.get("dependencies", []))
+            if isinstance(project, dict)
+            and isinstance(project.get("dependencies", []), list)
+            else []
+        )
+        # These names are the established packaging conventions for shared
+        # runtime requirements. Backend-, docs-, dev-, and test-specific files
+        # are excluded because installing from them would broaden the audited
+        # runtime in response to an unrelated import.
+        for path in (
+            self.target_root / "requirements.txt",
+            self.target_root / "requirements" / "common.txt",
+            self.target_root / "requirements" / "base.txt",
+            self.target_root / "requirements" / "runtime.txt",
+        ):
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            values.extend(
+                line.split(" #", 1)[0].strip() for line in lines
+                if line.strip() and not line.lstrip().startswith(("#", "-"))
+            )
+        result: dict[str, list[str]] = {}
+        for value in values:
+            if not isinstance(value, str):
+                continue
+            match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", value)
+            if not match:
+                continue
+            key = re.sub(r"[-_.]+", "_", match.group(1).lower())
+            if value not in result.setdefault(key, []):
+                result[key].append(value)
+        return result
+
+    def configure_native_python_runner(self) -> None:
+        """Expose a built Python extension through an ASan-first host."""
+        if not self.args.build:
+            return
+        config = self.load_config()
+        generated_runner = ".audit/python-runner-asan"
+        if (
+            config.build_system not in {"cmake", "meson"}
+            or (config.runner_bin and config.runner_bin != generated_runner)
+            or "asan" not in config.sanitizers_enabled or config.asan_bin
+            or not (self.target_root / "pyproject.toml").is_file()
+        ):
+            return
+        build = self.target_root / target_config.build_dir_name("asan")
+        extensions = target_config.python_extension_artifacts(build)
+        if not extensions:
+            return
+        tools_python = self.target_root / ".audit" / "build-tools" / "bin" / "python"
+        python = tools_python if tools_python.is_file() else Path(sys.executable)
+        dependency_roots: list[Path] = []
+        if tools_python.is_file():
+            discovered = subprocess.run(
+                [
+                    str(tools_python), "-c",
+                    "import site; print('\\n'.join(site.getsitepackages()))",
+                ],
+                capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            dependency_roots = [
+                Path(value).resolve() for value in discovered
+                if value and Path(value).is_dir()
+            ]
+        base = subprocess.run(
+            [str(python), "-c", "import sys; print(sys._base_executable)"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        version = subprocess.run(
+            [str(python), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        config_tool = next((
+            candidate for candidate in (
+                Path(base).with_name(f"python{version}-config"),
+                Path(shutil.which(f"python{version}-config") or ""),
+            ) if candidate.is_file()
+        ), None)
+        if config_tool is None:
+            raise RuntimeError(
+                f"cannot build an ASan Python runner: python{version}-config is missing"
+            )
+
+        stage = self.target_root / ".audit" / "python-stage-asan"
+        shutil.rmtree(stage, ignore_errors=True)
+        if config.build_system == "meson":
+            meson = self.target_root / "vendored-meson" / "meson" / "meson.py"
+            driver = [str(python), str(meson)] if meson.is_file() else ["meson"]
+            run([
+                *driver, "install", "--quiet", "-C", str(build),
+                "--destdir", str(stage),
+            ])
+            import_roots = sorted({
+                path for path in stage.rglob("*")
+                if path.is_dir()
+                and path.name in {"site-packages", "dist-packages"}
+            })
+        else:
+            import_root = stage / "site-packages"
+            import_root.mkdir(parents=True)
+            project = target_config.parse_toml(
+                self.target_root / "pyproject.toml"
+            ).get("project", {})
+            package = re.sub(
+                r"[-.]+", "_",
+                str(project.get("name", ""))
+                if isinstance(project, dict) else "",
+            )
+            source_package = next((
+                candidate for candidate in (
+                    self.target_root / package,
+                    self.target_root / "src" / package,
+                )
+                if package and (candidate / "__init__.py").is_file()
+            ), None)
+            if source_package is not None:
+                shutil.copytree(
+                    source_package, import_root / package, dirs_exist_ok=True,
+                )
+            run([
+                "cmake", "--install", str(build), "--prefix", str(import_root),
+            ])
+            import_roots = [import_root]
+        if not import_roots:
+            raise RuntimeError("the native build installed no Python package")
+        project = target_config.parse_toml(
+            self.target_root / "pyproject.toml"
+        ).get("project", {})
+        wanted = re.sub(
+            r"[-.]+", "_",
+            str(project.get("name", "")) if isinstance(project, dict) else "",
+        )
+        modules = sorted({
+            (
+                child.name if child.is_dir()
+                else child.name.split(".cpython-", 1)[0].split(".abi3", 1)[0]
+            )
+            for root in import_roots for child in root.iterdir()
+            if (
+                child.is_dir() and (child / "__init__.py").is_file()
+            ) or (
+                child.is_file()
+                and (".cpython-" in child.name or ".abi3" in child.name)
+                and child.suffix.lower() in {".so", ".pyd"}
+            )
+        })
+        module = wanted if wanted in modules else (modules[0] if len(modules) == 1 else "")
+        if not module:
+            raise RuntimeError(
+                "cannot identify the installed Python package: " + ", ".join(modules)
+            )
+
+        launcher_source = self.target_root / ".audit" / "python-runner.c"
+        launcher = self.target_root / ".audit" / "python-runner-asan"
+        launcher_source.write_text(
+            "#include <Python.h>\n"
+            "int main(int argc, char **argv) { return Py_BytesMain(argc, argv); }\n",
+            encoding="utf-8",
+        )
+        cflags = shlex.split(subprocess.run(
+            [str(config_tool), "--embed", "--cflags"],
+            capture_output=True, text=True, check=True,
+        ).stdout)
+        ldflags = shlex.split(subprocess.run(
+            [str(config_tool), "--embed", "--ldflags"],
+            capture_output=True, text=True, check=True,
+        ).stdout)
+        compiler = os.environ.get("CC") or shutil.which("clang") or shutil.which("cc")
+        if not compiler:
+            raise RuntimeError("cannot build an ASan Python runner: no C compiler")
+        run([
+            compiler, "-fsanitize=address", *cflags, str(launcher_source),
+            *ldflags, "-o", str(launcher),
+        ])
+        import_root = import_roots[0]
+        python_paths = [import_root, *dependency_roots]
+        python_path = os.pathsep.join(str(path) for path in python_paths)
+        environment = os.environ | {"PYTHONPATH": python_path}
+        testcase = self.target_root / ".audit" / "python-runner-canary.py"
+        testcase.write_text(
+            f"import {module}\nprint('TOKENFUZZ-CANARY')\n",
+            encoding="utf-8",
+        )
+        requirements = self.declared_python_runtime_requirements()
+        installed_for_canary: set[str] = set()
+        while True:
+            canary = subprocess.run(
+                [str(launcher), str(testcase)],
+                env=environment, capture_output=True, text=True,
+                timeout=max(1, int(os.environ.get("ASAN_TIMEOUT", "15"))),
+                check=False,
+            )
+            if not canary.returncode and "TOKENFUZZ-CANARY" in canary.stdout:
+                break
+            output = (canary.stdout + canary.stderr).strip()[-4000:]
+            missing = re.search(
+                r"ModuleNotFoundError:\s+No module named ['\"]([^.'\"]+)",
+                output,
+            )
+            key = (
+                re.sub(r"[-_.]+", "_", missing.group(1).lower())
+                if missing else ""
+            )
+            candidates = requirements.get(key, [])
+            if (
+                not tools_python.is_file() or key in installed_for_canary
+                or len(candidates) != 1
+            ):
+                raise RuntimeError(
+                    "ASan Python runner could not import the staged package:\n" + output
+                )
+            log(
+                "Installing declared Python runtime dependency required by "
+                f"the runner canary: {candidates[0]}"
+            )
+            run([
+                str(tools_python), "-m", "pip", "install", "--", candidates[0],
+            ])
+            installed_for_canary.add(key)
+        self.validated_runner = generated_runner
+        configured_python_path = os.pathsep.join(
+            "{TARGET_ROOT}/" + path.resolve().relative_to(
+                self.target_root.resolve()
+            ).as_posix()
+            for path in python_paths
+        )
+        public_includes = sorted({
+            path.relative_to(self.target_root).as_posix()
+            for path in stage.rglob("include")
+            if path.is_dir() and any(
+                target_config.is_header_file(header)
+                for header in path.rglob("*")
+            )
+        })
+        for index, flag in enumerate(cflags):
+            value = (
+                cflags[index + 1] if flag == "-I" and index + 1 < len(cflags)
+                else flag[2:] if flag.startswith("-I") and len(flag) > 2
+                else ""
+            )
+            if value and Path(value).is_dir() and value not in public_includes:
+                public_includes.append(value)
+        clear_library = False
+        replacement_library = ""
+        if config.asan_lib:
+            metadata = build / "meson-info" / "intro-installed.json"
+            try:
+                installed = json.loads(metadata.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                installed = None
+            if isinstance(installed, dict):
+                library = str(Path(config.resolve_path(config.asan_lib)).resolve())
+                clear_library = library not in {
+                    str(Path(path).resolve()) for path in installed
+                    if isinstance(path, str)
+                }
+                if clear_library:
+                    _binary, replacement_library = (
+                        target_config.detect_sanitizer_build_artifacts(
+                            self.target_root, "asan",
+                        )
+                    )
+        updated = target_config.set_python_extension_runner(
+            self.toml.read_text(encoding="utf-8"), "asan",
+            generated_runner,
+            configured_python_path,
+            clear_library=clear_library,
+            replacement_library=replacement_library,
+        )
+        parsed = target_config.parse_toml(self.toml)
+        current_includes = parsed.get("includes", [])
+        if isinstance(current_includes, list):
+            updated = target_config.set_harness_includes(
+                updated,
+                list(dict.fromkeys([
+                    *(value for value in current_includes if isinstance(value, str)),
+                    *public_includes,
+                ])),
+                add_missing=True,
+            )
+        self.toml.write_text(updated, encoding="utf-8")
+        log("Configured staged Python extension runner for the ASan build")
+
     def require_reachable_runner(self, config: target_config.Config) -> None:
         """Prove the seeded [runner] reaches the target it was written for.
 
@@ -610,14 +1097,17 @@ class Setup:
         """
         if not self.args.build:
             return
-        fresh = target_config.Config(
-            slug=self.name, target_root=str(self.target_root),
-            results_dir=str(self.toml.parent / "preflight" / "results"),
-        )
         try:
-            target_config.load_toml_into(fresh, self.toml)
+            fresh = self.load_config(
+                results_dir=str(self.toml.parent / "preflight" / "results"),
+            )
         except (OSError, ValueError) as exc:
             log(f"WARN: runner reachability check skipped: {self.toml} could not be read ({exc})")
+            return
+        if fresh.runner_bin and fresh.runner_bin == getattr(
+            self, "validated_runner", "",
+        ):
+            log(f"Runner reachability OK: a testcase reaches {self.target_root}")
             return
         skipped = runner_canary.skip_reason(fresh)
         if skipped:
@@ -653,11 +1143,8 @@ class Setup:
         """
         if not self.toml.is_file():
             return
-        config = target_config.Config(
-            slug=self.name, target_root=str(self.target_root),
-        )
         try:
-            target_config.load_toml_into(config, self.toml)
+            config = self.load_config()
         except (OSError, ValueError):
             return
         if str(config.is_browser).lower() in {"1", "true"}:
@@ -753,6 +1240,16 @@ class Setup:
                 config, Path(config.resolve_path(detected_bin)), sanitizer_name
             )
         if detected_bin or detected_lib:
+            return True
+        if (
+            config.build_system in {"cmake", "meson"}
+            and (self.target_root / "pyproject.toml").is_file()
+            and target_config.python_extension_artifacts(build_dir)
+        ):
+            # A Python extension is not a standalone probe route, but it is a
+            # complete native build product. The next setup phase stages it,
+            # builds the sanitizer-first Python host, and must pass an import
+            # canary before setup can succeed.
             return True
         return (
             config.build_system == "cmake"
@@ -978,6 +1475,10 @@ class Setup:
             preferred_browser_bins=preferred_browser_bins,
         ):
             log(f"Refreshed <san>_bin/<san>_lib in {self.toml} from build trees on disk")
+        if target_config.refresh_detected_compile_fields(
+            self.target_root, self.toml,
+        ):
+            log("Refreshed C++ standard from compile_commands.json")
         # Persist every sanitizer that completed before reporting a later
         # failure, so retrying does not discard usable build output.
         if self.args.build and build_errors:
@@ -987,8 +1488,7 @@ class Setup:
         # above and never gate setup: a target without one audits exactly as
         # before, with the missing feedback reported to the operator.
         if self.args.build and sanitizers:
-            refreshed = target_config.Config(target_root=str(self.target_root))
-            target_config.load_toml_into(refreshed, self.toml)
+            refreshed = self.load_config()
             for sibling in coverage_build.SIBLING_SUFFIXES:
                 coverage_build.report(
                     coverage_build.materialize(
@@ -1006,20 +1506,29 @@ class Setup:
             and config.build_configs and os.access(build_configs_command, os.X_OK)
         ):
             candidates = self.backend_candidates()
-            command = [
-                str(build_configs_command),
-                "--target-path", str(self.target_root),
-                "--target-toml", str(self.toml), "--all",
-            ]
-            if candidates:
-                command += ["--backend", candidates[0]]
-            if self.args.force:
-                command.append("--force")
-            environment = os.environ.copy()
-            if candidates:
-                environment.update(ACTIVE_BACKEND=candidates[0], BACKEND=candidates[0])
-            completed = subprocess.run(command, env=environment, check=False)
-            if completed.returncode:
+            alternate_ready = False
+            for index, backend in enumerate(candidates):
+                command = [
+                    str(build_configs_command),
+                    "--target-path", str(self.checkout_root),
+                    "--target-toml", str(self.toml), "--all",
+                    "--backend", backend,
+                ]
+                if self.args.force:
+                    command.append("--force")
+                environment = {
+                    **os.environ, "ACTIVE_BACKEND": backend, "BACKEND": backend,
+                }
+                completed = subprocess.run(command, env=environment, check=False)
+                if completed.returncode == 0:
+                    alternate_ready = True
+                    break
+                if index + 1 < len(candidates):
+                    log(
+                        "bootstrap: alternate build configuration failed on "
+                        f"backend={backend}; retrying with backend={candidates[index + 1]}"
+                    )
+            if not alternate_ready:
                 log("bootstrap: alternate build configurations could not be prepared; primary build is unaffected")
 
     def report_harness_input_mismatch(self) -> None:
@@ -1039,8 +1548,7 @@ class Setup:
         and report the unresolved route instead of auditing a nearby helper.
         """
         for sanitizer_name in self.harness_input_sanitizers():
-            config = target_config.Config(target_root=str(self.target_root))
-            target_config.load_toml_into(config, self.toml)
+            config = self.load_config()
             exported, declared = self.declared_exports(config, sanitizer_name)
             if not exported or declared:
                 continue
@@ -1048,8 +1556,7 @@ class Setup:
                 self.target_root, sanitizer_name,
             )
             configured_library = config.sanitizer_lib(sanitizer_name)
-            candidate = target_config.Config(target_root=str(self.target_root))
-            target_config.load_toml_into(candidate, self.toml)
+            candidate = self.load_config()
             repaired_includes = list(dict.fromkeys([*config.includes, *includes]))
             candidate.includes = repaired_includes
             _, repaired = self.declared_exports(candidate, sanitizer_name)
@@ -1085,9 +1592,48 @@ class Setup:
                 f"`includes` reaches its public headers"
             )
 
+    def refresh_installed_harness_includes(self) -> None:
+        """Merge public include roots proved by the completed build."""
+        config = self.load_config()
+        detected: list[str] = []
+        for sanitizer_name in self.harness_input_sanitizers():
+            detected.extend(target_config.installed_harness_include_dirs(
+                self.target_root,
+                target_config.build_dir_name(sanitizer_name, suffix=""),
+            ))
+        merged = list(dict.fromkeys([*config.includes, *detected]))
+        if merged == config.includes:
+            return
+        before = self.toml.read_text(encoding="utf-8")
+        after = target_config.set_harness_includes(
+            before, merged, add_missing=True,
+        )
+        if after != before:
+            self.toml.write_text(after, encoding="utf-8")
+            log("Refreshed public harness includes from build install metadata")
+
+    def refresh_cmake_harness_link_libs(self) -> None:
+        """Merge a static product's published downstream link closure."""
+        config = self.load_config()
+        if config.build_system != "cmake" or not config.asan_lib:
+            return
+        detected = target_config.cmake_package_harness_link_args(
+            self.target_root, target_config.build_dir_name("asan", suffix=""),
+            config.asan_lib,
+        )
+        merged = list(dict.fromkeys([*config.link_libs, *detected]))
+        if merged == config.link_libs:
+            return
+        before = self.toml.read_text(encoding="utf-8")
+        after = target_config.set_harness_link_libs(
+            before, merged, add_missing=True,
+        )
+        if after != before:
+            self.toml.write_text(after, encoding="utf-8")
+            log("Refreshed harness link dependencies from CMake package metadata")
+
     def harness_input_sanitizers(self) -> "list[str]":
-        config = target_config.Config(target_root=str(self.target_root))
-        target_config.load_toml_into(config, self.toml)
+        config = self.load_config()
         # Browser setup deliberately does not detect or refresh a link library:
         # its proved product route is the page/script runner, and a browser
         # build contains thousands of unrelated native archives. Treating an
@@ -1101,6 +1647,29 @@ class Setup:
             and config.sanitizer_lib(name)
         ]
 
+    def require_audit_route(self) -> None:
+        """Reject a successful --build that produced no executable route."""
+        if not self.args.build or not self.seeded_full:
+            return
+        config = self.load_config()
+        if config.runner_bin or any((
+            config.asan_bin, config.asan_lib, config.ubsan_bin,
+            config.ubsan_lib, config.msan_bin, config.msan_lib,
+            config.tsan_bin, config.tsan_lib,
+        )):
+            return
+        if (
+            config.build_system == "cmake"
+            and target_config.cmake_build_is_header_only(
+                self.target_root / target_config.build_dir_name("asan")
+            )
+        ):
+            return
+        raise RuntimeError(
+            "setup produced no runnable target: target.toml has no runner, "
+            "sanitizer binary, or sanitizer library"
+        )
+
     @staticmethod
     def declared_exports(config, sanitizer_name: str) -> "tuple[int, int]":
         try:
@@ -1110,23 +1679,29 @@ class Setup:
 
     def execute(self) -> int:
         self.prepare_source()
+        self.sync_git_submodules()
+        self.select_source_root()
         self.seed_profile_build_recipe()
         self.seed_config()
         self.llm_bootstrap()
         target_config.parse_toml(self.toml)
-        revision = target_config.detect_rev(self.target_root)
+        revision = target_config.detect_rev(self.checkout_root)
         log(f"Source: {self.target_root}")
         log(f"Config: {self.toml}")
         if revision:
             log(f"Revision: {revision}")
-        config = target_config.Config(target_root=str(self.target_root))
-        target_config.load_toml_into(config, self.toml)
+        config = self.load_config()
+        self.prepare_native_python_build_tools(config)
         self.language_build(config)
         self.sanitizer_builds(config)
+        self.configure_native_python_runner()
+        self.refresh_installed_harness_includes()
+        self.refresh_cmake_harness_link_libs()
         self.runner_bootstrap()
         self.report_invariant_runners()
         self.require_reachable_runner(config)
         self.report_harness_input_mismatch()
+        self.require_audit_route()
         print(f"\nNext steps:\n  1. Review output/{self.name}/target.toml.\n  2. Smoke-test with: bin/audit --target {self.requested_name} --backend <claude|codex|gemini|grok|oss> 1")
         return 0
 

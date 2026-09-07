@@ -28,7 +28,10 @@ def ok(cond: bool, name: str, detail: str = "") -> None:
 
 
 # ── EXCLUDED_PATH_SEGMENTS literal hits ────────────────────────────
-for seg in ("doc", "docs", "test", "tests", "fuzz", "fuzzer", "example", "examples"):
+for seg in (
+    "doc", "docs", "test", "tests", "fuzz", "fuzzer", "example",
+    "examples", "bench", "benchmark", "benchmarks", "asv_bench",
+):
     ok(
         audit_scope.is_excluded_path_part(seg),
         f"literal segment '{seg}' is excluded",

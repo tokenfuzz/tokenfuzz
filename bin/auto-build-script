@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import platform
 import re
 import shlex
 import shutil
@@ -60,12 +61,13 @@ SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import build_config  # noqa: E402
-from llm_decide import llm_decide  # noqa: E402
+from llm_decide import decision_timeout, llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 
 
 _BUILD_LOG_TAIL_BYTES = 4_000
 _README_EXCERPT_BYTES = 2_000
+_BUILD_MANIFEST_EXCERPT_BYTES = 8_000
 _MAX_SCRIPT_LEN = 8_000
 
 # Anything matching these substrings in an LLM-proposed script is a
@@ -92,6 +94,7 @@ _REQUIRED_SUBSTRINGS = (
 
 _SANITIZER_CONFIG_MARKERS = (
     "-fsanitize=",
+    "-Db_sanitize=",
     "--enable-address-sanitizer",
     "--enable-undefined-sanitizer",
     "--enable-memory-sanitizer",
@@ -149,11 +152,20 @@ def detect_build_system(src: Path) -> str:
 # CMAKE_BUILD_TYPE=Release applies the same NDEBUG/-O2 baseline at
 # the CMake level for projects that read the type and not raw
 # C_FLAGS.
+_PACKAGE_PREFIX_ENV = """\
+if command -v brew >/dev/null 2>&1; then
+    if homebrew_prefix="$(brew --prefix 2>/dev/null)" && [ -d "$homebrew_prefix/opt" ]; then
+        export CMAKE_PREFIX_PATH="${CMAKE_PREFIX_PATH:+$CMAKE_PREFIX_PATH:}$homebrew_prefix/opt"
+    fi
+fi
+"""
+
 _INITIAL_CMAKE = """\
 #!/usr/bin/env bash
 set -eu
 src="$1"; build="$2"
 mkdir -p "$build"
+__PACKAGE_PREFIX_ENV__
 rm -f "$build/CMakeCache.txt"
 rm -rf "$build/CMakeFiles"
 cmake -S "$src" -B "$build" \\
@@ -197,12 +209,17 @@ _INITIAL_MESON = """\
 set -eu
 src="$1"; build="$2"
 mkdir -p "$build"
-meson setup --reconfigure "$build" "$src" \\
+__PACKAGE_PREFIX_ENV__
+meson_cmd=(meson)
+if [ -f "$src/vendored-meson/meson/meson.py" ]; then
+    meson_cmd=(python3 "$src/vendored-meson/meson/meson.py")
+fi
+"${meson_cmd[@]}" setup --reconfigure "$build" "$src" \\
     --buildtype=release \\
     -Db_sanitize=__SAN_MESON__ -Db_ndebug=true \\
     -Dc_args="-g1 -fno-omit-frame-pointer" \\
     -Dcpp_args="-g1 -fno-omit-frame-pointer"__EXTRA_ARGS__
-meson compile -C "$build"
+"${meson_cmd[@]}" compile -C "$build"
 """
 
 # Let the driver own sanitizer flags. Exporting -fsanitize globally also
@@ -323,7 +340,11 @@ def initial_script(build_system: str, sanitizer: str, extra_flags=()) -> str:
     elif build_system != "cmake":
         die(f"no initial recipe for build system: {build_system!r}")
         return ""  # unreachable
-    return template.replace("__SAN__", cc_flag).replace("__EXTRA_ARGS__", extra)
+    return (
+        template.replace("__SAN__", cc_flag)
+        .replace("__EXTRA_ARGS__", extra)
+        .replace("__PACKAGE_PREFIX_ENV__", _PACKAGE_PREFIX_ENV.rstrip())
+    )
 
 
 def run_script(script_path: Path, src: Path, build: Path,
@@ -400,21 +421,164 @@ def read_readme_excerpt(src: Path) -> str:
     return ""
 
 
+_CMAKE_DIAGNOSTIC_PATH_RE = re.compile(
+    r"(?:^|\s)((?:[A-Za-z0-9_.+-]+/)*[A-Za-z0-9_.+-]+\.cmake|CMakeLists\.txt):\d+",
+    re.MULTILINE,
+)
+
+
+def read_build_manifest_excerpt(
+    src: Path, build_system: str, build_log: str = "",
+) -> str:
+    """Return bounded primary build declarations for a repair decision."""
+    names = {
+        "cmake": ("CMakeLists.txt",),
+        "meson": ("meson.build", "meson.options", "meson_options.txt"),
+        "autotools": ("configure.ac", "configure.in"),
+        "make": ("Makefile", "GNUmakefile"),
+    }.get(build_system, ())
+    candidates: list[Path] = []
+    if build_system == "cmake":
+        for match in _CMAKE_DIAGNOSTIC_PATH_RE.finditer(build_log):
+            candidate = (src / match.group(1)).resolve()
+            try:
+                candidate.relative_to(src.resolve())
+            except ValueError:
+                continue
+            if candidate.is_file() and candidate not in candidates:
+                candidates.append(candidate)
+    candidates.extend(
+        src / name for name in names if (src / name) not in candidates
+    )
+    chunks: list[str] = []
+    remaining = _BUILD_MANIFEST_EXCERPT_BYTES
+    for path in candidates:
+        if not path.is_file() or remaining <= 0:
+            continue
+        try:
+            body = path.read_text(encoding="utf-8", errors="replace")[:remaining]
+        except OSError:
+            continue
+        chunks.append(f"--- {path.resolve().relative_to(src.resolve())} ---\n{body}")
+        remaining -= len(body.encode("utf-8", errors="replace"))
+    return "\n".join(chunks)[:_BUILD_MANIFEST_EXCERPT_BYTES]
+
+
 def read_build_log_tail(path: Path) -> str:
     """Read only the bounded failure context sent to the model."""
     with path.open("rb") as stream:
         stream.seek(0, os.SEEK_END)
         size = stream.tell()
         stream.seek(max(0, size - _BUILD_LOG_TAIL_BYTES))
-        return stream.read(_BUILD_LOG_TAIL_BYTES).decode(
+        text = stream.read(_BUILD_LOG_TAIL_BYTES).decode(
             "utf-8", errors="replace"
         )
+    marker = text.rfind("\n=== ")
+    if marker >= 0:
+        text = text[marker + 1:]
+    return text
+
+
+_CMAKE_PYTHON_REQUEST_RE = re.compile(
+    r"Please set\s+([A-Za-z_][A-Za-z0-9_]*PYTHON[A-Za-z0-9_]*EXECUTABLE)"
+    r"\s+to[^\n]*python",
+    re.IGNORECASE,
+)
+_CMAKE_DEVICE_CACHE_RE = re.compile(
+    r"\bset\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s+['\"]?"
+    r"(?:cuda|rocm)['\"]?\s+CACHE\s+STRING\b",
+    re.IGNORECASE,
+)
+_CMAKE_CACHE_STRING_RE = re.compile(
+    r"\bset\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s+[^)]*?\bCACHE\s+STRING\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_OPTIONAL_TOOLCHAIN_FAILURE_RE = re.compile(
+    r"^[^\n]*\brequires\b[^\n]{0,160}\b(?:toolchain|compiler|SDK)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def deterministic_recipe_revision(
+    script: str, *, build_system: str, build_log: str,
+    build_manifest_excerpt: str, host_summary: str,
+) -> tuple[str, list[str]]:
+    """Apply build declarations whose correct value is mechanically known."""
+    if build_system != "cmake":
+        return script, []
+    arguments: list[str] = []
+    labels: list[str] = []
+    for match in _CMAKE_PYTHON_REQUEST_RE.finditer(build_log):
+        name = match.group(1)
+        if not re.search(rf"-D{re.escape(name)}(?::[^=\s]+)?=", script):
+            arguments.append(f'-D{name}:FILEPATH="$(command -v python3)"')
+            labels.append(f"required Python executable ({name})")
+    if host_summary.startswith("darwin/"):
+        for match in _CMAKE_DEVICE_CACHE_RE.finditer(build_manifest_excerpt):
+            name = match.group(1)
+            cpu_branch = re.search(
+                rf"\b{re.escape(name)}\b[^\n]{{0,80}}\bSTREQUAL\s+['\"]cpu['\"]",
+                build_manifest_excerpt,
+                re.IGNORECASE,
+            )
+            if (
+                cpu_branch
+                and not re.search(rf"-D{re.escape(name)}(?::[^=\s]+)?=", script)
+            ):
+                arguments.append(f"-D{name}=cpu")
+                labels.append(f"advertised Darwin CPU backend ({name})")
+    toolchain_failures = _OPTIONAL_TOOLCHAIN_FAILURE_RE.findall(build_log)
+    if toolchain_failures:
+        failure_words = set(re.findall(
+            r"[A-Za-z][A-Za-z0-9]+", "\n".join(toolchain_failures).upper()
+        ))
+        disabled: set[str] = set()
+        for match in _CMAKE_CACHE_STRING_RE.finditer(build_manifest_excerpt):
+            name = match.group(1)
+            parts = name.upper().split("_")
+            # The leading component is conventionally a project namespace;
+            # matching it would disable every optional selector whenever the
+            # project name appears in a diagnostic. Remaining words identify
+            # the actual backend, with singular/plural spellings equivalent.
+            if len(parts) > 1:
+                parts = parts[1:]
+            name_words = set()
+            for word in parts:
+                if len(word) < 3 or word in {
+                    "BUILD", "ENABLE", "BACKEND", "BACKENDS",
+                }:
+                    continue
+                name_words.add(word)
+                if word.endswith("S") and len(word) > 3:
+                    name_words.add(word[:-1])
+            if (
+                name not in disabled
+                and name_words & failure_words
+                and re.search(
+                    rf"\bif\s*\(\s*{re.escape(name)}\s*\)",
+                    build_manifest_excerpt,
+                    re.IGNORECASE,
+                )
+                and not re.search(rf"-D{re.escape(name)}(?::[^=\s]+)?=", script)
+            ):
+                arguments.append(f"-D{name}=")
+                labels.append(f"disabled unavailable optional backend ({name})")
+                disabled.add(name)
+    if not arguments:
+        return script, []
+    build_command = script.find("\ncmake --build")
+    if build_command < 0:
+        return script, []
+    addition = "".join(f" \\\n    {argument}" for argument in arguments)
+    return script[:build_command] + addition + script[build_command:], labels
 
 
 def ask_llm_for_revision(*, slug: str, build_system: str, sanitizer: str,
                          current_script: str, build_log: str,
                          readme_excerpt: str,
-                         timeout_secs: int) -> str | None:
+                         timeout_secs: int,
+                         build_manifest_excerpt: str = "",
+                         host_summary: str = "") -> str | None:
     readme_block = ""
     if readme_excerpt:
         readme_block = (
@@ -430,6 +594,8 @@ def ask_llm_for_revision(*, slug: str, build_system: str, sanitizer: str,
         "current_script": current_script,
         "build_log": build_log[-_BUILD_LOG_TAIL_BYTES:],
         "upstream_readme_block": readme_block,
+        "build_manifest_excerpt": build_manifest_excerpt,
+        "host_summary": host_summary,
     })
     obj = llm_decide("build-script-converge", "script", prompt,
                     timeout=timeout_secs)
@@ -800,7 +966,7 @@ def main(argv: list[str]) -> int:
                     help="scratch build dir (default: a tempdir)")
     ap.add_argument("--max-iters", type=int, default=5)
     ap.add_argument("--build-timeout-secs", type=int, default=900)
-    ap.add_argument("--llm-timeout-secs", type=int, default=60)
+    ap.add_argument("--llm-timeout-secs", type=int, default=None)
     ap.add_argument("--keep-scratch", action="store_true")
     ap.add_argument(
         "--emit-initial", action="store_true",
@@ -837,6 +1003,11 @@ def main(argv: list[str]) -> int:
         die("--emit-initial is incompatible with --widen-from and --repair-from")
     if bool(args.failure_log) != bool(args.repair_from):
         die("--failure-log is required with, and only valid for, --repair-from")
+    if args.llm_timeout_secs is None:
+        args.llm_timeout_secs = (
+            decision_timeout("build-script-converge")
+            if args.repair_from else 60
+        )
 
     src = Path(args.src).expanduser().absolute()
     if not src.is_dir():
@@ -858,6 +1029,8 @@ def main(argv: list[str]) -> int:
 
     slug = src.name
     readme_excerpt = read_readme_excerpt(src)
+    build_manifest_excerpt = read_build_manifest_excerpt(src, build_system)
+    host_summary = f"{sys.platform}/{platform.machine()}"
 
     if args.emit_initial:
         script = initial_script(build_system, args.sanitizer, args.extra_flag)
@@ -915,6 +1088,10 @@ def main(argv: list[str]) -> int:
         ok, reason = validate_proposed_script(script)
         if not ok:
             die(f"--repair-from recipe is invalid: {reason}")
+        baseline_contract = script
+        build_manifest_excerpt = read_build_manifest_excerpt(
+            src, build_system, repair_seed_log
+        )
         missing = detect_missing_commands(repair_seed_log)
         if missing:
             die(
@@ -922,19 +1099,32 @@ def main(argv: list[str]) -> int:
                 f"recipe error: {' '.join(missing)}",
                 rc=3,
             )
-        info(
-            "repair: asking LLM for revision from the failed clean-build log "
-            f"(tail {min(len(repair_seed_log), _BUILD_LOG_TAIL_BYTES)} bytes)"
+        revised, deterministic = deterministic_recipe_revision(
+            script, build_system=build_system, build_log=repair_seed_log,
+            build_manifest_excerpt=build_manifest_excerpt,
+            host_summary=host_summary,
         )
-        revised = ask_llm_for_revision(
-            slug=slug, build_system=build_system, sanitizer=args.sanitizer,
-            current_script=script, build_log=repair_seed_log,
-            readme_excerpt=readme_excerpt,
-            timeout_secs=args.llm_timeout_secs,
-        )
-        if revised is None:
-            die("repair LLM returned no script", rc=3)
+        if deterministic:
+            info("repair: derived " + ", ".join(deterministic))
+        else:
+            info(
+                "repair: asking LLM for revision from the failed clean-build log "
+                f"(tail {min(len(repair_seed_log), _BUILD_LOG_TAIL_BYTES)} bytes)"
+            )
+            revised = ask_llm_for_revision(
+                slug=slug, build_system=build_system, sanitizer=args.sanitizer,
+                current_script=script, build_log=repair_seed_log,
+                readme_excerpt=readme_excerpt,
+                timeout_secs=args.llm_timeout_secs,
+                build_manifest_excerpt=build_manifest_excerpt,
+                host_summary=host_summary,
+            )
+            if revised is None:
+                die("repair LLM returned no script", rc=3)
         ok, reason = validate_proposed_script(revised)
+        if not ok:
+            die(f"repair LLM script rejected ({reason})", rc=3)
+        ok, reason = widened_preserves_baseline(baseline_contract, revised)
         if not ok:
             die(f"repair LLM script rejected ({reason})", rc=3)
         if revised.strip() == script.strip():
@@ -942,6 +1132,7 @@ def main(argv: list[str]) -> int:
         script = revised
     else:
         script = initial_script(build_system, args.sanitizer, args.extra_flag)
+        baseline_contract = script
 
     # Write the candidate script next to scratch each iteration so the
     # build can be inspected on failure.
@@ -1003,6 +1194,26 @@ def main(argv: list[str]) -> int:
         if i == args.max_iters:
             break
 
+        build_manifest_excerpt = read_build_manifest_excerpt(src, build_system, log)
+
+        revised, deterministic = deterministic_recipe_revision(
+            script, build_system=build_system, build_log=log,
+            build_manifest_excerpt=build_manifest_excerpt,
+            host_summary=host_summary,
+        )
+        if deterministic:
+            ok, reason = validate_proposed_script(revised)
+            if not ok:
+                info(f"iter {i}: rejecting deterministic revision ({reason})")
+                break
+            ok, reason = widened_preserves_baseline(baseline_contract, revised)
+            if not ok:
+                info(f"iter {i}: rejecting deterministic revision ({reason})")
+                break
+            info(f"iter {i}: derived " + ", ".join(deterministic))
+            script = revised
+            continue
+
         # Ask the LLM for a revised complete script. There is no revision
         # request after the final build attempt because it could never be
         # validated or persisted.
@@ -1012,12 +1223,18 @@ def main(argv: list[str]) -> int:
             current_script=script, build_log=log,
             readme_excerpt=readme_excerpt,
             timeout_secs=args.llm_timeout_secs,
+            build_manifest_excerpt=build_manifest_excerpt,
+            host_summary=host_summary,
         )
         if revised is None:
             info(f"iter {i}: LLM returned no script — giving up")
             break
 
         ok, reason = validate_proposed_script(revised)
+        if not ok:
+            info(f"iter {i}: rejecting LLM script ({reason})")
+            break
+        ok, reason = widened_preserves_baseline(baseline_contract, revised)
         if not ok:
             info(f"iter {i}: rejecting LLM script ({reason})")
             break

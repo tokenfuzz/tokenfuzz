@@ -100,6 +100,33 @@ class VerifyOnlyCellTests(unittest.TestCase):
         self._build()
         self.assertEqual([], build_preflight.build_problems(self.target, self.config))
 
+    def test_build_checks_use_the_configured_source_subdirectory(self) -> None:
+        checkout = self.tmp / "checkout"
+        source = checkout / "python"
+        _native_target(source)
+        config_path = checkout / "target.toml"
+        config_path.write_text(
+            'target = "sampleproj"\nsource_subdir = "python"\n'
+            'build_system = "cmake"\nasan_bin = "build-asan/app"\n',
+            encoding="utf-8",
+        )
+        config = target_config.Config(target_root=str(checkout))
+        target_config.load_toml_into(config, config_path)
+        (source / "build-asan").mkdir()
+        app = source / "build-asan" / "app"
+        app.write_text("#!/bin/sh\n", encoding="utf-8")
+        app.chmod(0o755)
+        target_config.build_write_stamp(source, "asan")
+
+        identity = build_preflight.build_identity(checkout, config)
+        self.assertIn("asan", identity["stamps"])
+        self.assertEqual([], build_preflight.build_problems(checkout, config))
+        self.assertEqual(
+            [], build_preflight.pinned_build_problems(
+                checkout, identity, config,
+            ),
+        )
+
     def test_missing_tree_is_a_problem(self) -> None:
         problems = build_preflight.build_problems(self.target, self.config)
         self.assertTrue(any("missing" in item for item in problems), problems)

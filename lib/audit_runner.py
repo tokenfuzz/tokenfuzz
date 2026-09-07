@@ -59,6 +59,7 @@ STRATEGY_FORCE_EXTRA = 5
 PROVIDER_PAUSE_MAX_SECONDS = 6 * 60 * 60
 TRANSIENT_RETRY_MAX = 6
 _OWNED_INSTANCE_LOCKS: set[Path] = set()
+_CODEX_UPGRADE_REQUIRED = "requires a newer version of Codex"
 
 
 def _agent_timeout() -> int:
@@ -353,13 +354,15 @@ def prepare_runtime(
     agent_security: str = llm_invoke.DEFAULT_AGENT_SECURITY,
     since: str = "",
 ) -> Runtime:
+    checkout_root = target_root
     output_root = root / "output" / output_slug
-    config = _load_config(root, target_root, output_root, target_slug)
+    config = _load_config(root, checkout_root, output_root, target_slug)
+    target_root = Path(config.target_root)
     results = output_root / backend / "results"
     logs = output_root / backend / "logs"
     raw = logs / ".raw"
-    target_rev = target_config.detect_rev(target_root)
-    repo_type = target_config.detect_repo_type(target_root)
+    target_rev = target_config.detect_rev(checkout_root)
+    repo_type = target_config.detect_repo_type(checkout_root)
     # Resolved and checked before any run state is written, so a delta
     # the tree cannot take leaves no half-started run behind it.
     delta = workqueue.delta_scope(
@@ -395,7 +398,10 @@ def prepare_runtime(
         fixed_strategy_path.write_text(fixed_strategy + "\n", encoding="utf-8")
     else:
         fixed_strategy_path.unlink(missing_ok=True)
-    target_config.write_session_env(results, str(results), str(target_root), target_slug, target_rev, str(logs))
+    target_config.write_session_env(
+        results, str(results), str(checkout_root), target_slug, target_rev,
+        str(logs),
+    )
     _write_run_config(
         results / "state" / "run-config.json", total, browser, shell,
         backend, model, target_slug, agent_security, delta=delta,
@@ -463,6 +469,51 @@ def _operator_decision_timeout(override: str | None) -> int:
             f"LLM_DECISION_TIMEOUT must be a positive integer number of seconds (got {override!r})"
         )
     return int(override)
+
+
+def _codex_version(binary: str) -> tuple[int, ...]:
+    """Return a comparable CLI version, or empty when a candidate is opaque."""
+    try:
+        completed = subprocess.run(
+            [binary, "--version"], capture_output=True, text=True,
+            timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    match = re.search(
+        r"\bcodex(?:-cli)?\s+([0-9]+(?:\.[0-9]+)+)\b",
+        f"{completed.stdout}\n{completed.stderr}", re.IGNORECASE,
+    )
+    return tuple(int(part) for part in match.group(1).split(".")) if match else ()
+
+
+def _newer_codex_on_path() -> str:
+    """Find a newer same-name CLI already exposed by the operator's PATH."""
+    if os.environ.get("CODEX_BIN"):
+        return ""
+    current = shutil.which("codex")
+    if not current:
+        return ""
+    current_version = _codex_version(current)
+    if not current_version:
+        return ""
+    candidates: dict[Path, tuple[int, ...]] = {}
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory or ".") / "codex"
+        if not os.access(candidate, os.X_OK):
+            continue
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved == Path(current).resolve() or resolved in candidates:
+            continue
+        version = _codex_version(str(candidate))
+        if version > current_version:
+            candidates[resolved] = version
+    if not candidates:
+        return ""
+    return str(max(candidates, key=lambda path: candidates[path]))
 
 
 def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
@@ -600,6 +651,22 @@ def validate_model(runtime: Runtime, audit_guide: str = "") -> None:
                     agy_log.unlink(missing_ok=True)
                 index_log(runtime, f"Model preflight passed: backend={runtime.backend} model={runtime.model}")
                 return
+            if runtime.backend == "codex":
+                try:
+                    transcript = raw.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    transcript = ""
+                if _CODEX_UPGRADE_REQUIRED in transcript:
+                    replacement = _newer_codex_on_path()
+                    if not replacement:
+                        break
+                    os.environ["CODEX_BIN"] = replacement
+                    index_log(
+                        runtime,
+                        "Model preflight auto-remedy: provider requires a newer "
+                        f"Codex CLI; retrying with existing PATH candidate {replacement}",
+                    )
+                    continue
             if attempt < attempts:
                 # Provider startup and authentication failures benefit from a
                 # short retry delay, but this is harness policy rather than an
@@ -834,7 +901,22 @@ def _work_card_signature(
     # so they are part of the queue's identity. Without them a re-run under a
     # different --strategy reads its predecessor's queue as fresh and never
     # rebuilds it — and on a VCS target ttl=0 makes that permanent.
-    inputs: list[str] = []
+    # A source-identical target still needs a fresh queue after the harness's
+    # scope or ranking policy changes. Otherwise an upgraded harness keeps
+    # serving cards selected by the old code forever because VCS targets use
+    # a zero TTL. File metadata is enough here: housekeeping hashes the full
+    # path, size, and nanosecond mtime, while callgraph's inner fingerprint
+    # content-hashes the same policy for its independently cached artifact.
+    policy_root = Path(__file__).resolve().parent.parent
+    inputs: list[str] = [
+        str(policy_root / "bin" / "rank-work"),
+        str(policy_root / "bin" / "patch-cards"),
+        str(policy_root / "bin" / "peer-fix-cards"),
+        str(policy_root / "lib" / "workqueue.py"),
+        str(policy_root / "lib" / "audit_scope.py"),
+        str(policy_root / "lib" / "languages.py"),
+        str(policy_root / "lib" / "callgraph.py"),
+    ]
     inputs.extend(str(path) for path in sorted((runtime.results / "coverage").glob("edges-agent-*.journal")))
     inputs.extend(str(path) for path in sorted((runtime.results / "corpus").glob("COVER-*/metadata.md")))
     if source_signature is None:
@@ -1768,7 +1850,7 @@ def run_agent(
     first_probe = probe_stats.get("first_probe_seconds")
     index_log(
         runtime,
-        f"Agent {agent} {launch} {outcome} provider={issue} "
+        f"Agent {agent} {launch} {outcome} provider_issue={issue} "
         f"tokens={token_display} probes={probe_stats['probes']}"
         f"{'' if first_probe is None else f' first-probe={first_probe:.0f}s'}"
         f" probe-seconds={probe_stats['probe_seconds']:.0f} log={text_path.name}",
@@ -2400,6 +2482,20 @@ def should_skip_launch(
     return prompt.fuzz_leads_empty(runtime.results)
 
 
+def all_work_sources_exhausted(
+    runtime: Runtime, context: prompt.PromptContext,
+) -> bool:
+    """Recheck every lane after queue expansion, without the primary free pass."""
+    expand_work_cards_if_exhausted(runtime)
+    initialize_agent_strategies(runtime)
+    return all(
+        should_skip_launch(
+            runtime, context, agent, primary_always_launches=False,
+        )
+        for agent in range(1, runtime.num_agents + 1)
+    )
+
+
 def delta_queue_exhausted(
     runtime: Runtime, context: prompt.PromptContext,
 ) -> bool:
@@ -2679,7 +2775,9 @@ def pin_runtime_config(runtime: Runtime) -> None:
     """Reload and freeze the post-build execution contract for one backend."""
     config_path = runtime_config_path(runtime)
     if config_path is not None and config_path.is_file():
-        refreshed = target_config.Config(target_root=str(runtime.target_root))
+        refreshed = target_config.Config(
+            target_root=runtime.config.checkout_root or str(runtime.target_root)
+        )
         target_config.load_toml_into(refreshed, config_path)
         runtime.config = refreshed
         target_config.pin_session_config(runtime.results, config_path)
@@ -3924,6 +4022,17 @@ def run_continuous(state: BackendState) -> tuple[str, list[AgentResult]]:
     if status in ("rejected", "capacity", "transient"):
         return status, results
     if state.stopped:
+        return "stalled", results
+    if (
+        progress(runtime).active == 0
+        and all_work_sources_exhausted(runtime, context)
+    ):
+        index_log(
+            runtime,
+            "EXHAUSTED_STOP: no active hypothesis, handoff, claimable card, "
+            "or fuzz lead remains after queue expansion",
+        )
+        state.stopped = True
         return "stalled", results
     if _productive_wall_exhausted(state):
         return "budget", results

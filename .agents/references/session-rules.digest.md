@@ -29,6 +29,14 @@ harness's harvester only looks under `${RESULTS_DIR}`.
     Different C/C++ harness logic needs a unique sibling filename per testcase;
     put that exact name in HARNESS and never overwrite a shared harness.
   - `bin/probe "${RESULTS_DIR}/scratch-N/tc.html"` → 1 run; `--confirm` → 5 runs.
+  - Direct `.swift` and `.rs` testcases are package harnesses: `bin/probe`
+    compiles them against exported libraries even when `[runner].args` only
+    contains `{TESTCASE}` or the audited package has no executable product.
+  - On a harness build failure, use the raw first compiler diagnostic. If it
+    points into `scratch-N` (including copied `Sources/Probe/main.swift`),
+    repair the testcase and probe again; do not call it ENV-BLOCKED.
+  - An S8 counterexample prints a line beginning exactly
+    `PROPERTY VIOLATION:` and exits nonzero. Aliases receive no finding credit.
   - Do not create repo-root `scratch-N/` dirs; a bare relative path writes to
     the shell cwd, not the active audit scratch dir.
   - MISSED → revise input, don't discard. Don't burn ASan budget.
@@ -55,8 +63,9 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
 ## Memory before action
 
 - `bin/find-seed <file>[:<Function>]` before writing a fresh testcase.
-- `grep -A4 "SUBSYSTEM: <subsystem>" <RESULTS_DIR>/guards-db.md` before
-  building a hypothesis. Append a new entry on a reproducible guard string.
+- `bin/state recent-notes --kind guard --limit 40` before building a
+  hypothesis. Record a reproducible guard with `bin/state add-note --kind
+  guard` and its hypothesis/card id.
 - `bin/state recent-tried --agent N --limit 40` after compression. Never
   rerun identical inputs.
 - If recent-tried shows `closest`, mutate around that near-miss frame before

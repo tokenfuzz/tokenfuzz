@@ -13,7 +13,7 @@ Two consumers:
   ``tests/`` directory.
 
 Scope is deliberately narrow: only directory-name families that are
-universally non-product (doc, example, test, fuzz). Build outputs,
+universally non-product (doc, example, test, benchmark, fuzz). Build outputs,
 vendored deps, tools, scripts, and CI metadata are intentionally NOT
 excluded here — auditing vendored libraries and build-generated code
 is in scope.
@@ -30,7 +30,8 @@ from __future__ import annotations
 EXCLUDED_PATH_SEGMENTS = frozenset({
     "doc", "docs", "documentation",
     "example", "examples",
-    "test", "tests", "testing",
+    "test", "tests", "testing", "unittest", "unittests",
+    "bench", "benchmark", "benchmarks", "asv_bench",
     "fuzz", "fuzzer", "fuzzers", "fuzzing",
 })
 

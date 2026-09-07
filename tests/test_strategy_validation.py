@@ -70,6 +70,8 @@ class StrategyValidationTests(unittest.TestCase):
         ):
             self.assertRegex(s5, pattern)
         s7 = self.text("S7-adversarial-input.md")
+        self.assertIn("library-only Cargo package", s7)
+        self.assertIn("direct `.rs` testcase", s7)
         for pattern in (
             r"Strategy S7", r"Adversarial", r"Truncation",
             r"Size issue", r"Encoding.*charset", r"Format confusion", r"bin/probe",

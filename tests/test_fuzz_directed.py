@@ -1218,6 +1218,54 @@ class ArtifactLifecycleTests(unittest.TestCase):
             state, _ = self._routed(raw, "EXEC_FAIL", 1)
         self.assertEqual(state.seen_artifacts, [])
 
+    def test_timeout_artifact_uses_one_probe_unless_it_crashes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            results = root / "results"
+            results.mkdir()
+            source = root / "fuzz_api.c"
+            source.write_text("int LLVMFuzzerTestOneInput(void){return 0;}")
+            config = config_for(root / "src", ["bytes"])
+            config.results_dir = str(results)
+            campaign = fuzz_campaign.Campaign(config, log=lambda _: None)
+            campaign.deadline = fuzz_campaign.time.monotonic() + 600
+            state = campaign.add("fuzz_api", "/nonexistent", str(source))
+            artifacts = fuzz_harness.artifact_dir(results, "fuzz_api")
+            artifacts.mkdir(parents=True)
+            artifact = artifacts / "timeout-aaa"
+            artifact.write_bytes(b"a")
+            commands: list[list[str]] = []
+
+            def timed_out(command, _seconds, **_kwargs):
+                commands.append(command)
+                return subprocess.CompletedProcess(
+                    command, 0, "[probe] verdict=TIMEOUT\n", "",
+                )
+
+            with mock.patch.object(fuzz_campaign, "run_timeout", timed_out):
+                campaign.route_artifacts(state, [str(artifact)])
+            self.assertEqual(len(commands), 1)
+            self.assertNotIn("--confirm", commands[0])
+            self.assertEqual(state.seen_artifacts, ["timeout-aaa"])
+
+            state.seen_artifacts = []
+            commands.clear()
+            verdicts = iter(("CRASH", "CRASH"))
+
+            def crashes(command, _seconds, **_kwargs):
+                commands.append(command)
+                verdict = next(verdicts)
+                return subprocess.CompletedProcess(
+                    command, 0, f"[probe] verdict={verdict}\n", "",
+                )
+
+            with mock.patch.object(fuzz_campaign, "run_timeout", crashes):
+                campaign.route_artifacts(state, [str(artifact)])
+            self.assertEqual(len(commands), 2)
+            self.assertNotIn("--confirm", commands[0])
+            self.assertIn("--confirm", commands[1])
+            self.assertEqual(state.seen_artifacts, ["timeout-aaa"])
+
     def test_unadjudicated_artifacts_are_found_again_next_campaign(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             results = Path(raw) / "results"

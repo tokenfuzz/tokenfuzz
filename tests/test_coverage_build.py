@@ -365,6 +365,21 @@ class CoveragePreflightTests(unittest.TestCase):
                 )
             untouched.assert_not_called()
 
+    def test_race_runner_does_not_probe_asan_siblings(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "targets" / "sample"
+            target.mkdir(parents=True)
+            config = SimpleNamespace(sanitizers_enabled=["race"])
+            with mock.patch.object(
+                build_preflight.coverage_build, "materialize",
+            ) as untouched:
+                build_preflight._refresh_coverage(
+                    root, target, config, lambda _message: None,
+                )
+            untouched.assert_not_called()
+            self.assertEqual(build_preflight.enabled_sanitizers(config), [])
+
     def test_hold_builds_holds_the_sibling_that_exists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory)

@@ -76,7 +76,7 @@ else:
         self, mode: str | None = "browser", testcase: Path | None = None,
         *, runs: int = 1, environment: dict[str, str] | None = None,
         extra_args: list[str] | None = None,
-        process_boundary: bool = False,
+        process_boundary: bool = False, sanitizer: str = "asan",
     ) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         for key in (
@@ -92,7 +92,7 @@ else:
         })
         if environment:
             env.update({key: str(value) for key, value in environment.items()})
-        command = [sys.executable, str(self.bin / "run-sanitizer-multi"), "asan"]
+        command = [sys.executable, str(self.bin / "run-sanitizer-multi"), sanitizer]
         if mode is not None:
             command.append(mode)
         if testcase is not None or mode is not None:
@@ -147,6 +147,30 @@ else:
         self.assertIn("EXECUTION_RATE: 2/2", output)
         self.assertIn("SUCCESS_RATE: 0/2", output)
         self.assertIn("EXECUTION FAILED", output)
+
+        self.write_runner(
+            "print('NO_EXEC: optional native payload is absent')\n"
+            "print('[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=7)')\n"
+            "raise SystemExit(7)\n"
+        )
+        declared_no_exec = self.run_multi("generic")
+        output = self.output(declared_no_exec)
+        self.assertEqual(declared_no_exec.returncode, 2, output)
+        self.assertIn("EXECUTION_RATE: 0/1", output)
+        self.assertIn("testcase may not have executed", output)
+
+    def test_runner_sanitizers_skip_native_coverage_gate(self) -> None:
+        self.write_hits("raise SystemExit('native coverage must not run')\n")
+        for selected in ("race", "runner"):
+            with self.subTest(sanitizer=selected):
+                result = self.run_multi(
+                    mode="generic", sanitizer=selected,
+                    environment={"WANT": "sample_target"},
+                )
+                output = self.output(result)
+                self.assertEqual(result.returncode, 0, output)
+                self.assertNotIn("COVERAGE", output)
+                self.assertIn("TESTCASE_EXECUTED", output)
 
     def test_timeout_survives_repetition_as_a_structured_outcome(self) -> None:
         self.write_runner(

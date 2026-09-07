@@ -1789,6 +1789,25 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
             not audit_runner.should_skip_launch(skip_runtime, skip_context, 2),
             "an active hypothesis keeps a secondary agent active",
         )
+    skip_runtime.num_agents = 2
+    with mock.patch.object(
+        audit_runner, "expand_work_cards_if_exhausted", return_value=False,
+    ), mock.patch.object(
+        audit_runner, "initialize_agent_strategies",
+    ), mock.patch.object(
+        audit_runner, "should_skip_launch", return_value=True,
+    ) as exhausted_check:
+        check(
+            audit_runner.all_work_sources_exhausted(skip_runtime, skip_context),
+            "a fully drained queue is terminal even with the primary-agent discovery exception",
+        )
+        check(
+            all(
+                call.kwargs.get("primary_always_launches") is False
+                for call in exhausted_check.call_args_list
+            ),
+            "exhaustion rechecks every slot without the primary-agent free pass",
+        )
 
     # bin/audit owns the native build lazily: before agents spawn it rebuilds a
     # stale/missing sanitizer tree via setup-target --build so nobody audits a binary
@@ -1891,6 +1910,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     # --target-path must never accidentally build a same-named in-tree target.
     pf_runtime.target_root = root / "external-target"
     pf_runtime.target_root.mkdir()
+    pf_runtime.config.target_root = str(pf_runtime.target_root)
     with mock.patch.object(
         audit_runner.target_config, "build_freshness", return_value="missing"
     ), mock.patch.object(audit_runner.build_preflight.subprocess, "run") as pf_run_external:
@@ -1901,6 +1921,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "preflight never redirects an external target build to the in-tree slug",
     )
     pf_runtime.target_root = pf_target
+    pf_runtime.config.target_root = str(pf_target)
     # A browser backed by a supported native build system uses the same
     # freshness preflight, then exercises the sanitizer wrapper canary before
     # agents launch.

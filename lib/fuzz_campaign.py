@@ -955,8 +955,11 @@ class Campaign:
             # here instead paired its runtime with a library built by the
             # target's toolchain: two sanitizer runtimes in one process abort
             # before the testcase runs, and every artifact read EXEC_FAIL.
-            command = [sys.executable, str(probe), "--confirm",
-                       "--harness", replica.name]
+            timeout_artifact = artifact.name.startswith("timeout-")
+            command = [sys.executable, str(probe)]
+            if not timeout_artifact:
+                command.append("--confirm")
+            command += ["--harness", replica.name]
             # Without the hypothesis the run records against nothing, so the
             # campaign's crashes never join the strategy's evidence.
             if state.hypothesis_id:
@@ -976,6 +979,29 @@ class Campaign:
                      "PROBE_SANITIZER": self.sanitizer},
             )
             output = (completed.stdout or "") + (completed.stderr or "")
+            verdict = _PROBE_VERDICT.search(output)
+            # A fuzzer timeout has no crash signal to confirm, so five
+            # identical timeout runs only consume the campaign wall. Probe it
+            # once. If that replay exposes a crash instead, immediately take
+            # the normal five-run confirmation path before marking it seen.
+            if (
+                timeout_artifact and verdict is not None
+                and verdict.group(1) == "CRASH"
+            ):
+                if self.remaining() < self.reserve:
+                    self.log(
+                        f"[fuzz] {state.name}: {landed.name} crashed once "
+                        "but no confirmation budget remains; left pending"
+                    )
+                    break
+                confirm = list(command)
+                confirm.insert(2, "--confirm")
+                completed = run_timeout(
+                    confirm, max(self.reserve, int(self.remaining())),
+                    kill=True, capture_output=True, text=True,
+                    env={**os.environ, "PROBE_SANITIZER": self.sanitizer},
+                )
+                output = (completed.stdout or "") + (completed.stderr or "")
             for line in output.splitlines():
                 if "CRASH FILED" in line:
                     filed.append(line.strip())

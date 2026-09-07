@@ -109,6 +109,20 @@ preflight run a canary when the registry can prove target ownership. A runner
 that starts but imports only an installed package is rejected rather than
 silently auditing the wrong code.
 
+For a CMake or Meson project whose native products are Python extension modules, setup
+treats the completed extension build as an intermediate artifact. It then
+stages the package, builds an ASan-first Python host, and requires a successful
+import from that staging tree before setup succeeds. The runner reuses the
+isolated environment containing declared native build dependencies. If the
+import names one missing runtime dependency that exactly matches a standard
+project requirement, setup installs that declaration and repeats the canary;
+ambiguous or undeclared imports still fail setup.
+
+Optional LLM-derived build widening is converged by `bin/setup-target --build`
+and cached beside the target. Audit preflight refreshes a prepared recipe, but
+does not spend audit startup time asking a model to invent a missing optional
+recipe; the regular sanitizer build remains available.
+
 Use `bin/suggest-runner <target> --apply --force` only when the generated
 native CLI route is wrong. The helper selects from instrumented executables
 declared by the build, validates input-dependent behavior, and updates
@@ -123,6 +137,11 @@ A compiled `HARNESS:` testcase uses:
 - `includes` and `defines`;
 - `link_libs`, including target-relative archives or source files;
 - the target source root.
+
+After a CMake build, setup also evaluates the product's generated top-level
+package config when it names the selected static archive. Its published
+transitive libraries are merged into `link_libs`, with build-local paths kept
+relative so the same configuration works in container build trees.
 
 After repeated C/C++ harness build failures, `bin/auto-repair-target-toml`
 proposes a conservative additive repair to `includes`, `defines`, or

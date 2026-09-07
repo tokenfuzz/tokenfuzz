@@ -371,12 +371,10 @@ class BenchmarkReportTests(unittest.TestCase):
         # SANITIZER_RUNNER_BUILD_SYSTEMS is the single source of truth for
         # "this ecosystem's default runner drives a sanitizer." Guard it
         # against drift from lib/languages.py: every listed build system must
-        # map to a language whose canonical runner selects a sanitizer via a
-        # {SANITIZER}/{SWIFT_SANITIZER} token. Otherwise the model-direct
+        # map to a language that declares its canonical sanitizer. Otherwise the model-direct
         # prompt would advertise crash capability the runner cannot deliver.
         import languages
 
-        tokens = ("{SANITIZER}", "{SWIFT_SANITIZER}")
         for build_system in target_config.SANITIZER_RUNNER_BUILD_SYSTEMS:
             matches = [
                 lang for lang in languages.LANGUAGES
@@ -387,10 +385,9 @@ class BenchmarkReportTests(unittest.TestCase):
                 f"{build_system!r} has no language in lib/languages.py",
             )
             for lang in matches:
-                blob = " ".join((*lang.runner_args, *lang.runner_env))
                 self.assertTrue(
-                    any(tok in blob for tok in tokens),
-                    f"{lang.name} runner drives no sanitizer token",
+                    lang.default_sanitizers,
+                    f"{lang.name} runner declares no default sanitizer",
                 )
 
     def test_default_model_and_end_to_end_cell_metadata(self) -> None:

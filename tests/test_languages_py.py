@@ -143,25 +143,30 @@ assert_eq("php", languages.for_build_system("composer").name,
           "for_build_system: composer -> php")
 assert_eq("ruby", languages.for_build_system("bundler").name,
           "for_build_system: bundler -> ruby")
-assert_eq(("RUBYLIB={TARGET_ROOT}/lib",),
+assert_in("RUBYLIB={TARGET_ROOT}/lib",
           languages.for_build_system("bundler").runner_env,
           "Ruby runner imports the audited checkout")
+assert_in("RUBYOPT=-rbundler/setup",
+          languages.for_build_system("bundler").runner_env,
+          "Ruby runner activates the target's vendored bundle")
 assert_eq("java", languages.for_build_system("maven").name,
           "for_build_system: maven -> java")
 assert_eq("java", languages.for_build_system("gradle").name,
           "for_build_system: gradle -> java")
 assert_eq("kotlin", languages.for_build_system("kotlin").name,
           "for_build_system: kotlin -> kotlin")
-assert_eq(("PERL5LIB={TARGET_ROOT}/lib",),
-          languages.for_build_system("perl").runner_env,
-          "Perl runner imports the audited checkout")
+_perl_path = languages.for_build_system("perl").runner_env[0]
+assert_in("{TARGET_ROOT}/blib/arch", _perl_path,
+          "Perl runner loads the checkout's compiled XS modules")
+assert_in("{TARGET_ROOT}/.audit/perl5/lib/perl5", _perl_path,
+          "Perl runner loads target-local dependencies")
 assert_eq(("R_LIBS_USER={TARGET_ROOT}/.audit/r-library",),
           languages.for_build_system("rlang").runner_env,
           "R runner imports the target-local package install")
 # Every language whose runner executes a testcase as source can prove it
-# reaches the target. Swift is the documented exemption: its runner hands the
-# testcase to the package's own executable, so there is no source to run.
-_CANARY_EXEMPT = {"swift"}
+# reaches the target. Swift's canary is completed with a real exported module
+# after SwiftPM describes the package.
+_CANARY_EXEMPT = set()
 for _lang in languages.LANGUAGES:
     if not _lang.runner_bin or _lang.name in _CANARY_EXEMPT:
         continue
@@ -169,8 +174,8 @@ for _lang in languages.LANGUAGES:
                 f"{_lang.name} runner carries a reachability canary")
     assert_in("TOKENFUZZ-CANARY", _lang.canary_source,
               f"{_lang.name} canary prints the marker the harness reads")
-assert_eq("", languages.for_build_system("swift").canary_source,
-          "swift declares no canary rather than a canary it cannot run")
+assert_in("TOKENFUZZ-CANARY", languages.for_build_system("swift").canary_source,
+          "swift carries the marker used by its package-aware canary")
 
 # Native C/C++ build systems -> c (which carries the union)
 assert_eq("c", languages.for_build_system("cmake").name,
@@ -347,10 +352,16 @@ with tempfile.TemporaryDirectory() as td:
 
     (tmp_root / "DESCRIPTION").write_text("Package: sample\n")
     r_plan = languages.bootstrap_plan_for_target(tmp_root, "rlang")
-    assert_eq(2, len(r_plan["cmds"]),
-              "bootstrap: R creates a local library then installs the package")
+    assert_eq(3, len(r_plan["cmds"]),
+              "bootstrap: R installs dependencies before the package")
     assert_eq("Rscript", r_plan["cmds"][0][0],
               "bootstrap: R creates its local library portably")
+    assert_in("remotes::install_deps", r_plan["cmds"][1][-1],
+              "bootstrap: R resolves hard dependencies from DESCRIPTION")
+    assert_in("dependencies=NA", r_plan["cmds"][1][-1],
+              "bootstrap: R excludes development-only dependencies")
+    assert_eq(["R", "CMD", "INSTALL"], r_plan["cmds"][2][:3],
+              "bootstrap: R installs the package after its dependencies")
     assert_in(["R_LIBS_USER", ".audit/r-library"], r_plan["env"],
               "bootstrap: R install stays target-local")
     (tmp_root / "DESCRIPTION").unlink()
@@ -521,6 +532,106 @@ with tempfile.TemporaryDirectory() as td:
                 "bootstrap-plan npm: at least one alternative present")
 
 with tempfile.TemporaryDirectory() as td:
+    (Path(td) / "package.json").write_text(json.dumps({
+        "packageManager": "pnpm@10.0.0",
+        "scripts": {"build": "tsc"},
+    }))
+    plan = languages.bootstrap_plan_for_target(Path(td), "npm")
+    assert_eq([["npx", "--yes", "pnpm", "run", "build"]], plan["post_cmds"],
+              "bootstrap-plan npm: declared build runs after dependency install")
+
+with tempfile.TemporaryDirectory() as td:
+    (Path(td) / "composer.json").write_text(json.dumps({
+        "require": {"ext-json": "*"},
+        "require-dev": {"ext-sample": "*", "sample/tests": "^1"},
+    }))
+    plan = languages.bootstrap_plan_for_target(Path(td), "composer")
+    assert_eq([["composer", "install", "--no-interaction"]], plan["cmds"],
+              "bootstrap-plan composer: full install remains primary")
+    fallback = plan["alternatives"][0]
+    assert_in("--no-dev", fallback,
+              "bootstrap-plan composer: production-only fallback skips dev packages")
+    assert_in("--ignore-platform-req=ext-sample", fallback,
+              "bootstrap-plan composer: ignores a root development-only extension")
+    assert_true("--ignore-platform-req=ext-json" not in fallback,
+                "bootstrap-plan composer: production extension remains enforced")
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    old_bin = root / "path-bin"
+    brew_bin = root / "brew-bin"
+    keg_bin = root / "new-ruby" / "bin"
+    for directory in (old_bin, brew_bin, keg_bin):
+        directory.mkdir(parents=True)
+    for path, version in ((old_bin / "ruby", "2.6.10"),
+                          (keg_bin / "ruby", "3.4.2")):
+        path.write_text(f"#!/bin/sh\nprintf '%s' '{version}'\n")
+        path.chmod(0o755)
+        bundle = path.with_name("bundle")
+        bundle.write_text("#!/bin/sh\nexit 0\n")
+        bundle.chmod(0o755)
+    brew = brew_bin / "brew"
+    brew.write_text(f"#!/bin/sh\nprintf '%s\\n' '{keg_bin.parent}'\n")
+    brew.chmod(0o755)
+    ruby, bundle = languages.preferred_ruby_toolchain({
+        "PATH": f"{old_bin}:{brew_bin}",
+    })
+    assert_eq(str(keg_bin / "ruby"), ruby,
+              "Ruby discovery prefers a newer installed package-manager toolchain")
+    assert_eq(str(keg_bin / "bundle"), bundle,
+              "Ruby discovery keeps Bundler on the selected Ruby toolchain")
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    old_bin = root / "old" / "bin"
+    new_bin = root / "new" / "bin"
+    old_bin.mkdir(parents=True)
+    new_bin.mkdir(parents=True)
+    for path, version in ((old_bin / "perl", "v5.34.1"),
+                          (new_bin / "perl", "v5.40.5")):
+        path.write_text(f"#!/bin/sh\nprintf '%s' '{version}'\n")
+        path.chmod(0o755)
+    cpanm = old_bin / "cpanm"
+    cpanm.write_text("#!/bin/sh\nexit 0\n")
+    cpanm.chmod(0o755)
+    perl, cpanm_bin = languages.preferred_perl_toolchain({
+        "PATH": f"{old_bin}:{new_bin}",
+    })
+    assert_eq(str(new_bin / "perl"), perl,
+              "Perl discovery prefers the newest installed PATH toolchain")
+    assert_eq(str(cpanm), cpanm_bin,
+              "Perl discovery returns an available cpanm script")
+    assert_in("v5.40.5", languages.perl_local_lib_root(perl, {
+        "PATH": f"{old_bin}:{new_bin}",
+    }), "Perl dependency root is isolated by interpreter version")
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / "Makefile.PL").write_text("# sample\n")
+    (root / "lib" / "Sample").mkdir(parents=True)
+    (root / "lib" / "Sample.pm").write_text("package Sample; 1;\n")
+    (root / "lib" / "Sample" / "Nested.pm").write_text(
+        "package Sample::Nested; 1;\n"
+    )
+    plan = languages.bootstrap_plan_for_target(root, "perl")
+    assert_eq(4, len(plan["cmds"]),
+              "bootstrap-plan Perl: installs dependencies, builds, and installs")
+    assert_in("--installdeps", plan["cmds"][0],
+              "bootstrap-plan Perl: resolves declared CPAN dependencies")
+    assert_in("--verbose", plan["cmds"][0],
+              "bootstrap-plan Perl: exposes configure prerequisite diagnostics")
+    assert_in("{TARGET_ROOT}", plan["env"][0][1],
+              "bootstrap-plan Perl: requests an absolute local-library path")
+    assert_true(any(value.startswith(".audit/perl5/") for value in plan["cmds"][0]),
+                "bootstrap-plan Perl: isolates native dependencies by ABI")
+    assert_eq("Sample.pm", languages.perl_canary_module(root),
+              "Perl canary selects the distribution's shallow root module")
+    (root / "Makefile").write_text("# generated\n")
+    rebuilt = languages.bootstrap_plan_for_target(root, "perl")
+    assert_eq(["make", "realclean"], rebuilt["cmds"][0],
+              "bootstrap-plan Perl: cleans generated native artifacts before rebuild")
+
+with tempfile.TemporaryDirectory() as td:
     (Path(td) / "setup.py").write_text("# x\n")
     out, _, _ = run(CLI + ["bootstrap-plan", "python", td])
     plan = json.loads(out)
@@ -539,6 +650,8 @@ with tempfile.TemporaryDirectory() as td:
     target_root = Path(td)
     log_path = target_root / ".audit" / "bootstrap.log"
     recipe_path = target_root / ".audit" / "bootstrap.sh"
+    log_path.parent.mkdir()
+    log_path.write_text("stale-error-from-prior-setup\n")
     plan = {
         "cmds": [
             [sys.executable, "-c", "print('first-ok')"],
@@ -547,7 +660,11 @@ with tempfile.TemporaryDirectory() as td:
         "alternatives": [
             [sys.executable, "-c", "import os; print(os.environ['SETUP_SENTINEL'])"],
         ],
-        "env": [["SETUP_SENTINEL", "fallback ok"]],
+        "post_cmds": [
+            [sys.executable, "-c", "print('post-ok')"],
+        ],
+        "env": [["SETUP_SENTINEL", "fallback ok"],
+                ["ROOT_SENTINEL", "{TARGET_ROOT}/deps"]],
     }
     rc = languages.execute_bootstrap_plan(target_root, plan, log_path, recipe_path)
     assert_eq(0, rc, "bootstrap executor: successful final alternative returns zero")
@@ -555,6 +672,12 @@ with tempfile.TemporaryDirectory() as td:
     assert_in("first-ok", log_text, "bootstrap executor: logs successful command output")
     assert_in("primary-failed", log_text, "bootstrap executor: logs failed command output")
     assert_in("fallback ok", log_text, "bootstrap executor: applies plan environment")
+    assert_in("post-ok", log_text,
+              "bootstrap executor: runs post-install commands after fallback")
+    assert_true("stale-error-from-prior-setup" not in log_text,
+                "bootstrap executor: log describes only the current setup")
+    assert_in(str(target_root / "deps"), recipe_path.read_text(),
+              "bootstrap executor: materializes target-root placeholders")
     recipe_text = recipe_path.read_text()
     assert_in("export SETUP_SENTINEL='fallback ok'", recipe_text,
               "bootstrap executor: quotes environment in recipe")
@@ -562,8 +685,60 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap executor: recipe retains successful preceding command")
     assert_in("SETUP_SENTINEL", recipe_text,
               "bootstrap executor: recipe records successful alternative")
+    assert_in("post-ok", recipe_text,
+              "bootstrap executor: recipe records successful post-install command")
     assert_eq(True, bool(recipe_path.stat().st_mode & 0o111),
               "bootstrap executor: recipe is executable")
+    failed_plan = {
+        "cmds": [[sys.executable, "-c",
+                  "print('current-failure'); raise SystemExit(9)"]],
+        "alternatives": [], "post_cmds": [], "env": [],
+    }
+    rc = languages.execute_bootstrap_plan(
+        target_root, failed_plan, log_path, recipe_path,
+    )
+    assert_eq(9, rc, "bootstrap executor: reports a failed new attempt")
+    assert_true(not recipe_path.exists(),
+                "bootstrap executor: failed attempt removes stale recipe")
+    assert_in("current-failure", log_path.read_text(),
+              "bootstrap executor: failed attempt keeps its diagnostic")
+    assert_true("first-ok" not in log_path.read_text(),
+                "bootstrap executor: failed attempt replaces the prior log")
+
+# A CPAN repository checkout can need configure prerequisites before cpanm can
+# execute Makefile.PL and discover the rest.  The executor uses cpanm's own
+# diagnostic to install exactly those modules, then retries the unchanged
+# dependency command and records a reproducible recipe.
+with tempfile.TemporaryDirectory() as td:
+    target_root = Path(td)
+    fake_bin = target_root / "bin"
+    fake_bin.mkdir()
+    fake_cpanm = fake_bin / "cpanm"
+    fake_cpanm.write_text(
+        "#!/bin/sh\n"
+        "case \" $* \" in\n"
+        "  *' Sample::Configure '*) touch .configured; exit 0 ;;\n"
+        "esac\n"
+        "if [ ! -f .configured ]; then\n"
+        "  echo 'Configuring sample ... Warning: prerequisite Sample::Configure 1.0 not found.'\n"
+        "  exit 1\n"
+        "fi\n"
+        "echo dependencies-ready\n"
+    )
+    fake_cpanm.chmod(0o755)
+    log_path = target_root / ".audit" / "bootstrap.log"
+    recipe_path = target_root / ".audit" / "bootstrap.sh"
+    plan = {
+        "cmds": [[str(fake_cpanm), "--local-lib-contained", ".audit/perl5",
+                  "--installdeps", "."]],
+        "alternatives": [], "post_cmds": [], "env": [],
+    }
+    rc = languages.execute_bootstrap_plan(target_root, plan, log_path, recipe_path)
+    assert_eq(0, rc, "bootstrap executor: repairs CPAN configure dependency cycle")
+    assert_in("dependencies-ready", log_path.read_text(),
+              "bootstrap executor: retries dependency discovery after repair")
+    assert_in("Sample::Configure", recipe_path.read_text(),
+              "bootstrap executor: records the cpanm prerequisite repair")
 
 # fuzz-backends CLI returns the maintained toolchains per build_system.
 out, _, _ = run(CLI + ["fuzz-backends", "python"])

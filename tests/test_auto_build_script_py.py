@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 ABS = ROOT / "bin" / "auto-build-script"
@@ -241,6 +242,8 @@ try:
         slug="sampleproj", build_system="cmake", sanitizer="asan",
         current_script="#!/bin/bash\nset -eu\n", build_log="failed",
         readme_excerpt="Use the bundled configure preset.", timeout_secs=10,
+        build_manifest_excerpt="option(SAMPLE_BACKEND)",
+        host_summary="darwin/arm64",
     )
     abs_mod.ask_llm_for_revision(
         slug="sampleproj", build_system="cmake", sanitizer="asan",
@@ -252,10 +255,129 @@ finally:
 
 ok("Use the bundled configure preset." in captured_prompts[0],
    "prompt: caller includes a non-empty README excerpt")
+ok("option(SAMPLE_BACKEND)" in captured_prompts[0] and "darwin/arm64" in captured_prompts[0],
+   "prompt: repair receives bounded build declarations and host platform")
+ok("untrusted target data" in captured_prompts[0],
+   "prompt: build declarations cannot override repair safety rules")
 ok("Upstream README build-instructions excerpt" not in captured_prompts[1],
    "prompt: caller omits the README section when no excerpt exists")
 ok(all("{%" not in prompt and "%}" not in prompt for prompt in captured_prompts),
    "prompt: unsupported template control tags never reach the model")
+with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "codex"}, clear=True):
+    ok(abs_mod.decision_timeout("build-script-converge") == 100,
+       "repair timeout covers twice the slowest observed hosted completion")
+
+with tempfile.TemporaryDirectory() as _manifest_tmp:
+    _manifest_root = Path(_manifest_tmp)
+    (_manifest_root / "CMakeLists.txt").write_text(
+        "set(SAMPLE_DEVICE cpu CACHE STRING \"backend\")\n", encoding="utf-8"
+    )
+    ok(
+        "SAMPLE_DEVICE" in abs_mod.read_build_manifest_excerpt(_manifest_root, "cmake"),
+        "repair context reads the detected build system's primary manifest",
+    )
+    (_manifest_root / "cmake").mkdir()
+    (_manifest_root / "cmake" / "backend.cmake").write_text(
+        'set(SAMPLE_ACCELERATORS "${SAMPLE_ACCELERATORS}" CACHE STRING "backends")\n'
+        'if(SAMPLE_ACCELERATORS)\nendif()\n',
+        encoding="utf-8",
+    )
+    _failure_manifest = abs_mod.read_build_manifest_excerpt(
+        _manifest_root,
+        "cmake",
+        "CMake Error at cmake/backend.cmake:9 (message): backend failure\n",
+    )
+    ok(
+        _failure_manifest.startswith("--- cmake/backend.cmake ---")
+        and "SAMPLE_ACCELERATORS" in _failure_manifest,
+        "repair context prioritizes the CMake file named by the diagnostic",
+    )
+
+with tempfile.TemporaryDirectory() as _build_log_tmp:
+    _build_log = Path(_build_log_tmp) / "materialize.log"
+    _build_log.write_text(
+        "=== old recipe ===\nold failure that must not be resent\n"
+        "=== current recipe ===\ncurrent failure\n",
+        encoding="utf-8",
+    )
+    _latest_failure = abs_mod.read_build_log_tail(_build_log)
+    ok(
+        _latest_failure.startswith("=== current recipe ===")
+        and "old failure" not in _latest_failure,
+        "repair context sends only the latest append-only build attempt",
+    )
+
+_derived_recipe, _derived_labels = abs_mod.deterministic_recipe_revision(
+    abs_mod.initial_script("cmake", "asan"),
+    build_system="cmake",
+    build_log=(
+        "Please set SAMPLE_PYTHON_EXECUTABLE to the path of the desired python "
+        "version before running cmake configure.\n"
+    ),
+    build_manifest_excerpt=(
+        'set(SAMPLE_TARGET_DEVICE "cuda" CACHE STRING "Target backend")\n'
+        'if (SAMPLE_TARGET_DEVICE STREQUAL "cpu")\nendif()\n'
+    ),
+    host_summary="darwin/arm64",
+)
+ok(
+    '-DSAMPLE_PYTHON_EXECUTABLE:FILEPATH="$(command -v python3)"' in _derived_recipe
+    and "-DSAMPLE_TARGET_DEVICE=cpu" in _derived_recipe,
+    "deterministic CMake repair derives required Python and advertised Darwin CPU flags",
+)
+ok(
+    len(_derived_labels) == 2
+    and abs_mod.widened_preserves_baseline(
+        abs_mod.initial_script("cmake", "asan"), _derived_recipe
+    )[0],
+    "deterministic CMake repair retains the sanitizer build baseline",
+)
+_linux_recipe, _ = abs_mod.deterministic_recipe_revision(
+    abs_mod.initial_script("cmake", "asan"),
+    build_system="cmake", build_log="",
+    build_manifest_excerpt=(
+        'set(SAMPLE_TARGET_DEVICE "cuda" CACHE STRING "Target backend")\n'
+        'if (SAMPLE_TARGET_DEVICE STREQUAL "cpu")\nendif()\n'
+    ),
+    host_summary="linux/x86_64",
+)
+ok(
+    "-DSAMPLE_TARGET_DEVICE=cpu" not in _linux_recipe,
+    "deterministic CMake repair does not replace accelerator selection on Linux",
+)
+_optional_recipe, _optional_labels = abs_mod.deterministic_recipe_revision(
+    abs_mod.initial_script("cmake", "asan"),
+    build_system="cmake",
+    build_log="Sample accelerator requires the Metal toolchain.\n",
+    build_manifest_excerpt=(
+        'set(SAMPLE_RENDERERS "${SAMPLE_RENDERERS}" CACHE STRING "backends")\n'
+        'if(SAMPLE_RENDERERS)\nendif()\n'
+        'set(SAMPLE_ACCELERATORS "${SAMPLE_ACCELERATORS}" CACHE STRING "backends")\n'
+        'if(SAMPLE_ACCELERATORS)\nendif()\n'
+    ),
+    host_summary="darwin/arm64",
+)
+ok(
+    "-DSAMPLE_ACCELERATORS=" in _optional_recipe
+    and "-DSAMPLE_RENDERERS=" not in _optional_recipe
+    and _optional_labels == [
+        "disabled unavailable optional backend (SAMPLE_ACCELERATORS)"
+    ],
+    "deterministic CMake repair disables a matching optional backend after its toolchain failure",
+)
+_required_recipe, _ = abs_mod.deterministic_recipe_revision(
+    abs_mod.initial_script("cmake", "asan"),
+    build_system="cmake",
+    build_log="Sample accelerator requires the Metal toolchain.\n",
+    build_manifest_excerpt=(
+        'set(SAMPLE_ACCELERATORS "${SAMPLE_ACCELERATORS}" CACHE STRING "backends")\n'
+    ),
+    host_summary="darwin/arm64",
+)
+ok(
+    "-DSAMPLE_ACCELERATORS=" not in _required_recipe,
+    "deterministic CMake repair does not disable a backend without an advertised empty branch",
+)
 
 
 # ─── Existing-recipe repair budget ────────────────────────────────────
@@ -392,6 +514,65 @@ ok(_script.index("-DFIRST=1") < _script.index("-DVALUE=two words") < _script.ind
 ok("'-DVALUE=two words'" in _script and "'-DTHIRD=$(literal)'" in _script,
    "named config flags are shell-quoted as single literal argv entries")
 
+_meson_script = abs_mod.initial_script("meson", "asan", [])
+ok("vendored-meson/meson/meson.py" in _meson_script,
+   "meson recipe prefers a repository's pinned driver when present")
+ok(_meson_script.count('"${meson_cmd[@]}"') == 2,
+   "the same selected Meson driver configures and compiles")
+ok(abs_mod.validate_proposed_script(_meson_script)[0],
+   "the generated Meson recipe passes the shared safety validator")
+
+for _build_system in ("cmake", "meson"):
+    _package_script = abs_mod.initial_script(_build_system, "asan", [])
+    ok("brew --prefix" in _package_script and "CMAKE_PREFIX_PATH" in _package_script,
+       f"{_build_system} recipe exposes installed Homebrew package prefixes")
+    ok("${CMAKE_PREFIX_PATH:+$CMAKE_PREFIX_PATH:}$homebrew_prefix/opt" in _package_script,
+       f"{_build_system} recipe preserves operator package precedence")
+
+with tempfile.TemporaryDirectory() as _prefix_tmp:
+    _prefix_root = Path(_prefix_tmp)
+    _prefix_bin = _prefix_root / "bin"
+    _prefix_src = _prefix_root / "src"
+    _prefix_build = _prefix_root / "build"
+    _prefix_homebrew = _prefix_root / "homebrew"
+    _prefix_bin.mkdir()
+    _prefix_src.mkdir()
+    (_prefix_homebrew / "opt").mkdir(parents=True)
+    (_prefix_bin / "brew").write_text(
+        f"#!/bin/sh\nprintf '%s\\n' '{_prefix_homebrew}'\n", encoding="utf-8"
+    )
+    (_prefix_bin / "meson").write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1\" = setup ]; then\n"
+        "  printf '%s' \"$CMAKE_PREFIX_PATH\" > \"$3/package-prefix\"\n"
+        "fi\n",
+        encoding="utf-8",
+    )
+    (_prefix_bin / "brew").chmod(0o755)
+    (_prefix_bin / "meson").chmod(0o755)
+    _prefix_recipe = _prefix_root / "build.sh"
+    _prefix_recipe.write_text(_meson_script, encoding="utf-8")
+    _prefix_run = subprocess.run(
+        ["bash", str(_prefix_recipe), str(_prefix_src), str(_prefix_build)],
+        env={
+            **os.environ,
+            "PATH": f"{_prefix_bin}:{os.environ.get('PATH', '')}",
+            "CMAKE_PREFIX_PATH": "/operator/packages",
+        },
+        check=False,
+    )
+    _observed_prefix = (
+        (_prefix_build / "package-prefix").read_text(encoding="utf-8")
+        if (_prefix_build / "package-prefix").is_file() else ""
+    )
+    ok(
+        _prefix_run.returncode == 0 and _observed_prefix == (
+            f"/operator/packages:{_prefix_homebrew}/opt"
+        ),
+        "meson recipe exposes package-manager dependencies without replacing operator prefixes",
+        detail=f"rc={_prefix_run.returncode} prefix={_observed_prefix!r}",
+    )
+
 _baseline = (
     "#!/usr/bin/env bash\nset -eu\nsrc=\"$1\"; build=\"$2\"\n"
     ": -fsanitize=address -O2 -g1 -DNDEBUG -fno-omit-frame-pointer\n"
@@ -401,6 +582,9 @@ ok(abs_mod.widened_preserves_baseline(_baseline, _baseline + ": -DWITH_X=ON\n")[
 ok(not abs_mod.widened_preserves_baseline(
        _baseline, _baseline.replace("-fsanitize=address", ""))[0],
    "widen guard rejects a candidate that drops the sanitizer")
+ok(not abs_mod.widened_preserves_baseline(
+       _baseline, _baseline.replace("-g1", "-g"))[0],
+   "build revision guard rejects a candidate that expands line tables to full debug data")
 ok(abs_mod.widened_adds_advertised_option(
        _baseline, _baseline + ": -DWITH_PARSER=ON\n", "WITH_PARSER\nBUILD_TESTING", "cmake"),
    "widen guard requires an advertised feature option")

@@ -79,12 +79,11 @@ class RunnerPreflightTests(unittest.TestCase):
             # A nested slug never names the package product, so preflight has
             # to build what [runner].args select, not what the slug says.
             config.slug = "samples/sampleproj"
-            config.runner_args = [
-                arg.replace("{TARGET_SLUG}", "sampleproj")
-                for arg in runner_preflight.languages.for_build_system(
-                    "swift"
-                ).runner_args
-            ]
+            config.runner_args = list(
+                runner_preflight.languages.swift_executable_runner_args(
+                    "sampleproj"
+                )
+            )
             failed = SimpleNamespace(
                 returncode=1, stdout=b"SDK does not match this compiler\n",
             )
@@ -96,16 +95,12 @@ class RunnerPreflightTests(unittest.TestCase):
             ) as launched:
                 with self.assertRaisesRegex(RuntimeError, "SDK does not match"):
                     runner_preflight.validate(config)
-            self.assertEqual(
-                [
-                    str(swift), "build", "--quiet", "--disable-sandbox",
-                    "-c", "release", "-Xswiftc", "-sanitize=address",
-                    "-Xswiftc", "-O", "--scratch-path",
-                    str(root / ".audit" / "swift-build-address"),
-                    "--package-path", str(root), "--product", "sampleproj",
-                ],
-                launched.call_args_list[1].args[0],
-            )
+            prepare = launched.call_args_list[1].args[0]
+            self.assertEqual([str(swift), "build"], prepare[:2])
+            self.assertIn("-sanitize=address", prepare)
+            self.assertIn(str(root / ".audit" / "swift-build-address"), prepare)
+            self.assertIn(str(root / ".audit" / "swiftpm" / "cache"), prepare)
+            self.assertEqual(["--product", "sampleproj"], prepare[-2:])
 
     def test_preflight_is_skipped_when_no_program_is_named(self):
         """A script route without --skip-build prepares itself at execution."""
@@ -158,12 +153,11 @@ class RunnerPreflightTests(unittest.TestCase):
             config = self.config(root, "swift", findings_only=False)
             config.build_system = "swift"
             config.sanitizers_enabled = ["asan", "ubsan"]
-            config.runner_args = [
-                arg.replace("{TARGET_SLUG}", "sampleproj")
-                for arg in runner_preflight.languages.for_build_system(
-                    "swift"
-                ).runner_args
-            ]
+            config.runner_args = list(
+                runner_preflight.languages.swift_executable_runner_args(
+                    "sampleproj"
+                )
+            )
             completed = SimpleNamespace(returncode=0, stdout=b"ok\n")
             with mock.patch.object(
                 runner_preflight.shutil, "which", return_value=str(swift),

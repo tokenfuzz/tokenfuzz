@@ -753,6 +753,19 @@ class FingerprintTests(unittest.TestCase):
             )
         self.assertEqual(signature, "")
 
+    def test_scope_policy_is_part_of_the_cache_signature(self) -> None:
+        with mock.patch.object(
+            target_config, "vcs_source_signature", return_value="source-1",
+        ), mock.patch.object(callgraph, "_toolchain", return_value="tools-1"):
+            first = callgraph.cache_signature(
+                self.ctx.target_root, self.ctx.results_dir, ("", ""),
+            )
+            with mock.patch.object(Path, "read_bytes", return_value=b"changed-policy"):
+                second = callgraph.cache_signature(
+                    self.ctx.target_root, self.ctx.results_dir, ("", ""),
+                )
+        self.assertNotEqual(first, second)
+
     def test_the_outer_gate_queries_the_source_once(self) -> None:
         import audit_runner
 

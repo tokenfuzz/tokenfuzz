@@ -79,6 +79,33 @@ class PeerFixCardsFacadeTests(unittest.TestCase):
         proc, output = self.run_command(self.facade)
         self.assert_facade_config_used(proc, output)
 
+    def test_live_nested_target_loads_config_from_checkout_root(self) -> None:
+        project = self.source / "nested"
+        project.mkdir()
+        (self.results / ".session-env").write_text(
+            f"TARGET_ROOT={self.source}\nTARGET_SLUG={self.slug}\n",
+            encoding="utf-8",
+        )
+        config = self.slug_dir / "target.toml"
+        config.write_text(
+            config.read_text(encoding="utf-8")
+            .replace('build_system = "cmake"\n',
+                     'source_subdir = "nested"\nbuild_system = "cmake"\n'),
+            encoding="utf-8",
+        )
+        output = self.results / "nested-peer-cards.jsonl"
+        proc = subprocess.run(
+            [
+                str(self.facade / "bin" / "peer-fix-cards"),
+                "--target-path", str(project), "--target-slug", self.slug,
+                "--results-dir", str(self.results), "--output", str(output),
+                "--quiet",
+            ],
+            cwd=str(self.facade), capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(output.is_file())
+
     def test_audit_exports_script_root_to_children(self) -> None:
         source = (ROOT / "lib" / "audit_runner.py").read_text(encoding="utf-8")
         self.assertIn('os.environ["SCRIPT_ROOT"] = str(root)', source)

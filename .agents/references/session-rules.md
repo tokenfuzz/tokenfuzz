@@ -70,6 +70,17 @@ bin/probe --confirm "${RESULTS_DIR}/scratch-N/tc.html"     # 5 runs (after first
 bin/probe "${RESULTS_DIR}/scratch-N/tc.xml" -- 8 100       # trailing args go to the harness
 ```
 
+Direct `.swift` and `.rs` testcases are package harnesses: `bin/probe`
+compiles them against exported libraries even when `[runner].args` only
+contains `{TESTCASE}` or the audited package has no executable product.
+On a harness build failure, use the raw first compiler diagnostic printed by
+`bin/probe`. If it points into `scratch-N` (including a copied
+`Sources/Probe/main.swift`), repair the testcase and probe again; do not
+paraphrase it into an environment failure.
+An S8 counterexample prints a line beginning exactly `PROPERTY VIOLATION:`
+and exits nonzero. Aliases such as `PROPERTY_FAIL` are ordinary testcase
+output and receive no finding credit.
+
 - Write testcases and sibling harnesses under `${RESULTS_DIR}/scratch-N/`;
   do not create top-level repo `scratch-N/` dirs. Native harness outputs
   belong under `RESULTS_DIR/scratch-N/` and should normally be built by
@@ -124,14 +135,15 @@ If it returns candidates, read the top 2-3 and start from seed + delta.
 If it returns nothing, write from scratch — seeds bootstrap mutation,
 they aren't a prerequisite.
 
-## Guards Database (Cross-Session Memory)
+## Guard Notes (Cross-Session Memory)
 
 Before building a hypothesis:
 ```
-grep -A4 "SUBSYSTEM: <your-subsystem>" <RESULTS_DIR>/guards-db.md
+bin/state recent-notes --kind guard --limit 40
 ```
 If a guard is listed, plan the documented bypass or pick a different target.
-When your testcase dies to a reproducible guard string, append a new entry.
+When your testcase dies to a reproducible guard string, record it with
+`bin/state add-note --agent N --hypothesis-id H-... --kind guard --text <proof>`.
 
 ## Tried-Inputs Memory (Survives Compression)
 

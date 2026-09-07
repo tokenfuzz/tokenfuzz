@@ -36,6 +36,8 @@ NUM_AGENTS=4 bin/audit --target <target> --backend <backend>
 | `POOL_OVERTIME` | `cohort-era` | Cohort mode only; an ordinary run refills every slot to the wall. Decides which in-flight peer lets a slot that finished after the initial cohort drained take its one extra session. `cohort-era`: only an initial session or a refill launched beside one, so an overtime session never justifies another. `any-peer`: any peer, including another slot's overtime; the per-slot cap and the `AGENT_TIMEOUT` clamp still bound the iteration at one extra session per slot. Measure it with the benchmark's Efficiency table (occupancy against confirmed per seat-hour) before making it a default. Any other value is refused. |
 | `SHELL_SANITIZER_RUN_BUDGET` | `60` | Sanitizer runs one shell/generic agent may spend per iteration. |
 | `BROWSER_SANITIZER_RUN_BUDGET` | `25` | The same budget for browser-mode agents. |
+| `ASAN_TIMEOUT` | `15` seconds (`10` for JavaScript mode) | Deadline for one ordinary ASan probe. Setup uses the same deadline when proving that a generated ASan Python host can import the staged native package. |
+| `FUZZ_ASAN_TIMEOUT` | `600` seconds | Deadline for one ASan fuzz or fuzz-replay process. |
 
 To bound an ordinary run, the positional iteration count is clearer than any of
 these:

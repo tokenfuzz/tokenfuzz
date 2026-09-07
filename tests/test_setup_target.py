@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import venv
 import time
 import unittest
 from pathlib import Path
@@ -170,6 +174,439 @@ class SetupTargetTests(unittest.TestCase):
     def config(self, slug: str) -> Path:
         return self.harness / "output" / slug / "target.toml"
 
+    def test_nested_project_root_is_selected_and_persisted_without_slug_rules(self) -> None:
+        source = self.temp / "nested-project"
+        project = source / "nested-project"
+        project.mkdir(parents=True)
+        (project / "Cargo.toml").write_text(
+            '[package]\nname = "sample"\nversion = "0.1.0"\n',
+            encoding="utf-8",
+        )
+        (project / "src").mkdir()
+        (project / "src" / "lib.rs").write_text("pub fn value() {}\n")
+
+        process = self.setup(
+            "nested-project", str(source), "--force", "--no-llm-config",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        parsed = target_config.parse_toml(self.config("nested-project"))
+        self.assertEqual(parsed["source_subdir"], "nested-project")
+        self.assertEqual(parsed["build_system"], "cargo")
+        loaded = target_config.Config(
+            target_root=str(self.harness / "targets" / "nested-project")
+        )
+        target_config.load_toml_into(loaded, self.config("nested-project"))
+        self.assertEqual(Path(loaded.target_root), project.resolve())
+        self.assertEqual(Path(loaded.checkout_root).resolve(), source.resolve())
+
+    def test_ambiguous_nested_projects_fail_instead_of_guessing(self) -> None:
+        source = self.temp / "ambiguous"
+        for name in ("alpha", "beta"):
+            child = source / name
+            child.mkdir(parents=True)
+            (child / "Cargo.toml").write_text(
+                f'[package]\nname = "{name}"\nversion = "0.1.0"\n'
+            )
+        process = self.setup(
+            "sample", str(source), "--force", "--no-llm-config",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("multiple buildable child projects", process.stderr)
+
+    def test_build_fails_when_configuration_has_no_execution_route(self) -> None:
+        source = self.temp / "unknown-source"
+        source.mkdir()
+        (source / "README.md").write_text("no recognized project manifest\n")
+
+        process = self.setup(
+            "unknown", str(source), "--build", "--force",
+            "--no-llm-config", environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        self.assertEqual(process.returncode, 1)
+        self.assertIn("setup produced no runnable target", process.stderr)
+
+    def test_findings_only_build_still_requires_a_runner(self) -> None:
+        target = self.temp / "findings-only-no-runner"
+        target.mkdir()
+        config = self.temp / "findings-only-no-runner.toml"
+        config.write_text(
+            'target = "sample"\n[sanitizer]\nenabled = []\n',
+            encoding="utf-8",
+        )
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.args = SimpleNamespace(build=True)
+        setup.seeded_full = True
+        setup.target_root = target
+        setup.checkout_root = target
+        setup.toml = config
+        setup.name = "sample"
+
+        with self.assertRaisesRegex(RuntimeError, "no runnable target"):
+            setup.require_audit_route()
+
+    def test_build_initializes_recorded_git_submodules(self) -> None:
+        dependency = self.temp / "dependency"
+        self.git("init", str(dependency))
+        (dependency / "dep.c").write_text("int dependency(void) { return 0; }\n")
+        self.commit(dependency, "dependency", "dep.c")
+
+        parent = self.temp / "parent"
+        self.git("init", str(parent))
+        (parent / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.16)\n"
+            "project(sample C)\n"
+            "add_executable(sample main.c dependency/dep.c)\n"
+        )
+        (parent / "main.c").write_text(
+            "int dependency(void); int main(void) { return dependency(); }\n"
+        )
+        self.git(
+            "-c", "protocol.file.allow=always", "submodule", "add",
+            str(dependency), "dependency", cwd=parent,
+        )
+        self.commit(parent, "parent", "CMakeLists.txt", "main.c", ".gitmodules", "dependency")
+        (self.harness / "bin" / "auto-build-script").symlink_to(
+            ROOT / "bin" / "auto-build-script"
+        )
+
+        process = self.setup(
+            "submodules", str(parent), "--build", "--force",
+            "--no-alternates", "--no-llm-config",
+            environment={
+                "LLM_DECIDE_DISABLE": "1", "GIT_ALLOW_PROTOCOL": "file",
+            },
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        target = self.harness / "targets" / "submodules"
+        self.assertTrue((target / "dependency" / "dep.c").is_file())
+        self.assertTrue((target / "build-asan" / "sample").is_file())
+        self.assertIn("Syncing git submodules", process.stdout)
+
+    def test_native_build_installs_declared_python_tools_with_a_compatible_python(self) -> None:
+        target = self.temp / "native-python-tools"
+        target.mkdir()
+        (target / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["sample-build-tool>=1"]\n'
+            '[project]\nrequires-python = ">=99"\n',
+            encoding="utf-8",
+        )
+        fake = self.temp / "python3.15"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, sys\n"
+            "if sys.argv[1] == '-c':\n"
+            "    print('0')\n"
+            "elif sys.argv[1:3] == ['-m', 'venv']:\n"
+            "    root = pathlib.Path(sys.argv[3])\n"
+            "    (root / 'bin').mkdir(parents=True)\n"
+            "    child = root / 'bin' / 'python'\n"
+            "    child.write_text('#!/bin/sh\\nexit 0\\n')\n"
+            "    child.chmod(0o755)\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.args = SimpleNamespace(build=True)
+        setup.target_root = target
+        config = target_config.Config(build_system="meson")
+
+        original_path = os.environ.get("PATH", "")
+        try:
+            os.environ["PATH"] = f"{self.temp}{os.pathsep}{original_path}"
+            setup.prepare_native_python_build_tools(config)
+        finally:
+            os.environ["PATH"] = original_path
+
+        stamp = target / ".audit" / "build-tools" / ".requirements.json"
+        self.assertTrue(stamp.is_file())
+        self.assertEqual(
+            json.loads(stamp.read_text())["requires"],
+            ["sample-build-tool>=1"],
+        )
+
+    def test_meson_python_extension_gets_a_proved_asan_runner(self) -> None:
+        target = self.temp / "meson-python-runner"
+        build = target / "build-asan"
+        (build / "sample").mkdir(parents=True)
+        (build / "sample" / "core.cpython-399-test.so").write_bytes(b"extension")
+        (build / "meson-info").mkdir()
+        (build / "meson-info" / "intro-installed.json").write_text("{}")
+        (target / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["meson-python"]\n'
+            '[project]\nname = "sample"\n',
+            encoding="utf-8",
+        )
+        meson = target / "vendored-meson" / "meson" / "meson.py"
+        meson.parent.mkdir(parents=True)
+        meson.write_text("# fixture driver\n")
+        internal = build / "libinternal.a"
+        internal.write_bytes(b"!<arch>\n")
+        config = self.temp / "meson-python-runner.toml"
+        config.write_text(
+            'target = "sample"\nbuild_system = "meson"\n'
+            'asan_lib = "build-asan/libinternal.a"\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        fake_config = self.temp / "python-config"
+        fake_config.write_text("#!/bin/sh\nexit 0\n")
+        fake_config.chmod(0o755)
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.args = SimpleNamespace(build=True)
+        setup.seeded_full = True
+        setup.target_root = target
+        setup.checkout_root = target
+        setup.toml = config
+        setup.name = "sample"
+
+        def materialize(command, **_kwargs):
+            if "install" in command:
+                stage = Path(command[command.index("--destdir") + 1])
+                package = stage / "usr/lib/python/site-packages/sample"
+                package.mkdir(parents=True)
+                (package / "__init__.py").write_text("VALUE = 1\n")
+                public = package / "_core" / "include" / "sample"
+                public.mkdir(parents=True)
+                (public / "api.h").write_text("int sample(void);\n")
+            elif "-o" in command:
+                launcher = Path(command[command.index("-o") + 1])
+                launcher.write_text(
+                    f"#!{sys.executable}\nimport os, sys\n"
+                    "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+                )
+                launcher.chmod(0o755)
+
+        with mock.patch.object(SETUP_TARGET, "run", side_effect=materialize), \
+                mock.patch.object(
+                    SETUP_TARGET.shutil, "which",
+                    side_effect=lambda name: (
+                        str(fake_config) if name.endswith("-config") else
+                        "/usr/bin/cc" if name in {"clang", "cc"} else None
+                    ),
+                ):
+            setup.configure_native_python_runner()
+
+        loaded = target_config.Config(target_root=str(target))
+        target_config.load_toml_into(loaded, config)
+        self.assertEqual(loaded.asan_lib, "")
+        self.assertEqual(loaded.runner_bin, ".audit/python-runner-asan")
+        self.assertIn("python-stage-asan", loaded.runner_env[0])
+        self.assertIn(
+            ".audit/python-stage-asan/usr/lib/python/site-packages/sample/_core/include",
+            loaded.includes,
+        )
+        self.assertEqual(setup.validated_runner, ".audit/python-runner-asan")
+
+    def test_cmake_python_extension_gets_a_staged_proved_runner(self) -> None:
+        target = self.temp / "cmake-python-runner"
+        build = target / "build-asan"
+        build.mkdir(parents=True)
+        (build / "core.abi3.so").write_bytes(b"extension")
+        package = target / "sample"
+        package.mkdir()
+        (package / "__init__.py").write_text("VALUE = 1\n")
+        (target / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["cmake"]\n'
+            '[project]\nname = "sample"\n',
+            encoding="utf-8",
+        )
+        config = self.temp / "cmake-python-runner.toml"
+        config.write_text(
+            'target = "sample"\nbuild_system = "cmake"\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        fake_config = self.temp / "cmake-python-config"
+        fake_config.write_text("#!/bin/sh\nexit 0\n")
+        fake_config.chmod(0o755)
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.args = SimpleNamespace(build=True)
+        setup.seeded_full = True
+        setup.target_root = target
+        setup.checkout_root = target
+        setup.toml = config
+        setup.name = "sample"
+
+        def materialize(command, **_kwargs):
+            if command[:2] == ["cmake", "--install"]:
+                prefix = Path(command[command.index("--prefix") + 1])
+                installed = prefix / "sample" / "_core.abi3.so"
+                installed.parent.mkdir(parents=True, exist_ok=True)
+                installed.write_bytes(b"extension")
+            elif "-o" in command:
+                launcher = Path(command[command.index("-o") + 1])
+                launcher.write_text(
+                    f"#!{sys.executable}\nimport os, sys\n"
+                    "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+                )
+                launcher.chmod(0o755)
+
+        with mock.patch.object(SETUP_TARGET, "run", side_effect=materialize), \
+                mock.patch.object(
+                    SETUP_TARGET.shutil, "which",
+                    side_effect=lambda name: (
+                        str(fake_config) if name.endswith("-config") else
+                        "/usr/bin/cc" if name in {"clang", "cc"} else None
+                    ),
+                ):
+            setup.configure_native_python_runner()
+
+        loaded = target_config.Config(target_root=str(target))
+        target_config.load_toml_into(loaded, config)
+        self.assertEqual(loaded.runner_bin, ".audit/python-runner-asan")
+        self.assertIn("python-stage-asan", loaded.runner_env[0])
+        self.assertTrue(
+            (target / ".audit/python-stage-asan/site-packages/sample/__init__.py").is_file()
+        )
+        self.assertEqual(setup.validated_runner, ".audit/python-runner-asan")
+
+    def test_python_extension_runner_reuses_declared_build_dependencies(self) -> None:
+        target = self.temp / "cmake-python-dependencies"
+        build = target / "build-asan"
+        build.mkdir(parents=True)
+        (build / "core.abi3.so").write_bytes(b"extension")
+        package = target / "sample"
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            "import sample_build_dependency\n", encoding="utf-8"
+        )
+        (target / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["sample-build-dependency"]\n'
+            '[project]\nname = "sample"\ndynamic = ["dependencies"]\n',
+            encoding="utf-8",
+        )
+        requirements = target / "requirements"
+        requirements.mkdir()
+        (requirements / "common.txt").write_text("sample-build-dependency\n")
+        tools = target / ".audit" / "build-tools"
+        venv.EnvBuilder(with_pip=False).create(tools)
+        tools_python = tools / "bin" / "python"
+        sites = subprocess.run(
+            [str(tools_python), "-c", "import site; print(site.getsitepackages()[0])"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        config = self.temp / "cmake-python-dependencies.toml"
+        config.write_text(
+            'target = "sample"\nbuild_system = "cmake"\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        fake_config = self.temp / "dependency-python-config"
+        fake_config.write_text("#!/bin/sh\nexit 0\n")
+        fake_config.chmod(0o755)
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.args = SimpleNamespace(build=True)
+        setup.seeded_full = True
+        setup.target_root = target
+        setup.checkout_root = target
+        setup.toml = config
+        setup.name = "sample"
+
+        def materialize(command, **_kwargs):
+            if command[:2] == ["cmake", "--install"]:
+                return
+            if command[1:4] == ["-m", "pip", "install"]:
+                Path(sites, "sample_build_dependency.py").write_text("VALUE = 1\n")
+                return
+            if "-o" in command:
+                launcher = Path(command[command.index("-o") + 1])
+                launcher.write_text(
+                    f"#!{sys.executable}\nimport os, sys\n"
+                    "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])\n"
+                )
+                launcher.chmod(0o755)
+
+        with mock.patch.object(SETUP_TARGET, "run", side_effect=materialize), \
+                mock.patch.object(
+                    SETUP_TARGET.shutil, "which",
+                    side_effect=lambda name: (
+                        str(fake_config) if name.endswith("-config") else
+                        "/usr/bin/cc" if name in {"clang", "cc"} else None
+                    ),
+                ):
+            setup.configure_native_python_runner()
+
+        loaded = target_config.Config(target_root=str(target))
+        target_config.load_toml_into(loaded, config)
+        self.assertIn("build-tools", loaded.runner_env[0])
+        self.assertEqual(setup.validated_runner, ".audit/python-runner-asan")
+
+    def test_meson_python_extension_is_an_intermediate_build_artifact(self) -> None:
+        target = self.temp / "meson-python-artifact"
+        build = target / "build-asan" / "package"
+        build.mkdir(parents=True)
+        extension = build / "core.cpython-314-darwin.so"
+        extension.write_bytes(b"extension")
+        metadata = target / "build-asan" / "meson-info"
+        metadata.mkdir()
+        (metadata / "intro-installed.json").write_text(
+            json.dumps({str(extension): "/usr/lib/python/core.cpython-314-darwin.so"}),
+            encoding="utf-8",
+        )
+        (target / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["meson-python"]\n',
+            encoding="utf-8",
+        )
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.target_root = target
+        setup.profile = None
+        config = target_config.Config(
+            target_root=str(target), build_system="meson",
+        )
+        self.assertTrue(
+            setup.sanitizer_build_artifact_present(
+                config, "asan", target / "build-asan",
+            )
+        )
+
+        config.build_system = "cmake"
+        self.assertTrue(
+            setup.sanitizer_build_artifact_present(
+                config, "asan", target / "build-asan",
+            ),
+            "CMake Python extensions also proceed to runner staging",
+        )
+
+        (target / "pyproject.toml").unlink()
+        self.assertFalse(
+            setup.sanitizer_build_artifact_present(
+                config, "asan", target / "build-asan",
+            )
+        )
+
+    def test_setup_reports_the_runner_canary_it_already_completed(self) -> None:
+        target = self.temp / "validated-runner"
+        target.mkdir()
+        config = self.temp / "validated-runner.toml"
+        config.write_text(
+            'target = "sample"\nbuild_system = "meson"\n'
+            '[runner]\nbin = ".audit/python-runner-asan"\n'
+            'args = ["{TESTCASE}"]\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.args = SimpleNamespace(build=True)
+        setup.target_root = target
+        setup.checkout_root = target
+        setup.toml = config
+        setup.name = "sample"
+        setup.validated_runner = ".audit/python-runner-asan"
+        with (
+            mock.patch.object(
+                SETUP_TARGET.runner_canary, "skip_reason",
+                side_effect=AssertionError("must use completed canary"),
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            setup.require_reachable_runner(target_config.Config())
+        self.assertIn("Runner reachability OK", output.getvalue())
+
     def test_a_detected_harness_input_mismatch_does_not_retarget_the_library(self) -> None:
         setup_target = SETUP_TARGET
         target = self.temp / "mismatch-target"
@@ -196,6 +633,59 @@ class SetupTargetTests(unittest.TestCase):
         ):
             setup.report_harness_input_mismatch()
         self.assertEqual(before, config.read_bytes())
+
+    def test_completed_build_adds_only_installed_public_include_roots(self) -> None:
+        target = self.temp / "installed-includes"
+        target.mkdir()
+        config = self.temp / "installed-includes.toml"
+        config.write_text(
+            'target = "demo"\nasan_lib = "build-asan/libdemo.a"\n'
+            'includes = ["curated/include"]\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.target_root = target
+        setup.checkout_root = target
+        setup.toml = config
+        with mock.patch.object(
+            SETUP_TARGET.target_config, "installed_harness_include_dirs",
+            return_value=["module/include", "build-asan/module"],
+        ):
+            setup.refresh_installed_harness_includes()
+        loaded = target_config.Config(target_root=str(target))
+        target_config.load_toml_into(loaded, config)
+        self.assertEqual(
+            loaded.includes,
+            ["curated/include", "module/include", "build-asan/module"],
+        )
+
+    def test_completed_cmake_build_adds_published_link_dependencies(self) -> None:
+        target = self.temp / "published-links"
+        target.mkdir()
+        config = self.temp / "published-links.toml"
+        config.write_text(
+            'target = "demo"\nbuild_system = "cmake"\n'
+            'asan_lib = "build-asan/libdemo.a"\n'
+            'link_libs = ["-lm"]\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.target_root = target
+        setup.checkout_root = target
+        setup.toml = config
+        with mock.patch.object(
+            SETUP_TARGET.target_config, "cmake_package_harness_link_args",
+            return_value=["build-asan/libdependency.a", "-framework", "Security"],
+        ):
+            setup.refresh_cmake_harness_link_libs()
+        loaded = target_config.Config(target_root=str(target))
+        target_config.load_toml_into(loaded, config)
+        self.assertEqual(
+            loaded.link_libs,
+            ["-lm", "build-asan/libdependency.a", "-framework", "Security"],
+        )
 
     def test_a_header_only_repair_preserves_curated_harness_inputs(self) -> None:
         setup_target = SETUP_TARGET
@@ -339,6 +829,25 @@ class SetupTargetTests(unittest.TestCase):
         self.assertIn("tracked local changes", blocked.stdout)
         self.assertFalse((checkout / "later.c").exists())
 
+    def test_pull_does_not_fail_when_upstream_moves_an_unrelated_tag(self) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.remote), "tag", "moving-ci-tag"],
+            check=True,
+        )
+        self.assertEqual(self.setup("demo", str(self.remote)).returncode, 0)
+        (self.remote / "fresh.c").write_text("int fresh(void) { return 0; }\n")
+        self.commit(self.remote, "move branch and tag", "fresh.c")
+        subprocess.run(
+            ["git", "-C", str(self.remote), "tag", "-f", "moving-ci-tag"],
+            check=True,
+        )
+
+        pulled = self.setup("demo", "--pull")
+        self.assertEqual(pulled.returncode, 0, pulled.stdout + pulled.stderr)
+        self.assertTrue(
+            (self.harness / "targets" / "demo" / "fresh.c").is_file()
+        )
+
     @unittest.skipUnless(shutil.which("hg"), "Mercurial is not installed")
     def test_hg_pull_ignores_untracked_build_artifacts(self) -> None:
         remote = self.temp / "hg-remote"
@@ -394,8 +903,9 @@ class SetupTargetTests(unittest.TestCase):
         text = self.config("demo").read_text()
         self.assertIn("[s6_peers]", text)
         self.assertIn("rapidjson", text)
-        self.assertRegex(process.stdout, r"suggest-peers returned rc=\d+ on backend=claude")
+        self.assertRegex(process.stdout, r"suggest-threat-model returned rc=\d+ on backend=claude")
         self.assertIn("suggest-peers succeeded on backend=codex", process.stdout)
+        self.assertNotRegex(process.stdout, r"suggest-peers returned rc=\d+ on backend=claude")
         self.assertNotIn("LLM call failed or unavailable", process.stdout)
 
         self.config("demo").write_text(text.replace("rapidjson", "oldjson"))
@@ -404,11 +914,11 @@ class SetupTargetTests(unittest.TestCase):
         text = self.config("demo").read_text()
         self.assertIn("rapidjson", text)
         self.assertNotIn("oldjson", text)
+        self.assertNotRegex(process.stdout, r"returned rc=\d+ on backend=claude")
 
-    def test_force_beside_build_calibrates_a_reviewed_runner_without_reselecting(self) -> None:
-        # --force --build rematerializes build output. A reviewed [runner] that
-        # only lacks its exit calibration is calibrated in place; handing the
-        # helper --force made it re-select the argv the operator had reviewed.
+    def test_force_runner_bootstrap_propagates_regeneration(self) -> None:
+        # --force regenerates inferred configuration whether or not --build is
+        # present, so runner selection receives the same force signal.
         setup_target = SETUP_TARGET
         target = self.temp / "force-build-target"
         binary = target / "build-asan" / "demo"
@@ -430,7 +940,7 @@ class SetupTargetTests(unittest.TestCase):
         setup.run_config_helper = mock.Mock()
         clean = {"AUDIT_NEW_TARGET_BOOTSTRAP": "1", "LLM_DECIDE_DISABLE": "0"}
         for force, build, expected in (
-            (True, True, ["demo", "--apply"]),
+            (True, True, ["demo", "--apply", "--force"]),
             (False, False, ["demo", "--apply"]),
             (True, False, ["demo", "--apply", "--force"]),
         ):
@@ -952,7 +1462,7 @@ class SetupTargetTests(unittest.TestCase):
         self.assertIn('"alpha"', rewritten)
         self.assertIn('"beta"', rewritten)
 
-    def test_force_build_preserves_reviewed_config_and_recipe(self) -> None:
+    def test_force_build_regenerates_config_and_preserves_recipe(self) -> None:
         target = self.make_build_target("reviewedbuild")
         recipe = self.build_recipe(target)
         original_recipe = recipe.read_text(encoding="utf-8")
@@ -991,12 +1501,42 @@ class SetupTargetTests(unittest.TestCase):
         )
 
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-        self.assertIn("REVIEWED_CONFIG", config.read_text(encoding="utf-8"))
-        self.assertIn('args = ["driver.py", "{TESTCASE}"]', config.read_text())
+        self.assertNotIn("REVIEWED_CONFIG", config.read_text(encoding="utf-8"))
+        self.assertNotIn('args = ["driver.py", "{TESTCASE}"]', config.read_text())
         self.assertEqual(original_recipe, recipe.read_text(encoding="utf-8"))
         self.assertFalse(called.exists())
         self.assertFalse(runner_called.exists())
         self.assertIn("--force rebuilds its output", process.stdout)
+
+    def test_build_refreshes_stale_detection_before_a_route_exists(self) -> None:
+        target = self.harness / "targets" / "delegated"
+        (target / "cmake").mkdir(parents=True)
+        (target / "go.mod").write_text("module example.invalid/delegated\n")
+        (target / "main.go").write_text("package main\nfunc main() {}\n")
+        (target / "CMakeLists.txt").write_text("include(cmake/package.cmake)\n")
+        (target / "cmake" / "package.cmake").write_text(
+            'add_custom_target(app COMMAND ${GO_EXECUTABLE} build -o "${APP}" .)\n'
+            'install(PROGRAMS "${APP}" DESTINATION bin)\n'
+        )
+        config = self.config("delegated")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "delegated"\nbuild_system = "cmake"\n'
+            '[threat_model]\nattacker_controls = ["bytes"]\n',
+            encoding="utf-8",
+        )
+
+        process = self.setup(
+            "delegated", "--build", "--force",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        parsed = target_config.parse_toml(config)
+        self.assertEqual(parsed["build_system"], "go")
+        self.assertEqual(parsed["runner"]["bin"], "go")
+        self.assertEqual(parsed["threat_model"]["attacker_controls"], ["bytes"])
+        self.assertIn("source discovery changed", process.stdout)
 
     def test_header_only_cmake_build_converges_without_fake_artifact(self) -> None:
         target = self.harness / "targets" / "headeronly"
@@ -1561,6 +2101,35 @@ class SetupTargetTests(unittest.TestCase):
         invocation = capture.read_text(encoding="utf-8")
         self.assertTrue(invocation.startswith("codex\n"), invocation)
         self.assertIn("--backend codex", invocation)
+
+    def test_build_widening_retries_the_next_backend(self) -> None:
+        target = self.make_build_target("widefallback")
+        self.build_recipe(target)
+        config = self.config("widefallback")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "widefallback"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/widefallback"\nbuild_widening = true\n'
+        )
+        capture = self.temp / "build-config-backends"
+        helper = self.harness / "bin" / "build-configs"
+        helper.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            f"path = pathlib.Path({str(capture)!r})\n"
+            "with path.open('a') as stream:\n"
+            "    stream.write(os.environ.get('ACTIVE_BACKEND', '') + '\\n')\n"
+            "raise SystemExit(0 if os.environ.get('ACTIVE_BACKEND') == 'codex' else 3)\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        process = self.setup(
+            "widefallback", "--build",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(capture.read_text().splitlines(), ["claude", "codex"])
+        self.assertIn("retrying with backend=codex", process.stdout)
 
     def test_build_does_not_reseed_placeholder_configuration(self) -> None:
         (self.harness / "bin" / "auto-build-script").symlink_to(ROOT / "bin" / "auto-build-script")

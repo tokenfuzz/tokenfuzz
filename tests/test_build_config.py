@@ -722,6 +722,9 @@ class BuildConfigTests(unittest.TestCase):
             toml.parent.mkdir(parents=True)
             toml.write_text('target="sample"\n')
             item = build_config.BuildConfig("wide", "wide", widen=True)
+            recipe = build_config.recipe_path(target, item)
+            recipe.parent.mkdir(parents=True)
+            recipe.write_text("#!/bin/sh\n")
             messages: list[str] = []
             with mock.patch.object(
                 build_preflight, "run_timeout",
@@ -732,13 +735,33 @@ class BuildConfigTests(unittest.TestCase):
                     {}, logs / "setup-build.log", messages.append,
                 )
             command = launched.call_args.args[0]
-            self.assertEqual(command[-1], "--all")
+            self.assertEqual(command[-2:], ["--config", "wide"])
             self.assertIn(str(root / "bin/build-configs"), command)
             self.assertEqual(
                 launched.call_args.args[1],
                 build_preflight._ALTERNATE_PREFLIGHT_TIMEOUT_SECONDS,
             )
             self.assertTrue(any("regular sanitizer build remains active" in line for line in messages))
+
+    def test_preflight_does_not_converge_a_missing_widening_recipe(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "targets/sample"
+            logs = root / "logs"
+            toml = root / "output/sample/target.toml"
+            target.mkdir(parents=True)
+            logs.mkdir()
+            toml.parent.mkdir(parents=True)
+            toml.write_text('target="sample"\n')
+            item = build_config.BuildConfig("wide", "wide", widen=True)
+            messages: list[str] = []
+            with mock.patch.object(build_preflight, "run_timeout") as launched:
+                build_preflight._refresh_alternates(
+                    root, target, "sample", SimpleNamespace(build_configs=[item]),
+                    {}, logs / "setup-build.log", messages.append,
+                )
+            launched.assert_not_called()
+            self.assertTrue(any("no validated recipe" in line for line in messages))
 
 
 if __name__ == "__main__":

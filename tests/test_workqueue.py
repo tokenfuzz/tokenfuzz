@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import report_identity
+import host_resources
 import validation_receipt
 import workqueue
 
@@ -30,6 +31,18 @@ def _reject_json_constant(name: str):
 
 
 class WorkQueueTests(unittest.TestCase):
+    def test_fractional_cpu_quota_allows_only_one_worker(self) -> None:
+        def cgroup_text(path: Path, *_args, **_kwargs) -> str:
+            if str(path) == "/sys/fs/cgroup/cpu.max":
+                return "50000 100000\n"
+            raise OSError("missing legacy cgroup files")
+
+        with mock.patch.object(
+            host_resources.os, "process_cpu_count", return_value=16,
+            create=True,
+        ), mock.patch.object(host_resources.Path, "read_text", cgroup_text):
+            self.assertEqual(host_resources.usable_cpu_count(), 1)
+
     def test_strategy_pin_matching_requires_a_real_label_boundary(self) -> None:
         self.assertTrue(workqueue.strategy_matches_pin("S6", "S6"))
         self.assertTrue(workqueue.strategy_matches_pin("S6-cross-project", "S6"))
@@ -626,6 +639,10 @@ class WorkQueueTests(unittest.TestCase):
                 self.assertEqual(workqueue.strategy_for(reasons), strategy)
         score, reasons = workqueue.code_feature_reasons("int checksum = 0; int thread_count = 1;")
         self.assertEqual((score, reasons), (0, []))
+        _score, reasons = workqueue.code_feature_reasons(
+            "# Match historical output type\n# initialized by reading data\n"
+        )
+        self.assertNotIn("input-consumption entrypoint", reasons)
         _score, reasons = workqueue.code_feature_reasons("return crc32(data, size);")
         self.assertNotIn("identity-key property surface", reasons)
         for source in ("internal_error();", "internalize();", "internet_open();"):
@@ -693,6 +710,12 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(workqueue.strategy_for(reasons), "S3")
         self.assertEqual(workqueue.complementary_strategies(reasons, "S3")[:2], ["S7", "S5"])
 
+        _score, reasons = workqueue.code_feature_reasons(
+            "def __reduce__(self): return state\nmemcpy(dst, src, length)\n"
+        )
+        self.assertEqual(workqueue.strategy_for(reasons), "S3")
+        self.assertNotIn("S7", workqueue.complementary_strategies(reasons, "S3"))
+
     def test_unguarded_sinks_rank_even_though_no_control_is_named(self) -> None:
         """The vulnerable shape is the one with no control to key on.
 
@@ -749,6 +772,28 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(reasons, {reason for reason, _ in bucketed})
         self.assertEqual(len(bucketed), len(set(reason for reason, _ in bucketed)))
         self.assertLessEqual(workqueue.BOUNDARY_REASONS, reasons)
+
+    def test_unit_test_directory_is_outside_the_product_work_queue(self) -> None:
+        self.assertTrue(
+            workqueue.is_excluded_work_path("vendor/tool/unittests/parser.py")
+        )
+        self.assertTrue(
+            workqueue.is_excluded_work_path("module/unittest/helper.cpp")
+        )
+        self.assertFalse(
+            workqueue.is_excluded_work_path("src/unittestadapter.cpp")
+        )
+
+    def test_benchmark_directory_is_outside_the_product_work_queue(self) -> None:
+        self.assertTrue(
+            workqueue.is_excluded_work_path("asv_bench/benchmarks/parser.py")
+        )
+        self.assertTrue(
+            workqueue.is_excluded_work_path("tools/benchmark/decoder.cpp")
+        )
+        self.assertFalse(
+            workqueue.is_excluded_work_path("src/index_benchmarkable.cpp")
+        )
 
     def test_no_file_feature_mints_a_fuzz_campaign_card(self) -> None:
         """A campaign covers a target, not a file.
@@ -808,6 +853,26 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(len(files), 140)
         self.assertNotIn("tests/hidden.c", files)
         self.assertEqual(len(list(workqueue.iter_source_files(self.target, max_files=7))), 7)
+
+    def test_source_subdir_keeps_only_checkout_tracked_sources(self) -> None:
+        checkout = self.root / "checkout"
+        project = checkout / "project"
+        project.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+        tracked = project / "tracked.c"
+        tracked.write_text("int tracked;\n")
+        subprocess.run(
+            ["git", "-C", str(checkout), "add", "project/tracked.c"],
+            check=True,
+        )
+        (project / "scratch.c").write_text("int scratch;\n")
+
+        files = [
+            path.relative_to(project).as_posix()
+            for path in workqueue.iter_source_files(project, repo_type="git")
+        ]
+
+        self.assertEqual(files, ["tracked.c"])
 
     def test_git_patch_scan_ranks_old_security_fixes_above_recent_churn(self) -> None:
         subprocess.run(
@@ -1101,6 +1166,40 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual(reproduced["id"], "WORK-BUILT")
         self.assertEqual(analyzed["id"], "WORK-OPTIONAL")
+
+    def test_buildability_uses_compile_database_without_feedback_duplicates(self) -> None:
+        """Structured build metadata answers once for mirrored siblings."""
+        source = self.target / "src/built.c"
+        optional = self.target / "src/optional.c"
+        source.parent.mkdir()
+        source.write_text("int built(void);\n", encoding="utf-8")
+        optional.write_text("int optional(void);\n", encoding="utf-8")
+        build = self.target / "build-asan"
+        build.mkdir()
+        (build / "compile_commands.json").write_text(json.dumps([{
+            "directory": str(build),
+            # Meson emits source paths relative to the build directory. Keep
+            # the parent component so the test exercises normalization before
+            # target-root matching.
+            "file": "../src/built.c",
+            "command": "cc -c ../src/built.c",
+        }]), encoding="utf-8")
+        # Coverage/fuzz trees replay this recipe and must not multiply the
+        # indexing cost. A stray object there cannot broaden the canonical
+        # source set either.
+        duplicate = self.target / "build-asan+cov/src/optional.o"
+        duplicate.parent.mkdir(parents=True)
+        duplicate.touch()
+
+        cards = workqueue.annotate_card_buildability(self.ctx, [
+            self.card("WORK-BUILT", "src/built.c"),
+            self.card("WORK-OPTIONAL", "src/optional.c"),
+        ])
+
+        self.assertEqual(
+            [card["buildability"] for card in cards],
+            ["built", "not-built"],
+        )
 
     def test_missing_object_is_not_ranked_below_unknown_build_evidence(self) -> None:
         """Unity/amalgamation sources have no same-name object of their own."""
@@ -1876,6 +1975,36 @@ class WorkQueueTests(unittest.TestCase):
         self.assertIn("filed after the parser fetched a remote entity", resume)
         self.assertIn("factory flag is applied after parser construction", resume)
         self.assertNotIn("unrelated guard note from the new owner", resume)
+
+    def test_companion_card_shows_same_file_history_from_other_strategies(self) -> None:
+        self.write_cards([
+            self.card("WORK-S3", "src/parser.c", strategy="S3"),
+            self.card("WORK-S8", "src/parser.c", strategy="S8"),
+            self.card("WORK-OTHER", "src/other.c", strategy="S8"),
+        ])
+        self.add_hypothesis(
+            hyp_id="H-SAME-FILE", card_id="WORK-S3", agent="3",
+            strategy="S3", status="FIND-004",
+            file="src/parser.c:parse_manifest:42",
+            hypothesis="source symlink escapes the publish root",
+        )
+        self.add_hypothesis(
+            hyp_id="H-OTHER-FILE", card_id="WORK-OTHER", agent="2",
+            strategy="S8", status="DISCARDED", file="src/other.c:decode:9",
+            hypothesis="unrelated transformation",
+        )
+        workqueue.update_card_status(
+            self.ctx, "WORK-S3", "find", agent="3",
+        )
+
+        resume = workqueue.state_resume(
+            self.ctx, "1", mode="generic", role="reproduce", strategy="S8",
+        )
+
+        self.assertIn("WORK-S8", resume)
+        self.assertIn("H-SAME-FILE", resume)
+        self.assertIn("source symlink escapes", resume)
+        self.assertNotIn("H-OTHER-FILE", resume)
 
     def test_resume_does_not_hide_other_active_hypotheses(self) -> None:
         self.write_cards([

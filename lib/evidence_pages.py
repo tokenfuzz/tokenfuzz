@@ -650,7 +650,9 @@ class _Context:
 
 
 def _target_name(start: Path) -> str:
-    for base in (start, *start.parents[:3]):
+    # Path.parents gained slice support in Python 3.10. Materialize only this
+    # tiny bounded sequence so index maintenance remains usable on 3.9.
+    for base in (start, *tuple(start.parents)[:3]):
         toml = base / "target.toml"
         if toml.is_file():
             match = re.search(r'^\s*target\s*=\s*"([^"]+)"', _read_text(toml), re.M)

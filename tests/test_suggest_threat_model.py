@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -56,6 +57,7 @@ class SuggestThreatModelTests(unittest.TestCase):
     def run_command(self, *args: str, mock=None, disable: bool = False) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["SCRIPT_ROOT"] = str(self.sandbox)
+        env["LLM_DECIDE_LOG"] = str(self.sandbox / "llm-decisions.log")
         if mock is not None:
             env["LLM_DECIDE_MOCK_THREAT_MODEL_SUGGEST"] = json.dumps(mock)
         else:
@@ -81,6 +83,30 @@ class SuggestThreatModelTests(unittest.TestCase):
         self.assertIn("[threat_model]", proc.stdout)
         self.assertIn("call-sequence", proc.stdout)
         self.assertEqual(self.target_toml.read_bytes(), before)
+
+    def test_prompt_uses_configured_source_subdirectory(self) -> None:
+        baseline = self.run_command(mock=self.DEFAULT)
+        self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+        log_path = self.sandbox / "llm-decisions.log"
+        baseline_log = log_path.read_text(encoding="utf-8")
+        baseline_bytes = int(re.search(
+            r"threat-model-suggest MOCK bytes=(\d+)", baseline_log,
+        ).group(1))
+        log_path.unlink()
+        nested = self.sandbox / "targets" / "demo" / "python"
+        nested.mkdir()
+        (nested / "README.md").write_text("nested-marker " * 400, encoding="utf-8")
+        self.target_toml.write_text(
+            'source_subdir = "python"\n'
+            + self.target_toml.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        proc = self.run_command(mock=self.DEFAULT)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        log = log_path.read_text(encoding="utf-8")
+        match = re.search(r"threat-model-suggest MOCK bytes=(\d+)", log)
+        self.assertIsNotNone(match, log)
+        self.assertGreater(int(match.group(1)), baseline_bytes + 1500)
 
     def test_apply_replaces_placeholder_and_round_trips(self) -> None:
         proc = self.run_command("--apply", mock=self.DEFAULT)

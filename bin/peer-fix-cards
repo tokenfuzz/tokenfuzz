@@ -179,9 +179,8 @@ def main(argv: list[str]) -> int:
         print(f"[peer-fix-cards] target.toml not found: {target_toml}",
               file=sys.stderr)
         return 1
-    cfg = tc.Config()
-    cfg.slug = ctx.target_slug
-    cfg.target_root = str(ctx.target_root)
+    config_root = tc.find_target_root(ctx.results_dir) or ctx.target_root
+    cfg = tc.Config(slug=ctx.target_slug, target_root=str(config_root))
     try:
         tc.load_toml_into(cfg, target_toml)
     except Exception as e:

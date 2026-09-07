@@ -169,6 +169,31 @@ class SuggestRunnerTests(unittest.TestCase):
             4,
         )
 
+    def test_uses_the_configured_source_subdirectory(self) -> None:
+        nested = self.target / "python"
+        nested.mkdir()
+        self.binary.parent.rename(nested / "build-asan")
+        self.binary = nested / "build-asan" / "sampleproj"
+        self.toml.write_text(
+            self.toml.read_text(encoding="utf-8").replace(
+                'build_system = "cmake"\n',
+                'source_subdir = "python"\nbuild_system = "cmake"\n',
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_command({
+            "binary": "c1",
+            "args": ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"],
+            "reasoning": "help names an input and sink",
+        }, "--apply")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = target_config.Config(target_root=str(self.target))
+        target_config.load_toml_into(config, self.toml)
+        self.assertEqual(
+            Path(config.resolve_path(config.asan_bin)).resolve(),
+            self.binary.resolve(),
+        )
+
     def test_calibrates_existing_args_without_reasking_for_an_argv(self) -> None:
         self.toml.write_text(
             self.toml.read_text(encoding="utf-8")

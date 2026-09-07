@@ -27,7 +27,7 @@ sys.path.insert(0, str(LIB_DIR))
 
 import sanitizer
 from file_tools import cap_output_file, capture_command
-from verdict import CRASH_PATTERNS
+from verdict import CRASH_PATTERNS, file_declares_no_exec
 
 VALID_SANITIZERS = {"asan", "ubsan", "msan", "tsan", "race", "runner"}
 RUNNERS = {
@@ -175,6 +175,12 @@ class MultiRun:
 
     def coverage_gate(self) -> int | None:
         mode = self.args[0] if self.args else "browser"
+        # Language runners and Go's race detector have no route-equivalent
+        # instrumented sibling for bin/hits to execute. Asking hits anyway
+        # produces an ASan configuration warning before running the exact same
+        # testcase ungated, which spends time and obscures the real route.
+        if self.sanitizer in {"race", "runner"}:
+            return None
         if not os.environ.get("WANT") or os.environ.get("SKIP_COVERAGE_GATE") or mode not in {"browser", "js", "generic"}:
             return None
         hits = SCRIPT_DIR / "hits"
@@ -248,9 +254,9 @@ class MultiRun:
                 print(f"[run-sanitizer-multi] COVERAGE GATE: MISSED - proceeding to the sanitizer; revise the input (closest: {closest or '<none>'})")
                 return None
             if completed.returncode == 1:
-                self.emit(f"COVERAGE_GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
+                self.emit(f"COVERAGE_GATE: MISSED - {self.sanitizer} skipped. Revise testcase (closest: {closest or '<none>'})")
                 self._record_coverage_miss(testcase, mode, closest)
-                print(f"[run-sanitizer-multi] COVERAGE GATE: MISSED - ASan skipped. Revise testcase (closest: {closest or '<none>'})")
+                print(f"[run-sanitizer-multi] COVERAGE GATE: MISSED - {self.sanitizer} skipped. Revise testcase (closest: {closest or '<none>'})")
                 return 1
             if completed.returncode == 4:
                 # No instrumented tree to measure against. Never a miss: an
@@ -258,8 +264,8 @@ class MultiRun:
                 # recorded so it is not mistaken for reached-nothing.
                 reason = unavailable or "no instrumented sibling build"
                 os.environ["HITS_VERDICT"] = "COVERAGE_UNAVAILABLE"
-                self.emit(f"COVERAGE_GATE: COVERAGE_UNAVAILABLE - ASan proceeding ungated (coverage unavailable: {reason})")
-                print(f"[run-sanitizer-multi] COVERAGE GATE: COVERAGE_UNAVAILABLE - proceeding to ASan ungated (coverage unavailable: {reason})")
+                self.emit(f"COVERAGE_GATE: COVERAGE_UNAVAILABLE - {self.sanitizer} proceeding ungated (coverage unavailable: {reason})")
+                print(f"[run-sanitizer-multi] COVERAGE GATE: COVERAGE_UNAVAILABLE - proceeding to {self.sanitizer} ungated (coverage unavailable: {reason})")
                 return None
             if completed.returncode:
                 if completed.returncode == 3:
@@ -267,13 +273,13 @@ class MultiRun:
                 else:
                     label = "COVERAGE_ENV_FAIL"
                 os.environ["HITS_VERDICT"] = label
-                self.emit(f"COVERAGE_GATE: {label} - ASan proceeding ungated (hits rc={completed.returncode}; {closest})")
-                print(f"[run-sanitizer-multi] COVERAGE GATE: {label} - proceeding to ASan ungated (hits rc={completed.returncode}; {closest})")
+                self.emit(f"COVERAGE_GATE: {label} - {self.sanitizer} proceeding ungated (hits rc={completed.returncode}; {closest})")
+                print(f"[run-sanitizer-multi] COVERAGE GATE: {label} - proceeding to {self.sanitizer} ungated (hits rc={completed.returncode}; {closest})")
             else:
                 os.environ["CLOSEST_FRAME"] = hit_frame
                 os.environ["HITS_VERDICT"] = "HIT"
                 self.emit(f"COVERAGE_GATE: HIT - reached {hit_frame or '<unnamed>'}")
-                print("[run-sanitizer-multi] COVERAGE GATE: HIT - proceeding to ASan")
+                print(f"[run-sanitizer-multi] COVERAGE GATE: HIT - proceeding to {self.sanitizer}")
             return None
 
     def _record_coverage_miss(self, testcase: str, mode: str, closest: str) -> None:
@@ -353,7 +359,21 @@ class MultiRun:
     def classify(self, path: Path, returncode: int) -> Outcome:
         crashed = _file_matches(path, CRASH_RE)
         succeeded = _file_matches(path, EXEC_VERIFIED_RE)
-        executed = succeeded or _file_matches(path, EXEC_INCONCLUSIVE_RE) or crashed
+        # A language testcase can prove that an optional target component is
+        # absent before the shared transport reports its nonzero exit. The
+        # transport's generic INCONCLUSIVE footer is weaker than that explicit
+        # NO_EXEC evidence; counting it as target execution corrupts the
+        # repetition rate and runtime feedback. A crash, clean completion, or
+        # timeout remains stronger than a contradictory early declaration.
+        no_exec = (
+            returncode not in {0, 124}
+            and not crashed
+            and not succeeded
+            and file_declares_no_exec(path)
+        )
+        executed = not no_exec and (
+            succeeded or _file_matches(path, EXEC_INCONCLUSIVE_RE) or crashed
+        )
         signature = self._signature(path)
         return Outcome(crashed, executed, succeeded, returncode == 124, signature)
 

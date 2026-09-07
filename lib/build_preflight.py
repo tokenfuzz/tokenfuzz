@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 
 import build_lease
+import build_config
 import coverage_build
 import runner_preflight
 import target_config
@@ -28,14 +29,29 @@ def _refresh_alternates(
     target_toml = root / "output" / target_slug / "target.toml"
     if not target_toml.is_file():
         return
+    selected = [
+        item for item in config.build_configs
+        if not item.widen or build_config.recipe_path(target_root, item).is_file()
+    ]
+    skipped = [item for item in config.build_configs if item not in selected]
+    if skipped:
+        logger(
+            "Alternate build widening has no validated recipe from setup; "
+            "the regular sanitizer build remains active"
+        )
+    if not selected:
+        return
+    command = [
+        str(root / "bin" / "build-configs"),
+        "--target-path", str(target_root),
+        "--target-toml", str(target_toml),
+    ]
+    for item in selected:
+        command += ["--config", item.name]
     try:
         with build_log.open("ab") as output:
             completed = run_timeout(
-                [
-                    str(root / "bin" / "build-configs"),
-                    "--target-path", str(target_root),
-                    "--target-toml", str(target_toml), "--all",
-                ],
+                command,
                 _ALTERNATE_PREFLIGHT_TIMEOUT_SECONDS,
                 env=environment, stdout=output, stderr=subprocess.STDOUT,
             )
@@ -57,6 +73,8 @@ def _refresh_coverage(root: Path, target_root: Path, config, logger) -> None:
     `build-asan+fuzz`. No agent builds either: an audit pays once before any
     session starts. A tree outside targets/ is the operator's to build.
     """
+    if "asan" not in getattr(config, "sanitizers_enabled", []):
+        return
     try:
         target_root.relative_to(root / "targets")
     except ValueError:
@@ -71,9 +89,14 @@ def _refresh_coverage(root: Path, target_root: Path, config, logger) -> None:
 
 
 def enabled_sanitizers(config) -> list[str]:
-    """asan plus every enabled native sanitizer — the trees a run reads."""
+    """Every enabled native sanitizer — the trees a run reads."""
     enabled = config.sanitizers_enabled if isinstance(config.sanitizers_enabled, list) else []
-    return ["asan", *(name for name in enabled if name in _NATIVE_SANITIZERS)]
+    return [name for name in enabled if name == "asan" or name in _NATIVE_SANITIZERS]
+
+
+def _configured_target_root(target_root: Path, config) -> Path:
+    """Use the source root resolved while loading target.toml, when present."""
+    return Path(getattr(config, "target_root", "") or target_root)
 
 
 def _build_freshness(target_root: Path, config, sanitizer: str) -> str:
@@ -156,6 +179,7 @@ def _artifact_routes(target_root: Path, config) -> dict[str, tuple[str, Path]]:
 
 def build_identity(target_root: Path, config) -> dict:
     """Content identity of the files this config may execute or link."""
+    target_root = _configured_target_root(target_root, config)
     artifacts: dict[str, dict[str, object]] = {}
     for name, (raw, path) in _artifact_routes(target_root, config).items():
         try:
@@ -285,6 +309,8 @@ def pinned_build_problems(
     the experiment, and an empty pin has nothing to verify at all — the parent's
     own freshness check is what gates both.
     """
+    if config is not None:
+        target_root = _configured_target_root(target_root, config)
     if artifact_keys is not None and not artifact_keys:
         return []
     if pinned is None:
@@ -351,6 +377,7 @@ def build_problems(target_root: Path, config) -> list[str]:
     """
     if config.sanitizers_explicitly_disabled:
         return []
+    target_root = _configured_target_root(target_root, config)
     problems: list[str] = []
     # Name what made a build stale. This refusal is where an operator chooses
     # between rebuilding and removing something, and "stale" alone does not say
@@ -398,6 +425,7 @@ def hold_builds(target_root: Path, config, logger) -> list[str]:
     build; one that wants different inputs is told rather than silently
     rebuilding over this one.
     """
+    target_root = _configured_target_root(target_root, config)
     directories = [
         target_config.build_dir_name(name)
         for name in enabled_sanitizers(config)
@@ -448,6 +476,7 @@ def refresh(
     tree is held. An audit continues regardless (the warning is on the record);
     a benchmark, whose whole result depends on the build not moving, refuses.
     """
+    target_root = _configured_target_root(target_root, config)
     if config.sanitizers_explicitly_disabled:
         return hold_builds(target_root, config, logger)
     sanitizers = enabled_sanitizers(config)

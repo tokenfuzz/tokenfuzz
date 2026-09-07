@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Collection
+import concurrent.futures
 import contextlib
 import fcntl
 import hashlib
@@ -25,6 +26,7 @@ from pathlib import Path
 from typing import Iterable
 
 import cluster_common
+from host_resources import usable_cpu_count
 import languages
 import verdict
 import report_identity
@@ -349,9 +351,9 @@ _CONSUME_VERBS = (
 # capitalised segment at any position, including leading (`ReadBuffer`).
 # Both casings are needed — snake_case C and CamelCase C++ alike.
 _INPUT_CONSUMPTION_RE = re.compile(
-    r"\b(?:[a-z0-9]+_)*(?:" + "|".join(_CONSUME_VERBS) + r")[a-z0-9_]*"
+    r"(?:\b(?:[a-z0-9]+_)*(?:" + "|".join(_CONSUME_VERBS) + r")[a-z0-9_]*"
     r"|\b[A-Za-z0-9]*(?:" + "|".join(v.capitalize() for v in _CONSUME_VERBS)
-    + r")[A-Za-z0-9]*\b"
+    + r")[A-Za-z0-9]*\b)\s*\("
 )
 
 # ── Code-feature signal table ──────────────────────────────────────
@@ -1298,6 +1300,15 @@ def complementary_strategies(reasons: list[str], primary: str) -> list[str]:
     rset = set(reasons)
     out = [strat for strat, tags in _STRATEGY_BUCKETS
            if strat != primary and rset & tags]
+    # Raw memory and allocation calls make a useful primary S7 lead when no
+    # stronger contract is known. They do not by themselves prove that a file
+    # selected for another strategy has the parser/decoder boundary S7 needs.
+    # Require an actual input consumer or remote-peer endpoint before minting
+    # that companion; the primary card still retains every memory signal.
+    if "S7" in out and not rset & {
+        "input-consumption entrypoint", "remote-peer endpoint",
+    }:
+        out.remove("S7")
     # S1 — a file next to a prior fix is explicit regression territory.
     if "near prior-fix card" in rset and primary != "S1":
         out.append("S1")
@@ -1306,6 +1317,7 @@ def complementary_strategies(reasons: list[str], primary: str) -> list[str]:
 
 def iter_source_files(
     root: Path, max_files: int = 0, only: Iterable[str] | None = None,
+    repo_type: str = "",
 ) -> Iterable[Path]:
     # `only` names the target-relative paths to consider instead of walking
     # the tree, each held to the same per-file rules (suffix, excluded-path,
@@ -1340,7 +1352,7 @@ def iter_source_files(
     # files so untracked scratch (agent PoCs, prior-run leftovers) never becomes
     # a work card. None => not a checkout / probe failed => audit everything.
     import target_config  # lazy: see import note at top of file
-    tracked = target_config.vcs_tracked_files(root)
+    tracked = target_config.vcs_tracked_files(root, repo_type=repo_type)
     seen = 0
     if only is not None:
         for rel in sorted({normalized_relpath(value) for value in only}):
@@ -1424,6 +1436,10 @@ def _sanitizer_object_index(ctx: Context) -> tuple[set[str], int]:
     keys: set[str] = set()
     builds = 0
     try:
+        target_root = ctx.target_root.resolve()
+    except OSError:
+        target_root = ctx.target_root.absolute()
+    try:
         roots = [
             path for path in ctx.target_root.iterdir()
             if path.is_dir()
@@ -1434,6 +1450,52 @@ def _sanitizer_object_index(ctx: Context) -> tuple[set[str], int]:
     except OSError:
         roots = []
     for root in roots:
+        # Feedback siblings replay the canonical recipe with added compiler
+        # instrumentation, so scanning their duplicate object trees can only
+        # rediscover the same source set. On large targets that duplicate walk
+        # consumed minutes of the audit wall before any agent could launch.
+        if root.name.endswith(("+cov", "+fuzz")):
+            continue
+        compile_commands = root / "compile_commands.json"
+        if compile_commands.is_file():
+            try:
+                commands = json.loads(compile_commands.read_text(
+                    encoding="utf-8", errors="replace",
+                ))
+            except (OSError, ValueError, TypeError):
+                commands = None
+            if isinstance(commands, list):
+                found = False
+                for command in commands:
+                    if not isinstance(command, dict):
+                        continue
+                    raw = command.get("file")
+                    if not isinstance(raw, str) or not raw:
+                        continue
+                    source = Path(raw)
+                    if not source.is_absolute():
+                        directory = command.get("directory")
+                        source = Path(directory) / source if isinstance(
+                            directory, str
+                        ) and directory else root / source
+                    try:
+                        relative = source.resolve().relative_to(
+                            target_root
+                        ).as_posix().lower()
+                    except (OSError, RuntimeError, ValueError):
+                        continue
+                    suffix = source.suffix.lower()
+                    if suffix not in _NATIVE_COMPILATION_UNIT_EXTS:
+                        continue
+                    found = True
+                    keys.add(relative)
+                    keys.add(relative[: -len(suffix)])
+                builds += int(found)
+                # A valid compilation database is the build system's direct
+                # answer. Do not walk its object layout merely because none of
+                # its entries belong to the audited source tree (a generated
+                # code-only build is still an authoritative empty answer).
+                continue
         found = False
         for dirpath, _dirnames, filenames in os.walk(root):
             for name in filenames:
@@ -1719,6 +1781,35 @@ def code_feature_reasons(text: str) -> tuple[int, list[str]]:
     return score, reasons
 
 
+def _source_feature_score(path: Path) -> tuple[int, list[str]]:
+    """Read and score one source file in a process-pool-safe call."""
+    return code_feature_reasons(read_sample(path))
+
+
+def source_feature_scores(
+    source_paths: list[tuple[Path, str]],
+) -> Iterable[tuple[int, list[str]]]:
+    """Score sources in order, spreading independent regex work over CPUs."""
+    workers = min(usable_cpu_count(), len(source_paths))
+    paths = (path for path, _rel in source_paths)
+    if workers <= 1:
+        return map(_source_feature_score, paths)
+    # Every pattern is still evaluated against every file. Processes only
+    # remove the serial startup bottleneck; map order keeps card generation
+    # and tie-breaking deterministic.
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers=workers)
+    chunksize = max(1, len(source_paths) // (workers * workers))
+    scores = pool.map(_source_feature_score, paths, chunksize=chunksize)
+
+    def closing_scores() -> Iterable[tuple[int, list[str]]]:
+        try:
+            yield from scores
+        finally:
+            pool.shutdown()
+
+    return closing_scores()
+
+
 def corpus_index(results_dir: Path) -> list[tuple[str, float, str]]:
     """Scan the promoted corpus once: (lowercased metadata, mtime, testcase).
 
@@ -1853,7 +1944,9 @@ def rank_target(
     # label. Header-only / monolithic targets get a deeper default; targets
     # with diverse depth-2 prefixes keep the historical depth=2 behavior.
     source_paths: list[tuple[Path, str]] = []
-    for path in iter_source_files(ctx.target_root, only=delta_files):
+    for path in iter_source_files(
+        ctx.target_root, only=delta_files, repo_type=ctx.repo_type,
+    ):
         rel = relpath(path, ctx.target_root)
         if not is_auditable_source_path(rel):
             continue
@@ -1872,14 +1965,15 @@ def rank_target(
     seen_ids = {c.get("id") for c in cards}
     seen_surfaces = {work_surface(c) for c in cards}
     diversity_floor = int(os.environ.get("RANK_WORK_DIVERSITY_FLOOR", "12") or "12")
-    for path, rel in source_paths:
-        text = read_sample(path)
+    feature_rows = source_feature_scores(source_paths)
+    for (path, rel), (feature_score, feature_reasons) in zip(
+        source_paths, feature_rows,
+    ):
         score = 0
         reasons: list[str] = []
         path_score, path_reasons = structural_path_score(rel)
         score += path_score
         reasons.extend(path_reasons)
-        feature_score, feature_reasons = code_feature_reasons(text)
         score += feature_score
         reasons.extend(feature_reasons)
         patch_info = patch_boosts.get(rel)
@@ -6362,19 +6456,35 @@ def state_resume(
     # so we don't bill it every resume.
     resume_limit = _int_env("STATE_RESUME_RECENT_LIMIT", 5)
     # Structured-state hygiene caps recent terminal rows at 15. When a card is
-    # re-offered after a finding, show that bounded card history so unrelated
-    # recent work cannot hide an already-discarded shape and cause a duplicate
-    # probe. Global resumes keep the smaller operator-selected digest.
+    # assigned after a finding, show bounded history from the same source file
+    # so unrelated recent work cannot hide an already-discarded shape and
+    # companion strategies do not duplicate it. Global resumes keep the
+    # smaller operator-selected digest.
     # An active resume can contain several live hypotheses. Keep that digest
     # agent-wide so selecting the newest row above does not hide and strand its
     # siblings. Card scoping is for the re-offered-card case this guard fixes.
     history_card_id = card_id if card is not None else ""
-    history_limit = max(resume_limit, 15) if history_card_id else resume_limit
-    # A re-offered card may move to a different worker. Its history is card
-    # state, not agent memory: filtering by the new owner hid the prior finding
-    # and sent that worker back to the same location. Active-hypothesis resumes
-    # remain agent-scoped so they do not absorb a sibling's unrelated work.
-    history_agent = "" if history_card_id else agent
+    history_hypotheses = hyps
+    if card is not None and card.get("file"):
+        # Companion strategies deliberately use different card ids for the
+        # same source file. Restricting resume history to the new id hid a
+        # sibling agent's filed or rejected mechanism and sent the next card
+        # back through the same investigation. File-local history is still
+        # bounded below, and gives the new strategy the information it needs
+        # to choose a distinct boundary while preserving same-file clustering.
+        assigned_file = normalized_relpath(str(card.get("file", "")))
+        history_hypotheses = [
+            row for row in hyps
+            if normalized_relpath(
+                str(row.get("file", "")).split(":", 1)[0]
+            ) == assigned_file
+        ]
+        history_card_id = ""
+    history_limit = max(resume_limit, 15) if card is not None else resume_limit
+    # An assigned card may move to a different worker. Its file-local history
+    # is shared state, not agent memory. Active-hypothesis resumes remain
+    # agent-scoped so they do not absorb a sibling's unrelated work.
+    history_agent = "" if card is not None else agent
     include_tried = os.environ.get("STATE_RESUME_INCLUDE_TRIED", "0") == "1"
     runs = read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl")
     notes = read_jsonl(state_dir(ctx.results_dir) / "notes.jsonl")
@@ -6384,7 +6494,7 @@ def state_resume(
             "## Recent Hypotheses",
             recent_hypotheses(
                 ctx, limit=history_limit, agent=history_agent,
-                card_id=history_card_id, rows=hyps,
+                card_id=history_card_id, rows=history_hypotheses,
             ).strip(),
             "",
             "## Recent Runs",

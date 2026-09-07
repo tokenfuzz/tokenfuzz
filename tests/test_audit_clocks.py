@@ -327,6 +327,29 @@ class AuditClockTests(unittest.TestCase):
                 ),
             )
 
+    def test_ranking_policy_is_part_of_the_work_card_signature(self) -> None:
+        results = self.root / "output" / "sampleproj" / "codex" / "results"
+        results.mkdir(parents=True)
+        runtime = SimpleNamespace(
+            results=results, target_root=self.root / "target",
+            target_rev="rev-1",
+            config=SimpleNamespace(s6_domain="", s6_peers=[]),
+        )
+        with mock.patch.object(
+            audit_runner.target_config, "vcs_source_signature",
+            return_value="source-1",
+        ), mock.patch.object(
+            audit_runner.callgraph, "cache_signature", return_value="graph-1",
+        ), mock.patch.object(
+            audit_runner.housekeeping, "signature", return_value="signature",
+        ) as signature:
+            self.assertEqual(audit_runner._work_card_signature(runtime), "signature")
+
+        paths = signature.call_args.args[1]
+        self.assertIn(str(ROOT / "bin" / "rank-work"), paths)
+        self.assertIn(str(ROOT / "lib" / "workqueue.py"), paths)
+        self.assertIn(str(ROOT / "lib" / "audit_scope.py"), paths)
+
     def test_cell_effective_wall_keeps_measured_housekeeping(self) -> None:
         path = self.root / "cell" / "cell.json"
         benchmark_runner.write_cell(

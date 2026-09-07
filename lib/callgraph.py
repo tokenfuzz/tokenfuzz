@@ -33,7 +33,7 @@ ARTIFACT_NAME = "callgraph.json"
 
 # Bump when the artifact's shape or the policy that fills it changes, so a
 # stale artifact is rebuilt rather than read under new rules.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # The unit pack is bounded in tokens, not units: it carries the definitions
 # an agent would otherwise spend its first tool calls opening, and at 600
@@ -213,7 +213,19 @@ def cache_signature(
     )
     if not source:
         return ""
-    parts = [f"schema={SCHEMA_VERSION}", f"source={source}", f"tools={_toolchain()}"]
+    policy = hashlib.sha1()
+    for path in (
+        Path(__file__), Path(workqueue.__file__), Path(languages.__file__),
+        Path(__file__).with_name("audit_scope.py"),
+    ):
+        try:
+            policy.update(path.read_bytes())
+        except OSError:
+            policy.update(f"missing:{path.name}".encode())
+    parts = [
+        f"schema={SCHEMA_VERSION}", f"source={source}",
+        f"tools={_toolchain()}", f"policy={policy.hexdigest()}",
+    ]
     for artifact in (artifacts if artifacts is not None else _built_artifacts(target_root, results_dir)):
         try:
             stat = Path(artifact).stat() if artifact else None
@@ -240,8 +252,8 @@ def _built_artifacts(target_root: Path, results_dir: Path) -> tuple[str, str]:
     toml_path = target_config.find_target_toml(results_dir)
     if toml_path is None:
         return "", ""
-    config = target_config.Config()
-    config.target_root = str(target_root)
+    config_root = target_config.find_target_root(results_dir) or target_root
+    config = target_config.Config(target_root=str(config_root))
     try:
         target_config.load_toml_into(config, toml_path)
     except (OSError, ValueError):
@@ -266,7 +278,9 @@ def _auditable_sources(ctx: workqueue.Context) -> tuple[list[str], list[str]]:
     """
     paths: list[str] = []
     names: set[str] = set()
-    for path in workqueue.iter_source_files(ctx.target_root):
+    for path in workqueue.iter_source_files(
+        ctx.target_root, repo_type=ctx.repo_type,
+    ):
         rel = workqueue.relpath(path, ctx.target_root)
         if not workqueue.is_auditable_source_path(rel):
             continue

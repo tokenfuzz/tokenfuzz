@@ -489,7 +489,7 @@ class HarnessBuilder:
         cache.mkdir(parents=True, exist_ok=True)
         sanitizer_lib = self._sanitizer_lib() if kind == "cc" else ""
         identity = "\n".join((
-            "schema=5", f"source={hashlib.sha1(self.source.read_bytes()).hexdigest()}",
+            "schema=6", f"source={hashlib.sha1(self.source.read_bytes()).hexdigest()}",
             f"compiler={shutil.which(compiler) or compiler}", f"compiler_stat={stat_key(shutil.which(compiler) or compiler)}",
             f"kind={kind}", f"flags={flags}", f"sanitizer={self.probe.sanitizer}",
             f"library={sanitizer_lib}", f"library_stat={stat_key(sanitizer_lib)}",
@@ -513,6 +513,8 @@ class HarnessBuilder:
                 self._show_failure(failed_log)
             if kind == "rust":
                 completed = self._build_rust(binary)
+            elif kind == "swift":
+                completed = self._build_swift(binary)
             else:
                 completed = fuzz_harness.run_build_steps(
                     self._command(kind, compiler, flags, binary, sanitizer_lib),
@@ -608,6 +610,101 @@ class HarnessBuilder:
             )
             shutil.copy2(built, binary)
             binary.chmod(binary.stat().st_mode | 0o111)
+        return completed
+
+    def _build_swift(self, binary: Path) -> subprocess.CompletedProcess:
+        """Build one Swift testcase against every exported library product."""
+        info = languages.swift_package_info(self.probe.config.target_root)
+        if not info.library_products:
+            raise ValueError(
+                "direct Swift testcases require an exported library product"
+            )
+        root = Path(self.probe.config.target_root).resolve()
+        project = root / ".audit" / (
+            f"swift-probe-{self.probe.sanitizer}-{self.probe.agent}"
+        )
+        sources = project / "Sources" / "Probe"
+        sources.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.source, sources / "main.swift")
+        def quote(value: object) -> str:
+            return json.dumps(str(value), ensure_ascii=False)
+
+        platform_names = {
+            "macos": "macOS", "ios": "iOS", "tvos": "tvOS",
+            "watchos": "watchOS", "visionos": "visionOS",
+            "maccatalyst": "macCatalyst", "driverkit": "driverKit",
+        }
+        platforms = [
+            f".{platform_names[name.lower()]}({quote(version)})"
+            for name, version in info.platforms
+            if name.lower() in platform_names
+        ]
+        products = ",\n        ".join(
+            f".product(name: {quote(name)}, package: {quote(root.name.lower())})"
+            for name, _targets in info.library_products
+        )
+        version = ".".join(info.tools_version.split(".")[:2])
+        platform_line = (
+            f"  platforms: [{', '.join(platforms)}],\n" if platforms else ""
+        )
+        (project / "Package.swift").write_text(
+            f"// swift-tools-version: {version}\n"
+            "import PackageDescription\n"
+            "let package = Package(\n"
+            "  name: \"TokenFuzzProbe\",\n"
+            f"{platform_line}"
+            f"  dependencies: [.package(path: {quote(root)})],\n"
+            "  targets: [.executableTarget(name: \"Probe\", dependencies: [\n"
+            f"        {products}\n"
+            "  ])]\n"
+            ")\n",
+            encoding="utf-8",
+        )
+        resolved = root / "Package.resolved"
+        if resolved.is_file():
+            shutil.copy2(resolved, project / resolved.name)
+        flag = {"asan": "address", "ubsan": "undefined", "tsan": "thread"}.get(
+            self.probe.sanitizer
+        )
+        if flag is None:
+            raise ValueError(
+                f"Swift testcases do not support sanitizer '{self.probe.sanitizer}'"
+            )
+        common = [
+            "--quiet", "--disable-sandbox", "-c", "release",
+            "-Xswiftc", f"-sanitize={flag}", "-Xswiftc", "-O",
+            "--cache-path", str(root / ".audit" / "swiftpm" / "cache"),
+            "--config-path", str(root / ".audit" / "swiftpm" / "configuration"),
+            "--security-path", str(root / ".audit" / "swiftpm" / "security"),
+            "-Xswiftc", "-module-cache-path", "-Xswiftc",
+            str(root / ".audit" / "clang-module-cache"),
+            "--package-path", str(project),
+        ]
+        environment = runner_preflight.runner_environment(
+            self.probe.config, self.probe.sanitizer,
+        )
+        completed = subprocess.run(
+            ["swift", "build", *common], capture_output=True, check=False,
+            env=environment,
+        )
+        if completed.returncode:
+            return completed
+        located = subprocess.run(
+            ["swift", "build", "--show-bin-path", *common],
+            capture_output=True, check=False, env=environment,
+        )
+        if located.returncode:
+            return located
+        built = Path(located.stdout.decode(errors="replace").strip()) / (
+            "Probe.exe" if os.name == "nt" else "Probe"
+        )
+        if not built.is_file():
+            return subprocess.CompletedProcess(
+                located.args, 1, b"",
+                f"SwiftPM did not produce {built}\n".encode(),
+            )
+        shutil.copy2(built, binary)
+        binary.chmod(binary.stat().st_mode | 0o111)
         return completed
 
     def _rust_named_crates(self) -> "set[str] | None":
@@ -1022,6 +1119,17 @@ class Probe:
             environment["TARGET"] = self.header["target"]
         if self.want:
             environment["WANT"] = self.want
+        if (
+            self.mode == "generic"
+            and self.config.runner_bin
+            and not self.config.sanitizer_bin(self.sanitizer)
+            and not self.config.sanitizer_lib(self.sanitizer)
+        ):
+            # bin/hits can compare only a configured native CLI or library
+            # with its instrumented sibling. A language runner with neither
+            # route always returns COVERAGE_UNAVAILABLE and then runs the same
+            # sanitizer ungated, so skip that guaranteed-no-answer process.
+            environment["SKIP_COVERAGE_GATE"] = "1"
         if self.exec_testcase != self.testcase:
             environment["ASAN_RECORDED_TESTCASE"] = str(self.testcase)
         return environment
@@ -1058,6 +1166,23 @@ class Probe:
                 "direct .rs public-API testcase, or a `// HARNESS: <name>.rs` "
                 "driver beside the input, and run it with bin/probe"
             )
+        elif self._runs_swift() and self.exec_testcase.suffix.lower() == ".swift":
+            override, preargs, self.build_kind = HarnessBuilder(
+                self, self.exec_testcase,
+            ).build()
+        elif self._runs_swift() and list(self.config.runner_args) == ["{TESTCASE}"]:
+            raise ValueError(
+                "Swift library target has no binary for opaque input; write a "
+                "direct .swift public-API testcase, or a `// HARNESS: <name>.swift` "
+                "driver beside the input, and run it with bin/probe"
+            )
+        elif self._runs_java() and self.exec_testcase.suffix.lower() == ".java":
+            module_args = languages.java_probe_runner_args(
+                self.config.target_root, self.config.build_system,
+                self.header["target"], self.exec_testcase,
+            )
+            if module_args:
+                self.config.runner_args = list(module_args)
         elif self.mode == "generic" and self.exec_testcase.suffix.lower() in {".ts", ".tsx"} and self._can_use_runner():
             if Path(self.config.runner_bin).name == "node":
                 ts_node = Path(self.config.target_root) / "node_modules/.bin/ts-node"
@@ -1137,8 +1262,9 @@ class Probe:
         elif preargs:
             generic_args = [*preargs, str(self.exec_testcase)]
             skip = True
-        elif self.build_kind == "rust" and not harness:
-            # A direct .rs testcase compiled itself; there is no input to pass.
+        elif self.build_kind in {"rust", "swift"} and not harness:
+            # A direct public-API testcase compiled itself; there is no input
+            # to pass to the resulting executable.
             skip = True
         elif self.exec_testcase != self.testcase:
             generic_args = [str(self.exec_testcase)]
@@ -1160,6 +1286,23 @@ class Probe:
             self.mode == "generic"
             and self._can_use_runner()
             and Path(self.config.runner_bin).name == "cargo"
+        )
+
+    def _runs_swift(self) -> bool:
+        """Whether this probe's route is the configured SwiftPM runner."""
+        return (
+            self.mode == "generic"
+            and self._can_use_runner()
+            and self.config.build_system == "swift"
+            and Path(self.config.runner_bin).name == "swift"
+        )
+
+    def _runs_java(self) -> bool:
+        return (
+            self.mode == "generic"
+            and self._can_use_runner()
+            and self.config.build_system in {"maven", "gradle"}
+            and Path(self.config.runner_bin).name == "java"
         )
 
     def _can_use_runner(self) -> bool:

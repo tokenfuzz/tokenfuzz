@@ -12,6 +12,7 @@ working unchanged.
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import sys
@@ -125,6 +126,20 @@ write("empty.toml", 'slug = "empty"\n[threat_model]\nattacker_controls = []\n')
 tc.load_toml_into(cfg, TEST_TMPDIR / "empty.toml")
 assert_eq(["bytes"], cfg.attacker_controls,
           "load_toml_into: empty attacker_controls defaults to ['bytes']")
+
+nested_checkout = TEST_TMPDIR / "nested-checkout"
+(nested_checkout / "project").mkdir(parents=True)
+nested_toml = write(
+    "nested-reload.toml",
+    'target = "sample"\nsource_subdir = "project"\n',
+)
+nested_cfg = tc.Config(target_root=str(nested_checkout))
+tc.load_toml_into(nested_cfg, nested_toml)
+tc.load_toml_into(nested_cfg, nested_toml)
+assert_eq(
+    (nested_checkout / "project").resolve(), Path(nested_cfg.target_root),
+    "load_toml_into: reloading a nested config keeps its checkout root",
+)
 
 cfg = tc.Config()
 write(
@@ -969,6 +984,120 @@ assert_in("modules/core/include", component_includes,
 assert_eq(False, "modules/core/src" in component_includes,
           "_detect_include_dirs: private component headers stay off the search path")
 
+# Some projects install namespace-shaped headers from a source directory that
+# is not literally named include. The generated destination supplies the
+# missing mapping: installing srcroot/Api/core.hpp to include/Api means
+# srcroot is the include search root.
+mapped_root = TEST_TMPDIR / "cmake-destination-includes"
+mapped_build = mapped_root / "build-asan"
+mapped_public = mapped_root / "source" / "Api" / "core.hpp"
+mapped_public.parent.mkdir(parents=True)
+mapped_build.mkdir(parents=True)
+mapped_public.write_text("int mapped(void);\n", encoding="utf-8")
+(mapped_build / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/include/Api" TYPE FILE '
+    f'FILES "{mapped_public}")\n', encoding="utf-8",
+)
+assert_in(
+    "source", tc._detect_include_dirs(mapped_root, "build-asan"),
+    "_detect_include_dirs: CMake destination maps public namespace to source root",
+)
+
+# Meson exposes the same relationship directly in intro-installed.json. Both
+# source headers and generated public headers are needed: the former resolves
+# <sample/api.h>, while the latter satisfies quoted configuration includes.
+meson_include_root = TEST_TMPDIR / "meson-installed-includes"
+meson_include_build = meson_include_root / "build-asan"
+meson_source_header = meson_include_root / "module" / "include" / "sample" / "api.h"
+meson_generated_header = meson_include_build / "module" / "config.h"
+meson_source_header.parent.mkdir(parents=True)
+meson_generated_header.parent.mkdir(parents=True)
+(meson_include_build / "meson-info").mkdir()
+meson_source_header.write_text('#include "config.h"\nint sample(void);\n')
+meson_generated_header.write_text("#define SAMPLE_CONFIG 1\n")
+(meson_include_build / "meson-info" / "intro-installed.json").write_text(
+    json.dumps({
+        str(meson_source_header): "/usr/local/include/sample/api.h",
+        str(meson_generated_header): "/usr/local/include/sample/config.h",
+    }),
+    encoding="utf-8",
+)
+meson_includes = tc._detect_include_dirs(meson_include_root, "build-asan")
+assert_in(
+    "module/include", meson_includes,
+    "_detect_include_dirs: Meson install metadata maps source public headers",
+)
+assert_in(
+    "build-asan/module", meson_includes,
+    "_detect_include_dirs: Meson install metadata maps generated public headers",
+)
+
+config_root = TEST_TMPDIR / "cmake-config-includes"
+config_build = config_root / "build-asan"
+config_public = config_root / "sdk" / "api" / "include"
+config_public.mkdir(parents=True)
+config_build.mkdir(parents=True)
+(config_public / "sample.hpp").write_text("int sample(void);\n")
+(config_build / "SampleConfig.cmake").write_text(
+    'set(SAMPLE_INCLUDE_DIRS ${SAMPLE_PREFIX}/include/sdk/api/include)\n',
+    encoding="utf-8",
+)
+assert_in(
+    "sdk/api/include", tc._detect_include_dirs(config_root, "build-asan"),
+    "_detect_include_dirs: package config maps its public install suffix to source",
+)
+
+# A static archive carries no dependency closure. A project's own downstream
+# CMake config does, and setup should turn its matching public variable into
+# relocatable harness argv without knowing project or dependency names.
+package_link_root = TEST_TMPDIR / "cmake-package-links"
+package_link_build = package_link_root / "build-asan"
+(package_link_build / "lib").mkdir(parents=True)
+package_primary = package_link_build / "lib" / "libsamplecore.a"
+package_dependency = package_link_build / "lib" / "libsampledep.a"
+package_primary.write_bytes(b"!<arch>\n")
+package_dependency.write_bytes(b"!<arch>\n")
+(package_link_build / "SampleConfig.cmake").write_text(
+    'set(SAMPLE_LIBRARIES '
+    '"$ENV{SAMPLE_INSTALL_PREFIX}/lib/libsamplecore.a;'
+    '-Wl,-force_load,$ENV{SAMPLE_INSTALL_PREFIX}/lib/libsampledep.a")\n',
+    encoding="utf-8",
+)
+if shutil.which("cmake"):
+    assert_eq(
+        ["-Wl,-force_load", "build-asan/lib/libsampledep.a"],
+        tc.cmake_package_harness_link_args(
+            package_link_root, "build-asan", "build-asan/lib/libsamplecore.a",
+        ),
+        "CMake package links: selected archive is omitted and dependency paths relocate",
+    )
+else:
+    passed("CMake package links: skipped without cmake")
+
+standard_root = TEST_TMPDIR / "compile-standard"
+(standard_root / "build-asan").mkdir(parents=True)
+(standard_root / "build-asan" / "compile_commands.json").write_text(
+    json.dumps([
+        {"file": "src/one.cpp", "arguments": ["c++", "-std=gnu++20", "one.cpp"]},
+        {"file": "src/two.cc", "command": "c++ -std=gnu++20 two.cc"},
+        {"file": "vendor/old.cpp", "arguments": ["c++", "-std=c++11", "old.cpp"]},
+        {"file": "src/plain.c", "arguments": ["cc", "-std=gnu99", "plain.c"]},
+    ]), encoding="utf-8",
+)
+standard_toml = standard_root / "target.toml"
+standard_toml.write_text('target = "sample"\ndefines = []\n', encoding="utf-8")
+assert_eq(True, tc.refresh_detected_compile_fields(standard_root, standard_toml),
+          "compile metadata fills a missing C++ language standard")
+assert_in('-std=gnu++20', tc.parse_toml(standard_toml)["defines"],
+          "the dominant C++ standard is persisted for harness builds")
+standard_toml.write_text(
+    'target = "sample"\ndefines = ["-std=c++17"]\n', encoding="utf-8",
+)
+assert_eq(False, tc.refresh_detected_compile_fields(standard_root, standard_toml),
+          "an explicit language standard remains curated")
+assert_in('-std=c++17', tc.parse_toml(standard_toml)["defines"],
+          "compile metadata does not replace an explicit standard")
+
 # Persisted include entries stay canonical in a container, while discovery
 # must read generated metadata from that container image's physical build.
 suffix_root = TEST_TMPDIR / "cmake-component-includes-suffix"
@@ -1223,6 +1352,27 @@ assert_eq(
     "_detect_sanitizer_lib: CMake-installed library outranks uninstalled support archive",
 )
 
+meson_public_root = TEST_TMPDIR / "meson-public-library"
+meson_public_build = meson_public_root / "build-asan"
+(meson_public_build / "meson-info").mkdir(parents=True)
+_meson_public = meson_public_build / "libmesonpubliclibrary.a"
+_meson_private = meson_public_build / "libinternal.a"
+_meson_extension = meson_public_build / "module.cpython-314-darwin.so"
+for artifact in (_meson_public, _meson_private, _meson_extension):
+    artifact.write_bytes(b"!<arch>\n")
+(meson_public_build / "meson-info" / "intro-installed.json").write_text(
+    json.dumps({
+        str(_meson_public): "/usr/local/lib/libmesonpubliclibrary.a",
+        str(_meson_extension): "/usr/local/lib/python/site-packages/module.so",
+    }),
+    encoding="utf-8",
+)
+assert_eq(
+    "build-asan/libmesonpubliclibrary.a",
+    tc._detect_sanitizer_lib(meson_public_build, meson_public_root),
+    "_detect_sanitizer_lib: Meson install metadata excludes internal archives and extensions",
+)
+
 cmake_modules_root = TEST_TMPDIR / "cmake-modular-library"
 cmake_modules_build = cmake_modules_root / "build-asan"
 (cmake_modules_build / "lib").mkdir(parents=True)
@@ -1245,6 +1395,76 @@ assert_eq(
     tc._detect_sanitizer_lib(cmake_modules_build, cmake_modules_root),
     "_detect_sanitizer_lib: a modular project's installed core library is the default",
 )
+
+# A same-named archive may be only a linkage anchor. Prefer the installed
+# implementation library when the exact-name archive exports no callable
+# code; linking the anchor gives a harness neither the API nor instrumentation.
+cmake_facade_root = TEST_TMPDIR / "cmake-static-facade"
+cmake_facade_build = cmake_facade_root / "build-asan"
+(cmake_facade_build / "lib").mkdir(parents=True)
+(cmake_facade_build / "CMakeCache.txt").write_text(
+    "CMAKE_PROJECT_NAME:STATIC=Sample\n", encoding="utf-8",
+)
+facade_source = cmake_facade_build / "facade.c"
+core_source = cmake_facade_build / "core.c"
+facade_object = cmake_facade_build / "facade.o"
+core_object = cmake_facade_build / "core.o"
+facade_source.write_text("static int linkage_anchor(void) { return 0; }\n", encoding="utf-8")
+core_source.write_text("int sample_core(void) { return 1; }\n", encoding="utf-8")
+cc = shutil.which(os.environ.get("CC", "cc")) or shutil.which("cc")
+ar = shutil.which("ar")
+subprocess.run([cc, "-c", str(facade_source), "-o", str(facade_object)], check=True)
+subprocess.run([cc, "-c", str(core_source), "-o", str(core_object)], check=True)
+facade_archive = cmake_facade_build / "lib" / "libsample.a"
+core_archive = cmake_facade_build / "lib" / "libsamplecore.a"
+subprocess.run([ar, "rcs", str(facade_archive), str(facade_object)], check=True)
+subprocess.run([ar, "rcs", str(core_archive), str(core_object)], check=True)
+(cmake_facade_build / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE STATIC_LIBRARY '
+    f'FILES "{facade_archive}" "{core_archive}")\n',
+    encoding="utf-8",
+)
+assert_eq(
+    "build-asan/lib/libsamplecore.a",
+    tc._detect_sanitizer_lib(cmake_facade_build, cmake_facade_root),
+    "_detect_sanitizer_lib: an installed core archive outranks an empty facade",
+)
+
+# Generated install plans belonging to vendored CMake subprojects do not make
+# their maintenance tools the audited project's CLI.
+cmake_dependency_root = TEST_TMPDIR / "cmake-dependency-tool"
+cmake_dependency_build = cmake_dependency_root / "build-asan"
+cmake_dependency_root.mkdir()
+(cmake_dependency_root / "CMakeLists.txt").write_text(
+    "cmake_minimum_required(VERSION 3.16)\nproject(Sample)\n", encoding="utf-8",
+)
+(cmake_dependency_build / "lib").mkdir(parents=True)
+(cmake_dependency_build / "third_party" / "dependency").mkdir(parents=True)
+dependency_library = cmake_dependency_build / "lib" / f"libsample{_sh_ext}"
+dependency_tool = cmake_dependency_build / "bin" / "dependency-tool"
+dependency_tool.parent.mkdir()
+dependency_library.write_bytes(b"\x7fELF")
+dependency_tool.write_bytes(b"\x7fELF")
+dependency_tool.chmod(0o755)
+(cmake_dependency_build / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE SHARED_LIBRARY '
+    f'FILES "{dependency_library}")\n', encoding="utf-8",
+)
+(cmake_dependency_build / "third_party" / "dependency" / "cmake_install.cmake").write_text(
+    'file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/bin" TYPE EXECUTABLE '
+    f'FILES "{dependency_tool}")\n', encoding="utf-8",
+)
+_saved_uses = tc._binary_uses_sanitizer
+tc._binary_uses_sanitizer = lambda path, sanitizer="asan": True
+try:
+    assert_eq(
+        ("", f"build-asan/lib/libsample{_sh_ext}"),
+        tc.detect_sanitizer_build_artifacts(cmake_dependency_root, "asan"),
+        "detect_sanitizer_build_artifacts: vendored installed tool is not the target CLI",
+    )
+finally:
+    tc._binary_uses_sanitizer = _saved_uses
+
 assert_in('asan_bin      = "build-asan/Product.app/Contents/MacOS/Product"',
           browser_refresh_toml.read_text(encoding="utf-8"),
           "browser refresh adopts the foreground product executable")
@@ -1527,6 +1747,52 @@ _setbin_ubsan_cfg = tc.Config()
 tc.load_toml_into(_setbin_ubsan_cfg, write("setbin-ubsan.toml", setbin_ubsan))
 assert_eq("build-ubsan/new", _setbin_ubsan_cfg.ubsan_bin,
           "set_sanitizer_bin: retargets a non-ASan field in [sanitizer]")
+
+python_runner_text = tc.set_python_extension_runner(
+    'target = "widget"\nasan_lib = "build-asan/internal.a"\n'
+    '[sanitizer]\nenabled = ["asan"]\n',
+    "asan", ".audit/python-runner-asan",
+    "{TARGET_ROOT}/.audit/python-stage-asan/site-packages",
+    clear_library=True,
+)
+_python_runner_cfg = tc.Config()
+tc.load_toml_into(
+    _python_runner_cfg, write("python-extension-runner.toml", python_runner_text)
+)
+assert_eq("", _python_runner_cfg.asan_lib,
+          "set_python_extension_runner: disables the unusable archive")
+assert_eq(".audit/python-runner-asan", _python_runner_cfg.runner_bin,
+          "set_python_extension_runner: adds the proved launcher")
+assert_eq(["{TESTCASE}"], _python_runner_cfg.runner_args,
+          "set_python_extension_runner: runs the testcase directly")
+python_runner_with_public_library = tc.set_python_extension_runner(
+    'target = "widget"\nasan_lib = "build-asan/internal.a"\n',
+    "asan", ".audit/python-runner-asan",
+    "{TARGET_ROOT}/.audit/python-stage-asan/site-packages",
+    clear_library=True,
+    replacement_library="build-asan/libpublic.a",
+)
+assert_in('asan_lib      = "build-asan/libpublic.a"',
+          python_runner_with_public_library,
+          "set_python_extension_runner: replaces an internal archive with the public build product")
+python_runner_repaired = tc.set_python_extension_runner(
+    python_runner_text.replace(
+        '# asan_lib      = "build-asan/internal.a"',
+        'asan_lib      = "build-asan/internal.a"',
+    ),
+    "asan", ".audit/python-runner-asan",
+    "{TARGET_ROOT}/.audit/python-stage-asan/site-packages",
+    clear_library=True,
+)
+_python_runner_repaired_cfg = tc.Config()
+tc.load_toml_into(
+    _python_runner_repaired_cfg,
+    write("python-extension-runner-repaired.toml", python_runner_repaired),
+)
+assert_eq("", _python_runner_repaired_cfg.asan_lib,
+          "set_python_extension_runner: repairs the library beside its existing runner")
+assert_eq(1, python_runner_repaired.count("[runner]"),
+          "set_python_extension_runner: existing runner is not duplicated")
 
 
 # ─── 10f. _detect_cli_bin prunes aux dirs and filters before the cap ──
@@ -2593,6 +2859,24 @@ except Exception as _e:  # noqa: BLE001
 
 
 # ─── Cleanup + summary ──────────────────────────────────────────────
+
+# A JVM build tool may already be running with a usable JDK even when the
+# platform `java` launcher on PATH is only an installation stub. Reuse the
+# runtime Maven reports instead of rejecting an otherwise runnable target.
+with mock.patch.object(tc.shutil, "which", side_effect=lambda name: {
+        "java": "/usr/bin/java", "mvn": "/opt/tools/bin/mvn"}.get(name)), \
+     mock.patch.object(tc, "_java_is_usable",
+                       side_effect=lambda path: str(path).startswith("/opt/jdk/")), \
+     mock.patch.object(tc.subprocess, "run", return_value=subprocess.CompletedProcess(
+         args=["/opt/tools/bin/mvn", "-v"], returncode=0,
+         stdout="Apache Maven 3.9.9\nJava runtime: /opt/jdk/runtime\n",
+         stderr="")):
+    assert_eq(
+        ("/opt/jdk/runtime/bin/java", ["JAVA_HOME=/opt/jdk/runtime"]),
+        tc._detect_java_runner("maven"),
+        "java runner: reuses the JDK reported by a working Maven",
+    )
+
 
 shutil.rmtree(TEST_TMPDIR, ignore_errors=True)
 

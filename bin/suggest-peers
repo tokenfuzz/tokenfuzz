@@ -134,16 +134,17 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         return 1
 
-    targets_dir = ROOT / "targets" / args.slug
+    checkout_root = ROOT / "targets" / args.slug
     upstream_url = ""
+    cfg = tc.Config(target_root=str(checkout_root))
     try:
-        cfg = tc.Config()
         tc.load_toml_into(cfg, target_toml)
         upstream_url = cfg.upstream_url
     except Exception as e:
         print(f"[suggest-peers] warning: target.toml parse: {e}", file=sys.stderr)
 
-    readme_excerpt = tc.read_readme_excerpt(targets_dir) if targets_dir.is_dir() else ""
+    source_root = Path(cfg.target_root)
+    readme_excerpt = tc.read_readme_excerpt(source_root) if source_root.is_dir() else ""
     taxonomy = read_s6_taxonomy()
     prompt = build_prompt(args.slug, upstream_url, readme_excerpt, taxonomy)
 
@@ -220,7 +221,7 @@ def main(argv: list[str]) -> int:
     # break parsing — and we would rather refuse the write than leave a
     # corrupted target.toml on disk for the next audit run.
     try:
-        _probe = tc.Config()
+        _probe = tc.Config(target_root=str(checkout_root))
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", suffix=".toml",
             dir=str(target_toml.parent), delete=False,

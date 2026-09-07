@@ -443,6 +443,11 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         and result.tool_calls == 0 and result.transcript_events == 1,
         "Claude stream-idle failure retries once through the real launch path",
     )
+    stream_index = stream_runtime.index.read_text(encoding="utf-8")
+    check(
+        "provider_issue=none" in stream_index and " provider=none " not in stream_index,
+        "agent completion logs distinguish provider health from backend identity",
+    )
 
 
     with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "oss"}, clear=True):

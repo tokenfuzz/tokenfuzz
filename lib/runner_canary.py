@@ -32,6 +32,7 @@ be worse than not looking.
 from __future__ import annotations
 
 import os
+import json
 import re
 import shutil
 import tempfile
@@ -71,7 +72,24 @@ def skip_reason(config) -> str:
         return "no [runner].bin is configured"
     if Path(str(config.runner_bin)).name != language.runner_bin:
         return f"[runner].bin is not the registry's {language.runner_bin}"
-    if list(config.runner_args) != list(language.runner_args):
+    expected_args = list(language.runner_args)
+    if language.name == "java":
+        expected_args = list(languages.java_runner_args(
+            config.target_root, config.build_system,
+        ))
+    if language.name == "swift":
+        try:
+            info = languages.swift_package_info(config.target_root)
+            expected_args = list(
+                languages.swift_runner_args(config.target_root, config.slug)
+            )
+        except ValueError as exc:
+            return str(exc)
+        if "--skip-build" in expected_args:
+            return "the Swift executable owns its input and cannot print the source canary"
+        if not info.library_products:
+            return "the Swift package exposes no library product for a source canary"
+    if list(config.runner_args) != expected_args:
         return "[runner].args no longer match the registry's own invocation"
     if language.name == "rust" and not target_config.cargo_root_has_library(
         config.target_root,
@@ -99,11 +117,55 @@ def _stage(config, language, tree: Path) -> Path:
     # Every tool below bin/probe rediscovers the session from this file, so a
     # canary run without one is not the route an agent's testcase takes.
     target_config.write_session_env(
-        str(results), str(results), str(Path(config.target_root).resolve()),
+        str(results), str(results), str(Path(
+            config.checkout_root or config.target_root
+        ).resolve()),
         slug, getattr(config, "target_rev", "") or "", str(tree / "logs"),
     )
     canary = scratch / f"canary{canary_suffix(language)}"
-    canary.write_text(language.canary_source, encoding="utf-8")
+    source = language.canary_source
+    if language.name == "swift":
+        info = languages.swift_package_info(config.target_root)
+        module = info.library_products[0][1][0]
+        source = f"import {module}\n{source}"
+    if language.name == "java":
+        classes = languages.java_canary_classes(
+            config.target_root, config.build_system,
+        )
+        quoted = ", ".join(json.dumps(name) for name in classes)
+        source = f"""public class Canary {{
+    public static void main(String[] args) {{
+        String[] names = new String[] {{{quoted}}};
+        for (String name : names) {{
+            try {{
+                Class<?> type = Class.forName(name, false, Canary.class.getClassLoader());
+                java.security.CodeSource origin = type.getProtectionDomain().getCodeSource();
+                if (origin != null) {{
+                    String path = new java.io.File(origin.getLocation().toURI()).getCanonicalPath();
+                    System.out.println("{MARKER} path=" + path);
+                    return;
+                }}
+            }} catch (Throwable ignored) {{}}
+        }}
+    }}
+}}
+"""
+    if language.name == "perl":
+        module = languages.perl_canary_module(config.target_root)
+        if module:
+            quoted = json.dumps(module)
+            source = f'''use strict;
+use warnings;
+use Cwd ();
+my $module = {quoted};
+require $module;
+my $package = $module;
+$package =~ s{{/}}{{::}}g;
+$package =~ s{{\.pm$}}{{}};
+$package->import() if $package->can("import");
+print "{MARKER} path=" . Cwd::abs_path($INC{{$module}});
+'''
+    canary.write_text(source, encoding="utf-8")
     return canary
 
 
@@ -154,10 +216,11 @@ def _reasons(config, output: str) -> list[str]:
 
 
 def _under(root: Path, candidate: str) -> bool:
-    # A search path that does not exist proves nothing: the runtime skips it
-    # and resolves the installed copy, which is the failure this checks for.
+    # A reported import directory or the concrete module file it supplied is
+    # proof only when that object exists. A missing path can be skipped by the
+    # runtime before it resolves an installed copy.
     path = Path(candidate)
-    if not path.is_dir():
+    if not path.exists():
         return False
     try:
         path.resolve().relative_to(root)
@@ -197,9 +260,23 @@ def check(config, timeout: int = 300) -> str:
             return f"the canary testcase did not finish within {timeout}s"
         report = canary.with_suffix(".asan.txt")
         output = report.read_text(errors="replace") if report.is_file() else ""
-        failures = _reasons(config, output + completed.stdout + completed.stderr)
+        combined = output + completed.stdout + completed.stderr
+        failures = _reasons(config, combined)
         if completed.returncode:
             failures.append(f"bin/probe exited {completed.returncode}")
+            noise = (
+                "[run-", "[probe]", "===", "CRASH_RATE:",
+                "SANITIZER_RUN_HEADER:",
+            )
+            detail = [
+                line.strip() for line in combined.splitlines()
+                if line.strip() and not line.lstrip().startswith(noise)
+            ]
+            if detail:
+                failures.append(
+                    "last output: "
+                    + " | ".join(line[:300] for line in detail[-3:])
+                )
     if not failures:
         return ""
     return "; ".join(failures)

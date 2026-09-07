@@ -210,6 +210,8 @@ container as privileged, and do not mount the Docker socket into it.
 - System Bash is sufficient for the test driver and generated recipes.
 - Homebrew LLVM is auto-detected at `/opt/homebrew/opt/llvm` and
   `/usr/local/opt/llvm`. Set `LLVM_PREFIX` only to select another installation.
+- Generated CMake and Meson recipes append Homebrew's installed package tree
+  to `CMAKE_PREFIX_PATH`. Any paths you set explicitly keep precedence.
 
 ## If preflight fails
 

@@ -36,7 +36,13 @@ bin/setup-target <target>
 
 `bin/setup-target` creates or updates `targets/<target>/` and generates
 `output/<target>/target.toml`. With no source argument it re-inspects an
-existing checkout and refreshes unresolved generated fields.
+existing checkout and refreshes unresolved generated fields. With `--build`,
+it initializes recorded Git submodules before detection. If the checkout root
+has no build manifest, setup selects one unambiguous immediate project child
+and records it as `source_subdir`; multiple unmatched projects fail loudly.
+For a Meson-built Python extension with no CLI, setup stages the installed
+package and builds a tiny ASan-linked Python host, then records that proved
+execution route in `[runner]`.
 
 Useful flags:
 
@@ -46,7 +52,7 @@ Useful flags:
 | `--browser` / `--no-browser` | Select browser execution mode explicitly. A browser-specific driver such as `mach` is inferred when neither flag is present; shared build systems such as GN require an explicit choice. |
 | `--pull` | Update an existing VCS checkout to the latest upstream source without re-passing its repo URL. Tracked local edits leave the checkout untouched; untracked build trees, `.audit/` overlays, and run leftovers do not block the update. |
 | `--no-update` | Do not pull or fetch an existing VCS checkout. |
-| `--force` | Without `--build`, regenerate generated config, including suggested threat-model and peer sections. With `--build`, preserve reviewed config and recipes but rematerialize their build output from a clean tree. |
+| `--force` | Regenerate inferred config, including suggested threat-model and peer sections. With `--build`, regenerate before building while preserving the target's build recipe. |
 | `--no-alternates` | Build only the canonical sanitizer trees, skipping the cached alternate ASan configurations described below. |
 | `--no-llm-config` | Skip best-effort model suggestions for the threat model and S6 peers. |
 

@@ -46,10 +46,339 @@ import json
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
+
+
+@dataclass(frozen=True)
+class SwiftPackageInfo:
+    name: str
+    tools_version: str
+    platforms: tuple[tuple[str, str], ...]
+    library_products: tuple[tuple[str, tuple[str, ...]], ...]
+    executable_products: tuple[str, ...]
+
+
+def swiftpm_paths(target_root: str | os.PathLike) -> dict[str, Path]:
+    root = Path(target_root)
+    paths = {
+        "cache": root / ".audit" / "swiftpm" / "cache",
+        "config": root / ".audit" / "swiftpm" / "configuration",
+        "security": root / ".audit" / "swiftpm" / "security",
+        "modules": root / ".audit" / "clang-module-cache",
+    }
+    for path in paths.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return paths
+
+
+def swift_package_info(target_root: str | os.PathLike) -> SwiftPackageInfo:
+    """Return SwiftPM's structured description of a package."""
+    root = Path(target_root)
+    paths = swiftpm_paths(root)
+    environment = os.environ.copy()
+    environment["CLANG_MODULE_CACHE_PATH"] = str(paths["modules"])
+    try:
+        completed = subprocess.run(
+            [
+                "swift", "package", "--package-path", str(root),
+                "--cache-path", str(paths["cache"]),
+                "--config-path", str(paths["config"]),
+                "--security-path", str(paths["security"]),
+                "dump-package",
+            ],
+            capture_output=True, text=True, check=False, timeout=60,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            f"SwiftPM did not describe {root / 'Package.swift'} within 60s"
+        ) from exc
+    if completed.returncode:
+        detail = next((line.strip() for line in completed.stderr.splitlines() if line.strip()), "no diagnostic output")
+        raise ValueError(f"SwiftPM could not describe {root / 'Package.swift'}: {detail}")
+    try:
+        raw = json.loads(completed.stdout)
+        products = raw.get("products", [])
+        libraries = tuple(
+            (str(product["name"]), tuple(str(value) for value in product.get("targets", [])))
+            for product in products
+            if isinstance(product, dict)
+            and isinstance(product.get("type"), dict)
+            and "library" in product["type"]
+            and product.get("targets")
+        )
+        executables = tuple(
+            str(product["name"])
+            for product in products
+            if isinstance(product, dict)
+            and isinstance(product.get("type"), dict)
+            and "executable" in product["type"]
+        )
+        version = str(raw.get("toolsVersion", {}).get("_version", "5.9.0"))
+        platforms = tuple(
+            (str(row["platformName"]), str(row["version"]))
+            for row in raw.get("platforms", [])
+            if isinstance(row, dict) and row.get("platformName") and row.get("version")
+        )
+        return SwiftPackageInfo(
+            name=str(raw["name"]), tools_version=version,
+            platforms=platforms, library_products=libraries,
+            executable_products=executables,
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"SwiftPM returned malformed package metadata for {root}: {exc}") from exc
+
+
+def swift_executable_runner_args(product: str) -> tuple[str, ...]:
+    return (
+        "run", "--quiet", "--disable-sandbox", "--skip-build",
+        "--cache-path", "{TARGET_ROOT}/.audit/swiftpm/cache",
+        "--config-path", "{TARGET_ROOT}/.audit/swiftpm/configuration",
+        "--security-path", "{TARGET_ROOT}/.audit/swiftpm/security",
+        "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}",
+        "-Xswiftc", "-O", "-Xswiftc", "-module-cache-path",
+        "-Xswiftc", "{TARGET_ROOT}/.audit/clang-module-cache", "--scratch-path",
+        "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}",
+        "--package-path", "{TARGET_ROOT}", product, "{TESTCASE}",
+    )
+
+
+def swift_runner_args(target_root: str | os.PathLike, target_slug: str = "") -> tuple[str, ...]:
+    """Select a source-library or executable SwiftPM route without guessing."""
+    info = swift_package_info(target_root)
+    if info.library_products:
+        return ("{TESTCASE}",)
+    candidates = info.executable_products
+    exact = tuple(name for name in candidates if name == target_slug)
+    if len(exact) == 1:
+        return swift_executable_runner_args(exact[0])
+    if len(candidates) == 1:
+        return swift_executable_runner_args(candidates[0])
+    raise ValueError(
+        "SwiftPM package exposes neither a library nor one unambiguous "
+        f"executable product (executables: {', '.join(candidates) or 'none'})"
+    )
+
+
+def java_classpath_entries(
+    target_root: str | os.PathLike, build_system: str,
+    target_file: str = "", testcase: str | os.PathLike | None = None,
+) -> tuple[str, ...]:
+    """Return compiled target classes and build-tool-resolved dependencies."""
+    root = Path(target_root)
+    if build_system == "maven":
+        class_roots = [
+            path for path in sorted(root.rglob("target/classes")) if path.is_dir()
+        ]
+    else:
+        class_roots = []
+        for suffix in (
+            "build/classes/java/main", "build/classes/kotlin/main",
+            "build/classes/kotlin/jvm/main",
+        ):
+            class_roots.extend(
+                path for path in sorted(root.rglob(suffix)) if path.is_dir()
+            )
+    entries: list[Path] = []
+    if build_system == "maven":
+        receipts: list[Path] = []
+        selected_roots: list[Path] = []
+        if target_file:
+            source = Path(target_file.split(":", 1)[0])
+            if not source.is_absolute():
+                source = root / source
+            try:
+                source.resolve().relative_to(root.resolve())
+            except (OSError, ValueError):
+                source = root
+            if source.is_file():
+                for parent in [source.parent, *source.parents]:
+                    if parent == root.parent:
+                        break
+                    candidate = parent / "target" / "tokenfuzz-classpath.txt"
+                    if candidate.is_file():
+                        receipts = [candidate]
+                        compiled = candidate.parent / "classes"
+                        if compiled.is_dir():
+                            selected_roots = [compiled]
+                        break
+                    if parent == root:
+                        break
+        if not receipts and testcase:
+            try:
+                source_text = Path(testcase).read_text(
+                    encoding="utf-8", errors="replace",
+                )
+            except OSError:
+                source_text = ""
+            imports = re.findall(
+                r"(?m)^\s*import\s+(?:static\s+)?([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+)\s*;",
+                source_text,
+            )
+            for imported in imports:
+                parts = imported.split(".")
+                while parts:
+                    relative = Path(*parts).with_suffix(".class")
+                    matched = next(
+                        (class_root for class_root in class_roots
+                         if (class_root / relative).is_file()),
+                        None,
+                    )
+                    if matched is not None:
+                        receipt = matched.parent / "tokenfuzz-classpath.txt"
+                        if receipt.is_file() and receipt not in receipts:
+                            receipts.append(receipt)
+                        if matched not in selected_roots:
+                            selected_roots.append(matched)
+                        break
+                    parts.pop()
+        if not receipts:
+            receipts = sorted(root.rglob("target/tokenfuzz-classpath.txt"))
+        entries.extend(selected_roots or class_roots)
+        artifact_roots: dict[str, list[Path]] = {}
+        for class_root in class_roots:
+            manifest = class_root.parent.parent / "pom.xml"
+            try:
+                project = ET.parse(manifest).getroot()
+                artifact = project.find("{*}artifactId")
+                name = (artifact.text or "").strip() if artifact is not None else ""
+            except (OSError, ET.ParseError):
+                name = ""
+            if name:
+                artifact_roots.setdefault(name, []).append(class_root)
+        seen_receipts: set[Path] = set()
+        receipt_index = 0
+        while receipt_index < len(receipts):
+            receipt = receipts[receipt_index]
+            receipt_index += 1
+            if receipt in seen_receipts:
+                continue
+            seen_receipts.add(receipt)
+            try:
+                values = receipt.read_text(encoding="utf-8").strip().split(os.pathsep)
+            except OSError:
+                continue
+            for value in values:
+                dependency = Path(value)
+                if not value or not dependency.exists():
+                    continue
+                artifact = dependency.parent.parent.name
+                local = artifact_roots.get(artifact, [])
+                if len(local) == 1:
+                    entries.append(local[0])
+                    transitive = local[0].parent / "tokenfuzz-classpath.txt"
+                    if transitive.is_file() and transitive not in seen_receipts:
+                        receipts.append(transitive)
+                else:
+                    entries.append(dependency)
+    else:
+        entries.extend(class_roots)
+        for receipt in sorted(root.rglob("build/tokenfuzz-classpath.txt")):
+            try:
+                values = receipt.read_text(encoding="utf-8").strip().split(os.pathsep)
+            except OSError:
+                continue
+            entries.extend(Path(value) for value in values if value and Path(value).exists())
+    return tuple(dict.fromkeys(str(path.resolve()) for path in entries))
+
+
+def java_probe_runner_args(
+    target_root: str | os.PathLike, build_system: str, target_file: str,
+    testcase: str | os.PathLike | None = None,
+) -> tuple[str, ...]:
+    """Use the named source module's dependencies for one direct testcase."""
+    entries = java_classpath_entries(
+        target_root, build_system, target_file, testcase,
+    )
+    if not entries:
+        return ()
+    return ("--class-path", os.pathsep.join(entries), "{TESTCASE}")
+
+
+def java_runner_args(
+    target_root: str | os.PathLike, build_system: str,
+) -> tuple[str, ...]:
+    entries = java_classpath_entries(target_root, build_system)
+    if not entries:
+        return ("{TESTCASE}",)
+    argfile = Path(target_root) / ".audit" / "java-runner.args"
+    if not argfile.is_file():
+        return ("{TESTCASE}",)
+    return ("@{TARGET_ROOT}/.audit/java-runner.args", "{TESTCASE}")
+
+
+def write_java_runner_argfile(
+    target_root: str | os.PathLike, build_system: str,
+) -> Path:
+    """Materialize the resolved classpath outside target.toml/model context."""
+    root = Path(target_root)
+    entries = java_classpath_entries(root, build_system)
+    if not entries:
+        raise ValueError("Java bootstrap produced no compiled target classes")
+    path = root / ".audit" / "java-runner.args"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    classpath = os.pathsep.join(entries).replace("\\", "\\\\").replace('"', '\\"')
+    path.write_text(f'--class-path\n"{classpath}"\n', encoding="utf-8")
+    return path
+
+
+def java_canary_classes(
+    target_root: str | os.PathLike, build_system: str,
+) -> tuple[str, ...]:
+    """Return loadable-name candidates backed by this checkout's class dirs."""
+    root = Path(target_root)
+    names: list[str] = []
+    class_roots = java_classpath_entries(root, build_system)
+    for value in class_roots:
+        class_root = Path(value)
+        if not class_root.is_dir() or "classes" not in class_root.parts:
+            continue
+        for compiled in sorted(class_root.rglob("*.class")):
+            relative = compiled.relative_to(class_root)
+            if "$" in relative.name or relative.name in {
+                "module-info.class", "package-info.class",
+            }:
+                continue
+            names.append(".".join(relative.with_suffix("").parts))
+            break
+    return tuple(dict.fromkeys(names))
+
+
+def write_gradle_init_script(target_root: str | os.PathLike) -> Path:
+    """Create the target-agnostic task that records JVM runtime closures."""
+    path = Path(target_root) / ".audit" / "tokenfuzz-gradle.init.gradle"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "allprojects { p ->\n"
+        "  p.tasks.register('tokenfuzzPrepare') { task ->\n"
+        "    task.dependsOn(p.tasks.matching { it.name == 'classes' || it.name == 'jvmMainClasses' })\n"
+        "    task.doLast {\n"
+        "      def buildRoot = p.layout.buildDirectory.get().asFile\n"
+        "      def entries = [\n"
+        "        new File(buildRoot, 'classes/java/main'),\n"
+        "        new File(buildRoot, 'classes/kotlin/main'),\n"
+        "        new File(buildRoot, 'classes/kotlin/jvm/main')\n"
+        "      ].findAll { it.isDirectory() }\n"
+        "      p.configurations.findAll { c ->\n"
+        "        c.canBeResolved && (c.name == 'runtimeClasspath' || c.name == 'jvmRuntimeClasspath')\n"
+        "      }.each { c -> entries.addAll(c.files) }\n"
+        "      if (!entries.isEmpty()) {\n"
+        "        def receipt = new File(buildRoot, 'tokenfuzz-classpath.txt')\n"
+        "        receipt.parentFile.mkdirs()\n"
+        "        receipt.text = entries.collect { it.canonicalPath }.unique().join(File.pathSeparator)\n"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    return path
 
 
 # ─── Language entry ─────────────────────────────────────────────────
@@ -117,6 +446,7 @@ class Language:
     runner_args: tuple[str, ...] = ("{TESTCASE}",)
     runner_env: tuple[str, ...] = ()
     crash_patterns: tuple[str, ...] = ()
+    default_sanitizers: tuple[str, ...] = ()
 
     # Workqueue mode hint. workqueue.mode_for_file returns this string
     # when the file matches this language; the audit loop treats "js"
@@ -349,8 +679,9 @@ func main() {
 	fmt.Print("TOKENFUZZ-CANARY cwd=" + d)
 }
 """,
-        runner_args=("run", "{TESTCASE}"),
+        runner_args=("run", "-race", "{TESTCASE}"),
         runner_env=("GOFLAGS=-mod=mod", "GORACE=halt_on_error=1"),
+        default_sanitizers=("race",),
         crash_patterns=(
             r"WARNING: DATA RACE",
             r"panic: runtime error:",
@@ -395,32 +726,35 @@ func main() {
         compiler_default="swiftc",
         compiler_flags_env="SWIFTFLAGS",
         runner_bin="swift",
-        # Build and run the package executable under the selected Swift
-        # sanitizer. {SWIFT_SANITIZER} is expanded from target configuration for the
-        # active sanitizer slug (asan -> address, ubsan -> undefined, tsan ->
-        # thread).
-        runner_args=(
-            "run", "--quiet", "--disable-sandbox", "--skip-build",
-            "-c", "release",
-            "-Xswiftc", "-sanitize={SWIFT_SANITIZER}",
-            "-Xswiftc", "-O",
-            "--scratch-path", "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}",
-            "--package-path", "{TARGET_ROOT}",
-            "{TARGET_SLUG}", "{TESTCASE}",
+        # Package metadata refines this seed. Library products compile direct
+        # Swift testcases through a detached path-dependent package; a package
+        # with one executable product uses swift run with its real product
+        # name. The source form is the safe fallback when metadata is not yet
+        # readable: it never invents an executable from the target slug.
+        runner_args=("{TESTCASE}",),
+        runner_env=(
+            "CLANG_MODULE_CACHE_PATH={TARGET_ROOT}/.audit/clang-module-cache",
         ),
+        # Importing the module injected by runner_canary is the reachability
+        # proof; the detached executable need not inherit TARGET_ROOT as cwd.
+        canary_source='print("TOKENFUZZ-CANARY built")\n',
+        default_sanitizers=("asan",),
         crash_patterns=(
             r"Fatal error:",
             _ASAN_BANNER,
             _TSAN_BANNER,
         ),
         # Release config (`-c release` strips Swift debug asserts and turns on
-        # optimization). Runner preflight builds the selected sanitizer once in
-        # its own scratch tree; probes reuse that product without putting
-        # SwiftPM work inside the testcase timeout.
+        # optimization). Direct library probes build outside the testcase
+        # execution deadline and cache their package dependencies.
         bootstrap_cmds=(
             (
                 "swift", "build", "--disable-sandbox", "-c", "release",
-                "-Xswiftc", "-O",
+                "--cache-path", ".audit/swiftpm/cache",
+                "--config-path", ".audit/swiftpm/configuration",
+                "--security-path", ".audit/swiftpm/security",
+                "-Xswiftc", "-O", "-Xswiftc", "-module-cache-path",
+                "-Xswiftc", ".audit/clang-module-cache",
             ),
         ),
         bootstrap_manifests=("Package.swift",),
@@ -696,7 +1030,12 @@ sys.stdout.write("\n".join(
 """,
         runner_bin="ruby",
         runner_args=("{TESTCASE}",),
-        runner_env=("RUBYLIB={TARGET_ROOT}/lib",),
+        runner_env=(
+            "RUBYLIB={TARGET_ROOT}/lib",
+            "BUNDLE_GEMFILE={TARGET_ROOT}/Gemfile",
+            "BUNDLE_PATH={TARGET_ROOT}/vendor/bundle",
+            "RUBYOPT=-rbundler/setup",
+        ),
         crash_patterns=(
             r"^[A-Z]\w*Error",
             r"SystemStackError",
@@ -734,11 +1073,25 @@ print join("\n",
 """,
         runner_bin="perl",
         runner_args=("{TESTCASE}",),
-        runner_env=("PERL5LIB={TARGET_ROOT}/lib",),
+        runner_env=(
+            "PERL5LIB={TARGET_ROOT}/blib/lib:{TARGET_ROOT}/blib/arch:{TARGET_ROOT}/.audit/perl5/lib/perl5:{TARGET_ROOT}/lib",
+        ),
         crash_patterns=(
             r"^Out of memory!",
             r"^Segmentation fault",
             r"died at .* line",
+        ),
+        bootstrap_cmds=(
+            ("cpanm", "--verbose", "--local-lib-contained", ".audit/perl5", "--installdeps", "."),
+            ("perl", "Makefile.PL", "INSTALL_BASE={TARGET_ROOT}/.audit/perl5"),
+            ("make",),
+            ("make", "install"),
+        ),
+        bootstrap_manifests=("Makefile.PL",),
+        sanitizer_env=(
+            ("PERL5LIB", "{TARGET_ROOT}/.audit/perl5/lib/perl5"),
+            ("PERL_MM_OPT", "INSTALL_BASE={TARGET_ROOT}/.audit/perl5"),
+            ("PERL_MB_OPT", "--install_base {TARGET_ROOT}/.audit/perl5"),
         ),
     ),
 
@@ -759,11 +1112,27 @@ print join("\n",
         runner_env=("R_LIBS_USER={TARGET_ROOT}/.audit/r-library",),
         crash_patterns=(r"^Error in", r"^Error:"),
         # Sourcing the package's R files would miss any compiled component,
-        # so the package is installed into a target-local library instead.
+        # so the package and its hard dependencies are installed into a
+        # target-local library instead. remotes reads DESCRIPTION using R's
+        # package metadata rules and avoids rebuilding dependencies that are
+        # already current.
         bootstrap_cmds=(
             (
                 "Rscript", "-e",
                 "dir.create('.audit/r-library', recursive=TRUE, showWarnings=FALSE)",
+            ),
+            (
+                "Rscript", "-e",
+                "lib <- normalizePath('.audit/r-library'); "
+                ".libPaths(c(lib, .libPaths())); "
+                "repos <- getOption('repos'); "
+                "if (!length(repos) || is.na(repos['CRAN']) || "
+                "repos['CRAN'] == '@CRAN@') "
+                "repos['CRAN'] <- 'https://cloud.r-project.org'; "
+                "if (!requireNamespace('remotes', quietly=TRUE)) "
+                "install.packages('remotes', lib=lib, repos=repos); "
+                "remotes::install_deps('.', dependencies=NA, "
+                "upgrade='always', lib=lib, repos=repos)",
             ),
             ("R", "CMD", "INSTALL", "--library=.audit/r-library", "."),
         ),
@@ -915,6 +1284,12 @@ def for_name(name: str) -> Optional[Language]:
 def for_build_system(slug: str) -> Optional[Language]:
     """Return the language that owns `slug` as one of its build_systems."""
     return _by_build_system().get(slug)
+
+
+def default_sanitizers_for_build_system(slug: str) -> tuple[str, ...]:
+    """Sanitizers selected by a language's canonical runner."""
+    language = for_build_system(slug)
+    return language.default_sanitizers if language else ()
 
 
 def runner_preflight_args(
@@ -1097,6 +1472,265 @@ def _js_bootstrap_chain(target_root: Path) -> list[tuple[str, ...]]:
     return chain
 
 
+def _js_build_commands(target_root: Path) -> list[list[str]]:
+    """Build a package that declares the conventional root build script."""
+    try:
+        package = json.loads(
+            (target_root / "package.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+    scripts = package.get("scripts", {})
+    if not isinstance(scripts, dict) or not isinstance(scripts.get("build"), str):
+        return []
+    manager = _js_package_manager(target_root)
+    if manager == "npm":
+        return [["npm", "run", "build"]]
+    return [["npx", "--yes", manager, "run", "build"]]
+
+
+def _composer_bootstrap_chain(target_root: Path) -> list[tuple[str, ...]]:
+    """Prefer a full install, then fall back to production dependencies.
+
+    Composer still resolves root ``require-dev`` platform requirements during
+    an update with ``--no-dev``.  A missing development-only PHP extension can
+    therefore prevent a usable production autoloader from being created.  The
+    fallback ignores only extension requirements declared exclusively by the
+    root development set; production requirements remain enforced.
+    """
+    primary = ("composer", "install", "--no-interaction")
+    manifest = target_root / "composer.json"
+    try:
+        package = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return [primary]
+    required = package.get("require", {})
+    development = package.get("require-dev", {})
+    if not isinstance(required, dict) or not isinstance(development, dict):
+        return [primary]
+    dev_extensions = sorted(
+        name for name in development
+        if name.startswith("ext-") and name not in required
+    )
+    if not dev_extensions:
+        return [primary]
+    fallback = primary + ("--no-dev",) + tuple(
+        f"--ignore-platform-req={name}" for name in dev_extensions
+    )
+    return [primary, fallback]
+
+
+def preferred_ruby_toolchain(
+    environment: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Return the newest usable Ruby and its matching Bundler.
+
+    Version managers normally expose their selected Ruby on PATH.  Homebrew's
+    keg-only Ruby is a common exception, so ask an available ``brew`` for its
+    prefix without embedding a platform path.  An explicit RUBY selection
+    remains authoritative.
+    """
+    env = dict(os.environ if environment is None else environment)
+    path = env.get("PATH", "")
+
+    def resolve(value: str) -> Path | None:
+        if not value:
+            return None
+        found = shutil.which(value, path=path)
+        candidate = Path(found or value)
+        return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+    explicit = resolve(env.get("RUBY", ""))
+    if explicit is not None:
+        bundle = explicit.with_name("bundle")
+        return str(explicit), str(bundle if os.access(bundle, os.X_OK) else "bundle")
+
+    candidates: list[Path] = []
+    path_ruby = resolve("ruby")
+    if path_ruby is not None:
+        candidates.append(path_ruby)
+    brew = shutil.which("brew", path=path)
+    if brew:
+        try:
+            completed = subprocess.run(
+                [brew, "--prefix", "ruby"], env=env, capture_output=True,
+                text=True, timeout=10, check=False,
+            )
+            brew_ruby = resolve(
+                str(Path(completed.stdout.strip()) / "bin" / "ruby")
+            ) if completed.returncode == 0 and completed.stdout.strip() else None
+            if brew_ruby is not None and brew_ruby not in candidates:
+                candidates.append(brew_ruby)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    versions: list[tuple[tuple[int, ...], Path]] = []
+    for candidate in candidates:
+        try:
+            completed = subprocess.run(
+                [str(candidate), "-e", "print RUBY_VERSION"], env=env,
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        match = re.fullmatch(r"\s*(\d+(?:\.\d+)+)\s*", completed.stdout)
+        if completed.returncode == 0 and match:
+            versions.append((tuple(map(int, match.group(1).split("."))), candidate))
+    if not versions:
+        return "ruby", "bundle"
+    ruby = max(versions, key=lambda item: item[0])[1]
+    bundle = ruby.with_name("bundle")
+    if not bundle.is_file() or not os.access(bundle, os.X_OK):
+        resolved_bundle = shutil.which("bundle", path=path)
+        bundle = Path(resolved_bundle) if resolved_bundle else Path("bundle")
+    return str(ruby), str(bundle)
+
+
+def preferred_perl_toolchain(
+    environment: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Return the newest usable Perl and a cpanm script it can execute."""
+    env = dict(os.environ if environment is None else environment)
+    path = env.get("PATH", "")
+
+    def usable(value: str) -> Path | None:
+        candidate = Path(value)
+        return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+    explicit_value = env.get("PERL", "")
+    if explicit_value:
+        explicit = usable(shutil.which(explicit_value, path=path) or explicit_value)
+        if explicit is not None:
+            return str(explicit), shutil.which("cpanm", path=path) or "cpanm"
+
+    candidates: list[Path] = []
+    for directory in path.split(os.pathsep):
+        candidate = usable(str(Path(directory) / "perl")) if directory else None
+        if candidate is not None and candidate not in candidates:
+            candidates.append(candidate)
+    brew = shutil.which("brew", path=path)
+    if brew:
+        try:
+            completed = subprocess.run(
+                [brew, "--prefix", "perl"], env=env, capture_output=True,
+                text=True, timeout=10, check=False,
+            )
+            candidate = usable(str(Path(completed.stdout.strip()) / "bin" / "perl"))
+            if completed.returncode == 0 and candidate is not None and candidate not in candidates:
+                candidates.append(candidate)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    versions: list[tuple[tuple[int, ...], Path]] = []
+    for candidate in candidates:
+        try:
+            completed = subprocess.run(
+                [str(candidate), "-e", "print $^V"], env=env,
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        match = re.fullmatch(r"\s*v?(\d+(?:\.\d+)+)\s*", completed.stdout)
+        if completed.returncode == 0 and match:
+            versions.append((tuple(map(int, match.group(1).split("."))), candidate))
+    perl = max(versions, key=lambda item: item[0])[1] if versions else Path("perl")
+    return str(perl), shutil.which("cpanm", path=path) or "cpanm"
+
+
+def perl_local_lib_root(
+    perl: str, environment: dict[str, str] | None = None,
+) -> str:
+    """Return a target-relative CPAN root isolated by Perl's binary ABI."""
+    env = dict(os.environ if environment is None else environment)
+    try:
+        completed = subprocess.run(
+            [perl, "-MConfig", "-e", 'print "$^V-$Config{archname}"'],
+            env=env, capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    identity = completed.stdout.strip() if completed and completed.returncode == 0 else "current"
+    identity = re.sub(r"[^A-Za-z0-9._-]+", "-", identity).strip("-") or "current"
+    return f".audit/perl5/{identity}"
+
+
+def perl_canary_module(target_root: str | os.PathLike[str]) -> str:
+    """Return the shallowest library module a Perl distribution ships."""
+    root = Path(target_root) / "lib"
+    try:
+        modules = sorted(
+            (path.relative_to(root).as_posix() for path in root.rglob("*.pm")),
+            key=lambda value: (value.count("/"), len(value), value),
+        )
+    except OSError:
+        return ""
+    return modules[0] if modules else ""
+
+
+def _go_embed_asset_commands(target_root: Path) -> list[list[str]]:
+    """Build declared JS assets when a Go embed input is not generated yet."""
+    package_roots: set[Path] = set()
+    for source in target_root.rglob("*.go"):
+        try:
+            relative = source.relative_to(target_root)
+            if any(part.startswith(".") or part == "vendor" for part in relative.parts):
+                continue
+            lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+        except (OSError, ValueError):
+            continue
+        for line in lines:
+            match = re.match(r"\s*//go:embed\s+(.+)$", line)
+            if not match:
+                continue
+            try:
+                patterns = shlex.split(match.group(1))
+            except ValueError:
+                continue
+            for pattern in patterns:
+                clean = pattern.removeprefix("all:")
+                if not clean or any(source.parent.glob(clean)):
+                    continue
+                expected = source.parent / clean
+                candidate = expected.parent
+                while candidate != source.parent.parent:
+                    manifest = candidate / "package.json"
+                    if manifest.is_file():
+                        try:
+                            package = json.loads(manifest.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            break
+                        scripts = package.get("scripts", {})
+                        if isinstance(scripts, dict) and isinstance(
+                            scripts.get("build"), str
+                        ):
+                            package_roots.add(candidate)
+                        break
+                    if candidate == source.parent:
+                        break
+                    candidate = candidate.parent
+
+    commands: list[list[str]] = []
+    for package_root in sorted(package_roots):
+        relative = package_root.relative_to(target_root).as_posix()
+        manager = _js_package_manager(package_root)
+        if manager == "npm":
+            commands.extend([
+                ["npm", "--prefix", relative, "ci", "--no-audit", "--no-fund"],
+                ["npm", "--prefix", relative, "run", "build"],
+            ])
+        elif manager == "pnpm":
+            commands.extend([
+                ["npx", "--yes", "pnpm", "--dir", relative, "install"],
+                ["npx", "--yes", "pnpm", "--dir", relative, "run", "build"],
+            ])
+        else:
+            commands.extend([
+                ["npx", "--yes", "yarn", "--cwd", relative, "install"],
+                ["npx", "--yes", "yarn", "--cwd", relative, "run", "build"],
+            ])
+    return commands
+
+
 def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]]:
     """Return the bootstrap commands setup-target should run.
 
@@ -1106,13 +1740,49 @@ def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]
     `npm install` a tree that has no package.json.
     """
     lang = for_build_system(build_system)
-    if not lang or not lang.bootstrap_cmds:
+    if not lang:
+        return []
+    if build_system == "maven":
+        tool = "./mvnw" if os.access(target_root / "mvnw", os.X_OK) else "mvn"
+        return [
+            [tool, "-q", "-DskipTests", "compile"],
+            [tool, "-q", "-DskipTests", "dependency:build-classpath",
+             "-DincludeScope=runtime",
+             "-Dmdep.outputFile=target/tokenfuzz-classpath.txt"],
+        ]
+    if build_system == "gradle":
+        tool = "./gradlew" if os.access(target_root / "gradlew", os.X_OK) else "gradle"
+        write_gradle_init_script(target_root)
+        return [[
+            tool, "--no-daemon", "--init-script",
+            ".audit/tokenfuzz-gradle.init.gradle", "tokenfuzzPrepare",
+        ]]
+    if build_system == "bundler":
+        _ruby, bundle = preferred_ruby_toolchain()
+        return [[bundle, "install"]]
+    if build_system == "perl":
+        perl, cpanm = preferred_perl_toolchain()
+        local_lib = perl_local_lib_root(perl)
+        commands = []
+        if (target_root / "Makefile").is_file():
+            commands.append(["make", "realclean"])
+        commands.extend([
+            [perl, cpanm, "--verbose", "--local-lib-contained", local_lib, "--installdeps", "."],
+            [perl, "Makefile.PL", f"INSTALL_BASE={{TARGET_ROOT}}/{local_lib}"],
+            ["make"],
+            ["make", "install"],
+        ])
+        return commands
+    if not lang.bootstrap_cmds:
         return []
     if lang.bootstrap_manifests:
         if not any((target_root / m).exists() for m in lang.bootstrap_manifests):
             return []
     if lang.name == "javascript":
-        return [list(_js_bootstrap_chain(target_root)[0])]
+        return [list(_js_bootstrap_chain(target_root)[0])] + \
+            _js_build_commands(target_root)
+    if lang.name == "php":
+        return [list(_composer_bootstrap_chain(target_root)[0])]
     return [list(cmd) for cmd in lang.bootstrap_cmds]
 
 
@@ -1124,6 +1794,7 @@ def bootstrap_plan_for_target(target_root: Path, build_system: str) -> dict:
           "language": <name>,
           "cmds": [["python3", "-m", "pip", ...], ...],
           "alternatives": [["npm", "install", ...], ...],
+          "post_cmds": [["npm", "run", "build"]],
           "env": [["CFLAGS", "-O2 ..."], ...],
           "fuzz_backends": ["atheris", ...],
         }
@@ -1138,6 +1809,7 @@ def bootstrap_plan_for_target(target_root: Path, build_system: str) -> dict:
         "language": lang.name if lang else "",
         "cmds": [],
         "alternatives": [],
+        "post_cmds": [],
         "env": [],
         "fuzz_backends": [],
     }
@@ -1145,6 +1817,23 @@ def bootstrap_plan_for_target(target_root: Path, build_system: str) -> dict:
         return out
     out["fuzz_backends"] = list(lang.fuzz_backends)
     out["env"] = [list(p) for p in lang.sanitizer_env]
+    if build_system in {"maven", "gradle"}:
+        out["cmds"] = bootstrap_for_target(target_root, build_system)
+        return out
+    if build_system == "bundler":
+        _ruby, bundle = preferred_ruby_toolchain()
+        out["cmds"] = [[bundle, "install"]]
+        return out
+    if build_system == "perl":
+        perl, _cpanm = preferred_perl_toolchain()
+        local_lib = perl_local_lib_root(perl)
+        out["cmds"] = bootstrap_for_target(target_root, build_system)
+        out["env"] = [
+            ["PERL5LIB", f"{{TARGET_ROOT}}/{local_lib}/lib/perl5"],
+            ["PERL_MM_OPT", f"INSTALL_BASE={{TARGET_ROOT}}/{local_lib}"],
+            ["PERL_MB_OPT", f"--install_base {{TARGET_ROOT}}/{local_lib}"],
+        ]
+        return out
     if not lang.bootstrap_cmds:
         return out
     if lang.bootstrap_manifests:
@@ -1154,9 +1843,16 @@ def bootstrap_plan_for_target(target_root: Path, build_system: str) -> dict:
         chain = _js_bootstrap_chain(target_root)
         out["cmds"] = [list(chain[0])]
         out["alternatives"] = [list(c) for c in chain[1:]]
+        out["post_cmds"] = _js_build_commands(target_root)
+    elif lang.name == "php":
+        chain = _composer_bootstrap_chain(target_root)
+        out["cmds"] = [list(chain[0])]
+        out["alternatives"] = [list(c) for c in chain[1:]]
     else:
         out["cmds"] = [list(c) for c in lang.bootstrap_cmds]
         out["alternatives"] = [list(c) for c in lang.bootstrap_alternatives]
+        if lang.name == "go":
+            out["cmds"] = _go_embed_asset_commands(target_root) + out["cmds"]
     return out
 
 
@@ -1178,10 +1874,14 @@ def execute_bootstrap_plan(
 
     commands: list[list[str]] = plan.get("cmds") or []
     alternatives: list[list[str]] = plan.get("alternatives") or []
+    post_commands: list[list[str]] = plan.get("post_cmds") or []
     env_pairs: list[list[str]] = plan.get("env") or []
+    def materialize(value: str) -> str:
+        return value.replace("{TARGET_ROOT}", str(target_root.resolve()))
+
     environment = os.environ.copy()
     for key, value in env_pairs:
-        environment[key] = value
+        environment[key] = materialize(value)
 
     recipe_lines = [
         "#!/usr/bin/env bash",
@@ -1191,11 +1891,18 @@ def execute_bootstrap_plan(
         'cd "$(dirname "$0")/.."',
     ]
     for key, value in env_pairs:
-        recipe_lines.append(f"export {key}={shlex.quote(value)}")
+        recipe_lines.append(f"export {key}={shlex.quote(materialize(value))}")
 
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    # The log describes this setup attempt. Keeping an earlier failed build's
+    # diagnostics beside a later success makes the current result ambiguous.
+    log_path.write_text("", encoding="utf-8")
+    # A failed attempt must not leave a runnable recipe from an older source
+    # revision that appears to reproduce the failure on record.
+    recipe_path.unlink(missing_ok=True)
 
-    def run(argv: list[str]) -> int:
+    def run(argv: list[str]) -> tuple[int, str]:
+        argv = [materialize(arg) for arg in argv]
         rendered = " ".join(shlex.quote(arg) for arg in argv)
         message = f"[setup-target] bootstrap: {rendered}\n"
         sys.stdout.write(message)
@@ -1217,14 +1924,70 @@ def execute_bootstrap_plan(
             for line in lines[-40:]:
                 print(line)
         elif lines:
-            print("    " + lines[-1])
-        return process.returncode
+            print(
+                f"[setup-target] bootstrap: command completed "
+                f"({len(lines)} output line(s); full output in {log_path})"
+            )
+        return process.returncode, process.stdout or ""
+
+    def cpanm_prerequisite_repair(
+        argv: list[str], output: str, already_requested: set[str],
+    ) -> list[str]:
+        """Turn cpanm's own missing-prerequisite report into one safe retry.
+
+        Repository checkouts often omit the META files shipped in a CPAN
+        release.  In that case cpanm must execute Makefile.PL to discover
+        configure requirements, but Makefile.PL can itself need those
+        requirements.  cpanm reports them in a stable diagnostic before it
+        fails.  Installing only those declared module names breaks the cycle
+        without guessing from target source or weakening dependency checks.
+        """
+        if (
+            not argv or "--installdeps" not in argv
+            or not any(Path(arg).name == "cpanm" for arg in argv[:argv.index("--installdeps")])
+        ):
+            return []
+        missing = []
+        for module in re.findall(
+            r"Warning: prerequisite ([A-Za-z_][A-Za-z0-9_:]*) "
+            r"(?:[^\n]* )?not found(?:\.|$)",
+            output,
+        ):
+            if module not in already_requested and module not in missing:
+                missing.append(module)
+        if not missing:
+            return []
+        split = argv.index("--installdeps")
+        return [*argv[:split], *missing]
 
     final_index = len(commands) - 1
     for index, command in enumerate(commands):
-        returncode = run(command)
+        returncode, output = run(command)
+        requested_prerequisites: set[str] = set()
+        while returncode:
+            repair = cpanm_prerequisite_repair(
+                command, output, requested_prerequisites,
+            )
+            if not repair:
+                break
+            modules = repair[len(command[:command.index("--installdeps")]):]
+            requested_prerequisites.update(modules)
+            print(
+                "[setup-target] bootstrap: installing prerequisites reported "
+                "by cpanm before retrying dependency discovery"
+            )
+            repair_returncode, _repair_output = run(repair)
+            if repair_returncode:
+                returncode = repair_returncode
+                break
+            recipe_lines.append(
+                " ".join(shlex.quote(materialize(arg)) for arg in repair)
+            )
+            returncode, output = run(command)
         if returncode == 0:
-            recipe_lines.append(" ".join(shlex.quote(arg) for arg in command))
+            recipe_lines.append(
+                " ".join(shlex.quote(materialize(arg)) for arg in command)
+            )
             continue
         if index != final_index or not alternatives:
             print(
@@ -1239,9 +2002,11 @@ def execute_bootstrap_plan(
                 f"[setup-target] bootstrap: primary failed (rc={returncode}); "
                 "trying alternative"
             )
-            returncode = run(alternative)
+            returncode, _output = run(alternative)
             if returncode == 0:
-                recipe_lines.append(" ".join(shlex.quote(arg) for arg in alternative))
+                recipe_lines.append(
+                    " ".join(shlex.quote(materialize(arg)) for arg in alternative)
+                )
                 succeeded = True
                 break
         if not succeeded:
@@ -1251,6 +2016,19 @@ def execute_bootstrap_plan(
                 file=sys.stderr,
             )
             return returncode
+
+    for command in post_commands:
+        returncode, _output = run(command)
+        if returncode:
+            print(
+                f"[setup-target] bootstrap: post-install command failed "
+                f"(rc={returncode}); aborting bootstrap",
+                file=sys.stderr,
+            )
+            return returncode
+        recipe_lines.append(
+            " ".join(shlex.quote(materialize(arg)) for arg in command)
+        )
 
     recipe_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None

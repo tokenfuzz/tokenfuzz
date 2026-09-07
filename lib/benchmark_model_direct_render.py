@@ -39,6 +39,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from host_resources import usable_cpu_count
+
 
 # Per-sanitizer prompt metadata for the C/C++ clang sanitizers. The runtime
 # *_OPTIONS strings are NOT duplicated here — they are read from
@@ -93,43 +95,6 @@ def _san_options(script_root: str, san: str, mode: str = "full") -> str:
         if len(parts) == 3 and parts[0] == san:
             rows[parts[1]] = parts[2]
     return rows.get(mode) or rows.get("full") or ""
-
-
-def _usable_cpus() -> int:
-    """CPUs this process may actually run on, honouring a container quota.
-
-    `os.cpu_count()` reports the machine, not the allocation: inside a
-    container with a fractional CPU quota it can overstate by an order of
-    magnitude, and a ceiling derived from it would license the overload it
-    exists to prevent.
-    """
-    count = 0
-    getter = getattr(os, "process_cpu_count", None)  # 3.13+
-    if getter is not None:
-        count = getter() or 0
-    if not count and hasattr(os, "sched_getaffinity"):
-        try:
-            count = len(os.sched_getaffinity(0))
-        except OSError:
-            count = 0
-    count = count or os.cpu_count() or 1
-    for quota_path, period_path in (
-        ("/sys/fs/cgroup/cpu.max", None),  # cgroup v2: "<quota|max> <period>"
-        ("/sys/fs/cgroup/cpu/cpu.cfs_quota_us",
-         "/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
-    ):
-        try:
-            raw = Path(quota_path).read_text().split()
-            quota = raw[0]
-            period = raw[1] if period_path is None else Path(period_path).read_text().strip()
-            if quota in ("max", "-1"):
-                continue
-            allowed = int(quota) // int(period)
-            if allowed >= 1:
-                count = min(count, allowed)
-        except (OSError, ValueError, IndexError, ZeroDivisionError):
-            continue
-    return max(1, count)
 
 
 def _symbolize_available(script_root: str) -> bool:
@@ -672,7 +637,7 @@ def render(
         # baseline with no ceiling drove a benchmark host to a load average
         # of 108, at which point its own timeout-based oracles reported load
         # as findings. Never below 1, and never above half of what is there.
-        "parallel_ceiling": max(1, _usable_cpus() // 2),
+        "parallel_ceiling": max(1, usable_cpu_count() // 2),
         "budget_line": _budget_line(wall_seconds),
     }
     return render_template("benchmark_model_direct.md.j2", ctx)

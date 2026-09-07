@@ -29,8 +29,9 @@ class RulesDigestTests(unittest.TestCase):
 
     def test_digest_covers_load_bearing_topics(self) -> None:
         text = DIGEST.read_text(encoding="utf-8").casefold()
+        self.assertNotIn("guards-db", text)
         topics = (
-            "bin/probe", "TARGET:", "find-seed", "guards-db", "tried-inputs",
+            "bin/probe", "TARGET:", "find-seed", "recent-notes", "tried-inputs",
             "rg-safe", "bin/peek", "show-patch", "NEUTRAL",
             "bin/state resume --agent", "crashes-rejected", "FINDING-CLUSTERS",
             "Caller contract", "Trigger source", "Parameter control", "FIND",

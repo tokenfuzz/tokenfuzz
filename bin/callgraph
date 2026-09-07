@@ -50,7 +50,7 @@ from native_symbols import defined_symbols  # noqa: E402
 BROKEN_TREE_SITTER = ("0.26",)
 
 # Mirrors lib/callgraph.SCHEMA_VERSION; the reader refuses any other value.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # A rendered route longer than this is not a recipe an agent can act on, and
 # the block is a summary, not a trace.

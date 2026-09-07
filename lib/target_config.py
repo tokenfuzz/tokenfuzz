@@ -22,7 +22,11 @@ import os
 import plistlib
 import re
 import secrets
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -38,6 +42,7 @@ from datetime import datetime, timezone
 # `languages` for the rest of this module.
 import languages
 import build_config
+import timeout as timeout_utils
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -221,14 +226,18 @@ ATTACKER_CONTROLS_VALID = (
 SANITIZERS_VALID = ("asan", "ubsan", "msan", "tsan", "race")
 
 # Non-native build systems whose default [runner] already drives a
-# sanitizer-instrumented run (e.g. `swift run -sanitize=...`), so they are
+# sanitizer-instrumented run, so they are
 # runnable sanitizer targets rather than findings-only ones. Inclusion
-# criterion: the language's canonical [runner] in lib/languages.py selects a
-# sanitizer through a {SANITIZER}/{SWIFT_SANITIZER} token. This is the single
+# criterion: the language's canonical runner in lib/languages.py declares a
+# default sanitizer. This is the single
 # source of truth for that classification, shared by the findings-only default
 # below and by benchmark_model_direct_render's crash-capability framing; a
 # sync test guards the two against drift.
-SANITIZER_RUNNER_BUILD_SYSTEMS = frozenset({"swift"})
+SANITIZER_RUNNER_BUILD_SYSTEMS = frozenset(
+    build_system
+    for language in languages.LANGUAGES if language.default_sanitizers
+    for build_system in language.build_systems
+)
 
 # .session-env keys trusted by the runtime.
 SESSION_ENV_ALLOW = (
@@ -945,7 +954,9 @@ def detect_rev(target_root: str | os.PathLike) -> str:
     return ""
 
 
-def vcs_tracked_files(target_root: str | os.PathLike) -> "set[str] | None":
+def vcs_tracked_files(
+    target_root: str | os.PathLike, repo_type: str = "",
+) -> "set[str] | None":
     """Set of VCS-tracked files under a target checkout — root-relative,
     forward-slash — or None when the target is not a git/hg checkout (or the
     VCS query fails/times out).
@@ -980,9 +991,12 @@ def vcs_tracked_files(target_root: str | os.PathLike) -> "set[str] | None":
     import subprocess
 
     root = Path(target_root)
-    repo_type = detect_repo_type(root)
+    repo_type = repo_type or detect_repo_type(root)
     if repo_type == "git":
-        cmd = ["git", "-C", str(root), "ls-files", "--recurse-submodules", "-z"]
+        cmd = [
+            "git", "-C", str(root), "ls-files", "--recurse-submodules",
+            "-z", "--", ".",
+        ]
     elif repo_type == "hg":
         cmd = ["hg", "--cwd", str(root), "files", "-S", "-0"]
     else:
@@ -995,6 +1009,9 @@ def vcs_tracked_files(target_root: str | os.PathLike) -> "set[str] | None":
         return None
     if out.returncode != 0:
         return None
+    # The explicit ``-- .`` pathspec makes git report paths relative to the
+    # supplied -C directory, including when that directory is a configured
+    # source_subdir inside the checkout.
     return {os.fsdecode(p) for p in out.stdout.split(b"\0") if p}
 
 
@@ -1401,11 +1418,14 @@ def _is_canonical_library_name(name: str) -> bool:
 # project's own library or CLI: CMake's CMakeFiles/ (compiler-probe
 # binaries like CMakeDetermineCompilerABI_C.bin, object trees), unit-test
 # frameworks vendored under test(s)/ (Unity, gtest, …), and FetchContent
-# dependency builds under _deps/. Inclusion criterion: a directory a build
-# system populates with helper/probe/dependency artifacts, not the target's
-# primary output. Structural (no project names), target-agnostic as new
-# projects appear.
-_AUX_BUILD_DIRS = {"cmakefiles", "test", "tests", "_deps"}
+# dependency builds under _deps/ or the conventional third_party/ spellings.
+# Inclusion criterion: a directory a build system populates with
+# helper/probe/dependency artifacts, not the target's primary output.
+# Structural (no project names), target-agnostic as new projects appear.
+_AUX_BUILD_DIRS = {
+    "cmakefiles", "test", "tests", "_deps",
+    "third_party", "third-party", "3rdparty",
+}
 
 
 def _is_aux_build_path(p: Path, base_dir: Path) -> bool:
@@ -1483,7 +1503,39 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
         name = re.split(r"(?:\.so(?:\.|$)|(?:\.[0-9.]+)?\.dylib$|\.a$)", name)[0]
         return re.sub(r"[^a-z0-9]", "", name.lower())
 
+    public_code: dict[Path, bool] = {}
+
+    def product_affinity(library: Path) -> int:
+        name = library_name(library)
+        if name == project_name:
+            if library.suffix != ".a":
+                return 0
+            # Some modular builds publish a same-named archive containing
+            # only an empty linkage anchor beside the implementation archive.
+            # It cannot expose an API to a harness, so let an explicitly named
+            # core/base product win. Inspect only the tiny exact-name
+            # candidate; scanning every large archive here would turn setup
+            # artifact discovery into a second symbol-indexing pass.
+            if library not in public_code:
+                import native_symbols
+                public_code[library] = bool(
+                    native_symbols.defined_symbols(library, exported_only=True)
+                )
+            return 0 if public_code[library] else 2
+        # `core`, `base`, and `cpu` conventionally name a modular project's
+        # foundational implementation library. The last form is common when
+        # accelerator backends are separate products.
+        if name in (
+            project_name + "core",
+            project_name + "base",
+            project_name + "cpu",
+        ):
+            return 1
+        return 3 if name.startswith(project_name) else 4
+
     installed = _cmake_installed_build_libraries(san_dir)
+    if installed is None:
+        installed = _meson_installed_build_libraries(san_dir)
     if installed is not None:
         # Generated install metadata is authoritative about which artifacts
         # are products.  A stray static test-support archive must not outrank
@@ -1494,16 +1546,6 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
                 path.suffix == ".a" or _is_shared_lib(path.name)
             ) and "posix" not in path.name
         ]
-        def product_affinity(library: Path) -> int:
-            name = library_name(library)
-            if name == project_name:
-                return 0
-            # `core` and `base` conventionally name a modular project's
-            # foundational public library; no other suffix makes that claim.
-            if name in (project_name + "core", project_name + "base"):
-                return 1
-            return 2 if name.startswith(project_name) else 3
-
         candidates.sort(key=lambda library: (
             product_affinity(library),
             library.suffix != ".a",
@@ -1525,7 +1567,7 @@ def _detect_sanitizer_lib(san_dir: Path, root: Path) -> str:
     # keeps any usable operator-selected library. A stable sort preserves the
     # existing deterministic order within one level.
     archives.sort(key=lambda archive: (
-        library_name(archive) != project_name,
+        product_affinity(archive),
         len(archive.relative_to(san_dir).parts),
     ))
     for a in archives[:3]:
@@ -1545,8 +1587,8 @@ _CMAKE_GENERATED_INSTALL = re.compile(
 
 def _cmake_generated_install_entries(
     san_dir: Path,
-) -> "list[tuple[str, Path]] | None":
-    """Resolved ``(TYPE, FILE)`` rows from CMake's generated install plan.
+) -> "list[tuple[str, Path, str]] | None":
+    """Resolved ``(TYPE, FILE, DESTINATION)`` CMake install-plan rows.
 
     ``None`` means no published install rule exists.  Commands can span lines
     and can name several files; parsing the generated form avoids interpreting
@@ -1555,7 +1597,7 @@ def _cmake_generated_install_entries(
     scripts = _find_under(san_dir, name="cmake_install.cmake")
     if not scripts:
         return None
-    entries: list[tuple[str, Path]] = []
+    entries: list[tuple[str, Path, str]] = []
     installs_anything = False
     for script in scripts:
         try:
@@ -1565,6 +1607,9 @@ def _cmake_generated_install_entries(
         for command in _CMAKE_GENERATED_INSTALL.finditer(text):
             body = command.group("body")
             kind_match = re.search(r"\bTYPE\s+([A-Z_]+)\b", body, re.IGNORECASE)
+            destination_match = re.search(
+                r'\bDESTINATION\s+"([^"]+)"', body, re.IGNORECASE,
+            )
             files_match = re.search(r"\bFILES\b(.*)", body, re.IGNORECASE | re.DOTALL)
             if not kind_match or not files_match:
                 continue
@@ -1573,13 +1618,16 @@ def _cmake_generated_install_entries(
                 continue
             installs_anything = True
             kind = kind_match.group(1).upper()
+            destination = (
+                destination_match.group(1) if destination_match else ""
+            )
             for value in values:
                 if "$" in value:
                     continue
                 candidate = Path(value)
                 if not candidate.is_absolute():
                     candidate = san_dir / candidate
-                entries.append((kind, candidate))
+                entries.append((kind, candidate, destination))
     return entries if installs_anything else None
 
 
@@ -1591,7 +1639,7 @@ def _cmake_installed_build_paths(
         return None
     found: list[Path] = []
     seen: set[str] = set()
-    for kind, candidate in entries:
+    for kind, candidate, _destination in entries:
         if kind not in kinds:
             continue
         # Re-anchor on san_dir: the script records the path configure-time
@@ -1620,6 +1668,55 @@ def _cmake_installed_build_libraries(san_dir: Path) -> "list[Path] | None":
     return _cmake_installed_build_paths(
         san_dir, {"STATIC_LIBRARY", "SHARED_LIBRARY"},
     )
+
+
+def _meson_installed_build_libraries(san_dir: Path) -> "list[Path] | None":
+    """Libraries Meson's generated install plan publishes from this build."""
+    metadata = san_dir / "meson-info" / "intro-installed.json"
+    try:
+        installed = json.loads(metadata.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(installed, dict):
+        return None
+    libraries = []
+    for raw in installed:
+        if not isinstance(raw, str):
+            continue
+        try:
+            relative = Path(raw).resolve().relative_to(san_dir.resolve())
+        except (OSError, ValueError):
+            continue
+        candidate = san_dir / relative
+        if (
+            not candidate.is_file() or _is_aux_build_path(candidate, san_dir)
+            or ".cpython-" in candidate.name or ".abi3" in candidate.name
+            or candidate.suffix.lower() == ".pyd"
+            or not (candidate.suffix == ".a" or _is_shared_lib(candidate.name))
+        ):
+            continue
+        libraries.append(candidate)
+    return libraries
+
+
+def python_extension_artifacts(build_dir: Path) -> list[Path]:
+    """Built CPython/ABI3 extension modules outside build-system internals."""
+    try:
+        candidates = [
+            path for pattern in ("*.so", "*.pyd")
+            for path in build_dir.rglob(pattern)
+        ]
+    except OSError:
+        return []
+    return sorted({
+        path for path in candidates
+        if path.is_file()
+        and (
+            ".cpython-" in path.name or ".abi3" in path.name
+            or path.suffix.lower() == ".pyd"
+        )
+        and "meson-private" not in path.parts
+    })
 
 
 def _cmake_installed_build_executables(san_dir: Path) -> "list[Path] | None":
@@ -1942,6 +2039,34 @@ def set_sanitizer_bin(text: str, sanitizer: str, value: str) -> str:
     return text
 
 
+def set_python_extension_runner(
+    text: str, sanitizer: str, runner_bin: str, python_path: str, *,
+    clear_library: bool = False, replacement_library: str = "",
+) -> str:
+    """Add a proved Python-package route and optionally disable a stale library."""
+    field = f"{sanitizer}_lib"
+    field_re = re.compile(rf"^\s*{field}\b\s*=")
+    lines = []
+    for line in text.splitlines():
+        if clear_library and field_re.match(line):
+            line = (
+                _build_field_line(field, replacement_library)
+                if replacement_library else f"# {line}"
+            )
+        lines.append(line)
+    if any(re.match(r"^\s*\[runner\]\s*$", line) for line in lines):
+        return "\n".join(lines) + "\n"
+    lines.extend([
+        "",
+        "[runner]",
+        f"bin = {toml_basic_string(runner_bin)}",
+        'args = ["{TESTCASE}"]',
+        f'env = [{toml_basic_string(f"PYTHONPATH={python_path}")}]',
+        "success_codes = [0]",
+    ])
+    return "\n".join(lines) + "\n"
+
+
 def _format_top_level_array(name: str, values: list[str]) -> str:
     rendered = ", ".join(toml_basic_string(value) for value in values)
     return f"{name:<13} = [{rendered}]"
@@ -2004,9 +2129,22 @@ def replace_top_level_array(
     raise ValueError(f"{name}: unbalanced array literal in target.toml")
 
 
-def set_harness_includes(text: str, includes: list[str]) -> str:
-    """Replace an active top-level harness include list, if present."""
-    return replace_top_level_array(text, "includes", includes, add_missing=False)
+def set_harness_includes(
+    text: str, includes: list[str], *, add_missing: bool = False,
+) -> str:
+    """Replace the top-level harness include list."""
+    return replace_top_level_array(
+        text, "includes", includes, add_missing=add_missing,
+    )
+
+
+def set_harness_link_libs(
+    text: str, link_libs: list[str], *, add_missing: bool = False,
+) -> str:
+    """Replace the top-level harness link argument list."""
+    return replace_top_level_array(
+        text, "link_libs", link_libs, add_missing=add_missing,
+    )
 
 
 def _in_other_sanitizer_build(
@@ -2159,6 +2297,65 @@ def refresh_detected_build_fields(
     return changed
 
 
+def detect_cpp_standard(target_root: str | os.PathLike) -> str:
+    """Most common C++ -std flag in the canonical compile database."""
+    database = _build_dir_for(Path(target_root), "asan") / "compile_commands.json"
+    try:
+        rows = json.loads(database.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(rows, list):
+        return ""
+    counts: dict[str, int] = {}
+    cpp_suffixes = {".cc", ".cpp", ".cxx", ".c++", ".mm"}
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or Path(str(row.get("file", ""))).suffix.lower()
+            not in cpp_suffixes
+        ):
+            continue
+        arguments = row.get("arguments")
+        if isinstance(arguments, list):
+            tokens = [str(value) for value in arguments]
+        else:
+            try:
+                tokens = shlex.split(str(row.get("command", "")))
+            except ValueError:
+                continue
+        for token in tokens:
+            if re.fullmatch(r"-std=(?:gnu\+\+|c\+\+)\d+[a-z]*", token):
+                counts[token] = counts.get(token, 0) + 1
+                break
+    return min(counts, key=lambda value: (-counts[value], value)) if counts else ""
+
+
+def refresh_detected_compile_fields(
+    target_root: str | os.PathLike, toml_path: str | os.PathLike,
+) -> bool:
+    """Add a compile-database C++ standard when target.toml has none."""
+    path = Path(toml_path)
+    try:
+        parsed = parse_toml(path)
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    defines = parsed.get("defines", [])
+    if not isinstance(defines, list):
+        return False
+    values = [value for value in defines if isinstance(value, str)]
+    if any(value.startswith("-std=") for value in values):
+        return False
+    standard = detect_cpp_standard(target_root)
+    if not standard:
+        return False
+    updated = replace_top_level_array(text, "defines", [*values, standard])
+    if updated == text:
+        return False
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
 def detected_harness_inputs(
     target_root: Path, sanitizer: str,
 ) -> "tuple[str, list[str]]":
@@ -2172,6 +2369,10 @@ def detected_harness_inputs(
 
 
 _HEADER_SUFFIXES = (".h", ".hpp", ".hh", ".hxx", ".H")
+
+
+def is_header_file(path: Path) -> bool:
+    return path.is_file() and path.suffix in _HEADER_SUFFIXES
 
 
 def _cmake_installed_source_include_dirs(
@@ -2190,7 +2391,7 @@ def _cmake_installed_source_include_dirs(
     root = target_root.resolve()
     build = san_dir.resolve()
     found: set[str] = set()
-    for kind, candidate in entries:
+    for kind, candidate, destination in entries:
         if kind != "FILE" or candidate.suffix not in _HEADER_SUFFIXES:
             continue
         try:
@@ -2204,12 +2405,114 @@ def _cmake_installed_source_include_dirs(
             (parent for parent in resolved.parents if parent.name == "include"),
             None,
         )
+        if include is None and destination:
+            parts = [
+                part for part in destination.replace("\\", "/").split("/")
+                if part
+            ]
+            try:
+                include_index = parts.index("include")
+            except ValueError:
+                include_index = -1
+            suffix = parts[include_index + 1:] if include_index >= 0 else []
+            parent = resolved.parent
+            if suffix and [part.casefold() for part in parent.parts[-len(suffix):]] == [
+                part.casefold() for part in suffix
+            ]:
+                include = parent
+                for _part in suffix:
+                    include = include.parent
         if include is None:
             continue
         try:
             found.add(include.relative_to(root).as_posix())
         except ValueError:
             continue
+    return sorted(found)
+
+
+def _cmake_config_source_include_dirs(
+    target_root: Path, san_dir: Path,
+) -> list[str]:
+    """Map root package-config install includes back to source directories."""
+    found: set[str] = set()
+    try:
+        configs = sorted(san_dir.glob("*Config.cmake"))
+    except OSError:
+        return []
+    for config in configs:
+        try:
+            text = config.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for suffix in re.findall(
+            r"\$\{[A-Za-z0-9_]+\}/include/([A-Za-z0-9_./+-]+)", text,
+        ):
+            candidate = target_root / suffix.rstrip(")\"')")
+            if candidate.is_dir() and any(
+                path.is_file() and path.suffix in _HEADER_SUFFIXES
+                for path in candidate.rglob("*")
+            ):
+                found.add(candidate.relative_to(target_root).as_posix())
+    return sorted(found)
+
+
+def _meson_installed_source_include_dirs(
+    target_root: Path, san_dir: Path, canonical_dir_name: str,
+) -> list[str]:
+    """Map Meson's installed public headers back to build/source include roots.
+
+    ``intro-installed.json`` records both the file Meson built and the path it
+    publishes.  Matching the suffix below the installed ``include/`` directory
+    finds the search root for ordinary source headers.  Generated headers may
+    only share their filename with that suffix; their build directory is then
+    the search root needed by quoted includes from the public headers.
+    """
+    metadata = san_dir / "meson-info" / "intro-installed.json"
+    try:
+        installed = json.loads(metadata.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(installed, dict):
+        return []
+    root = target_root.resolve()
+    found: set[str] = set()
+    for raw_source, raw_destination in installed.items():
+        if not isinstance(raw_source, str) or not isinstance(raw_destination, str):
+            continue
+        source = Path(raw_source).resolve()
+        if source.suffix not in _HEADER_SUFFIXES:
+            continue
+        destination_parts = Path(raw_destination).parts
+        include_indexes = [
+            index for index, part in enumerate(destination_parts)
+            if part.casefold() == "include"
+        ]
+        if not include_indexes:
+            continue
+        suffix = destination_parts[include_indexes[-1] + 1:]
+        source_parts = source.parts
+        matched = 0
+        for left, right in zip(reversed(source_parts), reversed(suffix)):
+            if left.casefold() != right.casefold():
+                break
+            matched += 1
+        if matched == 0:
+            continue
+        include_root = source
+        for _part in range(matched):
+            include_root = include_root.parent
+        try:
+            relative = (
+                Path(canonical_dir_name) /
+                include_root.relative_to(san_dir.resolve())
+            ).as_posix()
+        except ValueError:
+            try:
+                relative = include_root.relative_to(root).as_posix()
+            except ValueError:
+                continue
+        found.add(relative or ".")
     return sorted(found)
 
 
@@ -2259,8 +2562,8 @@ def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
     # whole library route unusable.
     if "include" not in out and _has_headers(target_root / "lib", recursive=False):
         out.append("lib")
-    for component in _cmake_installed_source_include_dirs(
-        target_root, _resolve_target_path(target_root, asan_dir_name),
+    for component in installed_harness_include_dirs(
+        target_root, asan_dir_name,
     ):
         if component not in out:
             out.append(component)
@@ -2284,6 +2587,245 @@ def _detect_include_dirs(target_root: Path, asan_dir_name: str) -> list[str]:
     return out
 
 
+def installed_harness_include_dirs(
+    target_root: Path, canonical_dir_name: str,
+) -> list[str]:
+    """Public include roots proved by generated install metadata."""
+    san_dir = _resolve_target_path(target_root, canonical_dir_name)
+    return list(dict.fromkeys([
+        *_cmake_installed_source_include_dirs(target_root, san_dir),
+        *_cmake_config_source_include_dirs(target_root, san_dir),
+        *_meson_installed_source_include_dirs(
+            target_root, san_dir, canonical_dir_name,
+        ),
+    ]))
+
+
+def _cmake_package_name(config: Path) -> str:
+    """Package name encoded by a conventional CMake config filename."""
+    name = config.name
+    if name.endswith("Config.cmake"):
+        return name[:-len("Config.cmake")]
+    if name.lower().endswith("-config.cmake"):
+        return name[:-len("-config.cmake")]
+    return ""
+
+
+def _cmake_link_library_name(value: str) -> str:
+    """Normalized logical name of a concrete library path."""
+    name = Path(value).name
+    if name.startswith("lib"):
+        name = name[3:]
+    name = re.split(r"(?:\.so(?:\.|$)|(?:\.[0-9.]+)?\.dylib$|\.a$)", name)[0]
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _canonical_cmake_link_path(
+    target_root: Path, san_dir: Path, value: str,
+) -> str:
+    """Prefer this sanitizer build's copy and persist target-relative paths."""
+    path = Path(value)
+    if not path.is_absolute():
+        candidate = san_dir / path
+        if candidate.exists():
+            try:
+                return candidate.resolve().relative_to(
+                    target_root.resolve()
+                ).as_posix()
+            except (OSError, ValueError):
+                pass
+    if path.is_absolute():
+        try:
+            return path.resolve().relative_to(target_root.resolve()).as_posix()
+        except (OSError, ValueError):
+            logical = _cmake_link_library_name(value)
+            if logical:
+                matches = [
+                    candidate for candidate in _find_under(san_dir, name=None)
+                    if candidate.is_file()
+                    and _cmake_link_library_name(candidate.name) == logical
+                    and (
+                        candidate.suffix == ".a"
+                        or _is_shared_lib(candidate.name)
+                    )
+                    and not _is_aux_build_path(candidate, san_dir)
+                ]
+                matches.sort(key=lambda candidate: (
+                    candidate.suffix != ".a",
+                    len(candidate.relative_to(san_dir).parts),
+                    str(candidate),
+                ))
+                if matches:
+                    return matches[0].resolve().relative_to(
+                        target_root.resolve()
+                    ).as_posix()
+    return value
+
+
+def cmake_package_harness_link_args(
+    target_root: Path, canonical_dir_name: str, primary_library: str,
+) -> list[str]:
+    """Resolve a static product's transitive links from its CMake package.
+
+    A static archive records no dependency closure in the archive itself.
+    Projects that publish a downstream CMake config do record that closure,
+    often including vendored archives which a direct harness must supply.
+    Evaluate only a top-level package config that names the already-selected
+    product archive, then return its matching ``*_LIBRARIES``/``*_LIBS``
+    value as compiler argv.  The selected archive is omitted because the
+    harness builder already places it before these dependencies.
+    """
+    if not primary_library or Path(primary_library).suffix != ".a":
+        return []
+    cmake = shutil.which("cmake")
+    if not cmake:
+        return []
+    san_dir = _resolve_target_path(target_root, canonical_dir_name)
+    primary = _resolve_target_path(target_root, primary_library).resolve()
+    if not san_dir.is_dir() or not primary.is_file():
+        return []
+    logical_primary = _cmake_link_library_name(primary.name)
+    configs: list[tuple[Path, str]] = []
+    try:
+        candidates = sorted([
+            *san_dir.glob("*Config.cmake"),
+            *san_dir.glob("*-config.cmake"),
+        ])
+    except OSError:
+        return []
+    for config in dict.fromkeys(candidates):
+        package = _cmake_package_name(config)
+        if not package or not re.fullmatch(r"[A-Za-z0-9_.+-]+", package):
+            continue
+        try:
+            text = config.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if logical_primary and logical_primary not in re.sub(
+            r"[^a-z0-9]", "", text.lower()
+        ):
+            continue
+        configs.append((config, package))
+
+    audit_dir = target_root / ".audit"
+    try:
+        audit_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return []
+    marker = "TOKENFUZZ_LINK_VAR:"
+    for config, package in configs:
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="cmake-package-links-", dir=audit_dir,
+            ) as temporary:
+                probe = Path(temporary)
+                cmakelists = probe / "CMakeLists.txt"
+                cmakelists.write_text(
+                    "cmake_minimum_required(VERSION 3.16)\n"
+                    "project(tokenfuzz_package_probe LANGUAGES C CXX)\n"
+                    f"find_package({package} CONFIG REQUIRED "
+                    f"PATHS [[{config.parent}]] NO_DEFAULT_PATH)\n"
+                    "get_cmake_property(_tokenfuzz_vars VARIABLES)\n"
+                    "foreach(_tokenfuzz_var IN LISTS _tokenfuzz_vars)\n"
+                    "  if(_tokenfuzz_var MATCHES \"(_LIBRARIES|_LIBS)$\")\n"
+                    f"    message(STATUS \"{marker}${{_tokenfuzz_var}}="
+                    "${${_tokenfuzz_var}}\")\n"
+                    "  endif()\n"
+                    "endforeach()\n",
+                    encoding="utf-8",
+                )
+                environment = os.environ.copy()
+                environment[f"{package.upper()}_INSTALL_PREFIX"] = str(san_dir)
+                completed = timeout_utils.run_timeout(
+                    [cmake, "-S", str(probe), "-B", str(probe / "build")],
+                    30, env=environment, capture_output=True, text=True,
+                )
+        except OSError:
+            continue
+        if completed.returncode:
+            continue
+        output = (completed.stdout or "") + "\n" + (completed.stderr or "")
+        values = [
+            line.split(marker, 1)[1].partition("=")[2]
+            for line in output.splitlines() if marker in line
+        ]
+        matching = [
+            value for value in values
+            if str(primary) in value or primary.name in value
+        ]
+        if not matching:
+            continue
+        # A package may expose both its direct product and an aggregate closure
+        # (for example FOO_LIB and FOO_LIBRARIES). Both contain the selected
+        # archive; the aggregate is the one a standalone downstream link needs.
+        raw = max(matching, key=lambda value: (value.count(";"), len(value)))
+        result: list[str] = []
+        for element in raw.split(";"):
+            element = element.strip()
+            if not element or "$<" in element or "::" in element:
+                continue
+            try:
+                tokens = shlex.split(element)
+            except ValueError:
+                continue
+            for token in tokens:
+                prefix = "-Wl,-force_load,"
+                if token.startswith(prefix):
+                    path = token[len(prefix):]
+                    path = _canonical_cmake_link_path(target_root, san_dir, path)
+                    if _resolve_target_path(target_root, path).resolve() == primary:
+                        continue
+                    # Keep path operands separate. clang accepts the native
+                    # two-argument spelling and the shared path resolver can
+                    # then relocate the archive for container/reproducer
+                    # builds instead of baking it into one opaque -Wl token.
+                    for value in ("-Wl,-force_load", path):
+                        if value not in result:
+                            result.append(value)
+                    continue
+                elif _link_value_looks_like_path(token):
+                    token = _canonical_cmake_link_path(
+                        target_root, san_dir, token,
+                    )
+                    if _resolve_target_path(target_root, token).resolve() == primary:
+                        continue
+                if token not in result:
+                    result.append(token)
+        return result
+    return []
+
+
+def _cmake_delegated_language(target_root: Path) -> str:
+    """Return a language whose top-level product CMake only orchestrates."""
+    manifests = [target_root / "CMakeLists.txt"]
+    cmake_dir = target_root / "cmake"
+    if cmake_dir.is_dir():
+        manifests.extend(sorted(cmake_dir.rglob("*.cmake")))
+    bodies: list[str] = []
+    for path in manifests:
+        try:
+            bodies.append(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    body = "\n".join(bodies)
+    # A project-owned compiled target makes CMake the primary build. Without
+    # one, a custom command that builds and installs a language product is a
+    # package-manager build wrapped in CMake orchestration.
+    if re.search(r"\badd_(?:executable|library)\s*\(", body, re.IGNORECASE):
+        return ""
+    if (
+        (target_root / "go.mod").is_file()
+        and re.search(
+            r"(?:\bgo|\$\{[^}\n]*GO[^}\n]*\})\s+build\b",
+            body,
+            re.IGNORECASE,
+        )
+        and re.search(r"\binstall\s*\(\s*PROGRAMS\b", body, re.IGNORECASE)
+    ):
+        return "go"
+    return ""
+
+
 def _detect_build_system(target_root: Path) -> str:
     """Return a slug naming the dominant build/package system at target_root.
 
@@ -2299,7 +2841,7 @@ def _detect_build_system(target_root: Path) -> str:
     if (target_root / ".gn").is_file():
         return "gn"
     if (target_root / "CMakeLists.txt").is_file():
-        return "cmake"
+        return _cmake_delegated_language(target_root) or "cmake"
     if (target_root / "meson.build").is_file():
         return "meson"
     if (
@@ -2355,6 +2897,71 @@ def _detect_build_system(target_root: Path) -> str:
     ):
         return "perl"
     return ""
+
+
+def discover_source_subdir(
+    checkout_root: str | os.PathLike, target_slug: str = "",
+) -> str:
+    """Select one immediate buildable child when the checkout root has none.
+
+    A matching target slug is unambiguous. Otherwise exactly one buildable
+    child is unambiguous. Multi-project repositories without either property
+    are rejected instead of silently auditing whichever directory happens to
+    sort first.
+    """
+    root = Path(checkout_root)
+    if _detect_build_system(root):
+        return ""
+    try:
+        children = [
+            child for child in root.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+            and _detect_build_system(child)
+        ]
+    except OSError:
+        return ""
+    children.sort(key=lambda child: child.name)
+    wanted = (
+        Path(target_slug).name.casefold()
+        if target_slug else root.name.casefold()
+    )
+    matches = [
+        child for child in children if child.name.casefold() == wanted
+    ]
+    if len(matches) == 1:
+        return matches[0].name
+    if len(children) == 1:
+        return children[0].name
+    if children:
+        names = ", ".join(child.name for child in children)
+        raise ValueError(
+            "checkout root has multiple buildable child projects "
+            f"({names}); use an explicit target profile/source subdirectory"
+        )
+    return ""
+
+
+def resolve_source_root(
+    checkout_root: str | os.PathLike, source_subdir: str,
+) -> Path:
+    """Resolve and contain a target.toml source_subdir below its checkout."""
+    root = Path(checkout_root).resolve()
+    relative = Path(source_subdir)
+    if (
+        relative.is_absolute() or not relative.parts
+        or any(part in ("", ".", "..") for part in relative.parts)
+    ):
+        raise ValueError(
+            "source_subdir must be a non-empty relative path without '..'"
+        )
+    candidate = (root / relative).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("source_subdir escapes the target checkout") from exc
+    if not candidate.is_dir():
+        raise ValueError(f"source_subdir does not exist: {source_subdir}")
+    return candidate
 
 
 def _cargo_root_package(root: Path) -> tuple[dict, dict] | None:
@@ -2444,8 +3051,6 @@ def _java_home_for_bin(java_bin: Path) -> str:
 
 
 def _java_is_usable(java_bin: Path) -> bool:
-    import subprocess
-
     if not java_bin.is_file() or not os.access(java_bin, os.X_OK):
         return False
     try:
@@ -2460,10 +3065,36 @@ def _java_is_usable(java_bin: Path) -> bool:
     return result.returncode == 0
 
 
-def _detect_java_runner() -> tuple[str, list[str]]:
-    """Return a usable Java executable and env entries, if one is discoverable."""
-    import shutil
+def _java_home_from_build_tool(build_system: str) -> str:
+    """Ask an already working JVM build tool which runtime it launched."""
+    commands = {
+        "maven": ("mvn", "-v"),
+        "gradle": ("gradle", "--version"),
+    }
+    command = commands.get(build_system)
+    executable = shutil.which(command[0]) if command else ""
+    if not executable:
+        return ""
+    try:
+        completed = subprocess.run(
+            [executable, *command[1:]], capture_output=True, text=True,
+            timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if completed.returncode:
+        return ""
+    for line in (completed.stdout + completed.stderr).splitlines():
+        stripped = line.strip()
+        if build_system == "maven" and "runtime:" in stripped.lower():
+            return stripped[stripped.lower().rfind("runtime:") + len("runtime:"):].strip()
+        if build_system == "gradle" and stripped.lower().startswith("daemon jvm:"):
+            return stripped.split(":", 1)[1].split(" (", 1)[0].strip()
+    return ""
 
+
+def _detect_java_runner(build_system: str = "") -> tuple[str, list[str]]:
+    """Return a usable Java executable and env entries, if one is discoverable."""
     for env_name in ("AUDIT_JAVA_HOME", "JAVA_HOME"):
         java_home = os.environ.get(env_name, "")
         if not java_home:
@@ -2476,6 +3107,12 @@ def _detect_java_runner() -> tuple[str, list[str]]:
     path_java = shutil.which("java")
     if path_java:
         candidate = Path(path_java)
+        if _java_is_usable(candidate):
+            home = _java_home_for_bin(candidate)
+            return str(candidate), ([f"JAVA_HOME={home}"] if home else [])
+
+    tool_home = _java_home_from_build_tool(build_system)
+    for candidate in _java_home_candidates(tool_home) if tool_home else ():
         if _java_is_usable(candidate):
             home = _java_home_for_bin(candidate)
             return str(candidate), ([f"JAVA_HOME={home}"] if home else [])
@@ -3107,16 +3744,47 @@ def build_freshness(
     return "fresh" if current_sig == stored_sig else "stale"
 
 
-def language_runner_defaults(build_system: str) -> dict:
+def language_runner_defaults(
+    build_system: str,
+    target_root: "str | os.PathLike | None" = None,
+    target_slug: str = "",
+) -> dict:
     """Return the default [runner] block for a build_system, or {}."""
     defaults = {k: (list(v) if isinstance(v, list) else v)
                 for k, v in LANGUAGE_RUNNERS.get(build_system, {}).items()}
     if build_system in {"maven", "gradle", "kotlin"} and defaults:
-        java_bin, java_env = _detect_java_runner()
+        java_bin, java_env = _detect_java_runner(build_system)
         if java_bin:
             if build_system in {"maven", "gradle"}:
                 defaults["bin"] = java_bin
             defaults["env"] = java_env
+    if build_system == "bundler" and defaults:
+        ruby_bin, _bundle_bin = languages.preferred_ruby_toolchain()
+        defaults["bin"] = ruby_bin
+    if build_system == "perl" and defaults:
+        perl_bin, _cpanm_bin = languages.preferred_perl_toolchain()
+        defaults["bin"] = perl_bin
+        local_lib = languages.perl_local_lib_root(perl_bin)
+        defaults["env"] = [
+            "PERL5LIB={TARGET_ROOT}/blib/lib:{TARGET_ROOT}/blib/arch:"
+            f"{{TARGET_ROOT}}/{local_lib}/lib/perl5:{{TARGET_ROOT}}/lib"
+        ]
+    if build_system in {"maven", "gradle"} and defaults and target_root is not None:
+        defaults["args"] = list(
+            languages.java_runner_args(target_root, build_system)
+        )
+    if build_system == "swift" and defaults and target_root is not None:
+        try:
+            defaults["args"] = list(
+                languages.swift_runner_args(target_root, target_slug)
+            )
+        except ValueError:
+            # Tests and newly scaffolded trees may carry an empty placeholder.
+            # A real manifest must be understood: falling back would seed an
+            # invocation SwiftPM never declared.
+            manifest = Path(target_root) / "Package.swift"
+            if manifest.is_file() and manifest.stat().st_size:
+                raise
     return defaults
 
 
@@ -3268,9 +3936,14 @@ def seed_toml(
     threat model / peer set. The helpers that can re-derive those sections
     overwrite them afterwards; dropping them first only decided what survives
     when those helpers do not run."""
-    root = Path(target_root)
+    checkout_root = Path(target_root)
     out = Path(out_path)
-    slug = target_slug or root.name
+    slug = target_slug or checkout_root.name
+    source_subdir = discover_source_subdir(checkout_root, slug)
+    root = (
+        resolve_source_root(checkout_root, source_subdir)
+        if source_subdir else checkout_root
+    )
 
     # Read the curated sections to carry forward BEFORE the template is built,
     # so the render below can substitute them in place of the seed defaults.
@@ -3336,7 +4009,7 @@ def seed_toml(
         asan_bin, asan_lib = detect_sanitizer_build_artifacts(root, "asan")
 
     if not upstream_url:
-        upstream_url = _detect_upstream_url(root)
+        upstream_url = _detect_upstream_url(checkout_root)
 
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -3372,6 +4045,10 @@ def seed_toml(
         "",
         f"target        = {toml_basic_string(slug)}",
         f"upstream_url  = {toml_basic_string(upstream_v)}",
+        *(
+            [f"source_subdir = {toml_basic_string(source_subdir)}"]
+            if source_subdir else []
+        ),
         f"build_system  = {toml_basic_string(build_system_v)}",
         *(
             [
@@ -3392,6 +4069,7 @@ def seed_toml(
             toml_basic_string(inc)
             for inc in _detect_include_dirs(root, _asan_dir_name)
         ) + "]",
+        'defines       = []',
         'link_libs     = ["-lm", "-lpthread"]',
         "",
         "# Optional: cmake target name used by maintainer reproduce.sh:",
@@ -3472,6 +4150,9 @@ def seed_toml(
         and build_system not in SANITIZER_RUNNER_BUILD_SYSTEMS
     )
 
+    default_runner_sanitizers = languages.default_sanitizers_for_build_system(
+        build_system
+    )
     if _findings_only_default:
         lines += [
             "",
@@ -3502,7 +4183,7 @@ def seed_toml(
             "",
             "# ── Sanitizer policy ─────────────────────────────────────────",
             "# enabled: which sanitizers the audit harness should run for this",
-            "# target. Only ASan is on by default. Tradeoffs:",
+            "# target. The language runner's maintained sanitizer is on by default. Tradeoffs:",
             "#   asan   memory corruption (OOB / UAF / double-free). High signal.",
             "#   msan   reads of uninitialized memory. Recommended for self-",
             "#          contained libraries; impractical for browsers because every",
@@ -3523,7 +4204,10 @@ def seed_toml(
             "# suppressions=... at runner startup. Missing files emit a warning",
             "# but do not abort.",
             "[sanitizer]",
-            'enabled = ["asan"]',
+            "enabled = [" + ", ".join(
+                toml_basic_string(value)
+                for value in (default_runner_sanitizers or ("asan",))
+            ) + "]",
             '# asan_suppressions  = "build-asan/asan-suppressions.txt"',
             '# ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"',
             '# msan_suppressions  = "build-msan/msan-suppressions.txt"',
@@ -3545,7 +4229,7 @@ def seed_toml(
     # tracebacks, race-detector reports) on top of its built-in markers.
     runner_default = (
         browser_runner_defaults(build_system)
-        if is_browser else language_runner_defaults(build_system)
+        if is_browser else language_runner_defaults(build_system, root, slug)
     )
 
     _toml_string = toml_basic_string  # local alias for the existing call sites
@@ -3637,6 +4321,7 @@ class Config:
     """Parsed and normalized target configuration."""
     slug: str = ""
     target_root: str = ""
+    checkout_root: str = ""
     results_dir: str = ""
     target_rev: str = ""
     logdir: str = ""
@@ -3651,6 +4336,7 @@ class Config:
     msan_lib: str = ""
     tsan_lib: str = ""
     build_system: str = ""
+    source_subdir: str = ""
     build_widening: bool = False
     build_configs: list[build_config.BuildConfig] = field(default_factory=list)
     cmake_target: str = ""
@@ -4007,6 +4693,8 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     cfg.runner_success_codes = [0]
     cfg.build_widening = False
     cfg.build_configs = []
+    cfg.source_subdir = ""
+    cfg.checkout_root = cfg.checkout_root or cfg.target_root
     for k, v in parsed.items():
         if k in ("target", "slug") and isinstance(v, str):
             cfg.slug = cfg.slug or v
@@ -4020,6 +4708,8 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
             cfg.cmake_target = v
         elif k == "build_system" and isinstance(v, str):
             cfg.build_system = v
+        elif k == "source_subdir" and isinstance(v, str):
+            cfg.source_subdir = v
         elif k == "build_widening" and isinstance(v, bool):
             cfg.build_widening = v
         elif k == "is_browser":
@@ -4045,6 +4735,10 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
             dom = v.get("domain", "")
             if isinstance(dom, str):
                 cfg.s6_domain = dom
+    if cfg.source_subdir and cfg.checkout_root:
+        cfg.target_root = str(resolve_source_root(
+            cfg.checkout_root, cfg.source_subdir,
+        ))
     if not cfg.attacker_controls:
         cfg.attacker_controls.append("bytes")
     # Default: ASan only — UNLESS the target.toml explicitly set

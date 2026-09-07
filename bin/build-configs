@@ -349,6 +349,7 @@ def main(argv: list[str] | None = None) -> int:
     toml = Path(args.target_toml).expanduser().resolve()
     config = target_config.Config(target_root=str(root))
     target_config.load_toml_into(config, toml)
+    root = Path(config.target_root)
     if config.build_system not in {"cmake", "autotools", "meson"} or not config.build_configs:
         return 0
     if target_config.build_freshness(root, "asan") != "fresh":

@@ -18,6 +18,9 @@ source-only audit. A one-shot API harness is a valid route only when it calls
 a documented public library boundary and no `[runner] bin` is configured; with
 a runner, probe through the runner or hand the API to S4. Startup or teardown
 code that runs for every testcase is not an input route.
+For a library-only Cargo package, a direct `.rs` testcase is the configured
+runner route: `bin/probe` links it to the audited crate. Use that route under
+S7; it is not a substituted `HARNESS:` or an S4 fuzz harness.
 
 **Direct-input gate.** The trigger must occur during one documented parse or
 decode operation on the crafted input; never add a dump, encode, or round trip
@@ -81,6 +84,9 @@ and no `[runner] bin` is configured: with a runner, `bin/probe` refuses an S7
 Startup or teardown code that executes identically for every testcase is not
 an input route: the testcase bytes must select or shape the named boundary,
 not merely cause the process to initialize it.
+For a library-only Cargo package, a direct `.rs` testcase is the configured
+runner route: `bin/probe` links it to the audited crate. Use that route under
+S7; it is not a substituted `HARNESS:` or an S4 fuzz harness.
 
 If a managed testcase prerequisite is absent, print `NO_EXEC: <proof>` and
 exit 2; do not raise an exception.

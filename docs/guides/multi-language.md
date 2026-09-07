@@ -35,8 +35,9 @@ not sanitizer evidence and is not a security finding by itself.
 
 `bin/setup-target` picks a conservative default by introspecting the source
 tree (`Cargo.toml`, `go.mod`, `pyproject.toml`, `package.json`, and so on). For
-a recognized non-native ecosystem with no configured sanitizer route, that
-default is findings-only:
+a recognized non-native ecosystem with no maintained sanitizer runner, that
+default is findings-only. Go and Swift instead seed their registry-provided
+race/ASan routes. Other ecosystems receive:
 
 - `[sanitizer] enabled = []`;
 - a starter `[runner]`.
@@ -52,7 +53,7 @@ session reads its pinned `.target.toml` snapshot.
 | C / C++ | `-fsanitize=address` / `undefined` / `memory` / `thread` | `asan`, `ubsan`, `msan`, `tsan` |
 | Rust | `RUSTFLAGS="-Z sanitizer=address"` (nightly) | `asan`; also `tsan` and `msan` on supported targets |
 | Go | `go build -race` | `race` |
-| Swift | `swift run … -Xswiftc -sanitize={SWIFT_SANITIZER}` through the seeded runner | `asan`, `ubsan`, `tsan` |
+| Swift | SwiftPM overlay or `swift run … -Xswiftc -sanitize={SWIFT_SANITIZER}` | `asan`, `ubsan`, `tsan` |
 | Java / JVM | None for JVM code; a JNI library can be built with ASan and driven separately | None for the JVM. Substantive security issues use `findings/`. |
 | Python | An ASan-built C extension driven by a standalone harness (see `samples/sample-python-native`) | Optional `asan` for native extensions |
 | Node / V8 | No compile-time sanitizer for ordinary JavaScript; native add-ons can link ASan | Optional `asan` for native add-ons |
@@ -98,31 +99,31 @@ The other ecosystems differ only in the `[runner]` fields:
 | Ecosystem | `build_system` | `bin` | `args` | Notable `env` |
 | --- | --- | --- | --- | --- |
 | Python | `python` | `python3` | `["{TESTCASE}"]` | `PYTHONDEVMODE=1`, `PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src:{TARGET_ROOT}/lib` |
-| Go | `go` | `go` | `["run", "{TESTCASE}"]` | `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
+| Go | `go` | `go` | `["run", "-race", "{TESTCASE}"]` | `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
 | Rust | `cargo` | `cargo` | `["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]` | `CARGO_HOME={TARGET_ROOT}/.audit/cargo-home`, `CARGO_NET_OFFLINE=true` |
-| Swift | `swift` | `swift` | `["run", "--quiet", "--disable-sandbox", "--skip-build", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--scratch-path", "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]` | none |
-| Ruby | `bundler` | `ruby` | `["{TESTCASE}"]` | `RUBYLIB={TARGET_ROOT}/lib` |
-| Java / JVM | `maven` or `gradle` | `java` | `["{TESTCASE}"]` | none |
+| Swift library | `swift` | `swift` | `["{TESTCASE}"]` | none |
+| Ruby | `bundler` | newest discovered `ruby` | `["{TESTCASE}"]` | target `RUBYLIB` and vendored Bundler environment |
+| Java / JVM | `maven` or `gradle` | `java` | Maven uses `["@{TARGET_ROOT}/.audit/java-runner.args", "{TESTCASE}"]`; an unbuilt tree starts with `["{TESTCASE}"]` | `JAVA_HOME` when discovered |
 | Kotlin | `kotlin` | `kotlinc` | `["-script", "{TESTCASE}"]` | none |
 | Node | `npm` | `node` | `["{TESTCASE}"]` | none |
 | PHP | `composer` | `php` | `["{TESTCASE}"]` | none |
 | R | `rlang` | `Rscript` | `["{TESTCASE}"]` | `R_LIBS_USER={TARGET_ROOT}/.audit/r-library` |
-| Perl | `perl` | `perl` | `["{TESTCASE}"]` | `PERL5LIB={TARGET_ROOT}/lib` |
+| Perl | `perl` | newest discovered `perl` | `["{TESTCASE}"]` | target `blib`, ABI-isolated `.audit/perl5`, and source `lib` paths |
 
 TypeScript projects are detected as `npm` and receive the Node runner. A
 project whose testcases must be TypeScript sets `bin` to its own loader; the
 committed `samples/sample-typescript` uses `ts-node`.
 
-For Swift, audit preflight builds every enabled release sanitizer configuration
-whose route uses the Swift runner with `--skip-build`, each in
-`.audit/swift-build-<sanitizer>`. That keeps compilation out of each testcase's
-15-second execution budget and stops audits on different sanitizers from
-replacing each other's products. A configured sanitizer binary still owns its
-route and does not pay for an unused Swift build. Preflight builds only
-`--product <name>`, where `<name>` is the executable `[runner].args` names
-before `{TESTCASE}`, so unrelated test-support targets stay out of the build,
-and a package whose product is named differently from the slug needs only that
-one edit.
+For a Swift library, a direct `.swift` testcase is compiled in a detached
+SwiftPM package that path-depends on every exported library product. Compilation
+runs before the 15-second execution budget and the per-agent package cache
+reuses dependencies. Setup builds and runs a canary that imports a real
+exported module, so a library-only package cannot pass with an invented
+executable. For an executable-only package, structured SwiftPM metadata selects
+the declared product; the generated `swift run` route is prepared once per
+sanitizer in `.audit/swift-build-<sanitizer>`. SwiftPM's cache, configuration,
+security state, and clang module cache live under the target's `.audit/` tree,
+so the same route works inside a restricted audit-agent workspace.
 
 `bin/setup-target` writes the matching starter `[runner]` block for each
 recognized registry ecosystem, and `--build` then proves that block reaches the
@@ -137,6 +138,17 @@ depend on, a changed `[runner].bin` or `args`, or configured `[sanitizer]`
 binaries that own every enabled testcase route, because the registry's
 generated source is then no longer proof of what runs. An unrecognized build
 system does not receive a guessed runner; configure its `[runner]` explicitly.
+
+Composer setup first installs the full dependency set. If that is blocked by a
+PHP extension declared only in the root package's `require-dev` section, setup
+retries with production dependencies and ignores only those development-only
+extension requirements. Extensions required by production dependencies remain
+mandatory.
+
+Node setup uses the checkout's lockfile and `packageManager` metadata to choose
+npm, pnpm, or Yarn. After installation it runs the conventional root `build`
+script when one is declared, so package exports that point to generated files
+are usable before the runner canary and audit begin.
 
 To print the registry's current answer for any build system:
 
@@ -153,10 +165,14 @@ python3 lib/languages.py runner-block <build_system> --pretty
 
 A few ecosystem notes:
 
-- **Go** seeds findings-only `go run`. To use the runtime race detector, set
-  `[sanitizer] enabled = ["race"]` and `args = ["run", "-race", "{TESTCASE}"]`,
-  or point the `[runner]` at a pre-built `go build -race` binary (the
-  `samples/sample-go` target demonstrates the latter route).
+- **Go** seeds `go run -race` with `[sanitizer] enabled = ["race"]`; the setup
+  bootstrap primes the matching race build cache before the runner canary.
+  You can instead point the `[runner]` at a pre-built `go build -race` binary
+  (the `samples/sample-go` target demonstrates that route).
+  When a checked-in Go source embeds an asset directory generated by an
+  adjacent JavaScript package, `bin/setup-target --build` runs that package's
+  declared `build` script through its lockfile-selected package manager before
+  compiling Go. It does this only while the declared embed input is absent.
 - **Rust**: a library-only crate has no `cargo run` route. Write the testcase
   as a direct `.rs` file calling the crate's public API, or a
   `// HARNESS: <name>.rs` driver beside an opaque input; `bin/probe` builds
@@ -173,10 +189,18 @@ A few ecosystem notes:
   the decision tree: its seeded `[runner]` compiles the package with
   `-sanitize={SWIFT_SANITIZER}`, so a sanitizer diagnostic routes to
   `crashes/` like a C/C++ target rather than staying findings-only.
-- **Java**: single-file Java is supported (JEP 330), so `java <file.java>`
-  compiles and runs in one shot. This is the seeded default. When seeding,
-  `bin/setup-target` prefers a working JDK from `JAVA_HOME`, then a working
-  `java` on `PATH`.
+- **Java**: single-file Java is supported (JEP 330). For Maven targets,
+  `bin/setup-target --build` compiles the reactor and asks Maven's dependency
+  plugin for each module's classpath. The generated Java argument file stays
+  under `.audit/`, outside `target.toml` and model context. A direct testcase's
+  `TARGET:` source location selects the nearest module; when that location is
+  incomplete, imports map back to compiled module classes. Maven's dependency
+  receipts then expand the local reactor and external runtime closure without
+  activating unrelated modules or test providers. The setup canary loads a
+  class whose code source is inside the checkout, so starting a JVM in the
+  target directory is not enough to pass. JDK discovery tries
+  `AUDIT_JAVA_HOME`, `JAVA_HOME`, and `PATH`, then reuses the runtime already
+  reported by a working Maven or Gradle.
 - **Kotlin**: `build_system = "kotlin"` seeds script-style `.kts` probes.
   Plain `.kt` sidecar harnesses compile through `kotlinc -include-runtime`. A
   detected `gradle` build currently receives the Java JEP 330 runner
@@ -185,10 +209,22 @@ A few ecosystem notes:
   classpath or configure a project-specific Kotlin/Gradle runner explicitly;
   do not assume the generated Java command loads Kotlin application code.
 - **R**: `bin/setup-target --build` installs a package with a `DESCRIPTION`
-  manifest into `.audit/r-library`, so a compiled component is built rather
-  than skipped; the seeded runner points `R_LIBS_USER` at that target-local
-  library. The install is a snapshot, so a later `bin/setup-target` without
-  `--build` reinstalls it when the checkout has moved since.
+  manifest and its declared hard dependencies into `.audit/r-library`, so a
+  compiled component is built rather than skipped and development-only
+  packages do not inflate setup. The seeded runner points `R_LIBS_USER` at
+  that target-local library. The install is a snapshot, so a later
+  `bin/setup-target` without `--build` reinstalls it when the checkout has
+  moved since.
+- **Perl**: a repository with `Makefile.PL` uses the newest installed Perl,
+  installs declared dependencies into an ABI-specific directory under
+  `.audit/perl5`, builds its native modules, and installs the result there. If
+  a repository checkout has no release `META` file and cpanm cannot execute
+  `Makefile.PL` before its configure prerequisites exist, setup installs the
+  prerequisite names from cpanm's own diagnostic and retries dependency
+  discovery. An existing generated Makefile is cleaned before rebuilding, so
+  a Perl upgrade cannot retain generated C or objects from the prior API. The
+  canary requires and imports a real module from `lib/`, then verifies that
+  Perl loaded its built copy from inside the audited checkout.
 
 ## Crash and finding routing
 

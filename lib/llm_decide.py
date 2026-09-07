@@ -132,6 +132,11 @@ DECISION_TIMEOUT_OSS = 180
 # site. The required argument prevents a refactor from silently dropping back
 # to the bare tier.
 DECISION_TIMEOUT_HOSTED_DEFAULTS = {
+    # The bounded build manifest made this decision deterministic, but the
+    # slowest completed hosted call still took 49s. Double that observed
+    # completion so ordinary latency variance does not discard a usable recipe
+    # and retry the same work on another backend.
+    "build-script-converge": 100,
     "cluster_expand": 800,
     # Completions are censored: this ran at the bare tier, so its own OK lines
     # cannot size it. Derived instead from its uncensored single-item sibling

@@ -261,7 +261,9 @@ def resolve_command(name: str) -> str:
     return found or name
 
 
-def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
+def run_generic(
+    option_string: str, timeout: int, args: list[str], selected: str = "asan",
+) -> int:
     if not args:
         print("Usage: run-asan generic <testcase> [target args...]", file=sys.stderr)
         return 1
@@ -282,14 +284,15 @@ def run_generic(option_string: str, timeout: int, args: list[str]) -> int:
         print(f"[run-asan] generic runner not executable / not on PATH: {binary}", file=sys.stderr)
         return 2
     disabled = BASE_ENV.get("ASAN_GENERIC_DISABLE_OPTIONS") == "1" or bool(CONFIG and CONFIG.sanitizers_explicitly_disabled)
-    environment = runtime_env(option_string, "none" if disabled else "asan")
+    runtime_sanitizer = selected if selected in {"race", "runner"} else ("none" if disabled else "asan")
+    environment = runtime_env(option_string, runtime_sanitizer)
     command = [binary]
-    if not sanitizer.generic_skips_testcase("asan", BASE_ENV):
+    if not sanitizer.generic_skips_testcase(selected, BASE_ENV):
         command.append(testcase)
     command.extend(extra)
     rss_mb = sanitizer.generic_rss_limit_mb(BASE_ENV)
-    cwd = sanitizer_run.configured_runner_cwd(CONFIG, binary, "asan")
-    if disabled:
+    cwd = sanitizer_run.configured_runner_cwd(CONFIG, binary, selected)
+    if disabled or selected in {"race", "runner"}:
         # Options are off by operator choice, so there is no ASAN_OPTIONS to
         # turn symbolization off in and nothing to symbolize.
         completed = run_timeout(
@@ -400,14 +403,20 @@ def main(argv: list[str]) -> int:
         print("Usage: run-asan {browser|browser-minimal|js|xpcshell|generic|fuzz|fuzz-repro|fuzz-js} [args...]")
         return 1
     mode, args = argv[0], argv[1:]
-    sanitizer.warn_if_disabled("asan", CONFIG)
-    sanitizer.hold_build("asan", CONFIG.target_root if CONFIG else "")
+    selected = BASE_ENV.get("PROBE_SANITIZER_SELECTED", "asan")
+    if selected not in {"asan", "race", "runner"}:
+        print(f"[run-asan] unsupported selected sanitizer: {selected}", file=sys.stderr)
+        return 2
+    if selected != "runner":
+        sanitizer.warn_if_disabled(selected, CONFIG)
+    if selected == "asan":
+        sanitizer.hold_build("asan", CONFIG.target_root if CONFIG else "")
     normal_timeout = int(BASE_ENV.get("ASAN_TIMEOUT", "15"))
     if mode == "browser": return run_browser(options("full"), normal_timeout, args)
     if mode == "browser-minimal": return run_browser(options("minimal"), normal_timeout, args)
     if mode == "js": return run_js(options("js"), int(BASE_ENV.get("ASAN_TIMEOUT", "10")), args)
     if mode == "xpcshell": return run_xpcshell(options("xpcshell"), normal_timeout, args)
-    if mode == "generic": return run_generic(options("full"), normal_timeout, args)
+    if mode == "generic": return run_generic(options("full"), normal_timeout, args, selected)
     if mode == "fuzz": return run_fuzz(options("fuzz"), int(BASE_ENV.get("FUZZ_ASAN_TIMEOUT", "600")), args)
     if mode == "fuzz-repro": return run_fuzz(options("fuzz-repro"), int(BASE_ENV.get("ASAN_FUZZ_REPRO_TIMEOUT", "20")), args, True)
     return run_fuzz_js(options("fuzz"), int(BASE_ENV.get("FUZZ_ASAN_TIMEOUT", "600")), args)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,6 +52,7 @@ class SuggestPeersTests(unittest.TestCase):
     def run_command(self, *args, mock=None, slug="demo", disable=False):
         env = os.environ.copy()
         env["SCRIPT_ROOT"] = str(self.sandbox)
+        env["LLM_DECIDE_LOG"] = str(self.sandbox / "llm-decisions.log")
         if mock is not None:
             env["LLM_DECIDE_MOCK_S6_PEER_SUGGEST"] = json.dumps(mock)
         else:
@@ -74,6 +76,30 @@ class SuggestPeersTests(unittest.TestCase):
         self.assertIn("[s6_peers]", proc.stdout)
         self.assertIn("rapidjson", proc.stdout)
         self.assertEqual(self.toml.read_bytes(), before)
+
+    def test_prompt_uses_configured_source_subdirectory(self) -> None:
+        baseline = self.run_command(mock=self.DEFAULT)
+        self.assertEqual(baseline.returncode, 0, baseline.stdout + baseline.stderr)
+        log_path = self.sandbox / "llm-decisions.log"
+        baseline_log = log_path.read_text(encoding="utf-8")
+        baseline_bytes = int(re.search(
+            r"s6-peer-suggest MOCK bytes=(\d+)", baseline_log,
+        ).group(1))
+        log_path.unlink()
+        nested = self.sandbox / "targets" / "demo" / "python"
+        nested.mkdir()
+        (nested / "README.md").write_text("nested-marker " * 400, encoding="utf-8")
+        self.toml.write_text(
+            self.toml.read_text(encoding="utf-8")
+            + 'source_subdir = "python"\n',
+            encoding="utf-8",
+        )
+        proc = self.run_command(mock=self.DEFAULT)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        log = log_path.read_text(encoding="utf-8")
+        match = re.search(r"s6-peer-suggest MOCK bytes=(\d+)", log)
+        self.assertIsNotNone(match, log)
+        self.assertGreater(int(match.group(1)), baseline_bytes + 1500)
 
     def test_apply_writes_parseable_section(self) -> None:
         proc = self.run_command("--apply", mock=self.DEFAULT)

@@ -77,19 +77,15 @@ attacker_controls = ["bytes"]
 | --- | --- |
 | `target` | Target slug. It should match `targets/<target>` and `output/<target>`. |
 | `upstream_url` | Source repository URL used as metadata in exported bundles. |
+| `source_subdir` | Optional relative project root inside the checkout. Setup emits it only when the checkout root has no build manifest and either one immediate child is buildable or a buildable child matches the target slug. Paths and runner tokens resolve from this directory. |
 | `build_system` | Informational build-system label such as `cmake`, `meson`, `autotools`, `mach`, or `gn`. |
 | `build_widening` | For ordinary native C/C++ targets, keep the canonical build and prepare one cached ASan sibling with compatible optional in-tree features enabled. Defaults to `true` when absent on a non-browser native target; set `false` to opt out. |
-| `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under `targets/<target>/`. An executable in the matching ASan build (or an external executable whose ASan instrumentation can be verified) is kept as you set it; `bin/setup-target` re-detects this field only to fill it or to replace a missing or mismatched path. |
+| `asan_bin` | ASan executable used by generic or browser runs. Relative paths resolve under the configured source root. An executable in the matching ASan build (or an external executable whose ASan instrumentation can be verified) is kept as you set it; `bin/setup-target` re-detects this field only to fill it or to replace a missing or mismatched path. |
 | `asan_lib` | ASan library used when compiling C harness testcases. |
-| `includes` | Include directories for C harness builds. Relative paths resolve under `targets/<target>/`. |
-| `link_libs` | Extra linker inputs for C harness builds: system/library flags such as `-lm`, target-relative archives, or target-relative source files that must be compiled into the harness. A token containing `$` is passed verbatim and never resolved as a path. |
+| `includes` | Include directories for C harness builds. Relative paths resolve under the configured source root. Setup derives public and generated roots from CMake/Meson install metadata; a staged native Python extension also contributes its installed headers and Python development headers. |
+| `defines` | Compiler flags for C/C++ harness builds. Setup seeds the dominant C++ `-std=` flag from `compile_commands.json`; other flags can be reviewed or added as needed. |
+| `link_libs` | Extra linker inputs for C harness builds: system/library flags such as `-lm`, target-relative archives, or target-relative source files that must be compiled into the harness. Setup merges the transitive library list from a matching top-level CMake package config for a selected static product. A token containing `$` is passed verbatim and never resolved as a path. |
 | `is_browser` | `"1"` for browser mode, `"0"` for generic mode. |
-
-One related field is *not* seeded: `defines`, the compiler define flags for
-C/C++ harness builds (such as `-DFOO=1`). Add it by hand when a harness build
-needs it, or run `bin/auto-repair-target-toml` to propose it after repeated
-harness build failures (see
-[Target configuration](../guides/configure-target.md#c-harness-readiness)).
 
 Which fields you need depends on what the run will do:
 
@@ -98,6 +94,10 @@ Which fields you need depends on what the run will do:
   `defines`, and `link_libs`.
 - ASan uses top-level `asan_lib`. UBSan, MSan, and TSan harnesses use
   `[sanitizer].ubsan_lib`, `msan_lib`, or `tsan_lib`.
+- A generated Meson/Python extension runner points at the staged package under
+  `.audit/`. Setup adds the staged public and Python development include roots,
+  and disables a guessed archive only when Meson's install metadata proves
+  that the project does not publish it.
 
 If only the executable path is correct, a CLI-first audit can still run.
 Leave the C harness fields unresolved until you actually need public API
@@ -317,17 +317,27 @@ crash_patterns = []
 ```
 
 ```toml
-# Swift package: the runner compiles with the selected Swift sanitizer
-# (`address`, `undefined`, or `thread`). The argument before `{TESTCASE}`
-# names the executable product to run, and is what audit preflight builds;
-# replace `{TARGET_SLUG}` with the product's own name whenever the two
-# differ, which they always do under a nested slug.
+# Swift library package: bin/probe creates a detached SwiftPM executable that
+# path-depends on the checkout's exported library products, compiles the direct
+# .swift testcase with the selected sanitizer, and then runs it.
 [runner]
 bin            = "swift"
-args           = ["run", "--quiet", "--disable-sandbox", "--skip-build", "-c", "release", "-Xswiftc", "-sanitize={SWIFT_SANITIZER}", "-Xswiftc", "-O", "--scratch-path", "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}", "--package-path", "{TARGET_ROOT}", "{TARGET_SLUG}", "{TESTCASE}"]
+args           = ["{TESTCASE}"]
 env            = []
 crash_patterns = []
 ```
+
+For an executable-only Swift package, `bin/setup-target` instead writes the
+`swift run` route with the executable product name obtained from `swift package
+dump-package`. It never assumes that the target slug is a product name.
+
+Maven targets use a generated `@{TARGET_ROOT}/.audit/java-runner.args` file for
+their compiled module classes and resolved dependencies. Keeping that long,
+machine-local classpath outside `target.toml` prevents it from entering every
+audit prompt. A direct Java testcase's `TARGET:` location narrows dependencies
+to the nearest Maven module at runtime; if the header carries only a slug, its
+imports identify the compiled module instead. Local reactor dependencies are
+substituted for installed copies before the external runtime closure is added.
 
 ```toml
 # Custom wrapper script: useful for Java/Kotlin builds that need a classpath

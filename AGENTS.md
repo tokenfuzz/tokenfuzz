@@ -51,6 +51,16 @@ Each agent has a role set by the harness:
    `output/<slug>/<backend>/results/.session-env`. No env vars to set.
    For opaque byte inputs, pass `--hypothesis-id H-...` and keep the input exact;
    S8 also passes `--property <kind>`.
+   Direct `.swift` and `.rs` testcases are package harnesses: `bin/probe`
+   compiles them against exported libraries even when `[runner].args` only
+   contains `{TESTCASE}` or the audited package has no executable product.
+   On a harness build failure, use the raw first compiler diagnostic printed
+   by `bin/probe`: if it points into `scratch-N` (including a copied
+   `Sources/Probe/main.swift`), repair the testcase and probe again. Do not
+   paraphrase it into an environment failure.
+   An S8 counterexample prints a line beginning exactly
+   `PROPERTY VIOLATION:` and exits nonzero; aliases such as `PROPERTY_FAIL`
+   are ordinary testcase output and receive no finding credit.
    MISSED = revise input, don't discard, don't spend the execution budget.
 4. **DEPTH FOLLOWS EVIDENCE.** Start with a trigger-aimed `bin/probe` run. One CLEAN may resolve a deterministic hypothesis only when the testcase directly instantiates every named boundary value or call step. Allocator-, scheduler-, race-, GC-, timing-, re-entrancy-, or state-dependent triggers need repetition or distinct shapes; a coverage HIT alone proves only that the location executed. MISSED, NO_EXEC, and EXEC_FAIL never justify discard; a concrete source/configuration proof that the named trigger has no documented input boundary may.
 5. **BREADTH WITH A CARD FLOOR.** Before discarding a card, record at least 3 card-linked CLEAN `bin/probe` runs across at least 2 distinct hypothesis shapes that were actually probed. This is a card floor, not a per-hypothesis variant tax. On a concrete patch/site card that retires the card; on a broad whole-file card it records this dry pass and yields to fresher work, but cannot prove unexamined functions exhausted, so the queue may reoffer it with its history until campaign dry/wall limits. Deepen any angle that clears a guard, reaches closer coverage, changes suspicious output, or exposes crash-adjacent state. If the configured target cannot execute the card, do not manufacture CLEAN evidence: after checking sibling builds/modes, use `ENV-BLOCKED`. That closes a concrete patch/site card, but on a broad ranked-source card it records and demotes only the failed route; use `update-card --status blocked --note <proof>` only for a proven whole-card mode incompatibility, stale surface, or non-public boundary. MISSED alone is not proof.
@@ -82,7 +92,7 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 2. Leftover testcase without sanitizer output? Run the sanitizer NOW or delete.
 3. **Cold start:** Use `bin/state add-hyp` to record 3-5 hypotheses from one subsystem.
 4. **After compression:** Start from structured state (`bin/state resume --agent <n>`); resume the top PENDING item before claiming new work, and do not re-read `PRIOR SESSION SEED` ranges.
-5. The harness embeds a condensed **session-rules digest** in your prompt (coverage-gate workflow, guards-db, search discipline, FIND quality bar). Rely on it. Read the full `.agents/references/session-rules.md` only if the digest is ambiguous for your situation — it is ~22 KB and re-sends on every later turn once read.
+5. The harness embeds a condensed **session-rules digest** in your prompt (coverage-gate workflow, structured guard notes, search discipline, FIND quality bar). Rely on it. Read the full `.agents/references/session-rules.md` only if the digest is ambiguous for your situation — it is ~22 KB and re-sends on every later turn once read.
 
 ---
 

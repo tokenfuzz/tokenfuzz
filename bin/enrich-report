@@ -85,16 +85,14 @@ def _config_for_report(report_path: Path):
     toml = target_config.find_target_toml(report_path)
     if toml is None:
         return target_config.load(str(report_path))
-    cfg = target_config.Config()
+    root = target_config.find_target_root(
+        report_path, repository_root=SCRIPT_ROOT,
+    )
+    cfg = target_config.Config(target_root=str(root) if root is not None else "")
     target_config.load_toml_into(cfg, toml)
     recorded_rev = target_config.find_benchmark_target_rev(toml, cfg.slug)
     if recorded_rev:
         cfg.target_rev = recorded_rev
-    root = target_config.find_target_root(
-        report_path, repository_root=SCRIPT_ROOT,
-    )
-    if root is not None:
-        cfg.target_root = str(root)
     return cfg
 
 

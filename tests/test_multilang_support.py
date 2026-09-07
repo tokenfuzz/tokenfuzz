@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import shutil
 import subprocess
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PROBE = ROOT / "bin" / "probe"
 CARGO = shutil.which("cargo")
 GO = shutil.which("go")
+SWIFT = shutil.which("swift")
 sys.path.insert(0, str(ROOT / "lib"))
 
 import languages
@@ -111,6 +113,10 @@ class MultiLanguageSupportTests(unittest.TestCase):
         go_env = target_config.language_runner_defaults("go")["env"]
         self.assertIn("GOFLAGS=-mod=mod", go_env)
         self.assertIn("GORACE=halt_on_error=1", go_env)
+        self.assertIn("-race", target_config.language_runner_defaults("go")["args"])
+        self.assertEqual(
+            languages.default_sanitizers_for_build_system("go"), ("race",)
+        )
         cargo_args = target_config.language_runner_defaults("cargo")["args"]
         self.assertIn("--manifest-path", cargo_args)
         self.assertIn("{TARGET_ROOT}/Cargo.toml", cargo_args)
@@ -118,13 +124,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertIn("CARGO_HOME={TARGET_ROOT}/.audit/cargo-home", cargo_env)
         self.assertIn("CARGO_NET_OFFLINE=true", cargo_env)
         swift_args = target_config.language_runner_defaults("swift")["args"]
-        for token in (
-            "--disable-sandbox", "--skip-build", "--package-path", "{TARGET_ROOT}",
-            "--scratch-path",
-            "{TARGET_ROOT}/.audit/swift-build-{SWIFT_SANITIZER}",
-            "{TARGET_SLUG}", "-sanitize={SWIFT_SANITIZER}",
-        ):
-            self.assertIn(token, swift_args)
+        self.assertEqual(swift_args, ["{TESTCASE}"])
 
         fake_home = self.root / "jdk"
         java = self.executable(
@@ -155,6 +155,22 @@ class MultiLanguageSupportTests(unittest.TestCase):
         (polyglot / "CMakeLists.txt").touch()
         (polyglot / "Cargo.toml").touch()
         self.assertEqual(target_config._detect_build_system(polyglot), "cmake")
+        delegated = self.root / "delegated-go"
+        (delegated / "cmake").mkdir(parents=True)
+        (delegated / "go.mod").write_text("module example.invalid/sample\n")
+        (delegated / "CMakeLists.txt").write_text("include(cmake/package.cmake)\n")
+        (delegated / "cmake" / "package.cmake").write_text(
+            'add_custom_target(app COMMAND ${GO_EXECUTABLE} build -o "${APP}" .)\n'
+            'install(PROGRAMS "${APP}" DESTINATION bin)\n'
+        )
+        self.assertEqual(target_config._detect_build_system(delegated), "go")
+        (delegated / "CMakeLists.txt").write_text(
+            "add_library(native STATIC native.c)\ninclude(cmake/package.cmake)\n"
+        )
+        self.assertEqual(
+            target_config._detect_build_system(delegated), "cmake",
+            "a project-owned native target keeps CMake dominant",
+        )
 
         managed = (
             ("python", "pyproject.toml"), ("cargo", "Cargo.toml"),
@@ -173,7 +189,11 @@ class MultiLanguageSupportTests(unittest.TestCase):
                 self.assertIn("[runner]", text)
                 config = target_config.Config()
                 target_config.load_toml_into(config, output)
-                self.assertTrue(config.sanitizers_explicitly_disabled)
+                if slug == "go":
+                    self.assertEqual(config.sanitizers_enabled, ["race"])
+                    self.assertFalse(config.sanitizers_explicitly_disabled)
+                else:
+                    self.assertTrue(config.sanitizers_explicitly_disabled)
                 self.assertTrue(config.runner_bin)
         for slug, manifest in (("cmake", "CMakeLists.txt"), ("meson", "meson.build"), ("swift", "Package.swift")):
             directory = self.root / f"native-{slug}"
@@ -191,6 +211,124 @@ class MultiLanguageSupportTests(unittest.TestCase):
         for extension in required_harnesses:
             self.assertIsNotNone(languages.probe_dispatch(extension))
         self.assertIsNone(languages.probe_dispatch(".bogus"))
+
+    def test_maven_bootstrap_builds_a_target_backed_java_classpath(self) -> None:
+        module = self.target / "module"
+        classes = module / "target" / "classes"
+        compiled = classes / "example" / "PublicApi.class"
+        compiled.parent.mkdir(parents=True)
+        compiled.write_bytes(b"compiled")
+        (module / "pom.xml").write_text(
+            '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+            '<artifactId>public-api</artifactId></project>',
+            encoding="utf-8",
+        )
+        dependency = self.root / "dependency.jar"
+        dependency.write_bytes(b"jar")
+        support = self.target / "support"
+        support_classes = support / "target" / "classes"
+        support_class = support_classes / "example" / "Support.class"
+        support_class.parent.mkdir(parents=True)
+        support_class.write_bytes(b"compiled")
+        (support / "pom.xml").write_text(
+            '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+            '<artifactId>support</artifactId></project>',
+            encoding="utf-8",
+        )
+        transitive = self.root / "transitive.jar"
+        transitive.write_bytes(b"jar")
+        (support / "target" / "tokenfuzz-classpath.txt").write_text(
+            str(transitive), encoding="utf-8",
+        )
+        installed_support = self.root / "repository" / "example" / "support" / "1" / "support-1.jar"
+        installed_support.parent.mkdir(parents=True)
+        installed_support.write_bytes(b"installed copy")
+        receipt = module / "target" / "tokenfuzz-classpath.txt"
+        receipt.write_text(
+            os.pathsep.join((str(installed_support), str(dependency))),
+            encoding="utf-8",
+        )
+        wrapper = self.target / "mvnw"
+        wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        wrapper.chmod(0o755)
+
+        plan = languages.bootstrap_plan_for_target(self.target, "maven")
+        self.assertEqual(plan["cmds"][0], ["./mvnw", "-q", "-DskipTests", "compile"])
+        self.assertIn("dependency:build-classpath", plan["cmds"][1])
+        self.assertIn("-DincludeScope=runtime", plan["cmds"][1])
+        argfile = languages.write_java_runner_argfile(self.target, "maven")
+        args = languages.java_runner_args(self.target, "maven")
+        self.assertEqual(args[0], "@{TARGET_ROOT}/.audit/java-runner.args")
+        self.assertEqual(args[-1], "{TESTCASE}")
+        rendered = argfile.read_text(encoding="utf-8")
+        self.assertIn(str(classes.resolve()), rendered)
+        self.assertIn(str(dependency.resolve()), rendered)
+        module_args = languages.java_probe_runner_args(
+            self.target, "maven", "module/src/main/java/example/PublicApi.java:1",
+        )
+        self.assertEqual(module_args[0], "--class-path")
+        self.assertIn(str(dependency.resolve()), module_args[1].split(os.pathsep))
+        self.assertIn(str(support_classes.resolve()), module_args[1].split(os.pathsep))
+        self.assertIn(str(transitive.resolve()), module_args[1].split(os.pathsep))
+        self.assertNotIn(str(installed_support.resolve()), module_args[1].split(os.pathsep))
+        fallback_args = languages.java_probe_runner_args(
+            self.target, "maven", "multilang",
+        )
+        self.assertIn(str(dependency.resolve()), fallback_args[1].split(os.pathsep))
+        testcase = self.root / "Probe.java"
+        testcase.write_text("import example.PublicApi;\nclass Probe {}\n")
+        import_args = languages.java_probe_runner_args(
+            self.target, "maven", "multilang", testcase,
+        )
+        self.assertIn(str(dependency.resolve()), import_args[1].split(os.pathsep))
+        self.assertEqual(
+            languages.java_canary_classes(self.target, "maven"),
+            ("example.PublicApi", "example.Support"),
+        )
+        with mock.patch.object(
+            target_config, "_detect_java_runner",
+            return_value=("/jdk/bin/java", ["JAVA_HOME=/jdk"]),
+        ):
+            defaults = target_config.language_runner_defaults(
+                "maven", self.target,
+            )
+        self.assertEqual(defaults["args"], list(args))
+
+    def test_gradle_bootstrap_records_kotlin_jvm_runtime_classpath(self) -> None:
+        module = self.target / "module"
+        classes = module / "build" / "classes" / "kotlin" / "jvm" / "main"
+        compiled = classes / "example" / "PublicApi.class"
+        compiled.parent.mkdir(parents=True)
+        compiled.write_bytes(b"compiled")
+        dependency = self.root / "dependency.jar"
+        dependency.write_bytes(b"jar")
+        receipt = module / "build" / "tokenfuzz-classpath.txt"
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(
+            os.pathsep.join((str(classes), str(dependency))), encoding="utf-8",
+        )
+        wrapper = self.target / "gradlew"
+        wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        wrapper.chmod(0o755)
+
+        plan = languages.bootstrap_plan_for_target(self.target, "gradle")
+        self.assertEqual(plan["cmds"][0][0], "./gradlew")
+        self.assertIn("--no-daemon", plan["cmds"][0])
+        self.assertIn("tokenfuzzPrepare", plan["cmds"][0])
+        init_script = self.target / ".audit" / "tokenfuzz-gradle.init.gradle"
+        generated = init_script.read_text(encoding="utf-8")
+        self.assertIn("jvmMainClasses", generated)
+        self.assertIn("jvmRuntimeClasspath", generated)
+
+        entries = languages.java_classpath_entries(self.target, "gradle")
+        self.assertIn(str(classes.resolve()), entries)
+        self.assertIn(str(dependency.resolve()), entries)
+        self.assertEqual(
+            languages.java_canary_classes(self.target, "gradle"),
+            ("example.PublicApi",),
+        )
+        argfile = languages.write_java_runner_argfile(self.target, "gradle")
+        self.assertIn(str(classes.resolve()), argfile.read_text(encoding="utf-8"))
 
     @unittest.skipUnless(GO, "Go toolchain is required")
     def test_go_testcase_runs_in_target_module_context(self) -> None:
@@ -240,6 +378,31 @@ class MultiLanguageSupportTests(unittest.TestCase):
             testcase.with_suffix(".asan.txt").read_text(encoding="utf-8"),
         )
 
+    def test_go_bootstrap_builds_declared_missing_embed_assets(self) -> None:
+        target = self.root / "go-assets"
+        package = target / "web" / "app"
+        package.mkdir(parents=True)
+        (target / "go.mod").write_text("module example.invalid/assets\n")
+        (target / "web" / "embed.go").write_text(
+            "package web\nimport \"embed\"\n//go:embed app/dist\nvar assets embed.FS\n"
+        )
+        (package / "package-lock.json").write_text("{}\n")
+        (package / "package.json").write_text(
+            json.dumps({"scripts": {"build": "build-assets"}})
+        )
+
+        plan = languages.bootstrap_plan_for_target(target, "go")
+
+        self.assertEqual(
+            plan["cmds"][:2],
+            [
+                ["npm", "--prefix", "web/app", "ci", "--no-audit", "--no-fund"],
+                ["npm", "--prefix", "web/app", "run", "build"],
+            ],
+        )
+        (package / "dist").mkdir()
+        self.assertFalse(languages._go_embed_asset_commands(target))
+
     def canary_config(self, scratch: Path):
         config = target_config.Config(
             slug="multilang", target_root=str(self.target),
@@ -283,16 +446,22 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertTrue(
             any("runtime search paths" in reason for reason in phantom), phantom,
         )
+        module_file = self.target / "reachable.py"
+        loaded_file = runner_canary._reasons(
+            self.canary_config(reaching),
+            f"{runner_canary.MARKER} path={module_file}\n"
+            "EXECUTION_RATE: 1/1\n",
+        )
+        self.assertEqual(loaded_file, [])
         failed_probe = subprocess.CompletedProcess(
             [], 7,
             f"{runner_canary.MARKER} cwd={self.target}\nEXECUTION_RATE: 1/1\n",
-            "",
+            "runner-detail",
         )
         with mock.patch.object(runner_canary, "run_timeout", return_value=failed_probe):
-            self.assertIn(
-                "bin/probe exited 7",
-                runner_canary.check(self.canary_config(reaching)),
-            )
+            failure = runner_canary.check(self.canary_config(reaching))
+            self.assertIn("bin/probe exited 7", failure)
+            self.assertIn("runner-detail", failure)
         # The wrapper's reserved 124: the probe tree was killed at the
         # deadline, so nothing it printed is a verdict.
         timed_out = subprocess.CompletedProcess([], 124, "", "")
@@ -527,6 +696,74 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertIn("TARGET_REACHED", output)
         self.assertIn("DEV_DEP_REACHED", output)
         self.assertIn("verdict=CLEAN", result.stdout + result.stderr)
+
+    @unittest.skipUnless(SWIFT, "Swift toolchain is required")
+    def test_direct_swift_testcase_links_exported_package_library(self) -> None:
+        (self.target / "Sources" / "ProbeTarget").mkdir(parents=True)
+        (self.target / "Package.swift").write_text(
+            '// swift-tools-version: 5.9\nimport PackageDescription\n'
+            'let package = Package(name: "ProbeTarget", products: ['
+            '.library(name: "ProbeTarget", targets: ["ProbeTarget"])], '
+            'targets: [.target(name: "ProbeTarget")])\n',
+            encoding="utf-8",
+        )
+        (self.target / "Sources" / "ProbeTarget" / "ProbeTarget.swift").write_text(
+            'public func marker() -> String { "SWIFT_TARGET_REACHED" }\n',
+            encoding="utf-8",
+        )
+        lockfile = self.target / "Package.resolved"
+        lockfile.write_text('{"pins":[],"version":2}\n', encoding="utf-8")
+        scratch = self.tree(
+            "swift-library",
+            'target = "multilang"\nbuild_system = "swift"\n'
+            '[sanitizer]\nenabled = ["asan"]\n'
+            '[runner]\nbin = "swift"\nargs = ["{TESTCASE}"]\n',
+        )
+        testcase = self.make_testcase(
+            scratch / "route.swift",
+            'import ProbeTarget\nprint(marker())\n',
+        )
+        opaque = self.make_testcase(scratch / "opaque.bin", "bytes")
+
+        rejected = self.run_probe(opaque)
+        self.assertEqual(rejected.returncode, 2, rejected.stdout + rejected.stderr)
+        self.assertIn(
+            "Swift library target has no binary for opaque input",
+            rejected.stdout + rejected.stderr,
+        )
+
+        result = self.run_probe(testcase, environment={"SANITIZER_RUNS": "1"})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = testcase.with_suffix(".asan.txt").read_text(encoding="utf-8")
+        self.assertIn("SWIFT_TARGET_REACHED", output)
+        self.assertIn("verdict=CLEAN", result.stdout + result.stderr)
+        detached_lockfile = self.target / ".audit" / "swift-probe-asan-1" / "Package.resolved"
+        self.assertTrue(detached_lockfile.is_file())
+
+        config = self.canary_config(scratch)
+        self.assertEqual(runner_canary.skip_reason(config), "")
+        self.assertEqual(runner_canary.check(config), "")
+
+    @unittest.skipUnless(SWIFT, "Swift toolchain is required")
+    def test_swift_seed_uses_a_declared_executable_product(self) -> None:
+        (self.target / "Sources" / "RealTool").mkdir(parents=True)
+        (self.target / "Sources" / "RealTool" / "main.swift").write_text(
+            'print("ok")\n', encoding="utf-8",
+        )
+        (self.target / "Package.swift").write_text(
+            '// swift-tools-version: 5.9\nimport PackageDescription\n'
+            'let package = Package(name: "DifferentPackageName", products: ['
+            '.executable(name: "RealTool", targets: ["RealTool"])], '
+            'targets: [.executableTarget(name: "RealTool")])\n',
+            encoding="utf-8",
+        )
+
+        defaults = target_config.language_runner_defaults(
+            "swift", self.target, "unrelated-target-slug",
+        )
+
+        self.assertIn("RealTool", defaults["args"])
+        self.assertNotIn("unrelated-target-slug", defaults["args"])
 
     def test_findings_only_runner_headers_output_caps_and_argument_tokens(self) -> None:
         scratch = self.tree(
@@ -775,6 +1012,18 @@ print("TESTCASE_EXECUTED")
         for name in ("ASAN", "UBSAN", "MSAN", "TSAN"):
             self.assertIn(f"{name}_OPTIONS_UNSET", race_output)
         self.assertIn(f"ARGV=-race {race_case.resolve()}", race_output)
+        self.assertNotIn("'asan' is not in [sanitizer].enabled", race_output)
+
+        asan_scratch = self.tree(
+            "asan-language-runner",
+            f'target = "multilang"\n[sanitizer]\nenabled = ["asan"]\n'
+            f'[runner]\nbin = "{race_runner}"\nargs = ["{{TESTCASE}}"]\n',
+        )
+        asan_case = self.make_testcase(asan_scratch / "input.dat")
+        asan_runner_result = self.run_probe(asan_case)
+        asan_runner_output = asan_runner_result.stdout + asan_runner_result.stderr
+        self.assertEqual(asan_runner_result.returncode, 0, asan_runner_output)
+        self.assertNotIn("COVERAGE_UNAVAILABLE", asan_runner_output)
 
         swift_runner = self.executable(self.target / "swift-runner", runner_body)
         mapping = {"asan": "address", "ubsan": "undefined", "tsan": "thread"}
