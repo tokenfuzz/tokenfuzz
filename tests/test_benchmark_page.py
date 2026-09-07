@@ -305,6 +305,36 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(rejected["conditions"], ["harness"])
         self.assertIn("no attacker-controlled path", rejected["reason"])
 
+    def test_unjudged_members_supply_no_problem_severity_or_evidence_link(self) -> None:
+        members_path = self.fixture.run / "pool-members.json"
+        members = json.loads(members_path.read_text())
+        members["unjudged"] = {
+            name: {"kind": "findings", "condition": members["findings"][name]}
+            for name in ("FIND-0001", "FIND-0002")
+        }
+        members_path.write_text(json.dumps(members), encoding="utf-8")
+        # A saved report from before the fix still contains withheld members;
+        # --rebuild-report must be sufficient to render it honestly.
+        self.fixture.report["finding_clusters"][0]["conditions"] = []
+        self.fixture.report["finding_clusters"][1]["conditions"] = ["model-direct"]
+        self.fixture.report["finding_clusters"][1]["member_severity"]["FIND-0002"] = {
+            "level": "Critical", "rank": 4, "score": 9.5,
+        }
+        (self.fixture.run / "report.json").write_text(
+            json.dumps(self.fixture.report), encoding="utf-8",
+        )
+        data = benchmark_page.build(self.fixture.root)
+        clusters = {c["id"]: c for c in data["runs"][0]["clusters"]["find"]}
+        self.assertNotIn("FCL-1", clusters)
+        shared = clusters["FCL-2"]
+        self.assertEqual(shared["conditions"], ["model-direct"])
+        self.assertEqual(shared["severity"], "Medium")
+        self.assertEqual(shared["severity_by"], {"model-direct": "Medium"})
+        self.assertEqual(shared["size"], 1)
+        self.assertIn("FIND-0004", shared["href"])
+        self.assertNotEqual(shared["title"], "I/O path frees a buffer twice")
+        self.assertTrue(all(p["found"] for p in data["targets"][0]["problems"]))
+
     def test_activity_is_binned_on_the_cell_clock_and_stops_at_its_wall(self) -> None:
         activity = self._cond("harness")["activity"]
         self.assertEqual(activity["bins"], 12)

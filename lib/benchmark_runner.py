@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -745,7 +746,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--agents", type=_positive,
-        help="harness workers per cell (default: the audit's machine-sized pool); the direct baseline is always one launch",
+        help="harness workers per cell (default: the audit's configured pool, normally 3); the direct baseline is always one launch",
     )
     result.add_argument(
         "--conditions", default="model-direct,harness",
@@ -758,12 +759,12 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--reset", action="store_true",
-        help="archive the backend's benchmark-results.md ledger before running, or alone to only do that",
+        help="archive the backend's benchmark-results.md ledger and exit",
     )
     postprocess = result.add_mutually_exclusive_group()
     postprocess.add_argument(
         "--regenerate", action="store_true",
-        help="rebuild a run's scores, ledger, and pages from what is on disk without launching anything; without --target, every recorded run",
+        help="rebuild scores, ledger, and pages without starting new audit cells; may replay artifacts and invoke reviewers; without --target, every recorded run",
     )
     postprocess.add_argument(
         "--rebuild-report", action="store_true",
@@ -1173,27 +1174,38 @@ def cleanup_model_direct_scratch(cell_dir: Path) -> None:
 _CACHE_STEM_RE = re.compile(r"^(?P<stem>.+\.[0-9a-f]{40})\.")
 # A cache path named anywhere in evidence: a probe context, a sanitizer
 # frame, a validation receipt, a report, or the debug map inside a pooled
-# binary. Scanned as bytes so a binary counts as a reference too.
-_CACHE_REFERENCE_RE = re.compile(rb"\.harness-cache/([^\s\"'()\[\]:,]+)")
+# binary. Matched by content key, not by source name: a name can hold
+# spaces, arrive JSON-escaped, or contain a hex segment of its own, so every
+# key in the run after the directory counts. Keeping another stem with the
+# same key is conservative; overlooking a reference destroys evidence.
+_CACHE_REFERENCE_RE = re.compile(rb"\.harness-cache/([^/\x00]*)")
+_CACHE_KEY_RE = re.compile(rb"\.([0-9a-f]{40})(?=\.)")
 
 
-def _referenced_cache_stems(roots: list[Path]) -> set[str]:
-    stems: set[str] = set()
+def _referenced_cache_keys(roots: list[Path]) -> set[str]:
+    def scan_error(error: OSError) -> None:
+        raise error
+
+    keys: set[str] = set()
     for root in roots:
-        if not root.is_dir():
+        try:
+            mode = root.stat().st_mode
+        except FileNotFoundError:
             continue
-        for path in root.rglob("*"):
-            if path.is_symlink() or not path.is_file():
-                continue
-            try:
+        if not stat.S_ISDIR(mode):
+            continue
+        # rglob suppresses directory read errors; an incomplete inventory
+        # must never authorize deletion of the builds it could not inspect.
+        for directory, _, files in os.walk(root, onerror=scan_error):
+            for name in files:
+                path = Path(directory) / name
+                if not stat.S_ISREG(path.lstat().st_mode):
+                    continue
                 data = path.read_bytes()
-            except OSError:
-                continue
-            for match in _CACHE_REFERENCE_RE.finditer(data):
-                stem = _CACHE_STEM_RE.match(match.group(1).decode("utf-8", "replace"))
-                if stem:
-                    stems.add(stem.group("stem"))
-    return stems
+                for match in _CACHE_REFERENCE_RE.finditer(data):
+                    for key in _CACHE_KEY_RE.findall(match.group(1)):
+                        keys.add(key.decode("ascii"))
+    return keys
 
 
 def _tree_bytes(path: Path) -> int:
@@ -1223,7 +1235,7 @@ def prune_harness_cache(results_dir: Path, keep: set[str], dry_run: bool = False
             if match:
                 groups.setdefault(match.group("stem"), []).append(entry)
         for stem, entries in sorted(groups.items()):
-            if stem in keep:
+            if stem.rsplit(".", 1)[-1] in keep:
                 pruned["kept"] += 1
                 continue
             for entry in entries:
@@ -1256,7 +1268,11 @@ def prune_run_caches(bench_dir: Path, dry_run: bool = False) -> None:
     The fuzz-activity receipt is frozen first: `harvest_fuzz_campaign` counts
     cached builds, and --regenerate reads it again.
     """
-    pool_keep = _referenced_cache_stems([bench_dir / "pool"])
+    try:
+        pool_keep = _referenced_cache_keys([bench_dir / "pool"])
+    except OSError as error:
+        log(f"WARN: harness caches kept — pool evidence could not be read: {error}")
+        return
     for cell_json in sorted((bench_dir / "cells").glob("*/cell.json")):
         try:
             cell = json.loads(cell_json.read_text(encoding="utf-8"))
@@ -1272,13 +1288,21 @@ def prune_run_caches(bench_dir: Path, dry_run: bool = False) -> None:
             log(f"Cell {name}: harness cache kept — cell processes never reaped")
             continue
         if not dry_run:
-            metrics.record_fuzz_campaign(results)
+            try:
+                metrics.record_fuzz_campaign(results)
+            except OSError as error:
+                log(f"WARN: Cell {name}: harness cache kept — activity receipt not frozen: {error}")
+                continue
         # Rejected evidence counts: --regenerate re-adjudicates a stale
         # trigger rejection against its probe context and sanitizer report.
-        keep = pool_keep | _referenced_cache_stems([
-            results / "crashes", results / "crashes-rejected",
-            results / "findings", results / "findings-rejected", results / "state",
-        ])
+        try:
+            keep = pool_keep | _referenced_cache_keys([
+                results / "crashes", results / "crashes-rejected",
+                results / "findings", results / "findings-rejected", results / "state",
+            ])
+        except OSError as error:
+            log(f"WARN: Cell {name}: harness cache kept — evidence could not be read: {error}")
+            continue
         pruned = prune_harness_cache(results, keep, dry_run=dry_run)
         if pruned["removed"] or pruned["failed"]:
             log(

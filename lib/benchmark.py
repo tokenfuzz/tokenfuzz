@@ -593,17 +593,29 @@ _FUZZ_ACTIVITY_FIELDS = (
 )
 
 
+def _recorded_fuzz_activity(results_dir: Path) -> dict | None:
+    """The frozen receipt, or None when there is no complete one to read."""
+    recorded = _read_json_object(results_dir / FUZZ_ACTIVITY_RECEIPT)
+    if all(field in recorded for field in _FUZZ_ACTIVITY_FIELDS):
+        return {field: recorded[field] for field in _FUZZ_ACTIVITY_FIELDS}
+    return None
+
+
 def record_fuzz_campaign(results_dir: Path) -> dict:
     """Freeze `harvest_fuzz_campaign` before the files it counts are pruned.
 
-    Written once: a receipt already on disk is the run's answer, and a later
-    call must not replace it with a count taken over a pruned cache.
+    Written once: a complete receipt already on disk is the run's answer, and
+    a later call must not replace it with a count taken over a pruned cache.
+    An incomplete one cannot answer, so the recount replaces it rather than
+    blocking the receipt's readers on every later pass. The write is atomic
+    so a receipt is either complete or absent, never half of either.
     """
     results_dir = Path(results_dir)
+    recorded = _recorded_fuzz_activity(results_dir)
+    if recorded is not None:
+        return recorded
     activity = harvest_fuzz_campaign(results_dir)
-    receipt = results_dir / FUZZ_ACTIVITY_RECEIPT
-    if not receipt.is_file():
-        _write_json(receipt, activity)
+    _atomic_write_json(results_dir / FUZZ_ACTIVITY_RECEIPT, activity)
     return activity
 
 
@@ -630,9 +642,9 @@ def harvest_fuzz_campaign(results_dir: Path) -> dict:
     number the run built rather than the number the prune left.
     """
     results_dir = Path(results_dir)
-    recorded = _read_json_object(results_dir / FUZZ_ACTIVITY_RECEIPT)
-    if all(field in recorded for field in _FUZZ_ACTIVITY_FIELDS):
-        return {field: recorded[field] for field in _FUZZ_ACTIVITY_FIELDS}
+    recorded = _recorded_fuzz_activity(results_dir)
+    if recorded is not None:
+        return recorded
     fuzz = results_dir / "fuzz"
     authored = sorted(
         path.name for path in (fuzz / "src").glob("*")
@@ -3916,6 +3928,15 @@ def _cell_dirs(bench_dir: Path) -> list[Path]:
     return sorted(c for c in cells.iterdir() if c.is_dir())
 
 
+def credited_pool_members(members: dict, kind: str) -> dict:
+    """Pool ownership eligible for credit, shared by totals and their views."""
+    unjudged = members.get("unjudged") or {}
+    return {
+        name: cond for name, cond in (members.get(kind) or {}).items()
+        if not isinstance(unjudged, dict) or not isinstance(unjudged.get(name), dict)
+    }
+
+
 def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
     """Attribute cross-condition clusters to the conditions that hit them.
 
@@ -3944,11 +3965,30 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
     out_clusters: list[dict] = []
     cond_clusters: dict[str, set] = {}
     for cl in cluster_json.get("clusters", []):
+        if not isinstance(cl, dict):
+            continue
         cid = cl.get("id", "?")
-        members = cl.get("members", []) or []
-        conds = sorted(
-            {member_conditions[m] for m in members if m in member_conditions}
-        )
+        original_members = cl.get("members", []) or []
+        members = [m for m in original_members if m in member_conditions]
+        if not members:
+            continue
+        conds = sorted({member_conditions[m] for m in members})
+        member_set = set(members)
+        member_severity = {
+            m: s for m, s in (cl.get("member_severity") or {}).items()
+            if m in member_set
+        }
+        severity = {
+            "level": cl.get("severity_level") or "—",
+            "rank": cl.get("severity_rank", 0),
+            "score": cl.get("severity_score", 0),
+        }
+        if len(members) != len(original_members):
+            # The canonical score may belong to a withheld member. Only
+            # surviving evidence can supply the cluster's displayed severity.
+            severity = max(member_severity.values(), key=lambda s: (
+                int(s.get("rank", 0) or 0), float(s.get("score", 0) or 0),
+            ), default={})
         out_clusters.append(
             {
                 "id": cid,
@@ -3958,14 +3998,14 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
                 ),
                 "conditions": conds,
                 "members": members,
-                "size": cl.get("size", len(members)),
+                "size": len(members),
                 "primitive": cl.get("primitive", "") or cl.get("signature", ""),
-                "severity_level": cl.get("severity_level") or "—",
-                "severity_rank": int(cl.get("severity_rank", 0) or 0),
-                "severity_score": float(cl.get("severity_score", 0) or 0),  # CVSS 4.0 score (0–10)
+                "severity_level": severity.get("level") or "—",
+                "severity_rank": int(severity.get("rank", 0) or 0),
+                "severity_score": float(severity.get("score", 0) or 0),  # CVSS 4.0 score (0–10)
                 # {member: {level, rank, score}} from the cluster tool; lets a
                 # cross-condition cluster be scored per condition below.
-                "member_severity": cl.get("member_severity") or {},
+                "member_severity": member_severity,
             }
         )
         for cond in conds:
@@ -4550,19 +4590,13 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         if isinstance(entry, dict)
     } if isinstance(members.get("unjudged"), dict) else {}
 
-    def _credited(kind: str) -> dict:
-        return {
-            name: cond for name, cond in members.get(kind, {}).items()
-            if name not in pool_unjudged
-        }
-
     crash_attr = attribute_clusters(
         _load("clusters-crashes.json") if include_pool else {},
-        _credited("crashes"),
+        credited_pool_members(members, "crashes"),
     )
     finding_attr = attribute_clusters(
         _load("clusters-findings.json") if include_pool else {},
-        _credited("findings"),
+        credited_pool_members(members, "findings"),
     )
     # The rejected side is clustered by the same tools (bin/benchmark points
     # them at pool/<kind>-rejected), so "unique cut" is counted like "unique

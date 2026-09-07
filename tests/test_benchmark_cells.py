@@ -759,8 +759,8 @@ raise SystemExit(23)
         results = cell_dir / "repo-root" / "output" / "sampleproj" / "codex" / "results"
         cache = results / "scratch-1" / ".harness-cache"
         cache.mkdir(parents=True)
-        named_by_crash = "app_parse.c." + "a" * 40
-        named_by_pool = "app_parse.c." + "b" * 40
+        named_by_crash = "sample driver.c." + "a" * 40
+        named_by_pool = "sample-é.c." + "b" * 40
         orphan = "app_parse.c." + "c" * 40
         for stem in (named_by_crash, named_by_pool, orphan):
             self._cached_build(cache, stem)
@@ -825,6 +825,89 @@ raise SystemExit(23)
         benchmark_runner.prune_run_caches(bench)
         self.assertTrue((cache / ("app_parse.c." + "e" * 40 + ".bin")).is_file())
         self.assertFalse((results / benchmark.FUZZ_ACTIVITY_RECEIPT).exists())
+
+    def test_prune_replaces_an_incomplete_activity_receipt(self) -> None:
+        """A receipt missing fields answers nothing; the recount is the record."""
+        bench = self.work / "prune-receipt"
+        cell = bench / "cells" / "harness-r1"
+        results = cell / "results"
+        cache = results / "scratch-1" / ".harness-cache"
+        cache.mkdir(parents=True)
+        binary = cache / ("sample.c." + "f" * 40 + ".bin")
+        binary.write_bytes(b"cached build")
+        (cell / "cell.json").write_text(json.dumps({
+            "condition": "harness", "status": "done", "results_dir": str(results),
+        }), encoding="utf-8")
+        receipt = results / benchmark.FUZZ_ACTIVITY_RECEIPT
+        receipt.write_text('{"probe_harnesses_observed":', encoding="utf-8")
+        benchmark_runner.prune_run_caches(bench)
+        self.assertFalse(binary.exists())
+        self.assertEqual(benchmark.harvest_fuzz_campaign(results)["probe_harnesses_observed"], 1)
+
+    def test_prune_keeps_cache_when_the_receipt_cannot_be_written(self) -> None:
+        bench = self.work / "prune-receipt-readonly"
+        cell = bench / "cells" / "harness-r1"
+        results = cell / "results"
+        cache = results / "scratch-1" / ".harness-cache"
+        cache.mkdir(parents=True)
+        binary = cache / ("sample.c." + "f" * 40 + ".bin")
+        binary.write_bytes(b"cached build")
+        (cell / "cell.json").write_text(json.dumps({
+            "condition": "harness", "status": "done", "results_dir": str(results),
+        }), encoding="utf-8")
+        with mock.patch.object(benchmark, "_atomic_write_json", side_effect=PermissionError("read-only results")), \
+             mock.patch.object(benchmark_runner, "log") as log:
+            benchmark_runner.prune_run_caches(bench)
+        self.assertTrue(binary.is_file())
+        self.assertFalse((results / benchmark.FUZZ_ACTIVITY_RECEIPT).exists())
+        self.assertTrue(any("read-only results" in str(call) for call in log.call_args_list))
+
+    def test_cache_reference_scan_keeps_every_key_a_name_could_hide(self) -> None:
+        evidence = self.work / "evidence"
+        evidence.mkdir()
+        hexish, key = "0" * 40, "a" * 40
+        (evidence / "frames.txt").write_text(
+            f"#0 0x1 in f (/r/scratch-1/.harness-cache/lib.{hexish}.c.{key}.bin:arm64+0x1)\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(benchmark_runner._referenced_cache_keys([evidence]), {hexish, key})
+
+    def test_prune_keeps_cache_if_evidence_cannot_be_read(self) -> None:
+        bench = self.work / "prune-unreadable"
+        cell = bench / "cells" / "harness-r1"
+        results = cell / "results"
+        cache = results / "scratch-1" / ".harness-cache"
+        cache.mkdir(parents=True)
+        binary = cache / ("sample.c." + "a" * 40 + ".bin")
+        binary.write_bytes(b"cached build")
+        (cell / "cell.json").write_text(json.dumps({
+            "condition": "harness", "status": "done", "results_dir": str(results),
+        }), encoding="utf-8")
+        read_bytes = Path.read_bytes
+        for root in (bench / "pool", results):
+            with self.subTest(root=root):
+                evidence = root / "findings" / "FIND-1" / "report.md"
+                evidence.parent.mkdir(parents=True, exist_ok=True)
+                evidence.write_text(str(binary), encoding="utf-8")
+
+                def unreadable(path):
+                    if path == evidence:
+                        raise PermissionError("evidence unavailable")
+                    return read_bytes(path)
+
+                with mock.patch.object(Path, "read_bytes", unreadable), \
+                     mock.patch.object(benchmark_runner, "log") as log:
+                    benchmark_runner.prune_run_caches(bench)
+                self.assertTrue(binary.is_file())
+                self.assertTrue(any("evidence unavailable" in str(call) for call in log.call_args_list))
+                evidence.unlink()
+
+    def test_cache_reference_scan_does_not_hide_directory_errors(self) -> None:
+        evidence = self.work / "evidence"
+        evidence.mkdir()
+        with mock.patch.object(os, "scandir", side_effect=PermissionError("cannot list evidence")):
+            with self.assertRaises(PermissionError):
+                benchmark_runner._referenced_cache_keys([evidence])
 
     def test_an_unreaped_cell_is_noncomparable_and_outranks_other_reasons(self) -> None:
         """Its wall did not contain its work, so it cannot be scored against one.

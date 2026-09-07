@@ -203,10 +203,13 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
         ("crash", "crash_clusters", "crashes"),
     ):
         index = _cluster_index(run_dir, kind)
-        owner = members.get(sub, {}) or {}
-        for cluster in report.get(key) or []:
-            if not isinstance(cluster, dict):
-                continue
+        owner = benchmark.credited_pool_members(members, sub)
+        # Older report.json files retained unjudged cluster members. Reuse
+        # attribution so a report-only rebuild also removes their credit.
+        clusters = benchmark.attribute_clusters(
+            {"clusters": report.get(key) or []}, owner,
+        )["clusters"]
+        for cluster in clusters:
             cid = str(cluster.get("id") or "")
             detail = index.get(cid, {})
             level, rank = _severity_of(cluster)
@@ -217,7 +220,7 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
                 cond: _severity_of(cluster, {m for m in member_list if owner.get(m) == cond})[0]
                 for cond in conditions
             }
-            if not canonical and member_list:
+            if canonical not in member_list and member_list:
                 canonical = member_list[0]
             # One link per condition, into that side's own pool copy: a shared
             # cluster's canonical report belongs to one side, and handing its

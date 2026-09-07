@@ -236,7 +236,7 @@ def _cluster_site(cluster: dict, kind: str) -> str:
 def _cluster_times(
     run_dir: Path, cond: str, kind: str, rejected: bool,
     index: dict, members: dict, fallback: float,
-) -> tuple[list[tuple[float, str]], bool]:
+) -> tuple[list[tuple[float, str, str]], bool]:
     """Earliest discovery time and source site per REAL cluster, from the
     clusterer's own JSON.
 
@@ -252,7 +252,7 @@ def _cluster_times(
     replay a run: it joins each step back to the dot it becomes.
     """
     sub = ("crashes" if kind == "crash" else "findings") + ("-rejected" if rejected else "")
-    owner = members.get(sub, {}) or {}
+    owner = benchmark.credited_pool_members(members, sub)
     pool_dir = run_dir / "pool" / sub
     times: list[tuple[float, str, str]] = []
     approximate = False

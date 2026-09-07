@@ -1359,6 +1359,12 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(condition["unadjudicated_finding_total"], 1)
         self.assertEqual(condition["unique_finding_clusters"], 1)
         self.assertEqual(
+            [cluster["id"] for cluster in report["crash_clusters"]], ["CRASH-a"],
+        )
+        self.assertEqual(
+            [cluster["id"] for cluster in report["finding_clusters"]], ["FINDING-a"],
+        )
+        self.assertEqual(
             [artifact["name"] for artifact in condition["pool_unjudged"]],
             ["CRASH-0002", "FIND-0002"],
         )
@@ -1721,6 +1727,23 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(
             attributed["model-direct"]["class_histogram"], {"auth": 1},
         )
+
+    def test_withheld_member_cannot_supply_cluster_severity(self) -> None:
+        for survivor_scores in ({"FIND-kept": {"level": "Low", "rank": 1, "score": 2.5}}, {}):
+            with self.subTest(scored=bool(survivor_scores)):
+                clusters = benchmark.attribute_clusters({"clusters": [{
+                    "id": "FCL-shared", "members": ["FIND-stale", "FIND-kept"],
+                    "severity_level": "Critical", "severity_rank": 4, "severity_score": 9.5,
+                    "member_severity": {
+                        "FIND-stale": {"level": "Critical", "rank": 4, "score": 9.5},
+                        **survivor_scores,
+                    },
+                }]}, {"FIND-kept": "harness"})["clusters"]
+                self.assertEqual(len(clusters), 1)
+                self.assertEqual(clusters[0]["members"], ["FIND-kept"])
+                self.assertEqual(clusters[0]["member_severity"], survivor_scores)
+                self.assertEqual(clusters[0]["severity_level"], "Low" if survivor_scores else "—")
+                self.assertEqual(clusters[0]["severity_score"], 2.5 if survivor_scores else 0)
 
     def test_aggregate_and_report_surface_unadjudicated_crashes(self) -> None:
         bench = self.root / "unjudged-crashes"

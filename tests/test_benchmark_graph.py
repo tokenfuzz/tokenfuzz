@@ -301,6 +301,30 @@ class ClusterMembershipTimingTests(unittest.TestCase):
         self.assertEqual(times, [(3.0, "a.c:1", "CL-a")])
         self.assertTrue(approx)
 
+    def test_unjudged_members_cannot_supply_an_accepted_time(self) -> None:
+        for name, frame in (("CRASH-0001", "a_fn a.c:1"),
+                            ("CRASH-0002", "b_fn b.c:2"),
+                            ("CRASH-0003", "c_fn c.c:3")):
+            self._crash(name, frame)
+        (self.run / "clusters-crashes.json").write_text(json.dumps({"clusters": [
+            {"id": "CL-a", "members": ["CRASH-0001"]},
+            {"id": "CL-b", "members": ["CRASH-0002", "CRASH-0003"]},
+        ]}), encoding="utf-8")
+        members = {
+            "crashes": {f"CRASH-{i:04d}": "harness" for i in range(1, 4)},
+            "unjudged": {f"CRASH-{i:04d}": {"kind": "crashes"} for i in (1, 2)},
+        }
+        index = {"crash": {
+            benchmark_graph._signature(
+                self.run / "pool" / "crashes" / f"CRASH-{i:04d}", "crash",
+            ): when for i, when in ((1, 0.1), (2, 0.2), (3, 0.9))
+        }}
+        times, approximate = benchmark_graph._cluster_times(
+            self.run, "harness", "crash", False, index, members, 3.0,
+        )
+        self.assertEqual(times, [(0.9, "", "CL-b")])
+        self.assertFalse(approximate)
+
     def test_other_conditions_do_not_leak_into_a_curve(self) -> None:
         self._crash("CRASH-0001", "a_fn a.c:1")
         (self.run / "clusters-crashes.json").write_text(json.dumps({"clusters": [

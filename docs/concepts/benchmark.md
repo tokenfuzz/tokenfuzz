@@ -104,7 +104,7 @@ With all defaults, the command means:
 | `--budget-wall` | `10800` | Active audit seconds per cell, including housekeeping. Provider-recovery pauses are excluded. `0` is unlimited. |
 | `--finalize-wall` | `0` | Wall-clock ceiling per final validation phase; crash triage and the finding drain each get a fresh one. A finding group admitted before the ceiling finishes its review; crash review stops at the deadline and may leave a candidate pending. `0`, the default, is unlimited. |
 | `--finalize-workers` | `4` | Concurrent reviewers per final validation phase, for crash triage and the finding drain alike. Independent of `--agents`, which sizes the audit itself. It also scales the finding gate's admission groups, so raising it shortens the closing pass but coarsens where a finite `--finalize-wall` can stop admitting groups. |
-| `--agents` | the audit's machine-sized pool | Harness workers per cell. The direct baseline is always one launch. |
+| `--agents` | the audit's configured pool, normally `3` | Harness workers per cell. The direct baseline is always one launch. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
 | `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
@@ -591,7 +591,7 @@ bin/benchmark --target <target> --conditions harness
 # Pick the backend and model explicitly.
 bin/benchmark --target <target> --backend codex --model <model>
 
-# Fix the harness worker count instead of sizing it to the machine.
+# Override the audit's configured harness worker count.
 # The direct baseline is still one launch of the CLI at its defaults.
 bin/benchmark --target <target> --agents 5
 
@@ -763,7 +763,8 @@ what the run built rather than what the prune left. `--prune-cache` applies
 the same prune to runs that finished before this existed; it narrows to
 `--target` and `--run-id`, reports without deleting under `--dry-run`, skips
 a run whose lock is held or whose cells are not all done, and touches no
-evidence.
+evidence. If evidence cannot be read or the activity receipt cannot be
+preserved, cleanup keeps the affected caches and logs a warning.
 
 Regeneration cannot manufacture evidence an old cell never recorded. Missing
 testcases, invocation prerequisites, build identity, source anchors, or replay
