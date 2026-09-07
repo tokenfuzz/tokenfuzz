@@ -765,8 +765,11 @@ The duplicate keeps callback data.
         quote_html = self.html(quote)
         self.assertIn("<blockquote>A footnote about the table", quote_html)
         self.assertNotIn("<p>&gt;", quote_html)
-        self.assertIn("Material 3 Expressive", quote_html)
-        self.assertIn("--m3-primary", quote_html)
+        # The shared evidence-page theme: one palette with the benchmark page,
+        # both colour schemes, and a plain shell for a document with no bundle.
+        self.assertIn("--crit:", quote_html)
+        self.assertIn("prefers-color-scheme:dark", quote_html)
+        self.assertIn('class="page report plain"', quote_html)
 
         diff = self.markdown(
             "diff",

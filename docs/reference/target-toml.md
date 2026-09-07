@@ -351,9 +351,10 @@ list, then lets the source reviewer correct that comparison from the code. A
 settled review is reportable only when every required trigger component is in
 the list: crafted bytes deciding the fault is not enough when the fault also
 needs an application call order the list does not cover. A defect the
-reviewer confirms is outside the list is retained as `not-reportable`, with no
-security credit or numeric CVSS; one no review settled stays unadjudicated
-instead.
+reviewer confirms is outside the list is rejected with a `threat-model:`
+reason, its evidence kept under the rejected tree; one the reviews cannot
+settle after the focused resolution is rejected as unsettled rather than left
+without a verdict.
 
 | Token | Meaning |
 | --- | --- |

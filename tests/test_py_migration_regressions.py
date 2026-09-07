@@ -2285,7 +2285,12 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     (live_finding / ".llm-find-quality.json").write_text(json.dumps({
         "decision_version": report_identity.FIND_QUALITY_DECISION_VERSION, "accept": True, "accept_count": 2,
     }), encoding="utf-8")
-    with mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision), \
+    # The filled trigger needs call-sequence as well as bytes: the same threat
+    # model the crash above ran under. Under a bytes-only model the finding
+    # would be out of scope and rejected, and no severity would run.
+    with mock.patch.dict(
+        os.environ, {"TARGET_ATTACKER_CONTROLS_CSV": "bytes,call-sequence"}, clear=False,
+    ), mock.patch.object(triage.llm_decide, "llm_decide", return_value=reach_decision), \
          mock.patch.object(triage, "_finding_trigger_disposition", return_value="accepted"), \
          mock.patch.object(triage, "_run_tool", return_value=0) as finding_tools:
         finding_status = triage.validate_one_finding(live_finding, live_finding_root)

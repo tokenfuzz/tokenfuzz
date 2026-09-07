@@ -23,6 +23,20 @@ ACTIVE: "tuple[str, ...]" = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
 #: pattern library used alongside one.
 ATTRIBUTABLE: "tuple[str, ...]" = ACTIVE + ("REF",)
 
+#: What each lane means, for indexes, report pages and legends. The registry
+#: owns the tokens; the words follow docs/concepts/strategy-model.md.
+NAMES: "dict[str, str]" = {
+    "S1": "Prior-fix variant",
+    "S2": "Invariant negation",
+    "S3": "Spec vs. implementation",
+    "S4": "Boundary fuzzing",
+    "S5": "Lifetime and state",
+    "S6": "Cross-project variant",
+    "S7": "Adversarial input",
+    "S8": "Property oracles",
+    "REF": "Pattern reference",
+}
+
 #: Placeholder values agents write when they have nothing to attribute.
 EMPTY_VALUES = frozenset({"", "—", "-", "TBD", "?", "N/A", "n/a"})
 

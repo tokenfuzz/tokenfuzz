@@ -1,8 +1,8 @@
 """cluster_common.py — shared helpers for bin/cluster-crashes + bin/cluster-findings.
 
-Both clustering tools emit a `*-CLUSTERS.md` report, render an HTML
-sibling next to it, and — when asked to aggregate a whole target root — serialize concurrent backends
-behind an advisory file lock. That scaffolding is identical between the
+Both clustering tools emit a `*-CLUSTERS.md` report, write its HTML page
+(lib/evidence_pages.py) next to it, and — when asked to aggregate a whole
+target root — serialize concurrent backends behind an advisory file lock. That scaffolding is identical between the
 two tools; only the signatures, file names, and stack-frame logic differ.
 Keeping the scaffolding here means a fix (e.g. to the render timeout or
 the lock semantics) lands in one place instead of drifting between two
@@ -132,41 +132,11 @@ def artifact_cluster_id(directory: Path) -> str:
     return ""
 
 
-def render_md_sibling(md_path: Path, title: str | None = None) -> None:
-    """Run bin/render-md on an emitted markdown file.
-
-    Pads the table columns for the raw markdown view AND writes a stylish
-    HTML sibling next to it for direct browser viewing. Best-effort —
-    silent no-op when render-md or python3 is unavailable. Set
-    ``CLUSTER_HTML=0`` to keep the markdown padding but skip HTML emission.
-    """
-    import shutil
-    import subprocess
-
-    here = Path(__file__).resolve().parent.parent / "bin"
-    render = here / "render-md"
-    if not render.is_file() or not os.access(render, os.X_OK):
-        return
-    if shutil.which("python3") is None:
-        return
-    args = ["python3", str(render), str(md_path)]
-    if os.environ.get("CLUSTER_HTML") != "0":
-        args.append("--html-sibling")
-    if title:
-        args.extend(["--title", title])
-    try:
-        subprocess.run(args, capture_output=True, timeout=15, check=False)
-    except (subprocess.SubprocessError, OSError):
-        pass
-
-
 def render_md_batch(md_paths: "list[Path]") -> None:
     """Render many markdown reports in ONE render-md process.
 
     render-md accepts multiple inputs and titles each by its parent dir under
-    ``--title-from parent`` — identical to the per-file
-    ``render_md_sibling(title=path.parent.name)`` it replaces. This turns the
-    cold-cluster hotspot (one subprocess per member; profiled at ~40 ms/finding,
+    ``--title-from parent``. This turns the cold-cluster hotspot (one subprocess per member; profiled at ~40 ms/finding,
     5.5 s for 150 findings, all in subprocess wait) into a single spawn. Chunked
     so a very large finding set can never overflow ARG_MAX. Best-effort.
     """
@@ -200,7 +170,7 @@ def render_member_report_siblings(clusters: Iterable[dict]) -> None:
     Cluster indexes link to ``REPORT.md`` / ``report.md`` / ``description.md``.
     The HTML renderer rewrites those links to ``.html`` for browser use, so
     the member reports need matching HTML siblings in the same pass that emits
-    the cluster index. Best-effort, like ``render_md_sibling``.
+    the cluster index. Best-effort.
     """
     seen: set[Path] = set()
     stale: list[Path] = []

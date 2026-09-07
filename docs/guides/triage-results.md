@@ -27,9 +27,9 @@ review state, severity, evidence signature, and canonical cluster member.
 | Rejected crash | `crashes-rejected/` | A crash candidate that was incomplete, low-value, contradicted by source, or rooted in harness-only misuse. |
 
 Nothing is silently deleted. Rejected directories move with their evidence and
-gain an index entry explaining why. A crash may also stay under `crashes/` as
-`not-reportable`: review accepted the engineering defect but found that its
-trigger crosses no configured security boundary.
+gain an index entry explaining why. A crash whose trigger crosses no configured
+security boundary is rejected the same way, with a `threat-model:` reason, so
+the accepted tree holds only security reports and pending review.
 
 ## A practical review order
 
@@ -59,7 +59,7 @@ first gate.
 | --- | --- | --- |
 | Mechanical or substance gate | Checks diagnostic class, reproduction files, report fields, caller contract, and auto-rejection classes. | Independent readers judge whether the report names a concrete security issue. Two accepts admit it; two rejects quarantine it. |
 | Source review | Reads the trigger and caller contract. Two source-anchored Reject votes are required to quarantine sanitizer-confirmed evidence. | Reads both the trigger and the exact claimed consequence. Two source-anchored Reject votes are required to quarantine an admitted FIND. |
-| Final state | `reportable`, `not-reportable`, `pending`, or `rejected`. | The same four states. |
+| Final state | `reportable`, `pending`, or `rejected`. | The same three states. |
 
 Both source-review paths fail open: missing, malformed, or inconclusive model
 output cannot destroy an artifact. Fail-open means *preserved and unsettled*,
@@ -85,7 +85,6 @@ Open `validation.json` when the index is not enough:
 | State | Final? | Meaning |
 | --- | --- | --- |
 | `reportable` | yes | Review found real security impact inside the declared attacker surface. This is the only state with a numeric severity or security-yield credit. |
-| `not-reportable` | yes | A real engineering defect needs a control outside the threat model or violates an admitted caller contract. It stays visible and unscored. |
 | `pending` | no | Review did not settle the claim. It is neither credited nor written off. |
 | `rejected` | yes | The evidence did not hold. The artifact is preserved in a rejected tree. |
 
@@ -123,10 +122,11 @@ Three non-reportable outcomes require different operator action:
 | --- | --- | --- |
 | Hard rejection | Near-null dereference, OOM only, assertion or panic only, plain stack overflow, a fault rooted in the audit harness, or two source-anchored reviews disproving the route | The directory moves to `crashes-rejected/` with the reason. A scratch-source fault counts as harness-rooted only when the leaf has an absolute path under this run's own `scratch-N/` and no target-source frame appears anywhere in the diagnostic; missing path ownership or any target allocation/free/context frame fails open and preserves the crash. |
 | Promotion pending | The testcase, saved diagnostic, report, required fields, or exported invocation is incomplete; source review may also remain unsettled | The directory stays under `crashes/` with a pending receipt. Work that stays incomplete for ten triage passes ages into rejection. |
-| Retained `not-reportable` defect | The report admits a caller-contract violation or harness-only parameter, or source review places the required trigger outside `attacker_controls` | The reproducible engineering evidence stays under `crashes/`, final and unscored. |
+| Threat-model rejection | The report admits a caller-contract violation or harness-only parameter, source review places the required trigger outside `attacker_controls`, or the reviews cannot settle scope after the focused resolution | The directory moves to `crashes-rejected/` with a `threat-model:` or `unsettled-scope:` reason; the evidence stays intact and unscored. |
 
-An out-of-model trigger is not itself a hard rejection. Keep a retained defect
-where it is rather than filing the same mechanism again as a security issue.
+An out-of-model trigger is a real defect worth reporting to the maintainers
+as an engineering bug; do not file the same mechanism again as a security
+issue.
 
 ### Finding candidates
 

@@ -489,9 +489,11 @@ def _restore_stale_trigger_rejections(
         raise ValueError(f"unsupported artifact kind: {kind}")
     restored = 0
     for directory in sorted(rejected_root.glob(prefix)):
+        reason = _rejection_reason(directory)
         if (
             not directory.is_dir()
-            or not _TRIGGER_REJECTION_RE.match(_rejection_reason(directory))
+            or _publication_rejection(reason)
+            or not _TRIGGER_REJECTION_RE.match(reason)
         ):
             continue
         report = _report(directory)
@@ -569,9 +571,11 @@ def _refresh_or_restore_quality_rejections(
     rejected_root = results_dir / "findings-rejected"
     restored = 0
     for directory in sorted(rejected_root.glob("FIND-*")):
+        reason = _rejection_reason(directory)
         if (
             not directory.is_dir()
-            or _TRIGGER_REJECTION_RE.match(_rejection_reason(directory))
+            or _publication_rejection(reason)
+            or _TRIGGER_REJECTION_RE.match(reason)
         ):
             continue
         report = _report(directory)
@@ -1477,6 +1481,28 @@ def evaluate_crash_verdict(report_text: str, controls: list[str]) -> tuple[str, 
 _UNSETTLED_REVIEW_DETAIL = (
     "source review did not settle whether the trigger is in the threat model"
 )
+# Terminal rejection reasons for the two dispositions that used to leave an
+# artifact without a verdict. Both keep the evidence under the rejected tree
+# and name the gate, so the rejected index groups them with their peers. The
+# prefixes are what the restore passes below key on: a publication rejection
+# is made once every review has answered, so neither pass reopens it — the
+# trigger pass would read its votes as a stale disproof (they were never two
+# dispositive Rejects) and the quality pass would read its accepted quality
+# cache as grounds to requeue. An operator can still restore one by hand.
+UNSETTLED_REJECTION_PREFIX = "unsettled-scope: "
+UNSETTLED_REJECTION_REASON = (
+    UNSETTLED_REJECTION_PREFIX
+    + "source review could not place the trigger inside the declared threat model"
+)
+THREAT_MODEL_REJECTION_PREFIX = "threat-model: "
+_PUBLICATION_REJECTION_PREFIXES = (
+    THREAT_MODEL_REJECTION_PREFIX, UNSETTLED_REJECTION_PREFIX,
+)
+
+
+def _publication_rejection(reason: str) -> bool:
+    """Whether a rejection reason is a terminal publication decision."""
+    return str(reason or "").startswith(_PUBLICATION_REJECTION_PREFIXES)
 
 
 def _final_publication_state(
@@ -1485,21 +1511,29 @@ def _final_publication_state(
     review_facts: dict[str, str] | None = None,
     *,
     direct_trigger_proof: bool = False,
+    resolved: bool = False,
 ) -> str:
-    """Resolve a kept artifact to a security report, a retained defect, or neither.
+    """Resolve a kept artifact: `reportable`, `not-reportable`, `unsettled`, or
+    `pending`.
 
-    Rejection remains a separate, two-review decision. `not-reportable` asserts
-    a fact somebody established — the report admitting caller misuse, agreeing
-    reviewers placing the trigger outside the declared controls, or agreeing
-    reviewers finding no added security boundary. A review that ran and did not
-    settle the question establishes none of those, so the artifact stays
-    `pending`: not security yield, and not a defect anyone showed is out of
-    scope. The benchmark then carries it as the unjudged remainder that marks
-    its counts a floor, where writing a negative would instead publish an
-    adjudication that never happened. An inconclusive first review or split is
-    re-asked once with the prior evidence; a resolver that remains uncertain is
-    cached, and content-addressing reopens it when the report, prior reviews,
-    evidence, or prompt version changes.
+    `not-reportable` asserts a fact somebody established — the report admitting
+    caller misuse, agreeing reviewers placing the trigger outside the declared
+    controls, or agreeing reviewers finding no added security boundary. The
+    callers turn it into a rejection with that reason: the evidence stays on
+    disk under the rejected tree, and nothing is retained in the accepted tree
+    without security credit. A human pin is the one exception and records the
+    state itself.
+
+    A review that ran and did not settle the question establishes none of
+    those. While another review is still due — the focused resolver has not
+    answered — the artifact stays `pending`, and the benchmark carries it as an
+    unjudged remainder. Once *resolved* says no further review will be asked,
+    a still-unsettled scope is `unsettled`: the claim had a first review, a
+    second where the lane asks for one, and a focused resolution, and none of
+    them could place the trigger inside the threat model. The callers reject
+    it with `UNSETTLED_REJECTION_REASON` rather than cache an adjudication
+    that never happens — an artifact that can never reach a verdict is not a
+    floor on the count, it is a rejected claim with its evidence kept.
 
     Scope comes from `trigger_controls_fit` — the reviewer's own threat-model
     comparison, read from source and supplied by `_source_review_facts` only
@@ -1527,12 +1561,27 @@ def _final_publication_state(
     if fit == "outside":
         return "not-reportable"
     if any(vote in {"Reject", "Uncertain"} for vote in trigger_votes):
-        return "pending"
+        return "unsettled" if resolved else "pending"
     if fit == "within":
         return "reportable"
     if any(vote is not None for vote in trigger_votes):
-        return "pending"
+        return "unsettled" if resolved else "pending"
     return "not-reportable" if reach_verdict == "out-of-model" else "reportable"
+
+
+def _publication_rejection_reason(
+    state: str,
+    reach_verdict: str,
+    reach_detail: str,
+    review_facts: dict[str, str] | None,
+    attacker_controls: list[str] | None = None,
+) -> str:
+    """The rejection reason for a `not-reportable` or `unsettled` state."""
+    if state == "unsettled":
+        return UNSETTLED_REJECTION_REASON
+    return THREAT_MODEL_REJECTION_PREFIX + _publication_detail(
+        state, reach_verdict, reach_detail, review_facts, attacker_controls,
+    )
 
 
 def _publication_detail(
@@ -2791,7 +2840,20 @@ def triage_one_crash(
     state = _final_publication_state(
         verdict, trigger_votes, review_facts,
         direct_trigger_proof=direct_trigger_proof,
+        resolved=_cached_trigger_resolution(crash_dir, report),
     )
+    if state in {"not-reportable", "unsettled"}:
+        # A reproduced crash outside the threat model, or one no review could
+        # place inside it, is a real defect and not a security report: it is
+        # rejected with that reason, evidence kept, rather than retained in
+        # crashes/ with no credit where every index has to explain it.
+        _reject(
+            crash_dir, rejected_root,
+            _publication_rejection_reason(
+                state, verdict, detail, review_facts, attacker_controls,
+            ),
+        )
+        return "rejected"
     validation_receipt.write(
         crash_dir, kind="crash", state=state,
         detail=_publication_detail(
@@ -2802,10 +2864,8 @@ def triage_one_crash(
     )
     if state == "pending":
         return "pending"
-    # A not-reportable decision must synchronously remove a score an earlier
-    # receipt published, or an obsolete rating outlives the decision that
-    # voided it. Reportable scoring may still yield to the triage deadline.
-    if state == "not-reportable" or _decision_timeout(1, deadline):
+    # Reportable scoring may yield to the triage deadline.
+    if _decision_timeout(1, deadline):
         state = _score_final_report(
             crash_dir, report, "crash", state,
             attacker_controls=attacker_controls, env=environment,
@@ -3694,8 +3754,8 @@ def _score_final_report(
 ) -> str:
     """Score a final artifact, or hold it pending when unscoring failed.
 
-    A `not-reportable` decision voids any numeric severity an earlier receipt
-    published, and only the scorer removes it. Leaving the final receipt in
+    A pinned artifact's `not-reportable` decision voids any numeric severity
+    an earlier receipt published, and only the scorer removes it. Leaving the final receipt in
     place after a failed removal would freeze a report that carries both a
     numeric CVSS line and the decision that voided it, and the next pass skips
     current final receipts, so nothing would ever retry. Hold the artifact
@@ -3766,29 +3826,12 @@ def _finalize_accepted_finding(
         return "pending"
     controls = triage_validate.trigger_attacker_controls()
     if disposition == "not-reportable":
-        resolution = finding_dir / _TRIGGER_RESOLUTION_NAME
-        vote_files = (
-            (finding_dir / _TRIGGER_PRIMARY_NAME, resolution)
-            if _cached_trigger_vote(report, resolution) == "Reject"
-            else tuple(finding_dir / name for name in _TRIGGER_REVIEW_NAMES)
+        _reject(
+            finding_dir, results_dir / "findings-rejected",
+            THREAT_MODEL_REJECTION_PREFIX
+            + "real defect that crosses no security boundary",
         )
-        review_facts = _source_review_facts(
-            report, vote_files,
-            rejection_quorum=2,
-        )
-        validation_receipt.write(
-            finding_dir, kind="finding", state="not-reportable",
-            detail="real defect that crosses no security boundary",
-            attacker_controls=controls,
-            review_facts=review_facts,
-        )
-        state = _score_final_report(
-            finding_dir, report, "finding", "not-reportable",
-            attacker_controls=controls,
-        )
-        if state == "pending":
-            return "pending"
-        return "accepted"
+        return "rejected"
     reach_verdict, reach_detail = evaluate_crash_verdict(_read(report), controls)
     if reach_verdict == "incomplete":
         validation_receipt.write(
@@ -3804,7 +3847,16 @@ def _finalize_accepted_finding(
     state = _final_publication_state(
         reach_verdict, trigger_votes, review_facts,
         direct_trigger_proof=direct_trigger_proof,
+        resolved=_cached_trigger_resolution(finding_dir, report, second_lens=True),
     )
+    if state in {"not-reportable", "unsettled"}:
+        _reject(
+            finding_dir, results_dir / "findings-rejected",
+            _publication_rejection_reason(
+                state, reach_verdict, reach_detail, review_facts, controls,
+            ),
+        )
+        return "rejected"
     validation_receipt.write(
         finding_dir, kind="finding", state=state,
         detail=_publication_detail(
@@ -3829,8 +3881,6 @@ def _finalize_accepted_finding(
     )
     if state == "pending":
         return "pending"
-    # A retained defect that crosses no security boundary is not yield: the
-    # not-reportable branch above records no card, and neither does this one.
     if state in validation_receipt.SECURITY_STATES:
         _record_accepted_finding_card(finding_dir, results_dir)
     return "accepted"
@@ -4485,16 +4535,10 @@ def maintain_indexes(
             and succeeded
         )
     if os.environ.get("INDEX_HTML_AUTO", "1") == "1":
+        # The four index pages are written by their own producers — the
+        # cluster tools and write_rejected_*_index above — so only the member
+        # reports still go through render-md here.
         succeeded = _render_reports(results, workers) and succeeded
-        summaries = [
-            results / "crashes" / "CRASH-CLUSTERS.md",
-            results / "crashes-rejected" / "REJECTED-CRASHES.md",
-            results / "findings" / "FINDING-CLUSTERS.md",
-            results / "findings-rejected" / "REJECTED-FINDINGS.md",
-        ]
-        existing = [str(path) for path in summaries if path.is_file() and path.stat().st_size]
-        if existing:
-            succeeded = _run_tool("render-md", *existing, "--html-sibling") == 0 and succeeded
     if succeeded:
         # Clustering, enrichment, and Markdown normalization change only the
         # maintainer-facing representation. Rebind after the whole successful

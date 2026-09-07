@@ -209,17 +209,21 @@ the older cohort model with a pass at the end of every iteration.
   (`0x0` SEGV), OOM, assertion-only abort (ABRT with no sanitizer error),
   `MOZ_CRASH`/panic, or a plain stack overflow.
 
-A trigger source outside the target's declared attacker surface is not a
-rejection: the crash stays in `crashes/`, and when the source reviewer agrees
-the fault needs something outside those controls, it ends `not-reportable`
-with no numeric CVSS score and no security yield.
+A trigger source outside the target's declared attacker surface is settled
+by the source reviewer: when the reviewer agrees the fault needs something
+outside those controls, the crash is rejected with a `threat-model:` reason;
+when the reviews cannot place the trigger either way after the focused
+resolution, it is rejected as unsettled. Either way the evidence moves to
+`crashes-rejected/` with the reason, and earns no numeric CVSS score and no
+security yield.
 
 Those checks are mechanical. On top of them, a reviewer reads the source and
-can still throw out a sanitizer-confirmed crash, but only on two independent
-rejections that each carry a concrete disproof. Silence or uncertainty keeps
-the crash. An inconclusive or split review receives the same focused
-resolution pass as a finding; one resolver Reject still cannot replace the
-two-Reject bar.
+can still disprove a sanitizer-confirmed crash, but only on two independent
+rejections that each carry a concrete disproof. Silence keeps the crash
+pending while a review is still due. An inconclusive or split review receives
+the same focused resolution pass as a finding; one resolver Reject still
+cannot replace the two-Reject bar, and a resolver that cannot settle scope
+ends the claim as unsettled rather than leaving it without a verdict.
 
 **For findings, the gates are about substance:**
 

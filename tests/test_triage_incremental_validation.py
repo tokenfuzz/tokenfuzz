@@ -427,9 +427,11 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         )
         self.assertEqual(finalized["report_sha1"], report_identity.content_sha1(self.report))
 
-    def test_a_not_reportable_finding_records_no_productive_card(self) -> None:
-        # A retained defect that crosses no security boundary earns no credit;
-        # recording it as card yield kept a dead lead open for the whole run.
+    def test_an_out_of_model_finding_is_rejected_with_its_reason(self) -> None:
+        # A defect outside the threat model earns no credit and is not kept
+        # in findings/ either: it moves to the rejected tree with the reason,
+        # so no index has to carry a retained-but-uncredited state and no
+        # card yield keeps a dead lead open for the whole run.
         with mock.patch.object(
             triage, "_prepare_accepted_finding", return_value=self.report,
         ), mock.patch.object(
@@ -450,11 +452,17 @@ class IncrementalFindingValidationTests(unittest.TestCase):
                 triage._finalize_accepted_finding(
                     self.finding, self.root, self.report, None,
                 ),
-                "accepted",
+                "rejected",
             )
         record_productive.assert_not_called()
-        receipt = json.loads((self.finding / "validation.json").read_text())
-        self.assertEqual(receipt["state"], "not-reportable")
+        rejected = self.root / "findings-rejected" / self.finding.name
+        self.assertFalse(self.finding.exists())
+        self.assertIn(
+            "Reason: threat-model: trigger outside bytes",
+            (rejected / "REJECTION.md").read_text(encoding="utf-8"),
+        )
+        receipt = json.loads((rejected / "validation.json").read_text())
+        self.assertEqual(receipt["state"], "rejected")
 
     def test_harness_annotations_do_not_invalidate_semantic_content_key(self) -> None:
         base = "# State issue\n\nCaller-controlled data crosses a boundary.\n"
@@ -1773,7 +1781,12 @@ Generated score text.
                 "rejected",
             )
 
-    def test_one_resolution_reject_cannot_quarantine_after_uncertainty(self) -> None:
+    def test_one_resolution_reject_after_uncertainty_ends_unsettled_not_disproved(self) -> None:
+        # One resolver Reject is not the two-review disproof that quarantines a
+        # claim as unreachable, and the lane asks no further review after the
+        # resolver — so the claim ends as unsettled, rejected with that reason
+        # rather than the disproof nobody established or a pending state
+        # nothing would ever settle.
         first = self.finding / ".trigger-gate.json"
         resolution = self.finding / ".trigger-gate-resolution.json"
         first.write_text(json.dumps(trigger_vote(
@@ -1790,12 +1803,14 @@ Generated score text.
                 triage._finalize_accepted_finding(
                     self.finding, self.root, self.report, None, prepared=True,
                 ),
-                "pending",
+                "rejected",
             )
-        self.assertTrue(self.finding.is_dir())
-        self.assertEqual(
-            validation_receipt.read_current(self.finding)["state"], "pending",
-        )
+        self.assertFalse(self.finding.exists())
+        rejection = (
+            self.root / "findings-rejected" / self.finding.name / "REJECTION.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn(f"Reason: {triage.UNSETTLED_REJECTION_REASON}", rejection)
+        self.assertNotIn("not attacker-reachable", rejection)
 
     def test_find_gate_stabilizes_report_before_batched_trigger_vote(self) -> None:
         report_text = triage.read_report_bounded(self.report)
@@ -3430,6 +3445,15 @@ Generated score text.
                     self.assertEqual(
                         resolve(verdict, promote, facts), "pending",
                     )
+        # Once the lane has asked every review it will ask, the same silence is
+        # terminal: the callers reject an unsettled claim with its reason
+        # instead of caching a verdict that never arrives.
+        for verdict in ("out-of-model", "promote"):
+            for facts in ({}, {"trigger_controls_fit": "unclear"}):
+                with self.subTest(verdict=verdict, facts=facts, resolved=True):
+                    self.assertEqual(
+                        resolve(verdict, promote, facts, resolved=True), "unsettled",
+                    )
         # With no review at all — a machine trigger proof, an operator opt-out,
         # or a human pin — there is no reviewer to have answered, so the
         # report's own comparison is all there is.
@@ -3456,6 +3480,11 @@ Generated score text.
                 self.assertEqual(
                     resolve("promote", votes, {"trigger_controls_fit": "within"}),
                     "pending",
+                )
+                self.assertEqual(
+                    resolve("promote", votes, {"trigger_controls_fit": "within"},
+                            resolved=True),
+                    "unsettled",
                 )
         # An affirmative out-of-scope fact still settles it against the claim.
         self.assertEqual(
@@ -3601,7 +3630,7 @@ Generated score text.
             "within",
         )
 
-    def test_no_added_boundary_is_preserved_as_not_reportable(self) -> None:
+    def test_no_added_boundary_rejects_with_the_threat_model_reason(self) -> None:
         vote_path = self.finding / ".trigger-gate.json"
         payload = trigger_vote(self.report, self.root, "Reject")
         payload["review_facts"] = {
@@ -3622,15 +3651,69 @@ Generated score text.
                     self.finding, self.root, self.report, None, None,
                     prepared=True,
                 ),
-                "accepted",
+                "rejected",
             )
-        receipt = validation_receipt.read_current(self.finding)
-        self.assertIsNotNone(receipt)
-        self.assertEqual(receipt["state"], "not-reportable")
-        scorer.assert_called_once_with(
-            "severity", "--report", str(self.finding),
+        rejected = self.root / "findings-rejected" / self.finding.name
+        self.assertIn(
+            "Reason: threat-model: real defect that crosses no security boundary",
+            (rejected / "REJECTION.md").read_text(encoding="utf-8"),
         )
+        scorer.assert_not_called()
         record_productive.assert_not_called()
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(triage.restore_stale_trigger_rejections(self.root), 0)
+            self.assertEqual(
+                triage._refresh_or_restore_quality_rejections(
+                    self.root, quorum=2, accept_quorum=2,
+                ),
+                0,
+            )
+        self.assertTrue(rejected.is_dir())
+
+    def test_an_unsettled_resolution_rejects_rather_than_parks(self) -> None:
+        """Three reviews that cannot place the trigger end in a rejection.
+
+        The resolver is the last review the lane asks for. Caching its
+        Uncertain answer left the finding pending for good — an unjudged
+        remainder on every ledger that nothing would ever settle.
+        """
+        first = self.finding / ".trigger-gate.json"
+        first.write_text(json.dumps(trigger_vote(
+            self.report, self.root, "Uncertain",
+        )), encoding="utf-8")
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        resolution.write_text(json.dumps(trigger_resolution_vote(
+            self.report, self.root, [first], "Uncertain",
+        )), encoding="utf-8")
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "", "BACKEND": "", "TARGET_ROOT": str(self.root),
+        }, clear=False), mock.patch.object(
+            triage, "evaluate_crash_verdict", return_value=("promote", ""),
+        ), mock.patch.object(triage, "_run_tool", return_value=0):
+            self.assertEqual(
+                triage._finalize_accepted_finding(
+                    self.finding, self.root, self.report, None,
+                    prepared=True,
+                ),
+                "rejected",
+            )
+        rejected = self.root / "findings-rejected" / self.finding.name
+        self.assertIn(
+            f"Reason: {triage.UNSETTLED_REJECTION_REASON}",
+            (rejected / "REJECTION.md").read_text(encoding="utf-8"),
+        )
+        # Terminal: the restore passes that requeue a stale disproof or a
+        # stale quality rejection leave a publication rejection where it is.
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(triage.restore_stale_trigger_rejections(self.root), 0)
+            self.assertEqual(
+                triage._refresh_or_restore_quality_rejections(
+                    self.root, quorum=2, accept_quorum=2,
+                ),
+                0,
+            )
+        self.assertTrue(rejected.is_dir())
+        self.assertFalse(self.finding.exists())
 
     def test_failed_severity_clear_holds_the_artifact_retryable(self) -> None:
         """A final receipt must not freeze a voided score onto the report.
@@ -3639,23 +3722,14 @@ Generated score text.
         receipts, so a swallowed failure would leave a numeric CVSS line beside
         the decision that voided it for good.
         """
-        vote_path = self.finding / ".trigger-gate.json"
-        payload = trigger_vote(self.report, self.root, "Reject")
-        payload["review_facts"] = {
-            "rejection_kind": "no-added-boundary",
-            "vulnerable_boundary_surface": "dev-tool",
-        }
-        vote_path.write_text(json.dumps(payload), encoding="utf-8")
-        (self.finding / ".trigger-gate-2.json").write_text(
-            json.dumps(payload), encoding="utf-8",
-        )
+        # Only a human pin still records `not-reportable` in place; every
+        # other out-of-model decision rejects and takes its score with it.
         with mock.patch.object(
             triage, "_run_tool", return_value=1,
         ), contextlib.redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(
-                triage._finalize_accepted_finding(
-                    self.finding, self.root, self.report, None, None,
-                    prepared=True,
+                triage._score_final_report(
+                    self.finding, self.report, "finding", "not-reportable",
                 ),
                 "pending",
             )

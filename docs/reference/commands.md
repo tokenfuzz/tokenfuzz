@@ -437,6 +437,6 @@ command's source and its tests before depending on one.
 | `bin/validate-finding` | Runs one independent source-reading review over a single FIND. |
 | `bin/enrich-report` | Inlines source snippets and writes the `## Patch` section. The only writer of that section. |
 | `bin/severity-sweep` | Re-scores the cluster representatives of a results pool. |
-| `bin/render-md` | Generates the `.html` sibling of a report or cluster table. |
+| `bin/render-md` | Renders a report's `.html` sibling: the Markdown body inside the evidence-page shell, with the action card and evidence rail read from the bundle's sidecars. |
 | `bin/find-crash-testcase` | Resolves the testcase path for a `CRASH-*` directory. |
 | `bin/peek`, `bin/rg-safe`, `bin/show-patch` | Bounded source read, search, and diff wrappers: the caps that keep agent prompts small. |

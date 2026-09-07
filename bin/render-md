@@ -8,9 +8,11 @@ Two outputs from one tool, both deterministic and idempotent:
      `:--:` — are honoured). This makes `cat INDEX.md` actually align.
 
   2. With `--html` (or `--html-sibling`) a self-contained HTML file is
-     emitted next to the input. The template is single-file (no external
-     CSS/JS, no network), so the user can open `file:///.../INDEX.html`
-     in any browser and have a fully styled, clickable view.
+     emitted next to the input, in the evidence-page shell shared with the
+     cluster and rejected indexes (lib/evidence_pages.py). No external
+     CSS/JS, no network: `file:///.../report.html` opens anywhere. A report
+     inside a CRASH-*/FIND-* bundle also gets the action card and the
+     evidence rail read from its sidecars.
 
 The HTML carries a few touches that earn the "stylish" label without
 adding dependencies:
@@ -48,6 +50,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import strategies  # noqa: E402
 
+import evidence_pages  # noqa: E402
 import report_identity  # noqa: E402
 import stack_frames  # noqa: E402
 
@@ -171,667 +174,6 @@ def pad_markdown_tables(text: str) -> str:
 # ─── Markdown → HTML (single file, no external assets) ─────────────────────
 
 
-_HTML_HEAD = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>
-  :root {{
-    --fg: #1f2328;
-    --muted: #57606a;
-    --border: #d0d7de;
-    --border-soft: #eaeef2;
-    --bg: #ffffff;
-    --bg-alt: #f6f8fa;
-    --bg-row-even: #fcfdff;
-    --bg-row-hover: #f3f6fa;
-    --link: #0969da;
-    --link-hover: #0a4ea0;
-    --code-bg: #eef1f4;
-    --header-bg: linear-gradient(180deg, #ffffff 0%, #f6f8fa 100%);
-    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-    --shadow-sm: 0 1px 2px rgba(20, 30, 60, 0.06);
-    --shadow-md: 0 2px 6px rgba(20, 30, 60, 0.08);
-
-    --sev-critical-bg: #b91c1c;
-    --sev-critical-fg: #ffffff;
-    --sev-high-bg:     #d97706;
-    --sev-high-fg:     #ffffff;
-    --sev-medium-bg:   #facc15;
-    --sev-medium-fg:   #3a2a00;
-    --sev-low-bg:      #16a34a;
-    --sev-low-fg:      #ffffff;
-    --sev-unknown-bg:  #d0d7de;
-    --sev-unknown-fg:  #57606a;
-
-    --chip-lib-bg:   #dbeafe;
-    --chip-lib-fg:   #1e40af;
-    --chip-cli-bg:   #e2e8f0;
-    --chip-cli-fg:   #334155;
-    --chip-maint-bg: #fef3c7;
-    --chip-maint-fg: #854d0e;
-    --chip-unk-bg:   #f1f5f9;
-    --chip-unk-fg:   #64748b;
-  }}
-  html, body {{ background: var(--bg); color: var(--fg); }}
-  /* Hard backstop against page-level horizontal scroll: no individual
-     element should ever push the document wider than the viewport.
-     Long unbreakable content (C++ symbols, identifiers, diff lines)
-     scrolls inside its own container (`.table-wrap`, `<pre>`) instead. */
-  html {{ overflow-x: hidden; }}
-  body {{
-    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-    max-width: 1320px;
-    margin: 2em auto;
-    padding: 0 1.5em 5em;
-    overflow-x: hidden;
-  }}
-  h1 {{
-    font-size: 1.85em;
-    margin: 0 0 .5em;
-    padding-bottom: .35em;
-    border-bottom: 2px solid var(--border-soft);
-    letter-spacing: -0.01em;
-  }}
-  h2 {{
-    font-size: 1.3em;
-    margin: 1.6em 0 .6em;
-    padding-bottom: .25em;
-    border-bottom: 1px solid var(--border-soft);
-    letter-spacing: -0.005em;
-  }}
-  h3 {{
-    font-size: 1.05em;
-    margin: 1.4em 0 .5em;
-    letter-spacing: -0.005em;
-  }}
-  h2 .anchor, h3 .anchor {{
-    color: var(--muted);
-    text-decoration: none;
-    margin-left: .35em;
-    opacity: 0;
-    transition: opacity .15s ease;
-    font-weight: 500;
-  }}
-  h2:hover .anchor, h3:hover .anchor {{ opacity: 0.55; }}
-  h2 .anchor:hover, h3 .anchor:hover {{ opacity: 1; }}
-  p, ul {{ margin: .65em 0; }}
-  em, em.note {{ color: var(--muted); font-style: normal; }}
-  /* Default to a visible underlined link: the M3 grey surface makes
-     un-underlined links blend in with surrounding `<code>` and table
-     text, so every <a> declares its affordance up front. The dimmer
-     `text-decoration-color` softens the underline so it does not shout
-     at high link density (table count cells, scoreboards). */
-  a {{
-    color: var(--link);
-    text-decoration: underline;
-    text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent);
-    text-underline-offset: 2px;
-    text-decoration-thickness: 1px;
-  }}
-  a:hover {{
-    color: var(--link-hover);
-    text-decoration-color: currentColor;
-  }}
-  /* `<code>` inside `<a>` (e.g. `<a><code>codex</code></a>` in scoreboard
-     identity cells) used to keep the code's dark-grey fill, hiding the
-     link affordance. Make it inherit so a linked code chip reads as a
-     link, not as identical text to its un-linked neighbour. */
-  a code, a:hover code {{ color: inherit; }}
-  code {{
-    background: var(--code-bg);
-    padding: 2px 6px;
-    border-radius: 5px;
-    font-family: var(--mono);
-    font-size: .92em;
-    color: #2c3e50;
-    /* Long unbreakable identifiers (C++ qualified names, file paths
-       with no separators) would otherwise push their parent past the
-       viewport. Allow a break at any character when content would
-       overflow — only kicks in when normal word-boundary breaking
-       isn't enough. Table cells override this via `td code` below to
-       keep slugs / CVE ids / run timestamps atomic, with the wrap
-       falling back to the `.table-wrap`'s horizontal scroll. */
-    overflow-wrap: anywhere;
-  }}
-  pre {{
-    background: var(--bg-alt);
-    padding: .9em 1.1em;
-    border-radius: 7px;
-    overflow: auto;
-    border: 1px solid var(--border-soft);
-    font-size: .9em;
-  }}
-  pre code {{ background: transparent; padding: 0; }}
-  strong {{ font-weight: 600; }}
-  blockquote {{
-    margin: 1em 0;
-    padding: .7em 1.1em;
-    border-left: 3px solid var(--border);
-    background: var(--bg-alt);
-    border-radius: 0 8px 8px 0;
-    color: var(--muted);
-  }}
-  blockquote strong {{ color: var(--fg); }}
-  blockquote :first-child {{ margin-top: 0; }}
-  blockquote :last-child {{ margin-bottom: 0; }}
-
-  table {{
-    border-collapse: separate;
-    border-spacing: 0;
-    width: 100%;
-    min-width: 100%;
-    font-size: .94em;
-    background: var(--bg);
-    border: none;
-    box-shadow: none;
-  }}
-  .table-wrap {{
-    margin: 1em 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    border-radius: 8px;
-    box-shadow: var(--shadow-md);
-    border: 1px solid var(--border);
-    background: var(--bg);
-  }}
-  thead th {{
-    background: var(--header-bg);
-    border-bottom: 2px solid var(--border);
-    text-align: left;
-    font-weight: 600;
-    padding: 9px 12px;
-    position: sticky;
-    top: 0;
-    z-index: 2;
-    color: var(--fg);
-    white-space: nowrap;
-  }}
-  tbody td {{
-    border-top: 1px solid var(--border-soft);
-    padding: 8px 12px;
-    vertical-align: top;
-    word-break: break-word;
-  }}
-  tbody tr:first-child td {{ border-top: none; }}
-  tbody tr:nth-child(even) td {{ background: var(--bg-row-even); }}
-  tbody tr:hover td {{ background: var(--bg-row-hover); }}
-  td.right, th.right {{ text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }}
-  td.center, th.center {{ text-align: center; }}
-  td.left, th.left {{ text-align: left; }}
-  /* Inline `code` inside table cells is atomic by default — run ids,
-     slugs, CVE numbers, identifiers stay on one line so they aren't
-     chopped mid-token. render-md marks structured code spans (stack
-     signatures with `->`, prose snippets with whitespace) with the
-     `.wrap` class so the bug-causing case — a Root signature like
-     `cJSON_Delete cJSON.c:258 -> cJSON_Delete cJSON.c:261` blowing
-     out the table — wraps inside its cell instead. The classifier is
-     content-based, not column-based, so it works across every report
-     type without an allowlist that drifts as new tables appear. */
-  td code, th code {{
-    white-space: nowrap;
-  }}
-  td code.wrap, th code.wrap {{
-    white-space: normal;
-    word-break: normal;
-    overflow-wrap: anywhere;
-  }}
-
-  /* Severity pill */
-  .sev {{
-    display: inline-block;
-    padding: 2px 9px;
-    border-radius: 999px;
-    font-weight: 600;
-    font-size: .82em;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    line-height: 1.4;
-    white-space: nowrap;
-  }}
-  .sev-Critical {{ background: var(--sev-critical-bg); color: var(--sev-critical-fg); }}
-  .sev-High     {{ background: var(--sev-high-bg);     color: var(--sev-high-fg); }}
-  .sev-Medium   {{ background: var(--sev-medium-bg);   color: var(--sev-medium-fg); }}
-  .sev-Low      {{ background: var(--sev-low-bg);      color: var(--sev-low-fg); }}
-  .sev-Unknown  {{ background: var(--sev-unknown-bg);  color: var(--sev-unknown-fg); }}
-  .sev-Needs-review {{ background: var(--sev-unknown-bg); color: var(--sev-unknown-fg); }}
-  /* `None` = scored 0.0 (CVSS band), e.g. internal-surface code whose
-     modified impacts are all N. Same neutral palette as Unknown. */
-  .sev-None     {{ background: var(--sev-unknown-bg);  color: var(--sev-unknown-fg); }}
-  /* `Pending` = quality gate has no verdict yet. Muted neutral chip — same
-     shape as a real severity pill so the column lines up, but visually
-     subordinate so the eye skips it for scored rows. */
-  .sev-Pending  {{ background: var(--sev-unknown-bg);  color: var(--muted); font-weight: 500; opacity: 0.85; }}
-  .sev-score {{ font-weight: 400; opacity: 0.85; margin-left: .25em; }}
-
-  /* Surface chip */
-  .chip {{
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 5px;
-    font-size: .85em;
-    font-weight: 500;
-    line-height: 1.45;
-    white-space: nowrap;
-  }}
-  .chip-library  {{ background: var(--chip-lib-bg);   color: var(--chip-lib-fg); }}
-  .chip-cli      {{ background: var(--chip-cli-bg);   color: var(--chip-cli-fg); }}
-  .chip-maint    {{ background: var(--chip-maint-bg); color: var(--chip-maint-fg); }}
-  .chip-unknown  {{ background: var(--chip-unk-bg);   color: var(--chip-unk-fg); }}
-  .chip-reason {{ color: var(--muted); margin-left: .35em; font-weight: 400; }}
-
-  /* Compact field grid for REPORT.md "Fields" table */
-  .fields-table th:first-child {{ width: 220px; }}
-  .fields-table td:first-child {{ font-weight: 500; color: var(--muted); }}
-  /* Field-name glossary: the harness vocabulary (Primitive, Boundary,
-     Caller contract, ...) is defined once here rather than re-explained
-     in every report's prose. Dotted underline is the conventional
-     "hover me" affordance and degrades to plain text without CSS. */
-  .fields-table td:first-child abbr {{
-    text-decoration: underline dotted;
-    text-underline-offset: 3px;
-    cursor: help;
-  }}
-  /* Rejected crashes / findings table: ID | Site | Reason | Report. Fixed
-     widths cap ID, Site, and Report; Reason takes the remainder. ID and
-     Site can hold tokens wider than their column (long finding slugs,
-     `file.c:func:line` signatures), so they wrap within the cell instead
-     of spilling over and overlapping the next column — `overflow-wrap:
-     anywhere` does the wrapping, so these cells must NOT be `nowrap`.
-     Shared by the audit and benchmark rejection indexes so both read
-     identically. */
-  .rejected-table {{
-    table-layout: fixed;
-  }}
-  .rejected-table th:nth-child(1),
-  .rejected-table td:nth-child(1) {{ width: 14rem; overflow-wrap: anywhere; }}
-  .rejected-table th:nth-child(2),
-  .rejected-table td:nth-child(2) {{
-    width: 14rem;
-    overflow-wrap: anywhere;
-  }}
-  .rejected-table th:nth-child(4),
-  .rejected-table td:nth-child(4) {{ width: 6rem; white-space: nowrap; }}
-  .rejected-table td:nth-child(3) {{
-    word-break: normal;
-    overflow-wrap: anywhere;
-  }}
-  /* Aggregated benchmark crosstab — wide table, many columns. Let
-     multi-word headers wrap onto a second line — by default `thead th`
-     (and `.right`) carry `white-space: nowrap`, which keeps "Rejected
-     findings", "Unique crashes", "Top crash severity", etc. on a single
-     line and consumes most of the table width.
-     With the headers free to wrap, identifier cells (run id, condition
-     slug) stay atomic on a single line instead of being chopped
-     character-by-character mid-token. Compact padding + a slightly
-     smaller type scale buy back the rest. */
-  .benchmark-table {{
-    min-width: 0;
-    font-size: .88em;
-  }}
-  .benchmark-table thead th,
-  .benchmark-table tbody td {{
-    /* Tight horizontal padding keeps the 18-column crosstab's min-content
-       width inside the prose column so it doesn't overspill into a
-       `.table-wrap` scrollbar on normal-width monitors. Wider viewports
-       show every column; narrow ones still fall back to the wrap's own
-       scroll (which never hides a column). */
-    padding: 7px 6px;
-    vertical-align: middle;
-  }}
-  .benchmark-table thead th,
-  .benchmark-table thead th.right,
-  .benchmark-table thead th.center {{
-    white-space: normal;
-    word-break: normal;
-    overflow-wrap: normal;
-    line-height: 1.25;
-  }}
-  .benchmark-table tbody td:nth-child(1) code,
-  .benchmark-table tbody td:nth-child(3) code,
-  .benchmark-table tbody td:nth-child(4) code {{
-    padding: 0;
-    background: transparent;
-    color: inherit;
-    font-family: inherit;
-    font-size: 1em;
-    line-height: 1.15;
-  }}
-  .benchmark-table tbody td:nth-child(1),
-  .benchmark-table tbody td:nth-child(3) {{
-    line-height: 1.15;
-  }}
-  .benchmark-table tbody td:nth-child(1) br + code {{
-    display: inline-block;
-    margin-top: 1px;
-    color: var(--muted);
-    font-size: .84em;
-  }}
-  dl.report-definition {{
-    display: grid;
-    grid-template-columns: minmax(160px, 240px) 1fr;
-    gap: 0;
-    margin: .8em 0 1em;
-    border: 1px solid var(--border-soft);
-    border-radius: 7px;
-    overflow: hidden;
-    background: var(--bg);
-  }}
-  dl.report-definition dt,
-  dl.report-definition dd {{
-    margin: 0;
-    padding: 8px 11px;
-    border-top: 1px solid var(--border-soft);
-  }}
-  dl.report-definition dt:nth-of-type(1),
-  dl.report-definition dd:nth-of-type(1) {{ border-top: none; }}
-  dl.report-definition dt {{
-    color: var(--muted);
-    font-weight: 600;
-    background: var(--bg-alt);
-    white-space: nowrap;
-  }}
-  dl.report-definition dd {{
-    word-break: break-word;
-  }}
-
-  /* Triage hero card — verdict at a glance, no scrolling required.
-     Pulls from the Fields table + Summary + ASan top frames so the
-     security triager can decide in 2 seconds. */
-  .triage-card {{
-    margin: 1em 0 1.6em;
-    padding: 1.1em 1.25em 1.15em;
-    background: var(--bg-alt);
-    border: 1px solid var(--border);
-    border-left: 4px solid var(--border);
-    border-radius: 8px;
-    box-shadow: var(--shadow-sm);
-  }}
-  .triage-card.sev-Critical {{ border-left-color: var(--sev-critical-bg); }}
-  .triage-card.sev-High     {{ border-left-color: var(--sev-high-bg); }}
-  .triage-card.sev-Medium   {{ border-left-color: var(--sev-medium-bg); }}
-  .triage-card.sev-Low      {{ border-left-color: var(--sev-low-bg); }}
-  .triage-card.sev-Unknown  {{ border-left-color: var(--sev-unknown-bg); }}
-  .triage-card.sev-Needs-review {{ border-left-color: var(--sev-unknown-bg); }}
-  .triage-card.sev-None     {{ border-left-color: var(--sev-unknown-bg); }}
-  .triage-row {{
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: .55em;
-  }}
-  .triage-row + .triage-row,
-  .triage-card .triage-frames,
-  .triage-card .triage-meta,
-  .triage-card .triage-summary {{ margin-top: .55em; }}
-  .triage-frames {{
-    display: grid;
-    gap: .2em;
-  }}
-  .triage-frame {{
-    font-family: var(--mono);
-    font-size: .92em;
-    color: var(--fg);
-  }}
-  .triage-frame code {{ background: transparent; padding: 0; }}
-  .triage-frame .frame-func {{ font-weight: 600; }}
-  .triage-frame .frame-loc  {{ color: var(--muted); }}
-  .triage-meta {{
-    color: var(--muted);
-    font-size: .92em;
-    display: flex;
-    flex-wrap: wrap;
-    gap: .3em 1.2em;
-  }}
-  .triage-meta strong {{ color: var(--fg); font-weight: 600; }}
-  .triage-summary {{
-    font-size: .98em;
-    line-height: 1.55;
-    color: var(--fg);
-    border-top: 1px solid var(--border-soft);
-    padding-top: .65em;
-    /* Long C++ symbols (`sampledb::Engine::Store::set_blob`) inside
-       the summary were the original culprit for page-level horizontal
-       overflow on narrow viewports — make the box itself a contained
-       line context so its inline `<code>` chips wrap before the page
-       does. */
-    overflow-wrap: anywhere;
-    word-break: break-word;
-  }}
-  .primitive {{
-    display: inline-block;
-    padding: 1px 8px;
-    border-radius: 5px;
-    font-family: var(--mono);
-    font-size: .85em;
-    font-weight: 500;
-    line-height: 1.45;
-    background: #ede9fe;
-    color: #5b21b6;
-    white-space: nowrap;
-  }}
-  .primitive.cat-bounds   {{ background: #fee2e2; color: #991b1b; }}
-  .primitive.cat-lifetime {{ background: #ffedd5; color: #9a3412; }}
-  .primitive.cat-uninit   {{ background: #fef3c7; color: #92400e; }}
-  .primitive.cat-type     {{ background: #e0e7ff; color: #3730a3; }}
-  .primitive.cat-state    {{ background: #ecfccb; color: #3f6212; }}
-
-  /* Collapsible sections — Severity rationale is reference material
-     (the math, not the headline). <details> keeps it one click away
-     without dominating the report. */
-  details.collapsible {{
-    margin: 1.6em 0 .6em;
-    padding: 0;
-    border: none;
-  }}
-  details.collapsible > summary {{
-    cursor: pointer;
-    font-size: 1.45em;
-    font-weight: 600;
-    margin: 1.6em 0 .6em;
-    padding-bottom: .25em;
-    border-bottom: 1px solid var(--border-soft);
-    letter-spacing: -0.005em;
-    list-style: none;
-  }}
-  details.collapsible > summary::-webkit-details-marker {{ display: none; }}
-  details.collapsible > summary::before {{
-    content: "▸";
-    color: var(--muted);
-    margin-right: .4em;
-    font-size: .85em;
-    display: inline-block;
-    transition: transform .15s ease;
-  }}
-  details.collapsible[open] > summary::before {{ transform: rotate(90deg); }}
-  details.collapsible > summary:hover {{ color: var(--link); }}
-
-  @media (max-width: 700px) {{
-    body {{ margin: 1em auto; padding: 0 .8em 3em; }}
-    table {{ font-size: .88em; }}
-    thead th, tbody td {{ padding: 7px 8px; }}
-    dl.report-definition {{ grid-template-columns: 1fr; }}
-    dl.report-definition dd {{ border-top: none; padding-top: 0; }}
-  }}
-{theme_css}
-</style>
-</head>
-<body>
-"""
-
-_HTML_FOOT = "</body>\n</html>\n"
-
-
-# ─── Material 3 stylesheet ────────────────────────────────────────────────
-#
-# Every HTML page render-md emits uses Google Material 3 Expressive on a
-# neutral grey tonal palette: layered grey surfaces, the M3 shape scale
-# (large corner radii), elevation instead of hairline borders, and a
-# tonal-grey table header. A restrained, professional monochrome — no
-# accent hue, severity badges aside.
-#
-# It is kept as a block appended at the end of <style>, so it overrides
-# the base (GitHub-flavoured) stylesheet above by source order without
-# editing it. The base is fully variable-driven, so this is mostly a
-# second :root that re-points the colour/elevation tokens plus a few
-# structural rules for shape.
-_MATERIAL_CSS = """
-  /* ─── Theme: Google Material 3 Expressive (neutral grey) ──────────── */
-  :root {
-    --fg: #202124;            /* on-surface — near-black grey */
-    --muted: #5f6368;         /* on-surface-variant — medium grey */
-    --border: #dadce0;        /* outline-variant */
-    --border-soft: #e8eaed;
-    --bg: #f1f3f4;            /* surface-container — page sits on tone */
-    --bg-alt: #e8eaed;        /* surface-container-high */
-    --bg-row-even: #f8f9fa;
-    --bg-row-hover: #f1f3f4;
-    --link: #1a73e8;          /* M3 reference blue — readable on grey surfaces */
-    --link-hover: #174ea6;    /* darker on hover for contrast */
-    --code-bg: #f1f3f4;
-    --header-bg: #e8eaed;     /* tonal grey header */
-    --shadow-sm: 0 1px 2px rgba(32,33,36,.16);
-    --shadow-md: 0 1px 3px 1px rgba(32,33,36,.10),
-                 0 1px 2px rgba(32,33,36,.18);
-    --m3-primary: #3c4043;    /* primary role — a professional dark grey */
-    --m3-on-pc: #202124;      /* header / heading text */
-    --surface-lowest: #ffffff;
-    /* Severity badges deliberately keep the base colour palette (red /
-       orange / yellow / green): the grey treatment is for surfaces only,
-       and severity is the one place colour earns its keep. */
-  }
-  body {
-    font-family: "Roboto", "Roboto Flex", -apple-system, BlinkMacSystemFont,
-                 "Segoe UI", system-ui, sans-serif;
-    background: var(--bg);
-    line-height: 1.6;
-  }
-  /* Headings on the M3 display / headline scale, primary-toned. */
-  h1 {
-    font-size: 2.15em;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    color: var(--m3-on-pc);
-    border-bottom: none;
-    margin-bottom: .1em;
-  }
-  h2 {
-    font-size: 1.45em;
-    font-weight: 600;
-    color: var(--m3-primary);
-    border-bottom: none;
-    margin-top: 2em;
-  }
-  h3 {
-    font-size: 1.12em;
-    font-weight: 600;
-  }
-  /* Every table wrapper is an elevated M3 surface card — elevation, not outline.
-     The wrapper owns horizontal scrolling so atomic audit fields can stay
-     unwrapped instead of being forced into broken hyphenated fragments. */
-  .table-wrap {
-    border: none;
-    border-radius: 20px;
-    box-shadow: var(--shadow-md);
-    background: var(--surface-lowest);
-  }
-  table {
-    background: var(--surface-lowest);
-  }
-  thead th {
-    background: var(--header-bg);
-    color: var(--m3-on-pc);
-    border-bottom: none;
-    padding: 13px 16px;
-  }
-  tbody td {
-    padding: 11px 16px;
-    border-top: 1px solid var(--border-soft);
-  }
-  /* Code, fenced blocks, and quotes adopt the M3 rounded shape scale. */
-  code { border-radius: 8px; color: #4a4458; }
-  pre {
-    border: none;
-    border-radius: 16px;
-    background: var(--surface-lowest);
-    box-shadow: var(--shadow-sm);
-  }
-  /* Unified-diff coloring inside ```diff fenced blocks. Every line is
-     wrapped in a block span; the class keys the tint (added/removed/
-     hunk/file-header/context). Block layout from the shared selector,
-     not the per-class rules — keeping `display: block` on each class
-     plus `\n` text nodes between spans inside `<pre>` doubles the
-     line spacing. */
-  code.language-diff > span { display: block; min-height: 1.2em; }
-  code.language-diff .da { color: #166534; background: #dcfce7; }
-  code.language-diff .dr { color: #991b1b; background: #fee2e2; }
-  code.language-diff .dh { color: #4a4458; font-weight: 600; }
-  code.language-diff .dx { color: #1e3a8a; background: #dbeafe; }
-  /* Blockquote → an M3 tonal "note" card with a primary accent edge. */
-  blockquote {
-    background: var(--surface-lowest);
-    border-left: 4px solid var(--m3-primary);
-    border-radius: 16px;
-    padding: 1em 1.3em;
-    box-shadow: var(--shadow-sm);
-    color: var(--muted);
-  }
-  ul { margin: .8em 0; padding-left: 1.4em; }
-  li { margin: .35em 0; }
-  .sev { padding: 3px 12px; letter-spacing: .03em; }
-
-  /* Enrichment cards: snippet stacks (Data Flow / ASan / Affected) and
-     the captured patch get a Material 3 surface so the long chain of
-     paragraph, code, and rule siblings reads as one contained group.
-     The card sits inside the section heading flow and adopts the M3
-     elevation + large corner radius. Inner code blocks drop their own
-     shadow — the card already provides elevation. */
-  .enrich-card {
-    background: var(--surface-lowest);
-    border-radius: 20px;
-    box-shadow: var(--shadow-md);
-    padding: 1.1em 1.4em;
-    margin: 1em 0 1.4em;
-  }
-  .enrich-card > :first-child { margin-top: 0; }
-  .enrich-card > :last-child { margin-bottom: 0; }
-  .enrich-card pre {
-    background: var(--bg);
-    box-shadow: none;
-    border-radius: 12px;
-    margin: .5em 0 .75em;
-  }
-  /* The "↳ Referenced in:" caption + "From file (lines):" line + the
-     fenced source window form a logical sub-block within a snippet card.
-     Tighten the spacing between them and let the divider between blocks
-     do the visual separation. */
-  .enrich-snippets > p { margin: .4em 0; }
-  .enrich-snippets > hr {
-    border: none;
-    border-top: 1px solid var(--border-soft);
-    margin: 1.1em -.4em;
-  }
-  .enrich-snippets em.note { display: inline-block; margin-top: .15em; }
-  .enrich-patch pre { margin: 0; }
-
-  /* Severity rationale axis table — now that `<br>` survives inline
-     rendering, each reach reason lands on its own line. Bump the
-     vertical rhythm so the "Why" column doesn't crush its rows. */
-  details.collapsible td { vertical-align: top; line-height: 1.55; }
-  details.collapsible td br + * { margin-top: .2em; }
-  /* Match the collapsible heading to the section H2 in the M3 theme so
-     the Severity rationale row aligns with neighbouring `## ` headings
-     (same size, same primary-tone colour, same vertical rhythm). */
-  details.collapsible > summary {
-    color: var(--m3-primary);
-    border-bottom: none;
-    margin-top: 2em;
-  }
-"""
-
-
 _INLINE_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
 _INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 # Decide whether an inline `code` span may wrap inside a table cell. By
@@ -889,7 +231,7 @@ _HTML_COMMENT_LINE_RE = re.compile(r"^<!--.*?-->\s*$")
 # carries them for plain-text readers, harness parsers, and GitHub.
 _HERO_DUPLICATED_ENRICH = ("tldr", "severity-badge", "cluster-siblings")
 # Enrichment blocks whose body benefits from being grouped inside a
-# Material 3 surface card — the snippet stacks (Data Flow, Affected,
+# surface card — the snippet stacks (Data Flow, Affected,
 # ASan frames) and the captured patch otherwise render as a long
 # disjointed sequence of `<p>` / `<pre>` / `<hr>` siblings with no
 # visual containment.
@@ -1000,22 +342,9 @@ _SEV_CELL_RE = re.compile(
     r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(\d+(?:\.\d+)?)\s*\))?\s*$"
 )
 
-# Strategy short-codes used in REPORT.md `Strategy:` field. The full
-# names live in `.agents/references/strategies/README.md`; mirroring the
-# title here lets the HTML field show `S1 — Prior-fix + regression
-# variant` instead of an opaque code. `REF` is a pattern reference, not
-# a strategy proper, but the field accepts it.
-_STRATEGY_NAMES = {
-    "S1":  "Prior-fix + regression variant",
-    "S2":  "Invariant negation",
-    "S3":  "Spec-vs-impl + fast-paths",
-    "S4":  "Boundary-directed fuzzing",
-    "S5":  "Lifetime & state violation",
-    "S6":  "Cross-project variant mining",
-    "S7":  "Adversarial input",
-    "S8":  "Property-based oracles",
-    "REF": "Pattern reference",
-}
+# Strategy short-codes used in the REPORT.md `Strategy:` field; the registry
+# carries the words so the field shows `S1 — Prior-fix variant`.
+_STRATEGY_NAMES = strategies.NAMES
 _STRATEGY_CELL_RE = re.compile(
     r"^\s*(" + "|".join(strategies.ATTRIBUTABLE) + r")\s*$")
 
@@ -1939,15 +1268,25 @@ def _render_hero(h: dict) -> str:
     return "\n".join(parts)
 
 
-def markdown_to_html(text: str, title: str = "Report") -> str:
+def markdown_to_html(text: str, title: str = "Report",
+                     directory: Path | None = None) -> str:
     """Render a small subset of markdown (headings, paragraphs, tables,
     blockquotes, inline code/bold/italic/links, fenced code blocks) to a
-    self-contained HTML document, styled with the Material 3 stylesheet."""
+    self-contained HTML document in the shared evidence-page shell.
+
+    *directory* is the artifact directory the markdown lives in. When it is a
+    CRASH-*/FIND-* bundle, the shell adds the action card and evidence rail
+    read from the sidecars beside the report; any other document gets the
+    plain shell."""
     lines = text.splitlines()
     # Render the hero first: what it shows decides what the grid may omit, so
     # a value is only ever suppressed once its replacement is on the page.
     hero = _extract_hero(text)
     hero_html = _render_hero(hero)
+    facts = evidence_pages.report_context(directory)
+    # The action card sits under the hero: the verdict first, then what to do
+    # about it, then the report's own argument.
+    action_html = evidence_pages.action_card(facts) if facts else ""
     omitted_labels = _omitted_grid_labels(hero, hero_html)
     # Fields the body carries as bare labels, and the labels it must stop
     # repeating once the grid answers them. The rows fold into the report's
@@ -2030,7 +1369,7 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
         # block so the prose between open and close fences is also
         # suppressed in HTML — the markdown source keeps it for
         # plain-text readers and parsers. For snippet stacks and the
-        # captured patch, wrap the body in a Material 3 surface card so
+        # captured patch, wrap the body in a surface card so
         # the long sequence of `<p>`/`<pre>` siblings reads as one
         # contained group instead of free-floating elements.
         if _HTML_COMMENT_LINE_RE.match(stripped):
@@ -2085,7 +1424,7 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
             ttext = stripped[2:].strip()
             body.append(f"<h1>{_render_inline(ttext)}</h1>")
             if not hero_emitted:
-                body.extend(part for part in (hero_html, synthesized_grid) if part)
+                body.extend(part for part in (hero_html, action_html, synthesized_grid) if part)
                 hero_emitted = True
             i += 1
             continue
@@ -2315,11 +1654,8 @@ def markdown_to_html(text: str, title: str = "Report") -> str:
     # whether the author wrote an H1. `_render_hero` returns "" when there is no
     # useful signal, so non-report docs (INDEX.md, crosstabs) stay heroless.
     if not hero_emitted:
-        body[0:0] = [part for part in (hero_html, synthesized_grid) if part]
-    return (
-        _HTML_HEAD.format(title=html.escape(title), theme_css=_MATERIAL_CSS)
-        + "\n".join(body) + "\n" + _HTML_FOOT
-    )
+        body[0:0] = [part for part in (hero_html, action_html, synthesized_grid) if part]
+    return evidence_pages.report_document(title, "\n".join(body) + "\n", facts)
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────
@@ -2358,7 +1694,7 @@ def _process_one(input_path: Path, args) -> int:
             title = input_path.parent.name or input_path.stem
         else:
             title = input_path.stem
-        html_doc = markdown_to_html(text, title=title)
+        html_doc = markdown_to_html(text, title=title, directory=input_path.parent)
         html_path.parent.mkdir(parents=True, exist_ok=True)
         html_path.write_text(html_doc, "utf-8")
 

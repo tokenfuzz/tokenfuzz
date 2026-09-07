@@ -48,9 +48,9 @@ import finding_signature  # noqa: E402
 import finding_dedup  # noqa: E402
 import report_identity  # noqa: E402
 import validation_receipt  # noqa: E402
+import evidence_pages  # noqa: E402
 from cluster_common import (  # noqa: E402
     render_member_report_siblings,
-    render_md_sibling,
     run_under_aggregate_lock,
     texts_differ_beyond_padding,
 )
@@ -780,7 +780,7 @@ def main(argv: list[str] | None = None) -> int:
     _atomic_write_text(out_md, md)
     n_updated = update_reports(clusters, dry_run=False)
     render_member_report_siblings(clusters)
-    render_md_sibling(out_md)
+    evidence_pages.write_cluster_page('find', clusters, findings_root, out_md.with_suffix(".html"))
 
     print(f"[cluster-findings] {len(clusters)} cluster(s) over "
           f"{sum(c['size'] for c in clusters)} finding(s)")
@@ -894,7 +894,7 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
     _atomic_write_text(out_md, md)
     n_updated = update_aggregate_reports(clusters, dry_run=False)
     render_member_report_siblings(clusters)
-    render_md_sibling(out_md)
+    evidence_pages.write_cluster_page('find', clusters, target_root, out_md.with_suffix(".html"))
 
     print(f"[cluster-findings] {len(clusters)} cluster(s) over "
           f"{len(all_sigs)} finding(s) across {len(per_agent)} agent(s)")

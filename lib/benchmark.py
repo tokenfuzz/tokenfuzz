@@ -49,6 +49,7 @@ import bug_classes
 import cluster_common
 import crash_artifacts
 import crash_bundle
+import evidence_pages
 import finding_signature
 import llm_usage
 import report_identity
@@ -3769,7 +3770,7 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
 
 
 def write_rejected_crashes_index(rejected_dir: Path) -> None:
-    """Write a markdown summary for crashes rejected by triage.
+    """Write the rejected-crashes index, Markdown and HTML.
 
     Two sources are stitched together so the column can link to a single
     artifact: (1) any pooled `CRASH-REJECTED-NNNN/` subdirs (crash dirs
@@ -3870,14 +3871,28 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
     md.append("")
     text = "\n".join(md)
     (rejected_dir / "REJECTED-CRASHES.md").write_text(text, encoding="utf-8")
+    rows = [{
+        "id": p.name, "site": _crash_site(p),
+        "reason": _rejection_artifact_reason(p), "report": _report_link_name(p),
+    } for p in subdirs]
+    ledgers = []
+    for r in rosters:
+        try:
+            ledgers.append((r.name, r.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    discarded = [{
+        "cell": r.stem, "count": _count_discarded_roster_rows(r), "name": r.name,
+        "href": urllib.parse.quote(r.name),
+    } for r in discarded_rosters]
+    evidence_pages.write_rejected_page(
+        "crash", rows, rejected_dir, ledgers=ledgers, discarded=discarded,
+    )
 
 
 def write_rejected_findings_index(rejected_dir: Path) -> None:
-    """Write a markdown list for findings rejected by the validator gate.
-
-    bin/benchmark renders the sibling HTML with bin/render-md, matching the
-    rest of the benchmark artifacts and keeping formatting in one renderer.
-    """
+    """Write the rejected-findings index: Markdown for agents and parsers,
+    and the HTML page beside it (lib/evidence_pages.py)."""
     rejected_dir = Path(rejected_dir)
     if not rejected_dir.is_dir():
         return
@@ -3916,6 +3931,7 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
     md_lines.append("")
     text = "\n".join(md_lines)
     (rejected_dir / "REJECTED-FINDINGS.md").write_text(text, encoding="utf-8")
+    evidence_pages.write_rejected_page("find", rows, rejected_dir)
 
 
 # ── aggregation across a benchmark run's cells ───────────────────────────

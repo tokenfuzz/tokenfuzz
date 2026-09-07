@@ -2702,16 +2702,6 @@ def rebuild_pool(bench_dir: Path, target_slug: str, backend: str, model: str, dr
     _finalize_condition_pools(
         pool, target, backend, model, target_slug, bench_dir / "llm-decisions.log"
     )
-    rejected_indexes = [
-        pool / "findings-rejected" / "REJECTED-FINDINGS.md",
-        pool / "crashes-rejected" / "REJECTED-CRASHES.md",
-    ]
-    rejected_indexes = [path for path in rejected_indexes if path.is_file()]
-    if rejected_indexes:
-        subprocess.run(
-            [str(SCRIPT_ROOT / "bin" / "render-md"), *map(str, rejected_indexes), "--html-sibling"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
     # Re-audit immediately before the swap. Everything above — clustering,
     # split_pool, per-condition index maintenance, rendering — rewrites
     # reports, so the pre-clustering audit cannot speak for the tree that

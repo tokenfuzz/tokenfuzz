@@ -98,7 +98,7 @@ Anything here is provisional until probe confirms it.
 trace, an input, and a report. Promotion requires a memory-safety or explicit
 boundary violation, not attacker reachability, which decides *reportability*
 instead: a crash whose trigger needs a control outside `attacker_controls`
-stays here as `not-reportable`.
+is rejected with a `threat-model:` reason.
 
 **Bug class.** The canonical token a finding's `Class` field carries, from
 the [bug class reference](bug-classes.md): the vocabulary public disclosure
@@ -183,8 +183,9 @@ See [Target config reference](target-toml.md).
 describing what an external caller can legitimately control. Valid tokens are
 `bytes`, `call-sequence`, `timing`, `race`, `env`, `protocol-state`, and
 `fs-state`. A crash whose trigger source falls outside this set, and whose
-source reviewer agrees that it does, stays in `crashes/` as `not-reportable`:
-no security report, no security yield, no numeric CVSS.
+source reviewer agrees that it does, is rejected with a `threat-model:`
+reason: the evidence moves to `crashes-rejected/`, no security yield, no
+numeric CVSS.
 
 **Findings-only mode.** `[sanitizer].enabled = []`. Typical for interpreted
 or managed-runtime targets (Python, Ruby, Node, Java, PHP) but valid for any

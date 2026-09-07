@@ -147,9 +147,10 @@ diagnostic, a testcase, or a complete exported bundle. Fix the named artifact
 and rerun triage. The adjacent signature and count files are internal progress
 state; do not delete or edit them.
 
-A trigger source outside `attacker_controls` is **not** a rejection reason.
-Such crashes stay in `crashes/` as `not-reportable` engineering defects,
-without security credit or numeric CVSS. See
+A trigger source outside `attacker_controls` rejects the crash once the
+source reviewer agrees: the directory moves to `crashes-rejected/` with a
+`threat-model:` reason, the evidence intact, no security credit and no
+numeric CVSS. See
 [Triage and review](../guides/triage-results.md#common-rejection-reasons).
 
 Fix the evidence if the result is genuinely in scope. Otherwise leave it

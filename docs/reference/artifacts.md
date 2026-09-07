@@ -23,6 +23,17 @@ $RESULTS/crashes/CRASH-*/REPORT.html
 $RESULTS/findings/FIND-*/report.html
 ```
 
+Each page answers one question. A cluster index lists every distinct
+problem once, with when its first report landed on the run's clock, which
+subsystem it sits in, which strategy lane reached it, and how many reports
+rediscovered it; a benchmark pool page keeps both conditions apart. A
+rejected index groups what did not hold up by the gate that turned it away.
+A report page frames the report's own text with an action card — the fix,
+the site, how to reproduce, how sure the review was — and a rail carrying
+the CVSS vector, the review receipt, the bundle files, and the timeline.
+Every figure on them is read from the Markdown indexes and receipts beside
+them, never recounted.
+
 Use `results/` for evidence and progress. Use `logs/` only to debug
 orchestration, backend authentication, or wrapper failures.
 
@@ -159,12 +170,16 @@ severity, patch, enrichment, and cluster annotations do not.
 
 Every adjudicated artifact has a content-addressed `validation.json`. It binds
 the publication state to the report, saved evidence, target revision and
-config, and threat model. Its states are `reportable`, `not-reportable`,
-`pending`, and `rejected`. Pending and legacy artifacts remain visible on
-disk. Only a current `reportable` receipt enters the security benchmark total
-or receives numeric severity. `not-reportable` is a final retained
-engineering defect, not a security report; `pending` is an artifact no review
-settled, which is neither credited nor written off.
+config, and threat model. Its states are `reportable`, `pending`, and
+`rejected`. Pending and legacy artifacts remain visible on disk. Only a
+current `reportable` receipt enters the security benchmark total or receives
+numeric severity. `pending` is an artifact a review is still due on, which is
+neither credited nor written off. A defect the reviewers place outside the
+threat model, or one they cannot place inside it once every review the lane
+asks for has answered, is rejected with that reason and keeps its evidence
+under the rejected tree. Only a human-pinned artifact still records
+`not-reportable` in place; older trees may carry the state from before this
+rule.
 
 When `TARGET_ROOT` is available, new receipts join each source review to a
 `source_attestations` entry. The harness re-reads the review's path, line,

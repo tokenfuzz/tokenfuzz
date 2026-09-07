@@ -62,11 +62,11 @@ import symbol_names  # noqa: E402
 import clusterfuzz_stacktrace as cf_stack  # noqa: E402
 import finding_signature  # noqa: E402
 import validation_receipt  # noqa: E402
+import evidence_pages  # noqa: E402
 from report_identity import exact_child_file  # noqa: E402
 from cluster_common import (  # noqa: E402
     promotion_pending_reasons,
     render_member_report_siblings,
-    render_md_sibling,
     run_under_aggregate_lock,
     texts_differ_beyond_padding,
 )
@@ -1041,7 +1041,7 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
         return 0
 
     _atomic_write_text(out_md, md)
-    render_md_sibling(out_md)
+    evidence_pages.write_cluster_page("crash", clusters, target_root, out_md.with_suffix(".html"))
 
     # Per-agent CRASH-CLUSTERS.md and REPORT.md Cluster: lines are owned by the
     # single-results-dir invocation each backend already runs from its own
@@ -1112,7 +1112,7 @@ def main(argv: list[str] | None = None) -> int:
     n_updated = update_reports(clusters, dry_run=False)
 
     render_member_report_siblings(clusters)
-    render_md_sibling(out_md)
+    evidence_pages.write_cluster_page("crash", clusters, crashes_root, out_md.with_suffix(".html"))
 
     print(f"[cluster-crashes] {len(clusters)} cluster(s) over "
           f"{sum(c['size'] for c in clusters)} crash dir(s)")
