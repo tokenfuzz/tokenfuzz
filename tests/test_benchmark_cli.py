@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,10 @@ class BenchmarkCliTests(unittest.TestCase):
             (("--target", "sample", "--conditions", "unknown", "--dry-run"), "unknown condition"),
             (("--target", "sample", "--unknown-option"), "unrecognized arguments"),
             (("--target", " , ", "--dry-run"), "must contain at least one non-empty slug"),
+            (
+                ("--regenerate", "--rebuild-report"),
+                "not allowed with argument --regenerate",
+            ),
             (
                 ("--target", "samples/sample-python", "--backend", "grok", "--dry-run"),
                 "cannot use agent security 'sandboxed'",
@@ -216,6 +221,60 @@ class BenchmarkCliTests(unittest.TestCase):
             self.assertTrue((run / "pool").is_dir())
             self.assertFalse((run / ".pool.staging").exists())
             self.assertFalse((run / ".pool.old").exists())
+
+    def test_rebuild_report_reads_surviving_state_without_processing_runs(self) -> None:
+        backend = self.bench_root / "codex"
+        runs = {}
+        for run_id, target in (
+            ("keep-run", "target-kept-by-report-rebuild"),
+            ("delete-run", "target-deleted-before-report-rebuild"),
+        ):
+            run = backend / run_id
+            run.mkdir(parents=True)
+            report = {
+                "run": {
+                    "runid": run_id,
+                    "target": target,
+                    "backend": "codex",
+                },
+                "bench_dir": str(run),
+                "conditions": [],
+            }
+            (run / "report.json").write_text(
+                json.dumps(report) + "\n", encoding="utf-8",
+            )
+            runs[target] = run
+        provisional = backend / "unfinished-run"
+        provisional.mkdir()
+        (provisional / "run.json").write_text(
+            json.dumps({
+                "runid": "unfinished-run",
+                "target": "target-with-unfinished-run",
+                "backend": "codex",
+            }) + "\n",
+            encoding="utf-8",
+        )
+
+        rebuilt = self.run_cli(
+            "--rebuild-report", "--bench-root", str(self.bench_root),
+        )
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout)
+        self.assertIn("Benchmark report rebuilt", rebuilt.stdout)
+
+        deleted = "target-deleted-before-report-rebuild"
+        shutil.rmtree(runs[deleted])
+        rebuilt = self.run_cli(
+            "--rebuild-report", "--bench-root", str(self.bench_root),
+        )
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout)
+        for result in (
+            self.bench_root / "benchmark-result.md",
+            self.bench_root / "benchmark-result.html",
+        ):
+            text = result.read_text(encoding="utf-8")
+            self.assertIn("target-kept-by-report-rebuild", text)
+            self.assertIn("target-with-unfinished-run", text)
+            self.assertNotIn(deleted, text)
 
     def test_resume_retries_provider_limited_but_keeps_recovered(self) -> None:
         target = "samples/sample-python"

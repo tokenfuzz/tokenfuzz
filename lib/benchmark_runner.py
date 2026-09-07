@@ -744,7 +744,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--run-id", default="")
     result.add_argument("--reset", action="store_true")
     result.add_argument("--hard", action="store_true")
-    result.add_argument("--regenerate", action="store_true")
+    postprocess = result.add_mutually_exclusive_group()
+    postprocess.add_argument("--regenerate", action="store_true")
+    postprocess.add_argument(
+        "--rebuild-report", action="store_true",
+        help="rebuild benchmark-result.md/html from existing run state only",
+    )
     result.add_argument("--dry-run", action="store_true")
     result.add_argument(
         "--isolate-build", action="store_true",
@@ -3732,6 +3737,10 @@ def _main(argv: list[str] | None = None) -> int:
     bench_root = Path(args.bench_root)
     if not bench_root.is_absolute():
         bench_root = (SCRIPT_ROOT / bench_root).resolve()
+    if args.rebuild_report:
+        artifact = _render_root_result(bench_root)
+        log(f"Benchmark report rebuilt: {artifact} ({artifact.resolve().as_uri()})")
+        return 0
     if args.regenerate and not args.target:
         return _regenerate_all(args, bench_root)
     targets = [item.strip() for item in args.target.split(",") if item.strip()]

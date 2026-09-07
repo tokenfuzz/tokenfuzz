@@ -727,6 +727,9 @@ bin/benchmark --target <target> --backend codex --regenerate \
 
 # Re-derive every run under output/benchmark/.
 bin/benchmark --regenerate
+
+# Rebuild only the root result pages from the surviving run reports.
+bin/benchmark --rebuild-report
 ```
 
 `--regenerate` launches no audit or discovery agents. It re-routes, validates,
@@ -736,6 +739,14 @@ artifact can recover. Source-semantic validation may invoke the configured
 reviewer when a current content-addressed receipt is missing or stale;
 deterministic sanitizer, identity, scoring, and counting work does not.
 Provider-limited and failed cells stay excluded.
+
+`--rebuild-report` reads the surviving run state and rewrites only
+`output/benchmark/benchmark-result.md` and `benchmark-result.html`. Finalized
+runs come from `report.json`; unfinished runs are included provisionally from
+their recorded cells. Use it after deleting or archiving run directories when
+the remaining runs do not need to be replayed, rescored, or otherwise
+regenerated. Per-backend `benchmark-results.md` and `benchmark-results.html`
+ledgers are unchanged.
 
 Regeneration cannot manufacture evidence an old cell never recorded. Missing
 testcases, invocation prerequisites, build identity, source anchors, or replay
