@@ -64,12 +64,12 @@ class AuditStartupTests(unittest.TestCase):
                 FAKE_CODEX_TRACE=str(trace), AUDIT_MODEL_PREFLIGHT_ATTEMPTS="1",
                 AUDIT_MODEL_PREFLIGHT_TIMEOUT="10", COOLDOWN="0",
                 LLM_DECIDE_DISABLE="1", NUM_AGENTS="1",
+                CODEX_BIN=str(fake_codex),
             )
             proc = subprocess.run(
                 [
                     str(ROOT / "bin" / "audit"), "--target", slug,
-                    "--backend", "codex", "--model", "fixture-model",
-                    "--codex-bin", str(fake_codex), "1",
+                    "--backend", "codex", "--model", "fixture-model", "1",
                 ],
                 capture_output=True, text=True, env=env,
             )

@@ -631,7 +631,7 @@ assert_not_in("build-asan-img42", suffixed_seed_out.read_text(encoding="utf-8"),
 
 
 # ─── 9c. S6 peers come only from target.toml ────────────────────────
-# seed_toml never emits [s6_peers]. bin/audit --new-target may call
+# seed_toml never emits [s6_peers]. bin/setup-target may call
 # bin/suggest-peers afterwards, but target_config.py itself does not
 # consult any shared bundled peer table.
 s6_root = TEST_TMPDIR / "s6-seed"

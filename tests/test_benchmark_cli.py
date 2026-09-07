@@ -71,6 +71,14 @@ class BenchmarkCliTests(unittest.TestCase):
             "",
         )
 
+    def test_bare_launch_prints_help_instead_of_starting_a_cell(self) -> None:
+        result = self.run_main()
+        self.assertEqual(result.returncode, 2, result.stdout)
+        self.assertIn("usage: benchmark", result.stdout)
+        self.assertIn("--budget-wall", result.stdout)
+        self.assertNotIn("FATAL", result.stdout)
+        self.assertFalse(self.bench_root.exists())
+
     def test_public_cli_rejects_invalid_arguments(self) -> None:
         cases = (
             (("--dry-run",), "--target is required"),
@@ -343,12 +351,13 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertIn("Multi-target complete: 1/2 target(s) succeeded", output.getvalue())
 
     def test_reset_and_live_lock_contracts(self) -> None:
-        ledger = self.root / "benchmark-results.md"
+        ledger = self.bench_root / "codex" / "benchmark-results.md"
+        ledger.parent.mkdir(parents=True)
         ledger.write_text("# existing results\n", encoding="utf-8")
-        reset = self.run_cli("--reset", "--ledger", str(ledger))
+        reset = self.run_cli("--reset", "--bench-root", str(self.bench_root))
         self.assertEqual(reset.returncode, 0, reset.stdout)
         self.assertFalse(ledger.exists())
-        self.assertEqual(len(list(self.root.glob("benchmark-results.*.md"))), 1)
+        self.assertEqual(len(list(ledger.parent.glob("benchmark-results.*.md"))), 1)
 
         target = "samples/sample-python"
         backend_root = self.bench_root / "codex"
@@ -364,10 +373,7 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertFalse(lock.exists())
 
     def test_target_overlay_applies_before_benchmark_paths(self) -> None:
-        args = benchmark_runner.parser().parse_args([
-            "--target", "chromium", "--reset",
-            "--ledger", str(self.root / "overlay-ledger.md"),
-        ])
+        args = benchmark_runner.parser().parse_args(["--target", "chromium", "--reset"])
         root = isolated_script_root(self.root)
         with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", root):
             self.assertEqual(benchmark_runner.run_single(args, self.bench_root), 0)

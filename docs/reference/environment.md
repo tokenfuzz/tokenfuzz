@@ -84,7 +84,7 @@ for a shared shell, or a backend binary outside `PATH`.
 | `CODEX_MODEL_DEFAULT` | `config/models.toml` | Default Codex model. |
 | `GEMINI_MODEL_DEFAULT` | `config/models.toml` | Default Gemini model. |
 | `GROK_MODEL_DEFAULT` | `config/models.toml` | Default Grok model. |
-| `CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN` / `GROK_BIN` / `OPENCODE_BIN` | the CLI's own name (`agy` for Gemini) | Backend executable outside `PATH`. `bin/audit --<backend>-bin` does the same for one run. |
+| `CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN` / `GROK_BIN` / `OPENCODE_BIN` | the CLI's own name (`agy` for Gemini) | Backend executable outside `PATH`. |
 | `USE_GEMINI_CLI` | `0` | Use Google Gemini CLI instead of the default Antigravity CLI. |
 | `CLAUDE_CODE_PROMPT_CACHE_TTL` | unset | Claude Code's prompt-cache write tier (`5m` or `1h`). TokenFuzz sets `5m` on every Claude launch it makes (agent sessions, validators, and decision calls), because a harness prefix is almost never idle for five minutes and the one-hour write costs 60% more; see the [cost model](../concepts/cost-model.md#what-prompt-caching-can-reuse). Set it yourself to override. Cost tier only; it never changes model behaviour. |
 | `AUDIT_MODEL_PREFLIGHT` | `1` | Before starting, launch the selected model once through the real agent path, with the same granted directories as an audit session and the audit guide in the prompt, and require it to run a command that writes into the target tree. A backend that can reply but cannot act, a CLI that silently serves a different model, or a model whose safeguards refuse the audit workload fails here rather than spending the run. Set `0` only for an intentionally offline or mock run. |

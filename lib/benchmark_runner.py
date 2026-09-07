@@ -708,16 +708,22 @@ def parser() -> argparse.ArgumentParser:
             "without running anything; see `benchmark score --help`."
         ),
     )
-    result.add_argument("--target", default="")
-    result.add_argument("--backend", default="codex", choices=("claude", "codex", "gemini", "grok", "oss"))
-    result.add_argument("--model", default="")
+    result.add_argument(
+        "--target", default="",
+        help="target slug under targets/; a comma-separated list runs one cell per target (required unless --regenerate or --reset)",
+    )
+    result.add_argument(
+        "--backend", default="codex", choices=("claude", "codex", "gemini", "grok", "oss"),
+        help="agent backend used by both conditions",
+    )
+    result.add_argument("--model", default="", help="override the backend's configured model; required for oss")
     result.add_argument(
         "--agent-security", choices=llm_invoke.AGENT_SECURITY_MODES, default=None,
         help=(
             "backend execution boundary, used by both conditions. sandboxed runs the backend inside its own OS sandbox; external-bypass drops that for an outer container or VM you administer, and warns once when nothing asserts IS_SANDBOX=1. Defaults to external-bypass for oss, which OpenCode is the only backend to need: its permissions are an approval policy, not an OS sandbox, so it cannot run sandboxed at all. Every other backend defaults to sandboxed."
         ),
     )
-    result.add_argument("--replicates", type=_positive, default=3)
+    result.add_argument("--replicates", type=_positive, default=3, help="runs per condition")
     result.add_argument(
         "--budget-wall", type=_nonnegative, default=10800,
         help=(
@@ -737,29 +743,51 @@ def parser() -> argparse.ArgumentParser:
              "gate's admission groups, so raising it coarsens where a finite "
              "--finalize-wall can cut",
     )
-    result.add_argument("--agents", type=_positive)
-    result.add_argument("--conditions", default="model-direct,harness")
-    result.add_argument("--ledger")
-    result.add_argument("--bench-root", default="output/benchmark")
-    result.add_argument("--run-id", default="")
-    result.add_argument("--reset", action="store_true")
-    result.add_argument("--hard", action="store_true")
+    result.add_argument(
+        "--agents", type=_positive,
+        help="harness workers per cell (default: the audit's machine-sized pool); the direct baseline is always one launch",
+    )
+    result.add_argument(
+        "--conditions", default="model-direct,harness",
+        help="comma-separated conditions to run: model-direct, harness, or both",
+    )
+    result.add_argument("--bench-root", default="output/benchmark", help="shared benchmark artifact root")
+    result.add_argument(
+        "--run-id", default="",
+        help="run directory under <bench-root>/<backend>/ (default: UTC timestamp); reuse it to resume",
+    )
+    result.add_argument(
+        "--reset", action="store_true",
+        help="archive the backend's benchmark-results.md ledger before running, or alone to only do that",
+    )
     postprocess = result.add_mutually_exclusive_group()
-    postprocess.add_argument("--regenerate", action="store_true")
+    postprocess.add_argument(
+        "--regenerate", action="store_true",
+        help="rebuild a run's scores, ledger, and pages from what is on disk without launching anything; without --target, every recorded run",
+    )
     postprocess.add_argument(
         "--rebuild-report", action="store_true",
         help="rebuild benchmark-result.md/html from existing run state only",
     )
-    result.add_argument("--dry-run", action="store_true")
+    result.add_argument(
+        "--dry-run", action="store_true",
+        help="plan the cells and write run metadata without launching any backend",
+    )
     result.add_argument(
         "--isolate-build", action="store_true",
         help="build into a private tree keyed by build inputs, instead of "
              "sharing the target's canonical build with concurrent runs",
     )
     validation = result.add_mutually_exclusive_group()
-    validation.add_argument("--no-validate-findings", dest="validate_findings", action="store_false")
-    validation.add_argument("--validate-findings", dest="validate_findings", action="store_true")
-    result.set_defaults(validate_findings=os.environ.get("BENCHMARK_VALIDATE_FINDINGS", "1") != "0")
+    validation.add_argument(
+        "--no-validate-findings", dest="validate_findings", action="store_false",
+        help="skip the post-cell finding review; every filed finding then stays unconfirmed",
+    )
+    validation.add_argument(
+        "--validate-findings", dest="validate_findings", action="store_true",
+        help="review every filed finding after each cell (the default)",
+    )
+    result.set_defaults(validate_findings=True)
     return result
 
 
@@ -2849,11 +2877,11 @@ def preflight_build(
 def run_single(args: argparse.Namespace, bench_root: Path) -> int:
     args.target = target_profile.effective_slug(SCRIPT_ROOT, args.target)
     backend_root = bench_root / args.backend
-    ledger = Path(args.ledger).resolve() if args.ledger else backend_root / "benchmark-results.md"
+    ledger = backend_root / "benchmark-results.md"
     if args.reset:
         with _ledger_lock(ledger):
-            archive = metrics.reset_ledger(ledger, args.hard)
-        log(f"Ledger {'deleted' if args.hard else f'archived to {archive}' if archive else 'already absent'}")
+            archive = metrics.reset_ledger(ledger)
+        log(f"Ledger {f'archived to {archive}' if archive else 'already absent'}")
         return 0
     if not args.target:
         print("FATAL: --target is required", file=sys.stderr)
@@ -3728,6 +3756,10 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
 
 def _main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if not arguments:
+        # A bare launch is a request for orientation, not for a cell.
+        parser().print_help()
+        return 2
     if arguments and arguments[0] == "score":
         # The answer-key scorer is the one lib/benchmark.py verb an operator
         # runs by hand. Route it through the library's own parser so the two

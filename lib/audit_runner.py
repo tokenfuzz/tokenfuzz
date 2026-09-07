@@ -120,27 +120,49 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="audit",
         description="Run parallel security-audit agents against one configured target.",
+        epilog=(
+            "Name the target with --target (a slug under targets/) or "
+            "--target-path (any source tree). Backend executables outside PATH "
+            "come from the CLAUDE_BIN, CODEX_BIN, GEMINI_BIN, GROK_BIN, and "
+            "OPENCODE_BIN environment variables."
+        ),
     )
-    parser.add_argument("max_iterations", nargs="?", type=_nonnegative, default=0)
-    parser.add_argument("--target", default="firefox")
-    parser.add_argument("--target-path")
-    parser.add_argument("--backend", choices=("all", "claude", "codex", "gemini", "grok", "oss"), default=None)
-    parser.add_argument("--model", default="")
-    parser.add_argument("--experiment", default="")
-    parser.add_argument("--strategy", choices=STRATEGIES, default="")
+    parser.add_argument(
+        "max_iterations", nargs="?", type=_nonnegative, default=0,
+        help="iteration limit; 1 is a one-worker smoke test, 0 or omitted runs continuously",
+    )
+    parser.add_argument("--target", default="", help="target slug under targets/, such as samples/sample-python")
+    parser.add_argument(
+        "--target-path",
+        help="audit the source tree at this path instead of targets/<target>/; the output tree is named after its basename",
+    )
+    parser.add_argument(
+        "--backend", choices=("all", "claude", "codex", "gemini", "grok", "oss"), default=None,
+        help="agent backend; all rotates every installed and configured hosted backend (default: AUDIT_BACKEND or all)",
+    )
+    parser.add_argument("--model", default="", help="override the backend's configured model; required for oss")
+    parser.add_argument(
+        "--experiment", default="",
+        help="write results and logs under output/<target>-<name>/ instead of the target's normal tree",
+    )
+    parser.add_argument(
+        "--strategy", choices=STRATEGIES, default="",
+        help="pin one investigation strategy and suspend rotation",
+    )
     parser.add_argument(
         "--since", metavar="REV", default="",
         help=(
             "delta mode: audit only the files changed in REV..HEAD, their one-hop callers, and S1 cards for exactly those commits. The results tree records the delta; a resumed run must pass the same REV."
         ),
     )
-    parser.add_argument("--claude-bin")
-    parser.add_argument("--codex-bin")
-    parser.add_argument("--gemini-bin")
-    parser.add_argument("--grok-bin")
-    parser.add_argument("--new-target")
-    parser.add_argument("--allow-concurrent", action="store_true")
-    parser.add_argument("--enable-memory", action="store_true")
+    parser.add_argument(
+        "--allow-concurrent", action="store_true",
+        help="skip the one-instance lock; two runs then append to one state tree",
+    )
+    parser.add_argument(
+        "--enable-memory", action="store_true",
+        help="allow the backend's cross-run learned memory, which is off by default so stale conclusions cannot steer later audits",
+    )
     parser.add_argument(
         "--agent-security", choices=llm_invoke.AGENT_SECURITY_MODES, default=None,
         help=(
@@ -197,15 +219,6 @@ def backend_configured(backend: str) -> bool:
 
 def discover_backends() -> list[str]:
     return [backend for backend in ("claude", "codex", "gemini", "grok") if backend_configured(backend)]
-
-
-def _configure_binaries(args) -> None:
-    for backend, value in (
-        ("claude", args.claude_bin), ("codex", args.codex_bin),
-        ("gemini", args.gemini_bin), ("grok", args.grok_bin),
-    ):
-        if value:
-            os.environ[f"{backend.upper()}_BIN"] = value
 
 
 def _output_slug(slug: str, experiment: str) -> str:
@@ -4244,22 +4257,20 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
         return 2 if failures == len(states) else 0
 
 
-def _new_target(root: Path, slug: str) -> int:
-    return subprocess.run(
-        [str(root / "bin" / "setup-target"), slug],
-        env=os.environ.copy() | {"AUDIT_ROOT": str(root), "SCRIPT_ROOT": str(root)},
-        check=False,
-    ).returncode
-
-
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    if not arguments:
+        # A bare launch is a request for orientation, not for an audit of
+        # some default target.
+        parser.print_help()
+        return 2
+    args = parser.parse_args(arguments)
+    if not args.target and not args.target_path:
+        parser.error("one of --target or --target-path is required")
     root = Path(os.environ.get("SCRIPT_ROOT") or Path(__file__).resolve().parent.parent).absolute()
     os.environ["SCRIPT_ROOT"] = str(root)
-    _configure_binaries(args)
     llm_invoke.apply_memory_policy(args.enable_memory)
-    if args.new_target:
-        return _new_target(root, args.new_target)
     effective_target = (
         args.target if args.target_path
         else target_profile.effective_slug(root, args.target)

@@ -12,7 +12,7 @@ then asks the LLM to pick 3-5 peer OSS projects that implement the same
 spec / format / algorithm. Prints a [s6_peers] TOML snippet that the
 operator can paste, or appends it to target.toml with --apply.
 
-`bin/audit --new-target` runs this helper automatically when an LLM backend
+`bin/setup-target` runs this helper automatically when an LLM backend
 is available. Existing targets can run it manually to add or refresh
 `[s6_peers]`.
 
@@ -130,7 +130,7 @@ def main(argv: list[str]) -> int:
     target_toml = output_dir / "target.toml"
     if not target_toml.is_file():
         print(f"[suggest-peers] target.toml not found: {target_toml}", file=sys.stderr)
-        print("[suggest-peers] run `bin/audit --new-target <slug>` first.",
+        print("[suggest-peers] run `bin/setup-target <slug>` first.",
               file=sys.stderr)
         return 1
 

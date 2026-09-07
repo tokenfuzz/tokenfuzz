@@ -111,6 +111,8 @@ bin/audit --target "$TARGET" --backend "$BACKEND"
 
 The optional final number is the iteration limit. `1` is a smoke test with one
 worker. Omit the number, or pass `0`, for a continuous run.
+`bin/audit` with no arguments prints its help; `--target` or `--target-path`
+is required to start a run.
 
 Common flags:
 
@@ -124,9 +126,7 @@ Common flags:
 | `--no-refill-workers` | Leave a slot idle once its agent finishes, instead of relaunching it while a peer is still running. This also switches the run to the older cohort scheduler. |
 | `--enable-memory` | Allow the backend's cross-run learned memory. It is disabled by default to prevent stale conclusions from steering later audits, except on Antigravity (`agy`), which has no memory switch; see [the isolation policy](../guides/backends.md#one-isolation-policy-for-every-launch). |
 | `--agent-security sandboxed|external-bypass` | Select the agent execution boundary. Each backend defaults to the strongest mode it can run under; see [Agent security modes](../guides/backends.md#agent-security-modes). |
-| `--new-target <slug>` | Generate starter config and exit without starting an audit. |
 | `--allow-concurrent` | Skip the one-instance lock below. Two runs then append to one state tree; use it only when you know why you want that. |
-| `--claude-bin`, `--codex-bin`, `--gemini-bin`, `--grok-bin` | Point at a backend executable outside `PATH` for this run. The `*_BIN` environment variables do the same for a shell. |
 
 One audit at a time owns a result tree: a second run on the same target and
 backend exits with `another bin/audit instance is writing to …`. A lock left

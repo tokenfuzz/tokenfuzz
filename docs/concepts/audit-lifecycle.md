@@ -38,8 +38,7 @@ builds against it, and records its revision, but audit output stays under
 
 If `target.toml` is missing, `bin/audit --target <slug>` seeds a starter config
 automatically before loading it. You can also seed or refresh it explicitly
-with `bin/setup-target <slug>`, or use `bin/audit --new-target <slug>` to
-generate the file and exit.
+with `bin/setup-target <slug>`.
 
 ## 2. Build the sanitizer artifact
 

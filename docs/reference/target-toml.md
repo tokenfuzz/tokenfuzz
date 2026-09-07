@@ -461,7 +461,7 @@ peers  = ["libexpat", "Xerces-C++", "rapidxml"]
 ```
 
 Empty or missing values are fine. The section only suggests additional
-strategy material. `bin/audit --new-target` can also LLM-bootstrap a real
+strategy material. `bin/setup-target` can also LLM-bootstrap a real
 `[threat_model]` and `[s6_peers]` instead of the conservative defaults; you
 can re-run that derivation at any time:
 
