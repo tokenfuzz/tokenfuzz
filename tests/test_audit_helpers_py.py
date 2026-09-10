@@ -531,6 +531,12 @@ provider_cases = [
         "provider-issue: quoted JSON code 429 is capacity-limited",
     ),
     (
+        [{"type": "error",
+          "message": "Selected model is at capacity. Please try a different model."}],
+        "capacity_limited",
+        "provider-issue: codex model-capacity error is capacity-limited",
+    ),
+    (
         [{"type": "error", "error": {"code": 503, "message": "backend unavailable"}}],
         "transient",
         "provider-issue: quoted JSON code 503 is transient",
@@ -660,6 +666,20 @@ provider_cases = [
         }],
         "backend_rejected",
         "provider-issue: a model safeguard fallback rejects the requested backend",
+    ),
+    (
+        [{"type": "error", "message": "Invalid prompt: your prompt was flagged "
+          "as potentially violating our usage policy. Please try again with a "
+          "different prompt."}],
+        "backend_rejected",
+        "provider-issue: a structured prompt-policy rejection is terminal",
+    ),
+    (
+        [{"type": "item.completed", "item": {"type": "command_execution",
+          "aggregated_output": "Invalid prompt: input was flagged as violating "
+          "usage policy"}}],
+        "none",
+        "provider-issue: target output cannot spoof a prompt-policy rejection",
     ),
     (
         # A plain-text CLI relays the audited program's test output verbatim;

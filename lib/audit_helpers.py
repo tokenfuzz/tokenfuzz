@@ -66,8 +66,9 @@ Subcommands (run as `python3 lib/audit_helpers.py <name> ...`):
 
   iteration-provider-status <raw_dir> <timestamp>
       Aggregate an iteration's session_<timestamp>_*.log.raw logs in one pass.
-      Prints rate_limit=<0|1>, issue=<none|transient|capacity_limited>, and
-      reset_at=<epoch|unknown|> (empty when no rejection).
+      Prints rate_limit=<0|1>,
+      issue=<none|transient|capacity_limited|backend_rejected>, and
+      reset_at=<epoch|unknown|> (empty when no retryable rejection).
 
   claims-activity-since <claims_file> <since_epoch>
       Summarize state/claims.jsonl events at or after <since_epoch>.
@@ -1044,7 +1045,8 @@ _PROVIDER_STATUS_CODE_RE = re.compile(
 _PROVIDER_CAPACITY_TEXT_RE = re.compile(
     r'Too Many Requests|RESOURCE_EXHAUSTED|Individual quota reached|'
     r'exceeded your current quota|exhausted your capacity|quota reached|'
-    r'quota will reset|rate_limit_error|rate.?limit.*(?:exceeded|reached)',
+    r'quota will reset|model is at capacity|rate_limit_error|'
+    r'rate.?limit.*(?:exceeded|reached)',
     re.IGNORECASE,
 )
 
@@ -1095,6 +1097,18 @@ _PROVIDER_CREDENTIAL_TEXT_RE = re.compile(
 _PROVIDER_UNSERVABLE_TEXT_RE = re.compile(
     r'requires a newer version|upgrade to the latest|unknown model|'
     r'model[^.\n]{0,40}(?:not found|not supported|unsupported|does not exist)',
+    re.IGNORECASE,
+)
+
+# A provider safeguard rejected the submitted prompt. Codex emits this exact
+# shape as a structured error event, followed by turn.failed. Repeating the
+# same prompt cannot clear it, so treat it like the model/credential refusals
+# above. The conjunction stays deliberately narrow and is only consulted in a
+# backend error event below; audited programs and model prose can safely quote
+# either half without halting the run.
+_PROVIDER_PROMPT_REJECTION_RE = re.compile(
+    r'invalid prompt[^.\n]{0,120}(?:flagged|violat(?:e|ing|ion))[^.\n]{0,120}'
+    r'(?:usage )?policy',
     re.IGNORECASE,
 )
 
@@ -1272,6 +1286,8 @@ def _provider_issue_from_lines(
             if is_error_event and (
                 status == "refused" or _PROVIDER_CREDENTIAL_TEXT_RE.search(line)
             ):
+                refused = True
+            if is_error_event and _PROVIDER_PROMPT_REJECTION_RE.search(line):
                 refused = True
             # A plain line has to name the credential: a bare 401 there is as
             # often the audited program's HTTP client writing to a plain-text
@@ -2041,7 +2057,7 @@ def _build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=_cmd_raw_status)
 
     s = sub.add_parser("provider-issue",
-                       help="Classify provider failures as none, transient, or capacity_limited.")
+                       help="Classify provider failures as none, transient, capacity_limited, or backend_rejected.")
     s.add_argument("log_file")
     s.set_defaults(func=_cmd_provider_issue)
 
