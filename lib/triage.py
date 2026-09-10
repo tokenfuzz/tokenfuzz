@@ -22,6 +22,7 @@ import cluster_common
 import crash_artifacts
 import crash_bundle
 import finding_signature
+import languages
 import llm_decide
 import llm_usage
 import report_identity
@@ -63,7 +64,7 @@ _RUNTIME_DIAGNOSTIC = re.compile(
     r"|^Exception in thread|java\.lang\.(?:OutOfMemoryError|StackOverflowError|NullPointerException"
     r"|IndexOutOfBoundsException|VerifyError|ClassCastException)"
     r"|^Fatal Python error:|^Traceback \(most recent call last\):"
-    r"|^\[BUG\]|\(NoMemoryError\)|SystemStackError|stack level too deep"
+    rf"|^\[BUG\]|{languages.RUBY_EXCEPTION_PATTERN}|\(NoMemoryError\)|SystemStackError|stack level too deep"
     r"|^FATAL ERROR:.*(?:heap out of memory|Allocation failed)|RangeError: Maximum call stack"
     r"|^PHP Fatal error:|^Fatal error:|^Uncaught \w+Error:",
     re.MULTILINE,

@@ -42,6 +42,18 @@ class FindingCrashRoutingTests(unittest.TestCase):
         (directory / "sanitizer.txt").write_text(diagnostic, encoding="utf-8")
         return directory
 
+    def test_ruby_uncaught_exception_is_a_findings_only_diagnostic(self) -> None:
+        diagnostic = (
+            "/tmp/sample.rb:9:in 'Sample#parse': invalid value "
+            "(Sample::ParseError)\n"
+        )
+        self.assertTrue(triage.has_valid_diagnostic(
+            diagnostic, findings_only=True,
+        ))
+        self.assertFalse(triage.has_valid_diagnostic(
+            diagnostic, findings_only=False,
+        ))
+
     def test_complete_memory_diagnostic_routes_to_crash_triage(self) -> None:
         directory = self.finding("FIND-001")
         (directory / "input.bin").write_bytes(b"input")

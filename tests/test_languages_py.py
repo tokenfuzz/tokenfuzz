@@ -23,14 +23,17 @@ still works.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 import languages
+import verdict
 import workqueue
 import target_config
 import crash_artifacts
@@ -82,6 +85,26 @@ def assert_not_in(needle, haystack, name: str) -> None:
         passed(name)
     else:
         failed(name, f"{needle!r} unexpectedly in {haystack!r}")
+
+
+# SwiftPM metadata discovery runs inside the audit sandbox, so both SwiftPM
+# itself and Clang must use target-local writable state.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    described = subprocess.CompletedProcess(
+        [], 0, stdout='{"name": "Sample", "products": [], "targets": []}', stderr="",
+    )
+    with mock.patch.object(languages.subprocess, "run", return_value=described) as run_swift:
+        languages.swift_package_info(root)
+    command = run_swift.call_args.args[0]
+    environment = run_swift.call_args.kwargs["env"]
+    assert_in("--disable-sandbox", command,
+              "SwiftPM metadata disables its nested sandbox")
+    assert_true(environment["SWIFTPM_MODULECACHE_OVERRIDE"].startswith(str(root)),
+                "SwiftPM metadata uses target-local module cache")
+    assert_true(environment["CLANG_MODULE_CACHE_PATH"].startswith(str(root)),
+                "SwiftPM metadata gives Clang the target-local module cache")
 
 
 # ─── 1. Required languages are present ─────────────────────────────
@@ -149,6 +172,15 @@ assert_in("RUBYLIB={TARGET_ROOT}/lib",
 assert_in("RUBYOPT=-rbundler/setup",
           languages.for_build_system("bundler").runner_env,
           "Ruby runner activates the target's vendored bundle")
+with tempfile.TemporaryDirectory() as td:
+    ruby_error = Path(td) / "runner.txt"
+    ruby_error.write_text(
+        "/tmp/sample.rb:9:in 'Sample#parse': invalid value (Sample::ParseError)\n",
+        encoding="utf-8",
+    )
+    assert_true(verdict.file_has_crash(
+        ruby_error, languages.for_build_system("bundler").crash_patterns,
+    ), "Ruby runner recognizes the standard uncaught-exception header")
 assert_eq("java", languages.for_build_system("maven").name,
           "for_build_system: maven -> java")
 assert_eq("java", languages.for_build_system("gradle").name,
@@ -366,6 +398,12 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap: R install stays target-local")
     (tmp_root / "DESCRIPTION").unlink()
 
+    (tmp_root / "build.gradle").write_text("plugins { id 'java' }\n")
+    gradle_cmd = languages.bootstrap_for_target(tmp_root, "gradle")[0]
+    assert_in("-Dorg.gradle.configuration-cache=false", gradle_cmd,
+              "bootstrap: injected Gradle task disables incompatible configuration cache")
+    (tmp_root / "build.gradle").unlink()
+
     # go.mod -> go primes the default cache, so no probe compiles std inside
     # its run deadline, then builds with -race (Go's maintained sanitizer).
     (tmp_root / "go.mod").write_text("module x\n")
@@ -376,10 +414,17 @@ with tempfile.TemporaryDirectory() as td:
     assert_in("-race", cmds[1],
               "bootstrap: go enables -race data-race detector")
     go_plan = languages.bootstrap_plan_for_target(tmp_root, "go")
-    assert_eq(1, len(go_plan["alternatives"]),
-              "bootstrap: go keeps a build for a host without cgo")
-    assert_not_in("-race", go_plan["alternatives"][0],
-                  "bootstrap: the go fallback drops the cgo-only detector")
+    assert_eq(3, len(go_plan["alternatives"]),
+              "bootstrap: go keeps race and plain root-package fallbacks")
+    assert_eq(["go", "build", "-race", "-trimpath", "."],
+              go_plan["alternatives"][0],
+              "bootstrap: optional subpackages cannot block the audited root package")
+    assert_not_in("-race", go_plan["alternatives"][1],
+                  "bootstrap: the remaining go fallbacks drop the cgo-only detector")
+    assert_in(["GOCACHE", "{TARGET_ROOT}/.audit/go-build"], go_plan["env"],
+              "bootstrap: go build cache stays under the target")
+    assert_in(["GOMODCACHE", "{TARGET_ROOT}/.audit/go-mod"], go_plan["env"],
+              "bootstrap: go module cache stays under the target")
     (tmp_root / "go.mod").unlink()
 
     # package.json -> npm bootstrap, primary is `npm ci`.
@@ -420,6 +465,20 @@ with tempfile.TemporaryDirectory() as td:
     assert_in("npm", js_primary(root), "js-pm: bare package.json -> npm")
     assert_in("ci", js_primary(root), "js-pm: bare package.json primary is npm ci")
 
+    with mock.patch.object(
+        languages.shutil, "which",
+        side_effect=lambda name: "/usr/bin/python3" if name == "python3" else None,
+    ):
+        shim_plan = languages.bootstrap_plan_for_target(root, "npm")
+    shim = root / ".audit" / "tool-bin" / "python"
+    assert_true(os.access(shim, os.X_OK),
+                "js bootstrap: missing legacy python name gets target-local shim")
+    assert_in(["PYTHON", "/usr/bin/python3"], shim_plan["env"],
+              "js bootstrap: node-gyp receives the discovered Python 3")
+    assert_true(dict(shim_plan["env"])["PATH"].startswith(
+                    "{TARGET_ROOT}/.audit/tool-bin" + os.pathsep),
+                "js bootstrap: shim directory is bootstrap-local PATH prefix")
+
     # pnpm-lock.yaml -> pnpm runs first.
     (root / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n")
     assert_in("pnpm", js_primary(root), "js-pm: pnpm-lock.yaml -> pnpm primary")
@@ -454,6 +513,15 @@ with tempfile.TemporaryDirectory() as td:
     (root / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n")
     assert_in("pnpm", js_primary(root),
               "js-pm: lockfile outranks packageManager field")
+    (root / "package-lock.json").write_text("{}\n")
+    with mock.patch.object(
+        languages.subprocess, "run",
+        return_value=subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="package-lock.json\n", stderr="",
+        ),
+    ):
+        assert_in("npm", js_primary(root),
+                  "js-pm: tracked lock outranks a foreign generated lock")
 
 
 # ─── 10. CLI subcommands ───────────────────────────────────────────
@@ -541,6 +609,66 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap-plan npm: declared build runs after dependency install")
 
 with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    member = root / "core"
+    member.mkdir()
+    raw = {
+        "workspace_members": ["core-id"],
+        "packages": [{
+            "id": "core-id", "name": "sample-core",
+            "manifest_path": str(member / "Cargo.toml"),
+            "targets": [
+                {"name": "sample_core", "kind": ["lib"]},
+                {"name": "helper", "kind": ["bin"]},
+            ],
+        }],
+    }
+    info = languages._cargo_workspace_info(raw, root)
+    assert_eq((languages.CargoLibraryProduct("sample-core", "sample_core", "core"),),
+              info.libraries,
+              "Cargo metadata: workspace member library is retained")
+    assert_eq("core", info.executables[0].manifest_dir,
+              "Cargo metadata: executable retains its member manifest")
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    for member in ("app", "tool"):
+        (root / member).mkdir()
+    raw = {
+        "workspace_members": ["app-id", "tool-id"],
+        "workspace_default_members": ["app-id"],
+        "packages": [
+            {
+                "id": "app-id", "name": "sample-app",
+                "manifest_path": str(root / "app" / "Cargo.toml"),
+                "targets": [{"name": "sample_app", "kind": ["lib"]}],
+            },
+            {
+                "id": "tool-id", "name": "helper-tool",
+                "manifest_path": str(root / "tool" / "Cargo.toml"),
+                "targets": [{"name": "helper", "kind": ["bin"]}],
+            },
+        ],
+    }
+    info = languages._cargo_workspace_info(raw, root)
+    assert_eq("sample_app", languages.preferred_cargo_libraries(info)[0].crate,
+              "Cargo metadata: direct harnesses prefer a default member library")
+    assert_eq(False, info.executables[0].default_member,
+              "Cargo metadata: non-default workspace tools remain distinguishable")
+    with mock.patch.object(languages, "cargo_workspace_info", return_value=info):
+        assert_eq(("{TESTCASE}",), languages.cargo_runner_args(root, "helper-tool"),
+                  "Cargo metadata: a default library beats a non-default helper binary")
+
+    binaries = languages.CargoWorkspaceInfo((), (
+        languages.CargoExecutableProduct("sample-app", "sample-app", "app"),
+        languages.CargoExecutableProduct("sample-app", "helper", "app"),
+    ))
+    with mock.patch.object(languages, "cargo_workspace_info", return_value=binaries):
+        args = languages.cargo_runner_args(root, "sample-app")
+    assert_in("sample-app", args,
+              "Cargo metadata: an exact binary beats other bins in the matching package")
+
+with tempfile.TemporaryDirectory() as td:
     (Path(td) / "composer.json").write_text(json.dumps({
         "require": {"ext-json": "*"},
         "require-dev": {"ext-sample": "*", "sample/tests": "^1"},
@@ -583,6 +711,41 @@ with tempfile.TemporaryDirectory() as td:
 
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
+    (root / "sample.gemspec").write_text("Gem::Specification.new {}\n")
+    entrypoint = root / "lib" / "sample.rb"
+    entrypoint.parent.mkdir()
+    entrypoint.write_text("module Sample; end\n")
+    metadata = subprocess.CompletedProcess(
+        [], 0,
+        stdout=json.dumps({
+            "name": "sample", "require_paths": ["lib"],
+            "extensions": ["ext/sample/extconf.rb"],
+        }),
+        stderr="",
+    )
+    with mock.patch.object(
+        languages, "preferred_ruby_toolchain", return_value=("ruby", "bundle"),
+    ), mock.patch.object(languages.subprocess, "run", return_value=metadata):
+        info = languages.ruby_package_info(root)
+    assert_eq("sample", info.entrypoint,
+              "Ruby metadata selects the declared gem entrypoint")
+    assert_eq(str(entrypoint.resolve()), info.entrypoint_path,
+              "Ruby metadata retains the checkout entrypoint path")
+    assert_eq(("ext/sample/extconf.rb",), info.extensions,
+              "Ruby metadata retains declared native extensions")
+    with mock.patch.object(
+        languages, "preferred_ruby_toolchain", return_value=("ruby", "bundle"),
+    ), mock.patch.object(
+        languages, "ruby_package_info", return_value=info,
+    ), mock.patch.dict(os.environ, {"CONFIGURE_ARGS": "--with-sample-dir=/opt/sample"}):
+        plan = languages.bootstrap_plan_for_target(root, "bundler")
+    assert_eq([["bundle", "exec", "rake", "compile"]], plan["post_cmds"],
+              "Ruby bootstrap compiles a root gem's declared extensions")
+    assert_in(["CONFIGURE_ARGS", "--with-sample-dir=/opt/sample"], plan["env"],
+              "Ruby bootstrap records standard native configure arguments")
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
     old_bin = root / "old" / "bin"
     new_bin = root / "new" / "bin"
     old_bin.mkdir(parents=True)
@@ -620,6 +783,12 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap-plan Perl: resolves declared CPAN dependencies")
     assert_in("--verbose", plan["cmds"][0],
               "bootstrap-plan Perl: exposes configure prerequisite diagnostics")
+    assert_in("--mirror-only", plan["cmds"][0],
+              "bootstrap-plan Perl: avoids the optional per-module metadata service")
+    assert_in(["PERL_CPANM_HOME", "{TARGET_ROOT}/.audit/cpanm"], plan["env"],
+              "bootstrap-plan Perl: keeps installer state inside the target")
+    assert_in("NO_COLOR", plan["unset_env"],
+              "bootstrap-plan Perl: isolates dependency tests from display policy")
     assert_in("{TARGET_ROOT}", plan["env"][0][1],
               "bootstrap-plan Perl: requests an absolute local-library path")
     assert_true(any(value.startswith(".audit/perl5/") for value in plan["cmds"][0]),
@@ -630,6 +799,24 @@ with tempfile.TemporaryDirectory() as td:
     rebuilt = languages.bootstrap_plan_for_target(root, "perl")
     assert_eq(["make", "realclean"], rebuilt["cmds"][0],
               "bootstrap-plan Perl: cleans generated native artifacts before rebuild")
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / "dist.ini").write_text("name = Sample\nversion = 1\n")
+    with mock.patch.object(
+        languages, "preferred_perl_toolchain", return_value=("perl", "cpanm"),
+    ), mock.patch.object(
+        languages, "perl_local_lib_root", return_value=".audit/perl5",
+    ):
+        plan = languages.bootstrap_plan_for_target(root, "perl")
+    assert_eq("Dist::Zilla", plan["cmds"][0][-1],
+              "bootstrap-plan Perl: author checkout installs its declared build tool")
+    assert_in("authordeps", plan["module_queries"][0]["cmd"],
+              "bootstrap-plan Perl: asks Dist::Zilla for author dependencies")
+    assert_in("--cpanm-versions", plan["module_queries"][0]["cmd"],
+              "bootstrap-plan Perl: requests cpanm's structured requirement format")
+    assert_eq(".audit/perl-dist", plan["post_cmds"][0][-1],
+              "bootstrap-plan Perl: materializes a release tree before installation")
 
 with tempfile.TemporaryDirectory() as td:
     (Path(td) / "setup.py").write_text("# x\n")
@@ -661,12 +848,17 @@ with tempfile.TemporaryDirectory() as td:
             [sys.executable, "-c", "import os; print(os.environ['SETUP_SENTINEL'])"],
         ],
         "post_cmds": [
-            [sys.executable, "-c", "print('post-ok')"],
+            [sys.executable, "-c",
+             "import os; assert 'REMOVE_SENTINEL' not in os.environ; print('post-ok')"],
         ],
         "env": [["SETUP_SENTINEL", "fallback ok"],
                 ["ROOT_SENTINEL", "{TARGET_ROOT}/deps"]],
+        "unset_env": ["REMOVE_SENTINEL"],
     }
-    rc = languages.execute_bootstrap_plan(target_root, plan, log_path, recipe_path)
+    with mock.patch.dict(os.environ, {"REMOVE_SENTINEL": "host-value"}):
+        rc = languages.execute_bootstrap_plan(
+            target_root, plan, log_path, recipe_path,
+        )
     assert_eq(0, rc, "bootstrap executor: successful final alternative returns zero")
     log_text = log_path.read_text()
     assert_in("first-ok", log_text, "bootstrap executor: logs successful command output")
@@ -687,6 +879,8 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap executor: recipe records successful alternative")
     assert_in("post-ok", recipe_text,
               "bootstrap executor: recipe records successful post-install command")
+    assert_in("unset REMOVE_SENTINEL", recipe_text,
+              "bootstrap executor: recipe records removed host policy")
     assert_eq(True, bool(recipe_path.stat().st_mode & 0o111),
               "bootstrap executor: recipe is executable")
     failed_plan = {
@@ -705,6 +899,44 @@ with tempfile.TemporaryDirectory() as td:
     assert_true("first-ok" not in log_path.read_text(),
                 "bootstrap executor: failed attempt replaces the prior log")
 
+# Failed JS package-manager attempts must not poison the next manager with a
+# partial node_modules tree or a lockfile the failed attempt generated.
+with tempfile.TemporaryDirectory() as td:
+    target_root = Path(td)
+    audit = target_root / ".audit"
+    audit.mkdir()
+    package_lock = target_root / "package-lock.json"
+    package_lock.write_text("tracked\n")
+    failed = (
+        "from pathlib import Path; "
+        "Path('node_modules/partial').mkdir(parents=True); "
+        "Path('pnpm-lock.yaml').write_text('generated'); "
+        "Path('package-lock.json').write_text('changed'); "
+        "raise SystemExit(7)"
+    )
+    fallback = (
+        "from pathlib import Path; "
+        "assert not Path('node_modules').exists(); "
+        "assert not Path('pnpm-lock.yaml').exists(); "
+        "assert Path('package-lock.json').read_text() == 'tracked\\n'"
+    )
+    plan = {
+        "language": "javascript",
+        "cmds": [[sys.executable, "-c", failed]],
+        "alternatives": [[sys.executable, "-c", fallback]],
+        "post_cmds": [], "env": [],
+    }
+    rc = languages.execute_bootstrap_plan(
+        target_root, plan, audit / "bootstrap.log", audit / "bootstrap.sh",
+    )
+    assert_eq(0, rc, "js bootstrap: clean fallback succeeds after failed manager")
+    assert_true(not (target_root / "node_modules").exists(),
+                "js bootstrap: failed manager's partial install is removed")
+    assert_true(not (target_root / "pnpm-lock.yaml").exists(),
+                "js bootstrap: failed manager's generated lock is removed")
+    assert_eq("tracked\n", package_lock.read_text(),
+              "js bootstrap: failed manager's tracked lock change is restored")
+
 # A CPAN repository checkout can need configure prerequisites before cpanm can
 # execute Makefile.PL and discover the rest.  The executor uses cpanm's own
 # diagnostic to install exactly those modules, then retries the unchanged
@@ -721,6 +953,7 @@ with tempfile.TemporaryDirectory() as td:
         "esac\n"
         "if [ ! -f .configured ]; then\n"
         "  echo 'Configuring sample ... Warning: prerequisite Sample::Configure 1.0 not found.'\n"
+        "  echo \"Can't locate Sample/Bootstrap.pm in @INC at Makefile.PL line 4.\"\n"
         "  exit 1\n"
         "fi\n"
         "echo dependencies-ready\n"
@@ -739,6 +972,70 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap executor: retries dependency discovery after repair")
     assert_in("Sample::Configure", recipe_path.read_text(),
               "bootstrap executor: records the cpanm prerequisite repair")
+    assert_in("Sample::Bootstrap", recipe_path.read_text(),
+              "bootstrap executor: repairs Makefile.PL import prerequisites")
+
+# cpanm identifies repository transfer failures explicitly. The executor gives
+# the unchanged command one clean retry so a partial dependency graph can
+# resume from the target-local cache.
+with tempfile.TemporaryDirectory() as td:
+    target_root = Path(td)
+    fake_cpanm = target_root / "cpanm"
+    fake_cpanm.write_text(
+        "#!/bin/sh\n"
+        "if [ ! -f .downloaded ]; then\n"
+        "  touch .downloaded\n"
+        "  echo '! Download https://cpan.example/Sample.tar.gz failed'\n"
+        "  exit 1\n"
+        "fi\n"
+        "echo download-ready\n"
+    )
+    fake_cpanm.chmod(0o755)
+    audit = target_root / ".audit"
+    plan = {
+        "cmds": [[str(fake_cpanm), "Sample"]],
+        "alternatives": [], "post_cmds": [], "env": [],
+    }
+    rc = languages.execute_bootstrap_plan(
+        target_root, plan, audit / "bootstrap.log", audit / "bootstrap.sh",
+    )
+    assert_eq(0, rc, "bootstrap executor: retries a reported CPAN transfer failure")
+    assert_in("download-ready", (audit / "bootstrap.log").read_text(),
+              "bootstrap executor: resumed cpanm after the transfer retry")
+
+# Structured dependency queries let author-oriented build tools report their
+# own missing modules without parsing a target-specific manifest.
+with tempfile.TemporaryDirectory() as td:
+    target_root = Path(td)
+    audit = target_root / ".audit"
+    audit.mkdir()
+    generated = audit / "generated-release"
+    generated.mkdir()
+    (generated / "stale").write_text("old")
+    installed = audit / "installed"
+    installer = (
+        "from pathlib import Path; import sys; "
+        f"Path({str(installed)!r}).write_text(' '.join(sys.argv[1:]))"
+    )
+    plan = {
+        "cmds": [], "alternatives": [], "post_cmds": [], "env": [],
+        "unset_env": [],
+        "module_queries": [{
+            "cmd": [sys.executable, "-c", "print('Sample::Plugin~>= 1.2, < 2')"],
+            "install_prefix": [sys.executable, "-c", installer],
+        }],
+        "clean_dirs": [".audit/generated-release"],
+    }
+    rc = languages.execute_bootstrap_plan(
+        target_root, plan, audit / "bootstrap.log", audit / "bootstrap.sh",
+    )
+    assert_eq(0, rc, "bootstrap executor: installs build-tool-reported modules")
+    assert_eq("Sample::Plugin~>= 1.2, < 2", installed.read_text(),
+              "bootstrap executor: preserves the build tool's version requirement")
+    assert_in("Sample::Plugin~>= 1.2, < 2", (audit / "bootstrap.sh").read_text(),
+              "bootstrap executor: records resolved build dependencies")
+    assert_true(not generated.exists(),
+                "bootstrap executor: removes a stale generated release tree")
 
 # fuzz-backends CLI returns the maintained toolchains per build_system.
 out, _, _ = run(CLI + ["fuzz-backends", "python"])

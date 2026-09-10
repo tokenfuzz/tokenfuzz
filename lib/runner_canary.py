@@ -77,6 +77,13 @@ def skip_reason(config) -> str:
         expected_args = list(languages.java_runner_args(
             config.target_root, config.build_system,
         ))
+    if language.name == "rust":
+        try:
+            expected_args = list(languages.cargo_runner_args(
+                config.target_root, config.slug,
+            ))
+        except ValueError as exc:
+            return str(exc)
     if language.name == "swift":
         try:
             info = languages.swift_package_info(config.target_root)
@@ -91,10 +98,10 @@ def skip_reason(config) -> str:
             return "the Swift package exposes no library product for a source canary"
     if list(config.runner_args) != expected_args:
         return "[runner].args no longer match the registry's own invocation"
-    if language.name == "rust" and not target_config.cargo_root_has_library(
+    if language.name == "rust" and not target_config.cargo_workspace_has_library(
         config.target_root,
     ):
-        return "the root Cargo package exposes no library to depend on"
+        return "the Cargo workspace exposes no library to depend on"
     # Stand aside only when every enabled route has its own binary. In a mixed
     # configuration, the runner still needs proving on the sanitizer it owns.
     if not runner_sanitizer(config):
@@ -124,6 +131,10 @@ def _stage(config, language, tree: Path) -> Path:
     )
     canary = scratch / f"canary{canary_suffix(language)}"
     source = language.canary_source
+    if language.name == "rust":
+        info = languages.cargo_workspace_info(config.target_root)
+        library = languages.preferred_cargo_libraries(info)[0]
+        source = f"use {library.crate} as _;\n{source}"
     if language.name == "swift":
         info = languages.swift_package_info(config.target_root)
         module = info.library_products[0][1][0]
@@ -150,6 +161,23 @@ def _stage(config, language, tree: Path) -> Path:
     }}
 }}
 """
+    if language.name == "ruby":
+        gemspecs = list(Path(config.target_root).glob("*.gemspec"))
+        package = (
+            languages.ruby_package_info(config.target_root)
+            if len(gemspecs) == 1 else None
+        )
+        if package and package.entrypoint:
+            entrypoint = json.dumps(package.entrypoint)
+            expected = json.dumps(package.entrypoint_path)
+            source = f'''require {entrypoint}
+expected = File.realpath({expected})
+loaded = $LOADED_FEATURES.find {{ |path|
+  File.file?(path) && File.realpath(path) == expected
+}}
+abort "audited gem entrypoint was not loaded" unless loaded
+print "{MARKER} path=#{{loaded}}"
+'''
     if language.name == "perl":
         module = languages.perl_canary_module(config.target_root)
         if module:
@@ -161,7 +189,7 @@ my $module = {quoted};
 require $module;
 my $package = $module;
 $package =~ s{{/}}{{::}}g;
-$package =~ s{{\.pm$}}{{}};
+$package =~ s{{\\.pm$}}{{}};
 $package->import() if $package->can("import");
 print "{MARKER} path=" . Cwd::abs_path($INC{{$module}});
 '''

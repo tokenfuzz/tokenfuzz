@@ -113,6 +113,8 @@ class MultiLanguageSupportTests(unittest.TestCase):
         go_env = target_config.language_runner_defaults("go")["env"]
         self.assertIn("GOFLAGS=-mod=mod", go_env)
         self.assertIn("GORACE=halt_on_error=1", go_env)
+        self.assertIn("GOCACHE={TARGET_ROOT}/.audit/go-build", go_env)
+        self.assertIn("GOMODCACHE={TARGET_ROOT}/.audit/go-mod", go_env)
         self.assertIn("-race", target_config.language_runner_defaults("go")["args"])
         self.assertEqual(
             languages.default_sanitizers_for_build_system("go"), ("race",)
@@ -123,6 +125,15 @@ class MultiLanguageSupportTests(unittest.TestCase):
         cargo_env = target_config.language_runner_defaults("cargo")["env"]
         self.assertIn("CARGO_HOME={TARGET_ROOT}/.audit/cargo-home", cargo_env)
         self.assertIn("CARGO_NET_OFFLINE=true", cargo_env)
+        swift_env = target_config.language_runner_defaults("swift")["env"]
+        self.assertIn(
+            "CLANG_MODULE_CACHE_PATH={TARGET_ROOT}/.audit/clang-module-cache",
+            swift_env,
+        )
+        self.assertIn(
+            "SWIFTPM_MODULECACHE_OVERRIDE={TARGET_ROOT}/.audit/clang-module-cache",
+            swift_env,
+        )
         swift_args = target_config.language_runner_defaults("swift")["args"]
         self.assertEqual(swift_args, ["{TESTCASE}"])
 
@@ -170,6 +181,41 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertEqual(
             target_config._detect_build_system(delegated), "cmake",
             "a project-owned native target keeps CMake dominant",
+        )
+        swift_cmake = self.root / "swift-cmake"
+        swift_cmake.mkdir()
+        (swift_cmake / "Package.swift").write_text(
+            '// swift-tools-version: 6.0\n', encoding="utf-8",
+        )
+        (swift_cmake / "CMakeLists.txt").write_text(
+            "project(Sample LANGUAGES C CXX Swift)\n"
+            "add_library(Sample STATIC sample.swift)\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            target_config._detect_build_system(swift_cmake), "swift",
+            "an explicitly Swift CMake project keeps its SwiftPM testcase route",
+        )
+        (swift_cmake / "build-asan").mkdir()
+        (swift_cmake / "build-asan" / "libhelper.a").write_bytes(b"!<arch>\n")
+        swift_config = swift_cmake / "target.toml"
+        with mock.patch.object(
+            target_config.languages, "swift_runner_args",
+            return_value=("{TESTCASE}",),
+        ):
+            target_config.seed_toml(swift_cmake, swift_config, "")
+        self.assertNotRegex(
+            swift_config.read_text(), r"(?m)^asan_lib\s*=",
+            "a managed runner does not inherit an archive from an older native build",
+        )
+        (swift_cmake / "CMakeLists.txt").write_text(
+            "project(Sample LANGUAGES C CXX)\n"
+            "add_library(Sample STATIC sample.c)\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            target_config._detect_build_system(swift_cmake), "cmake",
+            "a Package.swift beside a native-only CMake project does not override it",
         )
 
         managed = (
@@ -261,6 +307,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertEqual(args[0], "@{TARGET_ROOT}/.audit/java-runner.args")
         self.assertEqual(args[-1], "{TESTCASE}")
         rendered = argfile.read_text(encoding="utf-8")
+        self.assertNotIn("--enable-native-access", rendered)
         self.assertIn(str(classes.resolve()), rendered)
         self.assertIn(str(dependency.resolve()), rendered)
         module_args = languages.java_probe_runner_args(
@@ -300,12 +347,42 @@ class MultiLanguageSupportTests(unittest.TestCase):
         compiled = classes / "example" / "PublicApi.class"
         compiled.parent.mkdir(parents=True)
         compiled.write_bytes(b"compiled")
+        resources = module / "build" / "resources" / "main"
+        resources.mkdir(parents=True)
+        (resources / "engine.properties").write_text("name=sample\n")
         dependency = self.root / "dependency.jar"
         dependency.write_bytes(b"jar")
         receipt = module / "build" / "tokenfuzz-classpath.txt"
         receipt.parent.mkdir(parents=True, exist_ok=True)
         receipt.write_text(
             os.pathsep.join((str(classes), str(dependency))), encoding="utf-8",
+        )
+        support = self.target / "support"
+        support_classes = support / "build" / "classes" / "java" / "main"
+        support_class = support_classes / "example" / "Support.class"
+        support_class.parent.mkdir(parents=True)
+        support_class.write_bytes(b"compiled")
+        missing_support_jar = support / "build" / "libs" / "support-1.jar"
+        receipt.write_text(
+            os.pathsep.join((str(classes), str(missing_support_jar), str(dependency))),
+            encoding="utf-8",
+        )
+        transitive = self.root / "transitive.jar"
+        transitive.write_bytes(b"transitive")
+        support_receipt = support / "build" / "tokenfuzz-classpath.txt"
+        support_receipt.write_text(
+            os.pathsep.join((str(support_classes), str(transitive))),
+            encoding="utf-8",
+        )
+        other = self.target / "other"
+        other_classes = other / "build" / "classes" / "java" / "main"
+        other_classes.mkdir(parents=True)
+        other_dependency = self.root / "other-dependency.jar"
+        other_dependency.write_bytes(b"other")
+        other_receipt = other / "build" / "tokenfuzz-classpath.txt"
+        other_receipt.write_text(
+            os.pathsep.join((str(other_classes), str(other_dependency))),
+            encoding="utf-8",
         )
         wrapper = self.target / "gradlew"
         wrapper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -319,16 +396,31 @@ class MultiLanguageSupportTests(unittest.TestCase):
         generated = init_script.read_text(encoding="utf-8")
         self.assertIn("jvmMainClasses", generated)
         self.assertIn("jvmRuntimeClasspath", generated)
+        self.assertIn("resources/main", generated)
+        self.assertIn("processedResources/jvm/main", generated)
+        self.assertNotIn("tasks.matching", generated)
+        self.assertIn("tasks.findByName(name)", generated)
 
         entries = languages.java_classpath_entries(self.target, "gradle")
         self.assertIn(str(classes.resolve()), entries)
+        self.assertIn(str(resources.resolve()), entries)
         self.assertIn(str(dependency.resolve()), entries)
+        targeted = languages.java_probe_runner_args(
+            self.target, "gradle", "module/src/main/kotlin/example/PublicApi.kt:1",
+        )
+        targeted_classpath = targeted[1].split(os.pathsep)
+        self.assertIn(str(dependency.resolve()), targeted_classpath)
+        self.assertIn(str(support_classes.resolve()), targeted_classpath)
+        self.assertIn(str(transitive.resolve()), targeted_classpath)
+        self.assertNotIn(str(missing_support_jar.resolve()), targeted_classpath)
+        self.assertNotIn(str(other_dependency.resolve()), targeted_classpath)
         self.assertEqual(
             languages.java_canary_classes(self.target, "gradle"),
-            ("example.PublicApi",),
+            ("example.PublicApi", "example.Support"),
         )
         argfile = languages.write_java_runner_argfile(self.target, "gradle")
         self.assertIn(str(classes.resolve()), argfile.read_text(encoding="utf-8"))
+        self.assertIn(str(resources.resolve()), argfile.read_text(encoding="utf-8"))
 
     @unittest.skipUnless(GO, "Go toolchain is required")
     def test_go_testcase_runs_in_target_module_context(self) -> None:
@@ -344,7 +436,9 @@ class MultiLanguageSupportTests(unittest.TestCase):
             'target = "multilang"\nbuild_system = "go"\n'
             '[sanitizer]\nenabled = []\n'
             '[runner]\nbin = "go"\nargs = ["run", "{TESTCASE}"]\n'
-            'env = ["GOFLAGS=-mod=mod"]\n',
+            'env = ["GOFLAGS=-mod=mod", '
+            '"GOCACHE={TARGET_ROOT}/.audit/go-build", '
+            '"GOMODCACHE={TARGET_ROOT}/.audit/go-mod"]\n',
         )
         testcase = self.make_testcase(
             scratch / "route.go",
@@ -400,6 +494,14 @@ class MultiLanguageSupportTests(unittest.TestCase):
                 ["npm", "--prefix", "web/app", "run", "build"],
             ],
         )
+        with mock.patch.object(
+            languages.shutil, "which",
+            side_effect=lambda name: (
+                "/usr/bin/python3" if name == "python3" else None
+            ),
+        ):
+            shim_plan = languages.bootstrap_plan_for_target(target, "go")
+        self.assertIn(["PYTHON", "/usr/bin/python3"], shim_plan["env"])
         (package / "dist").mkdir()
         self.assertFalse(languages._go_embed_asset_commands(target))
 
@@ -496,6 +598,31 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertIn("[runner].args", runner_canary.skip_reason(config))
         self.assertEqual(runner_canary.check(config), "")
 
+    def test_ruby_runner_canary_loads_the_root_gem_entrypoint(self) -> None:
+        """A load-path-only canary must not bless an unbuilt native gem."""
+        (self.target / "sample.gemspec").write_text("", encoding="utf-8")
+        entrypoint = self.target / "lib" / "sample.rb"
+        entrypoint.parent.mkdir(parents=True)
+        entrypoint.write_text("require 'sample/ext'\n", encoding="utf-8")
+        package = languages.RubyPackageInfo(
+            "sample", "sample", str(entrypoint.resolve()),
+            ("ext/sample/extconf.rb",),
+        )
+        config = target_config.Config(
+            slug="sample", target_root=str(self.target),
+            results_dir=str(self.root / "unused"),
+        )
+        tree = self.root / "ruby-canary"
+        with mock.patch.object(
+            languages, "ruby_package_info", return_value=package,
+        ):
+            canary = runner_canary._stage(
+                config, languages.for_build_system("bundler"), tree,
+            )
+        source = canary.read_text(encoding="utf-8")
+        self.assertIn('require "sample"', source)
+        self.assertIn(str(entrypoint.resolve()), source)
+
     def test_runner_canary_checks_the_runner_owned_sanitizer_route(self) -> None:
         """One sanitizer binary must not hide another sanitizer's runner route."""
         scratch = self.tree(
@@ -533,13 +660,15 @@ class MultiLanguageSupportTests(unittest.TestCase):
                 else 'fn main() { println!("TARGET_REACHED"); }\n',
                 encoding="utf-8",
             )
+        args = json.dumps(list(languages.cargo_runner_args(
+            self.target, "multilang",
+        )))
         return self.canary_config(self.tree(
             name,
             'target = "multilang"\nbuild_system = "cargo"\n'
             '[sanitizer]\nenabled = []\n'
             '[runner]\nbin = "cargo"\n'
-            'args = ["run", "--quiet", "--manifest-path", '
-            '"{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]\n',
+            f'args = {args}\n',
         ))
 
     def test_runner_canary_does_not_treat_a_binary_crate_as_a_dependency(self) -> None:
@@ -556,6 +685,43 @@ class MultiLanguageSupportTests(unittest.TestCase):
             "canary-rust-lib-and-bin", "lib.rs", "main.rs",
         )
 
+        self.assertEqual("", runner_canary.skip_reason(config))
+
+    @unittest.skipUnless(CARGO, "Cargo toolchain is required")
+    def test_virtual_cargo_workspace_routes_direct_testcase_to_member_library(self) -> None:
+        """A virtual root must not turn a built workspace into an unusable runner."""
+        member = self.target / "sample-core"
+        (member / "src").mkdir(parents=True)
+        (self.target / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["sample-core"]\nresolver = "2"\n',
+            encoding="utf-8",
+        )
+        (member / "Cargo.toml").write_text(
+            '[package]\nname = "sample-core"\nversion = "0.1.0"\n'
+            'edition = "2021"\n',
+            encoding="utf-8",
+        )
+        (member / "src" / "lib.rs").write_text(
+            'pub fn marker() -> &\'static str { "TARGET_REACHED" }\n',
+            encoding="utf-8",
+        )
+        scratch = self.tree(
+            "rust-workspace-library",
+            'target = "multilang"\nbuild_system = "cargo"\n'
+            '[sanitizer]\nenabled = []\n'
+            '[runner]\nbin = "cargo"\nargs = ["{TESTCASE}"]\n',
+        )
+        testcase = self.make_testcase(
+            scratch / "route.rs",
+            'fn main() { println!("{}", sample_core::marker()); }\n',
+        )
+
+        result = self.run_probe(testcase)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = testcase.with_suffix(".asan.txt").read_text(encoding="utf-8")
+        self.assertIn("TARGET_REACHED", output)
+        config = self.canary_config(scratch)
         self.assertEqual("", runner_canary.skip_reason(config))
 
     def test_probe_runs_without_tomllib(self) -> None:

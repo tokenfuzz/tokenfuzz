@@ -283,10 +283,16 @@ facade = (nroot / "output" / "benchmark" / "codex" / "run-1" / "cells"
 (facade / "target.toml").write_text('target = "cjson"\n', encoding="utf-8")
 (facade / "codex" / "results" / ".session-env").write_text(
     "RESULTS_DIR=facade\n", encoding="utf-8")
+# Repository-wide runtime state may contain arbitrary receipts. Hidden output
+# directories cannot be target slug components and must not be searched.
+hidden = nroot / "output" / ".setup-target" / "receipt"
+hidden.mkdir(parents=True)
+(hidden / "target.toml").write_text(
+    'target = "not-a-target"\n', encoding="utf-8")
 roots = sorted(str(r.relative_to(nroot / "output"))
                for r in tc.iter_target_roots(nroot / "output"))
 assert_eq(["samples/sample-x"], roots,
-          "iter_target_roots excludes benchmark repo-root facades")
+          "iter_target_roots excludes benchmark artifacts and hidden runtime state")
 found = tc.find_session_dir(nroot)
 assert_eq(n_results.resolve(), found.resolve() if found else None,
           "find_session_dir skips a benchmark facade and returns the real target")

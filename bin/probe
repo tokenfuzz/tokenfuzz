@@ -542,29 +542,38 @@ class HarnessBuilder:
         matches the bootstrap build: `debug_assert!` and overflow checks fire on
         conditions a shipped build does not have.
         """
-        manifest = Path(self.probe.config.target_root) / "Cargo.toml"
-        try:
-            raw = target_config.parse_toml(manifest)
-            package = raw["package"]
-            package_name = str(package["name"])
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        root = Path(self.probe.config.target_root)
+        info = languages.cargo_workspace_info(root)
+        named = self._rust_named_crates()
+        selected = [
+            row for row in info.libraries
+            if named is not None and row.crate in named
+        ]
+        if not selected:
+            preferred = languages.preferred_cargo_libraries(info)
+            selected = list(preferred[:1])
+        if not selected:
             raise ValueError(
-                f"Rust testcases need a root Cargo package in {manifest}: {exc}"
-            ) from exc
-        library = raw.get("lib", {})
-        crate_name = str(library.get("name") or package_name.replace("-", "_"))
+                f"Rust testcases need a library target in {root / 'Cargo.toml'}"
+            )
         project = binary.with_suffix(".cargo")
         project.mkdir(parents=True, exist_ok=True)
         harness_name = f"tokenfuzz_harness_{hashlib.sha1(str(binary).encode()).hexdigest()[:12]}"
         harness_manifest = project / "Cargo.toml"
         quote = target_config.toml_basic_string
         dependencies = [
-            f"{quote(crate_name)} = {{ package = {quote(package_name)}, "
-            f"path = {quote(self.probe.config.target_root)} }}"
+            f"{quote(row.crate)} = {{ package = {quote(row.package)}, "
+            f"path = {quote(str(root / row.manifest_dir))} }}"
+            for row in selected
         ]
-        dev_dependencies = raw.get("dev-dependencies", {})
+        root_package = target_config._cargo_root_package(root)
+        if root_package is not None:
+            raw, package = root_package
+            package_name = str(package["name"])
+            dev_dependencies = raw.get("dev-dependencies", {})
+        else:
+            raw, package_name, dev_dependencies = {}, "", {}
         if isinstance(dev_dependencies, dict) and dev_dependencies:
-            named = self._rust_named_crates()
             for name, spec in dev_dependencies.items():
                 # Carry only what this testcase names. Cargo builds a normal
                 # dependency whether or not it is used, so an unused one that
@@ -683,6 +692,9 @@ class HarnessBuilder:
         environment = runner_preflight.runner_environment(
             self.probe.config, self.probe.sanitizer,
         )
+        module_cache = str(root / ".audit" / "clang-module-cache")
+        environment["CLANG_MODULE_CACHE_PATH"] = module_cache
+        environment["SWIFTPM_MODULECACHE_OVERRIDE"] = module_cache
         completed = subprocess.run(
             ["swift", "build", *common], capture_output=True, check=False,
             env=environment,
@@ -1158,14 +1170,25 @@ class Probe:
             override, preargs, self.build_kind = HarnessBuilder(
                 self, self.exec_testcase,
             ).build()
-        elif self._runs_cargo() and target_config.cargo_package_is_library_only(
-            self.config.target_root,
-        ):
-            raise ValueError(
-                "Cargo library target has no binary for opaque input; write a "
-                "direct .rs public-API testcase, or a `// HARNESS: <name>.rs` "
-                "driver beside the input, and run it with bin/probe"
-            )
+        elif self._runs_cargo():
+            configured = tuple(self.config.runner_args)
+            legacy = languages.for_build_system("cargo")
+            source_route = configured == ("{TESTCASE}",)
+            # Configs seeded before Cargo workspace discovery used the
+            # registry's generic `cargo run` route. Reinspect only that legacy
+            # shape: current generated routes and operator-curated invocations
+            # already say exactly what they execute, so a metadata subprocess
+            # on every probe would add cost without strengthening the guard.
+            if legacy is not None and configured == legacy.runner_args:
+                source_route = list(languages.cargo_runner_args(
+                    self.config.target_root, self.config.slug,
+                )) == ["{TESTCASE}"]
+            if source_route:
+                raise ValueError(
+                    "Cargo library target has no binary for opaque input; write a "
+                    "direct .rs public-API testcase, or a `// HARNESS: <name>.rs` "
+                    "driver beside the input, and run it with bin/probe"
+                )
         elif self._runs_swift() and self.exec_testcase.suffix.lower() == ".swift":
             override, preargs, self.build_kind = HarnessBuilder(
                 self, self.exec_testcase,

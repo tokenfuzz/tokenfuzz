@@ -239,6 +239,16 @@ SANITIZER_RUNNER_BUILD_SYSTEMS = frozenset(
     for build_system in language.build_systems
 )
 
+# Package systems whose registry runner owns testcase execution.  Their old
+# build-asan trees may contain unrelated native archives, while an unknown or
+# C/C++ build can legitimately expose only a discovered native artifact.
+LANGUAGE_RUNNER_BUILD_SYSTEMS = frozenset(
+    build_system
+    for language in languages.LANGUAGES
+    if language.name not in {"c", "cpp"}
+    for build_system in language.build_systems
+)
+
 # .session-env keys trusted by the runtime.
 SESSION_ENV_ALLOW = (
     "RESULTS_DIR", "TARGET_ROOT", "TARGET_SLUG",
@@ -497,9 +507,10 @@ def iter_target_roots(output_root: str | os.PathLike) -> Iterator[Path]:
     A target root is a directory holding target.toml; its slug (path relative
     to output_root) may be nested, e.g. output/samples/sample-c. The walk
     descends through container dirs (output/samples/) but never into a target
-    root's own subtree, skips the benchmark artifact tree, and never follows a
-    nested output/ — so a benchmark repo-root facade is excluded regardless of
-    where --bench-root points.
+    root's own subtree, hidden runtime state, or the benchmark artifact tree,
+    and never follows a nested output/ — so a benchmark repo-root facade is
+    excluded regardless of where --bench-root points. Target path components
+    cannot start with a dot, so a hidden directory cannot be a target.
     """
     root = Path(output_root)
 
@@ -509,7 +520,10 @@ def iter_target_roots(output_root: str | os.PathLike) -> Iterator[Path]:
             # the source tree (which contains its own output/), so following it
             # would recurse without bound. is_dir() alone follows the link.
             entries = sorted(
-                p for p in d.iterdir() if _is_dir(p) and not p.is_symlink()
+                p for p in d.iterdir()
+                if not p.name.startswith(".")
+                and _is_dir(p)
+                and not p.is_symlink()
             )
         except OSError:
             return
@@ -2808,6 +2822,27 @@ def _cmake_delegated_language(target_root: Path) -> str:
         except OSError:
             continue
     body = "\n".join(bodies)
+    # A Swift package remains the public build boundary when the same root's
+    # CMake project explicitly enables Swift.  Treating it as a generic CMake
+    # library loses the SwiftPM product metadata and makes artifact discovery
+    # choose an arbitrary native archive from a mixed-language build instead
+    # of compiling a testcase against the declared Swift module.
+    if (
+        (target_root / "Package.swift").is_file()
+        and (
+            re.search(
+                r"\bproject\s*\([^)]*\bLANGUAGES\b[^)]*\bSwift\b",
+                body,
+                re.IGNORECASE | re.DOTALL,
+            )
+            or re.search(
+                r"\benable_language\s*\(\s*Swift(?:\s|\))",
+                body,
+                re.IGNORECASE,
+            )
+        )
+    ):
+        return "swift"
     # A project-owned compiled target makes CMake the primary build. Without
     # one, a custom command that builds and installs a language product is a
     # package-manager build wrapped in CMake orchestration.
@@ -2978,46 +3013,12 @@ def _cargo_root_package(root: Path) -> tuple[dict, dict] | None:
     return (raw, package) if isinstance(package, dict) else None
 
 
-def cargo_root_has_library(target_root: str | os.PathLike[str]) -> bool:
-    """Whether the root Cargo package declares or autodiscovers a library.
-
-    Cargo ignores a path dependency on a package without one -- with a warning,
-    not an error -- so a detached testcase that depends on the audited crate
-    builds either way, and building proves nothing unless this is True.
-    """
-    root = Path(target_root)
-    parsed = _cargo_root_package(root)
-    if parsed is None:
+def cargo_workspace_has_library(target_root: str | os.PathLike[str]) -> bool:
+    """Whether Cargo declares a linkable library anywhere in this workspace."""
+    try:
+        return bool(languages.cargo_workspace_info(target_root).libraries)
+    except ValueError:
         return False
-    raw, package = parsed
-    return isinstance(raw.get("lib"), dict) or (
-        package.get("autolib") is not False
-        and (root / "src" / "lib.rs").is_file()
-    )
-
-
-def cargo_package_is_library_only(
-    target_root: str | os.PathLike[str],
-) -> bool:
-    """Whether the root Cargo package certainly has a library and no binary.
-
-    Unreadable manifests, virtual workspaces, packages with no library target,
-    and any declared or autodiscovered binary return False. Callers may route
-    away from ``cargo run`` only on the certain answer.
-    """
-    root = Path(target_root)
-    parsed = _cargo_root_package(root)
-    if parsed is None or not cargo_root_has_library(root):
-        return False
-    raw, package = parsed
-    if raw.get("bin") or package.get("default-run"):
-        return False
-    if package.get("autobins") is False:
-        return True
-    bin_dir = root / "src" / "bin"
-    return not (root / "src" / "main.rs").is_file() and not any(
-        bin_dir.glob("*.rs")
-    ) and not any(bin_dir.glob("*/main.rs"))
 
 
 # ─── Per-build-system runner defaults ───────────────────────────────
@@ -3773,6 +3774,15 @@ def language_runner_defaults(
         defaults["args"] = list(
             languages.java_runner_args(target_root, build_system)
         )
+    if build_system == "cargo" and defaults and target_root is not None:
+        try:
+            defaults["args"] = list(
+                languages.cargo_runner_args(target_root, target_slug)
+            )
+        except ValueError:
+            manifest = Path(target_root) / "Cargo.toml"
+            if manifest.is_file() and manifest.stat().st_size:
+                raise
     if build_system == "swift" and defaults and target_root is not None:
         try:
             defaults["args"] = list(
@@ -3999,10 +4009,11 @@ def seed_toml(
 
     asan_bin = ""
     asan_lib = ""
+    native_artifacts = build_system not in LANGUAGE_RUNNER_BUILD_SYSTEMS
 
     if is_browser:
         asan_bin = detect_browser_sanitizer_bin(root, "asan")
-    else:
+    elif native_artifacts:
         # Candidate CLI names come from the target's own build manifests
         # (declared_cli_names), not a hardcoded per-project table. An
         # empty list just means we fall through to the free scan below.
@@ -4125,9 +4136,10 @@ def seed_toml(
     def _san_lib_toml_line(san: str) -> str:
         field = f"{san}_lib"
         pad = " " * (len("ubsan_lib") - len(field))
-        detected = "" if is_browser else detect_sanitizer_build_artifacts(
-            root, san
-        )[1]
+        detected = (
+            detect_sanitizer_build_artifacts(root, san)[1]
+            if native_artifacts and not is_browser else ""
+        )
         if detected:
             return f"{field}{pad} = {toml_basic_string(detected)}"
         return f'# {field}{pad} = "{build_dir_name(san, suffix="")}/FILL_ME.a"'

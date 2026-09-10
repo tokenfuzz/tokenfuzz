@@ -99,9 +99,9 @@ The other ecosystems differ only in the `[runner]` fields:
 | Ecosystem | `build_system` | `bin` | `args` | Notable `env` |
 | --- | --- | --- | --- | --- |
 | Python | `python` | `python3` | `["{TESTCASE}"]` | `PYTHONDEVMODE=1`, `PYTHONPATH={TARGET_ROOT}:{TARGET_ROOT}/src:{TARGET_ROOT}/lib` |
-| Go | `go` | `go` | `["run", "-race", "{TESTCASE}"]` | `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
-| Rust | `cargo` | `cargo` | `["run", "--quiet", "--manifest-path", "{TARGET_ROOT}/Cargo.toml", "--", "{TESTCASE}"]` | `CARGO_HOME={TARGET_ROOT}/.audit/cargo-home`, `CARGO_NET_OFFLINE=true` |
-| Swift library | `swift` | `swift` | `["{TESTCASE}"]` | none |
+| Go | `go` | `go` | `["run", "-race", "{TESTCASE}"]` | module and build caches under `{TARGET_ROOT}/.audit`, `GOFLAGS=-mod=mod`, `GORACE=halt_on_error=1` |
+| Rust | `cargo` | `cargo` | An unambiguous declared binary uses `cargo run`; a library or virtual workspace uses direct `.rs` testcases | `CARGO_HOME={TARGET_ROOT}/.audit/cargo-home`, `CARGO_NET_OFFLINE=true` |
+| Swift library | `swift` | `swift` | `["{TESTCASE}"]` | module cache under `{TARGET_ROOT}/.audit` |
 | Ruby | `bundler` | newest discovered `ruby` | `["{TESTCASE}"]` | target `RUBYLIB` and vendored Bundler environment |
 | Java / JVM | `maven` or `gradle` | `java` | Maven uses `["@{TARGET_ROOT}/.audit/java-runner.args", "{TESTCASE}"]`; an unbuilt tree starts with `["{TESTCASE}"]` | `JAVA_HOME` when discovered |
 | Kotlin | `kotlin` | `kotlinc` | `["-script", "{TESTCASE}"]` | none |
@@ -133,8 +133,8 @@ or resolved its imports entirely outside it. `bin/audit` and `bin/benchmark`
 repeat that check before spending a model on the target, so a runner that
 starts but loads an installed copy of the audited package is rejected instead
 of auditing the wrong code. The check stands aside, and says so, when it cannot
-make that claim: a Cargo root package that exposes no library for the canary to
-depend on, a changed `[runner].bin` or `args`, or configured `[sanitizer]`
+make that claim: a Cargo package or workspace that exposes no library for the
+canary to depend on, a changed `[runner].bin` or `args`, or configured `[sanitizer]`
 binaries that own every enabled testcase route, because the registry's
 generated source is then no longer proof of what runs. An unrecognized build
 system does not receive a guessed runner; configure its `[runner]` explicitly.
@@ -165,6 +165,13 @@ python3 lib/languages.py runner-block <build_system> --pretty
 
 A few ecosystem notes:
 
+- **Ruby** setup reads the root gemspec through RubyGems. If it declares a
+  native extension, `--build` runs the project's standard `rake compile` task
+  after Bundler installs dependencies. When the gem has a conventional root
+  entrypoint, the runner canary requires that exact checkout file; otherwise it
+  verifies the target-local load path. Standard `CONFIGURE_ARGS` supplied to
+  setup are saved in `.audit/bootstrap.sh` for extensions that need an external
+  prefix.
 - **Go** seeds `go run -race` with `[sanitizer] enabled = ["race"]`; the setup
   bootstrap primes the matching race build cache before the runner canary.
   You can instead point the `[runner]` at a pre-built `go build -race` binary
@@ -178,6 +185,11 @@ A few ecosystem notes:
   `// HARNESS: <name>.rs` driver beside an opaque input; `bin/probe` builds
   either against the audited crate in release mode (matching the bootstrap
   build, so `debug_assert!` is not mistaken for a finding).
+  Virtual workspaces follow the same route: Cargo metadata supplies the member
+  libraries, and a testcase is linked to the crates it names. If the workspace
+  exposes several binaries without one declared default or a unique slug
+  match, setup does not guess among them; opaque input requires a named Rust
+  harness.
   `bin/setup-target --build` prefetches dependencies into
   `.audit/cargo-home`, which those builds then read offline.
 - **Rust** can opt into an AddressSanitizer build: set
@@ -217,11 +229,22 @@ A few ecosystem notes:
   moved since.
 - **Perl**: a repository with `Makefile.PL` uses the newest installed Perl,
   installs declared dependencies into an ABI-specific directory under
-  `.audit/perl5`, builds its native modules, and installs the result there. If
+  `.audit/perl5`, builds its native modules, and installs the result there.
+  cpanm reads the standard CPAN mirror index and keeps its working state under
+  the target's `.audit` directory, avoiding a separate metadata service and
+  user-global installer state. A repository transfer that cpanm explicitly
+  reports as failed gets one unchanged retry, reusing completed work from that
+  local cache. Dependency tests run without the operator's
+  `NO_COLOR` display preference, which can otherwise alter expected output in
+  unrelated packages. A Dist::Zilla author checkout with `dist.ini`
+  uses `dzil authordeps` to install the build dependencies declared by the
+  project, generates a release tree under `.audit`, then installs that tree
+  through the same target-local cpanm environment. If
   a repository checkout has no release `META` file and cpanm cannot execute
   `Makefile.PL` before its configure prerequisites exist, setup installs the
   prerequisite names from cpanm's own diagnostic and retries dependency
-  discovery. An existing generated Makefile is cleaned before rebuilding, so
+  discovery. This includes a module that `Makefile.PL` or `Build.PL` imports
+  before metadata is available. An existing generated Makefile is cleaned before rebuilding, so
   a Perl upgrade cannot retain generated C or objects from the prior API. The
   canary requires and imports a real module from `lib/`, then verifies that
   Perl loaded its built copy from inside the audited checkout.

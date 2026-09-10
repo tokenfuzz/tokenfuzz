@@ -22,9 +22,10 @@ substitute the fallback default when the queue assigned something else.
   `HARNESS: harness.c|harness.cc|harness.cpp`.
 - Different C/C++ harness logic needs a unique sibling filename per runnable
   testcase; put that exact name in HARNESS and never overwrite a shared harness.
-- A Cargo library with no binary takes a direct `.rs` public-API testcase, or
-  a `HARNESS: <name>.rs` driver for opaque bytes; `bin/probe` compiles either
-  against the audited crate. Do not send opaque bytes to `cargo run`.
+- A Cargo package or virtual workspace with libraries and no unambiguous
+  binary takes a direct `.rs` public-API testcase, or a `HARNESS: <name>.rs`
+  driver for opaque bytes; `bin/probe` compiles it against the workspace
+  member crates it names. Do not send opaque bytes to `cargo run`.
 - Run `bin/probe {{ scratch_name }}/<testcase>` immediately; after a
   first diagnostic, run the same path with `--confirm`. Every path a
   `bin/state` view prints is relative to the results dir: `bin/probe` resolves
