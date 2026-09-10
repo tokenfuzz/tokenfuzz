@@ -83,6 +83,7 @@ else:
             "WANT", "SKIP_COVERAGE_GATE", "SANITIZER_RUN_COUNTER_FILE",
             "SANITIZER_RUN_BUDGET", "TRIED_INPUTS_LOG", "SANITIZER_NO_DIGEST",
             "SANITIZER_DIGEST_HEAD", "SANITIZER_DIGEST_TAIL", "ASAN_OUTPUT_FILE",
+            "SANITIZER_DIGEST_LINE_CHARS",
             "SAN_OUTPUT_FILE", "ASAN_OUTPUT_FILE_OPTIONAL", "SAN_OUTPUT_FILE_OPTIONAL",
         ):
             env.pop(key, None)
@@ -470,7 +471,7 @@ print("[run-asan] CRASH DETECTED: ASan error found")
                "print('[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)')\n")
         )
 
-    def test_clean_digest_truncation_preserves_full_file_but_never_clips_diagnostics(self) -> None:
+    def test_digest_truncation_preserves_full_file_and_diagnostic_ends(self) -> None:
         self.flood_runner()
         output_file = self.root / "flood.txt"
         env = {
@@ -518,6 +519,60 @@ print("[run-asan] CRASH DETECTED: ASan error found")
         self.assertNotIn("DIGEST: clean run", self.output(short))
         self.assertIn("small body line 1", self.output(short))
         self.assertIn("small body line 2", self.output(short))
+
+        self.write_runner(
+            "print('[run-asan] generic EXECUTION VERIFIED (pre-run)')\n"
+            "print('PREFIX-' + ('x' * 10000) + '-SUFFIX')\n"
+            "print('[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)')\n"
+        )
+        long_output_file = self.root / "long-line.txt"
+        long_line = self.run_multi("generic", environment={
+            "ASAN_OUTPUT_FILE": str(long_output_file),
+            "SANITIZER_DIGEST_LINE_CHARS": "1000",
+        })
+        rendered = self.output(long_line)
+        self.assertIn("middle character(s) elided from one long line", rendered)
+        self.assertIn("PREFIX-", rendered)
+        self.assertIn("-SUFFIX", rendered)
+        self.assertIn("x" * 10000, long_output_file.read_text())
+
+    def test_long_line_digest_keeps_head_tail_counts_and_saved_output(self) -> None:
+        self.write_runner(
+            "print('[run-asan] generic EXECUTION VERIFIED (pre-run)')\n"
+            "for index in range(30): print(f'ROW_{index:02d} ' + 'x' * 1000)\n"
+            "print('[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)')\n"
+        )
+        output_file = self.root / "long-lines.txt"
+        process = self.run_multi("generic", environment={
+            "ASAN_OUTPUT_FILE": str(output_file),
+            "SANITIZER_DIGEST_HEAD": "3", "SANITIZER_DIGEST_TAIL": "3",
+            "SANITIZER_DIGEST_LINE_CHARS": "100",
+        })
+        output = self.output(process)
+        displayed = [f"ROW_{index:02d}" for index in range(30)
+                     if f"ROW_{index:02d}" in output]
+        self.assertEqual(displayed, ["ROW_00", "ROW_01", "ROW_28", "ROW_29"])
+        self.assertIn("26 middle line(s) elided", output)
+        self.assertIn("SUCCESS_RATE: 1/1", output)
+        saved = output_file.read_text()
+        for index in range(30):
+            self.assertIn(f"ROW_{index:02d} " + "x" * 1000, saved)
+        self.assertNotIn("middle character(s) elided", saved)
+
+    def test_long_line_digest_opt_out_and_unsaved_output(self) -> None:
+        body = "PREFIX-" + "x" * 5000 + "-SUFFIX"
+        self.write_runner(f"print({body!r})\n")
+        for environment in (
+            {"ASAN_OUTPUT_FILE": str(self.root / "zero.txt"),
+             "SANITIZER_DIGEST_LINE_CHARS": "0"},
+            {"ASAN_OUTPUT_FILE": str(self.root / "raw.txt"),
+             "SANITIZER_NO_DIGEST": "1"},
+            {},
+        ):
+            with self.subTest(environment=environment):
+                output = self.output(self.run_multi("generic", environment=environment))
+                self.assertIn(body, output)
+                self.assertNotIn("middle character(s) elided", output)
 
     def test_identical_non_crash_repeats_collapse_to_one_line(self) -> None:
         # A --confirm of a clean or failing testcase used to replay every

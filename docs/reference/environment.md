@@ -224,3 +224,9 @@ PROBE_ASAN_OUTPUT_MAX_BYTES=0 bin/probe .../scratch-1/testcase
 
 This can create a very large file. Use it only when the saved marker shows
 that the omitted middle contains context needed for review.
+
+The terminal digest also shortens the middle of any single line longer than
+4,096 characters, a common shape for Java classpaths and generated data. The
+line shortening affects terminal display only; saved probe output remains
+subject to the file-size limit above. Set `SANITIZER_DIGEST_LINE_CHARS` to
+another limit, or to `0` to show full lines.

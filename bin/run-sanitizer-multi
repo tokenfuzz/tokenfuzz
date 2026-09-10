@@ -129,6 +129,7 @@ class MultiRun:
         self.digest_tail = _integer_env(
             "SANITIZER_DIGEST_TAIL" if "SANITIZER_DIGEST_TAIL" in os.environ else "ASAN_DIGEST_TAIL", 120
         )
+        self.digest_line_chars = _integer_env("SANITIZER_DIGEST_LINE_CHARS", 4096)
         sibling_frames = SCRIPT_DIR.parent / "lib" / "stack_frames.py"
         self.stack_frames = sibling_frames if sibling_frames.is_file() else LIB_DIR / "stack_frames.py"
         self.crashes = 0
@@ -542,6 +543,24 @@ class MultiRun:
                         skip_shadow = False
                     elif skip_shadow:
                         continue
+                    if (
+                        self.output_file
+                        and self.digest_line_chars > 0
+                        and len(line) > self.digest_line_chars
+                    ):
+                        head = self.digest_line_chars * 3 // 5
+                        tail = self.digest_line_chars - head
+                        omitted = len(line) - self.digest_line_chars
+                        # Keep one physical line: the head/tail pass below
+                        # indexes the filtered file using this loop's count.
+                        line = (
+                            line[:head]
+                            + f" [run-sanitizer-multi] DIGEST: {omitted} middle "
+                            f"character(s) elided from one long line - full output in "
+                            f"{self.output_display}. Override: "
+                            "SANITIZER_DIGEST_LINE_CHARS or SANITIZER_NO_DIGEST=1. "
+                            + line[-tail:]
+                        )
                     target.write(line.encode("utf-8", errors="replace"))
                     count += 1
             if _file_matches(path, DIGEST_CRASH_RE):
