@@ -653,6 +653,61 @@ class WorkQueueTests(unittest.TestCase):
             with self.subTest(source=source):
                 _score, reasons = workqueue.code_feature_reasons(source)
                 self.assertIn("identity-key property surface", reasons)
+        for source in (
+            "arg_match(choice, values);",
+            "arg_match0(choice, values);",
+            "match = regex.exec(text);",
+        ):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertNotIn("input-consumption entrypoint", reasons)
+        for source in (
+            "regex_match(subject, expression);",
+            "is_match(subject, expression);",
+            "regexec(expression, subject, 0, NULL, 0);",
+            "engine.match(subject);",
+            "pattern.fullmatch(subject);",
+            "value.matches(expression);",
+            "value.matchAll(expression);",
+            "value.match?(expression);",
+            "regexp.MatchString(expression, subject);",
+            "regex.matchEntire(subject);",
+            "regex.containsMatchIn(subject);",
+            "subject.firstMatch(of: expression);",
+            "subject.wholeMatch(of: expression);",
+            "subject.prefixMatch(of: expression);",
+            "RE2::FullMatch(subject, expression);",
+            "RE2::PartialMatch(subject, expression);",
+        ):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertIn("input-consumption entrypoint", reasons)
+        for source in (
+            "value.is_matches(expression);",
+            "value.fullMatches(expression);",
+            "matcher->match(option);",
+            "Thing::Match(option);",
+        ):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertNotIn("input-consumption entrypoint", reasons)
+
+    def test_s7_requires_an_input_route_not_only_a_memory_operation(self) -> None:
+        """Allocation syntax alone must not launch an impossible S7 session."""
+        self.assertEqual(workqueue.strategy_for(["allocation/resize"]), "S1")
+        self.assertEqual(workqueue.strategy_for(["raw memory operation"]), "S1")
+        self.assertEqual(
+            workqueue.strategy_for([
+                "allocation/resize", "lifetime/ownership operation",
+            ]),
+            "S5",
+        )
+        self.assertEqual(
+            workqueue.strategy_for([
+                "allocation/resize", "input-consumption entrypoint",
+            ]),
+            "S7",
+        )
 
     def test_boundary_rows_ignore_the_prose_that_surrounds_real_source(self) -> None:
         """Every pattern runs over comments and licence headers too.

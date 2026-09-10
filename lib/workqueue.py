@@ -341,9 +341,13 @@ _ASSERT_RE = re.compile(
 # Verb stems that mark a function as consuming or interpreting input.
 # The input-consumption regex is built from this list in both snake_case
 # and CamelCase form, so a verb is declared exactly once (no drift).
+# Generic matching is deliberately absent: option validators such as
+# arg_match() compare already-materialized values and do not establish an
+# input route. The separate structural forms below retain regex-style entry
+# points without restoring that broad false positive.
 _CONSUME_VERBS = (
     "read", "parse", "decode", "scan", "lex", "tokeniz", "compile",
-    "match", "deserializ", "unmarshal", "decompress", "inflate",
+    "deserializ", "unmarshal", "decompress", "inflate",
     "recv", "demangl",
 )
 # snake_case alt: verb is a whole `_`-delimited segment, so `thread` /
@@ -354,6 +358,18 @@ _INPUT_CONSUMPTION_RE = re.compile(
     r"(?:\b(?:[a-z0-9]+_)*(?:" + "|".join(_CONSUME_VERBS) + r")[a-z0-9_]*"
     r"|\b[A-Za-z0-9]*(?:" + "|".join(v.capitalize() for v in _CONSUME_VERBS)
     + r")[A-Za-z0-9]*\b)\s*\("
+    # These unqualified spellings are established regex entrypoints. A broad
+    # *_match family also admits argument, option, type, and path validators.
+    r"|\b(?:regex_match|is_match|regexec)\s*\("
+    # A receiver supplies the missing context that a bare match() call lacks.
+    # This is the bounded set of standard regex spellings used across the
+    # supported languages.
+    r"|\.\s*(?:match|Match|fullmatch|full_match|FullMatch|is_match|IsMatch"
+    r"|matches|matchAll|match\?|MatchString|MatchReader|matchEntire"
+    r"|containsMatchIn|firstMatch|wholeMatch|prefixMatch)\s*\("
+    # C++ scoped calls lack a receiver object, so retain only the established
+    # RE2-style full/partial matching operation family.
+    r"|::\s*(?:Full|Partial)Match\s*\("
 )
 
 # ── Code-feature signal table ──────────────────────────────────────
@@ -723,6 +739,13 @@ S3_SECURITY_REASONS: frozenset[str] = frozenset({
 # All trust-boundary ranking reasons, including the raw peer input endpoint
 # whose correct primary method remains S7 adversarial-input engineering.
 BOUNDARY_REASONS: frozenset[str] = S3_SECURITY_REASONS | {"remote-peer endpoint"}
+
+# S7 can act only where testcase bytes reach a parser/decoder or a remote
+# peer boundary. Memory operations raise a routed file's priority, but do not
+# establish that route by themselves.
+S7_INPUT_ROUTE_REASONS: frozenset[str] = frozenset({
+    "input-consumption entrypoint", "remote-peer endpoint",
+})
 
 # Reason → strategy map. Single source of truth shared by strategy_for
 # (logical-security reasons first, otherwise the first matching bucket) and
@@ -1283,7 +1306,10 @@ def strategy_for(reasons: list[str]) -> str:
     if rset & S3_SECURITY_REASONS:
         return "S3"
     for strat, tags in _STRATEGY_BUCKETS:
-        if rset & tags:
+        if (
+            rset & tags
+            and (strat != "S7" or rset & S7_INPUT_ROUTE_REASONS)
+        ):
             return strat
     return "S1"
 
@@ -1300,14 +1326,10 @@ def complementary_strategies(reasons: list[str], primary: str) -> list[str]:
     rset = set(reasons)
     out = [strat for strat, tags in _STRATEGY_BUCKETS
            if strat != primary and rset & tags]
-    # Raw memory and allocation calls make a useful primary S7 lead when no
-    # stronger contract is known. They do not by themselves prove that a file
-    # selected for another strategy has the parser/decoder boundary S7 needs.
-    # Require an actual input consumer or remote-peer endpoint before minting
-    # that companion; the primary card still retains every memory signal.
-    if "S7" in out and not rset & {
-        "input-consumption entrypoint", "remote-peer endpoint",
-    }:
+    # Memory and allocation calls raise a routed S7 file's rank. They do not
+    # establish the parser/decoder boundary S7 needs, so require an actual
+    # input consumer or remote-peer endpoint before minting the companion.
+    if "S7" in out and not rset & S7_INPUT_ROUTE_REASONS:
         out.remove("S7")
     # S1 — a file next to a prior fix is explicit regression territory.
     if "near prior-fix card" in rset and primary != "S1":

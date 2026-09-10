@@ -49,7 +49,7 @@ that fits:
 
 | What the file looks like | Primary strategy | Why |
 | --- | --- | --- |
-| Input consumers, deserializers, allocation/resize paths, raw memory calls | **S7** Adversarial input | Byte- and shape-driven code. Existing seeds and hand-written boundary inputs pay off; fuzz harnesses belong to S4. |
+| Input consumers, deserializers, and remote-peer endpoints; allocation/resize or raw memory calls in the same file raise their rank | **S7** Adversarial input | Byte- and shape-driven code with an executable input route. Existing seeds and hand-written boundary inputs pay off; fuzz harnesses belong to S4. |
 | Lifetime / ownership operations, unsafe escape hatches, concurrency primitives | **S5** Lifetime and state | The interesting input is a sequence, teardown path, callback order, or interleaving. |
 | Assert / check / panic / precondition families | **S2** Invariant negation | The code already states the condition to challenge. |
 | Exported APIs, cast-heavy paths, size arithmetic, command-injection or XXE surfaces | **S3** Spec vs. implementation | Contract, type, and size-boundary surfaces. |
