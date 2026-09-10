@@ -513,6 +513,8 @@ ok(_script.index("-DFIRST=1") < _script.index("-DVALUE=two words") < _script.ind
    "named config flags retain declared order")
 ok("'-DVALUE=two words'" in _script and "'-DTHIRD=$(literal)'" in _script,
    "named config flags are shell-quoted as single literal argv entries")
+ok("command -v ninja" in _script and 'cmake "$@" -S' in _script,
+   "cmake recipe selects Ninja when the host provides it")
 
 _meson_script = abs_mod.initial_script("meson", "asan", [])
 ok("vendored-meson/meson/meson.py" in _meson_script,

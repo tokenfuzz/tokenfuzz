@@ -221,6 +221,11 @@ Paths under `output/<target>/<backend>/logs/` without `${agent_num}` are
 shared across parallel agents and the orchestrator; concurrent writes corrupt
 or lose lines.
 
+The repository root is source, not an operator workspace. `.audit/` belongs
+under a target checkout; put campaign-wide diagnostics under `output/` or a
+temporary directory. Never create `SCRIPT_ROOT/.audit` or redirect setup and
+audit logs to a relative `.audit/` path from the repository root.
+
 1. Prefer per-agent paths, keyed by `${agent_num}` or a unique session
    timestamp.
 2. Keep forensic dumps under `logs/.raw/` (`session_*.log.raw`,

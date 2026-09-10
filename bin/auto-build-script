@@ -168,7 +168,11 @@ mkdir -p "$build"
 __PACKAGE_PREFIX_ENV__
 rm -f "$build/CMakeCache.txt"
 rm -rf "$build/CMakeFiles"
-cmake -S "$src" -B "$build" \\
+set --
+if command -v ninja >/dev/null 2>&1; then
+    set -- -G Ninja
+fi
+cmake "$@" -S "$src" -B "$build" \\
     -DCMAKE_BUILD_TYPE=Release \\
     -DCMAKE_C_COMPILER="${CC:-clang}" \\
     -DCMAKE_CXX_COMPILER="${CXX:-clang++}" \\
