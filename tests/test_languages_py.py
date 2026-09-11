@@ -106,6 +106,41 @@ with tempfile.TemporaryDirectory() as td:
     assert_true(environment["CLANG_MODULE_CACHE_PATH"].startswith(str(root)),
                 "SwiftPM metadata gives Clang the target-local module cache")
 
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / "Package.swift").write_text("// swift-tools-version: 6.0\n")
+    with mock.patch.object(
+        languages.subprocess, "run", side_effect=FileNotFoundError("swift"),
+    ):
+        try:
+            languages.swift_package_info(root)
+        except ValueError as exc:
+            assert_in("SwiftPM could not describe", str(exc),
+                      "missing SwiftPM is reported as package metadata failure")
+        else:
+            failed("missing SwiftPM is reported as package metadata failure")
+        try:
+            target_config.seed_toml(root, root / "target.toml", "")
+        except ValueError as exc:
+            assert_in("SwiftPM could not describe", str(exc),
+                      "missing SwiftPM does not hide a real package manifest")
+        else:
+            failed("missing SwiftPM does not hide a real package manifest")
+
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / "Package.swift").touch()
+    config = root / "target.toml"
+    with mock.patch.object(
+        languages.subprocess, "run", side_effect=FileNotFoundError("swift"),
+    ):
+        target_config.seed_toml(root, config, "")
+    seeded = target_config.parse_toml(config)
+    assert_eq("swift", seeded["runner"]["bin"],
+              "an empty Swift placeholder seeds a runner without the toolchain")
+    assert_eq(["{TESTCASE}"], seeded["runner"]["args"],
+              "an empty Swift placeholder keeps the safe source fallback")
+
 
 # ─── 1. Required languages are present ─────────────────────────────
 

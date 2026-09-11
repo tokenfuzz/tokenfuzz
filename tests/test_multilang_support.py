@@ -229,7 +229,16 @@ class MultiLanguageSupportTests(unittest.TestCase):
                 directory.mkdir()
                 (directory / manifest).touch()
                 output = directory / "target.toml"
-                target_config.seed_toml(directory, output, "")
+                if slug == "cargo":
+                    # An empty manifest's metadata failure is the input this
+                    # seed test needs; do not ask a host Cargo to produce it.
+                    with mock.patch.object(
+                        languages, "cargo_workspace_info",
+                        side_effect=ValueError,
+                    ):
+                        target_config.seed_toml(directory, output, "")
+                else:
+                    target_config.seed_toml(directory, output, "")
                 text = output.read_text()
                 self.assertIn("enabled = []", text)
                 self.assertIn("[runner]", text)
@@ -246,7 +255,14 @@ class MultiLanguageSupportTests(unittest.TestCase):
             directory.mkdir()
             (directory / manifest).touch()
             output = directory / "target.toml"
-            target_config.seed_toml(directory, output, "")
+            if slug == "swift":
+                # As above, construct the empty-manifest failure directly.
+                with mock.patch.object(
+                    languages, "swift_package_info", side_effect=ValueError,
+                ):
+                    target_config.seed_toml(directory, output, "")
+            else:
+                target_config.seed_toml(directory, output, "")
             text = output.read_text()
             self.assertIn('enabled = ["asan"]', text)
             if slug == "swift":
@@ -647,7 +663,11 @@ class MultiLanguageSupportTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["env"]["PROBE_SANITIZER"], "ubsan")
 
     def _cargo_canary_config(self, name: str, *sources: str):
-        """A cargo target whose [runner] is the registry's own invocation."""
+        """A cargo target whose [runner] is the registry's own invocation.
+
+        These tests exercise canary policy over structured Cargo metadata;
+        the skip-guarded integration tests below exercise the real toolchain.
+        """
         (self.target / "src").mkdir(exist_ok=True)
         (self.target / "Cargo.toml").write_text(
             '[package]\nname = "probe-bin"\nversion = "0.1.0"\n'
@@ -660,32 +680,56 @@ class MultiLanguageSupportTests(unittest.TestCase):
                 else 'fn main() { println!("TARGET_REACHED"); }\n',
                 encoding="utf-8",
             )
-        args = json.dumps(list(languages.cargo_runner_args(
-            self.target, "multilang",
-        )))
-        return self.canary_config(self.tree(
+        info = languages.CargoWorkspaceInfo(
+            libraries=(
+                languages.CargoLibraryProduct(
+                    "probe-bin", "probe_bin", "", default_member=True,
+                ),
+            ) if "lib.rs" in sources else (),
+            executables=(
+                languages.CargoExecutableProduct(
+                    "probe-bin", "probe-bin", "", default_member=True,
+                ),
+            ) if "main.rs" in sources else (),
+        )
+        with mock.patch.object(
+            languages, "cargo_workspace_info", return_value=info,
+        ):
+            args = json.dumps(list(languages.cargo_runner_args(
+                self.target, "multilang",
+            )))
+        config = self.canary_config(self.tree(
             name,
             'target = "multilang"\nbuild_system = "cargo"\n'
             '[sanitizer]\nenabled = []\n'
             '[runner]\nbin = "cargo"\n'
             f'args = {args}\n',
         ))
+        return config, info
 
     def test_runner_canary_does_not_treat_a_binary_crate_as_a_dependency(self) -> None:
         """Cargo ignores a lib-less path dependency, so building proves nothing."""
-        config = self._cargo_canary_config("canary-rust-binary", "main.rs")
-
-        self.assertIn(
-            "exposes no library", runner_canary.skip_reason(config),
+        config, info = self._cargo_canary_config(
+            "canary-rust-binary", "main.rs",
         )
+
+        with mock.patch.object(
+            languages, "cargo_workspace_info", return_value=info,
+        ):
+            self.assertIn(
+                "exposes no library", runner_canary.skip_reason(config),
+            )
 
     def test_runner_canary_still_checks_a_crate_that_also_ships_a_binary(self) -> None:
         """A library the canary links is what makes the route provable."""
-        config = self._cargo_canary_config(
+        config, info = self._cargo_canary_config(
             "canary-rust-lib-and-bin", "lib.rs", "main.rs",
         )
 
-        self.assertEqual("", runner_canary.skip_reason(config))
+        with mock.patch.object(
+            languages, "cargo_workspace_info", return_value=info,
+        ):
+            self.assertEqual("", runner_canary.skip_reason(config))
 
     @unittest.skipUnless(CARGO, "Cargo toolchain is required")
     def test_virtual_cargo_workspace_routes_direct_testcase_to_member_library(self) -> None:

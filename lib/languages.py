@@ -264,6 +264,10 @@ def swift_package_info(target_root: str | os.PathLike) -> SwiftPackageInfo:
         raise ValueError(
             f"SwiftPM did not describe {root / 'Package.swift'} within 60s"
         ) from exc
+    except OSError as exc:
+        raise ValueError(
+            f"SwiftPM could not describe {root / 'Package.swift'}: {exc}"
+        ) from exc
     if completed.returncode:
         detail = next((line.strip() for line in completed.stderr.splitlines() if line.strip()), "no diagnostic output")
         raise ValueError(f"SwiftPM could not describe {root / 'Package.swift'}: {detail}")

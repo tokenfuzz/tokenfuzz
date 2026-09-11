@@ -250,10 +250,19 @@ class SetupTargetTests(unittest.TestCase):
         (project / "src").mkdir()
         (project / "src" / "lib.rs").write_text("pub fn value() {}\n")
 
-        process = self.setup(
-            "nested-project", str(source), "--force", "--no-llm-config",
-            environment={"LLM_DECIDE_DISABLE": "1"},
-        )
+        info = target_config.languages.CargoWorkspaceInfo((
+            target_config.languages.CargoLibraryProduct(
+                "sample", "sample", "", default_member=True,
+            ),
+        ), ())
+        # Root selection does not require the host to have Cargo installed.
+        with mock.patch.object(
+            target_config.languages, "cargo_workspace_info", return_value=info,
+        ):
+            process = self.setup(
+                "nested-project", str(source), "--force", "--no-llm-config",
+                environment={"LLM_DECIDE_DISABLE": "1"},
+            )
 
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         parsed = target_config.parse_toml(self.config("nested-project"))
@@ -319,7 +328,7 @@ class SetupTargetTests(unittest.TestCase):
         (dependency / "dep.c").write_text("int dependency(void) { return 0; }\n")
         self.commit(dependency, "dependency", "dep.c")
 
-        parent = self.temp / "parent"
+        parent = self.temp / "sample"
         self.git("init", str(parent))
         (parent / "CMakeLists.txt").write_text(
             "cmake_minimum_required(VERSION 3.16)\n"
@@ -333,9 +342,11 @@ class SetupTargetTests(unittest.TestCase):
             "-c", "protocol.file.allow=always", "submodule", "add",
             str(dependency), "dependency", cwd=parent,
         )
-        self.commit(parent, "parent", "CMakeLists.txt", "main.c", ".gitmodules", "dependency")
-        (self.harness / "bin" / "auto-build-script").symlink_to(
-            ROOT / "bin" / "auto-build-script"
+        # Submodule synchronization is independent of the host's CMake install.
+        recipe = self.build_recipe(parent)
+        self.commit(
+            parent, "parent", "CMakeLists.txt", "main.c", ".gitmodules",
+            "dependency", str(recipe.relative_to(parent)),
         )
 
         process = self.setup(
@@ -1607,12 +1618,25 @@ class SetupTargetTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-        process = self.setup(
-            "delegated", "--build", "--force",
-            environment={"LLM_DECIDE_DISABLE": "1"},
-        )
+        # This regression ends at detection and config refresh; language
+        # bootstrap and runner reachability have dedicated integration tests.
+        with (
+            mock.patch.object(
+                SETUP_TARGET.languages, "execute_bootstrap_plan",
+                return_value=0,
+            ) as bootstrap,
+            mock.patch.object(
+                SETUP_TARGET.runner_canary, "check", return_value="",
+            ) as canary,
+        ):
+            process = self.setup(
+                "delegated", "--build", "--force",
+                environment={"LLM_DECIDE_DISABLE": "1"},
+            )
 
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        bootstrap.assert_called_once()
+        canary.assert_called_once()
         parsed = target_config.parse_toml(config)
         self.assertEqual(parsed["build_system"], "go")
         self.assertEqual(parsed["runner"]["bin"], "go")
