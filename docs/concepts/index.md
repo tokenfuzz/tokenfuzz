@@ -1,7 +1,7 @@
 # Concepts
 
-These pages explain why TokenFuzz is shaped the way it is. They describe the
-system rather than walking through an operator task.
+These pages explain how TokenFuzz works and why its components behave this
+way. For step-by-step tasks, use the [Guides](../guides/index.md).
 
 If you are reading them in order, start with
 [Audit lifecycle](audit-lifecycle.md) for the end-to-end story. The other pages

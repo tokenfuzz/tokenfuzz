@@ -13,8 +13,8 @@ Use them to:
   reports) on a target small enough to read in a sitting;
 - measure the harness itself, because each one ships an **answer key**.
 
-They are *not* evidence about real-world difficulty. A synthetic bug is planted
-to be findable; an upstream parser is not.
+These samples test the machinery and its scoring rules. Their results do not
+measure performance on an unfamiliar production codebase.
 
 ## What is shipped
 
@@ -92,7 +92,9 @@ bin/setup-target samples/sample-rust --build --no-llm-config
 bin/audit --target samples/sample-rust --backend <backend> 1
 ```
 
-`--no-llm-config` needs no backend. `--force` regenerates inferred
+This sample's checked-in build recipe needs no model to build;
+`--no-llm-config` skips configuration suggestions. It does not disable network
+access for dependency installation. `--force` regenerates inferred
 `target.toml` fields before an optional build while keeping the target's build
 recipe, curated threat model, peer list, and build-widening settings.
 
@@ -109,7 +111,8 @@ describes.
 
 Every sample ships a manifest at `output/<slug>/.ground-truth.json`. Note the
 path: it lives under `output/`, **not** inside the target tree handed to the
-agents, so a run is scored blind. Each entry pins one planted bug (its
+agents. This separates scoring data from audited source; it is not an access
+control on other files the backend can read. Each entry pins one planted bug (its
 primitive, the symbol it faults in, and the input that reaches it), and each
 trap declares the benign outcome it expects.
 
@@ -130,7 +133,7 @@ benchmark, and the ground-truth block in the ledger. Extra arguments go to
 `bin/benchmark`:
 
 ```bash
-targets/canary/run-benchmark.sh --backend codex
+targets/canary/run-benchmark.sh --backend claude
 ```
 
 See [Benchmarking](../concepts/benchmark.md#ground-truth-precision-and-recall)

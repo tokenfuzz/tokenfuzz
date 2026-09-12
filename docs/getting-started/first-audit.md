@@ -2,7 +2,8 @@
 
 Run one bounded audit before committing time or model budget to a continuous
 session. The smoke test verifies the target config, build preflight, backend,
-state store, and output layout. It is not expected to find a vulnerability.
+state store, and output layout. An empty findings directory is a normal
+outcome of this check.
 
 Complete [Prerequisites](prerequisites.md) and
 [Add a target](add-a-target.md) first. Run the audit in a container or on an
@@ -13,7 +14,7 @@ Set short shell variables for the commands on this page. Use an explicit
 backend so the output path is predictable:
 
 ```bash
-export TARGET=<target>
+export TARGET="<target>"
 export BACKEND=claude               # or codex, gemini, grok, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 export LOGS="output/$TARGET/$BACKEND/logs"

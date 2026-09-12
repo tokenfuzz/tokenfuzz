@@ -1,9 +1,13 @@
 # Triage and Review
 
-TokenFuzz preserves evidence in four result lanes. Triage decides which lane an
-artifact belongs in and records the decision beside the files it judged. It
-does not replace a security team's review or the upstream project's disclosure
-process.
+Triage turns an agent's report into something a maintainer can assess: what
+went wrong, what evidence supports it, and whether it crosses the project's
+security boundary. A crash needs saved reproduction evidence; a finding can
+stand on a concrete source-based report.
+
+TokenFuzz records each review decision beside the files it judged and preserves
+rejected evidence with its reason. The security team and upstream maintainer
+still decide what to fix and how to disclose it.
 
 Start with the generated HTML indexes:
 
@@ -23,13 +27,14 @@ review state, severity, evidence signature, and canonical cluster member.
 | --- | --- | --- |
 | Finding | `findings/FIND-*/` | A concrete security report with a location, issue class, and actionable rationale. A testcase is optional. |
 | Crash | `crashes/CRASH-*/` | A reproducible sanitizer or runtime-race diagnostic with saved input and output. |
-| Rejected finding | `findings-rejected/` | A FIND whose evidence lost at the substance or source-review gates. |
+| Rejected finding | `findings-rejected/` | A FIND that failed substance, source, or publication review; the reason distinguishes a disproved claim from unresolved scope. |
 | Rejected crash | `crashes-rejected/` | A crash candidate that was incomplete, low-value, contradicted by source, or rooted in harness-only misuse. |
 
 Nothing is silently deleted. Rejected directories move with their evidence and
 gain an index entry explaining why. A crash whose trigger crosses no configured
 security boundary is rejected the same way, with a `threat-model:` reason, so
-the accepted tree holds only security reports and pending review.
+the active tree normally holds security reports and pending review.
+Human-pinned and legacy artifacts can remain `not-reportable` in place.
 
 ## A practical review order
 
@@ -58,14 +63,19 @@ first gate.
 | Stage | Crash | Finding |
 | --- | --- | --- |
 | Mechanical or substance gate | Checks diagnostic class, reproduction files, report fields, caller contract, and auto-rejection classes. | Independent readers judge whether the report names a concrete security issue. Two accepts admit it; two rejects quarantine it. |
-| Source review | Reads the trigger and caller contract. Two source-anchored Reject votes are required to quarantine sanitizer-confirmed evidence. | Reads both the trigger and the exact claimed consequence. Two source-anchored Reject votes are required to quarantine an admitted FIND. |
+| Source review | Reads the trigger and caller contract. Two source-anchored Reject votes can disprove sanitizer-confirmed evidence. Publication review separately decides scope. | Reads both the trigger and the exact claimed consequence. Two source-anchored Reject votes can disprove an admitted FIND. Publication review separately decides scope. |
 | Final state | `reportable`, `pending`, or `rejected`. | The same three states. |
 
-Both source-review paths fail open: missing, malformed, or inconclusive model
-output cannot destroy an artifact. Fail-open means *preserved and unsettled*,
-not confirmed. A first `Uncertain` vote or a split review gets one focused
-resolver that sees the prior rationales. If the resolver still cannot settle
-the question, the artifact remains pending.
+Both source-review paths preserve evidence when output is missing or malformed.
+The artifact remains pending while required review is incomplete. An
+`Uncertain` vote or split review can receive a focused resolution pass that
+sees the prior rationales.
+
+Once all required reviews have answered, scope that remains unresolved is a
+terminal rejection with an `unsettled-scope:` reason. This is different from a
+source disproof: it means the review could not establish that the trigger is
+inside the declared threat model. The report and evidence remain available in
+the rejected tree.
 
 Review receipts are content-addressed. Changing the authored report, testcase,
 harness, diagnostic, invocation evidence, target revision, config, or threat
@@ -85,8 +95,9 @@ Open `validation.json` when the index is not enough:
 | State | Final? | Meaning |
 | --- | --- | --- |
 | `reportable` | yes | Review found real security impact inside the declared attacker surface. This is the only state with a numeric severity or security-yield credit. |
-| `pending` | no | Review did not settle the claim. It is neither credited nor written off. |
-| `rejected` | yes | The evidence did not hold. The artifact is preserved in a rejected tree. |
+| `pending` | no | Required content or review is incomplete. It receives no security credit while awaiting a decision. |
+| `rejected` | yes | The claim failed a gate, was outside the threat model, or remained out of established scope after completed review. Read the reason; the artifact is preserved in a rejected tree. |
+| `not-reportable` | yes | A human-pinned or legacy artifact retained in place without security credit or numeric severity. |
 
 "Filed", "admitted", and "reportable" are deliberately different words. An
 agent can file a FIND; the substance gate can admit it; only a current final
@@ -241,8 +252,8 @@ the harness. Do not hand-author those generated sections.
 The two accepted lanes use different deterministic signatures:
 
 - crashes cluster by sanitizer primitive and normalized top stack frames;
-- findings cluster by an exact normalized `(class, file, line)` site or a
-  matching crash state.
+- findings cluster by an exact normalized `(class family, file, line)` site
+  or a matching crash state.
 
 Each cluster has a canonical member. Non-canonical members remain on disk
 (findings also get a `.dup-of` marker) because they may carry a useful input or
@@ -287,6 +298,18 @@ first backend alphabetically.
 not-reportable artifacts remain unscored. Re-run clustering after changing a
 root location or other identity field.
 
-When the evidence is ready for upstream, send the report and bundle through the
-project's coordinated-disclosure process. TokenFuzz never publishes or files
-an upstream advisory automatically.
+## Triage mindset
+
+A useful result should let the next reviewer answer three questions:
+
+- **What should I inspect?** The report identifies the relevant code or
+  behavior and explains the security consequence.
+- **What was established?** Saved diagnostics, source reasoning, and the
+  current review receipt distinguish observations from assumptions.
+- **What can I do next?** A crash bundle provides its reproduction route;
+  every report should give a concrete fix direction where the evidence allows.
+
+Send ready evidence through the project's coordinated-disclosure process.
+[Reproduce a crash](reproduce-a-crash.md) is written for the maintainer
+receiving a bundle and can accompany the report. TokenFuzz never publishes or
+files an upstream advisory automatically.

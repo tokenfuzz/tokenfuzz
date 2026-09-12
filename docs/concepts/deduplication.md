@@ -92,8 +92,8 @@ by max-member severity then size) and stamps a `Cluster:` line into each member
 in the cluster, with the CVSS score breaking ties inside a severity band and
 the lowest id breaking those. The **Members** column lists every crash sharing
 the signature, ordered by severity descending with the canonical in **bold**.
-This mirrors `bin/cluster-findings`, so both pages pick and present the
-canonical the same way.
+Finding clusters use a different canonical-selection rule: security-credit
+tier and evidence rank come before severity, as described below.
 
 The cluster id is `CL-` plus eight hex digits of a hash of the encounter-order
 representative's `(primitive, crash state)`, for example `CL-4b21c7de`.
@@ -155,8 +155,9 @@ The source site is `(file, line)`, never `(file, func)`:
   might have an integer overflow on one line and an unrelated out-of-bounds
   read forty lines down. Merging on `file:func` would fuse them and hide one
   bug behind the other.
-- A single **source line** is one statement. Two findings that pin the same
-  class and the same line are almost always the same defect.
+- A **source line** is a more precise identity than a function name, but it
+  can still contain multiple operations. Matching family and line is a
+  deduplication rule, not proof that two reports need the same fix.
 
 A finding that pins a file but **no line** therefore gets *no* site edge. It
 stays its own cluster rather than collapsing onto a coarse `(class, file)`

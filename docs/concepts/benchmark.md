@@ -1,26 +1,26 @@
 # Benchmarking TokenFuzz
 
-`bin/benchmark` answers one question with evidence rather than opinion:
+`bin/benchmark` compares TokenFuzz with a direct model prompt on the same
+target, backend, model, and wall-clock budget. Both conditions are scored
+through the same validation and clustering pipeline.
 
-> For the same target, backend, model, and wall-clock budget, does TokenFuzz
-> find stronger **validated security evidence** (reproducible sanitizer
-> crashes and substantive report-only findings) than a direct "find
-> vulnerabilities" prompt?
+The question is whether the harness earns its overhead: does its coordination,
+execution, and review produce stronger validated evidence within the same
+budget? That is useful to a security lead comparing approaches or a contributor
+checking a harness change. For routine target work, use `bin/audit`.
 
-You do not need to know the harness internals to run it or read the result.
-This page is for the person deciding whether the harness is earning its
-overhead: a security lead comparing approaches, a backend operator tuning
-model choice, or a maintainer checking whether a triage, clustering, severity,
-or prompt change helped.
+This page has three reading paths:
 
-The important word is **evidence**. A crash does not count because an agent
-claimed one in prose; it counts when sanitizer output is on disk. A finding
-does not count because it sounds plausible; it goes through the same
-validation and clustering machinery used by normal audits. That is what makes
-a benchmark row worth reading later.
+- **Run an experiment:** start with [Quick start](#quick-start), then read
+  [resumption](#resuming-an-interrupted-run) before continuing an old run.
+- **Assess the result:** read [How a result is counted](#how-a-result-is-counted)
+  and [Reading the ledger](#reading-the-ledger).
+- **Maintain saved results:** use
+  [Regenerating results](#regenerating-results-after-code-changes).
 
-Benchmarking is for evaluating TokenFuzz itself. For routine target work, run
-`bin/audit` directly.
+A reported count represents reviewed evidence signatures. It is not a count
+of independently proven root causes, and it is not a precision or recall
+measurement without an answer key.
 
 ## The experiment
 
@@ -76,11 +76,11 @@ severity and uniqueness columns before the raw counts.
 Equal wall time does not mean equal worker capacity. `model-direct` is one
 launch of the CLI at its defaults, which may delegate internally
 (`delegation_events` records how often, and the Efficiency table marks such
-conditions `≤`). The harness runs its normal worker pool, sized to the machine
-unless `--agents` says otherwise. The scoreboard keeps the wall comparison
-visible and separately reports occupancy, worker-hours, confirmed results per
-seat-hour, tokens, and cost, so that concurrency is not mistaken for free
-efficiency.
+conditions `≤`). The harness uses its configured worker pool, normally three
+workers unless overridden. It is not sized automatically to the machine. The
+scoreboard keeps the wall comparison visible and separately reports occupancy,
+worker-hours, confirmed results per seat-hour, tokens, and cost, so that
+concurrency is not mistaken for free efficiency.
 
 ## Quick start
 
@@ -113,12 +113,11 @@ Run `bin/benchmark --help` for the full option list.
 
 ## What a run looks like
 
-The commands below run the same target through four hosted backends, two
+The commands below run the same target through three hosted backends, two
 replicates per condition, at the default 3-hour cell budget:
 
 ```bash
 bin/benchmark --target <target> --backend claude --replicates 2 --budget-wall 10800
-bin/benchmark --target <target> --backend codex  --replicates 2 --budget-wall 10800
 bin/benchmark --target <target> --backend gemini --replicates 2 --budget-wall 10800 --agent-security external-bypass
 bin/benchmark --target <target> --backend grok   --replicates 2 --budget-wall 10800 --agent-security external-bypass
 ```
@@ -191,17 +190,19 @@ Every run report carries one compact table of review outcomes:
 | --- | --- |
 | **Report** | Settled: real security impact inside the declared attacker surface. The only outcome that enters security yield or receives a numeric severity. |
 | **Not reportable** | Settled: a real engineering defect that crosses no security boundary, either an admitted contract violation or reviewers agreeing the trigger needs a control the threat model does not list. Preserved on disk, never presented as a security bug. |
-| **Rejected** | Settled: the evidence did not hold up. Kept in the rejected tree with its reason. |
-| **Review unsettled** | The review never finished, or finished without settling the claim. No credit either way. |
+| **Rejected** | The claim failed a gate or completed review could not establish its scope. Kept in the rejected tree; the reason distinguishes disproof, threat-model rejection, and `unsettled-scope`. |
+| **Review unsettled** | Required review is incomplete or has no usable answer. No security credit; shown as an unjudged remainder. |
 
-An `Uncertain` verdict and two reviewers who disagree both establish nothing,
-so the gate hands their exact open question to one focused resolver rather
-than asking for another blind review. If that resolver is still uncertain, the
-artifact stays unsettled rather than being written off as out of scope, and
-that remainder is what puts the `≥` floor mark on a count. Review decisions
-are content-addressed, so changing a report, its evidence, or the prompt
-version reopens the review. Runtime signature details stay in the linked crash
-and finding indexes rather than adding another number to the headline.
+An `Uncertain` verdict or split review can receive focused resolution using
+the prior rationales. While required output is missing, the artifact remains
+pending and contributes to the unjudged remainder. When all required reviews
+have answered but still cannot place the trigger inside the threat model,
+triage rejects it with an `unsettled-scope:` reason. That terminal outcome is
+not an unjudged remainder.
+
+Review receipts bind decisions to the evidence they evaluated. Changed
+substantive evidence requires fresh review. The linked crash and finding
+indexes carry the detailed signatures and reasons.
 
 ### Scope is decided by reading source, not by the report
 
@@ -357,98 +358,35 @@ the number.
 
 ## Reading the result page
 
-`output/benchmark/benchmark-result.html` is one self-contained page over every
-run under the benchmark root. Every count on it comes from the run's
-`report.json`, so it cannot disagree with the ledger; what it adds is the
-comparison the ledger's table cannot draw: what each model surfaced, what each
-surfaced that no other did, how much of everything known on the target each
-reaches, when, and — from the audit's own state streams — what it was thinking
-on the way. It opens from `file://`, survives `bin/export-benchmark`, and
-renders as plain tables without script. It is built to invite study rather than
-to settle it: each run is one sample on one revision, unique and coverage are
-relative to the runs on the page, a finding stays a lead until a maintainer
-confirms it, and the page's own guide says so. Sections, in order:
+Open `output/benchmark/benchmark-result.html` for the cross-run comparison.
+It reads counts from each run's `report.json` and links them to the supporting
+reports. The page opens locally, is included by `bin/export-benchmark`, and
+retains plain tables when JavaScript is unavailable.
 
-**What each model surfaced** orders every condition of every run on a target
-revision — harness and plain model together — by distinct problems, then by
-Medium-or-higher. Each row splits its problems into the ones *unique* to it
-(no other condition on the revision reached them, its own control included)
-and the ones others reached too; *coverage* is its share of every distinct
-problem any run has reported on the revision, the closest thing to an answer
-key a live target has. A harness row also carries its delta against the same
-model's control. The ledger's marks travel with the count: an unjudged
-remainder is named beside it, a floor keeps its `≥` and is never subtracted
-from a control, and `‡` flags severities from a superseded scorer.
+| Section | What to look for |
+| --- | --- |
+| **What each model surfaced** | Results by target revision and condition, split into signatures unique to that condition and signatures shared with other runs. Harness rows include a comparison with their own control. |
+| **Models side by side** | Discovery timelines, which conditions reported each signature, attention by subsystem, strategy use, and available cost and timing measures. |
+| **Run by run** | Each run's outcomes and hypothesis history, with probe events, notes, and links to evidence. Replay controls show how the recorded state changed over time. |
+| **Ledger** | Sortable reference rows for every target, backend, condition, and run. Count links open the indexes that produced them. |
+| **Token usage** | Agent and orchestration cost, including preflight and review. Estimated usage and incomplete delegated spend are marked. |
+| **Bugs by severity** | Crash clusters ordered by severity, with links to the bundles. |
+| **Ground truth** | Precision and recall, only when the target has an answer key. |
 
-**Models side by side** is one comparison per target revision:
+The page's “coverage” comparison is the share of distinct problems reported
+by the runs shown on that revision. It is neither code coverage nor recall
+against every bug in the target. “Unique” is also relative to those runs.
 
-- *The race* — every condition's discovery curve on one clock, a replay slider
-  that also drives every run section, and a table of distinct problems each
-  condition had by each whole hour of the budget.
-- *Who found what* — every distinct problem any run reported, joined by the
-  clusterers' own located key, against every condition: a dot with its hour
-  for a find; *looked · N* when the harness opened N hypotheses on that file
-  and did not file this problem, with how many of those became artifacts
-  elsewhere in the file; a dash when it never looked. The control leaves no
-  trace, so its empty cell is unknowable, not a miss. A row opens the
-  problem's story across models.
-- *Where each model looked, and where it found* — hypotheses per subsystem
-  for every harness condition, shaded by attention, beside the problems each
-  side kept there: models that look in the same places and find different
-  things differ in judgement; models that look in different places differ in
-  strategy.
-- *Which strategies each model reached for* — each harness condition's
-  hypotheses by strategy lane, and how many in each lane became artifacts.
-- *How each model behaves* — the same dimensions for every condition, each
-  bar scaled to the best value on the target in that dimension's own
-  direction: distinct problems, Medium-or-higher share, bug classes, the share
-  of claims that held up, time to the first admitted artifact, hypotheses
-  opened and the share that became artifacts, median idea lifetime,
-  subsystems explored, probes per crash, cost per confirmed result, and budget
-  spent. A dash is a dimension that condition cannot report, never a zero.
+A harness cell marked “looked” has recorded hypotheses on that file. This does
+not prove that it investigated the particular issue in the row. The direct
+control does not produce the same state history, so its missing entry is
+unknown rather than a measured miss.
 
-**Run by run** gives each run a replay control and, in order: *what each side
-found* (one dot per merged cluster: row is the bug class, column is who
-reached it, colour is severity, shape says crash or finding, rejected clusters
-in a fourth column with the reviewer's reason); *how the harness reasoned*
-(every hypothesis an agent opened as a bar from written to resolved, one row
-per agent, coloured by outcome, with the probes it drove ticked above it —
-hover for the idea in the agent's own words, click for its reasoning, guard
-gap, input shape, probes, and notes; a hypothesis never resolved runs to the
-wall); *how the run thought* (the cell's state streams in quarter-hour bins:
-hypotheses by lane, probes by verdict, artifacts filed, output tokens); and
-*where they looked, where they found* by subsystem. Reference detail — the
-run's own discovery curve, the review funnel, lane yield, effort tiles, and
-cells — sits under a collapsed heading.
-
-**Ledger** is the reference table at the end: one row per target, backend,
-condition, and run, sortable, every count linked to the cluster report or
-rejected index that produced it, with the same labels and marks (`M+`,
-`classes`, `unjudged`, `retained`, `≥`, `up to`, `~`, `‡`) as the Markdown
-ledger.
-
-None of these figures is *precision*, which needs the answer key described
-below.
-
-**Token usage** compares what each condition actually cost. The bold row per
-condition is the total, and the harness side includes everything it spends
-beyond the agents themselves (preflight, triage, validation, and its other
-model calls), so the comparison is not flattered by hiding overhead.
-Estimated figures are marked: Gemini through the Antigravity CLI and Grok
-Build report no usage, so their numbers are estimates, and a Codex or OpenCode
-cell that delegated to subagents is a spend floor, because those run as
-separate threads or sessions the cell's usage cannot see. The `Delegation`
-column counts the subagent spawns each cell's transcripts show; the
-[backends guide](../guides/backends.md#one-isolation-policy-for-every-launch)
-says which backends carry their subagents' spend in the row and which do not.
-
-**Bugs by severity** lists distinct crash clusters strongest first. The bug id
-links to the crash directory, and the reproducer link opens the rendered
-report bundle.
-
-**Ground truth** appears only for a target that ships an answer key (see
-below). It reports measured precision and recall per condition, so you can see
-not just how many crashes a run produced but how many were the *right* ones.
+Keep the ledger's markers with the values when quoting them: `≥` identifies a
+count dominated by unjudged evidence, `~` marks non-exact usage or cost,
+`up to` marks an upper bound, and `‡` identifies superseded severity scoring.
+Do not subtract a floor from a control or compare severity subsets scored
+under different versions.
 
 ## Ground truth: precision and recall
 
@@ -465,11 +403,12 @@ detection, triage, clustering, and severity scoring end to end.
 
 The answer key is deliberately **not** in the target tree. It lives at
 `output/canary/.ground-truth.json`, outside the directory handed to the
-audited agents, so the score stays blind: an agent auditing the canary is not
-also handed a list of which inputs are real bugs and which are traps. The
-deterministic scorer reads it after the run. Each planted bug pins its
-sanitizer primitive and the stack frame it crashes in; each trap declares the
-benign outcome it expects. The canary is 100% synthetic, so the answer key
+audited agents. The deterministic scorer reads it after the run rather than
+including it in the audit prompt. This separation is not an access control on
+other files the backend can read; account for that when making blind-evaluation
+claims. Each planted bug pins its sanitizer primitive and the stack frame it
+crashes in; each trap declares the benign outcome it expects. The canary is
+100% synthetic, so the answer key
 discloses no real project's bug.
 
 When one source defect has multiple runtime shapes, its entry may add
@@ -568,13 +507,14 @@ keys on the runtime `(primitive, signature_symbol)` pair, plus `access` only
 for an alternate that declares it.
 
 !!! warning "Keep real-bug manifests local; never commit them"
-    A real-CVE manifest names actual crashing symbols and primitives, which
-    discloses unreleased bug detail, exactly what the
-    [neutral-fixture rule](../development.md#testing-discipline) forbids.
-    `output/` is gitignored precisely so these stay private, so a real-bug
-    `output/<slug>/.ground-truth.json` is uncommitted by default; leave it
-    that way. The synthetic sample answer keys are the committed exception
-    because they implement no real project.
+    A real-bug manifest can contain disclosure-sensitive symbols, inputs, and
+    diagnostic details. Keep these out of shared fixtures under the
+    [neutral-fixture rule](../development.md#testing-discipline).
+    A real-bug `output/<slug>/.ground-truth.json` is gitignored by default;
+    leave it uncommitted. Gitignore prevents accidental tracking, not access
+    or disclosure through an archive, report, or tool. The synthetic sample
+    answer keys are the committed exception because they implement no real
+    project.
 
 ## Common variations
 
@@ -589,7 +529,7 @@ bin/benchmark --target <target> --budget-wall 5400
 bin/benchmark --target <target> --conditions harness
 
 # Pick the backend and model explicitly.
-bin/benchmark --target <target> --backend codex --model <model>
+bin/benchmark --target <target> --backend claude --model <model>
 
 # Override the audit's configured harness worker count.
 # The direct baseline is still one launch of the CLI at its defaults.
@@ -719,10 +659,10 @@ valid. Re-derive the rollups instead of launching agents:
 
 ```bash
 # Re-derive the most recent run for this target and backend.
-bin/benchmark --target <target> --backend codex --regenerate
+bin/benchmark --target <target> --backend claude --regenerate
 
 # Re-derive one specific run.
-bin/benchmark --target <target> --backend codex --regenerate \
+bin/benchmark --target <target> --backend claude --regenerate \
   --run-id 20260530-142558
 
 # Re-derive every run under output/benchmark/.
@@ -813,8 +753,9 @@ reproduction. Evidence whose own fault cannot be characterised claims no rate.
 
 ## How to make the result worth reading
 
-- Pick targets that can plausibly produce evidence inside the budget. If both
-  rows stay at zero, you measured target hardness, not harness quality.
+- If both conditions report zero, inspect setup failures, unjudged artifacts,
+  and actual budget spent. Zero alone cannot distinguish a difficult target,
+  inadequate budget, or an ineffective approach.
 - Prefer 5+ replicates before making claims. This is a practical rule of
   thumb, not a derived confidence bound; report variability rather than
   treating the count as statistically conclusive.

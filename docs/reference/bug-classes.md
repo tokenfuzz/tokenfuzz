@@ -8,7 +8,8 @@ The harness keeps a few classes of its own beside it where folding them into a
 dashboard class would change the CVSS impact shape or lose a sanitizer-grade
 distinction; each of those says why.
 
-The vocabulary lives in `lib/bug_classes.py` and drives four things:
+`lib/bug_classes.py` is the source of truth for the vocabulary. It drives four
+parts of TokenFuzz:
 
 - **Reports.** Agents and the model-direct baseline write one token in the
   `## Fields` table; the find-quality gate re-labels each accepted finding with

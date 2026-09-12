@@ -1,7 +1,10 @@
 # Getting Started
 
-The shortest useful path is: install the host tools, prove one backend on a
-sample target, add the real target, then run one bounded iteration.
+Start with a sample target to check your installation. Then add the project
+you want to review and check its configuration before a longer run.
+
+Run examples from the repository root. Replace placeholders such as
+`<target>` and `<backend>` with your own values before running a command.
 
 ## Try the pipeline first
 

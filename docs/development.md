@@ -28,7 +28,7 @@ bin/docs build
 | --- | --- |
 | `bin/` | Executable operator and orchestration entry points. |
 | `lib/` | Shared Python: prompt renderers, state, runners, triage, reporting. |
-| `lib/prompts/` | Central Jinja prompt bodies. |
+| `lib/prompts/` | Central Markdown prompt templates. |
 | `.agents/` | Runtime strategy and reproducer references for audit agents. |
 | `config/` | Checked-in defaults: backend models and reasoning effort. |
 | `tests/` | Shell and Python behavior tests plus neutral fixtures. |
@@ -37,6 +37,8 @@ bin/docs build
 Read the command or module you intend to change, its callers, and its tests
 before editing. `AGENTS.md` is part of the runtime audit contract, not a
 contributor guide; changes there affect every spawned audit agent.
+
+## Development agents
 
 Start your coding agent — `claude`, `codex`, `gemini`, `grok`, `opencode`, or
 any other agent CLI — from the repository root and send:
@@ -47,18 +49,19 @@ Read docs/development.md first, then help me with: <task>
 
 ## Working discipline
 
-An agent's characteristic failures are *fluent*: wrong output that reads
-correctly, passes a skim, and often passes tests. These rules catch them, in
-the order a change happens.
+A plausible change can still be wrong. Verify references and behavior in the
+current tree, keep the change focused, and report the checks you actually ran.
+These rules apply to human contributors and development agents.
 
 ### Before writing a line
 
 - **Verify every reference exists in this tree.** Never name a helper, flag,
   path, or env var from plausibility — `rg` it or open the file. Unread this
   session means unknown.
-- **Question the premise.** Reproduce the failure and confirm the mechanism
-  before fixing; if the framing is wrong, say so and stop. When a requirement
-  is unclear, ask; state the assumptions you do make.
+- **Confirm the problem.** For a bug fix, reproduce the failure and trace its
+  cause before editing. For documentation, compare the claim with the current
+  implementation and tests. State material assumptions and resolve unclear
+  requirements.
 - **A hypothesis is a lead, not a diagnosis.** Trace the actual control and
   data flow to the specific cause in *this* code before changing a line.
 
@@ -91,7 +94,9 @@ confident "done" that never ran:
 
 - `bash tests/run-tests.sh` ran and you saw it pass — plus `bin/docs build`
   if the change touches `docs/`.
-- The fix has a test that failed before the change and passes after.
+- A behavior fix has a test that failed before the change and passes after.
+  Documentation-only edits need a strict docs build and checks of the changed
+  claims, examples, and links.
 - `rg` for every renamed or removed symbol finds no orphaned reference.
 - The diff contains the task and its orphans — nothing else.
 - The non-obvious *why* — options rejected, the failure a guard defends
@@ -146,28 +151,20 @@ that reads correctly but was never checked.
      or any unreleased bug detail.
    - Use neutral placeholders (`child_free child.c:91`, `app_parse`,
      `sampleproj`), consistent within a file. The same rule applies to docs.
-5. **Construct the host property a test needs; never assert it.** A setup line
-   that samples a host policy — process-environment disclosure, uid, a sandbox
-   — passes only where that policy happens to match, and where it does not
-   hold the behaviour it guards goes unexercised, so the green hosts prove
-   nothing either. Build the input that policy would produce rather than
-   waiting for a host that produces it. A toolchain cache is a host property
-   too: `go run` compiles the standard library on first use, so a probe that
-   pays for it inside a per-run execution deadline passes on a warm developer
-   machine and times out on a fresh runner — bootstrap the target the way
-   `bin/setup-target` does instead. `tests/run-tests.sh --image ubuntu:24.04`
-   runs the Linux CI container job locally, on caches as cold as CI's. A
-   container covers only the toolchains `--install-container-deps` installs,
-   and a skipped test is not a passing one — read the skips.
-6. **Suite time is spawn count.** Every `bin/` entry point costs 120–260ms of
-   interpreter and import, so count spawns before optimising anything else,
-   and fix the harness rather than thinning the test — the same chain runs in
-   an audit. Never spawn a Python entry point from Python that could import
-   it: give a printing callee a form that *returns* its answer and leave the
-   CLI a thin printer (a threaded caller cannot capture stdout). Ask a tool
-   once, not once per output format. Pace a wait by what it waits for — a
-   poll that also drives a sampler bills every fast call a full interval. And
-   dropping a process boundary drops its containment: restore that, loudly.
+5. **Construct the conditions a test needs.** Do not depend on the host's
+   process-environment visibility, uid, sandbox policy, or warm compiler cache.
+   Build fixtures that represent the relevant condition. Bootstrap compiled
+   targets before starting a per-run execution deadline: a cold `go run`, for
+   example, may first compile the standard library.
+   `tests/run-tests.sh --image ubuntu:24.04` exercises the Linux CI container
+   on fresh caches. It covers only the toolchains installed by
+   `--install-container-deps`; read the skips as well as failures.
+6. **Reduce unnecessary process launches.** Import Python helpers rather than
+   spawning Python entry points. Give a printing helper a return-value API
+   and keep the CLI as a thin printer; threaded callers cannot safely capture
+   global stdout. Reuse one tool result across output formats, and pace polls
+   according to the operation they wait for. When removing a process boundary,
+   preserve its timeout and containment guarantees.
 
 Tests live in `tests/`; shared fixtures and assertions in `tests/helpers.sh`.
 Time a suite change on an idle machine — a stale or parallel run makes wall
@@ -191,7 +188,9 @@ clock meaningless — and let only a whole-suite run write the scheduler's
 - **Prompts stay centralized** in `lib/prompts/*.md.j2`, rendered through the
   shared helpers — never inlined in `bin/`, `lib/`, or `.agents/`. Keep
   `AGENTS.md` runtime-safe for spawned audit agents; development guidance
-  belongs here.
+  belongs here. Despite the `.j2` extension, `lib/prompt_render.py` supports
+  only `{{ name }}` substitution and `{# comment #}` removal. Compute optional
+  blocks in the caller; Jinja control tags such as `{% if %}` are rejected.
 - **No hidden knobs.** No hardcoded caps or defensive env toggles. Operator
   choices are visible, documented, and test-covered; add an env var only when
   operators genuinely vary it across routine runs.
@@ -236,39 +235,28 @@ audit logs to a relative `.audit/` path from the repository root.
 
 ## Benchmark wall discipline
 
-The benchmark asks whether the harness beats the same model asked directly at
-the same budget, so what the wall contains decides whether that answer means
-anything. Three settled rules — do not re-derive them per change:
+The benchmark compares the harness with the same model prompted directly at
+the same budget. Its time accounting is part of that experimental contract:
 
-1. **The wall contains all agent time and all in-run steering.** Housekeeping is
-   steering, not overhead: `post_iteration` promotes crashes, gates findings,
-   re-ranks work cards, and rotates strategy, and each of those changes what
-   agents do next. Slow steering is a bug to fix, never a reason to stop
-   counting it.
-2. **The only exclusion is provider-withheld capacity, capped.** A quota reset
-   is the vendor removing time from whichever condition straddles it, not work
-   either side chose to do. `PROVIDER_PAUSE_MAX_SECONDS` bounds it.
-3. **Post-cell adjudication runs off the audit wall, under one policy and one
-   cap for both conditions, and cannot add an artifact.** Terminal crash triage
-   and the find-gate drain score what is already on disk; that is measurement,
-   and it runs under `finalize_wall` rather than the audit wall. That cap is
-   unlimited by default and equal for both conditions, so a condition that
-   files more artifacts pays more measurement time rather than publishing an
-   unmeasured count — the artifact set is frozen when the audit wall ends, so
-   the extra time cannot buy it a finding. Equal policy is still not equal
-   completion: a finite cap, or a review that answers for some ids and not
-   others, leaves artifacts unadjudicated, and each counts as unconfirmed and
-   is reported as an unjudged remainder beside the count. Read such a cell as
-   a floor; when the remainder outnumbers the verdicts the count itself is
-   marked `≥`, because the part review never reached is not a sample of the
-   part it did. `finalize_wall` bounds when another bounded group of artifacts
-   may *start*, not when adjudication stops: a group already in flight runs to
-   a recorded disposition, because votes that never become one bought nothing.
+1. **Count all agent time and in-run steering.** Housekeeping promotes
+   artifacts, validates findings, re-ranks cards, and rotates strategies.
+   Because it affects subsequent work, its duration belongs to the audit wall.
+   A slow steering step is a performance problem, not an exclusion.
+2. **Exclude only provider-withheld capacity, up to the cap.**
+   `PROVIDER_PAUSE_MAX_SECONDS` bounds the excluded wait.
+3. **Score the frozen artifact set after the audit wall.** Final crash triage
+   and finding validation cannot add discoveries. Both conditions use the
+   same policy and `finalize_wall`, unlimited by default. Report incomplete
+   review as an unjudged remainder; never infer a verdict from a timeout.
 
-The trap rule 1 defends against: excluding a stall converts a performance bug
-into extra budget. A cell that spends 24% of its wall in housekeeping would
-silently get a 24% larger agent budget than its control, and the next report
-would show an improvement that came entirely from the accounting change.
+For example, a cell that spends 15 minutes of a one-hour budget in
+housekeeping has 45 minutes left for investigation. Excluding those 15 minutes
+would let it run longer while still reporting a one-hour budget. An apparent
+improvement could then come entirely from changed accounting.
+
+[Benchmarking](concepts/benchmark.md#the-closing-pass) describes the finalization
+limits, including the different deadline behavior of crash reviews and admitted
+finding groups.
 
 ## Documentation discipline
 
@@ -284,9 +272,23 @@ bin/docs build   # one-shot strict build matching CI; output in site/
 bin/docs serve   # install deps, then preview at http://127.0.0.1:4000/
 ```
 
-`--strict` is what the Pages workflow runs: broken internal links, missing
-nav entries, and unrecognised references fail the build. Fix them before
-opening a docs PR.
+`bin/docs build` installs the pinned documentation dependencies into `.venv`
+and runs MkDocs with `--strict`, matching the Pages build. Resolve its warnings
+before opening a docs PR. Also check linked heading anchors and rendered
+examples: a successful build alone does not verify every claim or fragment.
+
+For a documentation review:
+
+1. Read each affected page in full, including tables, examples, and image text.
+2. Trace technical claims to the current command, shared implementation, and
+   relevant behavior tests. Treat old prose as a claim to check.
+3. Keep existing page paths and linked heading anchors where possible. Link
+   to the canonical explanation instead of copying it into several pages.
+4. Use neutral examples, and distinguish a filed candidate from a validated
+   result. Avoid promising reproducibility or security impact beyond the
+   recorded evidence.
+5. Build the site, inspect representative rendered pages and diagrams, and
+   check internal links. Describe any verification limits in the handoff.
 
 ## Releasing
 

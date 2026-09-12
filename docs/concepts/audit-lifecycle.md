@@ -15,9 +15,10 @@ A useful run can end in either evidence lane:
   sanitizer or race detector, it lands in `crashes/` with the trace, the
   input, and a `reproduce.sh` that rebuilds and re-runs it.
 
-These are parallel lanes, not two copies of every issue. Managed-runtime panics
-and tracebacks normally become findings; sanitizer-class diagnostics and
-enabled race-detector reports become crashes.
+These are parallel result paths. A managed-runtime panic or traceback can
+support a finding, but does not become one automatically: a report must
+establish a security issue. Sanitizer and race diagnostics must meet the crash
+confirmation and review requirements.
 
 Every accepted crash is automatically converted to a maintainer bundle
 (`REPORT.md`, `reproduce.sh`, the sanitizer output, and the input) as part of
@@ -49,10 +50,9 @@ trees. `target.toml` points the harness at the binary inside it (`asan_bin`,
 `asan_lib`). The same layout is used for browsers and generic CLI/library
 targets.
 
-- ASan is the only sanitizer enabled by default.
-- UBSan, MSan, TSan, and Go's race detector are opt-in per target.
-- MSan is recommended for self-contained libraries.
-- UBSan and TSan are useful but need triage of their false positives.
+Ordinary C/C++ setup enables ASan by default; UBSan, MSan, and TSan are
+opt-in. Language setup uses the registry's defaults: Go enables `race`, Swift
+enables ASan, and most other language runners start in findings-only mode.
 
 See [Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for the
 recommended posture.
@@ -179,26 +179,32 @@ instead.
 
 Triage decides whether an artifact is useful and in scope.
 
-An ordinary audit schedules continuously. A slot that finishes a session
-relaunches at once if it has work, and nothing waits for the slowest peer.
-While slots are busy, a background sweep adjudicates the artifacts no live
-session can still write:
+Review can happen while other agents are still working. The harness waits
+until a report's writers have finished before judging it, then makes a final
+pass after the workers drain. The scheduling details below explain how it
+avoids reviewing a half-written artifact.
 
-- a completed crash bundle, once the slot that filed it has no session in
-  flight and no other session has written into it (a `bin/probe` skeleton or a
-  held bundle stays with its owner until finished);
-- a finding, once every session whose own commands or file writes named it has
-  ended, or, when no session named it, once every session still running
-  started after it was filed.
+??? info "Scheduling and background review"
+    An ordinary audit schedules continuously. A slot that finishes a session
+    relaunches at once if it has work, and nothing waits for the slowest peer.
+    While slots are busy, a background sweep adjudicates the artifacts no live
+    session can still write:
 
-A turn-capped session's continuation counts as the same session. A steward
-tick every few minutes scores the generation, rotates starved strategy lanes,
-and re-ranks the queue without stopping anyone. The one full pass over the
-whole tree, including orphan-testcase enforcement and corpus promotion (which
-touch a slot's own scratch), runs after the last slot drains. It reuses the
-cached verdicts, so what the sweeps settled costs no further review, and what
-they could not reach is judged there. Fixed-lane, delta, and ensemble runs keep
-the older cohort model with a pass at the end of every iteration.
+    - a completed crash bundle, once the slot that filed it has no session in
+      flight and no other session has written into it (a `bin/probe` skeleton or a
+      held bundle stays with its owner until finished);
+    - a finding, once every session whose own commands or file writes named it has
+      ended, or, when no session named it, once every session still running
+      started after it was filed.
+
+    A turn-capped session's continuation counts as the same session. A steward
+    tick every few minutes scores the generation, rotates starved strategy lanes,
+    and re-ranks the queue without stopping anyone. The one full pass over the
+    whole tree, including orphan-testcase enforcement and corpus promotion (which
+    touch a slot's own scratch), runs after the last slot drains. It reuses the
+    cached verdicts, so what the sweeps settled costs no further review, and what
+    they could not reach is judged there. Fixed-lane, delta, and ensemble runs keep
+    the older cohort model with a pass at the end of every iteration.
 
 **For crashes, the gates are strict:**
 
@@ -233,12 +239,13 @@ ends the claim as unsettled rather than leaving it without a verdict.
 
 Because no sanitizer vouches for a finding, each report is read independently,
 with none of the filing agent's context, and voted accept or reject. Two
-accepts promote it; two rejects move it to `findings-rejected/`. A promoted
-finding then receives source review of its trigger and exact claimed security
-consequence. It is quarantined only when two anchored reviewers agree on a
-concrete disproof; missing or ambiguous evidence fails open. An inconclusive
-first review or a split receives one focused resolution pass carrying the
-prior evidence; genuine remaining uncertainty stays visible and unjudged.
+accepts promote it; two rejects move it to `findings-rejected/`. An admitted
+finding then receives source review of its trigger and claimed security
+consequence. Two anchored Reject votes can disprove the claim. Missing review
+output keeps it pending; completed review that cannot establish scope leads
+to an `unsettled-scope:` rejection. See
+[Triage and review](../guides/triage-results.md#how-automated-review-works)
+for the distinction between incomplete review and a terminal decision.
 
 What happens to each artifact:
 
@@ -306,8 +313,9 @@ A maintainer runs:
 ./reproduce.sh /path/to/source
 ```
 
-and sees the same sanitizer output against a clean checkout. The first export
-happens during triage without operator action;
+and compares the new diagnostic with the saved `sanitizer.txt`. Reproduction
+can depend on the recorded revision, toolchain, configuration, and runtime
+conditions. The first export happens during triage without operator action;
 [Maintenance commands](../guides/triage-results.md#maintenance-commands) shows
 how to re-run it after editing a bundle.
 

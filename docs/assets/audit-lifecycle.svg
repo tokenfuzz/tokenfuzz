@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 570"
      font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
-     role="img" aria-label="TokenFuzz audit lifecycle: set up and preflight the target, agents either file source-only findings or run one testcase through probe, lane-specific validation records findings, crashes, rejected or unsettled artifacts, and crash bundles">
+     role="img" aria-label="TokenFuzz audit lifecycle: set up and preflight the target, agents either file source-only findings or run one testcase through probe, lane-specific validation records findings, crashes, rejected or pending artifacts, and crash bundles">
   <title>TokenFuzz audit lifecycle</title>
   <defs>
     <marker id="al-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -85,7 +85,7 @@
 
   <g filter="url(#al-shadow)"><rect x="560" y="476" width="180" height="64" class="reject"/></g>
   <text x="576" y="494" class="out-tag" fill="#374151">Preserved</text>
-  <text x="576" y="512" class="title">rejected / unsettled</text>
+  <text x="576" y="512" class="title">rejected / pending</text>
   <text x="576" y="530" class="micro">Reason or review retained.</text>
 
   <g filter="url(#al-shadow)"><rect x="760" y="476" width="160" height="64" class="bundle"/></g>

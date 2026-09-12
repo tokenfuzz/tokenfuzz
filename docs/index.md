@@ -1,46 +1,50 @@
 # TokenFuzz
 
 TokenFuzz is an open-source harness for evidence-driven, LLM-assisted security
-auditing. It turns model-led source review into a shared queue of concrete
-hypotheses, runs every testcase through one execution contract, and keeps the
-result as evidence a security team or upstream maintainer can inspect.
+auditing. It coordinates agents that inspect source, form concrete hypotheses,
+run testcases, and turn validated results into reports a maintainer can review.
+It works with C/C++, Rust, Go, Python, Java, and other supported languages,
+from native libraries and command-line tools to browsers and JavaScript
+runtimes.
 
-The distinction that matters is between discovery and proof. An agent can
-suggest where a bug may be. TokenFuzz records what was actually tested, keeps
-each review decision attached to the evidence it judged, and separates four
-outcomes:
+The harness supplies the parts a long audit needs beyond a prompt:
 
-| Outcome | What it means |
-| --- | --- |
-| Finding | A concrete security claim with a source location and an actionable report. A reproducer is optional. |
-| Crash | A reproducible sanitizer or runtime-race diagnostic with its testcase and saved output. |
-| Not reportable | A real engineering defect that review placed outside the configured security boundary. It stays visible and receives no security score. |
-| Rejected | Evidence that did not meet its gate. It is preserved with the reason. |
-
-Keeping that separation over a long run is what the harness is for:
-
-- **A shared work queue.** Deterministic ranking turns a source tree into
-  claimable cards, and eight review strategies direct the investigation without
-  needing a known bug or a crashing seed to start from.
-- **One execution contract.** Every testcase runs through `bin/probe`, which
-  picks the runner, gates on coverage where it can, and records the verdict in
-  structured state rather than in a transcript.
-- **Independent review.** Reports are judged by readers that never saw the
-  filing agent's context. Each decision is content-addressed to the evidence it
-  read, so editing a report reopens its review.
-- **Maintainer handoff.** An accepted crash becomes a self-contained bundle: a
-  report, the input, the saved sanitizer output, and a `reproduce.sh` that
-  rebuilds and re-runs it from a clean checkout.
+- **Source-to-testcase investigation.** Deterministic ranking builds a shared
+  work queue; eight review strategies guide deeper analysis without requiring
+  a known bug or crashing seed.
+- **Evidence-gated results.** Testcases run through one probe contract.
+  Sanitizer diagnostics are confirmed before promotion, while concrete
+  non-crashing security issues remain first-class findings.
+- **Fleet coordination.** Work leases, structured state, and clustering let
+  parallel agents resume investigations and avoid rediscovering the same root
+  cause.
+- **Reviewable triage.** Independent validation, reachability and caller-control
+  fields, rejected-result indexes, and severity annotation make model claims
+  traceable rather than self-authenticating.
+- **Maintainer handoff.** Accepted crashes become self-contained bundles with a
+  report, input, sanitizer output, and a one-command reproduction script for a
+  clean checkout.
+- **Comparable evaluation.** A built-in benchmark runs TokenFuzz and a direct
+  vulnerability prompt under matched target, model, and wall-clock budgets,
+  then compares validated, deduplicated evidence instead of prose volume.
 
 ## Supported targets
 
-Native libraries and CLIs, browsers and JavaScript engines, and language-runner
-targets in Rust, Go, Python, Java, Kotlin, Swift, Ruby, PHP,
-JavaScript/TypeScript, Perl, and R. ASan is the default for native targets;
-UBSan, MSan, TSan, and Go's `race` detector are opt-in per target. A project
-with no sanitizer build runs in findings-only mode, where runtime diagnostics
-and source-backed security issues go to `findings/` rather than `crashes/`. See
-[Language runners](guides/multi-language.md).
+TokenFuzz works across several kinds of project:
+
+- **Native libraries and tools:** C/C++ parsers, codecs, protocol
+  implementations, and command-line programs.
+- **Compiled language projects:** Rust, Go, and Swift packages, using the
+  sanitizer or language runner configured for the target.
+- **Managed and interpreted code:** Python, Java, Kotlin, Ruby, PHP,
+  JavaScript/TypeScript, Perl, and R.
+- **Browsers and runtimes:** full browsers, JavaScript engines, WebAssembly
+  runtimes, and mixed-language products.
+
+Setup defaults ordinary C/C++ targets to ASan, Go to `race`, and Swift to
+ASan. Projects without a sanitizer build can use findings-only mode; runtime
+errors support investigation, while a security finding still needs a concrete
+report. See [Language runners](guides/multi-language.md) for ecosystem details.
 
 TokenFuzz drives Claude Code, Codex CLI, Gemini through the Antigravity CLI or
 Google Gemini CLI, Grok Build, and OpenCode with either a catalog provider or a
@@ -97,6 +101,20 @@ The complete walkthrough is in [First audit](getting-started/first-audit.md).
 
 ## Where results go
 
+A model's claim is the start of review. TokenFuzz records what was tested and
+keeps review decisions attached to the evidence they evaluated. It records two
+kinds of artifact:
+
+| Artifact | What it contains |
+| --- | --- |
+| Finding | A concrete security claim with a source location and an actionable report. A reproducer is optional. |
+| Crash | A sanitizer or runtime-race diagnostic with its testcase and saved output. Confirmation and triage determine whether it becomes a reviewed crash bundle. |
+
+Either kind can be pending, reportable, or rejected. Rejected evidence is kept
+with the reason, including defects outside the configured security boundary.
+Only reportable results receive security credit; directory placement alone
+does not establish that state.
+
 TokenFuzz keeps source and audit evidence apart:
 
 ```text
@@ -106,20 +124,24 @@ output/<target>/<backend>/results/        findings, crashes, state, and scratch 
 output/<target>/<backend>/logs/           run and backend diagnostics
 ```
 
-Start review with the generated HTML indexes, not model transcripts:
+Start review with the generated HTML indexes. A directory can contain pending
+candidates as well as reviewed results; check the publication state in
+`validation.json` before counting a report as confirmed.
 
 | Path | Purpose |
 | --- | --- |
 | `results/findings/FINDING-CLUSTERS.html` | Concrete security findings, grouped by exact evidence signature. |
-| `results/crashes/CRASH-CLUSTERS.html` | Confirmed sanitizer or race diagnostics and their reproduction bundles. |
+| `results/crashes/CRASH-CLUSTERS.html` | Crash candidates, reviewed diagnostics, and reproduction bundles. |
 | `results/crashes-rejected/REJECTED-CRASHES.html` | Crash candidates rejected with an explanation. |
 | `results/findings-rejected/REJECTED-FINDINGS.html` | Findings triage rejected, with the reason. |
 
 `results/` here means `output/<target>/<backend>/results/`. Cross-backend
 finding and crash summaries are written directly under `output/<target>/`.
 
-[Artifact layout](reference/artifacts.md) lists every generated path, and
+[Artifact layout](reference/artifacts.md) describes the main generated paths, and
 [Triage and review](guides/triage-results.md) explains the review standard.
+
+<span id="how-the-pieces-fit"></span>
 
 ## The operating model
 
@@ -145,15 +167,27 @@ boundaries.
 - **It does not publish anything.** There is no advisory pipeline and no
   automatic upstream filing. Disclosure stays yours, through the upstream
   project's process.
-- **Its severity scores are advisory.** They are real CVSS v4.0 vectors,
-  computed offline from the report's own fields. Two metrics are worst-case
-  defaults the harness cannot know, and only you know what the asset is worth.
-  Read the generated `## Severity rationale` before citing a number.
+- **Severity scores are advisory.** CVSS v4.0 vectors are computed offline
+  from the available evidence and report fields. Review the generated
+  `## Severity rationale` and your deployment context before citing a score.
 - **A finding is still a claim until a human checks it.** Automated review can
   admit, reject, or leave it unsettled. A fail-open gate preserves uncertain
   evidence; it does not certify it.
 - **Clusters are a review aid, not a root-cause proof.** One defect can split
   across sinks, and two defects can share one.
+
+## Choose what to read next
+
+| What you want to do | Start here |
+| --- | --- |
+| Try TokenFuzz on a small example | [Getting started](getting-started/index.md) and [Sample targets](getting-started/sample-targets.md) |
+| Bring your own project | [Add a target](getting-started/add-a-target.md), then [First audit](getting-started/first-audit.md) |
+| Choose a backend and execution boundary | [Backends and isolation](guides/backends.md) |
+| Review the output of a run | [Triage and review](guides/triage-results.md) |
+| Assess a bundle sent to your project | [Reproduce a crash](guides/reproduce-a-crash.md) |
+| Evaluate whether the harness helps | [Benchmarking](concepts/benchmark.md) |
+| Understand or change the implementation | [System architecture](concepts/system-architecture.md) and [Development](development.md) |
+| Look up a field or diagnose a failure | [Reference](reference/index.md) and [Troubleshooting](reference/troubleshooting.md) |
 
 ## Responsible use
 

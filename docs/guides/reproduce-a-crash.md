@@ -5,8 +5,10 @@ TokenFuzz crash bundle. The shortest path is: read `REPORT.md`, inspect
 `reproduce.sh`, run it against a disposable checkout, and compare the new
 diagnostic with `sanitizer.txt`.
 
-If you are the operator running TokenFuzz, see
-[Triage and review](triage-results.md) instead.
+Use this page to [understand the bundle](#bundle-layout),
+[read its diagnostic](#reading-the-sanitizer-output), and
+[verify a fix](#verifying-your-fix). If you are the operator running TokenFuzz,
+see [Triage and review](triage-results.md) instead.
 
 Accepted crashes are exported in place during triage. The directory under
 `output/.../crashes/CRASH-*` is therefore the same self-contained shape an
@@ -46,7 +48,8 @@ a `## Fields` table of the structured claims triage parsed. Between them they
 name:
 
 - the affected `file:function:line`;
-- the issue class (bounds / lifetime / type / size / uninit / state);
+- the issue class, using the
+  [canonical bug-class vocabulary](../reference/bug-classes.md);
 - the data flow;
 - a candidate fix direction.
 
@@ -64,8 +67,8 @@ build steps under your own policy.
 
 If no runnable route (testcase, harness, or wrapper) was captured,
 `reproduce.sh` is a stub: it names what is missing and exits 2. The report and
-saved diagnostic are still valid evidence; reproduction then needs a route you
-author yourself.
+saved diagnostic remain available for review, but the stub does not establish
+that the crash is reproducible.
 
 ## Reproduce in one command
 
@@ -200,9 +203,12 @@ revision *is* affected, the most common causes are:
 
 ## Privacy and provenance
 
-The bundle is self-contained:
+The bundle contains the files needed for its recorded reproduction route.
+Review it before sharing:
 
-- It contains no model transcript or TokenFuzz telemetry.
+- It is not intended to include full model transcripts. Reports, saved
+  diagnostics, paths, and `.audit/` originals can still contain sensitive
+  target information.
 - The script may use the network to clone the recorded upstream source, fetch
   submodules, or install project dependencies.
 - `.audit/` retains audit-side source artifacts for provenance; it is not

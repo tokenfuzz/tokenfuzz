@@ -1,7 +1,7 @@
 # Strategy Model
 
-A *strategy* in TokenFuzz is a small, named recipe an agent follows to turn a
-chunk of source into evidence. Each strategy specifies:
+A *strategy* is a named investigation method assigned to a work card. Each
+strategy specifies:
 
 - how to pick a hypothesis;
 - where to look for an input;
@@ -142,9 +142,8 @@ Claims live as append-only rows in `state/claims.jsonl`. They expire on a
 timer (30 minutes by default) *and* are released when the associated
 hypothesis closes, so a wedged or killed agent does not poison the queue.
 
-The net effect: agents work different angles of the same target without
-duplicating effort, and a card the agent peeks at but does not adopt stays
-available for the next iteration.
+These rules reduce duplicate work while allowing different strategies on the
+same target. A card an agent inspects but does not adopt remains available.
 
 ## Strategy rotation
 

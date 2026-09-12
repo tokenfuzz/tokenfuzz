@@ -4,12 +4,9 @@ TokenFuzz is designed to run without an environment file. Prefer command flags
 for choices that belong to one run (`--target`, `--backend`, `--model`,
 `--strategy`) and `target.toml` for choices that belong to one target.
 
-The variables below are the operator-facing exceptions. Each one is here for
-the same reason: its default can produce something you would otherwise have to
-diagnose, such as a run that stops by itself, a session that restarts
-mid-thought, or a local model that never finishes a decision. The harness
-reads other variables internally; those are not a supported interface and you
-should not need them.
+This page lists operator overrides and explains the defaults that affect
+spend, session duration, backend selection, and diagnostics. Other variables
+are internal runtime state rather than a supported configuration interface.
 
 ## Worker pool
 
@@ -17,7 +14,7 @@ should not need them.
 | --- | --- | --- |
 | `NUM_AGENTS` | unset | A flat pool of `N` workers. On a browser target this replaces the browser/shell split. |
 | `BROWSER_AGENTS` | `1` | Browser-mode workers. Only applies when `[runner].args` declares a `{PROFILE}` page route; a browser-mode script engine gets shell workers only. |
-| `SHELL_AGENTS` | `2` beside browser workers, `3` otherwise | Shell/generic workers when `NUM_AGENTS` is unset. The default is deliberately not sized to the machine: an ordinary run refills every slot to the wall, so the pool multiplies token spend directly, and a shared provider quota is a hard stop for the whole account rather than a pause. Raise it per run when the budget allows. |
+| `SHELL_AGENTS` | `2` beside browser workers, `3` otherwise | Shell/generic workers when `NUM_AGENTS` is unset. The default is fixed rather than CPU-sized. More workers increase concurrent spend and share the account's provider quota. |
 | `WORK_CARD_CLAIM_TTL_SECONDS` | `1800` | How long a work-card claim stays valid without its hypothesis closing. Thirty minutes is a safety net so a killed agent does not hold its card for a shift; raise it only for cards you know take longer. |
 
 A one-iteration smoke test always launches one worker, whatever these say.
@@ -61,10 +58,9 @@ Already checkpointed hypotheses and artifacts are preserved. The next
 iteration resumes them from structured state; work not checkpointed before a
 backend's turn boundary may need to be repeated.
 
-The default is deliberately conservative: recorded Claude request curves
-modeled about 28% lower cache reads at 128 while interrupting fewer original
-sessions than a 100-turn cap. Use 100 as a more aggressive cost setting only
-after checking finding yield and incomplete-artifact rates on your workload:
+A lower cap creates more continuations and can reduce the context carried
+by each session. Check both cost and incomplete-artifact rates before adopting
+a different value:
 
 ```bash
 TURN_SOFT_CAP=100 bin/audit --target <target> --backend <backend>
@@ -88,7 +84,7 @@ for a shared shell, or a backend binary outside `PATH`.
 | `GROK_MODEL_DEFAULT` | `config/models.toml` | Default Grok model. |
 | `CLAUDE_BIN` / `CODEX_BIN` / `GEMINI_BIN` / `GROK_BIN` / `OPENCODE_BIN` | the CLI's own name (`agy` for Gemini) | Backend executable outside `PATH`. |
 | `USE_GEMINI_CLI` | `0` | Use Google Gemini CLI instead of the default Antigravity CLI. |
-| `CLAUDE_CODE_PROMPT_CACHE_TTL` | unset | Claude Code's prompt-cache write tier (`5m` or `1h`). TokenFuzz sets `5m` on every Claude launch it makes (agent sessions, validators, and decision calls), because a harness prefix is almost never idle for five minutes and the one-hour write costs 60% more; see the [cost model](../concepts/cost-model.md#what-prompt-caching-can-reuse). Set it yourself to override. Cost tier only; it never changes model behaviour. |
+| `CLAUDE_CODE_PROMPT_CACHE_TTL` | unset | Claude Code's prompt-cache write tier (`5m` or `1h`). TokenFuzz sets `5m` on every Claude launch it makes (agent sessions, validators, and decision calls), to reduce cache-write cost for closely spaced requests; see the [cost model](../concepts/cost-model.md#what-prompt-caching-can-reuse). Set it yourself to override. Cost tier only; it never changes model behaviour. |
 | `AUDIT_MODEL_PREFLIGHT` | `1` | Before starting, launch the selected model once through the real agent path, with the same granted directories as an audit session and the audit guide in the prompt, and require it to run a command that writes into the target tree. A backend that can reply but cannot act, a CLI that silently serves a different model, or a model whose safeguards refuse the audit workload fails here rather than spending the run. Set `0` only for an intentionally offline or mock run. |
 | `AUDIT_MODEL_PREFLIGHT_TIMEOUT` | `60` seconds (`300` for Google Gemini CLI) | Ceiling on each preflight attempt. Raise it when a slow local model loses the probe and the audit never reaches its first agent. |
 | `AUDIT_MODEL_PREFLIGHT_ATTEMPTS` | `3` | How many times the preflight probe is retried on a transient failure before the run stops. |

@@ -29,8 +29,9 @@ tooling infers:
 - default sanitizer policy;
 - default threat model controls.
 
-Your job is to edit only values that remain unresolved or are wrong for this
-target.
+Review the inferred values against the actual project, especially its
+execution route and threat model. Edit unresolved or incorrect values before
+a run.
 
 At audit preflight this file is copied to
 `output/<target>/<backend>/results/.target.toml`. That session snapshot is
@@ -161,9 +162,11 @@ The `[sanitizer]` section declares which sanitizer runners are intentionally
 enabled for this target, and where to find each sanitizer's optional
 suppression file.
 
-Only ASan is enabled by default. The supported sanitizer slugs are `asan`,
-`ubsan`, `msan`, `tsan`, and `race`; everything except `asan` is opt-in per
-target. `race` (Go's runtime race detector) is valid only inside `enabled`. It
+The loader defaults to `["asan"]` when the section is absent. Setup writes an
+explicit policy for recognized language targets: Go gets `["race"]`, Swift
+gets `["asan"]`, and most other language runners get `[]`. The supported
+sanitizer slugs are `asan`, `ubsan`, `msan`, `tsan`, and `race`.
+`race` (Go's runtime race detector) is valid only inside `enabled`. It
 routes through `[runner]` and takes none of the per-sanitizer `<name>_bin`,
 `<name>_lib`, or `<name>_suppressions` keys below. For when to enable each one
 and the false-positive trade-offs, see
@@ -481,9 +484,10 @@ bin/suggest-threat-model <slug> --apply --force   # re-derive attacker_controls
 bin/suggest-peers <slug> --apply --force          # re-derive [s6_peers]
 ```
 
-`bin/setup-target` accepts `--no-llm-config` to keep the deterministic seed
-and skip LLM enrichment. Use it when setup must stay offline; otherwise let
-the suggestions run and review them.
+`bin/setup-target --no-llm-config` skips threat-model, peer, and runner
+suggestions. It is not an offline switch: source checkout, dependency
+installation, and build preparation can still need network access, and a
+missing native build recipe can require a model.
 
 ## The audited revision
 

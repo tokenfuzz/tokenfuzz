@@ -129,8 +129,9 @@ does not replace the target's toolchain.
 - Browser targets can require Mercurial, large SDKs, and project-specific
   bootstrap tooling.
 
-The goal is a source tree that builds and runs normally before sanitizer
-instrumentation is introduced.
+First establish that the project builds and runs with its documented
+toolchain. This makes it easier to distinguish a project dependency problem
+from an instrumentation or harness problem.
 
 ## 4. Verify the harness
 
@@ -140,9 +141,11 @@ From the repository root:
 bash tests/run-tests.sh
 ```
 
-The suite uses stubbed backend invocations; it spends no model tokens and needs
-no backend authentication. It exercises config parsing, state, triage, runner
-dispatch, reporting, and shell/Python portability.
+By default, the suite uses stubbed backend invocations and needs no backend
+authentication or model tokens. It exercises config parsing, state, triage,
+runner dispatch, reporting, and shell/Python portability. Live backend sandbox
+checks are opt-in through `TOKENFUZZ_LIVE_BACKENDS`; without it, those tests
+are reported as skipped.
 
 Optional Linux image checks run the same suite in a clean Docker container.
 `ubuntu:24.04` is the image the CI container job runs:

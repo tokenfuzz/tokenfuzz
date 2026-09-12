@@ -15,10 +15,6 @@ fit one of these four routes:
 | Broad hosted-model coverage | `--backend all`, after checking which backends the selected security mode can launch. |
 | Backend has no usable native sandbox | `external-bypass` inside a container or VM you administer. |
 
-The backend changes who reasons about the source. It does not change the
-target config, work-state format, probe contract, triage gates, or artifact
-layout.
-
 ## Choose a backend
 
 ```bash
@@ -118,12 +114,15 @@ contract without creating a stronger boundary.
 
 ### What the sandbox does and does not buy
 
-A native sandbox gives **integrity and process containment**: the agent cannot
-write outside its workspace or reach the network. It is **not a
-confidentiality boundary**. Every one of these sandboxes still reads the whole
-filesystem, and whatever the model reads travels to its provider by design. If
-secrets on the machine are in scope, the boundary is a hardened outer container
-or VM with only the target mounted, entered before the audit starts.
+For supported backends, the native sandbox restricts writes and network
+access as described in the table below. Read access is broader: a hosted model
+can receive files the agent reads. Native sandbox mode therefore does not
+provide confidentiality for other readable files on the host.
+
+Use an outer container or VM with only the required source and output mounted
+when the audit must be separated from host files and credentials. The
+container helper mounts the repository, so all content in that mount remains
+available to the run.
 
 ### Backend support
 
@@ -169,8 +168,9 @@ tree has egress through the model's own tools:
 | OpenCode | `webfetch` and `websearch` denied in every profile. |
 | Antigravity (`agy`) | Exposes no web switch. |
 
-The same launch flags serve both benchmark conditions, so the model-direct
-control is egress-free too. Cross-project research (S6 peer fixes, advisories)
+The same web-tool restrictions apply to both benchmark conditions.
+Network access from shell commands still depends on the selected sandbox or
+outer environment. Cross-project research (S6 peer fixes, advisories)
 is done by the harness's own tooling, not by agents.
 
 Two things stay uneven and are documented rather than fixed:
@@ -198,7 +198,7 @@ its fan-out is treated as unobservable. The
 
 ```bash
 # Default: the backend's own sandbox, no flag needed.
-bin/audit --target <target> --backend codex 1
+bin/audit --target <target> --backend claude 1
 
 # Compatibility path, only after entering an externally hardened shell.
 bin/audit --target <target> --backend grok --agent-security external-bypass 1

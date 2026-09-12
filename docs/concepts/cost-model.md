@@ -1,21 +1,13 @@
 # Cost Model
 
-Long, useful LLM-based audit runs are mostly a **context-economy problem**.
-Backends account for context differently, but later turns generally carry an
-accumulated prompt or a compacted summary. More source, logs, and narration in
-that context means more latency and usually more input-token cost.
+Audit cost includes model input and output, testcase execution, and automated
+review. Larger contexts usually increase latency and input-token spend;
+additional workers multiply concurrent demand. TokenFuzz records these costs
+and limits repeated context, oversized output, and duplicate work.
 
-An agent that dumps raw logs into context can multiply latency and token spend
-without adding evidence. TokenFuzz treats context size as a first-class
-resource and gives the harness concrete levers to keep it bounded.
-
-A long run, in practice, is just the audit command without an iteration count:
-
-```bash
-bin/audit --target <target> --backend <backend>
-```
-
-The rest of this page is what keeps that run cheap enough to leave running.
+Use the [environment reference](../reference/environment.md) for worker,
+wall-time, and session limits. Use [Benchmarking](benchmark.md) to compare
+cost against reviewed results.
 
 ## What scales with cost
 
@@ -27,10 +19,16 @@ The rest of this page is what keeps that run cheap enough to leave running.
 | Sanitizer runs | Each run takes wall-clock and RAM; browsers cost more | Per-agent launch budget; browser/JS coverage gate; native coverage feedback. |
 | Redundant work | Two agents re-exploring the same surface | Work-card leases, per-agent input memory, rejected indexes. |
 
-The two anchors are simple. **Avoid re-reading**: every byte the agent has
-already seen should not be sent again. **Avoid re-running**: every probe that
-has already happened should not be repeated by another agent. Every mechanism
-below is a specific application of one of those two rules.
+Two principles explain most of these choices:
+
+- **Reuse context that still applies.** Compact state and session seeds help
+  the next agent continue without reconstructing the run from raw logs.
+- **Reuse evidence that still holds.** Claims, recorded probes, and review
+  receipts reduce duplicate work while leaving room for confirmation runs and
+  fresh review when the source or evidence changes.
+
+The aim is to spend the budget on investigation and verification. A smaller
+transcript is useful only if it preserves the information that work needs.
 
 ## What prompt caching can reuse
 
@@ -46,37 +44,25 @@ The shared safety-and-guide prefix may still qualify where a backend supports
 automatic prefix caching. Availability and price are provider-specific, so run
 logs record what the backend actually reports rather than assuming a discount.
 
-Every backend runs with its CLI's default tool set and delegation inside one
-isolation policy applied to all of them alike, so a benchmark measures each
-backend as it ships, less the operator's environment and the network. The
-policy and its per-backend exceptions are in the
+Both benchmark conditions use the same backend tool and delegation policy.
+The execution boundary and available controls differ by backend; see the
 [backends guide](../guides/backends.md#one-isolation-policy-for-every-launch).
 
-Two cost-only choices shrink what a request bills without changing what it can
-do:
+Two implementation choices reduce duplicated context and cache-write cost:
 
-- Codex loads the repo-root `AGENTS.md` itself, so its cold-start prompt points
-  at that copy instead of embedding a second one.
-- Every Claude launch writes its prompt cache at the five-minute tier rather
-  than the CLI's one-hour default (`CLAUDE_CODE_PROMPT_CACHE_TTL` in the
-  [environment reference](../reference/environment.md)). A one-hour cache
-  write costs 2x fresh input against 1.25x, and a read costs the same at either
-  tier, so the hour only pays for a prefix left unread for more than five
-  minutes. A harness prefix is almost never idle that long. Measured over 122
-  audit sessions, the five-minute tier cost about 20% less; the few sessions
-  with gaps longer than five minutes (foreground fuzz campaigns and probe
-  loops) each re-wrote one context, and every other session saved 18–24%.
-  Both benchmark conditions bill the same tier.
+- Codex loads the repo-root `AGENTS.md`, so its cold-start prompt refers to
+  that copy instead of embedding it again.
+- TokenFuzz defaults Claude launches to a five-minute prompt-cache tier,
+  including agent sessions and one-shot decisions in both benchmark
+  conditions. An explicit operator cache setting takes precedence; see
+  `CLAUDE_CODE_PROMPT_CACHE_TTL` in the
+  [environment reference](../reference/environment.md#model-selection).
 
-Every prompt the harness renders, session prompts and decision prompts alike,
-puts its static instructions first and the per-agent or per-artifact material
-last. Backends that cache by token prefix (Codex, and local OpenAI-compatible
-servers such as ollama, vLLM, or llama.cpp) reuse the shared head across
-agents and sessions for free. For a local server, keep the model resident
-between turns (ollama: `OLLAMA_KEEP_ALIVE=-1`) and give it at least as many
-parallel slots as the run has agents (ollama: `OLLAMA_NUM_PARALLEL`).
-Otherwise each agent's turn evicts its peers' prefill and every request
-re-processes the whole context.
+Cache reuse depends on the provider, prompt prefix, and time between requests.
+A shared rules suffix is not a reusable prefix. Local-server caching also
+depends on server configuration and available capacity. Use recorded cache
+usage and actual costs to assess savings; the harness cannot guarantee a
+cache hit or a fixed discount.
 
 ## Capped source reading
 
@@ -185,11 +171,12 @@ launch with a `tokens` object and the session's probe counts (`probes`,
 `probe_seconds`, `probe_diagnostics`, `first_probe_seconds`). Two numbers tell
 you most of what you need:
 
-- **`tokens.cached_input`** should be roughly stable per iteration. Rising
-  without more output means an agent is pulling logs or source dumps into
-  context.
-- **`tokens.output` against testcases written.** Lots of output and few
-  testcases is the "model wrote an essay" smell.
+- **`tokens.cached_input`** shows how much input was served from cache.
+  Compare sessions of similar length: a larger value can reflect more turns,
+  a larger context, or better cache reuse.
+- **`tokens.output` alongside useful artifacts.** Compare it with saved
+  reports, probe results, and completed reviews. A source-review session can
+  produce useful evidence without writing a testcase.
 
 The row also records `turn_soft_cap` and `turn_capped`, so cost comparisons
 can separate natural completions from sessions rolled over to fresh context,
@@ -208,7 +195,7 @@ as a measurement:
 | Backend | What it reports |
 | --- | --- |
 | Claude | Terminal counts on a normal finish. When stopped early, exact cache buckets are recovered from its per-request events, but the row is marked `estimated: true` because fresh input and output are then lower bounds. |
-| Codex | Usage only in `turn.completed`, which a session stopped at the turn cap or the wall deadline never emits. The harness therefore runs Codex without `--ephemeral` and reads the session rollout instead; its last `token_count` is measured, and covers every thread rather than only the ones that finished. |
+| Codex | Usage only in `turn.completed`, which a session stopped at the turn cap or the wall deadline never emits. The harness therefore runs Codex without `--ephemeral` and reads the session rollout instead; its last `token_count` recovers measured usage for the recorded session even when it did not finish. Separate delegated threads are not included in the parent's total. |
 | Google Gemini CLI | Terminal counts on a normal finish; its native turn-limit result retains them. |
 | OpenCode (`oss`) | Structured usage events when the transport emits them; completeness is recorded rather than assumed. |
 | Antigravity, Grok | No native usage in the current transports. Rows are estimated from prompt and transcript size. |

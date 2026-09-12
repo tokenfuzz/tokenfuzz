@@ -7,7 +7,7 @@ a run.
 Set the active result directory once when you start inspecting:
 
 ```bash
-export TARGET=<your-target>
+export TARGET="<your-target>"
 export BACKEND=claude             # or codex, gemini, grok, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 ```
@@ -23,16 +23,16 @@ $RESULTS/crashes/CRASH-*/REPORT.html
 $RESULTS/findings/FIND-*/report.html
 ```
 
-Each page answers one question. A cluster index lists every distinct
-problem once, with when its first report landed on the run's clock, which
-subsystem it sits in, which strategy lane reached it, and how many reports
-rediscovered it; a benchmark pool page keeps both conditions apart. A
-rejected index groups what did not hold up by the gate that turned it away.
-A report page frames the report's own text with an action card — the fix,
-the site, how to reproduce, how sure the review was — and a rail carrying
-the CVSS vector, the review receipt, the bundle files, and the timeline.
-Every figure on them is read from the Markdown indexes and receipts beside
-them, never recounted.
+Each page has a different purpose:
+
+- A cluster index groups matching evidence and shows discovery time, subsystem,
+  strategy, and member reports. Benchmark pool pages separate the conditions.
+- A rejected index groups artifacts by the gate and reason for rejection.
+- A report page presents the claim with its source location, suggested fix,
+  reproduction details, review receipt, severity, and bundle files.
+
+These views use the Markdown indexes and receipts beside them. A cluster is an
+evidence grouping, not proof of one distinct root cause.
 
 Use `results/` for evidence and progress. Use `logs/` only to debug
 orchestration, backend authentication, or wrapper failures.
@@ -96,7 +96,7 @@ The paths an operator inspects after a run:
 | `crashes/` | Crash candidates, including final and pending artifacts. |
 | `crashes-rejected/` | Rejected crash artifacts and `REJECTED-CRASHES.html` / `REJECTED-CRASHES.md`. |
 | `findings/` | Security finding candidates of any class, with or without a reproducer. See the note below. |
-| `findings-rejected/` | FIND directories triage rejected at quorum (substance gate, unreachable trigger, or source-disproved consequence), plus `REJECTED-FINDINGS.html` / `REJECTED-FINDINGS.md` listing them with reasons. |
+| `findings-rejected/` | FIND directories that failed substance, source, or publication review, plus `REJECTED-FINDINGS.html` / `REJECTED-FINDINGS.md` listing the reasons, including unresolved scope after completed review. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
 | `coverage/` | Per-agent edge journals (`edges-agent-N.journal`) written by `bin/hits`, keyed by target-relative path; `bin/coverage-summary` and `bin/rank-work` read them. |
 | `hits-N.log` | One HIT/MISSED/COVERAGE_UNAVAILABLE row per coverage replay by agent `N`, at the results root. |
@@ -138,8 +138,8 @@ carries a normalized `execution_failure_class` plus the detailed `reason`;
 resume aggregates a five-run same-class streak across the whole card and
 offers repair or seed guidance, but never closes or re-ranks work from that
 advisory signal. Older rows retain the same class token in `reason` and are
-read compatibly. This is also why `wc -l` on the file answers "did anything
-actually run?".
+read compatibly. A row can record `NO_EXEC`, so line count alone does not
+prove that target code ran; inspect the verdict and failure reason.
 
 `state/callgraph.json` is present only with the optional
 [call-neighbourhood analysis](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
@@ -222,9 +222,9 @@ after ten triage passes is moved to `crashes-rejected/`, with those artifacts
 named in its rejection report.
 
 Pending promotion is resumable work. `bin/state resume --agent N` presents an
-unfinished bundle before active hypotheses or new work cards. Its sanitizer
-proof remains countable in benchmark crash totals, but severity stays Unknown
-until the report is complete.
+unfinished bundle before active hypotheses or new work cards. Its saved
+diagnostic remains visible as candidate evidence, but pending promotion does
+not receive final security credit or numeric severity.
 
 After export, the maintainer-facing bundle has:
 
@@ -287,8 +287,8 @@ FIND-001/
 regenerated on every triage pass; hand-edit only `report.md`.
 
 `findings/` also contains `FINDING-CLUSTERS.md` and `FINDING-CLUSTERS.html`,
-the review table grouping reports that share a root cause. The cross-backend
-aggregate lives at `output/<target>/FINDING-CLUSTERS.md` and
+the review table grouping reports that share an evidence signature. The
+cross-backend aggregate lives at `output/<target>/FINDING-CLUSTERS.md` and
 `output/<target>/FINDING-CLUSTERS.html`.
 
 See [Triage and review](../guides/triage-results.md#clusters-and-duplicates)

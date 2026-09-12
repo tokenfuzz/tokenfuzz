@@ -132,6 +132,6 @@
 
   <g filter="url(#sa-shadow)"><rect x="660" y="556" width="260" height="44" class="reject"/></g>
   <text x="678" y="576" class="out-tag" fill="#374151">Preserved</text>
-  <text x="780" y="576" class="title">rejected / open</text>
+  <text x="780" y="576" class="title">rejected / pending</text>
   <text x="678" y="592" class="micro">Reason or open review retained.</text>
 </svg>

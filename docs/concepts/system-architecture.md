@@ -2,24 +2,15 @@
 
 [![TokenFuzz system architecture: source and configuration feed audit preflight, work cards and state coordinate agents, findings can go directly to validation, and testcases run through probe](../assets/system-architecture.svg)](../assets/system-architecture.svg){target="_blank" title="Open full-size diagram in a new tab"}
 
-TokenFuzz has a small number of moving parts. This page walks through them in
-the order they show up in a session:
+TokenFuzz separates three responsibilities: agents propose and investigate
+claims, the probe records what executed, and triage reviews the saved evidence.
+Structured state connects those steps so a run can continue after an agent
+exits or loses context.
 
-- directory model;
-- the audit run;
-- the work queue and structured state;
-- agents;
-- the probe runner;
-- triage and results;
-- backends and modes;
-- quality gates.
-
-The boundary worth remembering:
-
-- **Upstream source lives under `targets/`.**
-- **Audit state and results live under `output/`.**
-
-Almost every design decision in the harness exists to keep that boundary clean.
+The directory boundary is simple: upstream source and builds live under
+`targets/`; audit evidence, progress, and logs live under `output/`. This page
+explains the components. For the sequence of a run, see
+[Audit lifecycle](audit-lifecycle.md).
 
 ## Directory model
 
@@ -146,35 +137,26 @@ through FIND validation instead.
 
 ## Triage
 
-Triage is the boundary between "an agent produced an artifact" and "this is
-worth human review". Two contracts, deliberately different:
+Triage checks the evidence and records a publication decision:
 
-- **Crashes** need a runnable testcase, saved sanitizer output, complete
-  report fields, and they must not be a low-value class (OOM, assertion-only
-  abort, stack overflow, plain null deref). A trigger source outside the
-  declared attacker surface does not reject a crash: it stays in `crashes/`,
-  marked `not-reportable`, a real engineering defect outside the security
-  total and carrying no numeric CVSS score.
-- **Findings** need substance: a concrete location, an explicit issue class,
-  and a rationale a reviewer can act on. A sanitizer reproducer is *not*
-  required.
+- **Crashes** need a runnable testcase, a saved sanitizer or race diagnostic,
+  and complete report fields. Mechanical checks reject classes such as
+  OOM-only failures, assertion-only aborts, and plain null dereferences.
+- **Findings** need a concrete location, an explicit issue class, and an
+  actionable security rationale. A reproducer is optional.
 
-Crash class and bundle completeness are deterministic. A source-reading
-trigger reviewer needs two disproof-backed Reject votes to remove a
-sanitizer-confirmed crash and otherwise fails open. Findings need two
-substance-gate accepts to confirm (or two rejects to quarantine), followed by
-source review of the trigger and exact claimed security consequence. A finding
-no probe reproduced gets a second reviewer, reading through a reachability
-lens, when one is available; agreement publishes, a split goes to the focused
-resolver whose answer stands, and when no second reviewer can run the first
-verdict stands as before. This is additional review, not mandatory
-corroboration. A finding is quarantined only when two anchored reviewers agree that the trigger is
-unreachable or the claimed consequence is affirmatively source-disproved;
-missing evidence fails open.
+Findings receive substance review before source review. Source review checks
+the trigger, caller contract, claimed consequence, and threat model. Missing
+required review keeps an artifact pending. A source disproof, an out-of-scope
+trigger, or scope still unresolved after completed review moves it to the
+corresponding rejected tree with a reason. Evidence is preserved.
 
-Empty FIND directories stay in place marked `.needs-content`. Findings
-rejected twice by the substance gate are quarantined to `findings-rejected/`
-rather than deleted.
+A current `validation.json` binds the decision to the evidence it evaluated.
+Only `reportable` results receive security credit. Human-pinned and legacy
+artifacts may retain a `not-reportable` state in place.
+
+[Triage and review](../guides/triage-results.md) is the canonical description
+of review stages, publication states, and rejection reasons.
 
 ## Results layout
 
@@ -184,7 +166,7 @@ output/<target>/<backend>/results/
   crashes/                     filed crash candidates and reviewed crashes
   crashes-rejected/            rejected with reasons (skipped next session)
   findings/                    filed findings and their review state
-  findings-rejected/           findings triage rejected at quorum
+  findings-rejected/           rejected findings and their reasons
   corpus/                      saved seeds with metadata
   state/                       claims, hypotheses, notes, runs, events
   work-cards.jsonl             the ranked queue
@@ -241,6 +223,25 @@ an agent must still write a substantive security report, and that report
 passes the findings validation lane. Sanitizer-class signals remain crash
 candidates when an enabled detector emits them.
 
+## Where to read the implementation
+
+For contributors tracing a behavior, start with the owning entry point and
+then follow its shared code:
+
+| Responsibility | Main source files |
+| --- | --- |
+| Run setup and supervision | `bin/audit`, `lib/audit_runner.py` |
+| Target configuration and language defaults | `bin/setup-target`, `lib/target_config.py`, `lib/languages.py` |
+| Work claims and durable state | `bin/state`, `lib/workqueue.py` |
+| Session prompt assembly | `lib/prompt.py`, `lib/prompt_render.py`, `lib/prompts/` |
+| Testcase execution and recorded verdicts | `bin/probe`, `lib/sanitizer_run.py` |
+| Evidence review and publication receipts | `lib/triage.py`, `lib/validation_receipt.py` |
+| Experiment orchestration and measurement | `lib/benchmark_runner.py`, `lib/benchmark.py` |
+
+`AGENTS.md` and `.agents/` define the runtime audit instructions consumed by
+those components. [Development](../development.md) explains how to change
+TokenFuzz itself and verify the result.
+
 ## Quality gates
 
 The mechanisms that keep the loop honest:
@@ -256,6 +257,5 @@ The mechanisms that keep the loop honest:
   never produces qualifying evidence;
 - report fields that triage can parse mechanically.
 
-The architecture is intentionally opinionated: model reasoning becomes useful
-when it ends in reviewable evidence, a reproducible diagnostic or a concrete
-security report anchored in source.
+These checks make the result inspectable. They do not replace a maintainer's
+assessment of the evidence, impact, or proposed fix.

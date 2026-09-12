@@ -1,19 +1,17 @@
 # Getting Help
 
-This page is the entry point for when something is not working or you have a
-question the docs do not answer.
-
-If any of the terms below (target, backend, sanitizer build, `target.toml`,
-work card) are unfamiliar, the [Glossary](reference/glossary.md) has one-line
-definitions. Read those first.
+For setup and runtime failures, start with
+[Troubleshooting](reference/troubleshooting.md). If that does not resolve the
+problem, use the reporting guidance below. The
+[Glossary](reference/glossary.md) explains terms used in logs and reports.
 
 ## Where to file what
 
 | You want to… | Use |
 | --- | --- |
 | Report a bug in TokenFuzz itself | Search [GitHub Issues](https://github.com/tokenfuzz/tokenfuzz/issues), then open one. A focused pull request with a tested fix is welcome too. |
-| Ask a usage question | Check [Troubleshooting](reference/troubleshooting.md) and existing issues first, then open an issue labelled `question`. |
-| Suggest a feature or investigation strategy | Open an issue labelled `enhancement`. Read [Development](development.md) before opening a PR. |
+| Ask a usage question | Check [Troubleshooting](reference/troubleshooting.md) and existing issues first, then open an issue describing your question. |
+| Suggest a feature or investigation strategy | Open an issue describing the proposed change and who it helps. Read [Development](development.md) before opening a PR. |
 | Report a security issue **in TokenFuzz** | [SECURITY.md](https://github.com/tokenfuzz/tokenfuzz/blob/main/SECURITY.md). Do **not** open a public issue. |
 | Report a security issue **TokenFuzz found in another project** | The upstream project's normal security-disclosure process, not this repository. |
 | Share accepted impact from a TokenFuzz run | Follow the upstream disclosure process first. Once details are public, attribution in the upstream advisory, issue, or acknowledgement is enough. |
@@ -96,8 +94,9 @@ target.toml:
 - **Full raw backend transcripts or prompt dumps.** They are huge, expensive
   to read, and almost never the first thing needed. Start with `index.log` and
   the session log it points at.
-- **Target source code.** We do not need it; pointing at the upstream revision
-  is enough.
+- **Private source or undisclosed target findings.** Start with the upstream
+  revision and a small neutral example. Share source only when it is necessary
+  to explain the harness problem and you have permission to publish it.
 - **API keys, tokens, or anything from a backend CLI's config directory**
   (`~/.claude`, `~/.codex`, `~/.gemini`, and so on). A support report never
   needs them.
@@ -115,9 +114,7 @@ target details, reduce it to a sanitized reproducer before filing publicly.
 
 ## Helping the project
 
-If TokenFuzz gave you a confirmed sanitizer crash or a security finding that
-an upstream maintainer accepted, that is the highest-leverage thing you can do
-for the project: **tell us.**
-
-Saying "Found using TokenFuzz" in the upstream advisory, issue, or
-acknowledgement is enough.
+After coordinated disclosure is complete, a public acknowledgement helps
+maintainers understand how TokenFuzz is being used. “Found using TokenFuzz” in
+an upstream advisory, issue, or acknowledgement is enough. Do not share
+embargoed details here.

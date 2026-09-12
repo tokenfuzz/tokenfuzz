@@ -1,7 +1,7 @@
 # Glossary
 
-One-line definitions for the vocabulary used across the handbook, the reports,
-and the agent prompts.
+Definitions for terms used in the handbook, generated reports, and agent
+prompts. Entries are grouped by the part of the system they describe.
 
 ## Audit lifecycle
 
@@ -66,11 +66,12 @@ miss as feedback and run the sanitizer anyway. When no route-equivalent
 coverage build exists or the check cannot run, the probe records why
 (`COVERAGE_UNAVAILABLE`, `COVERAGE_ENV_FAIL`) and proceeds ungated.
 
-**Probe verdicts.** The execution result recorded in `state/runs.jsonl`.
+**Probe verdicts.** Execution results recorded in `state/runs.jsonl`.
+Coverage is a separate measurement: `HIT` means the named code was reached;
+`MISSED` means the coverage replay did not reach it. Neither says whether a
+sanitizer found an error.
 
-- `MISSED`: the testcase did not reach the target code.
-- `HIT`: it did.
-- `CLEAN`: it ran without sanitizer output.
+- `CLEAN`: execution completed without a recognized diagnostic.
 - `EXEC_FAIL`: it reached the configured runner but did not complete cleanly.
   The row carries an `execution_failure_class` (`loader`, `usage`,
   `input-rejected`, `aborted`, `unverified-exit`, or `exit`).
@@ -115,10 +116,10 @@ reportable result.
 triage, kept on disk and indexed in `REJECTED-CRASHES.html` with a reason, so
 future sessions do not refile it.
 
-**Rejected finding (`findings-rejected/`).** A FIND that lost at quorum: the
-substance gate, an unreachable trigger, or a source-disproved consequence.
-Kept on disk and indexed in `REJECTED-FINDINGS.html`. Quarantined, never
-deleted, so a false reject can be reviewed and recovered.
+**Rejected finding (`findings-rejected/`).** A FIND that failed substance or
+source review, fell outside the threat model, or remained out of established
+scope after completed review. Kept on disk and indexed in
+`REJECTED-FINDINGS.html` with its reason, so the decision can be reviewed.
 
 **Cluster file (`CRASH-CLUSTERS.html`, `FINDING-CLUSTERS.html`).** A
 browser-readable summary grouping reports that share a deterministic evidence
@@ -133,9 +134,11 @@ cluster. Per-backend at the result tree; cross-backend at the target root. The
 [Reproduce a crash](../guides/reproduce-a-crash.md).
 
 **Cluster id.** The hash naming a cluster: `CL-<8 hex>` for crashes,
-`FCL-<8 hex>` for findings. Derived from the cluster's signature (and, for
-findings, the canonical id), not from its membership, so it is stable across
-reruns.
+`FCL-<8 hex>` for findings. Crash ids depend on the encounter-order
+representative's signature; finding ids also include the canonical finding id.
+They are deterministic for
+unchanged inputs and ordering, but can change when the representative or
+canonical member changes. They are not permanent root-cause identifiers.
 
 ## Triage verdicts
 
@@ -147,8 +150,10 @@ quarantine.
 **Trigger reviewer.** The source-reading second opinion on a crash or an
 accepted finding. It answers whether the trigger is attacker-reachable and
 whether the claimed consequence holds, votes Promote / Reject / Uncertain, and
-must anchor a Reject in named source. It fails open: missing or inconclusive
-output keeps the artifact. Its vote is a triage signal, not proof.
+must anchor a Reject in named source. Missing required output keeps the
+artifact pending. Completed review that cannot establish scope leads to an
+`unsettled-scope:` rejection with the evidence preserved. A review vote is a
+triage signal, not proof.
 
 **`validation.json`.** The content-addressed receipt recording an artifact's
 publication state, bound to the report, its evidence, the target revision and
@@ -159,13 +164,15 @@ review.
 declared attacker surface. Only this state earns a numeric CVSS score and
 counts toward security yield.
 
-**Not reportable.** A settled review found a real *engineering* defect that
-crosses no security boundary, commonly a trigger needing a control
-`attacker_controls` does not list. Final, kept on disk, never scored, never
-counted as yield.
+**Not reportable.** A real engineering defect outside the security boundary.
+Current triage normally rejects it with a `threat-model:` reason while keeping
+the evidence. Human-pinned and older artifacts can retain the
+`not-reportable` receipt in place. Neither form receives security credit or
+numeric severity.
 
-**Pending.** No review settled the artifact. Neither credited nor written off;
-it is reported as part of the unjudged remainder.
+**Pending.** Required content or review is incomplete. The artifact stays
+available without security credit and contributes to the unjudged remainder.
+Completed review that cannot establish scope is rejected, not left pending.
 
 **Filed.** An agent wrote the required artifact to disk. This says nothing yet
 about independent review.
@@ -174,6 +181,19 @@ about independent review.
 can proceed to source review. Admission is not publication.
 
 ## Configuration
+
+**Target.** The project being reviewed, identified by a slug and a configured
+source root. A slug such as `samples/sample-python` can contain path components.
+Its configuration normally lives at `output/<slug>/target.toml`.
+
+**Runner.** The command that carries a testcase into the target. It can be a
+native executable, an interpreter, or a project-specific driver. `[runner]`
+defines its arguments and environment where that route is used.
+
+**Sanitizer.** Runtime instrumentation that reports particular classes of
+invalid execution, such as an out-of-range memory access. A clean run means
+that the selected detector did not report a problem in that execution; it is
+not proof that the project is safe.
 
 **`target.toml`.** Per-target generated config: source metadata, sanitizer
 binaries, build system, threat model. Lives at `output/<target>/target.toml`.
@@ -189,8 +209,8 @@ numeric CVSS.
 
 **Findings-only mode.** `[sanitizer].enabled = []`. Typical for interpreted
 or managed-runtime targets (Python, Ruby, Node, Java, PHP) but valid for any
-project without an ASan build. Runtime diagnostics are filed under
-`findings/`, not `crashes/`.
+project without a sanitizer build. Runtime diagnostics guide investigation;
+a substantive security report is required before filing under `findings/`.
 
 **`.session-env`.** Dynamic per-run paths and identifiers (`RESULTS_DIR`,
 `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`,

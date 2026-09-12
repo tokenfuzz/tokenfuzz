@@ -1,14 +1,9 @@
 # Troubleshooting
 
-Most TokenFuzz failures fall into a small number of categories:
-
-- missing host tools;
-- target config that does not match the build;
-- sanitizer binaries that do not run on their own;
-- backend CLIs that are not authenticated.
-
-This page is organised by symptom. Find the heading closest to what you see,
-and start there.
+Find the heading that matches the error or symptom. For startup failures,
+read `logs/index.log` first: it identifies the failed prerequisite, build,
+runner, or backend. For result-review problems, open the artifact's report,
+`validation.json`, and any rejection reason.
 
 For normal audit progress, the generated index pages under `crashes/`,
 `findings/`, `crashes-rejected/`, and `findings-rejected/` are the right first
@@ -39,9 +34,9 @@ The CLI answered, but with a different model than you asked for. Retrying
 cannot change which model is served, so the run stops before an agent starts
 rather than recording rows that name a model that never ran. Pick a model the
 provider will actually serve, or drop `--model` to use the configured default.
-A model whose safeguards refuse the audit workload reports the same way, with
-the refusing safeguard category named; use a different model or the local
-`oss` route for that target.
+A safeguard refusal also stops preflight and names the category in the log.
+Check the provider's access requirements and permitted-use policy before
+retrying; changing the model name does not resolve an access restriction.
 
 Symptom (Google Gemini CLI only):
 

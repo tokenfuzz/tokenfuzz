@@ -2,6 +2,8 @@
 
 Run commands from the repository root. This page documents the public operator
 workflow; each command's `--help` output is the source for rarely used flags.
+Replace `<placeholders>` before running an example. Square brackets in command
+syntax indicate optional arguments; do not type the brackets.
 
 | Task | Start with |
 | --- | --- |
@@ -16,7 +18,7 @@ workflow; each command's `--help` output is the source for rarely used flags.
 For the examples below:
 
 ```bash
-export TARGET=<target>
+export TARGET="<target>"
 export BACKEND=claude               # or codex, gemini, grok, oss
 export RESULTS="output/$TARGET/$BACKEND/results"
 ```
@@ -54,7 +56,7 @@ Useful flags:
 | `--no-update` | Do not pull or fetch an existing VCS checkout. |
 | `--force` | Regenerate inferred config, including suggested threat-model and peer sections. With `--build`, regenerate before building while preserving the target's build recipe. |
 | `--no-alternates` | Build only the canonical sanitizer trees, skipping the cached alternate ASan configurations described below. |
-| `--no-llm-config` | Skip best-effort model suggestions for the threat model and S6 peers. |
+| `--no-llm-config` | Skip model suggestions for the threat model, S6 peers, and runner. Does not disable network access or model-assisted creation of a missing build recipe. |
 
 The suggestion steps can also be rerun independently:
 

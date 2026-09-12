@@ -61,8 +61,8 @@ generated config keeps `upstream_url = "FILL_ME"`, and exported reproducers ask
 the maintainer for a checkout path instead of inventing a clone URL.
 
 Re-running `bin/setup-target` preserves reviewed values unless generated
-placeholders remain. `--no-llm-config` skips the best-effort threat-model and
-peer suggestions when setup must stay offline. Read the
+placeholders remain. `--no-llm-config` skips threat-model, peer, and runner
+suggestions; it does not make checkout or build preparation offline. Read the
 [command reference](../reference/commands.md#set-up-a-target) before using
 `--force`, because it deliberately behaves differently with and without
 `--build`.
@@ -111,8 +111,7 @@ build.sh <source-root> <build-directory>
 
 `bin/auto-build-script` is the supported generator for ordinary native
 projects. The same recipe is later embedded into exported crash bundles, so it
-must converge from a clean build directory rather than depend on unstated host
-state.
+must work from a clean build directory with documented dependencies.
 
 ### What native auto-build guarantees
 
@@ -182,7 +181,7 @@ Do not edit either file during the session. Change the shared
 `output/<target>/target.toml` between runs; the next invocation pins the new
 version.
 
-A schedulable smoke test creates `work-cards.jsonl`, `state/`, the result
+A smoke test with eligible work creates `work-cards.jsonl`, `state/`, the result
 lanes, and a per-agent scratch directory even if it finds nothing. Continue
 with [First audit](first-audit.md) to inspect them.
 

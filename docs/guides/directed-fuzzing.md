@@ -98,9 +98,9 @@ or hand-declaring a symbol. Each refusal names the repair. A crash found
 through any of those is a crash in the harness's fiction, and triaging one
 costs a reviewer a session.
 
-These are lints, not proofs. Passing them does not establish that a harness
-built its state legitimately or called only public APIs. They catch the common
-forgeries, and the reviewer still reads the harness.
+These checks detect particular harness mistakes. Passing them does not prove
+that setup is valid or that every call follows the public API contract; the
+reviewer still needs to read the harness.
 
 Every artifact a campaign produces is replayed with
 `bin/probe --confirm --harness <harness>`, so a fuzz crash is coverage-gated,
@@ -281,7 +281,7 @@ Blind harnesses, unresolved receipts, and harnesses with no receipt at all keep
 the generic widen-or-re-seed advice. A failed derivative never closes or
 quarantines its parent.
 
-Coverage totals are reported, never divided. libFuzzer's instrumented-counter
-total spans every loaded module including the harness's own translation unit;
-it is not the code reachable from this entry point, so it cannot say whether a
-harness is narrow or nearly done.
+Coverage totals are counts, not a percentage of the target reviewed.
+libFuzzer's counters span loaded modules, including the harness itself. They
+do not establish how much code is reachable from an entry point or how much
+of that code has been adequately tested.
