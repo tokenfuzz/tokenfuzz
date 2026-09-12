@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -24,6 +25,19 @@ from cleanup import (  # noqa: E402
     valid_component,
     valid_slug,
 )
+from target_config import (  # noqa: E402
+    SANITIZERS_VALID,
+    Config,
+    load_toml_into,
+    read_session_env,
+)
+
+_SANITIZERS = "|".join(map(re.escape, SANITIZERS_VALID))
+# Canonical recipes setup installs and commits: .audit/build.sh, build-<san>.sh.
+BUILD_RECIPE_RE = re.compile(rf"build(?:-(?:{_SANITIZERS}))?\.sh")
+# Every tree build_dir_name() can produce: build-<san> plus any
+# AUDIT_BUILD_SUFFIX or coverage sibling, which always starts with - or +.
+SANITIZER_BUILD_RE = re.compile(rf"build-(?:{_SANITIZERS})(?:[-+].*)?")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -31,8 +45,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         prog=TOOL,
         tool=TOOL,
         description=(
-            "Reset output/<target> while preserving target metadata. Backend filters "
-            "limit deletion to selected backend directories."
+            "Reset output/<target> and its generated sanitizer builds while preserving "
+            "target metadata and build recipes. Backend filters limit deletion to "
+            "selected backend directories and leave shared builds intact."
         ),
     )
     parser.add_argument("-n", "--dry-run", action="store_true")
@@ -94,6 +109,78 @@ def selected_entries(
     return entries, kept, skipped, failed
 
 
+def source_entries(target: Path) -> tuple[list[Path], int]:
+    """Return generated source-local entries and the build recipes kept."""
+    entries = [
+        Path(entry.path)
+        for entry in directory_entries(target)
+        if SANITIZER_BUILD_RE.fullmatch(entry.name)
+    ]
+    audit = target / ".audit"
+    if audit.is_symlink():
+        raise ValueError(f"refusing symlinked audit directory: {audit}")
+    if audit.exists() and not audit.is_dir():
+        entries.append(audit)
+        return entries, 0
+    if not audit.is_dir():
+        return entries, 0
+
+    kept = 0
+    for entry in directory_entries(audit):
+        if BUILD_RECIPE_RE.fullmatch(entry.name):
+            kept += 1
+        else:
+            entries.append(Path(entry.path))
+    return entries, kept
+
+
+def configured_source_root(
+    target_slug: str, target: Path, output_root: Path
+) -> Path | None:
+    """Resolve the source directory where setup created target-local builds.
+
+    Live sessions bind an exact, possibly external checkout; without one the
+    source lives at targets/<slug> beside the output root, the same layout
+    target_config.find_target_root assumes. A checkout that no longer exists
+    has nothing to clean.
+    """
+    recorded: set[Path] = set()
+    saw_session = False
+    for entry in directory_entries(target):
+        session = Path(entry.path) / "results" / ".session-env"
+        if not session.is_file():
+            continue
+        saw_session = True
+        root = read_session_env(session.parent).get("TARGET_ROOT", "").strip()
+        if root:
+            recorded.add(Path(root).expanduser().resolve())
+    if len(recorded) > 1:
+        raise ValueError("backend sessions record different target roots")
+    if recorded:
+        checkout = recorded.pop()
+    elif saw_session:
+        raise ValueError("backend session does not record TARGET_ROOT")
+    else:
+        checkout = (output_root.parent / "targets" / target_slug).resolve()
+    if not checkout.is_dir():
+        return None
+    suspicious = {
+        Path("/"),
+        Path.home().resolve(),
+        REPO_ROOT.resolve(),
+        (REPO_ROOT / "targets").resolve(),
+    }
+    if checkout in suspicious:
+        raise ValueError(f"refusing suspicious source path: {checkout}")
+
+    config = Config(target_root=str(checkout))
+    load_toml_into(config, target / "target.toml")
+    source = Path(config.target_root).resolve()
+    if source in suspicious:
+        raise ValueError(f"refusing suspicious source path: {source}")
+    return source
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     output_root = resolve_output_root(args.output_root, REPO_ROOT)
@@ -150,6 +237,19 @@ def main(argv: list[str]) -> int:
             failed += 1
             continue
 
+        source = None
+        source_resolution_failed = False
+        if backends is None:
+            try:
+                source = configured_source_root(target_slug, target, output_root)
+            except (OSError, ValueError) as exc:
+                print(
+                    f"[{TOOL}] failed to inspect source builds for {target_slug}: {exc}",
+                    file=sys.stderr,
+                )
+                failed += 1
+                source_resolution_failed = True
+
         try:
             to_remove, kept, target_skipped, validation_failed = selected_entries(
                 target, target_slug, backends, preserve_set
@@ -166,31 +266,72 @@ def main(argv: list[str]) -> int:
             if not args.quiet:
                 print(f"{target}: already clean ({kept} preserved)")
             cleaned += 1
-            continue
-        if args.dry_run:
+        elif args.dry_run:
             print(
                 f"[dry-run] {target}: would remove {len(to_remove)} entries "
                 f"({kept} preserved)"
             )
             for entry in to_remove:
                 print(f"[dry-run]   - {entry.name}")
+        else:
+            local_failed = 0
+            for entry in to_remove:
+                try:
+                    remove_entry(entry)
+                except OSError:
+                    print(f"[{TOOL}] failed to remove {entry}", file=sys.stderr)
+                    local_failed += 1
+            if local_failed:
+                failed += 1
+            else:
+                if not args.quiet:
+                    print(
+                        f"{target}: removed {len(to_remove)} entries, {kept} preserved"
+                    )
+                cleaned += 1
+
+        if backends is not None:
+            continue
+        if source_resolution_failed:
+            continue
+        try:
+            source_remove, source_kept = (
+                source_entries(source) if source is not None else ([], 0)
+            )
+        except (OSError, ValueError) as exc:
+            print(
+                f"[{TOOL}] failed to inspect source builds for {target_slug}: {exc}",
+                file=sys.stderr,
+            )
+            failed += 1
+            continue
+        if not source_remove:
+            if source is not None and not args.quiet:
+                print(f"{source}: source builds already clean ({source_kept} recipes preserved)")
+            continue
+        if args.dry_run:
+            print(
+                f"[dry-run] {source}: would remove {len(source_remove)} source build "
+                f"entries ({source_kept} recipes preserved)"
+            )
+            for entry in source_remove:
+                print(f"[dry-run]   - {entry.relative_to(source)}")
             continue
 
-        local_failed = 0
-        for entry in to_remove:
+        source_failed = 0
+        for entry in source_remove:
             try:
                 remove_entry(entry)
             except OSError:
                 print(f"[{TOOL}] failed to remove {entry}", file=sys.stderr)
-                local_failed += 1
-        if local_failed:
+                source_failed += 1
+        if source_failed:
             failed += 1
-        else:
-            if not args.quiet:
-                print(
-                    f"{target}: removed {len(to_remove)} entries, {kept} preserved"
-                )
-            cleaned += 1
+        elif not args.quiet:
+            print(
+                f"{source}: removed {len(source_remove)} source build entries, "
+                f"{source_kept} recipes preserved"
+            )
 
     if not args.dry_run and not args.quiet:
         print(

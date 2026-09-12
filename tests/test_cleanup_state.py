@@ -117,6 +117,141 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue((empty / "target.toml").is_file())
         self.assertFalse((empty / "codex").exists())
 
+    def test_target_wide_cleanup_removes_source_builds_and_keeps_recipes(self) -> None:
+        repository = self.root / "source-repository"
+        output = repository / "output"
+        source = repository / "targets" / "sample"
+        source.mkdir(parents=True)
+        slug = source.name
+        target = self.make_target(output, slug)
+        for backend in ("codex", "claude"):
+            (target / backend / "results" / ".session-env").write_text(
+                f"TARGET_ROOT={source}\n"
+            )
+        audit = source / ".audit"
+        audit.mkdir()
+        recipe = audit / "build.sh"
+        recipe.write_text("#!/bin/sh\n")
+        (audit / "build-ubsan.sh").write_text("#!/bin/sh\n")
+        (audit / "build-locks").mkdir()
+        (audit / "bootstrap.log").write_text("generated\n")
+        for name in ("build-asan", "build-asan+fuzz", "build-race-repro"):
+            (source / name).mkdir()
+            (source / name / "artifact").write_text("generated\n")
+        unrelated = source / "build-docs"
+        unrelated.mkdir()
+
+        dry = self.run_command(
+            CLEAN_STATE, output, "--target", slug, "--dry-run"
+        )
+        self.assertEqual(dry.returncode, 0, dry.stdout + dry.stderr)
+        self.assertIn("would remove 5 source build entries", dry.stdout)
+        self.assertTrue((source / "build-asan").is_dir())
+
+        filtered = self.run_command(
+            CLEAN_STATE, output, "--target", slug, "--backend", "codex"
+        )
+        self.assertEqual(filtered.returncode, 0, filtered.stdout + filtered.stderr)
+        self.assertTrue((source / "build-asan").is_dir())
+        self.assertTrue((target / "claude").is_dir())
+
+        cleaned = self.run_command(CLEAN_STATE, output, "--target", slug)
+        self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
+        self.assertIn("removed 5 source build entries", cleaned.stdout)
+        self.assertTrue(recipe.is_file())
+        self.assertTrue((audit / "build-ubsan.sh").is_file())
+        self.assertFalse((audit / "build-locks").exists())
+        self.assertFalse((audit / "bootstrap.log").exists())
+        self.assertFalse((source / "build-asan").exists())
+        self.assertFalse((source / "build-asan+fuzz").exists())
+        self.assertFalse((source / "build-race-repro").exists())
+        self.assertTrue(unrelated.is_dir())
+
+    def test_source_cleanup_refuses_conflicting_roots_and_symlinked_audit(self) -> None:
+        repository = self.root / "source-guards"
+        output = repository / "output"
+        source = repository / "source"
+        other = repository / "other-source"
+        source.mkdir(parents=True)
+        other.mkdir()
+        target = self.make_target(output, "sample")
+        sessions = [target / name / "results" / ".session-env" for name in ("codex", "claude")]
+        sessions[0].write_text(f"TARGET_ROOT={source}\n")
+        sessions[1].write_text(f"TARGET_ROOT={other}\n")
+        (source / "build-asan").mkdir()
+
+        conflict = self.run_command(CLEAN_STATE, output, "--target", "sample")
+        self.assertEqual(conflict.returncode, 1)
+        self.assertIn("different target roots", conflict.stderr)
+        self.assertTrue((source / "build-asan").is_dir())
+
+        target = self.make_target(output, "sample")
+        for session in sessions:
+            session.write_text(f"TARGET_ROOT={source}\n")
+        external_audit = repository / "external-audit"
+        external_audit.mkdir()
+        (external_audit / "build.sh").write_text("#!/bin/sh\n")
+        (source / ".audit").symlink_to(external_audit)
+
+        linked = self.run_command(CLEAN_STATE, output, "--target", "sample")
+        self.assertEqual(linked.returncode, 1)
+        self.assertIn("refusing symlinked audit directory", linked.stderr)
+        self.assertTrue((source / ".audit").is_symlink())
+        self.assertTrue((external_audit / "build.sh").is_file())
+
+    def test_recorded_checkout_resolves_source_subdir_and_refuses_root(self) -> None:
+        repository = self.root / "source-resolution"
+        output = repository / "output"
+        checkout = repository / "checkout"
+        source = checkout / "nested-project"
+        source.mkdir(parents=True)
+        target = self.make_target(output, "sample")
+        (target / "target.toml").write_text('source_subdir = "nested-project"\n')
+        for backend in ("codex", "claude"):
+            (target / backend / "results" / ".session-env").write_text(
+                f"TARGET_ROOT={checkout}\n"
+            )
+        (source / "build-asan").mkdir()
+
+        cleaned = self.run_command(CLEAN_STATE, output, "--target", "sample")
+        self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
+        self.assertFalse((source / "build-asan").exists())
+
+        target = self.make_target(output, "sample")
+        for backend in ("codex", "claude"):
+            (target / backend / "results" / ".session-env").write_text(
+                "TARGET_ROOT=/\n"
+            )
+        refused = self.run_command(CLEAN_STATE, output, "--target", "sample")
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("refusing suspicious source path: /", refused.stderr)
+
+        target = self.make_target(output, "sample")
+        for backend in ("codex", "claude"):
+            (target / backend / "results" / ".session-env").write_text(
+                f"TARGET_ROOT={repository / 'deleted-checkout'}\n"
+            )
+        stale = self.run_command(CLEAN_STATE, output, "--target", "sample")
+        self.assertEqual(stale.returncode, 0, stale.stdout + stale.stderr)
+        self.assertIn("failed=0", stale.stdout)
+        self.assertNotIn("source build", stale.stdout + stale.stderr)
+
+    def test_source_root_defaults_to_targets_beside_output_root(self) -> None:
+        repository = self.root / "source-default"
+        output = repository / "output"
+        source = repository / "targets" / "samples" / "sample"
+        source.mkdir(parents=True)
+        (source / "build-asan").mkdir()
+        (source / ".audit").mkdir()
+        (source / ".audit" / "build.sh").write_text("#!/bin/sh\n")
+        self.make_target(output, "samples/sample")
+
+        cleaned = self.run_command(CLEAN_STATE, output, "--target", "samples/sample")
+        self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
+        self.assertIn("removed 1 source build entries, 1 recipes preserved", cleaned.stdout)
+        self.assertFalse((source / "build-asan").exists())
+        self.assertTrue((source / ".audit" / "build.sh").is_file())
+
     def test_invalid_components_missing_root_orphan_and_idempotency(self) -> None:
         output = self.root / "validation"
         target = self.make_target(output, "libxml2")

@@ -404,6 +404,11 @@ bin/cleanup_logs --target "$TARGET" --backend "$BACKEND" --dry-run
 
 Remove `--dry-run` only after reviewing the paths. Both cleanup commands can
 sweep multiple targets, so prefer explicit `--target` and `--backend` values.
+Without a backend filter, `bin/cleanup_state` also removes the target's generated
+`build-<sanitizer>*` trees and transient `.audit/` entries while preserving its
+`.audit/build*.sh` recipes. Backend-scoped cleanup leaves those shared builds
+intact. The source root comes from backend session state when a session
+exists, else from `targets/<slug>` beside the output root.
 
 `bin/benchmark` evaluates TokenFuzz itself against a direct-prompt baseline; it
 is not part of routine target auditing:

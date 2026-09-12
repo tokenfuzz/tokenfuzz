@@ -141,10 +141,14 @@ bin/cleanup_state --target "$TARGET" --backend "$BACKEND" --dry-run
 bin/cleanup_logs --target "$TARGET" --backend "$BACKEND" --dry-run
 ```
 
-Remove `--dry-run` only after checking the printed paths. Cleanup does not
-delete source under `targets/`. Omitting `--backend` from `bin/cleanup_state`
-selects every backend and aggregate result under that target, so use that form
-only when you intend a target-wide reset.
+Remove `--dry-run` only after checking the printed paths. Omitting `--backend`
+from `bin/cleanup_state` selects every backend and aggregate result under that
+target. It also removes generated sanitizer build trees and transient `.audit/`
+state from the target source while preserving `.audit/build*.sh` recipes. Use
+that form only when you intend a target-wide reset; a backend-scoped cleanup
+leaves the shared source builds intact. Source cleanup uses the target root
+recorded by an existing backend session, else `targets/<slug>` beside the
+output root; a checkout that no longer exists is skipped.
 
 ## Auditing with UBSan, MSan, or TSan
 
