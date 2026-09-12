@@ -1,5 +1,307 @@
 # Changelog
 
+## 1.6.0 - 2026-09-12
+
+This release changes how an audit spends its wall and what it can show for it.
+The orchestrator refills a slot the moment one finishes instead of holding the
+pool at a barrier for the slowest peer, and the prompt, playbooks and replayed
+tool output that every turn pays for are cut without dropping a rule. Findings
+carry one bug-class vocabulary, a promoted finding gets a second reviewer, and
+every review now ends in a verdict. The benchmark page is rebuilt around the
+comparison — model against model, problem by problem, with the reasoning trace
+behind each — and gains report-only rebuilds, cache pruning and an operator
+scorer. Around it, preflight catches a provider serving a model other than the
+one requested, every launch shares one isolation policy, and target setup
+proves the route it hands the agent.
+
+### Scheduling and session cost
+
+- **Slots refill continuously.** The cohort pool held fast slots at a barrier
+  for the slowest peer and ran every gate with the pool empty; measured cells
+  idled 27–40% of the wall. `run_continuous` refills a slot the moment it
+  finishes and has work, gates sealed artifacts in the background, and steers
+  on a timer: each steward tick that saw a session end scores a generation for
+  the slots that ended one, renews the per-generation budgets and re-ranks the
+  queue beside the live sessions, never releasing a claim a live slot holds.
+  Clean relaunches are capped at two per slot between ticks so a sticky lead
+  cannot spin a slot. The only full barrier — tree-wide triage, orphan
+  enforcement, corpus promotion and index maintenance — runs after the last
+  slot drains, and a sweep that outlives the last session bills its tail as
+  housekeeping. Fixed-lane, delta, ensemble and `--no-refill-workers` runs
+  keep the cohort model. A `bin/probe` skeleton handed back to a slot's next
+  session is never sealed mid-edit. The default pool stays a fixed 3: a
+  machine-sized default chose 8 slots on a 16-core host and, with slots
+  refilling to the wall, drained a weekly provider quota in under three hours.
+
+- **A finding seals when its writers end, not the oldest peer.** A finding
+  names no slot, so the seal waited for the longest concurrent session; at
+  eight slots findings gated only in bulk when an outage ended many sessions at
+  once. The harness now reads which artifacts each session's own shell commands
+  and file-tool writes named and seals a finding once every session that
+  touched it has ended. Crashes gain the same touch check on top of their
+  owner-slot seal.
+
+- **Unreviewed findings wait for a batch.** Sessions end one at a time, so the
+  background gate reviewed each sealed finding in a batch of one or two — 68
+  provenance-review sessions for about 140 artifacts in one audit. Findings
+  without a first trigger vote are held until `TRIGGER_BATCH_SIZE` are sealed,
+  the oldest has waited `GATE_BATCH_HOLD_SECONDS`, or the wall is within that
+  window; the worker wakes on the hold clock rather than on the next session
+  end, so a lone finding sealed last before the wall is not left waiting for a
+  sweep that never comes. Reviewed findings and crashes never wait.
+
+- **A session can roll over on context.** Every turn replays the whole
+  transcript, and sessions on a native-cap backend reached 300K prompt tokens
+  with the long tail costing twice as much per artifact as shorter sessions.
+  `CONTEXT_SOFT_CAP` ends a session on the continue-from-state path once its
+  reported context reaches the cap, only after every dispatched tool has
+  completed, and only on dialects that report usage per request (Claude, Grok).
+  It defaults to 0 — off — because a cap that binds one benchmark condition
+  and not its comparison would distort the measurement.
+
+- **Every turn replays less.** The crash promotion gate is condensed from
+  10.9 KB to about 7 KB with every rule and every pinned sentence kept; each
+  playbook carries a marked brief that the prompt renders in place of sending
+  the session to read a 10–24 KB file on turn one; `rg-safe` caps at 20 KiB
+  and appends a per-file hit digest; `--confirm` prints one line for a
+  non-crash repeat identical to run 1; `bin/state` views render
+  results-relative paths; and a single generated classpath line can no longer
+  flood a turn, since the terminal copy is bounded while classification still
+  reads the saved output. Blocked cards show the proof a peer already recorded
+  to the siblings behind them, so a wall that is the configured runner is not
+  disproved once per file.
+
+- **The agent guide reaches every session.** Deep and compact prompts told
+  non-codex sessions to follow `AGENTS.md` without embedding it, and a fresh
+  CLI process has never seen it: 39 of 41 claude deep sessions in one audit
+  ran without the contract. The guide is embedded for every backend that does
+  not auto-load it, and dropped for codex and grok, which do — codex cold
+  starts had been replaying 5.4K duplicate tokens per request. Mapping
+  questions are pointed at a read-only delegate, bounded to one question and
+  never a verdict, only on backends whose delegated spend lands in the
+  session's own usage.
+
+- **Tools start faster.** Heavy stdlib imports move to their use sites where
+  that clears a module from a tool's import graph entirely (`bin/state`, which
+  agents invoke 30+ times per session, −19%; `peek`/`scratch-search` −39%),
+  and unreachable helpers, unread fields and parameters no caller passes are
+  gone.
+
+### Backends and provider accounting
+
+- **Preflight catches a model the provider will not serve.** Claude Fable 5.1's
+  safeguards flag the audit contract as `cyber` and Claude Code retries the
+  session on Opus, so a run requested as Fable was served entirely by Opus
+  while its rows named Fable; the one-line preflight prompt passed because it
+  was not the workload. Preflight now carries the audit guide under the same
+  vocabulary transform real prompts get, reads the provider's declared
+  original→fallback pair, and fails the run naming the safeguard category.
+  Rows carry `served_model` from the transcript's busiest billed model and the
+  rate card prices that model when the CLI reports no cost. The claude backend
+  default remains `claude-opus-5`, which is not refused.
+
+- **One isolation policy for every launch.** Web tools are denied on every
+  launch the harness makes — agents in both security modes and one-shot
+  decisions alike — on Claude, Codex, Gemini CLI, Grok and OpenCode; agy has
+  no web or memory switch, so it gets `--disable-slash-commands`, its only
+  skills switch, and the docs say so. A Gemini CLI launch that silently drops
+  the admin policy fails loudly.
+  Delegation stays at each CLI's default, including for the model-direct
+  control: a control that cannot delegate is not the product a user gets. What
+  a session then did is recorded as `delegation_events` on its usage row; a
+  backend whose delegated work is invisible to the parent's usage reports a
+  spend floor, with `$/confirmed` withheld.
+
+- **Claude launches bill the five-minute cache tier.** Measured over 122 audit
+  sessions and three model-direct cells, a prefix is almost never idle five
+  minutes, so the one-hour tier's 2× write price bought nothing: the cheaper
+  tier costs 10% less at Opus prices and 20% at Fable. Fable 5.1, Mythos 5.1
+  and the OpenAI
+  cyber models are priced, and every other row was rechecked against the
+  vendors' live pages.
+
+- **Grok is measured.** The current grok CLI streams per-request usage, tool
+  call updates and an end event with cost; the harness had filed its sessions
+  as character estimates with zero tool calls.
+
+- **Provider failures are classified from trusted events only.** Structured
+  model-capacity errors count as provider-withheld capacity and structured
+  prompt-policy rejections as terminal refusals, including codex's second
+  rejection wording and its bare usage-limit notices, which had billed a spent
+  plan to the audit wall as failed sessions; Ollama's `statusCode` quota shape
+  is recognised. All matches stay inside backend error events, where target
+  output cannot reach, and a transcript with a classified failure is not
+  retried by batched validation.
+
+### Findings, review and evidence
+
+- **One bug-class vocabulary.** Findings carried three class vocabularies
+  that never met: free-form quality-gate labels, whatever the prompt example
+  suggested, and a hand-grown severity list. `lib/bug_classes.py` is now the
+  one source — the 43 classes of Anthropic Red's public disclosure taxonomy
+  plus eight harness-native classes, each with a stated reason. Every class
+  belongs to a family that keys clusters, labels them, feeds class breadth and
+  the review rotation, and maps to a severity primitive; privilege escalation,
+  certificate validation, signature bypass and `segv` gain scoring rows, and
+  legacy labels resolve through aliases.
+
+- **A promoted finding gets a second, reachability-lens reviewer.** A finding
+  no probe reproduced published on one reviewer's Promote while a rejection
+  already needed two disproofs. Agreement publishes, a split goes to the
+  focused resolver, and a finding with a machine-proved byte path, and every
+  crash, keep the one-review flow. One answered reach-fields attempt settles
+  the conditional keys, which had bought a second identical provider ask for
+  every accepted finding.
+
+- **Every review ends in a verdict.** Two dispositions left artifacts marked
+  "unjudged" and "retained" on every ledger for good: an unsettled scope
+  review cached pending, and an out-of-model defect kept as not-reportable.
+  Once the lane has asked every review it asks for, both reject with a recorded
+  reason and stay under the rejected tree. A rejection whose primary gate vote
+  the operator has since invalidated by widening attacker controls is requeued
+  rather than staying terminal. Direct crashes a replay can never measure
+  demote to findings, a stale receipt publishes an artifact as an uncredited
+  remainder rather than parking the run at Pending, a report whose
+  reproduction rate disagrees with the pool's re-measurement is re-bundled
+  before severity reads it, and a replay whose every run hit its deadline is
+  unmeasured, not a verdict.
+
+- **Evidence pages are built from the data.** The cluster, rejected and
+  per-report pages were Markdown tables: a cluster row never said when a
+  problem was found, where, by which lane, or how often it was re-found.
+  `lib/evidence_pages.py` renders a discovery timeline per condition,
+  subsystem bars, a lane-by-class heat table, rejections grouped by gate, and
+  a report shell with an action card and an evidence rail.
+
+### Benchmark
+
+- **The result page is rebuilt around the comparison.** The root page was
+  the Markdown crosstab with a time-to-discovery SVG spliced in: it could say
+  how many, not which. `lib/benchmark_page.py` builds one data model from each
+  run's report, cluster files and per-cell state streams and renders a
+  self-contained page led by a leaderboard that splits each condition's
+  problems into the ones only it found and the ones others reached too. A
+  model-versus-model section per target revision joins every run on it: one
+  race clock with a replay control that scrubs every panel, a behaviour
+  profile across the same dimensions for each condition, and a convergence
+  matrix listing every distinct problem against every condition as found,
+  looked-and-missed, or never looked. Each harness cell carries a mind trace —
+  one bar per hypothesis from written to resolved, coloured by outcome, with
+  the agent's own reasoning behind it — and an attention table placing effort
+  by subsystem beside what it yielded. Every count still comes from the
+  report, so the page cannot disagree with the ledger; floors, unjudged and
+  superseded-scorer rows carry their marks, and agent free text is scrubbed of
+  workspace paths.
+
+- **Unjudged evidence is out of every score.** Artifacts published unjudged
+  were still credited by the ground-truth oracle and the security-decision
+  lanes, and filtering condition totals alone left withheld members in cluster
+  lists, severity, comparison denominators and discovery curves. Credited
+  ownership is shared through one accessor, withheld members drop from each
+  cluster's list and scores, and a saved report is re-attributed on render, so
+  `--rebuild-report` is enough for a run reported before this change.
+
+- **Report-only rebuild, cache pruning, and an operator scorer.**
+  `bin/benchmark --rebuild-report` renders the root pages from existing run
+  state without replaying or rescoring anything. Every harness an agent
+  compiled through `bin/probe` had stayed in the cell's build cache forever —
+  one ffmpeg run held 20 GiB of rebuildable binaries — and on macOS clang
+  wrote a `.dSYM` bundle beside every cached harness, 16.8 GiB across one
+  run's 792 entries. Harnesses now compile and link as separate steps, which
+  leaves a debug map `atos` can follow and no dSYM; a settled run
+  prunes every cache entry no evidence names, `--prune-cache` (with
+  `--dry-run`) applies the same to runs on disk, and an unreadable evidence
+  file keeps its caches with a warning rather than authorising a delete.
+  `bin/benchmark score` exposes the answer-key scorer the handbook had pointed
+  at three times through an unstable library CLI.
+
+- **The measurement is pinned and clocked honestly.** The control plane is
+  frozen once per run and every cell facade built from that copy, so an edit
+  landing mid-run cannot split one cell across two harnesses while `run.json`
+  names one commit. A model-direct cell is clocked from its own start rather
+  than its finalization rows, which had filed every artifact at second zero.
+  The findings oracle matches a planted bug on file as well as function, since
+  real targets have same-named statics in several files. Receipts record which
+  scorer produced a row's Medium+ count, and a superseded row says so. What S4
+  actually did — authored, built, campaign invoked, slices recorded, ad-hoc
+  probe harnesses — is reported as separate facts. Per-lane telemetry records
+  the share of ranked cards each run examined, so a queue change that starves
+  a lane cannot hide as a quiet yield drop.
+
+### Target setup, coverage and cards
+
+- **Setup proves the route it hands the agent.** Language setup could bless
+  stale native artifacts, ambiguous package binaries, or a runner that
+  resolved an installed copy instead of the checkout. Cargo workspaces, Swift
+  products, Ruby entrypoints and JVM classpaths are derived from their
+  project metadata, direct library testcases build against the declared
+  products, ambiguous opaque-input routes are rejected, runner canaries prove
+  the target-backed entrypoint, and bounded deterministic remediation runs
+  before any LLM fallback. Conventional Ruby and Perl native builds complete
+  and declared Go web assets are prepared. A generated sanitizer recipe whose
+  recorded build system no longer matches detection is rejected rather than
+  materialising unrelated artifacts, and a generated CMake build prefers
+  Ninja when it is available; a `pyproject.toml` only pulls a venv into
+  a native build when its backend drives that build; Perl `Build.PL`
+  distributions no longer run `Makefile.PL`; a failed JavaScript install rolls
+  back before fallback; and setup state stays under the target's `.audit/`,
+  never the repository root.
+
+- **CMake's install plan names the public library and headers.** Static-first
+  discovery picked an uninstalled test-support archive over the shared
+  libraries a modular project publishes, and modular header roots under
+  `modules/<name>/include` were never reached, so every library-route harness
+  failed to build. The generated install plan resolves both.
+
+- **One coverage sibling per consumer.** libFuzzer exits at startup when any
+  loaded object carries `trace-pc-guard`, the hook the `.sancov` dump needs,
+  so the single `build-asan+fuzz` sibling served `bin/hits` and killed every
+  `bin/fuzz` campaign. `+cov` is built for replay and `+fuzz` for libFuzzer
+  from the same recipe, and a sibling built under the old flags is rebuilt on
+  its next check; a toolchain without libFuzzer fails the fuzz sibling loudly
+  in its own log instead of silently downgrading its flags. A coverage run
+  that wrote no sancov, hit its deadline, would not symbolize, or only
+  executed the harness's own frames now names that failure
+  (`COVERAGE_NO_SANCOV`, `COVERAGE_TIMEOUT`, `COVERAGE_SYMBOLIZE_FAIL`,
+  `COVERAGE_HARNESS_ONLY`) instead of one `EXEC_FAIL`; coverage still falls
+  open. A run's ~900 PCs are symbolized in
+  one `atos` call under a deadline, where a pty-less sandbox had spent the full
+  60 s per probe on one process per address.
+
+- **S7 cards require an input route.** Raw allocation and memory operations
+  do not establish that testcase bytes reach a file; assigning S7 from those
+  signals created unusable cards and distorted lane yield. A parser, decoder
+  or remote-peer route is required, and the verb match admits lowerCamelCase
+  and prefixed names so whole Swift, Go and JavaScript files are not demoted
+  to S1.
+
+### Command line, samples and documentation
+
+- **A bare `bin/audit` or `bin/benchmark` prints help.** Each had tried to run
+  a default target and failed on a missing path or flag; both now exit 2 with
+  help, and every option carries a string from the command reference. Options
+  that duplicated a documented path or had no documentation and no test are
+  gone from `bin/audit` and `bin/benchmark`: `--new-target`, the
+  `--<backend>-bin` flags (the `*_BIN` environment variables remain),
+  benchmark `--hard` and `--ledger`, and the `BENCHMARK_VALIDATE_FINDINGS`
+  default behind `--no-validate-findings`.
+
+- **Samples cover the full taxonomy.** `sample-c-doublefree` and
+  `sample-c-uninit` plant the two classes no fixture measured directly, and
+  the answer keys and targets across the sample set are extended against the
+  public disclosure taxonomy, with source receipts, behaviour checks and
+  sanitizer checks so class coverage cannot drift from runnable examples. The
+  MSan sample refuses a build on a host without an MSan runtime rather than
+  reporting a clean run of the bug it plants.
+
+- **The handbook is checked against the code.** Every page is rewritten
+  against `bin/`, `lib/`, `.agents/` and `AGENTS.md` with paths and anchors
+  kept; the isolation policy, delegation and spend floors, and the cache tier
+  are each stated once and linked; and tests no longer sample host properties
+  such as an operator's configured targets or an installed toolchain, with
+  `bin/export-benchmark` honouring `SCRIPT_ROOT` the way `bin/audit` does.
+  Dependency bumps: pymdown-extensions 11.0.2, actions/deploy-pages 5.0.1.
+
 ## 1.5.3 - 2026-08-30
 
 This release closes the distance between what a run observed and what it can
