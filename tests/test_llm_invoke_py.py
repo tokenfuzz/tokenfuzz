@@ -119,7 +119,7 @@ assert_eq("claude-opus-5", proc.stdout.strip(), "claude default")
 proc = run(["default-model", "codex"], check=True)
 assert_eq("gpt-5.6-sol", proc.stdout.strip(), "codex default")
 proc = run(["default-model", "gemini"], check=True)
-assert_eq("gemini-3.7-flash", proc.stdout.strip(), "gemini default")
+assert_eq("gemini-3.8-flash", proc.stdout.strip(), "gemini default")
 proc = run(["default-model", "grok"], check=True)
 assert_eq("grok-4.6", proc.stdout.strip(), "grok default")
 assert_eq(1, run(["default-model", "openai"]).returncode, "unknown → rc=1")
@@ -146,7 +146,7 @@ env = os.environ.copy()
 env["USE_GEMINI_CLI"] = "1"
 env.pop("GEMINI_MODEL_DEFAULT", None)
 proc = run(["default-model", "gemini"], env=env, check=True)
-assert_eq("gemini-3.7-flash", proc.stdout.strip(), "Gemini CLI dialect defaults model to 3.7 flash")
+assert_eq("gemini-3.8-flash", proc.stdout.strip(), "Gemini CLI dialect defaults model to 3.8 flash")
 
 
 # ── agent-flags ─────────────────────────────────────────────────────
@@ -294,7 +294,7 @@ ok("--sandbox" not in f, "agy omits a sandbox that denies the audit its own tree
 # agy 1.0.5+ pins the model via its `agy models` display label, mapped from
 # the config slug — it resolves labels, not API slugs.
 model_idx = f.index("--model")
-assert_eq("Gemini 3.7 Flash (High)", f[model_idx + 1], "gemini agy wires the mapped model label")
+assert_eq("Gemini 3.8 Flash (High)", f[model_idx + 1], "gemini agy wires the mapped model label")
 for legacy in ("--output-format", "--yolo", "--skip-trust"):
     ok(legacy not in f, f"gemini omits legacy gemini-cli flag {legacy}")
 
@@ -309,7 +309,7 @@ ok("--sandbox" not in f,
 ok("--skip-trust" in f, "Gemini CLI agent skips workspace trust prompt")
 ok("--output-format" in f and "stream-json" in f, "Gemini CLI agent uses stream-json output")
 model_idx = f.index("--model")
-assert_eq("gemini-3.7-flash", f[model_idx + 1], "Gemini CLI agent uses launch-time model")
+assert_eq("gemini-3.8-flash", f[model_idx + 1], "Gemini CLI agent uses launch-time model")
 indices = [i for i, x in enumerate(f) if x == "--include-directories"]
 assert_eq(2, len(indices), "Gemini CLI emits two --include-directories flags")
 ok(f[indices[0] + 1] == "/a", "first Gemini CLI include dir = /a")
@@ -463,7 +463,7 @@ ok("--dangerously-skip-permissions" in f, "Antigravity decision stays non-intera
 ok("--sandbox" not in f and "--mode" not in f,
    "a decision claims no boundary agy would not enforce")
 model_idx = f.index("--model")
-assert_eq("Gemini 3.7 Flash (High)", f[model_idx + 1], "decide gemini agy wires the mapped model label")
+assert_eq("Gemini 3.8 Flash (High)", f[model_idx + 1], "decide gemini agy wires the mapped model label")
 for legacy in ("--output-format", "--approval-mode"):
     ok(legacy not in f, f"decide gemini omits legacy gemini-cli flag {legacy}")
 
@@ -475,7 +475,7 @@ f = flags(proc)
 ok("--approval-mode=plan" in f, "Gemini CLI decide uses plan approval mode")
 ok("--skip-trust" in f, "Gemini CLI decide skips workspace trust prompt")
 model_idx = f.index("--model")
-assert_eq("gemini-3.7-flash", f[model_idx + 1], "Gemini CLI decide wires model")
+assert_eq("gemini-3.8-flash", f[model_idx + 1], "Gemini CLI decide wires model")
 ok("--dangerously-skip-permissions" not in f, "Gemini CLI decide omits agy skip-permissions")
 
 proc = run(["decide-flags", "grok"], check=True)
@@ -1067,11 +1067,11 @@ ok(inv.known_backend("claude") is True, "known_backend('claude') True")
 ok(inv.known_backend("openai") is False, "known_backend('openai') False")
 assert_eq("claude-opus-5", inv.default_model("claude"), "default_model claude")
 assert_eq("gpt-5.6-sol", inv.default_model("codex"), "default_model codex")
-assert_eq("gemini-3.7-flash", inv.default_model("gemini"), "default_model gemini")
+assert_eq("gemini-3.8-flash", inv.default_model("gemini"), "default_model gemini")
 assert_eq("grok-4.6", inv.default_model("grok"), "default_model grok")
 os.environ["USE_GEMINI_CLI"] = "1"
 os.environ.pop("GEMINI_MODEL_DEFAULT", None)
-assert_eq("gemini-3.7-flash", inv.default_model("gemini"), "default_model gemini CLI")
+assert_eq("gemini-3.8-flash", inv.default_model("gemini"), "default_model gemini CLI")
 os.environ.pop("USE_GEMINI_CLI", None)
 
 decide_claude = inv.decide_flags("claude")
@@ -1266,7 +1266,7 @@ ok(settings["admin"]["extensions"]["enabled"] is False,
 assert_eq([], settings["context"]["memoryBoundaryMarkers"],
           "Gemini CLI stops GEMINI.md discovery at cwd")
 override = settings["modelConfigs"]["customOverrides"][0]
-assert_eq("gemini-3.7-flash", override["match"]["model"],
+assert_eq("gemini-3.8-flash", override["match"]["model"],
           "Gemini effort override targets the configured model")
 assert_eq("HIGH", override["modelConfig"]["generateContentConfig"]
           ["thinkingConfig"]["thinkingLevel"],

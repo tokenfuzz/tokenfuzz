@@ -875,6 +875,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("claude", "claude-haiku-4-5-20251001", "1", "0.10", "5"),
             ("claude", "claude-3-5-haiku-20241022", "0.80", "0.08", "4"),
             ("claude", "claude-3-haiku-20240307", "0.25", "0.03", "1.25"),
+            ("gemini", "gemini-3.8-flash", "0.75", "0.075", "3.75"),
             ("gemini", "gemini-3.7-flash", "0.75", "0.075", "3.75"),
             ("gemini", "gemini-3.6-flash", "0.75", "0.075", "3.75"),
             ("gemini", "gemini-3.5-flash", "1.50", "0.15", "9"),
@@ -932,9 +933,11 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(str(sonnet["cache_write_1h"]), "4")
         self.assertEqual(str(sonnet["cache_read"]), "0.20")
         self.assertEqual(str(sonnet["output"]), "10")
-        # Both Flash generations sit on the same promotion at the same rate,
+        # These Flash generations sit on the same promotion at the same rate,
         # and each still names its own generation in the cost source.
-        for model in ("gemini-3.7-flash", "gemini-3.6-flash"):
+        for model in (
+            "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+        ):
             flash = benchmark._pricing_rates("gemini", model)
             self.assertEqual(str(flash["input"]), "0.75")
             self.assertEqual(str(flash["cache_read"]), "0.075")

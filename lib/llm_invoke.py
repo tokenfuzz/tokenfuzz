@@ -829,6 +829,11 @@ def local_model_available(model: str) -> bool:
 # slug to the exact label here; bin/audit's model preflight parses agy's log
 # for the unresolved-flag signature as the hard backstop.
 _AGY_SLUG_TO_LABEL = {
+    "gemini-3.8-flash": {
+        "high": "Gemini 3.8 Flash (High)",
+        "medium": "Gemini 3.8 Flash (Medium)",
+        "low": "Gemini 3.8 Flash (Low)",
+    },
     "gemini-3.7-flash": {
         "high": "Gemini 3.7 Flash (High)",
         "medium": "Gemini 3.7 Flash (Medium)",

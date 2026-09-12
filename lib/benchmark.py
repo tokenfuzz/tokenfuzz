@@ -1710,11 +1710,15 @@ def _pricing_rates(
             return rates
 
     if b == "gemini":
-        # Both Flash generations are on the same promotion, which Google says
+        # These Flash generations are on the same promotion, which Google says
         # runs through 2026-12-31.
-        if _model_id_is(m, "gemini-3.7-flash", "gemini-3.6-flash"):
-            generation = (
-                "3.7" if _model_id_is(m, "gemini-3.7-flash") else "3.6"
+        if _model_id_is(
+            m, "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+        ):
+            generation = next(
+                version
+                for version in ("3.8", "3.7", "3.6")
+                if _model_id_is(m, f"gemini-{version}-flash")
             )
             return {
                 "input": _money("0.75"),
