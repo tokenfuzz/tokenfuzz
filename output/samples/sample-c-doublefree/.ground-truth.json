@@ -9,6 +9,7 @@
       "id": "error-path-double-free",
       "kind": "real",
       "primitive": "double-free",
+      "classes": ["double-free"],
       "signature_symbol": "cht_read",
       "input": "repro/case-doublefree",
       "cwe": "CWE-415",

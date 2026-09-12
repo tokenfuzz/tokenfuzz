@@ -54,6 +54,12 @@ export function mergeState(base: Record<string, any>, patch: Record<string, any>
   return base;
 }
 
+/** Merge request policy and apply the inherited administrator flag. */
+export function canPublish(patch: Record<string, any>): boolean {
+  mergeState({}, patch);
+  return ({} as any).isAdmin === true;
+}
+
 /** Run a named export hook and return its stdout. */
 export function runExport(hook: string): string {
   return execSync(hook).toString();

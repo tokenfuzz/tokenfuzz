@@ -26,26 +26,27 @@ and `.ground-truth.json` answer keys, is a gitignored working area.
 | --- | --- | --- | --- | --- |
 | `canary` | C / cmake | ASan | 3 | 2 |
 | `samples/sample-c` | C / cmake | ASan | 5 | 2 |
-| `samples/sample-cpp` | C++ / cmake | ASan | 5 | 2 |
+| `samples/sample-cpp` | C++ / cmake | ASan | 11 | 2 |
 | `samples/sample-c-doublefree` | C / cmake | ASan | 1 | 2 |
 | `samples/sample-c-uninit` | C / cmake | MSan (Linux only) | 1 | 2 |
 | `samples/sample-rust` | Rust / cargo | ASan (nightly `build-std`) | 3 | 4 |
 | `samples/sample-swift` | Swift / SwiftPM | ASan (via `[runner]`) | 3 | 4 |
 | `samples/sample-go` | Go / `go build -race` | `race` | 3 | 5 |
 | `samples/sample-python-native` | Python C extension | ASan | 1 | 0 |
-| `samples/sample-python` | Python | findings-only | 3 | 4 |
+| `samples/sample-python` | Python | findings-only | 27 | 4 |
 | `samples/sample-java` | Java / maven | findings-only | 4 | 5 |
 | `samples/sample-kotlin` | Kotlin | findings-only | 4 | 5 |
-| `samples/sample-javascript` | Node / npm | findings-only | 2 | 5 |
-| `samples/sample-typescript` | TypeScript / npm (`ts-node`) | findings-only | 2 | 5 |
+| `samples/sample-javascript` | Node / npm | findings-only | 3 | 4 |
+| `samples/sample-typescript` | TypeScript / npm (`ts-node`) | findings-only | 3 | 4 |
 | `samples/sample-ruby` | Ruby / bundler | findings-only | 2 | 5 |
 | `samples/sample-php` | PHP / composer | findings-only | 6 | 5 |
 | `samples/sample-perl` | Perl | findings-only | 4 | 3 |
 | `samples/sample-r` | R | findings-only | 2 | 5 |
 
 Each one is a small tool built around the same idea: read one attacker-supplied
-job file and do something with it. That lets the same bug classes be planted in
-every language and compared fairly. Most also carry deliberate
+job file and do something with it. The common input shape makes runner behavior
+comparable while each language demonstrates vulnerabilities natural to its
+ecosystem. Most also carry deliberate
 **false-positive traps**: code that looks dangerous to a quick scan but is
 safe, or an operation that crosses no independent security boundary because
 the same job chooses both sides of it. A run that promotes a trap is a
@@ -66,10 +67,33 @@ a clean run of the bug it plants.
     path traversal or a command injection, is marked `findings_only: true` and
     stays out of the crash-recall denominator. A separate findings scorer
     credits a confirmed FIND when its report names the planted fault function.
-    On the three hybrid sanitizer samples, `samples/sample-go` counts 1 of its
-    3 planted bugs toward crash recall; `samples/sample-rust` and
-    `samples/sample-swift` each count 2 of 3. Their remaining bugs exercise the
-    finding path.
+    On the four hybrid sanitizer samples, `samples/sample-cpp` counts 9 of 11
+    planted bugs toward crash recall, `samples/sample-go` counts 1 of 3, and
+    `samples/sample-rust` and `samples/sample-swift` each count 2 of 3. Their
+    remaining bugs exercise the finding path.
+
+## Vulnerability coverage
+
+The sample answer keys cover every class in the 2026-08-26 Anthropic Red
+[CVD dashboard snapshot](https://red.anthropic.com/2026/cvd/) plus TokenFuzz's
+[harness-native classes](../reference/bug-classes.md#harness-native-classes).
+The sanitizer targets demonstrate memory bounds, arithmetic, lifetime,
+uninitialized state, invalid frees, and races. The findings-only Python target
+adds short, independent examples for authorization, injection, cryptography,
+filesystem and network boundaries, resource exhaustion, and web security.
+
+An answer-key bug has one `primitive`, the exact label used to score its runtime
+diagnostic or finding. Its `classes` list records every established root cause
+and consequence. For example, an eight-bit subtraction can be both
+`integer-underflow` and a resulting `heap-buffer-overflow`; retaining both makes
+the sample-class coverage honest without asking the scorer to match two runtime
+diagnostics for one fault.
+
+The CVD dashboard includes low-address `null-deref` and unknown-address `segv`
+classes. TokenFuzz deliberately quarantines those crash shapes because a signal
+alone does not establish memory-safety impact. The C++ sample keeps both as
+source-review examples with `findings_only: true`, which exercises that policy
+without teaching the crash scorer to promote them.
 
 ## Run one
 
@@ -112,9 +136,13 @@ describes.
 Every sample ships a manifest at `output/<slug>/.ground-truth.json`. Note the
 path: it lives under `output/`, **not** inside the target tree handed to the
 agents. This separates scoring data from audited source; it is not an access
-control on other files the backend can read. Each entry pins one planted bug (its
-primitive, the symbol it faults in, and the input that reaches it), and each
-trap declares the benign outcome it expects.
+control on other files the backend can read. Each entry pins one planted bug
+(its primitive, source symbol, classes, and a compact input or input path), and
+each trap declares the benign outcome it expects.
+
+`tests/test_sample_bug_classes.py` checks the class matrix, source receipts,
+embedded job routes, and sanitizer diagnostics so an answer key cannot silently
+drift away from the target.
 
 ```bash
 bin/benchmark score output/samples/sample-c/<backend>/results \

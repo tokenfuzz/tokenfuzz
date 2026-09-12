@@ -47,8 +47,7 @@ const OPERATIONS: Record<string, (body: string) => string> = {
     return reportkit.renderTemplate(template, context);
   },
   state(body) {
-    reportkit.mergeState({}, JSON.parse(body));
-    return `polluted=${JSON.stringify(({} as any).polluted)}`;
+    return `allowed=${reportkit.canPublish(JSON.parse(body))}`;
   },
   export(body) {
     return reportkit.runExport(body.trim());

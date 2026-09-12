@@ -22,6 +22,7 @@ constexpr std::size_t HOST_CAP = 128;   /* host/identity staging buffer */
 constexpr std::size_t SLICE_CAP = 512;  /* slice window scratch         */
 constexpr std::size_t CHECK_CAP = 32;   /* self-check field scratch     */
 constexpr std::size_t BLOB_LIMIT = 4096; /* largest host blob accepted  */
+volatile std::uint8_t global_options[16];
 
 /* A record staged by T_STAGE and committed by T_FLUSH. */
 struct Record {
@@ -174,6 +175,57 @@ void handle_check(Context &ctx, const std::uint8_t *val, std::uint16_t len) {
   ctx.flag ^= scratch[0];
 }
 
+/* GLOBAL: replace the process-wide option bytes. */
+void handle_global(const std::uint8_t *val, std::uint16_t len) {
+  for (std::uint16_t i = 0; i < len; i++) {
+    global_options[i] = val[i];
+  }
+}
+
+/* RANGE: copy an inclusive byte range into a temporary buffer. */
+void handle_range(const std::uint8_t *val, std::uint16_t len) {
+  if (len < 2) {
+    return;
+  }
+  std::uint8_t span = static_cast<std::uint8_t>(val[1] - val[0]);
+  std::vector<std::uint8_t> range(span ? span : 1);
+  std::memcpy(range.data(), val + 2, len - 2);
+}
+
+/* CAST: apply an extended-record tag to a compact record. */
+void handle_cast(const std::uint8_t *val, std::uint16_t len) {
+  struct Compact { std::uint8_t tag; } compact{0};
+  struct Extended { std::uint8_t tag; std::uint8_t payload[15]; };
+  if (len >= 2) {
+    reinterpret_cast<Extended *>(&compact)->payload[val[0] % 15] = val[1];
+  }
+}
+
+/* FREE: discard an allocation after its payload prefix was consumed. */
+void handle_free(const std::uint8_t *val, std::uint16_t len) {
+  auto *allocation = new std::uint8_t[len + 1];
+  std::memcpy(allocation, val, len);
+  delete[] (allocation + 1);
+}
+
+/* WRITE: patch a byte at the encoded native address. */
+void handle_write(const std::uint8_t *val, std::uint16_t len) {
+  if (len < sizeof(std::uintptr_t) + 1) {
+    return;
+  }
+  std::uintptr_t address = 0;
+  std::memcpy(&address, val, sizeof(address));
+  *reinterpret_cast<volatile std::uint8_t *>(address) = val[sizeof(address)];
+}
+
+/* NULL: update an optional output byte. */
+void handle_null(const std::uint8_t *val, std::uint16_t len) {
+  volatile std::uint8_t *output = nullptr;
+  if (len != 0) {
+    *output = val[0];
+  }
+}
+
 void dispatch(Context &ctx, const std::uint8_t *stream, std::size_t stream_len,
               std::uint8_t type, const std::uint8_t *val, std::uint16_t len) {
   switch (type) {
@@ -186,6 +238,12 @@ void dispatch(Context &ctx, const std::uint8_t *stream, std::size_t stream_len,
     case T_FLUSH:  handle_flush(ctx); break;
     case T_OPT:    handle_opt(ctx, val, len); break;
     case T_CHECK:  handle_check(ctx, val, len); break;
+    case T_GLOBAL: handle_global(val, len); break;
+    case T_RANGE:  handle_range(val, len); break;
+    case T_CAST:   handle_cast(val, len); break;
+    case T_FREE:   handle_free(val, len); break;
+    case T_WRITE:  handle_write(val, len); break;
+    case T_NULL:   handle_null(val, len); break;
     default:       break; /* unknown tag: skip */
   }
 }

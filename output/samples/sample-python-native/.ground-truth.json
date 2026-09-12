@@ -10,6 +10,7 @@
       "id": "native-integer-overflow-oob-write",
       "kind": "real",
       "primitive": "heap-buffer-overflow",
+      "classes": ["heap-buffer-overflow", "oob-write", "integer-overflow"],
       "access": "WRITE",
       "signature_symbol": "pack_cells",
       "input": "/tmp/py-native.job",

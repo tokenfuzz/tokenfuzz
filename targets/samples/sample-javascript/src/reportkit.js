@@ -55,6 +55,12 @@ function mergeState(base, patch) {
   return base;
 }
 
+/** Merge request policy and apply the inherited administrator flag. */
+function canPublish(patch) {
+  mergeState({}, patch);
+  return {}.isAdmin === true;
+}
+
 /** Run a named export hook and return its stdout. */
 function runExport(hook) {
   return cp.execSync(hook).toString();
@@ -96,6 +102,7 @@ module.exports = {
   evaluateExpr,
   renderTemplate,
   mergeState,
+  canPublish,
   runExport,
   readAsset,
   loadInclude,

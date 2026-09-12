@@ -8,6 +8,7 @@
       "id": "unsafe-buffer-oob-read",
       "kind": "real",
       "primitive": "out-of-bounds-read",
+      "classes": ["oob-read"],
       "access": "READ",
       "signature_symbol": "sumWindow",
       "alternate_signatures": [
@@ -26,6 +27,7 @@
       "id": "integer-overflow-oob-write",
       "kind": "real",
       "primitive": "out-of-bounds-write",
+      "classes": ["oob-write", "integer-overflow"],
       "access": "WRITE",
       "signature_symbol": "packTable",
       "alternate_signatures": [
@@ -45,6 +47,7 @@
       "kind": "real",
       "findings_only": true,
       "primitive": "command-injection",
+      "classes": ["command-injection", "rce"],
       "access": "EXEC",
       "signature_symbol": "runExport",
       "input": "/tmp/swift-export.job",

@@ -2,41 +2,308 @@
   "target": "samples/sample-python",
   "language": "python",
   "findings_only": true,
-  "description": "Answer key for the synthetic sample-python target. Template eval, executable pickle, and shell execution cross the attacker-supplied job-file boundary. Read/write roots chosen by that same job are precision traps rather than trusted filesystem boundaries.",
+  "description": "Answer key for the findings-only Python sample. Each job reaches one short function with one security decision or sink. The classes array records every class the example establishes; primitive remains the primary scoring label.",
   "runner": "reportkit_cli.py",
   "planted_bugs": [
     {
       "id": "eval-template-injection",
       "kind": "real",
       "primitive": "code-injection",
+      "classes": ["code-injection", "rce", "sandbox-escape", "ssti"],
       "access": "EXEC",
       "signature_symbol": "evaluate_expr",
-      "input": "/tmp/py-render.job",
+      "file": "src/reportkit.py",
+      "input_text": "op: render\n{}\n{{ 1/0 }}",
       "cwe": "CWE-95",
-      "modeled_on": "server-side template injection class (e.g. Jinja/Mako SSTI CVEs) \u2014 a template expression passed straight to eval()",
-      "summary": "render_template evaluates each {{ ... }} placeholder with eval(expr, dict(context)), so a report template supplies arbitrary Python. case-render uses {{ 1/0 }} to prove the expression executes (ZeroDivisionError)."
+      "summary": "An attacker-controlled template expression is passed to eval, escaping the template expression boundary and reaching arbitrary Python execution."
     },
     {
       "id": "pickle-deserialization",
       "kind": "real",
       "primitive": "deserialization",
+      "classes": ["deserialization", "rce"],
       "access": "EXEC",
       "signature_symbol": "load_state",
-      "input": "/tmp/py-state.job",
+      "file": "src/reportkit.py",
+      "input_text": "op: state\ngASVCgAAAAAAAAB9lIwBeJRLAXMu",
       "cwe": "CWE-502",
-      "modeled_on": "unsafe-pickle deserialization class (e.g. ML model / cache-state CVEs) \u2014 pickle.loads on attacker bytes",
-      "summary": "load_state calls pickle.loads on an attacker-supplied state blob, so a crafted blob runs code on load. case-state carries a pickle whose __reduce__ exec()s a raising statement (RuntimeError)."
+      "summary": "Attacker-controlled bytes are passed directly to pickle.loads, whose reduction protocol can invoke arbitrary callables."
     },
     {
       "id": "shell-command-injection",
       "kind": "real",
       "primitive": "command-injection",
+      "classes": ["command-injection", "rce"],
       "access": "EXEC",
       "signature_symbol": "run_export",
-      "input": "/tmp/py-export.job",
+      "file": "src/reportkit.py",
+      "input_text": "op: export\nprintf injected",
       "cwe": "CWE-78",
-      "modeled_on": "OS command injection class \u2014 subprocess.run(hook, shell=True) on an attacker string",
-      "summary": "run_export runs its hook string through a shell (shell=True), so any export hook is arbitrary command execution. case-export runs 'exit 7' to prove execution (CalledProcessError on the nonzero status)."
+      "summary": "The job body is executed by subprocess.run with shell=True."
+    },
+    {
+      "id": "sql-owner-injection",
+      "kind": "real",
+      "primitive": "sql-injection",
+      "classes": ["sql-injection", "auth-bypass"],
+      "signature_symbol": "query_reports",
+      "file": "src/security_examples.py",
+      "input_text": "op: query\nalice' OR '1'='1",
+      "cwe": "CWE-89",
+      "summary": "The owner filter is concatenated into SQL, so a caller can read another owner's private report."
+    },
+    {
+      "id": "token-prefix-authentication",
+      "kind": "real",
+      "primitive": "auth-bypass",
+      "classes": ["auth-bypass"],
+      "signature_symbol": "authenticate",
+      "file": "src/security_examples.py",
+      "input_text": "op: login\na",
+      "cwe": "CWE-287",
+      "summary": "The expected token is tested with startswith, so any prefix, including one character, authenticates."
+    },
+    {
+      "id": "cross-owner-document-read",
+      "kind": "real",
+      "primitive": "idor",
+      "classes": ["idor", "broken-access-control"],
+      "signature_symbol": "read_document",
+      "file": "src/security_examples.py",
+      "input_text": "op: document\nalice\nprivate",
+      "cwe": "CWE-639",
+      "summary": "The document id is looked up without comparing its owner with the signed-in user."
+    },
+    {
+      "id": "caller-selected-role",
+      "kind": "real",
+      "primitive": "privilege-escalation",
+      "classes": ["privilege-escalation"],
+      "signature_symbol": "set_role",
+      "file": "src/security_examples.py",
+      "input_text": "op: role\nalice\nadmin",
+      "cwe": "CWE-269",
+      "summary": "The role-change operation accepts the new privileged role without verifying an administrator."
+    },
+    {
+      "id": "service-account-confused-deputy",
+      "kind": "real",
+      "primitive": "confused-deputy",
+      "classes": ["confused-deputy", "broken-access-control"],
+      "signature_symbol": "act_as_user",
+      "file": "src/security_examples.py",
+      "input_text": "op: delegate\nalice\ndelete private",
+      "cwe": "CWE-441",
+      "summary": "A caller chooses the identity and action performed with the service account's authority."
+    },
+    {
+      "id": "caller-selected-session-id",
+      "kind": "real",
+      "primitive": "session-fixation",
+      "classes": ["session-fixation"],
+      "signature_symbol": "start_session",
+      "file": "src/security_examples.py",
+      "input_text": "op: session\nknown-session",
+      "cwe": "CWE-384",
+      "summary": "Authentication retains a session identifier chosen by the unauthenticated caller."
+    },
+    {
+      "id": "state-change-without-csrf-token",
+      "kind": "real",
+      "primitive": "csrf",
+      "classes": ["csrf"],
+      "signature_symbol": "submit_change",
+      "file": "src/security_examples.py",
+      "input_text": "op: change\nemail=attacker@example.test",
+      "cwe": "CWE-352",
+      "summary": "The authenticated state-changing operation accepts a form body without a CSRF token."
+    },
+    {
+      "id": "credentialed-origin-reflection",
+      "kind": "real",
+      "primitive": "cors-misconfig",
+      "classes": ["cors-misconfig"],
+      "signature_symbol": "cors_headers",
+      "file": "src/security_examples.py",
+      "input_text": "op: cors\nhttps://attacker.example",
+      "cwe": "CWE-942",
+      "summary": "The private API reflects any Origin while allowing credentials."
+    },
+    {
+      "id": "unvalidated-login-redirect",
+      "kind": "real",
+      "primitive": "open-redirect",
+      "classes": ["open-redirect"],
+      "signature_symbol": "redirect_after_login",
+      "file": "src/security_examples.py",
+      "input_text": "op: redirect\nhttps://attacker.example/phish",
+      "cwe": "CWE-601",
+      "summary": "The post-login Location header is copied from caller input without an allowlist."
+    },
+    {
+      "id": "unescaped-html-comment",
+      "kind": "real",
+      "primitive": "xss",
+      "classes": ["xss"],
+      "signature_symbol": "render_comment",
+      "file": "src/security_examples.py",
+      "input_text": "op: comment\n<script>alert(1)</script>",
+      "cwe": "CWE-79",
+      "summary": "An untrusted comment is interpolated directly into HTML."
+    },
+    {
+      "id": "trusted-root-path-traversal",
+      "kind": "real",
+      "primitive": "path-traversal",
+      "classes": ["path-traversal", "info-disclosure"],
+      "signature_symbol": "read_shared_asset",
+      "file": "src/security_examples.py",
+      "input_text": "op: shared-asset\n../reportkit_cli.py",
+      "cwe": "CWE-22",
+      "summary": "A caller-controlled name is joined to an independently trusted asset root without containment validation."
+    },
+    {
+      "id": "trusted-root-arbitrary-file-write",
+      "kind": "real",
+      "primitive": "arbitrary-file-write",
+      "classes": ["arbitrary-file-write", "path-traversal"],
+      "signature_symbol": "write_export",
+      "file": "src/security_examples.py",
+      "input_text": "op: write\n../outside.txt\noverwritten",
+      "cwe": "CWE-23",
+      "summary": "A traversal name escapes the trusted export directory and writes caller-controlled content."
+    },
+    {
+      "id": "export-symlink-following",
+      "kind": "real",
+      "primitive": "symlink-following",
+      "classes": ["symlink-following", "arbitrary-file-write"],
+      "signature_symbol": "replace_export",
+      "file": "src/security_examples.py",
+      "input_text": "op: replace\nlatest\noverwritten",
+      "cwe": "CWE-59",
+      "summary": "Replacing an export follows an existing symlink without checking the final target."
+    },
+    {
+      "id": "unrestricted-link-preview",
+      "kind": "real",
+      "primitive": "ssrf",
+      "classes": ["ssrf"],
+      "signature_symbol": "fetch_preview",
+      "file": "src/security_examples.py",
+      "input_text": "op: fetch\nhttp://127.0.0.1:8000/private",
+      "cwe": "CWE-918",
+      "summary": "The preview service fetches an arbitrary URL without restricting loopback or private destinations."
+    },
+    {
+      "id": "ownership-check-toctou",
+      "kind": "real",
+      "primitive": "toctou",
+      "classes": ["toctou", "info-disclosure"],
+      "signature_symbol": "publish_owned",
+      "file": "src/security_examples.py",
+      "input_text": "op: publish\n/tmp/reportkit-candidate",
+      "cwe": "CWE-367",
+      "summary": "The path is checked with stat and opened later, so another process can replace it between authorization and use."
+    },
+    {
+      "id": "certificate-presence-check",
+      "kind": "real",
+      "primitive": "improper-cert-validation",
+      "classes": ["improper-cert-validation"],
+      "signature_symbol": "verify_certificate",
+      "file": "src/security_examples.py",
+      "input_text": "op: certificate\nreports.example\nself-signed-for-attacker.example",
+      "cwe": "CWE-295",
+      "summary": "Certificate validation checks only that host and certificate strings are nonempty."
+    },
+    {
+      "id": "signature-prefix-acceptance",
+      "kind": "real",
+      "primitive": "signature-bypass",
+      "classes": ["signature-bypass"],
+      "signature_symbol": "verify_signature",
+      "file": "src/security_examples.py",
+      "input_text": "op: signature\nmessage\n",
+      "cwe": "CWE-347",
+      "summary": "The expected HMAC is checked with startswith, so an empty signature verifies every message."
+    },
+    {
+      "id": "deterministic-record-encryption",
+      "kind": "real",
+      "primitive": "crypto-failure",
+      "classes": ["crypto-failure"],
+      "signature_symbol": "encrypt_record",
+      "file": "src/security_examples.py",
+      "input_text": "op: encrypt\nknown-prefix:secret",
+      "cwe": "CWE-329",
+      "summary": "A fixed repeating keystream encrypts every record without a nonce or authentication tag."
+    },
+    {
+      "id": "cyclic-alias-stack-exhaustion",
+      "kind": "real",
+      "primitive": "stack-overflow",
+      "classes": ["stack-overflow", "denial-of-service"],
+      "signature_symbol": "expand_alias",
+      "file": "src/security_examples.py",
+      "input_text": "op: alias\na\na=b\nb=a",
+      "cwe": "CWE-674",
+      "summary": "Alias expansion has no cycle detection or depth bound."
+    },
+    {
+      "id": "backtracking-filter-dos",
+      "kind": "real",
+      "primitive": "denial-of-service",
+      "classes": ["denial-of-service"],
+      "signature_symbol": "validate_filter",
+      "file": "src/security_examples.py",
+      "input_text": "op: filter\n(a+)+$\naaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
+      "cwe": "CWE-1333",
+      "summary": "An attacker-controlled backtracking regular expression runs over attacker-controlled text without a deadline."
+    },
+    {
+      "id": "negative-refund-logic",
+      "kind": "real",
+      "primitive": "logic-error",
+      "classes": ["logic-error"],
+      "signature_symbol": "approve_refund",
+      "file": "src/security_examples.py",
+      "input_text": "op: refund\n-999999",
+      "cwe": "CWE-840",
+      "summary": "The refund limit has an upper bound but no nonnegative lower bound."
+    },
+    {
+      "id": "uncaught-required-field",
+      "kind": "real",
+      "primitive": "uncaught-exception",
+      "classes": ["uncaught-exception", "denial-of-service"],
+      "signature_symbol": "load_required_field",
+      "file": "src/security_examples.py",
+      "input_text": "op: required\nmissing",
+      "cwe": "CWE-248",
+      "summary": "A missing caller-selected key raises an uncaught exception that terminates the CLI request process."
+    },
+    {
+      "id": "diagnostic-secret-disclosure",
+      "kind": "real",
+      "primitive": "info-disclosure",
+      "classes": ["info-disclosure"],
+      "signature_symbol": "diagnostic",
+      "file": "src/security_examples.py",
+      "input_text": "op: diagnostic\nsigning_key",
+      "cwe": "CWE-200",
+      "summary": "The diagnostic selector exposes an internal signing key."
+    },
+    {
+      "id": "hardcoded-debug-password",
+      "kind": "real",
+      "primitive": "other",
+      "classes": ["other"],
+      "signature_symbol": "debug_access",
+      "file": "src/security_examples.py",
+      "input_text": "op: debug\nreportkit-debug",
+      "cwe": "CWE-798",
+      "summary": "A privileged diagnostic endpoint uses a password embedded in distributed source."
     }
   ],
   "false_positive_traps": [
@@ -45,30 +312,34 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "parse_config",
-      "input": "/tmp/py-config.job",
-      "refute_reason": "parse_config uses ast.literal_eval, which only accepts Python literals (str/num/tuple/list/dict/True/False/None) and rejects calls and attribute access. It looks like the eval-family sibling of evaluate_expr but cannot execute code; a code-injection report here is a false positive."
+      "file": "src/reportkit.py",
+      "input_text": "op: config\n{'mode': 'safe'}",
+      "refute_reason": "ast.literal_eval accepts literals and rejects calls or attribute access."
     },
     {
       "id": "argv-subprocess",
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "run_command",
-      "input": "/tmp/py-command.job",
-      "refute_reason": "run_command runs a fixed executable (echo) via subprocess.run with no shell, passing the caller argument as a single argv data element. The caller controls neither the program that runs nor a shell, so shell metacharacters are inert and no other binary can be selected. It looks like the command-injection sibling of run_export but is not exploitable; a command-injection report here is a false positive."
+      "file": "src/reportkit.py",
+      "input_text": "op: command\nhello; false",
+      "refute_reason": "The executable is fixed and the caller string is one argv element with no shell."
     },
     {
       "id": "attacker-selected-asset-root",
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "read_asset",
-      "refute_reason": "The same job chooses both root and asset name, so traversal crosses no independently trusted namespace."
+      "file": "src/reportkit.py",
+      "refute_reason": "The same job chooses both root and name, so traversal crosses no independently trusted namespace."
     },
     {
       "id": "attacker-selected-output-root",
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "save_render",
-      "refute_reason": "The same job chooses both output root and name, so lexical traversal adds no write capability."
+      "file": "src/reportkit.py",
+      "refute_reason": "The same job chooses both root and name, so traversal adds no write capability."
     }
   ]
 }

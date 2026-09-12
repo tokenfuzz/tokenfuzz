@@ -9,6 +9,7 @@
       "id": "optional-attribute-uninit-read",
       "kind": "real",
       "primitive": "use-of-uninitialized-value",
+      "classes": ["uninitialized-read"],
       "signature_symbol": "handle_sample",
       "input": "repro/case-uninit",
       "cwe": "CWE-457",

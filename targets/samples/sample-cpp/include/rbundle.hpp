@@ -43,7 +43,13 @@ enum Type : std::uint8_t {
   T_DROP   = 0x06, /* discard the staged record                    */
   T_FLUSH  = 0x07, /* commit the staged record's tag               */
   T_OPT    = 0x08, /* optional flag, present only when set          */
-  T_CHECK  = 0x09  /* bounded self-check field                      */
+  T_CHECK  = 0x09, /* bounded self-check field                      */
+  T_GLOBAL = 0x0a, /* global option bytes                           */
+  T_RANGE  = 0x0b, /* byte range copied into a work buffer          */
+  T_CAST   = 0x0c, /* compact record interpreted as an extended one */
+  T_FREE   = 0x0d, /* discard an adjusted allocation                */
+  T_WRITE  = 0x0e, /* patch one byte at an encoded address          */
+  T_NULL   = 0x0f  /* update the optional output byte                */
 };
 
 /*
