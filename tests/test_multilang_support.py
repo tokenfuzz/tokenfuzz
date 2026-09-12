@@ -488,6 +488,24 @@ class MultiLanguageSupportTests(unittest.TestCase):
             testcase.with_suffix(".asan.txt").read_text(encoding="utf-8"),
         )
 
+    def test_go_embed_assets_install_without_a_lockfile(self) -> None:
+        target = self.root / "go-assets-unlocked"
+        package = target / "web" / "app"
+        package.mkdir(parents=True)
+        (target / "go.mod").write_text("module example.invalid/assets\n")
+        (target / "web" / "embed.go").write_text(
+            "package web\nimport \"embed\"\n//go:embed app/dist\nvar assets embed.FS\n"
+        )
+        (package / "package.json").write_text(
+            json.dumps({"scripts": {"build": "build-assets"}})
+        )
+        plan = languages.bootstrap_plan_for_target(target, "go")
+        # `npm ci` refuses a package with no package-lock.json.
+        self.assertEqual(
+            plan["cmds"][0],
+            ["npm", "--prefix", "web/app", "install", "--no-audit", "--no-fund"],
+        )
+
     def test_go_bootstrap_builds_declared_missing_embed_assets(self) -> None:
         target = self.root / "go-assets"
         package = target / "web" / "app"

@@ -1045,8 +1045,8 @@ _PROVIDER_STATUS_CODE_RE = re.compile(
 _PROVIDER_CAPACITY_TEXT_RE = re.compile(
     r'Too Many Requests|RESOURCE_EXHAUSTED|Individual quota reached|'
     r'exceeded your current quota|exhausted your capacity|quota reached|'
-    r'quota will reset|model is at capacity|rate_limit_error|'
-    r'rate.?limit.*(?:exceeded|reached)',
+    r'quota will reset|quota exceeded|out of credits|model is at capacity|'
+    r'rate_limit_error|rate.?limit.*(?:exceeded|reached)',
     re.IGNORECASE,
 )
 
@@ -1100,17 +1100,15 @@ _PROVIDER_UNSERVABLE_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A provider safeguard rejected the submitted prompt. Codex emits this exact
-# shape as a structured error event, followed by turn.failed. Repeating the
-# same prompt cannot clear it, so treat it like the model/credential refusals
-# above. The conjunction stays deliberately narrow and is only consulted in a
-# backend error event below; audited programs and model prose can safely quote
-# either half without halting the run.
-_PROVIDER_PROMPT_REJECTION_RE = re.compile(
-    r'invalid prompt[^.\n]{0,120}(?:flagged|violat(?:e|ing|ion))[^.\n]{0,120}'
-    r'(?:usage )?policy',
-    re.IGNORECASE,
-)
+# A provider safeguard rejected the submitted prompt. Codex emits it as a
+# structured error event, followed by turn.failed. Repeating the same prompt
+# cannot clear it, so treat it like the model/credential refusals above. The
+# fixed prefix is the structural signal; the sentence after it varies by
+# safeguard ("flagged as potentially violating our usage policy", "we've
+# limited access to this content for safety reasons"). It is consulted only
+# in a backend error event below, so audited programs and model prose can
+# quote it without halting the run.
+_PROVIDER_PROMPT_REJECTION_RE = re.compile(r'\bInvalid prompt:')
 
 # A provider-CLI log line at error level, optionally behind a leading timestamp.
 # Codex writes credential failures to stderr in exactly this shape, outside any
@@ -1259,6 +1257,10 @@ def _provider_issue_from_lines(
                 trans = trans or cls == "transient"
             cap = cap or bool(_PROVIDER_CAPACITY_TEXT_RE.search(line))
             trans = trans or bool(_PROVIDER_TRANSIENT_TEXT_RE.search(line))
+            # Inside the provider's own error event the account-limit phrase
+            # needs no retry wording: a spent plan without a reset clock
+            # ("You've hit your usage limit.") is still withheld capacity.
+            cap = cap or bool(_PROVIDER_USAGE_LIMIT_RE.search(line))
         elif is_plain:
             m = _PROVIDER_STATUS_CODE_RE.search(line)
             if m:
@@ -1284,10 +1286,10 @@ def _provider_issue_from_lines(
             found = _PROVIDER_STATUS_CODE_RE.search(line)
             status = _status_class(found) if found else ""
             if is_error_event and (
-                status == "refused" or _PROVIDER_CREDENTIAL_TEXT_RE.search(line)
+                status == "refused"
+                or _PROVIDER_CREDENTIAL_TEXT_RE.search(line)
+                or _PROVIDER_PROMPT_REJECTION_RE.search(line)
             ):
-                refused = True
-            if is_error_event and _PROVIDER_PROMPT_REJECTION_RE.search(line):
                 refused = True
             # A plain line has to name the credential: a bare 401 there is as
             # often the audited program's HTTP client writing to a plain-text

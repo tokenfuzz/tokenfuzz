@@ -668,8 +668,10 @@ def _problem(cluster: dict, kind: str, ctx: _Context, page_dir: Path) -> dict:
     members: list[dict] = []
     facts_by: dict[str, dict] = {}
     for member in cluster.get("_full") or []:
-        directory = Path(member.get("path") or "")
-        facts = artifact_facts(directory, kind, stamps=ctx.stamps) if directory.is_dir() else None
+        raw_path = str(member.get("path") or "")
+        directory = Path(raw_path)
+        # Path("") is the cwd, which is_dir() accepts; an unset path has no facts.
+        facts = artifact_facts(directory, kind, stamps=ctx.stamps) if raw_path and directory.is_dir() else None
         display = member.get("display_id") or member.get("id") or directory.name
         who = ctx.who(member.get("id") or directory.name, member.get("agent", ""))
         level = str(member.get("severity_label") or member.get("severity_level") or "")

@@ -486,8 +486,9 @@ bin/suggest-peers <slug> --apply --force          # re-derive [s6_peers]
 
 `bin/setup-target --no-llm-config` skips threat-model, peer, and runner
 suggestions. It is not an offline switch: source checkout, dependency
-installation, and build preparation can still need network access, and a
-missing native build recipe can require a model.
+installation, and build preparation can still need network access. A
+missing native build recipe is still generated deterministically; only the
+model-assisted repair of a failing recipe is skipped.
 
 ## The audited revision
 

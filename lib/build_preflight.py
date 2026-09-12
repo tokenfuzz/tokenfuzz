@@ -84,7 +84,7 @@ def _refresh_coverage(root: Path, target_root: Path, config, logger) -> None:
             result = coverage_build.materialize(target_root, config, sibling=sibling)
         except OSError as exc:
             logger(f"WARN: coverage sibling preflight could not run; continuing: {exc}")
-            return
+            continue
         coverage_build.report(result, "asan", logger, sibling)
 
 

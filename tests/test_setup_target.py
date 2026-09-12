@@ -368,6 +368,7 @@ class SetupTargetTests(unittest.TestCase):
         target.mkdir()
         (target / "pyproject.toml").write_text(
             '[build-system]\nrequires = ["sample-build-tool>=1"]\n'
+            'build-backend = "mesonpy"\n'
             '[project]\nrequires-python = ">=99"\n',
             encoding="utf-8",
         )
@@ -404,6 +405,25 @@ class SetupTargetTests(unittest.TestCase):
             json.loads(stamp.read_text())["requires"],
             ["sample-build-tool>=1"],
         )
+
+    def test_native_build_ignores_a_packaging_backend_that_does_not_drive_it(self) -> None:
+        """A C library's setuptools package must not add pip to its build."""
+        target = self.temp / "native-with-python-package"
+        target.mkdir()
+        (target / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["setuptools", "pkgconfig"]\n'
+            'build-backend = "setuptools.build_meta"\n',
+            encoding="utf-8",
+        )
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.args = SimpleNamespace(build=True)
+        setup.target_root = target
+        with mock.patch.object(SETUP_TARGET, "run") as run:
+            setup.prepare_native_python_build_tools(
+                target_config.Config(build_system="cmake")
+            )
+        run.assert_not_called()
+        self.assertFalse((target / ".audit" / "build-tools").exists())
 
     def test_meson_python_extension_gets_a_proved_asan_runner(self) -> None:
         target = self.temp / "meson-python-runner"

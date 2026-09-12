@@ -427,7 +427,9 @@ def canonical_class(raw: object) -> str:
     if s in _LEGACY_LABELS:
         return _LEGACY_LABELS[s]
     top, _, sub = s.partition(":")
-    top_class, top_family = _resolve_single(top)
+    # The legacy prompt's `other:<sub>` meant "no listed top fits", so the
+    # sub-label alone decides there rather than pinning the family to other.
+    top_class, top_family = ("", "") if top == "other" else _resolve_single(top)
     sub_class, sub_family = _resolve_single(sub)
     if top_family and sub_class and sub_family == top_family:
         return sub_class

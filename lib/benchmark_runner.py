@@ -1173,8 +1173,8 @@ def cleanup_model_direct_scratch(cell_dir: Path) -> None:
 # object, debug bundle, build log and lock that share its stem.
 _CACHE_STEM_RE = re.compile(r"^(?P<stem>.+\.[0-9a-f]{40})\.")
 # A cache path named anywhere in evidence: a probe context, a sanitizer
-# frame, a validation receipt, a report, or the debug map inside a pooled
-# binary. Matched by content key, not by source name: a name can hold
+# frame, a validation receipt, a report, or a crash bundle's saved output.
+# Matched by content key, not by source name: a name can hold
 # spaces, arrive JSON-escaped, or contain a hex segment of its own, so every
 # key in the run after the directory counts. Keeping another stem with the
 # same key is conservative; overlooking a reference destroys evidence.
@@ -1262,8 +1262,9 @@ def prune_run_caches(bench_dir: Path, dry_run: bool = False) -> None:
     Runs after pooling and adjudication, when the artifact set is frozen and
     nothing the run still does can need a binary its evidence does not name.
     A cell that did not finish is wiped and rerun by a same-run-id resume, so
-    its cache has no future either; what keeps a cache is a process this
-    runner could not reap, which may still be executing from it.
+    its cache has no future either; what keeps a cache is a process that may
+    still be executing from it — one this runner could not reap, or a cell
+    still marked running that nobody has reaped.
 
     The fuzz-activity receipt is frozen first: `harvest_fuzz_campaign` counts
     cached builds, and --regenerate reads it again.
@@ -1284,6 +1285,11 @@ def prune_run_caches(bench_dir: Path, dry_run: bool = False) -> None:
         if results is None or not results.is_dir():
             continue
         name = cell_json.parent.name
+        if cell.get("status") == "running":
+            # Nobody has reaped this cell: its runner died or is another
+            # invocation, and its agents may still be building from the cache.
+            log(f"Cell {name}: harness cache kept — cell still running")
+            continue
         if (cell_json.parent / ".processes-unreaped").is_file():
             log(f"Cell {name}: harness cache kept — cell processes never reaped")
             continue

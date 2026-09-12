@@ -618,6 +618,7 @@ class MultiRun:
                     sys.stdout.flush()
                     self.write_digest(data)
                     baseline = outcome
+                    baseline_reported = _file_matches(data, DIGEST_CRASH_RE)
                 elif self.no_digest or outcome != baseline:
                     if outcome != baseline:
                         if outcome.crashed and not baseline.crashed:
@@ -626,6 +627,16 @@ class MultiRun:
                             self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - clean where run 1 crashed")
                         else:
                             self.emit(f"[run-sanitizer-multi] Run {index}/{self.runs}: DIVERGED - result differs from run 1")
+                    sys.stdout.flush()
+                    self.write_digest(data)
+                elif (
+                    not outcome.crashed and not baseline_reported
+                    and _file_matches(data, DIGEST_CRASH_RE)
+                ):
+                    # A report the verdict does not count as a crash (a bare
+                    # `runtime error:` line, a MOZ_CRASH) is new information
+                    # when run 1 printed none; a repeat of run 1's report folds
+                    # into the verdict line like any other identical run.
                     sys.stdout.flush()
                     self.write_digest(data)
                 elif outcome.crashed and (outcome.signature is None or baseline.signature is None):

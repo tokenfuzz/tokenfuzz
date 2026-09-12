@@ -476,7 +476,9 @@ def _restore_stale_trigger_rejections(
     their directories in the rejected tree nevertheless made that fail-open
     rule ineffective: regeneration never visited them. Current votes are also
     requeued when their source facts say the vulnerable boundary is public and
-    the only objection is configured threat-model reachability.
+    the only objection is configured threat-model reachability. A publication
+    rejection (threat-model, unsettled-scope) is requeued only when its
+    primary gate vote is no longer current.
     """
     if kind == "crash":
         rejected_root = results_dir / "crashes-rejected"
@@ -491,13 +493,32 @@ def _restore_stale_trigger_rejections(
     restored = 0
     for directory in sorted(rejected_root.glob(prefix)):
         reason = _rejection_reason(directory)
-        if (
-            not directory.is_dir()
-            or _publication_rejection(reason)
-            or not _TRIGGER_REJECTION_RE.match(reason)
-        ):
+        if not directory.is_dir():
             continue
         report = _report(directory)
+        if _publication_rejection(reason):
+            # A publication verdict stands while the review behind it is
+            # current. A controls, revision, or decision-version change
+            # invalidates the primary vote, and the claim is re-asked under
+            # the new threat model rather than staying rejected on stale votes.
+            # The stale votes go with it: a verdict that never read them (a
+            # bypass, a direct probe proof) would otherwise leave them in
+            # place and requeue the same rejection every pass.
+            gate = directory / _TRIGGER_PRIMARY_NAME
+            if (
+                report is not None and gate.is_file()
+                and _cached_trigger_vote(report, gate) is None
+            ):
+                for name in _TRIGGER_EVIDENCE_NAMES:
+                    (directory / name).unlink(missing_ok=True)
+                _restore_rejected_artifact(
+                    directory, active_root, kind=kind,
+                    detail="requeued after trigger-review policy or schema change",
+                )
+                restored += 1
+            continue
+        if not _TRIGGER_REJECTION_RE.match(reason):
+            continue
         vote_pairs = [
             (
                 directory / _TRIGGER_PRIMARY_NAME,
@@ -1486,10 +1507,11 @@ _UNSETTLED_REVIEW_DETAIL = (
 # artifact without a verdict. Both keep the evidence under the rejected tree
 # and name the gate, so the rejected index groups them with their peers. The
 # prefixes are what the restore passes below key on: a publication rejection
-# is made once every review has answered, so neither pass reopens it — the
-# trigger pass would read its votes as a stale disproof (they were never two
-# dispositive Rejects) and the quality pass would read its accepted quality
-# cache as grounds to requeue. An operator can still restore one by hand.
+# is made once every review has answered, so the quality pass never reopens
+# it (its accepted quality cache is not grounds to requeue) and the trigger
+# pass reopens it only when the primary gate vote is no longer current under
+# the threat model, revision, or decision version — never as a stale
+# disproof, since the votes were never two dispositive Rejects.
 UNSETTLED_REJECTION_PREFIX = "unsettled-scope: "
 UNSETTLED_REJECTION_REASON = (
     UNSETTLED_REJECTION_PREFIX
@@ -4523,8 +4545,18 @@ def maintain_indexes(
     prior_validations = validation_receipt.snapshot_current_tree(results)
     for name in ("crashes", "crashes-rejected", "findings", "findings-rejected"):
         (results / name).mkdir(parents=True, exist_ok=True)
-    benchmark.write_rejected_crashes_index(results / "crashes-rejected")
-    benchmark.write_rejected_findings_index(results / "findings-rejected")
+    for name, write_index in (
+        ("crashes-rejected", benchmark.write_rejected_crashes_index),
+        ("findings-rejected", benchmark.write_rejected_findings_index),
+    ):
+        try:
+            write_index(results / name)
+        except Exception as error:  # noqa: BLE001 - a page must not end a live audit
+            print(
+                f"WARN: {name} index not rewritten ({error!r}); the previous "
+                "page stays in place",
+                file=sys.stderr,
+            )
     environment = os.environ.copy()
     if target_root:
         environment["TARGET_ROOT"] = str(target_root)

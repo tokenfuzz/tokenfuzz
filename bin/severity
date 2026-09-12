@@ -1093,12 +1093,17 @@ def _detect_primitive(report_text: str) -> tuple[str, str]:
 
     if re.search(r"\bdouble[- ]free\b", t):
         return "double_free", "double-free"
-    # Invalid frees share double-free's allocator-corruption impacts, but keep
-    # the sanitizer's distinct primitive label for diagnosis and metrics.
+    # A runtime bad-free shares double-free's allocator-corruption impacts,
+    # but keeps the sanitizer's distinct primitive label for diagnosis and
+    # metrics.
     if re.search(r"\bbad[- ]free\b|"
-                 r"attempting free on address which was not malloc|"
-                 r"\balloc[- ]dealloc[- ]mismatch\b|\binvalid[- ]free\b", t):
+                 r"attempting free on address which was not malloc", t):
         return "bad_free", "bad / invalid free"
+    # An invalid free or allocator mismatch, source-argued or ASan's own
+    # alloc-dealloc-mismatch header, is the harness class invalid-free: an
+    # invalid release, not the write primitive a runtime bad-free establishes.
+    if re.search(r"\balloc[- ]dealloc[- ]mismatch\b|\binvalid[- ]free\b", t):
+        return "allocator_mismatch", "invalid free"
 
     # C++ type confusion: ClusterFuzz's "Bad-cast to X from Y" crash type and
     # Clang CFI's cast-check failure are both precise sanitizer-grade signals.

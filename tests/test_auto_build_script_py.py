@@ -430,6 +430,31 @@ with tempfile.TemporaryDirectory() as _repair_tmp:
         abs_mod.ask_llm_for_revision = _original_ask
         abs_mod.run_script = _original_run
 
+    # The configured build system, not detection, names the initial recipe:
+    # setup compares the recipe header against target.toml, and a tree with
+    # both manifests would otherwise regenerate on every build.
+    _dual_tmp = tempfile.TemporaryDirectory(prefix="abs-dual-")
+    _dual_src = Path(_dual_tmp.name) / "src"
+    _dual_src.mkdir()
+    (_dual_src / "CMakeLists.txt").write_text("project(sample C)\n")
+    (_dual_src / "configure.ac").write_text("AC_INIT([sample], [1])\n")
+    _dual_out = _dual_src.parent / "build.sh"
+    try:
+        abs_mod.main([
+            "--src", str(_dual_src), "--sanitizer", "asan",
+            "--out", str(_dual_out), "--scratch", str(_dual_src.parent / "scratch"),
+            "--build-system", "autotools", "--emit-initial",
+        ])
+        _dual_rc = 0
+    except SystemExit as exc:
+        _dual_rc = int(exc.code or 0)
+    ok(_dual_rc == 0, "emit-initial: accepts the configured --build-system")
+    ok("# build_system=autotools " in _dual_out.read_text(),
+       "emit-initial: the recipe header records the configured build system")
+    ok("configure" in _dual_out.read_text() and "cmake -S" not in _dual_out.read_text(),
+       "emit-initial: the recipe body follows the configured build system")
+    _dual_tmp.cleanup()
+
     ok(_repair_rc == 3, "repair: exhausts the bounded budget without convergence")
     ok(len(_repair_attempts) == 3,
        "repair: --max-iters 3 performs exactly three revised build attempts")

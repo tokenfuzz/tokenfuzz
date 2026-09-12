@@ -654,6 +654,15 @@ class WorkQueueTests(unittest.TestCase):
                 _score, reasons = workqueue.code_feature_reasons(source)
                 self.assertIn("identity-key property surface", reasons)
         for source in (
+            "readFile(path);",
+            "func parseHeader(b []byte) error {",
+            "PyArg_ParseTuple(args, \"s\", &text);",
+            "let frame = readFrame(from: data)",
+        ):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertIn("input-consumption entrypoint", reasons)
+        for source in (
             "arg_match(choice, values);",
             "arg_match0(choice, values);",
             "match = regex.exec(text);",

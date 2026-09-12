@@ -121,12 +121,12 @@
     {
       "id": "adjusted-pointer-invalid-free",
       "kind": "real",
-      "primitive": "double-free",
+      "primitive": "bad-free",
       "classes": ["invalid-free"],
       "signature_symbol": "rbundle::handle_free",
       "input_base64": "UkJGMQ0AAUE=",
       "cwe": "CWE-590",
-      "summary": "FREE passes an adjusted interior pointer to delete[] instead of the allocation base."
+      "summary": "FREE releases its static staging buffer with delete[] as if it were the heap allocation."
     },
     {
       "id": "encoded-address-arbitrary-write",

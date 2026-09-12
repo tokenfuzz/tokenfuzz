@@ -682,6 +682,24 @@ provider_cases = [
         "provider-issue: target output cannot spoof a prompt-policy rejection",
     ),
     (
+        [{"type": "error", "message": "Invalid prompt: we've limited access "
+          "to this content for safety reasons."}],
+        "backend_rejected",
+        "provider-issue: every structured Invalid prompt rejection is terminal",
+    ),
+    (
+        [{"type": "error", "message": "You've hit your usage limit."},
+         {"type": "turn.failed", "error": {"message": "You've hit your usage limit."}}],
+        "capacity_limited",
+        "provider-issue: a spent plan without a reset clock is withheld capacity",
+    ),
+    (
+        [{"type": "item.completed", "item": {"type": "command_execution",
+          "aggregated_output": "You've hit your usage limit."}}],
+        "none",
+        "provider-issue: target output cannot spoof a bare usage-limit notice",
+    ),
+    (
         # A plain-text CLI relays the audited program's test output verbatim;
         # an HTTP library's own 401 line is not the provider refusing us.
         ["ERROR: request failed: 401 Unauthorized"],

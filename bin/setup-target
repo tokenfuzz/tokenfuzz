@@ -723,10 +723,21 @@ class Setup:
         except ValueError:
             return
         build_system = parsed.get("build-system", {})
-        requirements = (
-            build_system.get("requires", [])
-            if isinstance(build_system, dict) else []
-        )
+        if not isinstance(build_system, dict):
+            return
+        # Only a backend that drives the native build itself (meson-python,
+        # scikit-build-core) makes its requirements the native build's tools.
+        # A C library that also ships a setuptools or hatch package keeps its
+        # own build system: pulling that package's requirements would add a
+        # network and pip dependency the sanitizer build never needed.
+        backend = str(build_system.get("build-backend", ""))
+        if not (
+            backend.startswith("mesonpy") and config.build_system == "meson"
+            or backend.startswith("scikit_build_core")
+            and config.build_system == "cmake"
+        ):
+            return
+        requirements = build_system.get("requires", [])
         requirements = [
             value for value in requirements if isinstance(value, str) and value
         ]
@@ -1343,6 +1354,7 @@ class Setup:
                     completed = subprocess.run([
                         str(auto_builder), "--src", str(self.target_root),
                         "--out", str(candidate), "--sanitizer", sanitizer_name,
+                        "--build-system", config.build_system,
                         "--emit-initial",
                     ], env=environment)
                     if completed.returncode == 0:
@@ -1446,6 +1458,7 @@ class Setup:
                                     str(auto_builder), "--src", str(self.target_root),
                                     "--out", str(repaired),
                                     "--sanitizer", sanitizer_name,
+                                    "--build-system", config.build_system,
                                     "--repair-from", str(active_recipe),
                                     "--failure-log", str(result.log_path),
                                     "--max-iters", "3",

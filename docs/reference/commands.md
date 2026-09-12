@@ -56,7 +56,7 @@ Useful flags:
 | `--no-update` | Do not pull or fetch an existing VCS checkout. |
 | `--force` | Regenerate inferred config, including suggested threat-model and peer sections. With `--build`, regenerate before building while preserving the target's build recipe. |
 | `--no-alternates` | Build only the canonical sanitizer trees, skipping the cached alternate ASan configurations described below. |
-| `--no-llm-config` | Skip model suggestions for the threat model, S6 peers, and runner. Does not disable network access or model-assisted creation of a missing build recipe. |
+| `--no-llm-config` | Skip model suggestions for the threat model, S6 peers, and runner. Does not disable network access. A missing native recipe is still generated deterministically; only model-assisted repair of a failing recipe is skipped. |
 
 The suggestion steps can also be rerun independently:
 

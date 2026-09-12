@@ -170,8 +170,8 @@ severity, patch, enrichment, and cluster annotations do not.
 
 Every adjudicated artifact has a content-addressed `validation.json`. It binds
 the publication state to the report, saved evidence, target revision and
-config, and threat model. Its states are `reportable`, `pending`, and
-`rejected`. Pending and legacy artifacts remain visible on disk. Only a
+config, and threat model. Its states are `reportable`, `pending`,
+`rejected`, and, for a human-pinned FIND only, `not-reportable`. Pending and legacy artifacts remain visible on disk. Only a
 current `reportable` receipt enters the security benchmark total or receives
 numeric severity. `pending` is an artifact a review is still due on, which is
 neither credited nor written off. A defect the reviewers place outside the

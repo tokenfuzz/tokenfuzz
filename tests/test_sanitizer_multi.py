@@ -621,6 +621,37 @@ print("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)")
         self.assertNotIn("BODY_LINE run 3", output)
         self.assertIn("Run 3/3: VERIFIED - clean (matches run 1)", output)
 
+        # A report the verdict does not count as a crash is still new
+        # information when run 1 printed none; only a repeat of nothing folds.
+        counter.write_text("0")
+        self.write_runner(
+            """counter = pathlib.Path(os.environ["MOCK_RUN_COUNTER"])
+run = int(counter.read_text() or "0") + 1
+counter.write_text(str(run))
+print(f"BODY_LINE run {run}")
+if run == 2:
+    print("x.c:1:2: runtime error: signed integer overflow")
+print("TESTCASE_EXECUTED")
+print("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)")
+"""
+        )
+        reported = self.run_multi("generic", runs=3, environment={"MOCK_RUN_COUNTER": str(counter)})
+        output = self.output(reported)
+        self.assertIn("runtime error: signed integer overflow", output)
+        self.assertIn("BODY_LINE run 2", output)
+        self.assertNotIn("BODY_LINE run 3", output)
+        self.assertIn("SUCCESS_RATE: 3/3", output)
+        # The same report on every run is run 1's story; repeats fold.
+        self.write_runner(
+            "print('x.c:1:2: runtime error: signed integer overflow')\n"
+            "print('TESTCASE_EXECUTED')\n"
+            "print('[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)')\n"
+        )
+        repeated = self.run_multi("generic", runs=3)
+        output = self.output(repeated)
+        self.assertEqual(output.count("runtime error: signed integer overflow"), 1)
+        self.assertEqual(output.count("VERIFIED - clean (matches run 1)"), 2)
+
     def test_generic_coverage_unavailable_falls_open_and_crash_signature_dedup(self) -> None:
         # Generic coverage is gated when an instrumented sibling exists; with
         # none, hits exits 4 and the gate must proceed to the sanitizer,

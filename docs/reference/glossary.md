@@ -210,7 +210,8 @@ numeric CVSS.
 **Findings-only mode.** `[sanitizer].enabled = []`. Typical for interpreted
 or managed-runtime targets (Python, Ruby, Node, Java, PHP) but valid for any
 project without a sanitizer build. Runtime diagnostics guide investigation;
-a substantive security report is required before filing under `findings/`.
+a runtime-only diagnostic is demoted from `crashes/` into `findings/` as a
+candidate, and a substantive security report is required for it to be admitted.
 
 **`.session-env`.** Dynamic per-run paths and identifiers (`RESULTS_DIR`,
 `TARGET_ROOT`, `TARGET_SLUG`, `TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`,

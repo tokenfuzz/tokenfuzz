@@ -201,11 +201,12 @@ void handle_cast(const std::uint8_t *val, std::uint16_t len) {
   }
 }
 
-/* FREE: discard an allocation after its payload prefix was consumed. */
+/* FREE: release the record's staging buffer once its payload was consumed. */
 void handle_free(const std::uint8_t *val, std::uint16_t len) {
-  auto *allocation = new std::uint8_t[len + 1];
-  std::memcpy(allocation, val, len);
-  delete[] (allocation + 1);
+  static std::uint8_t staging[64];
+  std::uint8_t *buffer = len > sizeof(staging) ? new std::uint8_t[len] : staging;
+  std::memcpy(buffer, val, len);
+  delete[] buffer;
 }
 
 /* WRITE: patch a byte at the encoded native address. */

@@ -290,6 +290,8 @@ class SeverityTests(unittest.TestCase):
             "WARNING: ThreadSanitizer: data race": "data_race",
             "x.c:12:5: runtime error: signed integer overflow": "integer_overflow",
             "attempting free on address which was not malloc()-ed": "bad_free",
+            "| Class | invalid-free |\nThe handler frees a static staging buffer.": "allocator_mismatch",
+            "ERROR: AddressSanitizer: alloc-dealloc-mismatch (operator new [] vs free)": "allocator_mismatch",
             "Bad-cast detected": "type_confusion",
             "x.cc:10:5: runtime error: member access within address which does not point to an object; invalid vptr": "type_confusion",
             "x.c:1:2: runtime error: call to function through pointer to incorrect function type": "type_confusion",

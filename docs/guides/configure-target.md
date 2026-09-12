@@ -231,7 +231,7 @@ Keep the list narrow. A harness can choose arbitrary offsets, lengths, object
 states, or cleanup order; that does not make those choices attacker-controlled
 in the product. When a reproducible crash needs a control outside the list,
 triage preserves the evidence in the rejected tree with a `threat-model:`
-reason. Human-pinned or older artifacts may carry `not-reportable` in place.
+reason. Older artifacts may carry `not-reportable` in place.
 Do not widen the config merely to change that decision.
 
 ## Browser mode

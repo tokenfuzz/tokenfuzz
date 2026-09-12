@@ -3152,6 +3152,54 @@ Generated score text.
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt["state"], "rejected")
 
+    def test_publication_rejection_is_requeued_only_when_its_review_is_stale(self) -> None:
+        rejected = self.root / "findings-rejected"
+        rejected.mkdir()
+        moved = rejected / self.finding.name
+        self.finding.rename(moved)
+        report = moved / "report.md"
+        (moved / "REJECTION.md").write_text(
+            "# Rejected artifact\n\n"
+            f"Reason: {triage.UNSETTLED_REJECTION_REASON}\n",
+            encoding="utf-8",
+        )
+        (moved / ".trigger-gate.json").write_text(
+            json.dumps(trigger_vote(report, self.root, "Uncertain")),
+            encoding="utf-8",
+        )
+        # The verdict stands while the review behind it is current.
+        self.assertEqual(
+            triage._restore_stale_trigger_rejections(self.root, kind="finding"), 0,
+        )
+        self.assertTrue(moved.is_dir())
+        # A widened threat model invalidates that review, and the claim is
+        # re-asked instead of staying rejected on a vote nobody could reuse.
+        (moved / ".trigger-gate.json").write_text(
+            json.dumps(trigger_vote(
+                report, self.root, "Uncertain", controls=["bytes", "call-sequence"],
+            )),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            triage._restore_stale_trigger_rejections(self.root, kind="finding"), 1,
+        )
+        restored = self.root / "findings" / self.finding.name
+        self.assertTrue(restored.is_dir())
+        self.assertFalse((restored / "REJECTION.md").exists())
+        # The stale vote leaves with the requeue: a verdict that never reads
+        # it (a bypass, a direct proof) must not be requeued again next pass.
+        self.assertFalse((restored / ".trigger-gate.json").exists())
+        restored.rename(moved)
+        (moved / "REJECTION.md").write_text(
+            "# Rejected artifact\n\n"
+            "Reason: threat-model: report identifies caller-contract misuse\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            triage._restore_stale_trigger_rejections(self.root, kind="finding"), 0,
+        )
+        self.assertTrue(moved.is_dir())
+
     def test_quality_rejection_receipt_refresh_and_stale_requeue(self) -> None:
         rejected = self.root / "findings-rejected"
         rejected.mkdir()

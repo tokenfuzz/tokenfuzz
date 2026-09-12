@@ -696,7 +696,7 @@ cell's build cache while the run is live, and the cache is what a long run
 leaves behind: tens of MiB per build on a target that links statically. Once
 a run is settled the runner prunes it, keeping every build that evidence
 names — a probe context, a sanitizer frame, a validation receipt, a report,
-or a pooled binary's debug map — and removing the rest, since they rebuild
+or a crash bundle's saved output — and removing the rest, since they rebuild
 from the harness source the cache key hashes. The cell's fuzz-activity
 counts are written to `fuzz-activity.json` first, so `--regenerate` reports
 what the run built rather than what the prune left. `--prune-cache` applies

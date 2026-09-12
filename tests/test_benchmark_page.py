@@ -305,6 +305,12 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(rejected["conditions"], ["harness"])
         self.assertIn("no attacker-controlled path", rejected["reason"])
 
+    def test_a_missing_pool_receipt_keeps_the_saved_report_clusters(self) -> None:
+        (self.fixture.run / "pool-members.json").unlink()
+        data = benchmark_page.build(self.fixture.root)
+        clusters = {c["id"] for c in data["runs"][0]["clusters"]["find"]}
+        self.assertEqual(clusters, {"FCL-1", "FCL-2", "FCL-3", "FCL-4"})
+
     def test_unjudged_members_supply_no_problem_severity_or_evidence_link(self) -> None:
         members_path = self.fixture.run / "pool-members.json"
         members = json.loads(members_path.read_text())

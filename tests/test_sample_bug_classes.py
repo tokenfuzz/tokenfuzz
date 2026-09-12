@@ -47,8 +47,6 @@ def _clang() -> str:
 class SampleBugClassTests(unittest.TestCase):
     def setUp(self) -> None:
         self.clang = _clang()
-        if not self.clang:
-            self.skipTest("no clang to build the sample fixtures")
         self._tmp = tempfile.TemporaryDirectory(prefix="sample-bug-class-")
         self.build = Path(self._tmp.name)
 
@@ -66,6 +64,8 @@ class SampleBugClassTests(unittest.TestCase):
         )
 
     def test_the_double_free_target_reproduces_its_planted_bug(self) -> None:
+        if not self.clang:
+            self.skipTest("no clang to build the sample fixtures")
         slug = "sample-c-doublefree"
         source = ROOT / "targets" / "samples" / slug
         built = subprocess.run(
@@ -112,6 +112,8 @@ class SampleBugClassTests(unittest.TestCase):
         self.assertNotIn("AddressSanitizer", run.stdout + run.stderr)
 
     def test_the_uninit_target_reproduces_or_refuses_to_build(self) -> None:
+        if not self.clang:
+            self.skipTest("no clang to build the sample fixtures")
         slug = "sample-c-uninit"
         source = ROOT / "targets" / "samples" / slug
         built = subprocess.run(
@@ -262,6 +264,8 @@ class SampleBugClassTests(unittest.TestCase):
         self.assertEqual(run.stdout.strip(), "state: allowed=true")
 
     def test_cpp_memory_examples_emit_the_declared_diagnostics(self) -> None:
+        if not self.clang:
+            self.skipTest("no clang to build the sample fixtures")
         slug = "sample-cpp"
         source = ROOT / "targets" / "samples" / slug
         built = subprocess.run(
@@ -274,7 +278,7 @@ class SampleBugClassTests(unittest.TestCase):
             "global-option-overflow": "global-buffer-overflow",
             "range-integer-underflow": "heap-buffer-overflow",
             "compact-record-type-confusion": "stack-buffer-overflow",
-            "adjusted-pointer-invalid-free": "double-free",
+            "adjusted-pointer-invalid-free": "attempting free on address which was not malloc()-ed",
         }
         entries = {entry["id"]: entry for entry in self._manifest(slug)["planted_bugs"]}
         for bug_id, diagnostic in wanted.items():

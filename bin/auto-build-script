@@ -966,6 +966,9 @@ def main(argv: list[str]) -> int:
                     help="asan|ubsan|msan|tsan (default asan)")
     ap.add_argument("--out", required=True,
                     help="path to write the validated build script")
+    ap.add_argument("--build-system", default="",
+                    help="build system recorded in target.toml; default: "
+                         "detect from the source tree")
     ap.add_argument("--scratch", default="",
                     help="scratch build dir (default: a tempdir)")
     ap.add_argument("--max-iters", type=int, default=5)
@@ -1025,7 +1028,10 @@ def main(argv: list[str]) -> int:
                                    dir=os.environ.get("TMPDIR", "/tmp")))
     scratch.mkdir(parents=True, exist_ok=True)
 
-    build_system = detect_build_system(src)
+    # The configured system wins over detection so the recipe header records
+    # what setup will compare it against; a dual-manifest tree otherwise
+    # regenerates on every build.
+    build_system = args.build_system or detect_build_system(src)
     if not build_system:
         die(f"no recognized build system in: {src}")
     info(f"src={src} sanitizer={args.sanitizer} build_system={build_system}")

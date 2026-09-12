@@ -835,6 +835,23 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq(["make", "realclean"], rebuilt["cmds"][0],
               "bootstrap-plan Perl: cleans generated native artifacts before rebuild")
 
+# A Module::Build distribution has no Makefile.PL; its Build.PL drives the build.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / "Build.PL").write_text("# sample\n")
+    (root / "lib").mkdir()
+    (root / "lib" / "Sample.pm").write_text("package Sample; 1;\n")
+    plan = languages.bootstrap_plan_for_target(root, "perl")
+    assert_eq(4, len(plan["cmds"]),
+              "bootstrap-plan Perl Build.PL: installs dependencies, builds, and installs")
+    assert_in("--installdeps", plan["cmds"][0],
+              "bootstrap-plan Perl Build.PL: resolves declared CPAN dependencies")
+    assert_in("Build.PL", plan["cmds"][1],
+              "bootstrap-plan Perl Build.PL: configures through Build.PL")
+    assert_eq(["./Build"], plan["cmds"][2], "bootstrap-plan Perl Build.PL: runs ./Build")
+    assert_eq(["./Build", "install"], plan["cmds"][3],
+              "bootstrap-plan Perl Build.PL: installs into the local library")
+
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
     (root / "dist.ini").write_text("name = Sample\nversion = 1\n")
@@ -971,6 +988,28 @@ with tempfile.TemporaryDirectory() as td:
                 "js bootstrap: failed manager's generated lock is removed")
     assert_eq("tracked\n", package_lock.read_text(),
               "js bootstrap: failed manager's tracked lock change is restored")
+
+# A node_modules that existed before the attempt is not the failed manager's
+# to delete: a vendored tree or an earlier good install must survive.
+with tempfile.TemporaryDirectory() as td:
+    target_root = Path(td)
+    audit = target_root / ".audit"
+    audit.mkdir()
+    vendored = target_root / "node_modules" / "leftpad"
+    vendored.mkdir(parents=True)
+    (vendored / "index.js").write_text("module.exports = 1;\n")
+    plan = {
+        "language": "javascript",
+        "cmds": [[sys.executable, "-c", "raise SystemExit(7)"]],
+        "alternatives": [[sys.executable, "-c", "pass"]],
+        "post_cmds": [], "env": [],
+    }
+    rc = languages.execute_bootstrap_plan(
+        target_root, plan, audit / "bootstrap.log", audit / "bootstrap.sh",
+    )
+    assert_eq(0, rc, "js bootstrap: fallback succeeds after failed manager")
+    assert_true((vendored / "index.js").is_file(),
+                "js bootstrap: a pre-existing node_modules survives a failed manager")
 
 # A CPAN repository checkout can need configure prerequisites before cpanm can
 # execute Makefile.PL and discover the rest.  The executor uses cpanm's own

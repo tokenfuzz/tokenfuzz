@@ -2108,8 +2108,10 @@ def _go_embed_asset_commands(target_root: Path) -> list[list[str]]:
         relative = package_root.relative_to(target_root).as_posix()
         manager = _js_package_manager(package_root)
         if manager == "npm":
+            # `npm ci` refuses a package without a lockfile.
+            install = "ci" if (package_root / "package-lock.json").is_file() else "install"
             commands.extend([
-                ["npm", "--prefix", relative, "ci", "--no-audit", "--no-fund"],
+                ["npm", "--prefix", relative, install, "--no-audit", "--no-fund"],
                 ["npm", "--prefix", relative, "run", "build"],
             ])
         elif manager == "pnpm":
@@ -2159,14 +2161,22 @@ def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]
         perl, cpanm = preferred_perl_toolchain()
         local_lib = perl_local_lib_root(perl)
         commands = []
-        if (target_root / "Makefile").is_file():
-            commands.append(["make", "realclean"])
-        commands.extend([
-            [*perl_cpanm_prefix(perl, cpanm, local_lib), "--installdeps", "."],
-            [perl, "Makefile.PL", f"INSTALL_BASE={{TARGET_ROOT}}/{local_lib}"],
-            ["make"],
-            ["make", "install"],
-        ])
+        if (target_root / "Makefile.PL").is_file():
+            if (target_root / "Makefile").is_file():
+                commands.append(["make", "realclean"])
+            commands.extend([
+                [*perl_cpanm_prefix(perl, cpanm, local_lib), "--installdeps", "."],
+                [perl, "Makefile.PL", f"INSTALL_BASE={{TARGET_ROOT}}/{local_lib}"],
+                ["make"],
+                ["make", "install"],
+            ])
+        elif (target_root / "Build.PL").is_file():
+            commands.extend([
+                [*perl_cpanm_prefix(perl, cpanm, local_lib), "--installdeps", "."],
+                [perl, "Build.PL", "--install_base", f"{{TARGET_ROOT}}/{local_lib}"],
+                ["./Build"],
+                ["./Build", "install"],
+            ])
         return commands
     if not lang.bootstrap_cmds:
         return []
@@ -2350,6 +2360,11 @@ def execute_bootstrap_plan(
         if plan.get("language") != "javascript":
             return {}
         snapshot: dict[Path, tuple[bytes | str, int] | None] = {}
+        node_modules = target_root / "node_modules"
+        if not node_modules.exists() and not node_modules.is_symlink():
+            # A failed install must not leave a partial tree that misleads
+            # the next manager; one that existed before is not its to delete.
+            snapshot[node_modules] = None
         for name in js_metadata_names:
             path = target_root / name
             try:
@@ -2364,15 +2379,6 @@ def execute_bootstrap_plan(
     def restore_failed_js_install(
         snapshot: dict[Path, tuple[bytes | str, int] | None],
     ) -> None:
-        if not snapshot:
-            return
-        node_modules = target_root / "node_modules"
-        if node_modules.is_symlink():
-            node_modules.unlink()
-        elif node_modules.is_dir():
-            shutil.rmtree(node_modules)
-        elif node_modules.exists():
-            node_modules.unlink()
         restore_js_metadata(snapshot)
 
     def restore_js_metadata(

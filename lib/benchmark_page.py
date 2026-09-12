@@ -194,11 +194,15 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
     ):
         index = _cluster_index(run_dir, kind)
         owner = benchmark.credited_pool_members(members, sub)
-        # Older report.json files retained unjudged cluster members. Reuse
-        # attribution so a report-only rebuild also removes their credit.
-        clusters = benchmark.attribute_clusters(
-            {"clusters": report.get(key) or []}, owner,
-        )["clusters"]
+        clusters = report.get(key) or []
+        if members:
+            # Older report.json files retained unjudged cluster members. Reuse
+            # attribution so a report-only rebuild also removes their credit.
+            # Without the pool-members receipt there is nothing to attribute
+            # against, and the report's own clusters stand.
+            clusters = benchmark.attribute_clusters(
+                {"clusters": clusters}, owner,
+            )["clusters"]
         for cluster in clusters:
             cid = str(cluster.get("id") or "")
             detail = index.get(cid, {})

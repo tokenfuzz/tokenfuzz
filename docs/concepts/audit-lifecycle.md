@@ -16,8 +16,9 @@ A useful run can end in either evidence lane:
   input, and a `reproduce.sh` that rebuilds and re-runs it.
 
 These are parallel result paths. A managed-runtime panic or traceback can
-support a finding, but does not become one automatically: a report must
-establish a security issue. Sanitizer and race diagnostics must meet the crash
+support a finding, and a runtime-only diagnostic is demoted into `findings/`
+as a candidate, but it is admitted only when a report establishes a security
+issue. Sanitizer and race diagnostics must meet the crash
 confirmation and review requirements.
 
 Every accepted crash is automatically converted to a maintainer bundle

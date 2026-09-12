@@ -85,6 +85,9 @@ class VocabularyTests(unittest.TestCase):
             ("memory_leak", "denial-of-service"),
             ("stack-exhaustion", "stack-overflow"),
             ("arbitrary-file-read", "path-traversal"),
+            # the legacy prompt's escape hatch: the sub-label decides
+            ("other:ssrf", "ssrf"),
+            ("other:privilege-escalation", "privilege-escalation"),
             # neutral hypothesis categories
             ("bounds", "buffer-overflow"),
             ("Lifetime", "use-after-free"),

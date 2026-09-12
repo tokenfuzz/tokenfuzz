@@ -94,7 +94,7 @@ Triage uses `attacker_controls` when deciding whether a reproducible defect is
 security-reportable through a normal product boundary. Keep it tight. A crash
 that needs setup no real page or script can recreate is normally moved to
 `crashes-rejected/` with a `threat-model:` reason and receives no security
-score. Human-pinned or older artifacts can remain `not-reportable` in place.
+score. Older artifacts can carry `not-reportable` in place.
 
 ## Keep reports product-reachable
 

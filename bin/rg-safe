@@ -48,8 +48,8 @@ def file_hit_digest(executable: str, argv: list[str]) -> bytes:
         )
     except (OSError, subprocess.TimeoutExpired):
         return b""
-    if completed.returncode not in (0, 1):
-        return b""
+    # Exit status 2 also covers one unreadable entry in an otherwise complete
+    # count, so the count lines decide: a pattern error prints none.
     counts: list[tuple[int, str]] = []
     for line in completed.stdout.splitlines():
         path, separator, count = line.rpartition(":")

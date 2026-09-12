@@ -353,11 +353,15 @@ _CONSUME_VERBS = (
 # snake_case alt: verb is a whole `_`-delimited segment, so `thread` /
 # `spread` / `pthread_create` do not match. CamelCase alt: verb is a
 # capitalised segment at any position, including leading (`ReadBuffer`).
-# Both casings are needed — snake_case C and CamelCase C++ alike.
+# Both casings are needed — snake_case C and CamelCase C++ alike. The tail
+# after the verb admits any identifier character: lowerCamelCase entry
+# points (`readFile(`, `parseHeader(`) and prefixed C API names
+# (`PyArg_ParseTuple(`) are input consumers too, and the call paren keeps
+# an incidental word inside a longer identifier from counting.
 _INPUT_CONSUMPTION_RE = re.compile(
-    r"(?:\b(?:[a-z0-9]+_)*(?:" + "|".join(_CONSUME_VERBS) + r")[a-z0-9_]*"
-    r"|\b[A-Za-z0-9]*(?:" + "|".join(v.capitalize() for v in _CONSUME_VERBS)
-    + r")[A-Za-z0-9]*\b)\s*\("
+    r"(?:\b(?:[a-z0-9]+_)*(?:" + "|".join(_CONSUME_VERBS) + r")[A-Za-z0-9_]*"
+    r"|\b[A-Za-z0-9_]*(?:" + "|".join(v.capitalize() for v in _CONSUME_VERBS)
+    + r")[A-Za-z0-9_]*)\s*\("
     # These unqualified spellings are established regex entrypoints. A broad
     # *_match family also admits argument, option, type, and path validators.
     r"|\b(?:regex_match|is_match|regexec)\s*\("

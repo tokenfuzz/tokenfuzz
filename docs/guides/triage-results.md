@@ -34,7 +34,7 @@ Nothing is silently deleted. Rejected directories move with their evidence and
 gain an index entry explaining why. A crash whose trigger crosses no configured
 security boundary is rejected the same way, with a `threat-model:` reason, so
 the active tree normally holds security reports and pending review.
-Human-pinned and legacy artifacts can remain `not-reportable` in place.
+A human-pinned FIND and legacy artifacts can remain `not-reportable` in place.
 
 ## A practical review order
 
@@ -64,7 +64,7 @@ first gate.
 | --- | --- | --- |
 | Mechanical or substance gate | Checks diagnostic class, reproduction files, report fields, caller contract, and auto-rejection classes. | Independent readers judge whether the report names a concrete security issue. Two accepts admit it; two rejects quarantine it. |
 | Source review | Reads the trigger and caller contract. Two source-anchored Reject votes can disprove sanitizer-confirmed evidence. Publication review separately decides scope. | Reads both the trigger and the exact claimed consequence. Two source-anchored Reject votes can disprove an admitted FIND. Publication review separately decides scope. |
-| Final state | `reportable`, `pending`, or `rejected`. | The same three states. |
+| Final state | `reportable`, `pending`, or `rejected`. | The same three states, plus `not-reportable` for a human-pinned FIND. |
 
 Both source-review paths preserve evidence when output is missing or malformed.
 The artifact remains pending while required review is incomplete. An

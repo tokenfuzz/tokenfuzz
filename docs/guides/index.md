@@ -9,8 +9,7 @@ Results use two main directories:
 - `findings/` holds concrete security reports, with or without a reproducer.
 - `crashes/` holds sanitizer or runtime-race candidates and reviewed bundles.
   Triage moves out-of-scope results to `crashes-rejected/` with their evidence
-  and a reason. Human-pinned or older results can remain `not-reportable` in
-  place.
+  and a reason. Older results can carry `not-reportable` in place.
 
 Rejected artifacts are preserved under `findings-rejected/` and
 `crashes-rejected/`, each with an HTML index explaining the decision.

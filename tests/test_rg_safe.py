@@ -133,6 +133,17 @@ class RipgrepSafeTests(unittest.TestCase):
         self.assertNotIn("hits per file", self.run_rg("--no-cap", "match", self.root / "tree").stdout)
         single = self.run_rg("match", self.huge, RG_BYTES=8192).stdout
         self.assertIn("matching lines in 1 files", single)
+        # One unreadable entry makes rg exit 2 with a complete count for the
+        # rest; the digest must survive that, not vanish from every search.
+        if os.geteuid() != 0:
+            unreadable = self.root / "tree" / "sealed.c"
+            unreadable.write_text("match\n")
+            unreadable.chmod(0)
+            try:
+                output = self.run_rg("-n", "match", self.root / "tree").stdout
+            finally:
+                unreadable.chmod(0o644)
+            self.assertIn("matching lines in 40 files", output)
 
     def make_log_tree(self):
         tree = self.root / "logtree"
