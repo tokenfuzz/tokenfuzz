@@ -89,6 +89,14 @@ proves the route it hands the agent.
 
 ### Backends and provider accounting
 
+- **Classifier refusals are reported for every backend.** The shared launcher
+  recognizes structured provider refusal events from Claude, Codex, OpenCode,
+  Gemini, and Grok, and prints one `CYBER CLASSIFIER DETECTED` warning naming
+  the backend, the provider reason, and the raw log path. It writes the
+  existing refusal sidecar, so benchmark accounting is unchanged when a
+  provider continues on a fallback model. The audit preflight runs through the
+  same launcher, so a refusal surfaces before any session starts.
+
 - **Preflight catches a model the provider will not serve.** Claude Fable 5.1's
   safeguards flag the audit contract as `cyber` and Claude Code retries the
   session on Opus, so a run requested as Fable was served entirely by Opus

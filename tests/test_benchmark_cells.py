@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import io
 import json
 import os
 import re
@@ -717,6 +718,32 @@ raise SystemExit(23)
             ),
             {"version": 1},
         )
+
+        refusal_cell = self.work / "refusal-cell"
+
+        def refused_timeout(_command, _wall, **kwargs):
+            kwargs["stdout"].write(
+                "WARN: MODEL_REFUSAL: CYBER CLASSIFIER DETECTED "
+                "backend=gemini provider_reason=prohibited_content "
+                "raw_log=/tmp/provider.raw\n"
+            )
+            kwargs["stdout"].flush()
+            return SimpleNamespace(returncode=1)
+
+        console = io.StringIO()
+        with mock.patch.object(
+            benchmark_runner, "run_timeout", side_effect=refused_timeout,
+        ), mock.patch.object(
+            benchmark_runner, "mark_target_artifacts", return_value=set(),
+        ), mock.patch.object(
+            benchmark_runner, "_record_provider_quality",
+        ), contextlib.redirect_stdout(console):
+            benchmark_runner.run_harness(
+                refusal_cell, self.slug, "gemini", "",
+                "refusal-experiment", 1, 2, {"version": 1},
+            )
+        self.assertEqual(console.getvalue().count("CYBER CLASSIFIER DETECTED"), 1)
+        self.assertIn("backend=gemini", console.getvalue())
 
         scratch_cell = self.work / "scratch-cell"
         for relative in (

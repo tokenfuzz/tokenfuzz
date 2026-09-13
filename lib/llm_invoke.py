@@ -1372,7 +1372,9 @@ def run_agent_prompt(
     warning = refusal_warning(backend, str(raw_log), prompt)
     if warning:
         print(warning, file=sys.stderr)
-        Path(f"{raw_log}.refusals.log").write_text(warning + "\n")
+        Path(f"{raw_log}.refusals.log").write_text(
+            warning + "\n", encoding="utf-8",
+        )
     return returncode
 
 
@@ -2072,36 +2074,60 @@ def _has_refusal_value(value) -> bool:
     return isinstance(value, (dict, list)) and bool(value)
 
 
-def _json_has_refusal_signal(value) -> bool:
+def _refusal_reason_token(raw: str) -> str:
+    """Reduce a provider reason to the charset the console notice publishes.
+
+    Every reason reaches the same `provider_reason=` field, which the
+    benchmark relay matches as [a-z0-9_.-]+. An unsanitized value there
+    would be dropped by that match instead of surfacing the refusal.
+    """
+    token = re.sub(r"[^a-z0-9_.-]+", "-", raw.lower()).strip("-")
+    return token[:80] or "refusal"
+
+
+def _json_refusal_reason(value) -> str:
+    """Return a bounded provider reason for a structured refusal event."""
     if isinstance(value, dict):
         if (
             _norm_json_scalar(value.get("subtype")) == "MODEL_REFUSAL_FALLBACK"
             and _norm_json_scalar(value.get("trigger")) == "REFUSAL"
         ):
-            return True
+            category = value.get("api_refusal_category")
+            if isinstance(category, str):
+                return _refusal_reason_token(category)
+            return "refusal"
         for key, item in value.items():
-            k = str(key).lower()
+            normalized_key = str(key).lower()
             scalar = _norm_json_scalar(item)
-            if k in ("stop_reason", "stopreason") and scalar == "REFUSAL":
-                return True
-            if k == "type" and scalar == "REFUSAL":
-                return True
-            if k == "refusal" and _has_refusal_value(item):
-                return True
-            if k == "finishreason" and scalar in _GEMINI_REFUSAL_FINISH_REASONS:
-                return True
+            if normalized_key in ("stop_reason", "stopreason") and scalar == "REFUSAL":
+                return "refusal"
+            if normalized_key == "type" and scalar == "REFUSAL":
+                return "refusal"
+            if normalized_key == "refusal" and _has_refusal_value(item):
+                return "refusal"
+            if normalized_key == "finishreason" and scalar in _GEMINI_REFUSAL_FINISH_REASONS:
+                return _refusal_reason_token(scalar)
             if (
-                k == "blockreason"
+                normalized_key == "blockreason"
                 and scalar
                 and scalar != "BLOCK_REASON_UNSPECIFIED"
             ):
-                return True
-            if isinstance(item, (dict, list)) and _json_has_refusal_signal(item):
-                return True
-        return False
+                return _refusal_reason_token(scalar)
+            if isinstance(item, (dict, list)):
+                reason = _json_refusal_reason(item)
+                if reason:
+                    return reason
+        return ""
     if isinstance(value, list):
-        return any(_json_has_refusal_signal(item) for item in value)
-    return False
+        for item in value:
+            reason = _json_refusal_reason(item)
+            if reason:
+                return reason
+    return ""
+
+
+def _json_has_refusal_signal(value) -> bool:
+    return bool(_json_refusal_reason(value))
 
 
 def _normalize_refusal_text(text: str) -> str:
@@ -2267,11 +2293,28 @@ def prompt_first_line(prompt: str, limit: int = 180) -> str:
     return "<empty prompt>"
 
 
+def structured_refusal_warning(
+    backend: str, event: dict, raw_log_path: str = "",
+) -> str:
+    reason = _json_refusal_reason(event)
+    if not reason:
+        return ""
+    location = f" raw_log={raw_log_path}" if raw_log_path else ""
+    return (
+        "WARN: MODEL_REFUSAL: CYBER CLASSIFIER DETECTED "
+        f"backend={backend} provider_reason={reason}{location}"
+    )
+
+
 def refusal_warning(backend: str, raw_log_path: str, prompt: str) -> str:
     # Prefer provider refusal/block fields. Some CLIs can also return a short
     # assistant-message refusal with no structured metadata; catch only those
     # no-tool, response-initial shapes.
-    if not raw_log_has_model_refusal(backend, raw_log_path):
+    for event in _iter_refusal_scan_json(raw_log_path):
+        warning = structured_refusal_warning(backend, event, raw_log_path)
+        if warning:
+            return warning
+    if not raw_log_has_cli_no_work_refusal(backend, raw_log_path):
         return ""
     return (
         f"WARN: MODEL_REFUSAL backend={backend} refused to answer prompt: "

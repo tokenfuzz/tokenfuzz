@@ -1482,6 +1482,77 @@ ok(
 )
 os.unlink(_refusal_fallback)
 
+# Every backend uses the same console notice for structured prompt-policy
+# refusals, even though their provider event shapes differ.
+_structured_refusals = {
+    "claude": {
+        "type": "system", "subtype": "model_refusal_fallback",
+        "trigger": "refusal", "api_refusal_category": "cyber",
+    },
+    "codex": {
+        "type": "response.completed",
+        "response": {"output": [{"type": "refusal", "refusal": "policy"}]},
+    },
+    "oss": {"type": "error", "error": {"refusal": "policy"}},
+    "gemini": {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}},
+    "grok": {
+        "type": "response.completed",
+        "response": {"stop_reason": "refusal"},
+    },
+}
+for _backend, _event in _structured_refusals.items():
+    _warning = inv.structured_refusal_warning(_backend, _event)
+    ok(
+        "CYBER CLASSIFIER DETECTED" in _warning
+        and f"backend={_backend}" in _warning,
+        f"structured classifier refusal is visible for {_backend}",
+        _warning,
+    )
+
+# Reasons arrive as free-form provider strings but are published in the
+# `provider_reason=` field, which the benchmark relay matches as [a-z0-9_.-]+.
+# An unsanitized reason is dropped by that match instead of surfacing.
+import benchmark_runner as _bench  # noqa: E402
+
+_messy_warning = inv.structured_refusal_warning(
+    "gemini",
+    {"promptFeedback": {"blockReason": "Policy Violation: Cyber/Malware (v2)"}},
+    "/tmp/provider.raw",
+)
+ok(
+    bool(_bench._CLASSIFIER_NOTICE_RE.fullmatch(_messy_warning.strip())),
+    "a free-form provider reason still reaches the benchmark relay",
+    _messy_warning,
+)
+
+with tempfile.TemporaryDirectory() as _td:
+    _root = Path(_td)
+    _raw = _root / "live-refusal.raw"
+    _event = _structured_refusals["claude"]
+
+    def _emit_refusal(*args, **kwargs):
+        Path(args[2]).write_text(json.dumps(_event) + "\n", encoding="utf-8")
+        return 0
+
+    _stderr = io.StringIO()
+    with mock.patch.object(
+        inv, "backend_bin", return_value="claude",
+    ), mock.patch.object(
+        inv, "_run_agent_process", side_effect=_emit_refusal,
+    ), mock.patch.object(
+        inv, "agent_security_problem", return_value="",
+    ), contextlib.redirect_stderr(_stderr):
+        inv.run_agent_prompt("claude", "prompt", 0, _raw, cwd=_root)
+    _notice = _stderr.getvalue()
+    ok(
+        _notice.count("CYBER CLASSIFIER DETECTED") == 1,
+        "a classifier refusal in the completed log is reported exactly once",
+        _notice,
+    )
+    ok(
+        "MODEL_REFUSAL" in Path(f"{_raw}.refusals.log").read_text(),
+        "a classifier refusal writes the benchmark refusal sidecar",
+    )
 
 print(f"\n  \033[1m{PASSED}/{PASSED + FAILED} passed\033[0m")
 sys.exit(0 if FAILED == 0 else 1)

@@ -53,10 +53,31 @@ from timeout import run_timeout
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 SESSION_PAUSE_BACKSTOP = 21600
 _RESULT_SIGNATURES: dict[str, str] = {}
+_CLASSIFIER_NOTICE_RE = re.compile(
+    r"^WARN: MODEL_REFUSAL: CYBER CLASSIFIER DETECTED "
+    r"backend=[a-z0-9_-]+ provider_reason=[a-z0-9_.-]+(?: raw_log=.+)?$"
+)
 
 
 def log(message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [benchmark] {message}", flush=True)
+
+
+def _relay_classifier_notice(audit_log: Path) -> None:
+    """Copy the first trusted audit classifier notice to benchmark stdout.
+
+    Read once after the cell exits. The nested audit prints the notice through
+    the shared launcher, which detects a refusal from the completed backend
+    log, so the line is already in audit.log by the time the cell returns.
+    """
+    try:
+        with audit_log.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                if _CLASSIFIER_NOTICE_RE.fullmatch(line.strip()):
+                    log(line.strip())
+                    return
+    except OSError:
+        return
 
 
 @contextmanager
@@ -1713,7 +1734,8 @@ def run_harness(
     if wall:
         environment["AUDIT_WALL_BUDGET_SECS"] = str(wall)
     with _target_artifact_guard(target, cell_dir):
-        with (cell_dir / "audit.log").open("w", encoding="utf-8") as stream:
+        audit_log = cell_dir / "audit.log"
+        with audit_log.open("w", encoding="utf-8") as stream:
             try:
                 if wall:
                     rc = run_timeout(
@@ -1727,6 +1749,7 @@ def run_harness(
                 # (OSError, timeout-helper failure) — the leak this guards
                 # against is exactly what an abnormal exit leaves behind.
                 _reap_cell_processes(reap_marker, cell_dir)
+        _relay_classifier_notice(audit_log)
         result_dir.mkdir(parents=True, exist_ok=True)
     logs = result_dir.parent / "logs"
     for marker in (".run-quality", ".backend-unavailable"):
