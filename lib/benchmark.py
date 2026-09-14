@@ -2748,6 +2748,14 @@ def manifest_errors(manifest: dict) -> list[str]:
             # silently making the entry unreachable.
             if "file" in e and not (isinstance(e["file"], str) and e["file"].strip()):
                 errors.append(f"{where} ({eid or '?'}) file must be a non-empty string")
+            # A trap's classes name the claims it refutes; an empty or
+            # non-list value would silently widen it back to every class.
+            if "classes" in e and not (
+                isinstance(e["classes"], list) and e["classes"]
+                and all(isinstance(c, str) and c.strip() for c in e["classes"])
+            ):
+                errors.append(
+                    f"{where} ({eid or '?'}) classes must be a non-empty list of strings")
             # A trap must declare what a benign occurrence looks like, so the
             # scorer can tell a fired trap from a real crash in the same frame.
             outcome = str(e.get("expected_outcome", "")).strip()
@@ -2929,6 +2937,21 @@ def _findings_only_bug(manifest: dict, bug: dict) -> bool:
     return bool(bug.get("findings_only", manifest.get("findings_only")))
 
 
+def _trap_refutes_class(trap: dict, klass: str) -> bool:
+    """Whether a confirmed finding of *klass* at the trap's symbol is the trap.
+
+    A trap refutes one claim: that a fixed-argv helper is command injection,
+    that a literal-only config loader evaluates its input. A finding of another
+    class at the same function — a quadratic parser, a pipe that never drains —
+    is open-world, not the refuted claim. A trap that declares ``classes`` fires
+    only for those; one that declares none keeps the symbol-only match.
+    """
+    declared = trap.get("classes")
+    if not isinstance(declared, list) or not declared:
+        return True
+    return klass in {bug_classes.canonical_class(c) for c in declared}
+
+
 def score_findings_ground_truth(
     findings_dir: Path,
     manifest: dict,
@@ -2986,19 +3009,22 @@ def score_findings_ground_truth(
         )
     )
     _count, names = count_confirmed_findings(findings_dir)
-    evidence: list[tuple[str, str, str]] = []
+    evidence: list[tuple[str, str, str, str]] = []
     for name in names:
         if name in skip:
             continue
         text = _finding_report_text(findings_dir / name)
         file, func = finding_signature.extract_location(text, target_root)
-        evidence.append((name, file, func))
+        evidence.append((
+            name, file, func,
+            bug_classes.canonical_class(finding_signature.extract_class(text)),
+        ))
 
-    def score_subset(items: list[tuple[str, str, str]]) -> dict:
+    def score_subset(items: list[tuple[str, str, str, str]]) -> dict:
         detected: dict[str, list[str]] = {}
         traps_fired: dict[str, list[str]] = {}
         open_world: list[str] = []
-        for name, file, func in items:
+        for name, file, func, klass in items:
             hit = next((
                 b for b in real
                 if _finding_names_symbol(func, b)
@@ -3011,6 +3037,7 @@ def score_findings_ground_truth(
                 t for t in traps
                 if _finding_names_symbol(func, t)
                 and _manifest_file_allows(t, file)
+                and _trap_refutes_class(t, klass)
             ), None)
             if trap:
                 traps_fired.setdefault(str(trap["id"]), []).append(name)
@@ -5889,7 +5916,9 @@ def _render_findings_ground_truth(scoring: dict | None) -> list[str]:
         "> **How to read this.** Planted `findings_only` bugs are credited "
         "when a confirmed finding names the planted function as the one at "
         "fault; a confirmed finding at a clean-outcome trap's function counts "
-        "against precision. Every other confirmed finding is **open-world** — "
+        "against precision when its class is one the trap refutes (every "
+        "class, for a trap that declares none). Every other confirmed finding "
+        "is **open-world** — "
         "real code has bugs the answer key never planted — and is listed "
         "without being counted for or against."
     )
@@ -6564,6 +6593,65 @@ def _rejected_cell(
     )
 
 
+def _render_crosstab_answer_key(rows: list[dict]) -> list[str]:
+    """One answer-key row per scored run and condition, or nothing.
+
+    The per-run ledger carries the full precision/recall block; the crosstab is
+    the page an operator reads first, and the headline counts there include
+    trap findings and open-world extras. This is the deterministic column
+    beside them: which planted bugs each condition was credited with.
+    """
+    body: list[str] = []
+    for row in rows:
+        scoring = row.get("ground_truth_scoring") or {}
+        run = row["run"]
+        blocks = []
+        if scoring.get("by_condition"):
+            blocks.append(("crashes", scoring))
+        if isinstance(scoring.get("findings"), dict) and scoring["findings"].get("by_condition"):
+            blocks.append(("findings", scoring["findings"]))
+        for kind, block in blocks:
+            for cond, s in sorted(block["by_condition"].items()):
+                missed = ", ".join(s.get("missed", [])) or "—"
+                traps = ", ".join(s.get("false_positive_traps_fired", [])) or "—"
+                body.append(
+                    "| `{target}` | `{backend}` | `{runid}` | {cond} | {kind} "
+                    "| {recall} | {detected}/{total} | {missed} | {precision} | {traps} |".format(
+                        target=run.get("target", "?"),
+                        backend=run.get("backend", "?"),
+                        runid=run.get("runid", "?"),
+                        cond=_condition_label(
+                            str(cond), str(run.get("backend", "")), str(run.get("model", "")),
+                        ),
+                        kind=kind,
+                        recall=_fmt_ratio(s.get("recall")),
+                        detected=len(s.get("detected", [])),
+                        total=s.get("real_total", 0),
+                        missed=missed,
+                        precision=_fmt_ratio(s.get("precision")),
+                        traps=traps,
+                    )
+                )
+    if not body:
+        return []
+    return [
+        "## Answer key",
+        "",
+        "Targets that ship a `.ground-truth.json` are also scored against it. "
+        "Recall is the share of planted bugs a condition was credited with; "
+        "precision counts credited findings against findings at a trap the "
+        "answer key refutes. The headline table above does not use this: its "
+        "counts include trap findings and open-world extras. Each run's "
+        "ledger lists the detected and open-world artifacts by name.",
+        "",
+        "| Target | Backend | Run | Condition | Kind | Recall | Detected "
+        "| Missed | Precision | Traps fired |",
+        "| --- | --- | --- | --- | --- | --: | --: | --- | --: | --- |",
+        *body,
+        "",
+    ]
+
+
 def crosstab(bench_root: Path) -> str:
     """Render benchmark results for each backend/run/target/condition key."""
     bench_root = Path(bench_root)
@@ -6584,6 +6672,7 @@ def crosstab(bench_root: Path) -> str:
                 "outdated_scorers": _outdated_scorers(
                     report, Path(bench_dir) if bench_dir else None,
                 ),
+                "ground_truth_scoring": report.get("ground_truth_scoring") or {},
             })
 
     lines: list[str] = []
@@ -6775,6 +6864,7 @@ def crosstab(bench_root: Path) -> str:
                 )
             )
         lines.append("")
+    lines.extend(_render_crosstab_answer_key(rows))
     provisional_rows = [row for row in rows if row["provisional"]]
     if provisional_rows:
         lines.append("## Runs awaiting review")

@@ -44,6 +44,7 @@
   "false_positive_traps": [
     {
       "id": "json-parse-config",
+      "classes": ["code-injection", "deserialization", "prototype-pollution", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "parseConfig",
@@ -52,6 +53,7 @@
     },
     {
       "id": "execfile-fixed-command",
+      "classes": ["command-injection", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "runCommand",

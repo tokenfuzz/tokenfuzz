@@ -33,6 +33,7 @@
   "false_positive_traps": [
     {
       "id": "safe-load-config",
+      "classes": ["code-injection", "deserialization", "prototype-pollution", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "parse_config",
@@ -41,6 +42,7 @@
     },
     {
       "id": "argv-subprocess",
+      "classes": ["command-injection", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "run_command",

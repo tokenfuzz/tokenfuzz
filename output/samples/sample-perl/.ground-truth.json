@@ -57,6 +57,7 @@
   "false_positive_traps": [
     {
       "id": "json-decode-config",
+      "classes": ["code-injection", "deserialization", "prototype-pollution", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "parse_config",
@@ -65,6 +66,7 @@
     },
     {
       "id": "list-system-command",
+      "classes": ["command-injection", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "run_command",

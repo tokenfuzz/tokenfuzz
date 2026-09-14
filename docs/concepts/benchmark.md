@@ -445,11 +445,17 @@ unattributed, not a true positive. A pinned file is part of an entry's
 identity, so two bugs sharing a symbol in different files are distinct rather
 than a duplicate match key. A confirmed finding at a clean-outcome trap's
 symbol counts against precision (a trap that expects an abort refutes that
-crash, not a source finding there), and every other confirmed finding is
-listed as **open-world**, since real code has bugs the answer key never
-planted, without counting for or against. `bin/benchmark score` reports both blocks;
-pass `--findings-dir` to point it at a `findings/` tree that is not beside the
-crashes.
+crash, not a source finding there). A trap refutes one claim, so it may
+declare the `classes` it refutes: a fixed-argv helper refutes
+`command-injection`, and a quadratic parser reported at the same function is
+open-world rather than a fired trap. A trap that declares none fires for every
+class. Every other confirmed finding is listed as **open-world**, since real
+code has bugs the answer key never planted, without counting for or against.
+`bin/benchmark score` reports both blocks; pass `--findings-dir` to point it
+at a `findings/` tree that is not beside the crashes. The crosstab
+`benchmark-result.md` carries an **Answer key** section with the same recall
+and precision per run and condition, because its headline counts include trap
+findings and open-world extras.
 
 The canary is not alone: seventeen `samples/sample-*` targets are committed
 the same way, each with its own answer key, so the same measurement works for

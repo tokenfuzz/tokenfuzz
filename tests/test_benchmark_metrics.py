@@ -2778,6 +2778,53 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIn("read the cell as a floor, not as a measured yield", text)
         self.assertIn("172 unjudged", benchmark.render_section(report))
 
+    def test_crosstab_carries_the_answer_key_beside_the_headline(self) -> None:
+        # The headline counts include trap findings and open-world extras; a
+        # scored run also shows what each condition was credited with.
+        run = self.root / "keyed" / "codex" / "20260202-000000"
+        report = {
+            "run": {
+                "runid": "20260202-000000", "target": "samples/sampleproj",
+                "backend": "codex", "model": "codex-test",
+            },
+            "bench_dir": str(run),
+            "conditions": [{
+                "condition": "model-direct", "replicates_done": 1,
+                "replicates_total": 1, "wall_median": 3600,
+                "unique_finding_clusters": 5, "medium_plus_findings": 5,
+                "tokens": {},
+            }],
+            "ground_truth_scoring": {
+                "not_scored": "findings-only",
+                "findings": {
+                    "overall": {"real_total": 2, "detected": ["a", "b"], "missed": [],
+                                "recall": 1.0, "precision": 0.5714,
+                                "false_positive_traps_fired": ["asset-root"]},
+                    "by_condition": {
+                        "model-direct": {
+                            "real_total": 2, "detected": ["a", "b"], "missed": [],
+                            "recall": 1.0, "precision": 0.5714,
+                            "false_positive_traps_fired": ["asset-root"],
+                        },
+                        "harness": {
+                            "real_total": 2, "detected": ["a"], "missed": ["b"],
+                            "recall": 0.5, "precision": 1.0,
+                            "false_positive_traps_fired": [],
+                        },
+                    },
+                },
+            },
+        }
+        self.write_json(run / "report.json", report)
+        text = benchmark.crosstab(self.root / "keyed")
+        self.assertIn("## Answer key", text)
+        self.assertIn("| findings | 100% | 2/2 | — | 57% | asset-root |", text)
+        self.assertIn("| findings | 50% | 1/2 | b | 100% | — |", text)
+        unscored = {**report, "ground_truth_scoring": {}}
+        self.write_json(run / "report.json", unscored)
+        self.assertNotIn("## Answer key", benchmark.crosstab(self.root / "keyed"))
+
+
 
 class BenchmarkWallBudgetTests(unittest.TestCase):
     """Wall must be read against the budget the cell was granted.

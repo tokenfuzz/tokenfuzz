@@ -126,11 +126,12 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(zero["confirmed_crashes"], 0)
         self.assertEqual(zero["missed"], ["heap-oob-write", "stack-oob-write", "use-after-free"])
 
-    def make_finding(self, run, finding_id, function, condition=None):
+    def make_finding(self, run, finding_id, function, condition=None, klass=""):
         finding = run / "findings" / finding_id
         finding.mkdir(parents=True)
+        class_row = f"| Class | {klass} |\n" if klass else ""
         (finding / "REPORT.md").write_text(
-            f"# {finding_id}\n\n| Field | Value |\n| --- | --- |\n"
+            f"# {finding_id}\n\n| Field | Value |\n| --- | --- |\n{class_row}"
             f"| File | src/sample.c |\n| Function | {function} |\n| Line | 42 |\n\n"
             "## Summary\n\nA report.\n",
             encoding="utf-8",
@@ -599,6 +600,43 @@ class BenchmarkScoringTests(unittest.TestCase):
         _, score = self.score(empty)
         self.assertEqual(score["overall"]["recall"], 0.0)
         self.assertIsNone(score["overall"]["precision"])
+
+
+    def test_a_trap_fires_only_for_the_classes_it_refutes(self) -> None:
+        # A fixed-argv helper refutes command injection, not a pipe that never
+        # drains; a trap that names its classes leaves other claims open-world,
+        # while a trap that names none still fires for every class.
+        manifest = self.root / "classed-traps.json"
+        manifest.write_text(json.dumps({
+            "target": "sampleproj", "findings_only": True,
+            "planted_bugs": [
+                {"id": "shell-escape", "kind": "real", "primitive": "command-injection",
+                 "signature_symbol": "run_export"},
+            ],
+            "false_positive_traps": [
+                {"id": "fixed-command", "kind": "fp", "expected_outcome": "clean",
+                 "signature_symbol": "run_command", "classes": ["command-injection", "rce"]},
+                {"id": "json-config", "kind": "fp", "expected_outcome": "clean",
+                 "signature_symbol": "parse_config"},
+            ],
+        }))
+        run = self.root / "classed"
+        self.make_finding(run, "FIND-0001", "run_command", klass="denial-of-service")
+        self.make_finding(run, "FIND-0002", "run_command", klass="command-injection")
+        self.make_finding(run, "FIND-0003", "parse_config", klass="denial-of-service")
+        (run / "crashes").mkdir()
+        _, score = self.score(run, manifest=manifest)
+        overall = score["findings"]["overall"]
+        self.assertEqual(overall["open_world_findings"], ["FIND-0001"])
+        self.assertEqual(overall["false_positive_traps_fired"], ["fixed-command", "json-config"])
+        self.assertEqual(overall["false_positive_findings"], 2)
+        bad = self.root / "classed-traps-bad.json"
+        bad.write_text(json.dumps({"target": "sampleproj", "planted_bugs": [], "false_positive_traps": [
+            {"id": "fixed-command", "kind": "fp", "expected_outcome": "clean",
+             "signature_symbol": "run_command", "classes": []},
+        ]}))
+        self.assertTrue(any("classes must be a non-empty list" in e
+                            for e in benchmark.manifest_errors(json.loads(bad.read_text()))))
 
 
 if __name__ == "__main__":

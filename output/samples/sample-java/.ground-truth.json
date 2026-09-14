@@ -59,6 +59,7 @@
   "false_positive_traps": [
     {
       "id": "properties-config",
+      "classes": ["code-injection", "deserialization", "prototype-pollution", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "parseConfig",
@@ -67,6 +68,7 @@
     },
     {
       "id": "processbuilder-fixed-command",
+      "classes": ["command-injection", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "runCommand",
