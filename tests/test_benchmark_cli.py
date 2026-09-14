@@ -6,11 +6,13 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from types import SimpleNamespace
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -24,6 +26,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 import benchmark
 import benchmark_runner
 from python_test_helpers import invoke_main, isolated_script_root
+from test_benchmark_page import Fixture as PageFixture
 
 
 class BenchmarkCliTests(unittest.TestCase):
@@ -71,6 +74,23 @@ class BenchmarkCliTests(unittest.TestCase):
             "",
         )
 
+    def assert_links_relative(self, page: Path) -> list[str]:
+        # Every artifact link is relative to the page's own directory, so the
+        # rendered tree keeps working after it is moved or shared.
+        text = page.read_text(encoding="utf-8")
+        self.assertNotIn("file://", text, page)
+        links = [
+            link for pair in re.findall(r'\]\(([^)]+)\)|href="([^"]+)"', text)
+            for link in pair if link and not link.startswith("#")
+        ]
+        self.assertTrue(links, page)
+        for link in links:
+            self.assertFalse(link.startswith("/"), f"{page}: {link}")
+            url = urllib.parse.urlsplit(link)
+            self.assertEqual((url.scheme, url.netloc, url.query, url.fragment), ("", "", "", ""), link)
+            self.assertTrue((page.parent / urllib.parse.unquote(url.path)).exists(), f"{page}: {link}")
+        return links
+
     def test_bare_launch_prints_help_instead_of_starting_a_cell(self) -> None:
         result = self.run_main()
         self.assertEqual(result.returncode, 2, result.stdout)
@@ -78,6 +98,19 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertIn("--budget-wall", result.stdout)
         self.assertNotIn("FATAL", result.stdout)
         self.assertFalse(self.bench_root.exists())
+
+    def test_relative_bench_root_lives_under_output(self) -> None:
+        # A bare name must not land in the source root: benchmark trees share
+        # the output/ workspace like every other artifact.
+        with mock.patch.object(benchmark, "SCRIPT_ROOT", self.root):
+            result = self.run_main("--rebuild-report", "--bench-root", "rel-bench")
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue((self.root / "output" / "rel-bench" / "benchmark-result.md").is_file())
+        self.assertFalse((self.root / "rel-bench").exists())
+        self.assertEqual(
+            benchmark.resolve_bench_root(str(self.bench_root)),
+            self.bench_root,
+        )
 
     def test_public_cli_rejects_invalid_arguments(self) -> None:
         cases = (
@@ -219,6 +252,13 @@ class BenchmarkCliTests(unittest.TestCase):
             self.assertFalse((run / ".pool.staging").exists())
             self.assertFalse((run / ".pool.old").exists())
 
+        for page in (
+            self.bench_root / "benchmark-result.md",
+            self.bench_root / "benchmark-result.html",
+            self.bench_root / "codex" / "benchmark-results.md",
+        ):
+            self.assert_links_relative(page)
+
         resumed = self.run_cli(*base)
         self.assertEqual(resumed.returncode, 0, resumed.stdout)
         self.assertEqual(resumed.stdout.count("already done, skipping"), 4)
@@ -329,6 +369,31 @@ class BenchmarkCliTests(unittest.TestCase):
             self.assertIn("target-kept-by-report-rebuild", text)
             self.assertIn("target-with-unfinished-run", text)
             self.assertNotIn(deleted, text)
+
+    def test_rebuilt_report_links_where_a_moved_bench_root_lives_now(self) -> None:
+        PageFixture(self.bench_root)
+        moved = self.root / "moved-benchmark"
+        # Every report.json still names the old absolute bench_dir.
+        shutil.move(str(self.bench_root), str(moved))
+        rebuilt = self.run_main("--rebuild-report", "--bench-root", str(moved))
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout)
+        clusters = "codex/20260101-000000/pool/harness/findings/FINDING-CLUSTERS.html"
+        for name in ("benchmark-result.md", "benchmark-result.html"):
+            links = self.assert_links_relative(moved / name)
+            self.assertIn(clusters, links, name)
+
+    def test_report_links_encode_reserved_characters_in_run_directory(self) -> None:
+        fixture = PageFixture(self.bench_root)
+        run_name = "run #1?rate=100%25"
+        fixture.run.rename(fixture.run.with_name(run_name))
+        rebuilt = self.run_main("--rebuild-report", "--bench-root", str(self.bench_root))
+        self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout)
+        clusters = (
+            f"codex/{urllib.parse.quote(run_name, safe='')}/"
+            "pool/harness/findings/FINDING-CLUSTERS.html"
+        )
+        for name in ("benchmark-result.md", "benchmark-result.html"):
+            self.assertIn(clusters, self.assert_links_relative(self.bench_root / name))
 
     def test_resume_retries_provider_limited_but_keeps_recovered(self) -> None:
         target = "samples/sample-python"

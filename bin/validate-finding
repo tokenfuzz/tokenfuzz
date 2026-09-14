@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import audit_helpers
+import cli_help
 import crash_bundle
 import llm_decide
 import llm_invoke
@@ -65,24 +66,30 @@ def log_validator_decision(
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--finding")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=cli_help.DefaultsHelpFormatter)
+    parser.add_argument("--finding", help="finding report to validate (required unless a batch manifest is supplied)")
     parser.add_argument("--batch-manifest", help=argparse.SUPPRESS)
-    parser.add_argument("--target-path", required=True)
-    parser.add_argument("--backend", required=True, choices=("claude", "codex", "gemini", "grok", "oss"))
-    parser.add_argument("--model", default="")
-    parser.add_argument("--tiebreak", action="store_true")
+    parser.add_argument("--target-path", required=True, help="source tree the validator reads")
+    parser.add_argument("--backend", required=True, choices=("claude", "codex", "gemini", "grok", "oss"),
+                        help="LLM backend that runs the validator")
+    parser.add_argument("--model", default="",
+                        help="model name for the backend (default: the backend's configured default model)")
+    parser.add_argument("--tiebreak", action="store_true",
+                        help="add the skeptical tiebreak framing to the prompt")
     parser.add_argument("--resolve-trigger", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--prior-review", action="append", default=[],
                         help=argparse.SUPPRESS)
-    parser.add_argument("--gate", choices=("finding", "trigger"), default="finding")
+    parser.add_argument("--gate", choices=("finding", "trigger"), default="finding",
+                        help="review to run: a full second-opinion review of the finding, or a bounded source check of its trigger")
     parser.add_argument("--lens", choices=("", "reachability"), default="",
-                        help="second-review lens for the trigger gate")
+                        help="second-review lens for the trigger gate (default: no lens)")
     parser.add_argument("--target-root-is-product", action="store_true",
                         help=argparse.SUPPRESS)
-    parser.add_argument("--output")
-    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--output", help="vote JSON path to write (default: the next free validator-vote-N.json beside the finding)")
+    parser.add_argument("--timeout", type=int, default=300,
+                        help="seconds allowed for the validator session")
     parser.add_argument("--usage-index", help=argparse.SUPPRESS)
     return parser.parse_args(argv)
 

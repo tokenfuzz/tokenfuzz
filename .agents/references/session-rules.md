@@ -220,7 +220,7 @@ bin/state next-card     --agent N [--mode browser|js|generic] [--role reproduce|
 bin/state show-card     CARD_ID [--mode MODE]                    # compact JSON
 bin/state list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
 bin/state show-crash    CRASH-ID                                # compact JSON
-bin/state list-crashes  [--status OK|NEW|...] [--limit N]
+bin/state list-crashes  [--status OK|PENDING|CLUSTER] [--limit N]
 bin/state show-finding  FIND-ID                                 # compact JSON
 bin/state list-findings [--status OK|PENDING REVIEW|NOT REPORTABLE|REJECTED] [--limit N]
 bin/state add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \

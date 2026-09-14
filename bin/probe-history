@@ -49,6 +49,10 @@ import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+import cli_help  # noqa: E402
+
 PRETTY_OUTPUT_BYTE_CAP = 8 * 1024
 
 
@@ -318,36 +322,41 @@ def _emit_json(rows: list[dict], limit: int) -> None:
         sys.stdout.write(json.dumps(run, sort_keys=True) + "\n")
 
 
+class _HelpFormatter(cli_help.DefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    """Informative defaults plus the verbatim epilog."""
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="probe-history",
         description="Read-only digest of bin/probe runs for one testcase.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=_HelpFormatter,
         epilog=__doc__,
     )
     parser.add_argument(
         "testcase",
         nargs="?",
-        help="Testcase path. History is matched by path AND, if the file "
-        "exists, by current content sha1.",
+        help="testcase path matched against recorded runs by path and, if the file "
+        "exists, by current content sha1 (required unless --sha1, --hypothesis-id, "
+        "--card-id, or --all is given)",
     )
-    parser.add_argument("--sha1", default="", help="Content sha1 to look up (hex).")
-    parser.add_argument("--hypothesis-id", default="", help="Match runs under this hypothesis ID.")
-    parser.add_argument("--card-id", default="", help="Match runs under this work card ID.")
-    parser.add_argument("--all", action="store_true", help="Match all runs (no path/sha1 filter).")
-    parser.add_argument("--agent", default="", help="Restrict to one agent number.")
-    parser.add_argument("--verdict", default="", help="Regex filter on verdict.")
-    parser.add_argument("--limit", type=int, default=20, help="Cap output rows (0 = no cap).")
+    parser.add_argument("--sha1", default="", help="content sha1 (hex) to look up")
+    parser.add_argument("--hypothesis-id", default="", help="match runs under this hypothesis ID")
+    parser.add_argument("--card-id", default="", help="match runs under this work card ID")
+    parser.add_argument("--all", action="store_true", help="match all runs in the session with no path or sha1 filter")
+    parser.add_argument("--agent", default="", help="restrict to one agent number (default: all agents)")
+    parser.add_argument("--verdict", default="", help="regex a run's verdict must match (default: all verdicts)")
+    parser.add_argument("--limit", type=int, default=20, help="most history rows to print (0 = no cap)")
     parser.add_argument(
         "--format",
         choices=("pretty", "tsv", "json"),
         default="pretty",
-        help="Output shape (default: pretty).",
+        help="output shape",
     )
     parser.add_argument(
         "--results-dir",
         default="",
-        help="Override $RESULTS_DIR (state/runs.jsonl is read from <dir>/state/).",
+        help="results tree whose state/runs.jsonl is read (default: RESULTS_DIR)",
     )
 
     args = parser.parse_args(argv)

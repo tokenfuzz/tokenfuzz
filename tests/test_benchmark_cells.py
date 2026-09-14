@@ -144,8 +144,9 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
         )
 
         absolute_root = self.work / "codex-bench"
-        relative_root = Path("output") / f"benchmark-relative-{uuid.uuid4().hex}"
-        self.created_roots.append(ROOT / relative_root)
+        # A bare --bench-root name lands under output/ in the repository root.
+        relative_root = f"benchmark-relative-{uuid.uuid4().hex}"
+        self.created_roots.append(ROOT / "output" / relative_root)
         claude_root = self.work / "claude-bench"
         gemini_root = self.work / "gemini-bench"
         unlimited_root = self.work / "gemini-unlimited"
@@ -227,7 +228,7 @@ print(json.dumps({"id": "REC-empty", "slice": "sample", "confidence": "AUDIT-CLE
         relative_output = results["relative"].stdout
         self.assertRegex(
             relative_output,
-            re.escape(f"Cell model-direct-r1 live log: {(ROOT / relative_root).resolve()}/codex/")
+            re.escape(f"Cell model-direct-r1 live log: {(ROOT / 'output' / relative_root).resolve()}/codex/")
             + r".*/cells/model-direct-r1/backend\.raw\.log",
         )
         self.assertNotIn("live log: file://", relative_output)

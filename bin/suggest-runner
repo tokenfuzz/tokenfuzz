@@ -15,6 +15,7 @@ ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT"
     else Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import cli_help  # noqa: E402
 from llm_decide import llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 import runner_preflight  # noqa: E402
@@ -391,11 +392,15 @@ def validate_launch(
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("slug")
-    parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--timeout", type=int, default=120)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=cli_help.DefaultsHelpFormatter)
+    parser.add_argument("slug", help="target whose output/<slug>/target.toml and targets/<slug>/ checkout are read")
+    parser.add_argument("--apply", action="store_true",
+                        help="write the suggested [runner] args and success_codes into target.toml instead of printing them")
+    parser.add_argument("--force", action="store_true",
+                        help="re-derive the argv even when [runner] args and success_codes are already configured (otherwise exit 4)")
+    parser.add_argument("--timeout", type=int, default=120,
+                        help="seconds allowed for each LLM decision and each validation launch")
     args = parser.parse_args(argv)
 
     checkout_root = ROOT / "targets" / args.slug

@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import cli_help
 from workqueue import (
     card_yield,
     add_common_args,
@@ -127,27 +128,38 @@ def _emit_mutator(cmd: str, row: dict, want_json: bool) -> None:
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Read/write structured audit state")
+    formatter = cli_help.DefaultsHelpFormatter
+    parser = argparse.ArgumentParser(
+        description="Read/write structured audit state", formatter_class=formatter,
+    )
     add_common_args(parser)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init")
+    sub.add_parser("init", help="create the structured state files under the results tree")
 
-    p_next = sub.add_parser("next-card")
-    p_next.add_argument("--agent", required=True)
-    p_next.add_argument("--mode", default="")
-    p_next.add_argument("--role", default="")
-    p_next.add_argument("--strategy", default="", help="optional strategy filter, e.g. S2")
+    p_next = sub.add_parser(
+        "next-card",
+        help="claim and print the next eligible work card for one agent",
+        formatter_class=formatter,
+    )
+    p_next.add_argument("--agent", required=True, help="agent number the claim is recorded for")
+    p_next.add_argument("--mode", default="", help="agent mode matched against each card's mode (browser, js, generic, ...); empty accepts every card")
+    p_next.add_argument("--role", default="", help="session role, reproduce or analysis; reproduce ranks buildable cards first")
+    p_next.add_argument("--strategy", default="", help="strategy filter, e.g. S2; must match the operator pin when one is set")
     p_next.add_argument("--peek", action="store_true", help="print next eligible card without claiming it")
 
-    p_explain = sub.add_parser("explain-queue")
+    p_explain = sub.add_parser(
+        "explain-queue",
+        help="queue status per work card, aggregated by reason unless --all",
+        formatter_class=formatter,
+    )
     p_explain.add_argument("--mode", action="append", default=[], help="agent mode to test for compatibility; repeatable")
-    p_explain.add_argument("--strategy", default="", help="optional strategy filter, e.g. S2")
+    p_explain.add_argument("--strategy", default="", help="strategy filter, e.g. S2")
     p_explain.add_argument(
         "--top",
         type=int,
         default=8,
-        help="aggregate by reason and emit top N reasons (default: 8). Use 0 for all reasons.",
+        help="aggregate by reason and emit the top N reasons; 0 for all reasons",
     )
     p_explain.add_argument(
         "--all",
@@ -155,12 +167,16 @@ def main(argv: list[str]) -> int:
         help="emit one JSONL row per work card (verbose, for programmatic consumers)",
     )
 
-    p_show = sub.add_parser("show-card", help="compact JSON for one work card")
+    p_show = sub.add_parser(
+        "show-card", help="compact JSON for one work card", formatter_class=formatter,
+    )
     p_show.add_argument("card_id", help="card id")
-    p_show.add_argument("--mode", default="", help="optional mode for queue-status calculation")
+    p_show.add_argument("--mode", default="", help="agent mode for the queue-status calculation; empty ignores card modes")
 
-    p_list = sub.add_parser("list-cards", help="compact JSONL listing of work cards")
-    p_list.add_argument("--mode", default="")
+    p_list = sub.add_parser(
+        "list-cards", help="compact JSONL listing of work cards", formatter_class=formatter,
+    )
+    p_list.add_argument("--mode", default="", help="agent mode for the queue-status calculation; empty ignores card modes")
     p_list.add_argument("--status", default="", help="filter by visible status or queue reason, e.g. eligible")
     p_list.add_argument("--strategy", default="", help="filter by primary/allowed strategy, e.g. S5")
     p_list.add_argument(
@@ -178,150 +194,178 @@ def main(argv: list[str]) -> int:
     p_list.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
     p_list.add_argument("--verbose", action="store_true", help="include prose-heavy ranking/detail fields")
 
-    p_show_crash = sub.add_parser("show-crash", help="compact JSON for one crash artifact")
+    p_show_crash = sub.add_parser(
+        "show-crash", help="compact JSON for one crash artifact", formatter_class=formatter,
+    )
     p_show_crash.add_argument("crash_id", help="crash id")
 
-    p_list_crashes = sub.add_parser("list-crashes", help="compact JSONL listing of crash artifacts")
-    p_list_crashes.add_argument("--status", default="", help="filter by status or cluster")
+    p_list_crashes = sub.add_parser(
+        "list-crashes", help="compact JSONL listing of crash artifacts", formatter_class=formatter,
+    )
+    p_list_crashes.add_argument("--status", default="", help="keep rows whose status (OK or PENDING) or cluster equals this value")
     p_list_crashes.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
 
-    p_show_finding = sub.add_parser("show-finding", help="compact JSON for one finding artifact")
+    p_show_finding = sub.add_parser(
+        "show-finding", help="compact JSON for one finding artifact", formatter_class=formatter,
+    )
     p_show_finding.add_argument("finding_id", help="finding id")
 
-    p_list_findings = sub.add_parser("list-findings", help="compact JSONL listing of finding artifacts")
-    p_list_findings.add_argument("--status", default="", help="filter by status or class")
+    p_list_findings = sub.add_parser(
+        "list-findings", help="compact JSONL listing of finding artifacts", formatter_class=formatter,
+    )
+    p_list_findings.add_argument("--status", default="", help="keep rows whose status or class equals this value")
     p_list_findings.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
 
-    p_resume = sub.add_parser("resume", help="compact structured startup brief for one agent")
-    p_resume.add_argument("--agent", required=True)
-    p_resume.add_argument("--mode", default="")
-    p_resume.add_argument("--role", default="")
-    p_resume.add_argument("--strategy", default="", help="optional strategy filter for assigned cards")
+    p_resume = sub.add_parser(
+        "resume", help="compact structured startup brief for one agent", formatter_class=formatter,
+    )
+    p_resume.add_argument("--agent", required=True, help="agent number whose hypotheses, claims and pending crashes are rendered")
+    p_resume.add_argument("--mode", default="", help="agent mode matched against each card's mode (browser, js, generic, ...); empty accepts every card")
+    p_resume.add_argument("--role", default="", help="session role, reproduce or analysis; reproduce ranks buildable cards first")
+    p_resume.add_argument("--strategy", default="", help="strategy filter for assigned cards; must match the operator pin when one is set")
     p_resume.add_argument("--peek", action="store_true", help="render the next eligible card without claiming it")
 
-    p_add = sub.add_parser("add-hyp")
-    p_add.add_argument("--id", default="")
-    p_add.add_argument("--agent", required=True)
-    p_add.add_argument("--card-id", default="")
-    p_add.add_argument("--hypothesis", required=True)
-    p_add.add_argument("--file", required=True)
-    p_add.add_argument("--input-shape", required=True)
-    p_add.add_argument("--guard-gap", required=True)
+    p_add = sub.add_parser(
+        "add-hyp", help="record a new hypothesis and claim its card", formatter_class=formatter,
+    )
+    p_add.add_argument("--id", default="", help="hypothesis id; derived from agent, file and text when empty, must be unused when given")
+    p_add.add_argument("--agent", required=True, help="agent number that owns the hypothesis")
+    p_add.add_argument("--card-id", default="", help="work card to attach; the card is claimed for this agent when given")
+    p_add.add_argument("--hypothesis", required=True, help="one-line statement of the suspected bug")
+    p_add.add_argument("--file", required=True, help="source location, e.g. path:func:line")
+    p_add.add_argument("--input-shape", required=True, help="input shape expected to reach the sink")
+    p_add.add_argument("--guard-gap", required=True, help="missing or bypassable check that lets the input through")
     p_add.add_argument(
         "--diagnostic",
         dest="diagnostic",
         required=True,
         choices=list(HYPOTHESIS_DIAGNOSTIC_CATEGORIES),
+        help="sanitizer bug class the hypothesis predicts",
     )
     # Free-form on purpose: the agent types this, and agents write 'S7',
     # 's7', and 'S7-fuzz-improvement' alike. A rejected value would abort
     # add-hyp, and the hypothesis row is what couples a claim, a probe run,
     # and the rotation's evidence count — losing it costs far more than an
     # off-vocabulary label, which the report path normalizes anyway.
-    p_add.add_argument("--strategy", required=True)
-    p_add.add_argument("--status", default="PENDING")
+    p_add.add_argument("--strategy", required=True, help="strategy label, e.g. S7; must match the operator pin when one is set")
+    p_add.add_argument("--status", default="PENDING", help="initial hypothesis status")
     p_add.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
-    p_up = sub.add_parser("update-hyp")
-    p_up.add_argument("--id", default="")
-    p_up.add_argument("--agent", default="", help="optional agent scope for non-unique ids")
-    p_up.add_argument("--status", required=True)
-    p_up.add_argument("--note", default="")
+    p_up = sub.add_parser(
+        "update-hyp", help="set the status of one hypothesis", formatter_class=formatter,
+    )
+    p_up.add_argument("--id", default="", help="hypothesis id to update (required)")
+    p_up.add_argument("--agent", default="", help="agent scope for ids shared by several agents' rows")
+    p_up.add_argument("--status", required=True, help="new status; CRASH* is refused while the agent's crash report is unfinished, ENV-BLOCKED also blocks the card")
+    p_up.add_argument("--note", default="", help="note stored on the hypothesis when non-empty")
     p_up.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
-    p_card = sub.add_parser("update-card")
-    p_card.add_argument("--card-id", default="")
-    p_card.add_argument("--status", required=True)
-    p_card.add_argument("--agent", default="")
-    p_card.add_argument("--note", default="")
+    p_card = sub.add_parser(
+        "update-card", help="set the status of one work card", formatter_class=formatter,
+    )
+    p_card.add_argument("--card-id", default="", help="work card id to update (required)")
+    p_card.add_argument("--status", required=True, help="claimed, discarded, crash, find or blocked; CRASH-*, FIND-*, done, ENV-BLOCKED and mode-incompatible:* are normalized to those")
+    p_card.add_argument("--agent", default="", help="agent recorded on the status row")
+    p_card.add_argument("--note", default="", help="note recorded on the status row")
     p_card.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
-    p_run = sub.add_parser("add-run")
-    p_run.add_argument("--agent", required=True)
-    p_run.add_argument("--hypothesis-id", required=True)
-    p_run.add_argument("--card-id", default="")
-    p_run.add_argument("--mode", required=True)
-    p_run.add_argument("--testcase", required=True)
+    p_run = sub.add_parser(
+        "add-run", help="record one probe execution (normally written by bin/probe)", formatter_class=formatter,
+    )
+    p_run.add_argument("--agent", required=True, help="agent number that ran the probe")
+    p_run.add_argument("--hypothesis-id", required=True, help="hypothesis the run tested")
+    p_run.add_argument("--card-id", default="", help="work card the run counts toward")
+    p_run.add_argument("--mode", required=True, help="probe mode used for the run: auto, browser, js or generic")
+    p_run.add_argument("--testcase", required=True, help="path of the testcase that was executed")
     p_run.add_argument("--testcase-sha1", default="", help="sha1 of testcase contents at run time")
-    p_run.add_argument("--asan-output", required=True)
-    p_run.add_argument("--verdict", required=True)
-    p_run.add_argument("--sanitizer", default="", help="sanitizer selected by bin/probe")
-    p_run.add_argument("--sanitizer-runs", default="", help="SANITIZER_RUNS count for this run (1 default, 5 for --confirm)")
+    p_run.add_argument("--asan-output", required=True, help="path of the captured sanitizer output")
+    p_run.add_argument("--verdict", required=True, help="probe verdict: CRASH, PROPERTY, CLEAN, NO_EXEC, EXEC_FAIL or TIMEOUT")
+    p_run.add_argument("--sanitizer", default="", help="sanitizer selected by bin/probe: asan, ubsan, msan, tsan, race or runner")
+    p_run.add_argument("--sanitizer-runs", default="", help="SANITIZER_RUNS count for this run; 1 when empty, 5 under bin/probe --confirm")
     p_run.add_argument("--duration-seconds", default="", help="wall seconds the target execution took, so a sweep is not counted as one cheap run")
     p_run.add_argument("--reason", default="", help="short diagnostic for a non-evidence verdict, e.g. the child exit code behind an EXEC_FAIL")
     p_run.add_argument("--coverage", default="", help="coverage gate outcome for this run: HIT, MISSED, UNAVAILABLE, ENV_FAIL, EXEC_FAIL, TIMEOUT, NO_SANCOV, SYMBOLIZE_FAIL")
     p_run.add_argument("--closest", default="", help="the frame coverage reached (HIT) or came closest to (MISSED)")
     p_run.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
-    p_note = sub.add_parser("add-note")
-    p_note.add_argument("--agent", required=True)
-    p_note.add_argument("--hypothesis-id", default="")
-    p_note.add_argument("--card-id", default="")
+    p_note = sub.add_parser(
+        "add-note", help="record a structured note on a hypothesis or card", formatter_class=formatter,
+    )
+    p_note.add_argument("--agent", required=True, help="agent number writing the note")
+    p_note.add_argument("--hypothesis-id", default="", help="hypothesis the note belongs to")
+    p_note.add_argument("--card-id", default="", help="work card the note belongs to")
     p_note.add_argument(
         "--kind",
         required=True,
         choices=["data-flow", "guard", "variants", "decision", "context"],
+        help="note category",
     )
-    p_note.add_argument("--text", required=True)
+    p_note.add_argument("--text", required=True, help="note body")
     p_note.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
     p_recent = sub.add_parser(
         "recent-hyps",
         help="slim listing of hypotheses (id|status|agent|strategy|file|card_id|hypothesis)",
+        formatter_class=formatter,
     )
     p_recent.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
-    p_recent.add_argument("--agent", default="")
-    p_recent.add_argument("--card-id", default="")
+    p_recent.add_argument("--agent", default="", help="keep rows owned by this agent")
+    p_recent.add_argument("--card-id", default="", help="keep rows attached to this work card")
     p_recent.add_argument("--status", default="", help="regex matched against status")
-    p_recent.add_argument("--strategy", default="")
+    p_recent.add_argument("--strategy", default="", help="exact match against strategy")
 
     p_runs = sub.add_parser(
         "recent-runs",
         help="slim listing of runs.jsonl (id|verdict|mode|agent|hypothesis_id|card_id|testcase|coverage|closest|execution_failure_class)",
+        formatter_class=formatter,
     )
     p_runs.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
-    p_runs.add_argument("--agent", default="")
-    p_runs.add_argument("--hypothesis-id", default="")
-    p_runs.add_argument("--card-id", default="")
+    p_runs.add_argument("--agent", default="", help="keep rows recorded by this agent")
+    p_runs.add_argument("--hypothesis-id", default="", help="keep rows for this hypothesis")
+    p_runs.add_argument("--card-id", default="", help="keep rows attached to this work card")
     p_runs.add_argument("--verdict", default="", help="regex matched against verdict")
 
     p_notes = sub.add_parser(
         "recent-notes",
         help="slim listing of notes.jsonl (id|kind|agent|hypothesis_id|card_id|text)",
+        formatter_class=formatter,
     )
     p_notes.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
-    p_notes.add_argument("--agent", default="")
-    p_notes.add_argument("--hypothesis-id", default="")
-    p_notes.add_argument("--card-id", default="")
-    p_notes.add_argument("--kind", default="")
+    p_notes.add_argument("--agent", default="", help="keep rows written by this agent")
+    p_notes.add_argument("--hypothesis-id", default="", help="keep rows for this hypothesis")
+    p_notes.add_argument("--card-id", default="", help="keep rows attached to this work card")
+    p_notes.add_argument("--kind", default="", help="exact match against kind (data-flow, guard, variants, decision or context)")
 
     p_claims = sub.add_parser(
         "recent-claims",
         help="slim listing of claims.jsonl (timestamp|status|agent|card_id|hypothesis_id|note)",
+        formatter_class=formatter,
     )
     p_claims.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
-    p_claims.add_argument("--agent", default="")
-    p_claims.add_argument("--card-id", default="")
+    p_claims.add_argument("--agent", default="", help="keep rows recorded by this agent")
+    p_claims.add_argument("--card-id", default="", help="keep rows for this work card")
     p_claims.add_argument("--status", default="", help="exact status match (e.g. claimed)")
 
     p_recent_all = sub.add_parser(
         "show-recent",
         help="one-call bundle: recent claims + hypotheses + runs (replaces multi-tail JSONL pipelines)",
+        formatter_class=formatter,
     )
     p_recent_all.add_argument("--agent", default="", help="filter all sections by agent")
     p_recent_all.add_argument("--hyps", type=int, default=10, help="hypothesis rows (0 = skip)")
     p_recent_all.add_argument("--runs", type=int, default=10, help="run rows (0 = skip)")
     p_recent_all.add_argument("--claims", type=int, default=10, help="claim rows (0 = skip)")
-    p_recent_all.add_argument("--notes", type=int, default=0, help="note rows (0 = skip; default off, opt-in)")
+    p_recent_all.add_argument("--notes", type=int, default=0, help="note rows (0 = skip)")
 
     p_tried = sub.add_parser(
         "recent-tried",
         help="slim listing of tried-inputs-N.log (timestamp|verdict|mode|hash|hypothesis|target|closest|testcase|coverage)",
+        formatter_class=formatter,
     )
     p_tried.add_argument("--agent", required=True, help="agent number, or 'all'")
     p_tried.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
     p_tried.add_argument("--verdict", default="", help="regex matched against verdict")
-    p_tried.add_argument("--hypothesis", default="")
+    p_tried.add_argument("--hypothesis", default="", help="exact match against hypothesis id")
     p_tried.add_argument("--target", default="", help="substring match against target field")
 
     sub.add_parser(
@@ -332,12 +376,13 @@ def main(argv: list[str]) -> int:
     p_release = sub.add_parser(
         "release-stale-claims",
         help="release card claims with no active hypothesis (frees the queue between iterations)",
+        formatter_class=formatter,
     )
     p_release.add_argument(
         "--grace-seconds",
         type=int,
         default=0,
-        help="minimum age before a hypothesis-less claim can be released (0 = use WORK_CARD_CLAIM_GRACE_SECONDS env, default 300s)",
+        help="minimum age before a hypothesis-less claim can be released; 0 uses WORK_CARD_CLAIM_GRACE_SECONDS, itself 300 when unset",
     )
     p_release.add_argument(
         "--quiet",
@@ -347,9 +392,10 @@ def main(argv: list[str]) -> int:
     p_strat = sub.add_parser(
         "strategy-status",
         help="report strategy-completion evidence (used by the rotation gate)",
+        formatter_class=formatter,
     )
-    p_strat.add_argument("--agent", required=True)
-    p_strat.add_argument("--strategy", required=True)
+    p_strat.add_argument("--agent", required=True, help="agent number whose notes are counted as evidence")
+    p_strat.add_argument("--strategy", required=True, help="strategy label, e.g. S3; selects the evidence keywords and completion threshold")
 
     sub.add_parser(
         "strategy-yield",
@@ -360,8 +406,9 @@ def main(argv: list[str]) -> int:
     p_counts = sub.add_parser(
         "agent-counts",
         help="single-pass status histogram for one agent (replaces N separate jq counters)",
+        formatter_class=formatter,
     )
-    p_counts.add_argument("--agent", required=True)
+    p_counts.add_argument("--agent", required=True, help="agent number whose hypothesis statuses are counted")
 
     args = parser.parse_args(argv)
     ctx = context_from_args(args)

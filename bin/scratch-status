@@ -14,6 +14,7 @@ from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+import cli_help  # noqa: E402
 import quality  # noqa: E402
 import verdict as verdict_lib  # noqa: E402
 
@@ -178,12 +179,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="scratch-status",
         description="Bounded digest of agent scratch directories.",
+        formatter_class=cli_help.DefaultsHelpFormatter,
     )
-    parser.add_argument("directories", nargs="*")
-    parser.add_argument("--agent", action="append", default=[])
-    parser.add_argument("--terse", action="store_true")
-    parser.add_argument("--files", nargs="?", const="20")
-    parser.add_argument("--file-limit", default="")
+    parser.add_argument("directories", nargs="*",
+                        help="scratch directories to digest, relative paths resolved under RESULTS_DIR (default: every scratch-* under RESULTS_DIR, else the current directory)")
+    parser.add_argument("--agent", action="append", default=[], metavar="N",
+                        help="digest RESULTS_DIR/scratch-N instead; repeatable, ignored when directories are given")
+    parser.add_argument("--terse", action="store_true",
+                        help="print only the one-line header per directory")
+    parser.add_argument("--files", nargs="?", const="20", metavar="N",
+                        help="also list the N most recent files (default: no inventory; 20 when N is omitted)")
+    parser.add_argument("--file-limit", default="", metavar="N",
+                        help="files listed by --files, overriding its count (default: the --files count)")
     args = parser.parse_args()
     raw_limit = args.file_limit or args.files or "20"
     try:

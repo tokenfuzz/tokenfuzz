@@ -40,6 +40,7 @@ from pathlib import Path
 # shadow a real dependency. native_symbols is stdlib-only by contract so it
 # imports under whichever interpreter bin/rank-work picked.
 sys.path.append(str(Path(__file__).resolve().parent.parent / "lib"))
+import cli_help  # noqa: E402
 from native_symbols import defined_symbols  # noqa: E402
 
 # tree-sitter 0.26.0 segfaults in trailmark's C parser from the second file of
@@ -382,19 +383,20 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="callgraph",
         description="Write per-file call neighbourhoods for audit work cards.",
+        formatter_class=cli_help.DefaultsHelpFormatter,
     )
     parser.add_argument("--probe", action="store_true",
                         help="report whether this interpreter can run the analysis, and exit")
-    parser.add_argument("--root", help="target source root")
-    parser.add_argument("--out", help="artifact JSON path")
+    parser.add_argument("--root", help="target source root to parse (required unless --probe)")
+    parser.add_argument("--out", help="artifact JSON path to write (required unless --probe)")
     parser.add_argument("--language", default="auto",
-                        help="comma-separated trailmark languages, or 'auto'")
+                        help="comma-separated trailmark languages to parse, or auto")
     parser.add_argument("--api-artifact", default="",
-                        help="built library/binary holding the audited code (coverage oracle)")
+                        help="built library or binary whose symbols bound the audited code and yield the coverage figure (default: none)")
     parser.add_argument("--entry-artifact", default="",
-                        help="built binary whose main() is the entry boundary")
+                        help="built binary whose main() is the entry boundary (default: none)")
     parser.add_argument("--signature", default="",
-                        help="source-content signature stamped into the artifact")
+                        help="source-content signature stamped into the artifact (default: empty)")
     parser.add_argument("--neighbour-files", type=int, default=6,
                         help="caller/callee files listed per source file")
     parser.add_argument("--path-functions", type=int, default=3,

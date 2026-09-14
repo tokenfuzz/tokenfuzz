@@ -13,6 +13,7 @@ BUILTIN_PRESERVE = {"target.toml", ".ground-truth.json"}
 REPO_ROOT = Path(__file__).absolute().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
+import cli_help  # noqa: E402
 from cleanup import (  # noqa: E402
     CleanupArgumentParser,
     args_before_double_dash,
@@ -49,16 +50,41 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "target metadata and build recipes. Backend filters limit deletion to "
             "selected backend directories and leave shared builds intact."
         ),
+        formatter_class=cli_help.DefaultsHelpFormatter,
     )
-    parser.add_argument("-n", "--dry-run", action="store_true")
-    parser.add_argument("-q", "--quiet", action="store_true")
+    parser.add_argument(
+        "-n", "--dry-run", action="store_true",
+        help="list the entries that would be removed without removing them",
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="print only errors, not per-target progress or the summary",
+    )
     parser.set_defaults(backends=None, keep_only=None)
-    parser.add_argument("--backends", dest="backends", default=argparse.SUPPRESS)
-    parser.add_argument("--backend", dest="backends", default=argparse.SUPPRESS)
-    parser.add_argument("--target", action="append", default=[])
-    parser.add_argument("--output-root", default="")
-    parser.add_argument("--keep", action="append", default=[])
-    parser.add_argument("--keep-only", default=argparse.SUPPRESS)
+    parser.add_argument(
+        "--backends", dest="backends", default=argparse.SUPPRESS,
+        help="comma-separated backend directories to remove, leaving the rest of the target output and its source builds (default: reset the whole target)",
+    )
+    parser.add_argument(
+        "--backend", dest="backends", default=argparse.SUPPRESS,
+        help="alias for --backends",
+    )
+    parser.add_argument(
+        "--target", action="append", default=[],
+        help="target slug to reset (repeatable; default: every target under the output root)",
+    )
+    parser.add_argument(
+        "--output-root", default="",
+        help="output tree holding the target directories (default: output/ in this checkout)",
+    )
+    parser.add_argument(
+        "--keep", action="append", default=[],
+        help="entry name to preserve in each target directory (repeatable; target.toml and .ground-truth.json are always kept)",
+    )
+    parser.add_argument(
+        "--keep-only", default=argparse.SUPPRESS,
+        help="comma-separated entry names to preserve, replacing every --keep",
+    )
     parser.add_argument("positionals", nargs="*", help=argparse.SUPPRESS)
     args = parser.parse_args(args_before_double_dash(argv))
     if args.positionals:

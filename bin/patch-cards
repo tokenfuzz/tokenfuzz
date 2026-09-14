@@ -9,36 +9,40 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import cli_help  # noqa: E402
 from workqueue import add_common_args, build_patch_cards, context_from_args, delta_scope, write_cards
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Build ranked S1 prior-fix patch cards")
+    parser = argparse.ArgumentParser(
+        description="Build ranked S1 prior-fix patch cards",
+        formatter_class=cli_help.DefaultsHelpFormatter)
     add_common_args(parser)
     # Emitted-card cap. 120 matches the audit's RANK_WORK_LIMIT (bin/audit passes
     # it explicitly) and stays under rank-work's LLM rerank cap (--llm-top-n 160)
     # so every emitted card gets reranked; the audit queue auto-expands beyond
     # this on demand (RANK_WORK_EXPAND_STEP), so a larger batch here would only
     # front-load rank/rerank cost without speeding up agent-bound throughput.
-    parser.add_argument("--limit", type=int, default=120)
+    parser.add_argument("--limit", type=int, default=120,
+                        help="most cards to emit (ignored with --since)")
     parser.add_argument("--inspect-commits", type=int, default=24,
-                        help="Best-effort VCS file lookup for the top N "
+                        help="best-effort VCS file lookup for this many top "
                         "rows by pre-score (defect-keyword / severity / "
-                        "revision signal) — not the N newest commits")
+                        "revision signal), not the newest commits (ignored with --since)")
     parser.add_argument("--scan-window", type=int, default=None,
-                        help="Absolute commit count to scan before ranking "
+                        help="absolute commit count to scan before ranking "
                         "down to --limit, used verbatim with no date floor "
                         "(default: PATCH_SCAN_WINDOW env, else the most recent "
                         "5 years capped at 25k commits, whichever is smaller). "
                         "A wider window surfaces fixes buried under sync-bot / "
                         "test churn; the scan is a single git/hg log call so it "
-                        "stays cheap.")
+                        "stays cheap")
     parser.add_argument("--since", metavar="REV", default="",
-                        help="Delta mode: emit a card per commit in "
+                        help="delta mode: emit a card per commit in "
                         "REV..HEAD, all of them inspected, nothing "
                         "outside the range and no output cap")
-    parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/patch-cards.jsonl")
-    parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--output", help="card JSONL path to write (default: <results-dir>/patch-cards.jsonl)")
+    parser.add_argument("--quiet", action="store_true", help="write the file without printing the cards to stdout")
     args = parser.parse_args(argv)
 
     ctx = context_from_args(args)

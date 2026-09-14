@@ -226,11 +226,13 @@ def _path_uri(path: Path) -> str:
         except ValueError:
             rel = None
         if rel is not None:
-            return urllib.parse.quote(str(rel), safe="/:#?&=%")
+            # These are filesystem names, not URI components: literal #, ?,
+            # and % must not turn into fragments, queries, or escape sequences.
+            return urllib.parse.quote(str(rel), safe="/")
     try:
         return resolved.as_uri()
     except ValueError:
-        return urllib.parse.quote(str(resolved), safe="/:#?&=%")
+        return urllib.parse.quote(str(resolved), safe="/")
 
 
 def _md_link(label: object, path: Path | str | None) -> str:
@@ -6319,6 +6321,15 @@ def render_section(report: dict) -> str:
 # ── cross-backend crosstab ───────────────────────────────────────────────
 
 
+def resolve_bench_root(value: str | Path) -> Path:
+    """Place a relative bench root under output/ so every benchmark tree
+    shares the operator workspace instead of landing in the source root."""
+    bench_root = Path(value)
+    if bench_root.is_absolute():
+        return bench_root
+    return (SCRIPT_ROOT / "output" / bench_root).resolve()
+
+
 def _benchmark_roots(bench_root: Path) -> list[Path]:
     """Per-backend benchmark roots under the shared *bench_root*.
 
@@ -6423,6 +6434,11 @@ def _reports_by_run_target(bench_root: Path) -> list[dict]:
                 report["provisional_reason"] = "in-progress"
         except (OSError, ValueError):
             continue
+        # report.json records the absolute bench_dir it was aggregated in.
+        # The directory it was read from is where the artifacts are *now*,
+        # so a moved bench root relinks instead of dropping every link as
+        # dead.
+        report["bench_dir"] = str(run_dir.resolve())
         run = report.get("run", {})
         target = str(run.get("target") or "?")
         runid = str(run.get("runid") or run_dir.name)
@@ -7836,7 +7852,8 @@ def main(argv: list[str]) -> int:
     p_sc.add_argument("--conditions", default="",
                       help="comma-separated condition list; every one gets a "
                            "row even if it found zero crashes")
-    p_sc.add_argument("--out", type=Path, default=None)
+    p_sc.add_argument("--out", type=Path, default=None,
+                      help="write the scoring JSON here (default: stdout)")
 
     args = ap.parse_args(argv)
 

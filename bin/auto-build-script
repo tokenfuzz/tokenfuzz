@@ -61,6 +61,7 @@ SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import build_config  # noqa: E402
+import cli_help  # noqa: E402
 from llm_decide import decision_timeout, llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 
@@ -960,21 +961,27 @@ def write_recipe(out: Path, script: str, provenance: str) -> None:
 
 
 def main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--src", required=True, help="upstream source tree")
+    ap = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0],
+        formatter_class=cli_help.DefaultsHelpFormatter,
+    )
+    ap.add_argument("--src", required=True, help="upstream source tree to build")
     ap.add_argument("--sanitizer", default="asan",
-                    help="asan|ubsan|msan|tsan (default asan)")
+                    help="sanitizer the recipe instruments with: asan, ubsan, msan, or tsan")
     ap.add_argument("--out", required=True,
                     help="path to write the validated build script")
     ap.add_argument("--build-system", default="",
-                    help="build system recorded in target.toml; default: "
-                         "detect from the source tree")
+                    help="build system recorded in target.toml (default: detect from the source tree)")
     ap.add_argument("--scratch", default="",
-                    help="scratch build dir (default: a tempdir)")
-    ap.add_argument("--max-iters", type=int, default=5)
-    ap.add_argument("--build-timeout-secs", type=int, default=900)
-    ap.add_argument("--llm-timeout-secs", type=int, default=None)
-    ap.add_argument("--keep-scratch", action="store_true")
+                    help="scratch build dir (default: a fresh tempdir under TMPDIR)")
+    ap.add_argument("--max-iters", type=int, default=5,
+                    help="candidate builds to attempt before giving up")
+    ap.add_argument("--build-timeout-secs", type=int, default=900,
+                    help="seconds allowed for each candidate build")
+    ap.add_argument("--llm-timeout-secs", type=int, default=None,
+                    help="seconds allowed for each LLM call (default: 60, or the build-script-converge decision timeout with --repair-from)")
+    ap.add_argument("--keep-scratch", action="store_true",
+                    help="leave the scratch build dir in place on exit")
     ap.add_argument(
         "--emit-initial", action="store_true",
         help="write the deterministic initial recipe without a duplicate "
@@ -994,7 +1001,7 @@ def main(argv: list[str]) -> int:
     )
     ap.add_argument(
         "--failure-log", default="", metavar="LOG",
-        help="failed clean-build log used to seed --repair-from",
+        help="failed clean-build log used to seed --repair-from (required with --repair-from)",
     )
     args = ap.parse_args(argv)
 

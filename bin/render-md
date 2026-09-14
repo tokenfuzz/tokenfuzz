@@ -48,6 +48,7 @@ from pathlib import Path
 
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
+import cli_help  # noqa: E402
 import strategies  # noqa: E402
 
 import evidence_pages  # noqa: E402
@@ -1701,23 +1702,27 @@ def _process_one(input_path: Path, args) -> int:
     return 0
 
 
+class _HelpFormatter(cli_help.DefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    """Informative defaults plus the verbatim module docstring."""
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+                                 formatter_class=_HelpFormatter)
     # Multiple inputs are processed in one process — the caller (maintain_indexes)
     # renders many sibling-HTML files per pass, and one python start beats N.
     ap.add_argument("inputs", type=Path, nargs="+", metavar="input",
-                    help="markdown file(s) to process")
+                    help="markdown file(s) to pad in place")
     ap.add_argument("--no-pad", action="store_true",
                     help="skip markdown padding (only useful with --html)")
     ap.add_argument("--html", type=Path, default=None,
-                    help="write HTML output to this path (single input only)")
+                    help="write HTML output to this path (single input only; default: none unless --html-sibling)")
     ap.add_argument("--html-sibling", action="store_true",
                     help="write HTML to <input>.html (e.g. INDEX.md → INDEX.html)")
     ap.add_argument("--title", default=None,
-                    help="HTML <title> (single input only; batch uses --title-from)")
+                    help="HTML <title> (single input only; default: chosen by --title-from)")
     ap.add_argument("--title-from", choices=("stem", "parent"), default="stem",
-                    help="batch title source: 'stem' (filename) or 'parent' (containing dir name)")
+                    help="HTML title source when --title is absent: the filename stem or the containing directory name")
     ap.add_argument("--check", action="store_true",
                     help="exit non-zero if a rewrite would change the file; do not rewrite")
     args = ap.parse_args(argv)

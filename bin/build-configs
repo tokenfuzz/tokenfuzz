@@ -19,6 +19,7 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import build_config
 import build_lease
 import build_routes
+import cli_help
 import runner_preflight
 import target_config
 import target_profile
@@ -313,19 +314,39 @@ def prune_orphan_trees(root: Path, configs: list, base_suffix: str) -> int:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--target", default="", help="target slug under targets/ and output/")
-    parser.add_argument("--target-path", default="")
-    parser.add_argument("--target-toml", default="")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=cli_help.DefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--target", default="",
+        help="target slug under targets/ and output/ (required unless --target-path and --target-toml are both given)",
+    )
+    parser.add_argument(
+        "--target-path", default="",
+        help="source checkout to build (default: targets/<target>)",
+    )
+    parser.add_argument(
+        "--target-toml", default="",
+        help="target.toml that lists the build configurations (default: output/<target>/target.toml)",
+    )
     selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--config", action="append", default=[], help="configuration name or id (repeatable)")
-    selection.add_argument("--all", action="store_true")
-    parser.add_argument("--force", action="store_true")
+    selection.add_argument(
+        "--all", action="store_true",
+        help="build every configuration in target.toml and prune orphaned alternate trees",
+    )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="rebuild even when the cached tree is fresh or marked unavailable",
+    )
     parser.add_argument(
         "--backend", default="",
-        help="model backend for automatic widening (or set BACKEND/ACTIVE_BACKEND)",
+        help="model backend for automatic widening (default: BACKEND or ACTIVE_BACKEND from the environment)",
     )
-    parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument(
+        "--timeout-seconds", type=int, default=900,
+        help="seconds allowed for each configuration's recipe run",
+    )
     args = parser.parse_args(argv)
     if args.timeout_seconds <= 0:
         parser.error("--timeout-seconds must be positive")

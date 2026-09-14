@@ -32,6 +32,7 @@ ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT"
     else Path(__file__).absolute().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import cli_help  # noqa: E402
 import peer_sources  # noqa: E402
 import target_config as tc  # noqa: E402
 import workqueue  # noqa: E402
@@ -135,27 +136,30 @@ def build_s6_discovery_card(
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
+    parser = argparse.ArgumentParser(
+        description=__doc__.splitlines()[0] if __doc__ else "",
+        formatter_class=cli_help.DefaultsHelpFormatter)
     workqueue.add_common_args(parser)
-    parser.add_argument("--output", help="Output JSONL path; defaults to "
-                        "<RESULTS_DIR>/s6-peer-cards.jsonl")
+    parser.add_argument("--output", help="card JSONL path to write "
+                        "(default: <results-dir>/s6-peer-cards.jsonl)")
     parser.add_argument("--limit", type=int, default=40,
-                        help="Max cards total (default 40)")
+                        help="most cards to emit, and most peers to mine")
     parser.add_argument("--max-per-peer", type=int, default=6,
-                        help="Max cards per peer (default 6)")
+                        help="most cards kept per peer")
     parser.add_argument("--days", type=int, default=3650,
-                        help="Look-back window in days (default 3650 ~ 10y). "
+                        help="look-back window in days for peer fixes. "
                         "Wide on purpose: OSV's `modified` timestamp for "
                         "OSS-Fuzz advisories reflects bulk-import bookkeeping, "
                         "not the fix date, so a narrow window silently drops "
                         "genuine peer fixes. Card volume is bounded by "
-                        "--limit / --max-per-peer regardless.")
+                        "--limit / --max-per-peer regardless")
     parser.add_argument("--cache-ttl-days", type=int, default=7,
-                        help="OSV cache TTL (default 7 days)")
+                        help="days a cached OSV response stays fresh")
     parser.add_argument("--peer-clone-roots", default="",
-                        help="Colon-separated dirs to search for local peer "
-                        "clones (preferred exact-fix source)")
-    parser.add_argument("--quiet", action="store_true")
+                        help="colon-separated directories searched for local peer "
+                        "clones, the preferred exact-fix source (default: none)")
+    parser.add_argument("--quiet", action="store_true",
+                        help="write the file without printing the cards, the summary, or per-peer notes")
     args = parser.parse_args(argv)
 
     ctx = workqueue.context_from_args(args)

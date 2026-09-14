@@ -40,6 +40,7 @@ SCRIPT_DIR = Path(__file__).absolute().parent
 SCRIPT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import strategies  # noqa: E402
+import cli_help  # noqa: E402
 
 import crash_artifacts  # noqa: E402  (runtime sys.path adjustment)
 import crash_bundle  # noqa: E402
@@ -3281,29 +3282,51 @@ def main(argv: list[str]) -> int:
             "[--crash-dir <dir>] [--target-root <dir>] [--target-rev <rev>]"
         ),
         add_help=False,
+        formatter_class=cli_help.DefaultsHelpFormatter,
     )
-    parser.add_argument("crash_id", nargs="?")
-    parser.add_argument("--out")
-    parser.add_argument("--slug")
+    parser.add_argument(
+        "crash_id", nargs="?", metavar="CRASH-id",
+        help="crash id naming the audit dir to export (required)",
+    )
+    parser.add_argument(
+        "--out", metavar="<dir>",
+        help="bundle directory, whose previous content is replaced (default: the crash dir itself)",
+    )
+    parser.add_argument(
+        "--slug", metavar="<slug>",
+        help="target slug whose live session supplies the results dir and checkout (default: walk up from the current directory)",
+    )
     # Override the default RESULTS_DIR/crashes/<id> path. Used by maintenance
     # passes that regenerate bundles outside the live crashes/ directory.
-    parser.add_argument("--crash-dir")
+    parser.add_argument(
+        "--crash-dir", metavar="<dir>",
+        help="crash dir to export (default: <results dir>/crashes/<CRASH-id>)",
+    )
     # Maintenance callers rebuilding an old artifact know which checkout owns
     # its build recipe. This must outrank an unrelated live slug session.
-    parser.add_argument("--target-root")
+    parser.add_argument(
+        "--target-root", metavar="<dir>",
+        help="checkout owning the build recipe, outranking the session's TARGET_ROOT",
+    )
     # The revision these crashes were found at, when the caller knows it and
     # session discovery cannot. A benchmark pool is rebuilt long after its run,
     # against a slug whose live session may belong to an entirely different
     # one, so a caller-supplied revision outranks whatever is discovered.
-    parser.add_argument("--target-rev")
-    parser.add_argument("-h", "--help", action="store_true")
+    parser.add_argument(
+        "--target-rev", metavar="<rev>",
+        help="revision the crash was found at (default: the session's audited revision)",
+    )
+    parser.add_argument(
+        "-h", "--help", action="store_true",
+        help="show this help message and exit",
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit:
         usage()
         return 2
     if args.help:
-        usage()
+        parser.print_help(sys.stderr)
         return 0
     if not args.crash_id:
         usage()

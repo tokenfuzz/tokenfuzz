@@ -15,6 +15,8 @@ from pathlib import Path
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
+import cli_help  # noqa: E402
+
 
 SEED_GLOBS = (
     "*.html", "*.htm", "*.xhtml", "*.svg", "*.xml",
@@ -166,9 +168,13 @@ def first_context(path: Path, pattern: re.Pattern[str]) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="find-seed", description=__doc__)
-    parser.add_argument("spec", nargs="?")
-    parser.add_argument("max_results", nargs="?", type=int, default=15)
+    parser = argparse.ArgumentParser(
+        prog="find-seed", description=__doc__,
+        formatter_class=cli_help.DefaultsHelpFormatter)
+    parser.add_argument("spec", nargs="?",
+                        help="FILE or FILE:FUNCTION to find seeds for under TARGET_ROOT; omit it to print this help")
+    parser.add_argument("max_results", nargs="?", type=int, default=15,
+                        help="most seeds to print, best matches first")
     args = parser.parse_args()
     if not args.spec:
         parser.print_help()

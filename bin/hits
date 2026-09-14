@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import cli_help
 import coverage_build
 import edges
 import fuzz_harness
@@ -62,13 +63,20 @@ user_pref("browser.startup.page", 0);
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--testcase", required=True)
-    result.add_argument("--want", required=True)
-    result.add_argument("--mode", choices=("browser", "js", "generic"), default="browser")
-    result.add_argument("--timeout", type=int, default=20)
-    result.add_argument("--save")
-    result.add_argument("--log")
+    result = argparse.ArgumentParser(
+        description=__doc__, formatter_class=cli_help.DefaultsHelpFormatter)
+    result.add_argument("--testcase", required=True,
+                        help="testcase file to run under the coverage build")
+    result.add_argument("--want", required=True,
+                        help="regex a covered symbol or file:line must match for a HIT")
+    result.add_argument("--mode", choices=("browser", "js", "generic"), default="browser",
+                        help="how the testcase is launched: a browser profile, the JS shell, or the configured native CLI")
+    result.add_argument("--timeout", type=int, default=20,
+                        help="seconds the instrumented run may take before it is killed")
+    result.add_argument("--save",
+                        help="path to keep the symbolized hits list at (default: a temporary hits-list-* file)")
+    result.add_argument("--log",
+                        help="file to append a one-line HIT/MISSED verdict to (default: no verdict log)")
     result.add_argument(
         "--route-binary", default="",
         help="generic-mode binary selected by the caller; coverage falls open "
@@ -84,9 +92,12 @@ def parser() -> argparse.ArgumentParser:
         "--generic-skip-testcase", action="store_true",
         help="generic-mode argv already contains the testcase",
     )
-    result.add_argument("--slug", default=os.environ.get("TARGET_SLUG", ""))
-    result.add_argument("--agent", default=os.environ.get("AUDIT_AGENT_NUM", os.environ.get("AGENT_NUM", "0")))
-    result.add_argument("extra", nargs=argparse.REMAINDER)
+    result.add_argument("--slug", default=os.environ.get("TARGET_SLUG", ""),
+                        help="target slug whose edge ledger records new edges; TARGET_SLUG sets it (no ledger update when empty)")
+    result.add_argument("--agent", default=os.environ.get("AUDIT_AGENT_NUM", os.environ.get("AGENT_NUM", "0")),
+                        help="agent number stamped on recorded edges and the generic-mode coverage directory; AUDIT_AGENT_NUM or AGENT_NUM sets it")
+    result.add_argument("extra", nargs=argparse.REMAINDER,
+                        help="arguments passed through to the launched program after --")
     return result
 
 

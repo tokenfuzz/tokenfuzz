@@ -15,27 +15,17 @@ import time
 from pathlib import Path
 from typing import NoReturn
 
+SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
-HELP = r'''Usage:
-  bin/audit-container-shell [options]
+import cli_help  # noqa: E402
 
-Reuses the local audit-cli-shell Docker image, mounts this repository at /root/work,
+
+DESCRIPTION = '''Reuses the local audit-cli-shell Docker image, mounts this repository at /root/work,
 and opens an interactive shell. It does not run bin/audit.
-Each container starts logged out; pass --forward-credentials or log in inside.
+Each container starts logged out; pass --forward-credentials or log in inside.'''
 
-Options:
-  --image <image>       Base image (default: node:lts-bookworm)
-  --tag <name>          Image tag (default: audit-cli-shell:latest)
-  --runtime <name>      Container CLI; only docker is supported
-  --gvisor              Equivalent to --docker-runtime runsc
-  --docker-runtime <name>
-  --workdir <path>      Container work directory (default: /root/work)
-  --env-file <path>     Docker environment file
-  --forward-credentials Forward selected host credentials and Google config
-  --rebuild             Build or refresh the image
-  --dry-run             Print commands without executing them
-
-The image includes Claude Code, Codex, Antigravity CLI (`agy`), Google Gemini
+EPILOG = r'''The image includes Claude Code, Codex, Antigravity CLI (`agy`), Google Gemini
 CLI, Grok Build, and OpenCode. Host ~/.claude, ~/.codex, ~/.gemini, ~/.grok,
 and ~/.local/share/opencode are never mounted. `IS_SANDBOX=1` is set because
 the container is the sandbox boundary assertion required by `--agent-security
@@ -141,23 +131,56 @@ class Parser(argparse.ArgumentParser):
         fatal(message)
 
 
+class _HelpFormatter(cli_help.DefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    """Keep the login walkthrough's layout and still print informative defaults."""
+
+
 def parse_args() -> argparse.Namespace:
-    parser = Parser(add_help=False)
-    parser.add_argument("--image", dest="base_image", default="node:lts-bookworm")
-    parser.add_argument("--tag", default="audit-cli-shell:latest")
-    parser.add_argument("--runtime", default=os.environ.get("CONTAINER_RUNTIME", "docker"))
-    parser.add_argument("--gvisor", action="store_true")
-    parser.add_argument("--docker-runtime", default=os.environ.get("AUDIT_DOCKER_RUNTIME", ""))
-    parser.add_argument("--workdir", default="/root/work")
-    parser.add_argument("--env-file", default="")
-    parser.add_argument("--forward-credentials", action="store_true", default=os.environ.get("AUDIT_FORWARD_CREDENTIALS", "0") == "1")
-    parser.add_argument("--rebuild", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("-h", "--help", action="store_true")
+    parser = Parser(
+        prog="bin/audit-container-shell", description=DESCRIPTION, epilog=EPILOG,
+        formatter_class=_HelpFormatter,
+    )
+    parser.add_argument(
+        "--image", dest="base_image", default="node:lts-bookworm", metavar="<image>",
+        help="base image for --rebuild; ubuntu and fedora expand to their :latest tags",
+    )
+    parser.add_argument(
+        "--tag", default="audit-cli-shell:latest", metavar="<name>",
+        help="image tag to build and run",
+    )
+    parser.add_argument(
+        "--runtime", default=os.environ.get("CONTAINER_RUNTIME", "docker"), metavar="<name>",
+        help="container CLI, read from CONTAINER_RUNTIME; only docker is supported",
+    )
+    parser.add_argument(
+        "--gvisor", action="store_true",
+        help="shorthand for --docker-runtime runsc",
+    )
+    parser.add_argument(
+        "--docker-runtime", default=os.environ.get("AUDIT_DOCKER_RUNTIME", ""), metavar="<name>",
+        help="OCI runtime passed to docker run --runtime, e.g. runsc (default: AUDIT_DOCKER_RUNTIME, else the Docker daemon's default)",
+    )
+    parser.add_argument(
+        "--workdir", default="/root/work", metavar="<path>",
+        help="container path where this repository is mounted and the shell starts",
+    )
+    parser.add_argument(
+        "--env-file", default="", metavar="<path>",
+        help="environment file passed to docker run --env-file (default: none)",
+    )
+    parser.add_argument(
+        "--forward-credentials", action="store_true", default=os.environ.get("AUDIT_FORWARD_CREDENTIALS", "0") == "1",
+        help="forward host credential env vars and mount Google Cloud config read-only (default: on when AUDIT_FORWARD_CREDENTIALS=1)",
+    )
+    parser.add_argument(
+        "--rebuild", action="store_true",
+        help="build or refresh the image before opening the shell",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="print the build and run commands without executing them",
+    )
     args = parser.parse_args()
-    if args.help:
-        print(HELP)
-        raise SystemExit(0)
     if args.gvisor:
         args.docker_runtime = "runsc"
     if args.base_image == "ubuntu":

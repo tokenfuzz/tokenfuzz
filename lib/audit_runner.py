@@ -28,6 +28,7 @@ import build_preflight
 import build_config
 import build_session_seed
 import callgraph
+import cli_help
 import cluster_common
 import fuzz_triage
 import housekeeping
@@ -121,6 +122,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="audit",
         description="Run parallel security-audit agents against one configured target.",
+        formatter_class=cli_help.DefaultsHelpFormatter,
         epilog=(
             "Name the target with --target (a slug under targets/) or "
             "--target-path (any source tree). Backend executables outside PATH "
@@ -130,9 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "max_iterations", nargs="?", type=_nonnegative, default=0,
-        help="iteration limit; 1 is a one-worker smoke test, 0 or omitted runs continuously",
+        help="iteration limit; 1 is a one-worker smoke test, 0 runs continuously",
     )
-    parser.add_argument("--target", default="", help="target slug under targets/, such as samples/sample-python")
+    parser.add_argument(
+        "--target", default="",
+        help="target slug under targets/, such as samples/sample-python (required unless --target-path)",
+    )
     parser.add_argument(
         "--target-path",
         help="audit the source tree at this path instead of targets/<target>/; the output tree is named after its basename",

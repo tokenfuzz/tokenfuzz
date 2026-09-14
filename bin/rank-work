@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import callgraph
+import cli_help
 from llm_decide import decision_timeout
 import strategies
 import target_config
@@ -37,35 +38,42 @@ def _target_config_for(ctx):
 
 
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Rank target source files into concrete audit work cards")
+    parser = argparse.ArgumentParser(
+        description="Rank target source files into concrete audit work cards",
+        formatter_class=cli_help.DefaultsHelpFormatter)
     add_common_args(parser)
-    parser.add_argument("--limit", type=int, default=80)
-    parser.add_argument("--strategy", choices=strategies.ACTIVE, default="")
-    parser.add_argument("--patch-cards", help="Patch-card JSONL path; defaults to <RESULTS_DIR>/patch-cards.jsonl")
+    parser.add_argument("--limit", type=int, default=80,
+                        help="most cards to emit")
+    parser.add_argument("--strategy", choices=strategies.ACTIVE, default="",
+                        help="emit cards for this one strategy (default: every active strategy)")
+    parser.add_argument("--patch-cards", help="S1 patch-card JSONL to merge (default: <results-dir>/patch-cards.jsonl)")
     parser.add_argument("--since", metavar="REV", default="",
-                        help="Delta mode: rank only the files changed in "
+                        help="delta mode: rank only the files changed in "
                         "REV..HEAD plus their one-hop callers from the "
                         "call-neighbourhood graph, with the diversity "
                         "floor and bounded window off")
-    parser.add_argument("--s6-cards", help="S6 peer-fix card JSONL path; defaults to <RESULTS_DIR>/s6-peer-cards.jsonl")
-    parser.add_argument("--llm-top-n", type=int, default=int(os.environ.get("RANK_WORK_LLM_TOP_N", "160")))
+    parser.add_argument("--s6-cards", help="S6 peer-fix card JSONL to merge (default: <results-dir>/s6-peer-cards.jsonl)")
+    parser.add_argument("--llm-top-n", type=int, default=int(os.environ.get("RANK_WORK_LLM_TOP_N", "160")),
+                        help="top-ranked cards the LLM rerank scores; RANK_WORK_LLM_TOP_N sets it")
     parser.add_argument(
         "--llm-timeout", type=int,
         default=int(
             os.environ.get("RANK_WORK_LLM_TIMEOUT", "")
             or decision_timeout("work_rerank")
         ),
+        help="seconds allowed for the LLM rerank; RANK_WORK_LLM_TIMEOUT sets it, else the work_rerank decision timeout",
     )
     parser.add_argument(
         "--llm-mode", choices=RERANK_MODES,
         default=os.environ.get("RANK_WORK_LLM_MODE", "") or "boost",
         help="how far the rerank verdict reaches: a bounded boost on the "
-             "deterministic score, or the primary key inside the window",
+             "deterministic score, or the primary key inside the window; "
+             "RANK_WORK_LLM_MODE sets it",
     )
-    parser.add_argument("--output", help="Output JSONL path; defaults to <RESULTS_DIR>/work-cards.jsonl")
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--jsonl", action="store_true", help="print full card JSONL to stdout")
-    parser.add_argument("--summary-limit", type=int, default=8, help="number of top cards to show in compact stdout")
+    parser.add_argument("--output", help="work-card JSONL path to write (default: <results-dir>/work-cards.jsonl)")
+    parser.add_argument("--quiet", action="store_true", help="write the file without printing a summary or cards to stdout")
+    parser.add_argument("--jsonl", action="store_true", help="print full card JSONL to stdout instead of the compact summary")
+    parser.add_argument("--summary-limit", type=int, default=8, help="top cards shown in the compact summary")
     args = parser.parse_args(argv)
     # argparse validates `choices` only for values given on the command line,
     # so a typo in RANK_WORK_LLM_MODE would otherwise surface as a traceback

@@ -24,8 +24,8 @@ Scope follows the same confine-by-flag grammar as `bin/benchmark --regenerate`:
   bin/export-benchmark --run-id <id> --backend codex    # a single run
 
 Options (default in brackets):
-  --bench-root <dir>   Source root holding <backend>/<runid>/ runs.
-                       [output/benchmark]
+  --bench-root <dir>   Source root holding <backend>/<runid>/ runs; a relative
+                       path lives under output/. [benchmark]
   --backend <name>     Confine to one backend subtree.
   --target <slug>      Confine to runs whose run.json target matches. A run's
                        target lives in run.json, not its path, so this reads
@@ -71,6 +71,7 @@ sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
 import benchmark as B  # noqa: E402  (runtime sys.path adjustment)
 import benchmark_page  # noqa: E402
+import cli_help  # noqa: E402
 import target_profile  # noqa: E402
 
 # Run-level subtrees / files never shipped, plus each crash dir's internal
@@ -270,17 +271,23 @@ def default_out(bench_root: Path, backend: str, target: str, run_id: str,
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
         prog="bin/export-benchmark",
-        description="Package benchmark results into a self-contained archive.")
-    ap.add_argument("--bench-root", type=Path,
-                    default=SCRIPT_ROOT / "output" / "benchmark")
-    ap.add_argument("--backend", default="")
-    ap.add_argument("--target", default="")
-    ap.add_argument("--run-id", default="")
-    ap.add_argument("--format", choices=("zip", "tar", "dir"), default="zip")
-    ap.add_argument("--out", type=Path, default=None)
+        description="Package benchmark results into a self-contained archive.",
+        formatter_class=cli_help.DefaultsHelpFormatter)
+    ap.add_argument("--bench-root", default="benchmark",
+                    help="benchmark root holding <backend>/<runid>/ runs; a relative path lives under output/ in the repository root")
+    ap.add_argument("--backend", default="",
+                    help="confine to one backend subtree (required with --run-id)")
+    ap.add_argument("--target", default="",
+                    help="confine to runs whose run.json target is this slug")
+    ap.add_argument("--run-id", default="",
+                    help="confine to one run directory name (requires --backend)")
+    ap.add_argument("--format", choices=("zip", "tar", "dir"), default="zip",
+                    help="zip or gzipped tar archive, or a plain directory")
+    ap.add_argument("--out", type=Path, default=None,
+                    help="archive path, or directory with --format dir (default: <bench-root>/benchmark-share[-<backend>][-<target>][-<run-id>].<ext>)")
     args = ap.parse_args(argv)
 
-    bench_root = args.bench_root.resolve()
+    bench_root = B.resolve_bench_root(args.bench_root)
     if not bench_root.is_dir():
         log(f"FATAL: bench root not found: {bench_root}")
         return 1

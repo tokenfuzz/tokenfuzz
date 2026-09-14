@@ -970,11 +970,11 @@ def context_from_args(args: argparse.Namespace) -> Context:
 
 
 def add_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--script-root")
-    parser.add_argument("--target")
-    parser.add_argument("--target-path")
-    parser.add_argument("--target-slug")
-    parser.add_argument("--results-dir")
+    parser.add_argument("--script-root", help="TokenFuzz checkout to read (default: SCRIPT_ROOT, else the checkout containing this command)")
+    parser.add_argument("--target", help="target slug under targets/ (default: TARGET_NAME)")
+    parser.add_argument("--target-path", help="source tree audited in place of targets/<target>/ (default: TARGET_ROOT)")
+    parser.add_argument("--target-slug", help="output tree name when it differs from the target's slug (default: TARGET_SLUG)")
+    parser.add_argument("--results-dir", help="results tree to read and write (default: RESULTS_DIR, else derived from the target identity)")
 
 
 def relpath(path: Path, root: Path) -> str:

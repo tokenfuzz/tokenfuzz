@@ -10,13 +10,18 @@ from pathlib import Path
 SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
+import cli_help  # noqa: E402
 import crash_artifacts  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="bin/find-crash-testcase")
-    ap.add_argument("crash_dir", type=Path)
-    ap.add_argument("--min-bytes", type=int, default=1)
+    ap = argparse.ArgumentParser(
+        prog="bin/find-crash-testcase", description=__doc__,
+        formatter_class=cli_help.DefaultsHelpFormatter)
+    ap.add_argument("crash_dir", type=Path,
+                    help="CRASH-* bundle to search; its .audit/ subdirectory is scanned first")
+    ap.add_argument("--min-bytes", type=int, default=1,
+                    help="smallest file size accepted as a testcase")
     args = ap.parse_args(argv)
 
     d = args.crash_dir

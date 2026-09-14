@@ -106,10 +106,14 @@ With all defaults, the command means:
 | `--finalize-workers` | `4` | Concurrent reviewers per final validation phase, for crash triage and the finding drain alike. Independent of `--agents`, which sizes the audit itself. It also scales the finding gate's admission groups, so raising it shortens the closing pass but coarsens where a finite `--finalize-wall` can stop admitting groups. |
 | `--agents` | the audit's configured pool, normally `3` | Harness workers per cell. The direct baseline is always one launch. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
-| `--bench-root` | `output/benchmark` | Shared benchmark artifact root. |
+| `--bench-root` | `benchmark` | Shared benchmark artifact root. A relative path lives under `output/` in the repository root; an absolute path is used as given. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
 
 Run `bin/benchmark --help` for the full option list.
+
+When updating an existing command, replace `--bench-root output/benchmark`
+with `--bench-root benchmark`. To keep using an existing tree elsewhere,
+pass its absolute path. The same path rules apply to `bin/export-benchmark`.
 
 ## What a run looks like
 

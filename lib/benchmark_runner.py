@@ -31,6 +31,7 @@ import benchmark_page
 import benchmark_model_direct_render
 import build_lease
 import build_preflight
+import cli_help
 import crash_artifacts
 import crash_bundle
 import llm_decide
@@ -724,6 +725,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="benchmark",
         description="Run TokenFuzz harness-vs-model benchmark cells.",
+        formatter_class=cli_help.DefaultsHelpFormatter,
         epilog=(
             "benchmark score <crashes-or-results-dir> --ground-truth <manifest> "
             "scores a results or pool tree against a target's answer key "
@@ -732,7 +734,7 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--target", default="",
-        help="target slug under targets/; a comma-separated list runs one cell per target (required unless --regenerate or --reset)",
+        help="target slug under targets/; a comma-separated list runs one cell per target (required except with --reset, --regenerate, --rebuild-report, or --prune-cache)",
     )
     result.add_argument(
         "--backend", default="codex", choices=("claude", "codex", "gemini", "grok", "oss"),
@@ -756,7 +758,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--finalize-wall", type=_nonnegative, default=0,
         help="wall-clock ceiling per final validation phase; crash triage and the "
-             "finding drain each get their own budget (0 = unlimited, the default)",
+             "finding drain each get their own budget (0 = unlimited)",
     )
     result.add_argument(
         "--finalize-workers", type=_positive, default=4,
@@ -773,7 +775,10 @@ def parser() -> argparse.ArgumentParser:
         "--conditions", default="model-direct,harness",
         help="comma-separated conditions to run: model-direct, harness, or both",
     )
-    result.add_argument("--bench-root", default="output/benchmark", help="shared benchmark artifact root")
+    result.add_argument(
+        "--bench-root", default="benchmark",
+        help="shared benchmark artifact root; a relative path lives under output/ in the repository root",
+    )
     result.add_argument(
         "--run-id", default="",
         help="run directory under <bench-root>/<backend>/ (default: UTC timestamp); reuse it to resume",
@@ -2787,7 +2792,9 @@ def _render_root_result(bench_root: Path) -> Path:
     crosstab = bench_root / "benchmark-result.md"
     html = crosstab.with_suffix(".html")
     temporary_md = temporary_html = None
-    with _root_result_lock(bench_root):
+    # Both views link only into bench_root, so their links render relative to
+    # it and survive the tree being moved or shared.
+    with _root_result_lock(bench_root), metrics._render_relative_to(bench_root):
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", dir=bench_root,
@@ -3927,7 +3934,8 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         log(f"Regenerate: re-derived metrics from {refreshed} cell(s)")
 
     report = update_result(bench_dir, bench_root, args.target, args.backend, model, args.dry_run, "pre-ledger")
-    section = metrics.render_section(report)
+    with metrics._render_relative_to(ledger.parent):
+        section = metrics.render_section(report)
     render = SCRIPT_ROOT / "bin" / "render-md"
     with _ledger_lock(ledger):
         metrics.append_to_ledger(ledger, section)
@@ -3978,9 +3986,7 @@ def _main(argv: list[str] | None = None) -> int:
         # spellings share one argument contract and cannot drift.
         return metrics.main(arguments)
     args = parser().parse_args(arguments)
-    bench_root = Path(args.bench_root)
-    if not bench_root.is_absolute():
-        bench_root = (SCRIPT_ROOT / bench_root).resolve()
+    bench_root = metrics.resolve_bench_root(args.bench_root)
     if args.rebuild_report:
         artifact = _render_root_result(bench_root)
         log(f"Benchmark report rebuilt: {artifact} ({artifact.resolve().as_uri()})")

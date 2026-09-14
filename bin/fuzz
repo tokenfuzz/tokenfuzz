@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import build_lease  # noqa: E402
 import callgraph  # noqa: E402
+import cli_help  # noqa: E402
 import fuzz_campaign  # noqa: E402
 import fuzz_harness  # noqa: E402
 import native_symbols  # noqa: E402
@@ -639,36 +640,50 @@ def cmd_doctor(args) -> int:
     return 1 if problems else 0
 
 
+class _HelpFormatter(cli_help.DefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter):
+    """Keep the verb table's layout and still print informative defaults."""
+
+
 def main(argv: "list[str]") -> int:
     parser = argparse.ArgumentParser(
-        prog="bin/fuzz", description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--results-dir", default="")
-    parser.add_argument("--sanitizer", default="")
-    parser.add_argument("--json", action="store_true")
+        prog="bin/fuzz", description=__doc__, formatter_class=_HelpFormatter)
+    # Subparsers do not inherit the formatter, so their defaults would vanish.
+    sub_kwargs = {"formatter_class": _HelpFormatter}
+    parser.add_argument(
+        "--results-dir", default="",
+        help="results tree whose target.toml configures the session (default: RESULTS_DIR, else walk up from the current directory)",
+    )
+    parser.add_argument(
+        "--sanitizer", default="",
+        help="sanitizer build to compile and fuzz under (default: the target's first enabled native sanitizer)",
+    )
+    parser.add_argument("--json", action="store_true", help="print machine-readable output")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("inventory", help="existing harnesses and their gaps")
 
-    candidates = sub.add_parser("candidates", help="APIs that earn a fuzz target")
-    candidates.add_argument("--limit", type=int, default=25)
+    candidates = sub.add_parser("candidates", **sub_kwargs, help="APIs that earn a fuzz target")
+    candidates.add_argument("--limit", type=int, default=25, help="admitted symbols to list")
 
-    template = sub.add_parser("template", help="skeleton harness for one symbol")
-    template.add_argument("symbol")
-    template.add_argument("--output", default="")
-    template.add_argument("--target", default="")
-    template.add_argument("--hypothesis-id", default="")
-    template.add_argument("--force", action="store_true")
+    template = sub.add_parser("template", **sub_kwargs, help="skeleton harness for one symbol")
+    template.add_argument("symbol", help="admitted exported symbol to drive")
+    template.add_argument("--output", default="", help="harness path to write (default: the campaign's harness directory)")
+    template.add_argument("--target", default="", help="TARGET header for the harness receipt, as file[:function[:line]]")
+    template.add_argument("--hypothesis-id", default="", help="HYPOTHESIS-ID header for the harness receipt")
+    template.add_argument("--force", action="store_true", help="overwrite an existing harness at the output path")
 
     build = sub.add_parser("build", help="compile harnesses out of tree")
-    build.add_argument("sources", nargs="*")
+    build.add_argument("sources", nargs="*", help="harness sources to compile (default: every harness in the campaign)")
 
-    run = sub.add_parser("run", help="spend a budget across built harnesses")
+    run = sub.add_parser("run", **sub_kwargs, help="spend a budget across built harnesses")
     run.add_argument("--budget-seconds", type=int,
-                     default=fuzz_campaign.DEFAULT_BUDGET_SECONDS)
+                     default=fuzz_campaign.DEFAULT_BUDGET_SECONDS,
+                     help="total wall seconds to spend across the built harnesses")
     run.add_argument("--slice-seconds", type=int,
-                     default=fuzz_campaign.DEFAULT_SLICE_SECONDS)
-    run.add_argument("--agent", type=int, default=int(os.environ.get("AGENT_NUM", "1")))
+                     default=fuzz_campaign.DEFAULT_SLICE_SECONDS,
+                     help="seconds per harness before yield is compared and the budget moves on")
+    run.add_argument("--agent", type=int, default=int(os.environ.get("AGENT_NUM", "1")),
+                     help="agent number that owns the campaign state; AGENT_NUM sets it")
 
     sub.add_parser("status", help="what each harness has done so far")
     sub.add_parser("doctor", help="prove the shared build is unaffected")

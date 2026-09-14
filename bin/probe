@@ -129,9 +129,14 @@ TARGET and CARD-ID are derived from that hypothesis in structured state.
 replayed against the harness that produced it.
 --property supplies the required PROPERTY header for an opaque S8 input.
 
+--mode defaults to auto: the MODE header when present, else the mode
+target.toml configures. --want is the regex a hit must match (default:
+derived from the TARGET header).
+
 PROBE_SANITIZER=asan|ubsan|msan|tsan|race|runner overrides target.toml.
 --confirm runs five times; --sanitizer-runs runs an explicit positive count;
---dry-run resolves and prints the command only.
+the default is one run, or SANITIZER_RUNS when set. --dry-run resolves and
+prints the command only.
 """
 
 
