@@ -1,0 +1,5 @@
+{
+  "name": "sample-typescript",
+  "private": true,
+  "type": "module"
+}

@@ -8,9 +8,13 @@
  * compact so it can be embedded in build scripts and CI steps. Every entry
  * point takes caller-supplied text or objects.
  */
-import { execSync } from "child_process";
-import * as fs from "fs";
-import * as path from "path";
+import { execFileSync, execSync } from "node:child_process";
+import * as fs from "node:fs";
+import { createRequire } from "node:module";
+import * as path from "node:path";
+
+/** Includes are CommonJS modules, loaded with the module system's own require. */
+const require = createRequire(import.meta.url);
 
 /** Placeholder syntax: {{ expression }} with optional surrounding whitespace. */
 const PLACEHOLDER = /\{\{\s*(.*?)\s*\}\}/g;
@@ -94,6 +98,5 @@ export function parseConfig(text: string): unknown {
  * runs nor a shell to interpret metacharacters.
  */
 export function runCommand(arg: string): string {
-  const { execFileSync } = require("child_process");
   return execFileSync("echo", [arg]).toString();
 }

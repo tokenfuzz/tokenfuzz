@@ -454,7 +454,7 @@ class RunnerPreflightTests(unittest.TestCase):
             checked = {Path(call.args[0][0]).name for call in launched.call_args_list}
             self.assertEqual(
                 {"Rscript", "java", "kotlinc", "node", "perl", "php",
-                 "python3", "ruby", "swift", "ts-node"},
+                 "python3", "ruby", "swift"},
                 checked,
             )
             # An interpreter proves its loader by running an empty program,
@@ -465,7 +465,7 @@ class RunnerPreflightTests(unittest.TestCase):
                 Path(call.args[0][0]).name: tuple(call.args[0][1:])
                 for call in launched.call_args_list
             }
-            for interpreter in ("Rscript", "node", "perl", "php", "python3", "ruby", "ts-node"):
+            for interpreter in ("Rscript", "node", "perl", "php", "python3", "ruby"):
                 self.assertNotIn("--version", programs[interpreter], interpreter)
                 self.assertEqual(2, len(programs[interpreter]), interpreter)
 

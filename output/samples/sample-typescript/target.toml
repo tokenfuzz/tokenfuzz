@@ -71,9 +71,8 @@ enabled = []  # findings-only — uncomment a sanitizer to enable
 # ── Runner (language / interpreter / driver invocation) ────────
 # Preserved from the prior config: a reviewed runner outranks the registry default.
 [runner]
-bin            = "ts-node"
-args           = ["--transpile-only", "{TARGET_ROOT}/reportkit_cli.ts", "{TESTCASE}"]
-env            = ["TS_NODE_TRANSPILE_ONLY=1"]
+bin            = "node"
+args           = ["{TARGET_ROOT}/reportkit_cli.ts", "{TESTCASE}"]
 crash_patterns = [
   "^FATAL ERROR:",
   "RangeError: Maximum call stack",

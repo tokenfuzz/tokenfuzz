@@ -37,7 +37,7 @@ and `.ground-truth.json` answer keys, is a gitignored working area.
 | `samples/sample-java` | Java / maven | findings-only | 4 | 5 |
 | `samples/sample-kotlin` | Kotlin | findings-only | 4 | 5 |
 | `samples/sample-javascript` | Node / npm | findings-only | 3 | 4 |
-| `samples/sample-typescript` | TypeScript / npm (`ts-node`) | findings-only | 3 | 4 |
+| `samples/sample-typescript` | TypeScript / npm (`node`, type stripping) | findings-only | 3 | 4 |
 | `samples/sample-ruby` | Ruby / bundler | findings-only | 2 | 5 |
 | `samples/sample-php` | PHP / composer | findings-only | 6 | 5 |
 | `samples/sample-perl` | Perl | findings-only | 4 | 3 |

@@ -22,7 +22,7 @@
  *   command   the body is a single data argument echoed by a fixed tool.
  */
 import * as fs from "fs";
-import * as reportkit from "./src/reportkit";
+import * as reportkit from "./src/reportkit.ts";
 
 function splitJob(text: string): { op: string; body: string } {
   const nl = text.indexOf("\n");

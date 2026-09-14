@@ -110,9 +110,12 @@ The other ecosystems differ only in the `[runner]` fields:
 | R | `rlang` | `Rscript` | `["{TESTCASE}"]` | `R_LIBS_USER={TARGET_ROOT}/.audit/r-library` |
 | Perl | `perl` | newest discovered `perl` | `["{TESTCASE}"]` | target `blib`, ABI-isolated `.audit/perl5`, and source `lib` paths |
 
-TypeScript projects are detected as `npm` and receive the Node runner. A
-project whose testcases must be TypeScript sets `bin` to its own loader; the
-committed `samples/sample-typescript` uses `ts-node`.
+TypeScript projects are detected as `npm` and receive the Node runner. Node
+22.18 and later run `.ts` sources directly by stripping their types, so a
+TypeScript entry point needs no loader when its imports name the `.ts`
+extension; the committed `samples/sample-typescript` runs that way. A project
+that needs a loader such as `ts-node` sets `bin` to it, and preflight runs the
+loader on an empty program before any audit starts.
 
 For a Swift library, a direct `.swift` testcase is compiled in a detached
 SwiftPM package that path-depends on every exported library product. Compilation
