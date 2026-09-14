@@ -52,6 +52,18 @@ has no preflight; the launch itself reports the same condition with
 `ERROR: Gemini CLI ignored the harness admin policies` and exit code 46, and
 the cell counts as failed rather than measured.
 
+Symptom:
+
+```text
+FATAL: configured [runner].bin 'kotlinc' was not found on PATH or at <path>
+FATAL: configured [runner].bin failed startup check `/usr/bin/java -version`: exited 1: ...
+```
+
+The language runtime the target's `[runner]` names is missing or cannot
+start, so no agent is launched. Install it and run the quoted command yourself
+until it succeeds; the macOS Java stub needs a registered JDK, see
+[Target-specific tools](../getting-started/prerequisites.md#3-target-specific-tools).
+
 ## Target config does not parse
 
 Common fixes:

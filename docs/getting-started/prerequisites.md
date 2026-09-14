@@ -129,6 +129,24 @@ does not replace the target's toolchain.
 - Browser targets can require Mercurial, large SDKs, and project-specific
   bootstrap tooling.
 
+Every audit and benchmark starts by running the configured `[runner].bin`
+with its version switch (`java -version`, `kotlinc -version`, `go version`,
+`node --version`, and so on) and stops before launching an agent when that
+fails, naming the command. Run the same command yourself after installing a
+runtime.
+
+On macOS, `/usr/bin/java` is a system stub that only works once a JDK is
+registered under `/Library/Java/JavaVirtualMachines`; Homebrew's `openjdk`
+is keg-only, so install and link it, then add the Kotlin compiler:
+
+```bash
+brew install openjdk kotlin
+sudo ln -sfn /opt/homebrew/opt/openjdk/libexec/openjdk.jdk \
+  /Library/Java/JavaVirtualMachines/openjdk.jdk
+/usr/bin/java -version
+kotlinc -version
+```
+
 First establish that the project builds and runs with its documented
 toolchain. This makes it easier to distinguish a project dependency problem
 from an instrumentation or harness problem.
