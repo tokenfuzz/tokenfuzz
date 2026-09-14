@@ -1190,6 +1190,8 @@ class HostToolchainSupportTests(unittest.TestCase):
              mock.patch.object(benchmark_runner, "runner_preflight"), \
              mock.patch.object(benchmark_runner.build_preflight, "enabled_sanitizers",
                                return_value=["msan"]), \
+             mock.patch.object(benchmark_runner.build_preflight, "_build_freshness",
+                               return_value="missing"), \
              mock.patch.object(benchmark_runner.build_preflight, "host_unsupported_sanitizer",
                                return_value="msan is unsupported by the host toolchain (clang: no runtime)"), \
              mock.patch.object(benchmark_runner.build_preflight, "refresh") as refresh:
@@ -1198,6 +1200,49 @@ class HostToolchainSupportTests(unittest.TestCase):
             ["msan is unsupported by the host toolchain (clang: no runtime)"], blocking,
         )
         refresh.assert_not_called()
+
+    def test_fresh_and_pinned_benchmarks_do_not_probe_the_host_compiler(self) -> None:
+        args = SimpleNamespace(
+            target="samples/sampleproj", dry_run=False, regenerate=False,
+            backend="codex", agents=None,
+        )
+        config = SimpleNamespace(build_system="cmake")
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(benchmark_runner, "_benchmark_config", return_value=config), \
+             mock.patch.object(benchmark_runner, "runner_preflight"), \
+             mock.patch.object(
+                 benchmark_runner.build_preflight, "enabled_sanitizers",
+                 return_value=["asan"],
+             ), mock.patch.object(
+                 benchmark_runner.build_preflight, "_build_freshness",
+                 return_value="fresh",
+             ), mock.patch.object(
+                 benchmark_runner.build_preflight, "host_unsupported_sanitizer",
+             ) as compile_probe, mock.patch.object(
+                 benchmark_runner.build_preflight, "refresh", return_value=[],
+             ), mock.patch.object(
+                 benchmark_runner.build_preflight, "build_problems", return_value=[],
+             ):
+            self.assertEqual(
+                [], benchmark_runner.preflight_build(
+                    args, Path(directory), "m",
+                )
+            )
+            compile_probe.assert_not_called()
+
+            with mock.patch.object(
+                benchmark_runner.build_preflight, "hold_builds", return_value=[],
+            ), mock.patch.object(
+                benchmark_runner.build_preflight, "pinned_build_problems",
+                return_value=[],
+            ):
+                self.assertEqual(
+                    [], benchmark_runner.preflight_build(
+                        args, Path(directory), "m", pinned={"version": 1},
+                        config=config,
+                    )
+                )
+            compile_probe.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1350,15 +1350,6 @@ class Setup:
             for sanitizer_name in sanitizers:
                 if sanitizer_name not in {"asan", "ubsan", "msan", "tsan"}:
                     continue
-                unsupported = build_preflight.host_unsupported_sanitizer(
-                    config, sanitizer_name,
-                )
-                if unsupported:
-                    # A host refusal is not a recipe problem: no generated or
-                    # repaired recipe can build a runtime the compiler lacks.
-                    log(f"bootstrap: {unsupported}; not attempting this build here")
-                    build_errors.append(unsupported)
-                    continue
                 recipe = target_config.build_recipe_path(
                     self.target_root, sanitizer_name
                 )
@@ -1417,6 +1408,21 @@ class Setup:
                 freshness = target_config.build_freshness(
                     self.target_root, sanitizer_name, recipe_path=recipe
                 )
+                if freshness != "fresh" or self.args.force:
+                    unsupported = build_preflight.host_unsupported_sanitizer(
+                        config, sanitizer_name,
+                    )
+                    if unsupported:
+                        # A host refusal is not a recipe problem: no generated
+                        # or repaired recipe can build a runtime the compiler
+                        # lacks. A fresh artifact never reaches this probe.
+                        log(
+                            f"bootstrap: {unsupported}; "
+                            "not attempting this build here"
+                        )
+                        build_errors.append(unsupported)
+                        candidate.unlink(missing_ok=True)
+                        continue
                 # Existing recipes still need the materializer's launch check:
                 # a content-fresh tree can lose a host shared dependency.
                 # A newly generated candidate must not replace a healthy tree

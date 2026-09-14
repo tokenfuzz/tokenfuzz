@@ -3228,12 +3228,20 @@ def preflight_build(
         # ValueError included: a [runner].bin that escapes the target root is a
         # config the operator has to fix, not a traceback.
         return [str(exc)]
-    # A route this host's compiler cannot build is refused before anything
-    # converges: running setup-target would only spend a repair loop on it.
-    unsupported = [
-        reason for name in build_preflight.enabled_sanitizers(config)
-        if (reason := build_preflight.host_unsupported_sanitizer(config, name))
-    ]
+    # A compiler probe is relevant only when this invocation may build a stale
+    # or missing route. A fresh, resumed, or regeneration run executes the
+    # artifact already on disk; rejecting it based on an unrelated host
+    # frontend turns a valid pinned measurement into no measurement at all.
+    unsupported = []
+    if not args.regenerate and pinned is None:
+        for name in build_preflight.enabled_sanitizers(config):
+            if build_preflight._build_freshness(
+                target_root, config, name,
+            ) in ("fresh", "skip"):
+                continue
+            reason = build_preflight.host_unsupported_sanitizer(config, name)
+            if reason:
+                unsupported.append(reason)
     if unsupported:
         return unsupported
     if args.regenerate or pinned is not None:
