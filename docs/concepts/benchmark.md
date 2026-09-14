@@ -472,8 +472,7 @@ class. A real bug's `classes` do the same job where it shares a function
 with another entry: two bugs at one function are told apart by the classes
 each declares, and a trap that declares the report's class claims it when the
 bug's classes exclude that class. A report at a bug's function that matches no
-declared class is still credited to the bug, since the class is the reporter's
-word for it and the gate has already judged the claim. Every other confirmed
+declared class remains open-world. Every other confirmed
 finding is listed as **open-world**, since real code has bugs the answer key
 never planted, without counting for or against.
 `bin/benchmark score` reports both blocks; pass `--findings-dir` to point it

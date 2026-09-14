@@ -219,8 +219,7 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(score["findings"]["overall"]["recall"], 1.0)
 
     def test_a_manifest_level_findings_only_flag_scores_every_bug(self) -> None:
-        # Findings-only targets flag the manifest, not each bug; a trap in the
-        # same function as a real bug is named as one the oracle cannot fire.
+        # Findings-only targets flag the manifest, not each bug.
         manifest = {
             "target": "sampleproj", "findings_only": True,
             "planted_bugs": [
@@ -230,8 +229,6 @@ class BenchmarkScoringTests(unittest.TestCase):
                  "signature_symbol": "load_state"},
             ],
             "false_positive_traps": [
-                {"id": "inert-reconstruction", "kind": "fp", "expected_outcome": "clean",
-                 "signature_symbol": "load_state"},
                 {"id": "json-config", "kind": "fp", "expected_outcome": "clean",
                  "signature_symbol": "parse_config"},
                 # Refutes an abort crash's promotion, not a finding that the
@@ -254,10 +251,9 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(findings["detected"], ["amplification", "shell-escape"])
         self.assertEqual(findings["false_positive_traps_fired"], [])
         self.assertEqual(findings["open_world_findings"], ["FIND-0003-check"])
-        self.assertEqual(findings["traps_sharing_a_real_symbol"], ["inert-reconstruction"])
         rendered = "\n".join(benchmark._render_ground_truth(
             {"not_scored": "findings-only", "findings": score["findings"]}))
-        self.assertIn("`inert-reconstruction`", rendered)
+        self.assertIn("Ground truth — findings", rendered)
 
     def test_prose_caller_and_allocation_frames_cannot_spoof_attribution(self) -> None:
         spoof = self.root / "spoof"
@@ -500,6 +496,10 @@ class BenchmarkScoringTests(unittest.TestCase):
                 {"id": "x", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell",
                  "findings_only": "false"},
             ]},
+            {"findings_only": "false", "planted_bugs": [
+                {"id": "x", "primitive": "heap-buffer-overflow",
+                 "signature_symbol": "render_cell"},
+            ]},
             {"planted_bugs": [
                 {"id": "x", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell",
                  "alternate_signatures": "not-a-list"},
@@ -520,6 +520,20 @@ class BenchmarkScoringTests(unittest.TestCase):
                 {"id": "x", "primitive": "heap-buffer-overflow", "signature_symbol": "render_cell",
                  "alternate_signatures": [{"primitive": "double-free",
                                             "signature_symbol": "cleanup", "access": "EXEC"}]},
+            ]},
+            {"findings_only": True, "planted_bugs": [
+                {"id": "real", "primitive": "auth-bypass",
+                 "signature_symbol": "authenticate", "classes": ["auth-bypass"]},
+            ], "false_positive_traps": [
+                {"id": "trap", "expected_outcome": "clean",
+                 "signature_symbol": "authenticate", "classes": ["auth-bypass"]},
+            ]},
+            {"findings_only": True, "planted_bugs": [
+                {"id": "real", "primitive": "auth-bypass",
+                 "signature_symbol": "authenticate"},
+            ], "false_positive_traps": [
+                {"id": "trap", "expected_outcome": "clean",
+                 "signature_symbol": "authenticate"},
             ]},
         )
         for number, payload in enumerate(manifests):
@@ -642,7 +656,8 @@ class BenchmarkScoringTests(unittest.TestCase):
         # Two bugs planted in one function are told apart by the classes each
         # declares; a trap that declares the report's class claims it when the
         # bug's classes exclude it; a report matching no declared class at a
-        # bug's function is still that bug rather than a guessed trap.
+        # bug's function remains open-world rather than becoming arbitrary
+        # recall credit.
         manifest = self.root / "shared-symbols.json"
         manifest.write_text(json.dumps({
             "target": "sampleproj", "findings_only": True,
@@ -656,7 +671,7 @@ class BenchmarkScoringTests(unittest.TestCase):
             ],
             "false_positive_traps": [
                 {"id": "loose-compare", "kind": "fp", "expected_outcome": "clean",
-                 "signature_symbol": "token_check"},
+                 "signature_symbol": "token_check", "classes": ["other"]},
                 {"id": "asset-root", "kind": "fp", "expected_outcome": "clean",
                  "signature_symbol": "read_asset", "classes": ["path-traversal"]},
             ],
@@ -673,16 +688,14 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         overall = score["findings"]["overall"]
         self.assertEqual(overall["detected"], ["asset-fetch", "fixed-secret", "mac-extension"])
-        self.assertEqual(overall["true_positive_findings"], 5)
-        self.assertEqual(overall["false_positive_traps_fired"], ["asset-root"])
-        self.assertEqual(overall["open_world_findings"], [])
-        # Only the trap without classes is undecidable beside its bug.
-        self.assertEqual(overall["traps_sharing_a_real_symbol"], ["loose-compare"])
+        self.assertEqual(overall["true_positive_findings"], 3)
+        self.assertEqual(overall["false_positive_traps_fired"], ["asset-root", "loose-compare"])
+        self.assertEqual(overall["open_world_findings"], ["FIND-0006"])
 
-    def test_a_crash_at_a_findings_only_bug_is_that_bug(self) -> None:
-        # A wild write planted as findings-only faults under ASan instead of
-        # tripping a redzone; the crash in its frame is the planted bug, not an
-        # unexpected crash, and the bug stays out of the crash-recall denominator.
+    def test_a_crash_at_a_findings_only_symbol_stays_unexpected(self) -> None:
+        # A findings-only answer-key entry has no sanitizer signature. A crash
+        # at its symbol therefore stays unexpected rather than receiving
+        # symbol-only credit for an arbitrary primitive.
         run = self.root / "prose-crash"
         self.make_crash(run, "N-0001", "pack_cells", "heap-buffer-overflow")
         self.make_crash(run, "W-0001", "handle_write", "SEGV")
@@ -694,19 +707,19 @@ class BenchmarkScoringTests(unittest.TestCase):
         ]}), encoding="utf-8")
         _, score = self.score(run, manifest=manifest)
         overall = score["overall"]
-        self.assertEqual(overall["detected"], ["native", "wild-write"])
+        self.assertEqual(overall["detected"], ["native"])
         self.assertEqual(overall["real_total"], 1)
         self.assertEqual(overall["recall"], 1.0)
         self.assertEqual(overall["missed"], [])
-        self.assertEqual(overall["unexpected_crashes"], [])
-        self.assertEqual(overall["precision"], 1.0)
+        self.assertEqual(overall["unexpected_crashes"], ["W-0001"])
+        self.assertEqual(overall["precision"], 0.5)
 
     def test_an_auto_quarantined_site_scores_in_neither_oracle(self) -> None:
         # AGENTS.md tells agents that filing a zero-page null deref wastes
         # work, because the harness discards it. Scoring that site would read
-        # obedience as a miss, so it sits in no denominator -- while a crash
-        # that does land in its frame is still that site, not an unexpected
-        # crash.
+        # obedience as a miss, so it sits in no denominator. A crash that does
+        # land there still needs a declared sanitizer signature to receive
+        # credit and otherwise remains unexpected.
         run = self.root / "quarantined"
         self.make_crash(run, "N-0001", "pack_cells", "heap-buffer-overflow")
         self.make_crash(run, "Z-0001", "handle_null", "SEGV")
@@ -724,8 +737,8 @@ class BenchmarkScoringTests(unittest.TestCase):
         crash = score["overall"]
         self.assertEqual(crash["real_total"], 1)
         self.assertEqual(crash["recall"], 1.0)
-        self.assertEqual(crash["unexpected_crashes"], [])
-        self.assertEqual(crash["precision"], 1.0)
+        self.assertEqual(crash["unexpected_crashes"], ["Z-0001"])
+        self.assertEqual(crash["precision"], 0.5)
         findings = score["findings"]["overall"]
         self.assertEqual(findings["real_total"], 1)
         self.assertEqual(findings["missed"], [])

@@ -2706,6 +2706,10 @@ def manifest_errors(manifest: dict) -> list[str]:
     """
     errors: list[str] = []
     seen: set[str] = set()
+    if "findings_only" in manifest and not isinstance(
+        manifest["findings_only"], bool
+    ):
+        errors.append("findings_only must be true or false")
 
     def check(entries, label: str, *, need_primitive: bool,
               need_outcome: bool, want_kind: str):
@@ -2787,12 +2791,42 @@ def manifest_errors(manifest: dict) -> list[str]:
     check(manifest.get("false_positive_traps", []), "false_positive_traps",
           need_primitive=False, need_outcome=True, want_kind="fp")
 
+    bugs = manifest.get("planted_bugs", [])
+    traps = manifest.get("false_positive_traps", [])
+    if isinstance(bugs, list) and isinstance(traps, list):
+        for bug in bugs:
+            if not isinstance(bug, dict) or not _findings_only_bug(manifest, bug):
+                continue
+            bug_classes = _declared_classes(bug)
+            for trap in traps:
+                if not isinstance(trap, dict) or str(
+                    trap.get("expected_outcome", "")
+                ).strip() != "clean":
+                    continue
+                trap_classes = _declared_classes(trap)
+                overlap = (
+                    not bug_classes
+                    or not trap_classes
+                    or bool(bug_classes & trap_classes)
+                )
+                same_symbol = any(
+                    _finding_names_symbol(symbol, trap)
+                    for symbol in _manifest_symbols(bug)
+                )
+                if overlap and same_symbol and _entries_may_share_a_site(bug, trap):
+                    shared_classes = sorted(bug_classes & trap_classes)
+                    errors.append(
+                        f"findings-only bug {bug.get('id', '?')} and clean trap "
+                        f"{trap.get('id', '?')} share site and overlapping "
+                        f"classes {shared_classes!r} (an omitted classes list "
+                        "is a wildcard)"
+                    )
+
     # One source bug can legitimately surface under more than one sanitizer
     # signature (for example UAF versus double-free, or an inlined Swift READ
     # and WRITE at one wrapper). Keep those aliases explicit and exact. An
     # access-less key is a wildcard, so it overlaps either access-qualified
     # form and cannot belong to a second bug.
-    bugs = manifest.get("planted_bugs", [])
     runtime_keys: list[tuple[tuple[str, str, str], str, dict]] = []
     if isinstance(bugs, list):
         for i, bug in enumerate(bugs):
@@ -3021,21 +3055,6 @@ def score_findings_ground_truth(
         if isinstance(t, dict)
         and str(t.get("expected_outcome", "")).strip() in ("", "clean")
     ]
-    # A trap planted in the same function as a real bug fires there only when
-    # it declares the classes it refutes, so a report the bug's own classes
-    # exclude can be told apart from the bug. A trap that declares none can
-    # never fire at a shared function: the oracle keys on the function (refined
-    # by `file` where an entry pins one) and credits every report to the bug.
-    # Say so rather than score it.
-    ambiguous = sorted(
-        str(trap.get("id", "")) for trap in traps
-        if not _declared_classes(trap)
-        and any(
-            _manifest_symbols(trap) & _manifest_symbols(bug)
-            and _entries_may_share_a_site(trap, bug)
-            for bug in real
-        )
-    )
     _count, names = count_confirmed_findings(findings_dir)
     evidence: list[tuple[str, str, str, str]] = []
     for name in names:
@@ -3064,16 +3083,14 @@ def score_findings_ground_truth(
             # Classes settle a shared function: two bugs there are told apart
             # by the classes each declares, and a trap that declares the
             # report's class claims it when the bug's classes exclude it. A
-            # report at a bug's function that matches no declared class is
-            # still that bug — the class is the reporter's word for it, and
-            # the gate has already judged the claim — so the planted bug wins
-            # over guessing the trap.
+            # report at a bug's function that matches no declared class is not
+            # that planted bug. It may be a declared trap or an open-world
+            # issue at the same function; assigning the first bug here would
+            # manufacture recall credit.
             hit = next((b for b in bugs_here if _entry_admits_class(b, klass)), None)
             trap = None
             if hit is None and bugs_here:
                 trap = next((t for t in traps_here if klass in _declared_classes(t)), None)
-                if trap is None:
-                    hit = bugs_here[0]
             if hit:
                 detected.setdefault(str(hit["id"]), []).append(name)
                 continue
@@ -3096,7 +3113,6 @@ def score_findings_ground_truth(
             "false_positive_traps_fired": sorted(traps_fired),
             "open_world_findings": sorted(open_world),
             "precision": round(tp / (tp + fp), 4) if (tp + fp) else None,
-            "traps_sharing_a_real_symbol": ambiguous,
         }
 
     result = {"overall": score_subset(evidence)}
@@ -3426,14 +3442,6 @@ def score_ground_truth(
         b for b in planted
         if not _findings_only_bug(manifest, b) and not _auto_quarantined_bug(b)
     ]
-    # A findings-only bug predicts no sanitizer class, so when one crashes
-    # anyway (a wild write that faults instead of tripping a redzone) the crash
-    # in its frame is attributed by symbol alone: it is that planted bug, not
-    # an unexpected crash. It stays out of the crash-recall denominator.
-    prose_only = [
-        b for b in planted
-        if _findings_only_bug(manifest, b) or _auto_quarantined_bug(b)
-    ]
     traps = manifest.get("false_positive_traps", [])
     # Rust symbol demangling is applied only to a Rust target's frames (a
     # demangled C++ name is indistinguishable and must stay whole).
@@ -3465,10 +3473,7 @@ def score_ground_truth(
                 unattributed.append(name)
                 continue
             primitive, crash_site, access = evidence
-            hit = _match_real(primitive, crash_site, access, real) or next((
-                b for b in prose_only
-                if str(b.get("signature_symbol", "")) in crash_site
-            ), None)
+            hit = _match_real(primitive, crash_site, access, real)
             if hit:
                 detected.setdefault(hit["id"], []).append(name)
                 continue
@@ -5977,21 +5982,12 @@ def _render_findings_ground_truth(scoring: dict | None) -> list[str]:
         "real code has bugs the answer key never planted — and is listed "
         "without being counted for or against."
     )
-    shared = overall.get("traps_sharing_a_real_symbol") or []
-    if shared:
-        lines.append("")
-        lines.append(
-            "> Traps planted in the same function as a real bug cannot fire "
-            "here — the oracle keys on the function alone — so a confirmed "
-            "finding there is credited to the bug: "
-            + ", ".join(f"`{t}`" for t in shared) + "."
-        )
     lines.append("")
     return lines
 
 
 def _render_security_decisions(
-    conditions: list[dict], backend: str,
+    conditions: list[dict], backend: str, model: str = "",
 ) -> list[str]:
     rows: list[tuple[str, str, dict]] = []
     for condition in sorted(conditions, key=lambda item: item["condition"]):
