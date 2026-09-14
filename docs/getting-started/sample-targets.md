@@ -34,8 +34,8 @@ and `.ground-truth.json` answer keys, is a gitignored working area.
 | `samples/sample-go` | Go / `go build -race` | `race` | 3 | 5 |
 | `samples/sample-python-native` | Python C extension | ASan | 1 | 0 |
 | `samples/sample-python` | Python | findings-only | 27 | 4 |
-| `samples/sample-java` | Java / maven | findings-only | 4 | 5 |
-| `samples/sample-kotlin` | Kotlin | findings-only | 4 | 5 |
+| `samples/sample-java` | Java / maven | findings-only | 5 | 4 |
+| `samples/sample-kotlin` | Kotlin | findings-only | 5 | 4 |
 | `samples/sample-javascript` | Node / npm | findings-only | 3 | 4 |
 | `samples/sample-typescript` | TypeScript / npm (`node`, type stripping) | findings-only | 3 | 4 |
 | `samples/sample-ruby` | Ruby / bundler | findings-only | 3 | 4 |

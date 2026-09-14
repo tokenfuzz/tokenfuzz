@@ -54,6 +54,16 @@
       "cwe": "CWE-470",
       "modeled_on": "externally selected class construction reaching an installed constructor with a concrete process-lifetime effect",
       "summary": "loadPlugin constructs any caller-named class. Selecting the built-in java.util.Timer starts a non-daemon thread, so the CLI prints successful dispatch but cannot exit and remains alive until the runner deadline."
+    },
+    {
+      "id": "unfiltered-object-deserialization",
+      "kind": "real",
+      "findings_only": true,
+      "primitive": "deserialization",
+      "classes": ["deserialization", "rce", "ssrf"],
+      "signature_symbol": "loadState",
+      "cwe": "CWE-502",
+      "summary": "loadState calls ObjectInputStream.readObject on attacker-supplied bytes with no class filter, so the caller chooses which classes the JDK reconstructs and which serialization callbacks run. Stock-JDK gadgets reach an effect without any target class: rehashing a HashMap keyed by a URL resolves an attacker-chosen host. The size amplification planted at the same function is a separate bug; the classes each declares tell a report at loadState apart."
     }
   ],
   "false_positive_traps": [
@@ -76,13 +86,6 @@
       "refute_reason": "runCommand uses ProcessBuilder with a fixed executable (echo) and the caller argument as a single argv element; ProcessBuilder spawns no shell, so a caller controls neither which program runs nor a shell. It looks like the sibling of runExport but is not injectable; a command-injection report here is a false positive."
     },
     {
-      "id": "gadget-free-deserialization",
-      "kind": "fp",
-      "expected_outcome": "clean",
-      "signature_symbol": "loadState",
-      "refute_reason": "Object reconstruction alone names no gadget or concrete security effect in the target's loaded classes."
-    },
-    {
       "id": "attacker-selected-asset-root",
       "kind": "fp",
       "expected_outcome": "clean",
@@ -94,7 +97,8 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "loadPlugin",
-      "refute_reason": "Constructing java.util.Random proves class selection, not a gadget, privilege change, or other security impact."
+      "classes": ["rce", "code-injection"],
+      "refute_reason": "Constructing java.util.Random proves class selection, not a gadget, privilege change, or other security impact. The real bug at this function is the effect of construction itself, so only a code-execution claim fires this trap."
     }
   ]
 }
