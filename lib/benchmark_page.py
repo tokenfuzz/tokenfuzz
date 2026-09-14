@@ -87,10 +87,10 @@ def _epoch(stamp: object) -> float | None:
 def _href(path: Path | None) -> str:
     """A clickable link for an artifact on disk, or "" when there is none.
 
-    Links go through the ledger's own path helper so an exported bundle gets
-    relative links and a local page gets `file://` ones — and a link is only
-    emitted for something that exists, so a `0` never points at a sibling
-    condition's evidence.
+    Links go through the ledger's own path helper so they render relative to
+    the page's own directory and survive the tree being moved or exported —
+    and a link is only emitted for something that exists, so a `0` never
+    points at a sibling condition's evidence.
     """
     if path is None or not path.exists():
         return ""
