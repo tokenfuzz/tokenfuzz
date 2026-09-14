@@ -926,6 +926,36 @@ with tempfile.TemporaryDirectory() as td, \
     assert_eq(Path(td), agy_run.call_args.kwargs["cwd"],
               "Antigravity decision is rooted at SCRIPT_ROOT")
 
+# A decision reads its question from the prompt, so it needs no working
+# directory -- but inheriting the caller's is not neutral. The caller is the
+# harness process, whose cwd is the repository root during a benchmark, and a
+# reviewer that writes a relative scratch file then lands it in the source
+# tree. Every backend the launcher does not deliberately root gets a throwaway
+# directory instead, removed once the answer is in hand.
+seen_decide_cwd: list = []
+
+
+def _record_decide_cwd(*_args, **kwargs):
+    cwd = kwargs.get("cwd")
+    seen_decide_cwd.append(Path(cwd) if cwd else None)
+    ok(bool(cwd) and Path(cwd).is_dir(),
+       "a decision launch directory exists while it runs", repr(cwd))
+    return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+
+with mock.patch.dict(os.environ, {"CODEX_BIN": "/fake/codex"}, clear=False), \
+        mock.patch.object(decide_mod, "_which", return_value="/fake/codex"), \
+        mock.patch.object(decide_mod, "run_timeout", side_effect=_record_decide_cwd):
+    assert_eq("ok", decide_mod._invoke_backend("codex", "DECISION_PROMPT", 5),
+              "a codex decision succeeds")
+decide_cwd = seen_decide_cwd[0]
+ok(decide_cwd is not None and decide_cwd != Path.cwd(),
+   "a decision never inherits the caller's working directory",
+   repr(decide_cwd))
+ok(decide_cwd is not None and not decide_cwd.exists(),
+   "the decision's working directory is removed with the answer",
+   repr(decide_cwd))
+
 with mock.patch.dict(os.environ, {"MODEL": "qwen3-8b"}, clear=True), \
         mock.patch.object(decide_mod, "_which", return_value="/fake/opencode"), \
         mock.patch.object(

@@ -87,8 +87,10 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional
@@ -729,6 +731,17 @@ def _invoke_backend(
         cmd = [*cmd, prompt]
         run_input = None
 
+    # A decision reads its whole question from the prompt, so it needs no
+    # working directory of its own -- but inheriting one is not neutral. The
+    # caller is usually the harness process itself, whose cwd is the repository
+    # root during a benchmark or a repo-rooted audit, and a reviewer that
+    # writes a relative scratch file then lands it in the source tree. The two
+    # backends above need a real project root and keep it; every other one gets
+    # a throwaway directory that is removed with the answer.
+    scratch = None
+    if launch_cwd is None:
+        scratch = tempfile.mkdtemp(prefix="tokenfuzz-decide-")
+        launch_cwd = Path(scratch)
     try:
         result = run_timeout(
             cmd,
@@ -743,6 +756,9 @@ def _invoke_backend(
         raise
     except OSError:
         return None
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
 
     if result.returncode == 124:
         raise subprocess.TimeoutExpired(
