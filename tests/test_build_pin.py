@@ -915,7 +915,7 @@ class ImmutableRunSettingsTests(unittest.TestCase):
     def _args(self, **changes) -> SimpleNamespace:
         base = dict(
             backend="codex", budget_wall=10800, agents=3,
-            target="sampleproj", agent_security="sandboxed",
+            target="sampleproj", agent_security="sandboxed", hold_direct=False,
         )
         base.update(changes)
         return SimpleNamespace(**base)
@@ -925,6 +925,7 @@ class ImmutableRunSettingsTests(unittest.TestCase):
             "model": "gpt-5.6-sol", "resolved_effort": "high",
             "agent_security": "sandboxed",
             "budget_wall": 10800, "harness_agents": 3, "target_sha": "abc123",
+            "model_direct_hold": False,
         }
         base.update(changes)
         return base
@@ -963,6 +964,12 @@ class ImmutableRunSettingsTests(unittest.TestCase):
             self._mismatch(
                 self._previous(), self._args(agent_security="external-bypass"),
             ),
+        )
+
+    def test_a_changed_direct_hold_policy_refuses(self) -> None:
+        self.assertIn(
+            "model_direct_hold",
+            self._mismatch(self._previous(), self._args(hold_direct=True)),
         )
 
     def test_a_moved_target_revision_refuses(self) -> None:

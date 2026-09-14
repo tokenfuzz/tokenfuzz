@@ -3411,6 +3411,7 @@ def _settings_mismatch(previous: dict, args: argparse.Namespace, model: str) -> 
         ("agent_security", args.agent_security),
         ("budget_wall", args.budget_wall),
         ("harness_agents", args.agents),
+        ("model_direct_hold", bool(getattr(args, "hold_direct", False))),
         ("target_sha", target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target)),
         ("tokenfuzz_sha", _git_rev(SCRIPT_ROOT)),
     )

@@ -1259,7 +1259,9 @@ def _condition(condition: dict, run: dict, bench_dir: Path | None,
     timing = series.get(cond)
     return {
         "token": cond,
-        "label": benchmark._condition_label(cond, backend, model),
+        "label": benchmark._condition_label(
+            cond, backend, model, bool(condition.get("held")),
+        ),
         "provisional": provisional,
         "wall_h": wall_h,
         "budget_h": budget_h,

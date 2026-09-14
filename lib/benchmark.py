@@ -4459,7 +4459,9 @@ def _fmt_seconds(value: object) -> str:
     return f"{float(value):.0f}s"
 
 
-def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
+def _render_efficiency(
+    conditions: list[dict], backend: str, model: str = "",
+) -> list[str]:
     """The efficiency table: where each condition's wall went.
 
     Rendered only when some condition recorded any of it, so a ledger of old
@@ -4506,7 +4508,9 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
         lines.append(
             "| {cond} | {occ} | {blocked} | {review} | {filed} | {confirmed} "
             "| {admitted} | {exec_fail} | {dup} | {seat} | {dollar} |".format(
-                cond=_condition_cell(c["condition"], backend, held=bool(c.get("held"))),
+                cond=_condition_cell(
+                    c["condition"], backend, model, bool(c.get("held")),
+                ),
                 occ=occupancy,
                 blocked=_fmt_fraction(c.get("housekeeping_blocked_fraction_median")),
                 review=_fmt_seconds(c.get("review_seconds_per_artifact_median")),
@@ -5858,7 +5862,9 @@ def _bug_link(bench_dir: Path, cid: str, members: list[str]) -> str:
     return f"`{cid}`"
 
 
-def _verdict_line(clusters: list[dict], backend: str) -> str:
+def _verdict_line(
+    clusters: list[dict], backend: str, model: str = "", held: bool = False,
+) -> str:
     """One sentence naming the strongest bug and the condition that found it.
 
     *clusters* must already be sorted strongest-severity first; the
@@ -5870,7 +5876,8 @@ def _verdict_line(clusters: list[dict], backend: str) -> str:
                 "or raise the per-cell budget.")
     top = clusters[0]
     by = " and ".join(
-        _condition_label(c, backend) for c in top.get("conditions", [])
+        _condition_label(c, backend, model, held and c == "model-direct")
+        for c in top.get("conditions", [])
     ) or "an unattributed condition"
     if top.get("severity_rank", 0) >= 2:
         return (f"The strongest bug this run is **{top['severity_level']}** "
@@ -5889,7 +5896,8 @@ def _fmt_ratio(value) -> str:
 
 
 def _render_ground_truth(scoring: dict | None,
-                         error: list | None = None) -> list[str]:
+                         error: list | None = None, *, backend: str = "",
+                         model: str = "", held: bool = False) -> list[str]:
     """Render the precision/recall block for a ground-truth target.
 
     Empty when the run has no manifest, so non-canary runs are unchanged.
@@ -5912,7 +5920,9 @@ def _render_ground_truth(scoring: dict | None,
             "no sanitizer; its planted bugs surface under `findings/`, which "
             "the deterministic crash oracle does not grade.", "",
         ]
-        return lines + _render_findings_ground_truth(scoring.get("findings"))
+        return lines + _render_findings_ground_truth(
+            scoring.get("findings"), backend=backend, model=model, held=held,
+        )
     overall = scoring.get("overall", {})
     by_cond = scoring.get("by_condition", {})
     lines = ["### Ground truth (precision / recall)", ""]
@@ -5937,7 +5947,10 @@ def _render_ground_truth(scoring: dict | None,
         )
 
     for cond in sorted(by_cond):
-        lines.append(row(f"`{cond}`", by_cond[cond]))
+        lines.append(row(
+            f"`{_condition_label(cond, backend, model, held and cond == 'model-direct')}`",
+            by_cond[cond],
+        ))
     lines.append(row("**overall**", overall))
     lines.append("")
     lines.append(
@@ -5951,10 +5964,15 @@ def _render_ground_truth(scoring: dict | None,
         "numbers the triage gate thresholds are tuned to."
     )
     lines.append("")
-    return lines + _render_findings_ground_truth(scoring.get("findings"))
+    return lines + _render_findings_ground_truth(
+        scoring.get("findings"), backend=backend, model=model, held=held,
+    )
 
 
-def _render_findings_ground_truth(scoring: dict | None) -> list[str]:
+def _render_findings_ground_truth(
+    scoring: dict | None, *, backend: str = "", model: str = "",
+    held: bool = False,
+) -> list[str]:
     """The findings oracle's block; empty when the manifest plants none."""
     if not scoring:
         return []
@@ -5982,7 +6000,10 @@ def _render_findings_ground_truth(scoring: dict | None) -> list[str]:
         )
 
     for cond in sorted(by_cond):
-        lines.append(row(f"`{cond}`", by_cond[cond]))
+        lines.append(row(
+            f"`{_condition_label(cond, backend, model, held and cond == 'model-direct')}`",
+            by_cond[cond],
+        ))
     lines.append(row("**overall**", overall))
     lines.append("")
     lines.append(
@@ -6011,6 +6032,10 @@ def _render_security_decisions(
                 rows.append((condition["condition"], kind, values))
     if not rows:
         return []
+    held_by_condition = {
+        str(item.get("condition", "")): bool(item.get("held"))
+        for item in conditions
+    }
     totals: list[tuple[str, str, dict]] = []
     for kind in ("crashes", "findings"):
         matching = [values for _, row_kind, values in rows if row_kind == kind]
@@ -6047,7 +6072,10 @@ def _render_security_decisions(
         lines.append(
             "| {condition} | {kind} | {candidates} | {reportable} | "
             "{unreportable} | {pending} | {rejected} |".format(
-                condition=_condition_label(condition, backend),
+                condition=_condition_label(
+                    condition, backend, model,
+                    held_by_condition.get(condition, False),
+                ),
                 kind=kind,
                 candidates=_as_nonnegative_int(values.get("candidates")),
                 reportable=_as_nonnegative_int(lanes.get("reportable")),
@@ -6084,6 +6112,7 @@ def render_section(report: dict) -> str:
     runid = run.get("runid", "?")
     target = run.get("target", "?")
     backend = run.get("backend", "?")
+    model = str(run.get("model", ""))
     budget = run.get("budget_wall", "?")
     replicates = run.get("replicates", "?")
     harness_agents = run.get("harness_agents")
@@ -6121,7 +6150,8 @@ def render_section(report: dict) -> str:
     # ── Verdict ──────────────────────────────────────────────────────────
     lines.append("### Verdict")
     lines.append("")
-    lines.append(_verdict_line(clusters, backend))
+    held_direct = bool(run.get("model_direct_hold"))
+    lines.append(_verdict_line(clusters, backend, model, held_direct))
     lines.append("")
 
     # ── Scoreboard ───────────────────────────────────────────────────────
@@ -6165,7 +6195,9 @@ def render_section(report: dict) -> str:
         lines.append(
             "| {cond} | {rep} | {wall} | {worker_wall} | {rfi} | {uf} "
             "| {rcr} | {uc} | {sev} |".format(
-                cond=_condition_cell(c["condition"], backend, held=bool(c.get("held"))),
+                cond=_condition_cell(
+                    c["condition"], backend, model, bool(c.get("held")),
+                ),
                 rep=_replicates_cell(c),
                 wall=_wall_cell(c),
                 worker_wall=_fmt_hours(c.get("worker_wall_median")),
@@ -6205,7 +6237,7 @@ def render_section(report: dict) -> str:
             )
         )
     lines.append("")
-    lines.extend(_render_efficiency(conditions, backend))
+    lines.extend(_render_efficiency(conditions, backend, model))
     for c in sorted(conditions, key=lambda item: item["condition"]):
         for observed in c.get("incomplete_observed", []):
             lines.append(
@@ -6221,13 +6253,17 @@ def render_section(report: dict) -> str:
                 "the unjudged remainder, not credited.** `bin/benchmark "
                 "--regenerate` re-reviews it once the cause is fixed.".format(
                     name=artifact.get("name", "?"),
-                    cond=_condition_label(c["condition"], backend),
+                    cond=_condition_label(
+                        c["condition"], backend, model, bool(c.get("held")),
+                    ),
                     why=artifact.get("why", "?"),
                 )
             )
     if any(c.get("pool_unjudged") for c in conditions):
         lines.append("")
-    baseline_label = _condition_label("model-direct", backend)
+    baseline_label = _condition_label(
+        "model-direct", backend, model, held_direct,
+    )
     # A run scored by a superseded scorer says so: the same artifacts yield a
     # different M+ once the scoring rules change, so the number cannot be read
     # beside one scored today without saying which scale it is on.
@@ -6282,11 +6318,13 @@ def render_section(report: dict) -> str:
         "and the severity columns are what that extra work buys."
     )
     lines.append("")
-    lines.extend(_render_security_decisions(conditions, backend))
+    lines.extend(_render_security_decisions(conditions, backend, model))
 
     # ── Ground truth (precision / recall) ────────────────────────────────
-    lines.extend(_render_ground_truth(report.get("ground_truth_scoring"),
-                                      report.get("ground_truth_error")))
+    lines.extend(_render_ground_truth(
+        report.get("ground_truth_scoring"), report.get("ground_truth_error"),
+        backend=backend, model=model, held=held_direct,
+    ))
 
     # ── Token usage ──────────────────────────────────────────────────────
     token_rows = sorted(
@@ -6315,7 +6353,10 @@ def render_section(report: dict) -> str:
         for row in token_rows:
             by_cond.setdefault(str(row.get("condition", "?")), []).append(row)
         for cond, rows in by_cond.items():
-            label = _condition_cell(cond, backend)
+            label = _condition_cell(
+                cond, backend, model,
+                held_direct and cond == "model-direct",
+            )
             for row in rows:
                 source = _row_token_source(row)
                 exp = row.get("experiment") or row.get("cell") or "?"
@@ -6470,7 +6511,10 @@ def render_section(report: dict) -> str:
                     bug=_bug_link(bench_dir, cl.get("id", "?"), members),
                     typ=cl.get("primitive", "") or "?",
                     by=", ".join(
-                        _condition_label(x, backend)
+                        _condition_label(
+                            x, backend, model,
+                            held_direct and x == "model-direct",
+                        )
                         for x in cl.get("conditions", [])
                     ) or "?",
                     n=cl.get("size", 0),
@@ -6686,6 +6730,8 @@ def _render_crosstab_answer_key(rows: list[dict]) -> list[str]:
                         runid=run.get("runid", "?"),
                         cond=_condition_label(
                             str(cond), str(run.get("backend", "")), str(run.get("model", "")),
+                            str(cond) == "model-direct"
+                            and bool(run.get("model_direct_hold")),
                         ),
                         kind=kind,
                         recall=_fmt_ratio(s.get("recall")),
@@ -6922,6 +6968,7 @@ def crosstab(bench_root: Path) -> str:
                     cond=_condition_label(
                         str(entry["cond"].get("condition", "?")),
                         str(run.get("backend", "")), str(run.get("model", "")),
+                        bool(entry["cond"].get("held")),
                     ),
                     name=artifact.get("name", "?"),
                     why=artifact.get("why", "?"),
@@ -6984,6 +7031,8 @@ def crosstab(bench_root: Path) -> str:
                                 str(cell.get("condition", "?")),
                                 str(run.get("backend", "")),
                                 str(run.get("model", "")),
+                                cell.get("condition") == "model-direct"
+                                and bool(run.get("model_direct_hold")),
                             ),
                             status=(
                                 "regenerate"

@@ -2987,6 +2987,44 @@ class BenchmarkWallBudgetTests(unittest.TestCase):
         self.assertIn("0.52/5.00h", rendered)
         self.assertIn("The strongest bug this run", rendered)
 
+    def test_held_direct_identity_reaches_every_run_level_table(self) -> None:
+        condition = {
+            "condition": "model-direct", "held": True,
+            "replicates_done": 1, "replicates_total": 1,
+            "wall_median": 60, "wall_budget_seconds": 60,
+            "validation_waterfall": {
+                "crashes": {"candidates": 1, "lanes": {"reportable": 1}},
+                "findings": {"candidates": 0, "lanes": {}},
+            },
+            "pool_unjudged": [{"name": "CRASH-pending", "why": "pending"}],
+        }
+        report = {
+            "run": {
+                "runid": "held", "target": "sample", "backend": "codex",
+                "model": "gpt-test", "replicates": 1, "budget_wall": 60,
+                "model_direct_hold": True,
+            },
+            "conditions": [condition],
+            "crash_clusters": [{
+                "id": "CRCL-1", "severity_level": "High",
+                "severity_score": 8.0, "severity_rank": 3,
+                "conditions": ["model-direct"], "members": [],
+            }],
+            "ground_truth_scoring": {
+                "overall": {},
+                "by_condition": {"model-direct": {}},
+            },
+            "token_usage": [{
+                "condition": "model-direct", "replicate": 1,
+                "experiment": "held-direct", "wall_seconds": 60,
+            }],
+        }
+        rendered = benchmark.render_section(report)
+        self.assertIn("found by **gpt-test-direct-held**", rendered)
+        self.assertIn("| gpt-test-direct-held | crashes |", rendered)
+        self.assertGreaterEqual(rendered.count("`gpt-test-direct-held`"), 4)
+        self.assertNotIn("`gpt-test-direct`", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
