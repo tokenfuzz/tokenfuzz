@@ -201,29 +201,27 @@ class SampleBugClassTests(unittest.TestCase):
             self.assertTrue(header.startswith("op: "), entry["id"])
             self.assertIn(header.removeprefix("op: ").strip(), operations, entry["id"])
 
-    def test_a_trap_sharing_a_symbol_says_which_claim_it_refutes(self) -> None:
+    def test_every_trap_says_which_claim_it_refutes(self) -> None:
         """A trap that declares no classes claims every report at its symbol.
 
-        Where a real bug sits at the same function, that silently turns a
-        correct report of the real bug into a fired trap, or the reverse. The
-        classes are what tell the two apart, so a shared symbol must declare
-        them.
+        Each trap refutes one claim, and its own refute_reason names which. A
+        trap that leaves it unsaid turns any unrelated true finding at that
+        function into a fired trap -- a resource-exhaustion report at an
+        extractor charged to the traversal trap standing there -- and where a
+        real bug shares the function, it can swallow a correct report of that
+        bug or hand the bug credit for the trap's claim.
         """
-        manifests = sorted((ROOT / "output" / "samples").glob("sample-*/.ground-truth.json"))
-        for path in manifests:
+        keys = sorted((ROOT / "output" / "samples").glob("sample-*/.ground-truth.json"))
+        keys.append(ROOT / "output" / "canary" / ".ground-truth.json")
+        for path in keys:
             manifest = json.loads(path.read_text())
-            planted = {
-                str(bug.get("signature_symbol", ""))
-                for bug in manifest["planted_bugs"]
-            }
             for trap in manifest["false_positive_traps"]:
-                if str(trap.get("signature_symbol", "")) not in planted:
-                    continue
+                classes = trap.get("classes")
                 self.assertTrue(
-                    trap.get("classes"),
-                    f"{path}: trap {trap['id']} shares a symbol with a planted "
-                    "bug but declares no classes",
-                )
+                    classes, f"{path}: trap {trap['id']} declares no classes")
+                for name in classes:
+                    self.assertIn(
+                        name, bug_classes.BUG_CLASSES, f"{path}: {trap['id']}")
 
     def test_documented_sample_counts_match_the_answer_keys(self) -> None:
         page = (ROOT / "docs" / "getting-started" / "sample-targets.md").read_text()

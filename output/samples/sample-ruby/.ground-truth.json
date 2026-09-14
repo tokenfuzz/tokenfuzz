@@ -65,6 +65,7 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "read_asset",
+      "classes": ["path-traversal", "info-disclosure"],
       "refute_reason": "The same job chooses both root and asset name, so traversal crosses no independently trusted namespace."
     },
     {
@@ -72,6 +73,7 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "save_render",
+      "classes": ["path-traversal", "arbitrary-file-write"],
       "refute_reason": "The same job chooses both output root and name, so lexical traversal adds no write capability."
     }
   ]

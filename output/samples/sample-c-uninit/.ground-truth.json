@@ -25,6 +25,7 @@
       "expected_outcome": "clean",
       "signature_symbol": "handle_window",
       "input": "repro/case-window",
+      "classes": ["uninitialized-read"],
       "refute_reason": "handle_window declares an uninitialized 32-slot scratch array and fills only the first n slots, where n comes from the input \u2014 the shape that reads as an uninitialized-memory bug. It is not one: the averaging loop is bounded by the same n as the seeding loop, so no slot is ever read before it is written, and n == 0 takes a separate branch. MemorySanitizer emits no diagnostic; a report here is a false positive.",
       "file": "src/gauge.c"
     },
@@ -34,6 +35,7 @@
       "expected_outcome": "clean",
       "signature_symbol": "handle_note",
       "input": "repro/case-note",
+      "classes": ["null-deref"],
       "refute_reason": "The NOTE value pointer is dereferenced only inside the branch guarded by memcmp(val, \"unit\", 4) == 0, so a non-\"unit\" value returns before any dereference. MemorySanitizer emits no diagnostic; a static-shaped null-deref report here is a false positive.",
       "file": "src/gauge.c"
     }

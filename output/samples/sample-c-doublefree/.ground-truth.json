@@ -37,6 +37,7 @@
       "expected_outcome": "clean",
       "signature_symbol": "handle_note",
       "input": "repro/case-note",
+      "classes": ["null-deref"],
       "refute_reason": "The NOTE value pointer is dereferenced only inside the branch guarded by memcmp(val, \"on\", 2) == 0, so a non-\"on\" value returns before any dereference. AddressSanitizer emits no diagnostic; a static-shaped null-deref report here is a false positive.",
       "file": "src/chtio.c"
     },

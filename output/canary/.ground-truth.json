@@ -39,6 +39,7 @@
       "expected_outcome": "clean",
       "signature_symbol": "lookup_label",
       "input": "inputs/case-lookup",
+      "classes": ["null-deref"],
       "refute_reason": "The pointer is dereferenced only past an explicit NULL guard, so no input reaches the dereference. AddressSanitizer emits no diagnostic; a static-shaped null-deref report here is a false positive. Any confirmed crash in this frame is therefore unexpected, not this trap firing."
     },
     {
@@ -47,6 +48,7 @@
       "expected_outcome": "abort",
       "signature_symbol": "pack_field",
       "input": "inputs/case-pack",
+      "classes": ["stack-buffer-overflow", "buffer-overflow"],
       "refute_reason": "An over-long input trips assert() and aborts before the copy. With handle_abort=1 AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real memory-safety primitive here (e.g. a release build with -DNDEBUG) is an unexpected crash."
     }
   ]

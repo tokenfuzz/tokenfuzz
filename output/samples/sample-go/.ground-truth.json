@@ -68,6 +68,7 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "extractBundle",
+      "classes": ["path-traversal", "arbitrary-file-write"],
       "refute_reason": "The same job chooses the archive and destination root, so an entry escaping that root adds no write capability."
     },
     {
@@ -75,6 +76,7 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "readAsset",
+      "classes": ["path-traversal", "info-disclosure"],
       "refute_reason": "The same job chooses both root and asset name, so lexical traversal crosses no independently trusted namespace."
     },
     {
@@ -82,6 +84,7 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "saveRender",
+      "classes": ["path-traversal", "arbitrary-file-write"],
       "refute_reason": "The same job chooses both output root and name, so lexical traversal adds no write capability."
     }
   ]

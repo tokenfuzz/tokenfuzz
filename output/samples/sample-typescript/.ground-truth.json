@@ -65,6 +65,7 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "readAsset",
+      "classes": ["path-traversal", "info-disclosure"],
       "refute_reason": "The same job chooses both root and asset name, so traversal crosses no independently trusted namespace."
     },
     {
@@ -72,6 +73,7 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "loadInclude",
+      "classes": ["code-injection", "rce"],
       "refute_reason": "The testcase only names an outside file; it proves neither attacker placement nor an existing effectful module."
     }
   ]

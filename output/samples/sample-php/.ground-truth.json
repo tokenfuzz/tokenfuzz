@@ -98,6 +98,7 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "loadState",
+      "classes": ["deserialization", "rce", "code-injection"],
       "refute_reason": "The target loads no usable magic-method gadget; reconstructing stdClass alone proves no concrete security effect."
     },
     {
