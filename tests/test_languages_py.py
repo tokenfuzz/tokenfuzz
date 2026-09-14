@@ -397,6 +397,14 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq([], languages.bootstrap_plan_for_target(tmp_root, "bundler")["cmds"],
               "bootstrap plan: Ruby source without a Gemfile -> no bundle commands")
 
+    # Maven runs from target_root and no -f path is supplied.  A POM in an
+    # unrelated nested tree therefore cannot make the root Maven commands
+    # valid.
+    (tmp_root / "nested").mkdir()
+    (tmp_root / "nested" / "pom.xml").write_text("<project/>\n")
+    assert_eq([], languages.bootstrap_for_target(tmp_root, "maven"),
+              "bootstrap: a nested-only pom does not start Maven at the root")
+
     # setup.py present -> python bootstrap fires (three-step recipe:
     # create .audit/venv, upgrade pip, then `pip install -e .` which
     # uses PEP 517 build isolation to provision setuptools/Cython

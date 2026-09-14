@@ -313,6 +313,15 @@ class MultiLanguageSupportTests(unittest.TestCase):
         installed_support = self.root / "repository" / "example" / "support" / "1" / "support-1.jar"
         installed_support.parent.mkdir(parents=True)
         installed_support.write_bytes(b"installed copy")
+        (self.target / "pom.xml").write_text(
+            '<project xmlns="http://maven.apache.org/POM/4.0.0">'
+            '<modelVersion>4.0.0</modelVersion>'
+            '<groupId>example</groupId><artifactId>parent</artifactId>'
+            '<version>1</version><packaging>pom</packaging>'
+            '<modules><module>module</module><module>support</module></modules>'
+            '</project>',
+            encoding="utf-8",
+        )
         receipt = module / "target" / "tokenfuzz-classpath.txt"
         receipt.write_text(
             os.pathsep.join((str(installed_support), str(dependency))),
