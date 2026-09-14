@@ -208,6 +208,11 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     reach the abort. Accept only if the report names the unchecked
     OOB / UAF / type-confusion / boundary cross that follows in
     release when the assert is compiled out.
+    The pinned build establishes only its own runtime behavior. Accept a
+    source-proven release path when the project's source or build documentation
+    identifies that as a supported production configuration and the report
+    traces the unchecked consequence. A one-off rebuild with different flags
+    is not proof that the configuration ships.
   - **Non-product surface — the primary location does not ship in the
     product.** The bug lives in code whose ROLE is not the shipped
     library/program: a test driver or runner (`runtest.c`, a

@@ -68,10 +68,12 @@ a clean run of the bug it plants.
     path traversal or a command injection, is marked `findings_only: true` and
     stays out of the crash-recall denominator. A separate findings scorer
     credits a confirmed FIND when its report names the planted fault function.
-    On the four hybrid sanitizer samples, `samples/sample-cpp` counts 11 of 12
-    planted bugs toward crash recall, `samples/sample-go` counts 1 of 3, and
-    `samples/sample-rust` and `samples/sample-swift` each count 2 of 3. Their
-    remaining bugs exercise the finding path.
+    On the hybrid sanitizer samples, `samples/sample-c` counts 5 of 6 planted
+    bugs toward crash recall, `samples/sample-cpp` counts 10 of 12,
+    `samples/sample-c-doublefree` counts 1 of 2, `samples/sample-go` counts 1
+    of 3, and `samples/sample-rust` and `samples/sample-swift` each count 2 of
+    3. Their remaining scored bugs exercise the finding path; the C++
+    near-null site is auto-quarantined and belongs to neither denominator.
 
     A planted site whose crash shape the harness auto-quarantines is marked
     `auto_quarantined: true` and scores in neither oracle. `AGENTS.md` tells

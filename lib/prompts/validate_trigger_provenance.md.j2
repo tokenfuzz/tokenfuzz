@@ -103,8 +103,10 @@ state** and the report's **exact claimed security consequence**:
 >       is merely unproven, deployment-dependent, or ambiguous, vote Uncertain.
 >       A consequence that exists only on a platform, filesystem provider, or
 >       runtime the audited build does not run on (Windows UNC path semantics
->       reviewed against a Linux or macOS build) is deployment-dependent, not
->       established, unless the effect is demonstrated on the audited build.
+>       reviewed against a Linux or macOS build) is established only when the
+>       report traces the conditional path and the project's source or build
+>       documentation identifies that platform/runtime as a supported shipping
+>       configuration. An ad hoc alternate runtime is not enough.
 >       Review the report as written: a different scenario that might contain a
 >       real issue cannot rescue a source-refuted claim. It needs a rewritten
 >       report and a fresh review.
@@ -119,14 +121,17 @@ state** and the report's **exact claimed security consequence**:
 >         reproducer: a harness or script that holds the base constant while
 >         varying the child shows the report's choice, not the product's, and
 >         a `library-api` surface does not by itself supply a caller that
->         fixes the base from trusted configuration. Only a caller in the
->         tree that does so — name it — keeps such a report standing.
->       - debug-only `assert` / `*_CHECK`: the shipped configuration is the
->         pinned build in this tree — its `.audit/build*.sh` recipe and the
->         project's own build files. A guard that build compiles in is an
->         enforced guard, disproving the consequence under (g); a guard it
->         compiles out leaves the report standing. Never credit or discredit a
->         rebuild with different flags in either direction.
+>         fixes the base from trusted configuration. Keep such a report only
+>         when a shipped caller does so, or an explicit public API contract
+>         documents the base as trusted configuration and the child as
+>         caller-controlled; name that evidence.
+>       - debug-only `assert` / `*_CHECK`: the pinned build establishes runtime
+>         behavior for that configuration. A guard it compiles in disproves a
+>         claim about that build, but does not disprove a supported production
+>         configuration that the project's source or build documentation shows
+>         compiles the guard out. Trace the unchecked consequence in that
+>         documented path. A rebuild with different flags alone proves neither
+>         that the configuration ships nor that the report is false.
 >       Otherwise use rejection_kind `contract-invalid`.
 
 A machine-recorded `Build config` row naming an alternate configuration is not

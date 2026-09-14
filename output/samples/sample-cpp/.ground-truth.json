@@ -1,7 +1,7 @@
 {
   "target": "samples/sample-cpp",
   "language": "cpp",
-  "description": "Answer key for the synthetic sample-cpp target (RBF record decoder, modern C++). Nine inputs produce distinct AddressSanitizer diagnostics across bounds, arithmetic, lifetime, type, and invalid-free bugs. Two low-address faults are source findings because the harness intentionally quarantines their crash shape. Two false-positive traps measure precision.",
+  "description": "Answer key for the synthetic sample-cpp target (RBF record decoder, modern C++). Ten inputs produce distinct AddressSanitizer diagnostics across bounds, arithmetic, lifetime, type, invalid-free, and arbitrary-write bugs. The near-null site is auto-quarantined, while the release-only overflow is scored through source findings. Two false-positive traps measure precision.",
   "build": ".audit/build.sh",
   "asan_bin": "build-asan/rbundle",
   "planted_bugs": [
@@ -155,13 +155,14 @@
     {
       "id": "release-build-check-overflow",
       "kind": "real",
+      "findings_only": true,
       "primitive": "stack-buffer-overflow",
       "classes": ["stack-buffer-overflow"],
       "access": "WRITE",
       "signature_symbol": "rbundle::handle_check",
       "cwe": "CWE-121",
       "modeled_on": "a debug-only invariant guarding a fixed copy \u2014 assert() compiled out by -DNDEBUG leaves an unchecked memcpy",
-      "summary": "The CHECK handler checks its field against a 32-byte scratch buffer with assert() alone, then memcpy()s it. A release build (-DNDEBUG) compiles the check out, so an over-long CHECK field overflows the stack buffer. The shipped build recipe keeps asserts on, so proving it means building a release variant under the sanitizer. Only an overflow in this frame is this bug; the ABRT the assert raises in a debug build is the debug-only-assert trap."
+      "summary": "The CHECK handler checks its field against a 32-byte scratch buffer with assert() alone, then memcpy()s it. A supported release build (-DNDEBUG) compiles the check out, so an over-long CHECK field overflows the stack buffer. The configured sanitizer build keeps asserts on, so this source-proven release bug is scored as a finding; the ABRT the assert raises in the configured build is the debug-only-assert trap."
     }
   ],
   "false_positive_traps": [
