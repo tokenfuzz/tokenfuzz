@@ -491,6 +491,32 @@ ok(
     "first_sanitizer_diagnostic binds class and size to one runtime fault",
     detail=repr(_first_diagnostic),
 )
+# A sandbox that denies the external symbolizer makes ASan print WARNING lines
+# between the headline and the (in-process symbolized) frames; those are noise
+# inside one diagnostic, not the start of another.
+_warned_diagnostic = (
+    "==7==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x1\n"
+    "WRITE of size 512 at 0x1 thread T0\n"
+    "==7==WARNING: failed to spawn external symbolizer (errno: 9)\n"
+    "==7==WARNING: Failed to use and restart external symbolizer!\n"
+    "    #0 0x1 in __asan_memcpy (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x1)\n"
+    "    #1 0x2 in app_copy_host app.c:96\n"
+    "SUMMARY: AddressSanitizer: stack-buffer-overflow\n"
+)
+ok(
+    "app_copy_host app.c:96" in (
+        stack_frames.first_sanitizer_diagnostic(_warned_diagnostic) or ""
+    ),
+    "first_sanitizer_diagnostic keeps frames past symbolizer warnings",
+)
+ok(
+    "WARNING: DATA RACE" not in (
+        stack_frames.first_sanitizer_diagnostic(
+            _diagnostics + "WARNING: DATA RACE\nWrite at 0x3 by goroutine 7:\n"
+        ) or ""
+    ),
+    "first_sanitizer_diagnostic still closes before a race report",
+)
 _ubsan_diagnostics = (
     "sample.c:10:2: runtime error: signed integer overflow\n"
     "sample.c:20:4: runtime error: index 8 out of bounds\n"

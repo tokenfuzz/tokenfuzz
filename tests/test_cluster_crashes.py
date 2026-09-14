@@ -211,6 +211,51 @@ The parser writes past `{object_name}`.
         self.assertFalse(index.exists())
         self.assertEqual((crashes["A1"] / "REPORT.md").stat().st_mtime_ns, mtime)
 
+    def test_lifetime_crashes_cluster_on_their_free_site(self) -> None:
+        def lifetime(crash_id: str, headline: str, use_fn: str, free_fn: str) -> Path:
+            sanitizer = (
+                f"==1==ERROR: AddressSanitizer: {headline} on address 0x1\n"
+                "READ of size 1 at 0x1 thread T0\n"
+                f"    #0 0x1 in {use_fn} src/app.c:10\n"
+                "    #1 0x2 in dispatch src/app.c:50\n"
+                "    #2 0x3 in decode src/app.c:90\n"
+                "0x1 is located 0 bytes inside of 4-byte region\n"
+                "freed by thread T0 here:\n"
+                "    #0 0x4 in free (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x1)\n"
+                f"    #1 0x5 in {free_fn} src/app.c:30\n"
+                "    #2 0x2 in dispatch src/app.c:50\n"
+                "    #3 0x3 in decode src/app.c:90\n"
+                "previously allocated by thread T0 here:\n"
+                "    #0 0x6 in malloc (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x2)\n"
+                "    #1 0x7 in app_stage src/app.c:20\n"
+                f"SUMMARY: AddressSanitizer: {headline}\n"
+            )
+            report = (
+                f"# {crash_id}\nSurface: library-api\nTrigger source: bytes\n"
+                "## Classification\n- **Severity**: High (CVSS-BTE 4.0: 8.0 High; primitive=x)\n"
+            )
+            return self.make_simple_crash(self.results, crash_id, sanitizer, report)
+
+        # One DROP that leaves a dangling owner: read in FLUSH, second free at
+        # teardown, second free in STAGE. Same fix, so one cluster.
+        lifetime("CRASH-L1-1", "heap-use-after-free", "app_flush", "app_drop")
+        lifetime("CRASH-L2-1", "double-free", "app_decode_end", "app_drop")
+        lifetime("CRASH-L3-1", "double-free", "app_stage", "app_drop")
+        # Same use site, freed elsewhere: a different defect.
+        lifetime("CRASH-L4-1", "heap-use-after-free", "app_flush", "app_reset")
+        process = self.run_cluster()
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        ids = {
+            name: self.cluster_id(self.results / "crashes" / name / "REPORT.md")
+            for name in ("CRASH-L1-1", "CRASH-L2-1", "CRASH-L3-1", "CRASH-L4-1")
+        }
+        self.assertEqual(ids["CRASH-L1-1"], ids["CRASH-L2-1"])
+        self.assertEqual(ids["CRASH-L1-1"], ids["CRASH-L3-1"])
+        self.assertNotEqual(ids["CRASH-L1-1"], ids["CRASH-L4-1"])
+        index = (self.results / "crashes" / "CRASH-CLUSTERS.md").read_text()
+        self.assertIn("app_drop src/app.c:30", index)
+        self.assertIn("(use: app_flush src/app.c:10)", index)
+
     def test_highest_severity_member_is_canonical(self) -> None:
         parent = self.root / "severity" / "crashes"
         low = self.make_crash(

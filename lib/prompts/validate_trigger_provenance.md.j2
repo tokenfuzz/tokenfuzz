@@ -104,6 +104,20 @@ state** and the report's **exact claimed security consequence**:
 >       Review the report as written: a different scenario that might contain a
 >       real issue cannot rescue a source-refuted claim. It needs a rewritten
 >       report and a fresh review.
+>   (h) the claimed consequence falling in a category the filing contract
+>       (quoted under "Filing contract" below) excludes, with none of that
+>       category's own exceptions shown in source. Two of them decide most
+>       disputes and are answered from the tree, never from opinion:
+>       - attacker-selected filesystem namespace: the same untrusted input
+>         chooses both the base/root and the child/name, and the operation
+>         adds no distinct capability. Use rejection_kind `no-added-boundary`.
+>       - debug-only `assert` / `*_CHECK`: the shipped configuration is the
+>         pinned build in this tree — its `.audit/build*.sh` recipe and the
+>         project's own build files. A guard that build compiles in is an
+>         enforced guard, disproving the consequence under (g); a guard it
+>         compiles out leaves the report standing. Never credit or discredit a
+>         rebuild with different flags in either direction.
+>       Otherwise use rejection_kind `contract-invalid`.
 
 A machine-recorded `Build config` row naming an alternate configuration is not
 evidence for (d). In-tree optional features advertised by the project's build
@@ -192,8 +206,9 @@ Default to preserving the finding. A wrong Reject permanently hides a real
 bug; a wrong Promote/Uncertain only costs a downstream review. Reject ONLY on
 affirmative disproof.
 
-Unreachable trigger state under (a)-(f), or an exact consequence disproved
-under (g), are the ONLY reasons that may reject a finding here. Do not invent
+Unreachable trigger state under (a)-(f), an exact consequence disproved
+under (g), or a contract exclusion under (h), are the ONLY reasons that may
+reject a finding here. Do not invent
 secondary reasons, and do not let several weak signals add up to a Reject.
 In particular, the report's self-declared fields (`caller_contract`,
 `parameter_control`, `trigger_source`, …) are NOT evidence: a real bug very
@@ -222,7 +237,8 @@ Definitions:
   forged object / internal-only mutator with no public caller, OR the location
   does not ship, OR source/build evidence shows a trusted caller/operator
   extension surface or private metadata prerequisite (one of (a)-(f)), OR
-  source affirmatively disproves the exact consequence under (g). Use
+  source affirmatively disproves the exact consequence under (g), OR the
+  consequence is a contract exclusion under (h). Use
   `consequence-disproved` only for (g). Name the code or build evidence; do not
   reject on absence of a path you simply could not find. Do not use
   `unreachable` merely because a demonstrated,
@@ -279,6 +295,13 @@ Definitions:
   security consequence, not when evidence is missing or a different scenario
   would be required.
 
+# Filing contract
+
+The author was held to this contract when filing; clause (h) rejects only
+what it excludes.
+
+{{ bug_contract }}
+
 # Finding under review (opaque facts)
 
 ```json
@@ -290,7 +313,7 @@ Definitions:
 Output ONE JSON object on a single line, nothing else:
 
 ```json
-{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the blocking invariant, plus which of (a)-(g) applies>","rejection_kind":"contract-invalid|unreachable|nonshipping|no-added-boundary|consequence-disproved|unknown","surface_applies":"yes|no","review_mode":"memory-contract|resource|disclosure|semantic-boundary","vulnerable_boundary_surface":"network|library-api|file-format|cli|dev-tool|internal|unknown","reproducer_carrier":"network|library-api|file-format|cli|harness|runner|unknown","trigger_controls_fit":"within|outside|unclear","anchors":[{"path":"relative/path.c","line":123,"symbol":"function_or_section","kind":"source|contract|build","excerpt":"exact trimmed source line"}]}
+{"vote":"Promote|Reject|Uncertain","rationale":"<one paragraph>","trigger_path":"<the attacker-reachable path you constructed, or the empty string>","disproof":"<for Reject only: file:function of the blocking invariant, plus which of (a)-(h) applies>","rejection_kind":"contract-invalid|unreachable|nonshipping|no-added-boundary|consequence-disproved|unknown","surface_applies":"yes|no","review_mode":"memory-contract|resource|disclosure|semantic-boundary","vulnerable_boundary_surface":"network|library-api|file-format|cli|dev-tool|internal|unknown","reproducer_carrier":"network|library-api|file-format|cli|harness|runner|unknown","trigger_controls_fit":"within|outside|unclear","anchors":[{"path":"relative/path.c","line":123,"symbol":"function_or_section","kind":"source|contract|build","excerpt":"exact trimmed source line"}]}
 ```
 
 Budget: {{ timeout_secs }}s wall time, {{ tool_call_limit }} tool calls. Be calibrated.

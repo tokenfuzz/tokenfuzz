@@ -449,7 +449,13 @@ def finding_signature(
     siteless line and (class, "", title-slug) for a finding with no location
     at all, so the cluster id and Signature column are always populated. Only
     the (class, file, line) form is a merge edge — the degraded forms are
-    display anchors, never fused (bias-to-separate)."""
+    display anchors, never fused (bias-to-separate).
+
+    Do not widen this key. It decides which findings are one bug for every
+    ledger count, benchmark score, and shared gate verdict, and it was chosen
+    over (class, file, func) so that two distinct bugs in one function are
+    never fused: a wrong split costs a reviewer one look, a wrong merge hides
+    a real bug behind another. Widening it was tried and reverted."""
     cls_raw = llm_class or extract_class(report_text)
     cls = normalize_class(cls_raw)
     bug_class = bug_classes.canonical_class(cls_raw)

@@ -50,10 +50,17 @@ Every cell gets the same per-cell wall-clock budget. With the defaults,
 hours of audit time if run serially, plus a final validation pass that is
 measurement, not audit time (see [The closing pass](#the-closing-pass)). Both
 conditions are told when their budget ends (the direct prompt names a UTC
-deadline and a `date -u` command to check it against), but nothing re-enters a
-finished session to hold it there. A baseline driven back to work by the
-runner would measure the runner, so the Scoreboard reports what each condition
-spent of what it was granted instead.
+deadline and a `date -u` command to check it against), but by default nothing
+re-enters a finished session to hold it there. A baseline driven back to work
+by the runner measures the runner as well as the model, so the Scoreboard
+reports what each condition spent of what it was granted instead. Some models
+stop within minutes on a small target while others run to the wall, which
+makes the default an unequal-spend comparison. `--hold-direct` runs the
+equal-spend variant: a direct session that ends with more than a minute of
+budget left is re-entered with the same prompt, told what it already filed,
+until the wall. Its rows are labelled `<model>-direct-held` and the number of
+re-entries is recorded on the cell's usage row, so the two experiments never
+share a label.
 
 The benchmark keeps normal audit output separate. Cells run under isolated
 `bin/audit --experiment` trees, then the benchmark pools and scores their
@@ -106,6 +113,7 @@ With all defaults, the command means:
 | `--finalize-workers` | `4` | Concurrent reviewers per final validation phase, for crash triage and the finding drain alike. Independent of `--agents`, which sizes the audit itself. It also scales the finding gate's admission groups, so raising it shortens the closing pass but coarsens where a finite `--finalize-wall` can stop admitting groups. |
 | `--agents` | the audit's configured pool, normally `3` | Harness workers per cell. The direct baseline is always one launch. |
 | `--conditions` | `model-direct,harness` | Run both the direct baseline and TokenFuzz. |
+| `--hold-direct` | off | Re-enter a direct session that ends with more than a minute of budget left, until the wall. Rows are labelled `<model>-direct-held`. |
 | `--bench-root` | `benchmark` | Shared benchmark artifact root. A relative path lives under `output/` in the repository root; an absolute path is used as given. |
 | `--run-id` | UTC timestamp | Run directory under `output/benchmark/<backend>/`; reuse it to resume. |
 

@@ -148,7 +148,9 @@ def cluster(
     fps = [build_fingerprint(r, report_texts.get(r.get("id", ""), "")) for r in records]
     uf = _UnionFind([f.id for f in fps])
 
-    # Two merge edges, each bucketed by exact value:
+    # Two merge edges, each bucketed by exact value. Keep the site edge on
+    # the line: it is the deduplication decision every count downstream
+    # rests on, and a coarser key (the function) fuses distinct bugs.
     #   site  — (class, file, line), only when both file and line are present
     #   state — the normalized crash frames, only when the report has a stack
     # Bucket-union the whole bucket: a shared value is the same defect, so no

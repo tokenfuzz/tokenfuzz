@@ -199,6 +199,24 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertIn("crashes not scored", rendered_only)
         self.assertIn("Ground truth — findings", rendered_only)
 
+    def test_findings_oracle_matches_a_qualified_manifest_symbol(self) -> None:
+        # A report names the function as a maintainer writes it; the manifest
+        # may qualify it the way the language does. Both reduce to one leaf.
+        manifest = self.root / "qualified-gt.json"
+        manifest.write_text(json.dumps({"target": "sampleproj", "planted_bugs": [
+            {"id": "wild-write", "kind": "real", "findings_only": True,
+             "primitive": "arbitrary-write", "signature_symbol": "rbundle::handle_write"},
+            {"id": "null-out", "kind": "real", "findings_only": True,
+             "primitive": "null-deref", "signature_symbol": "Report.handleNull"},
+        ]}))
+        run = self.root / "qualrun"
+        self.make_finding(run, "FIND-0001", "handle_write")
+        self.make_finding(run, "FIND-0002", "app::Report::handleNull")
+        (run / "crashes").mkdir()
+        _, score = self.score(run, manifest=manifest)
+        self.assertEqual(score["findings"]["overall"]["detected"], ["null-out", "wild-write"])
+        self.assertEqual(score["findings"]["overall"]["recall"], 1.0)
+
     def test_a_manifest_level_findings_only_flag_scores_every_bug(self) -> None:
         # Findings-only targets flag the manifest, not each bug; a trap in the
         # same function as a real bug is named as one the oracle cannot fire.

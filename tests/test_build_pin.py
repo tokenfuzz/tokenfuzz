@@ -285,6 +285,28 @@ class VerifyOnlyCellTests(unittest.TestCase):
             audit_runner.preflight_build(runtime)
             refresh.assert_not_called()
 
+    def test_cell_preflight_accepts_the_pinned_build_through_a_facade_symlink(self) -> None:
+        # A cell reaches the target as <facade>/targets/<slug>, a symlink to
+        # the tree the run pinned; the same binary must not read as another.
+        self._build()
+        environment = self._benchmark_environment()
+        facade = self.tmp / "facade"
+        facade.mkdir()
+        (facade / "target").symlink_to(self.target)
+        config = SimpleNamespace(
+            **{**vars(self.config),
+               "resolve_path": lambda raw: str(facade / "target" / raw)},
+        )
+        runtime = SimpleNamespace(
+            target_root=facade / "target", config=config, root=ROOT,
+            target_slug="sampleproj", logs=self.tmp, backend="codex", model="m",
+        )
+        with mock.patch.dict(
+            os.environ, environment, clear=False
+        ), mock.patch.object(build_preflight, "refresh") as refresh:
+            audit_runner.preflight_build(runtime)
+            refresh.assert_not_called()
+
     def test_cell_preflight_requires_the_parent_pin(self) -> None:
         self._build()
         runtime = SimpleNamespace(

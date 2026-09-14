@@ -151,8 +151,13 @@ def memory_safety_class(text: str) -> str | None:
 _DIAGNOSTIC_CLOSE_RE = re.compile(
     r"^\s*(?:==\d+==)?SUMMARY:\s", re.IGNORECASE,
 )
+# A runtime WARNING opens a diagnostic only when it is one (TSan, MSan, Go's
+# race detector). ASan also prints `==pid==WARNING: failed to spawn external
+# symbolizer` between a report's headline and its frames; treating that as a
+# new diagnostic cut every such report off before its crash site.
 _DIAGNOSTIC_OPEN_RE = re.compile(
-    r"^\s*(?:==\d+==)?(?:ERROR|WARNING):\s"
+    r"^\s*(?:==\d+==)?ERROR:\s"
+    r"|^\s*(?:==\d+==)?WARNING: (?:ThreadSanitizer|MemorySanitizer|DATA RACE)"
     r"|^\s*UndefinedBehaviorSanitizer:"
     r"|^[^\s].*:\d+:\d+:\s*runtime error:",
     re.IGNORECASE,

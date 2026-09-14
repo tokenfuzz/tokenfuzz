@@ -856,6 +856,10 @@ with tempfile.TemporaryDirectory() as td:
         guarded_env["ZDOTDIR"],
         "agent launch exports the guard-only login-shell bootstrap",
     )
+    assert_eq(
+        os.path.realpath(ROOT / "targets"), guarded_env["GIT_CEILING_DIRECTORIES"],
+        "agent launch hides the harness's own history from an in-tree target",
+    )
 
     # A benchmark cell points AGENT_WRAPPERS_PATH at its facade so the agent
     # sees its own repo root. The process guards remain first, followed by the

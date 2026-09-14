@@ -2907,6 +2907,23 @@ def _manifest_symbols(entry: dict) -> set[str]:
     return {s for s in symbols if s}
 
 
+# Findings name their function the way a maintainer writes it in a report
+# (`handle_write`), while a manifest may qualify it the way the language does
+# (`rbundle::handle_write`, `Class.method`, `Mod#method`). Compare the trailing
+# identifier of both; the file check beside it keeps a leaf name from matching
+# across files.
+_QUALIFIER_RE = re.compile(r".*(?:::|\.|#|->|\$)")
+
+
+def _symbol_leaf(symbol: str) -> str:
+    return _QUALIFIER_RE.sub("", symbol.strip().split("(", 1)[0]).strip()
+
+
+def _finding_names_symbol(func: str, entry: dict) -> bool:
+    leaf = _symbol_leaf(func)
+    return bool(leaf) and leaf in {_symbol_leaf(s) for s in _manifest_symbols(entry)}
+
+
 def _findings_only_bug(manifest: dict, bug: dict) -> bool:
     """A manifest-level ``findings_only`` flags every bug it does not flag itself."""
     return bool(bug.get("findings_only", manifest.get("findings_only")))
@@ -2984,7 +3001,7 @@ def score_findings_ground_truth(
         for name, file, func in items:
             hit = next((
                 b for b in real
-                if func and func in _manifest_symbols(b)
+                if _finding_names_symbol(func, b)
                 and _manifest_file_allows(b, file)
             ), None)
             if hit:
@@ -2992,7 +3009,7 @@ def score_findings_ground_truth(
                 continue
             trap = next((
                 t for t in traps
-                if func and func in _manifest_symbols(t)
+                if _finding_names_symbol(func, t)
                 and _manifest_file_allows(t, file)
             ), None)
             if trap:
@@ -3959,7 +3976,51 @@ def credited_pool_members(members: dict, kind: str) -> dict:
     }
 
 
-def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
+def _finding_covered_by_crash(crash_attr: dict):
+    """Predicate: is this finding cluster the site of one of *cond*'s crashes?
+
+    A finding is "a security issue reported without a sanitizer crash behind
+    it". When the same condition also holds a reportable crash at the same
+    file and function (or line), the finding is that crash's write-up, and
+    counting both credits one defect twice. Crash and finding name the site
+    differently — a stack frame's `ns::fn file.c:12` against a report's
+    `src/file.c` and `fn` — so both reduce to (file basename, symbol leaf)
+    and (file basename, line) before comparing.
+    """
+    sites: dict[str, set[tuple[str, str]]] = {}
+    for cluster in crash_attr.get("clusters", []):
+        first = str(cluster.get("signature") or "").split(" -> ")[0]
+        func, location = (
+            _sf.parse_frame_body(first) if _sf is not None else ("", "")
+        )
+        if not location:
+            continue
+        path, _, line = location.partition(":")
+        base = os.path.basename(path)
+        tokens = {(base, _symbol_leaf(func))} if func else set()
+        line = line.split(":", 1)[0]
+        if line.isdigit():
+            tokens.add((base, line))
+        for cond in cluster.get("conditions", []):
+            sites.setdefault(cond, set()).update(tokens)
+
+    def covered(cluster: dict, cond: str) -> bool:
+        key = cluster.get("key") or []
+        if str(cluster.get("key_kind")) != "loc" or len(key) < 3:
+            return False
+        base = os.path.basename(str(cluster.get("file") or key[1]))
+        own = sites.get(cond, ())
+        return (
+            (base, _symbol_leaf(str(key[2]))) in own
+            or (base, str(cluster.get("line") or "")) in own
+        )
+
+    return covered
+
+
+def attribute_clusters(
+    cluster_json: dict, member_conditions: dict, covered=None,
+) -> dict:
     """Attribute cross-condition clusters to the conditions that hit them.
 
     Deduplication itself is done by `bin/cluster-crashes` / `bin/cluster-findings`
@@ -3971,6 +4032,9 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
                            object emitted by cluster-crashes/-findings.
       member_conditions  — {member-dir-name: condition} written by
                            bin/benchmark when it pooled the dirs.
+      covered            — optional (cluster, condition) predicate; a cluster
+                           it claims is attributed to the condition but not
+                           counted for it (see _finding_covered_by_crash).
 
     A cluster is *novel* to a condition when every member maps to that
     condition. Severity (level / rank / score) is carried straight through
@@ -3981,11 +4045,12 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
                       severity_level, severity_rank, severity_score}],
         "by_condition": {cond: {unique_clusters, novel_clusters,
                                 top_severity_level, top_severity_rank,
-                                medium_plus}},
+                                medium_plus, behind_crash}},
       }
     """
     out_clusters: list[dict] = []
     cond_clusters: dict[str, set] = {}
+    behind: dict[str, set] = {}
     for cl in cluster_json.get("clusters", []):
         if not isinstance(cl, dict):
             continue
@@ -4022,6 +4087,7 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
                 "members": members,
                 "size": len(members),
                 "primitive": cl.get("primitive", "") or cl.get("signature", ""),
+                "signature": str(cl.get("signature") or ""),
                 "severity_level": severity.get("level") or "—",
                 "severity_rank": int(severity.get("rank", 0) or 0),
                 "severity_score": float(severity.get("score", 0) or 0),  # CVSS 4.0 score (0–10)
@@ -4031,6 +4097,9 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
             }
         )
         for cond in conds:
+            if covered is not None and covered(cl, cond):
+                behind.setdefault(cond, set()).add(cid)
+                continue
             cond_clusters.setdefault(cond, set()).add(cid)
 
     def _cond_cluster_severity(c: dict, cond: str) -> tuple[int, int, str]:
@@ -4085,6 +4154,7 @@ def attribute_clusters(cluster_json: dict, member_conditions: dict) -> dict:
             "top_severity_level": top[2],
             "top_severity_rank": top[0],
             "medium_plus": sum(1 for s in cond_sevs if s[0] >= 2),
+            "behind_crash": len(behind.get(cond, ())),
             "class_histogram": class_histogram,
         }
     return {"clusters": out_clusters, "by_condition": by_condition}
@@ -4336,7 +4406,7 @@ def _render_efficiency(conditions: list[dict], backend: str) -> list[str]:
         lines.append(
             "| {cond} | {occ} | {blocked} | {review} | {filed} | {confirmed} "
             "| {admitted} | {exec_fail} | {dup} | {seat} | {dollar} |".format(
-                cond=_condition_cell(c["condition"], backend),
+                cond=_condition_cell(c["condition"], backend, held=bool(c.get("held"))),
                 occ=occupancy,
                 blocked=_fmt_fraction(c.get("housekeeping_blocked_fraction_median")),
                 review=_fmt_seconds(c.get("review_seconds_per_artifact_median")),
@@ -4619,6 +4689,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
     finding_attr = attribute_clusters(
         _load("clusters-findings.json") if include_pool else {},
         credited_pool_members(members, "findings"),
+        covered=_finding_covered_by_crash(crash_attr),
     )
     # The rejected side is clustered by the same tools (bin/benchmark points
     # them at pool/<kind>-rejected), so "unique cut" is counted like "unique
@@ -4937,6 +5008,10 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 ),
                 "unique_finding_classes": finding_classes_by_cond.get(cond, 0),
                 "medium_plus_findings": fb.get("medium_plus", 0),
+                "held": cond == "model-direct" and bool(run_meta.get("model_direct_hold")),
+                # Finding clusters this condition also holds a reportable
+                # crash for; counted once, under the crash.
+                "finding_clusters_behind_crashes": fb.get("behind_crash", 0),
                 "unique_rejected_crash_clusters": unique_rejected_crashes,
                 "rejected_crash_clusters_upper_bound": rejected_crashes_upper_bound,
                 "unique_rejected_finding_clusters": unique_rejected_findings,
@@ -5415,7 +5490,7 @@ def _severity_cell(level: str | None) -> str:
 
 
 def _condition_label(condition: str, backend: str,
-                     model: str = "") -> str:
+                     model: str = "", held: bool = False) -> str:
     """Display label for a benchmark condition in the rendered page.
 
     Internal condition tokens stay stable — `harness` and `model-direct`
@@ -5429,7 +5504,10 @@ def _condition_label(condition: str, backend: str,
         return "tokenfuzz"
     if condition == "model-direct":
         name = (model or "").strip() or (backend or "").strip()
-        return f"{name}-direct" if name and name != "?" else "model-direct"
+        label = f"{name}-direct" if name and name != "?" else "model-direct"
+        # A held control was re-entered to the wall (`--hold-direct`): a
+        # different experiment from one launch, so it never shares a label.
+        return f"{label}-held" if held else label
     return condition
 
 
@@ -5467,9 +5545,11 @@ def _tokenfuzz_cell(tokenfuzz_sha: object, *, stacked: bool = False) -> str:
     return f"`tokenfuzz`{_hash_suffix(tokenfuzz_sha, stacked=stacked)}"
 
 
-def _condition_cell(condition: str, backend: str, model: str = "") -> str:
+def _condition_cell(
+    condition: str, backend: str, model: str = "", held: bool = False,
+) -> str:
     """Condition table cell label."""
-    return f"`{_condition_label(condition, backend, model)}`"
+    return f"`{_condition_label(condition, backend, model, held)}`"
 
 
 def _fmt_tokens(value: object) -> str:
@@ -5992,7 +6072,7 @@ def render_section(report: dict) -> str:
         lines.append(
             "| {cond} | {rep} | {wall} | {worker_wall} | {rfi} | {uf} "
             "| {rcr} | {uc} | {sev} |".format(
-                cond=_condition_cell(c["condition"], backend),
+                cond=_condition_cell(c["condition"], backend, held=bool(c.get("held"))),
                 rep=_replicates_cell(c),
                 wall=_wall_cell(c),
                 worker_wall=_fmt_hours(c.get("worker_wall_median")),
@@ -6571,7 +6651,9 @@ def crosstab(bench_root: Path) -> str:
             return ""
         backend = str(entry["run"].get("backend", ""))
         model = str(entry["run"].get("model", ""))
-        return _condition_label(str(c.get("condition", "?")), backend, model)
+        return _condition_label(
+            str(c.get("condition", "?")), backend, model, bool(c.get("held")),
+        )
 
     flat_rows.sort(key=lambda e: (
         str(e["run"].get("target", "")),
@@ -6625,7 +6707,7 @@ def crosstab(bench_root: Path) -> str:
                 bk=backend_cell,
                 rid=run_cell,
                 tgt=target_cell,
-                cond=_condition_cell(cond, backend, model),
+                cond=_condition_cell(cond, backend, model, bool(c.get("held"))),
                 wall=_wall_cell(c),
                 reps=_replicates_cell(c),
                 # Clustering only runs at pooled finalization, so a provisional

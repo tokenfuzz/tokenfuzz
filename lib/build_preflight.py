@@ -274,10 +274,12 @@ def _pinned_route_problems(
         if not isinstance(recorded, dict):
             continue
         try:
+            # Resolve both: a cell reaches the target through its facade's
+            # `targets` symlink, so the same binary has two spellings.
             pinned_path = Path(
                 resolver.resolve_path(str(recorded.get("path", "")))
-            ).absolute()
-            current_path = routes[key][1].absolute()
+            ).resolve()
+            current_path = routes[key][1].resolve()
         except ValueError:
             problems.append(f"{label} route is unreadable")
             continue

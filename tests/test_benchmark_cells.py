@@ -629,12 +629,12 @@ raise SystemExit(23)
 
                 extraction = (
                     mock.patch.object(
-                        benchmark_runner.llm_usage, "extract_usage",
+                        benchmark_runner.llm_usage, "extract_usage_from_text",
                         side_effect=extracted,
                     )
                     if isinstance(extracted, BaseException)
                     else mock.patch.object(
-                        benchmark_runner.llm_usage, "extract_usage",
+                        benchmark_runner.llm_usage, "extract_usage_from_text",
                         return_value=extracted,
                     )
                 )
@@ -660,18 +660,66 @@ raise SystemExit(23)
                         0,
                     )
 
+                # The session's own slice of the raw log, not a wrapper process.
                 extract.assert_called_once_with(
-                    str(cell / "backend.raw.log"),
-                    str(cell / "prompt.txt"),
-                    backend="codex",
+                    '{"type":"turn.completed"}\n', prompt_text="prompt", backend="codex",
                 )
                 row = json.loads(
                     (cell / "logs" / "index.jsonl").read_text(encoding="utf-8"),
                 )
                 self.assertEqual(row["resolved_effort"], "high")
                 self.assertEqual(row["usage_complete"], name == "measured")
+                self.assertEqual(row["reentries"], 0)
                 if name == "measured":
                     self.assertEqual(row["tokens"]["input"], 7)
+
+    def test_a_held_direct_cell_is_re_entered_until_the_wall(self) -> None:
+        cell = self.work / "held"
+        launches: list[tuple[str, int]] = []
+
+        def finish(_backend, prompt, wall, raw, **_kwargs):
+            launches.append((prompt, wall))
+            (cell / "findings" / f"FIND-{len(launches)}").mkdir(parents=True)
+            with open(raw, "a", encoding="utf-8") as stream:
+                stream.write('{"type":"turn.completed"}\n')
+            return 0
+
+        usage = {"tokens": {"input": 5, "cached_input": 0, "cache_creation": 0, "output": 2},
+                 "probe": {}, "estimated": False}
+        clock = iter([0, 0, 10, 10, 20, 20, 30, 30, 40])
+        with mock.patch.object(
+            benchmark_runner.benchmark_model_direct_render, "render", return_value="prompt",
+        ), mock.patch.object(
+            benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=finish,
+        ), mock.patch.object(
+            benchmark_runner.llm_usage, "extract_usage_from_text", return_value=usage,
+        ), mock.patch.object(
+            benchmark_runner, "_reap_cell_processes",
+        ), mock.patch.object(
+            benchmark_runner, "_target_artifact_guard",
+            lambda *_args: contextlib.nullcontext(),
+        ), mock.patch.object(
+            benchmark_runner, "REENTRY_FLOOR_SECONDS", 15,
+        ), mock.patch.object(
+            benchmark_runner.time, "monotonic", side_effect=lambda: next(clock),
+        ):
+            self.assertEqual(
+                benchmark_runner.run_model_direct(
+                    cell, self.target, "codex", "", 40, hold=True,
+                ),
+                0,
+            )
+        # Launched at t=0 (40s left), re-entered at t=10 and t=20; at t=30 only
+        # 10s remain, under the floor, so the cell ends there.
+        self.assertEqual([wall for _prompt, wall in launches], [40, 30, 20])
+        self.assertEqual(launches[0][0], "prompt")
+        self.assertIn("re-entry 1", launches[1][0])
+        self.assertIn("FIND-1", launches[1][0])
+        self.assertTrue(launches[1][0].endswith("prompt"))
+        row = json.loads((cell / "logs" / "index.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(row["reentries"], 2)
+        self.assertEqual(row["tokens"]["input"], 15)
+        self.assertTrue(row["usage_complete"])
 
     def test_agent_flags_harness_facade_and_cleanup(self) -> None:
         unlimited = llm_invoke.agent_flags("claude", max_turns=0, add_dirs="/tmp")

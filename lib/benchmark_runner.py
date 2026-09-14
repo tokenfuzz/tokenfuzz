@@ -776,6 +776,10 @@ def parser() -> argparse.ArgumentParser:
         help="comma-separated conditions to run: model-direct, harness, or both",
     )
     result.add_argument(
+        "--hold-direct", action="store_true",
+        help="re-enter a direct session that ends with more than a minute of its budget left, until the wall; the row is labelled <model>-direct-held",
+    )
+    result.add_argument(
         "--bench-root", default="benchmark",
         help="shared benchmark artifact root; a relative path lives under output/ in the repository root",
     )
@@ -1481,6 +1485,58 @@ def _reap_cell_processes(marker: str, cell_dir: Path) -> None:
         )
 
 
+#: A held direct session is re-entered only while this much of its budget
+#: remains: a launch costs tens of seconds, and a session shorter than that
+#: does nothing but relaunch.
+REENTRY_FLOOR_SECONDS = 60
+
+
+def _reentry_prompt(prompt: str, cell_dir: Path, reentries: int, remaining: int) -> str:
+    """The original prompt under a header saying the session was re-entered."""
+    from prompt_render import render_template  # type: ignore
+
+    filed = sorted(
+        child.name
+        for kind in ("findings", "crashes")
+        for child in (cell_dir / kind).iterdir()
+        if child.is_dir() and not child.name.startswith(".")
+    )
+    header = render_template("benchmark_model_direct_reentry.md.j2", {
+        "reentry": str(reentries),
+        "remaining": f"{max(1, remaining // 60)} minute(s)",
+        "filed": ", ".join(filed) or "none yet",
+    })
+    return header + "\n" + prompt
+
+
+def _segment_usage(raw: Path, offset: int, prompt: str, backend: str) -> dict:
+    """Usage row for the part of *raw* one session appended."""
+    try:
+        text = raw.read_text(encoding="utf-8", errors="replace")[offset:]
+        return llm_usage.extract_usage_from_text(text, prompt_text=prompt, backend=backend)
+    except (Exception, SystemExit):  # noqa: BLE001 - usage accounting is fail-open
+        return {}
+
+
+def _sum_usage_rows(rows: list[dict]) -> dict:
+    """One usage row for a cell whose sessions each produced their own.
+
+    Numbers add up (tokens, cost); everything else is taken from the last
+    session, which is also the one whose exit status the cell reports.
+    """
+    total: dict = {}
+    for row in rows:
+        for key, value in row.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                if isinstance(value, dict) and isinstance(total.get(key), dict):
+                    total[key] = _sum_usage_rows([total[key], value])
+                else:
+                    total[key] = value
+            else:
+                total[key] = total.get(key, 0) + value
+    return total
+
+
 def run_model_direct(
     cell_dir: Path,
     target: Path,
@@ -1488,6 +1544,7 @@ def run_model_direct(
     model: str,
     wall: int,
     config_snapshot: Path | None = None,
+    hold: bool = False,
 ) -> int:
     for name in ("crashes", "findings", "logs"):
         (cell_dir / name).mkdir(parents=True, exist_ok=True)
@@ -1507,30 +1564,50 @@ def run_model_direct(
     # Marker goes into the child's environment only, never this process's, so
     # the reap can never turn on the orchestrator itself.
     reap_marker = process_tree.new_marker()
+    started = time.monotonic()
+    reentries = 0
+    usage_rows: list[dict] = []
     with _target_artifact_guard(target, cell_dir):
         try:
-            rc = llm_invoke.run_agent_prompt(
-                backend, prompt, wall, raw, model=model, max_turns=0,
-                add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
-                watchdog_marker_dir=cell_dir,
-                # The CLI's default delegation stays on: the control is the
-                # product as a user gets it, and any subagent spend lands in
-                # the same session's usage. What it actually did is recorded
-                # as `delegation_events` on the cell's usage row.
-                extra_env={process_tree.REAP_MARKER_VAR: reap_marker},
-            )
+            while True:
+                remaining = (
+                    max(1, wall - int(time.monotonic() - started)) if wall > 0 else wall
+                )
+                session_prompt = (
+                    _reentry_prompt(prompt, cell_dir, reentries, remaining)
+                    if reentries else prompt
+                )
+                offset = raw.stat().st_size if raw.is_file() else 0
+                rc = llm_invoke.run_agent_prompt(
+                    backend, session_prompt, remaining, raw, model=model, max_turns=0,
+                    add_dirs=f"{cell_dir},{target}", cwd=cell_dir,
+                    watchdog_marker_dir=cell_dir,
+                    # The CLI's default delegation stays on: the control is the
+                    # product as a user gets it, and any subagent spend lands in
+                    # the same session's usage. What it actually did is recorded
+                    # as `delegation_events` on the cell's usage row.
+                    extra_env={process_tree.REAP_MARKER_VAR: reap_marker},
+                )
+                usage_rows.append(_segment_usage(raw, offset, session_prompt, backend))
+                left = wall - int(time.monotonic() - started)
+                # A held control is re-entered only after a normal exit: a
+                # provider cut or a crash of the CLI is an outcome to record,
+                # not one to paper over with another launch.
+                if not (hold and rc == 0 and wall > 0 and left > REENTRY_FLOOR_SECONDS):
+                    break
+                reentries += 1
+                log(
+                    f"model-direct session ended with {left}s left; "
+                    f"re-entering (re-entry {reentries})"
+                )
         finally:
             if previous_logdir is None:
                 os.environ.pop("LOGDIR", None)
             else:
                 os.environ["LOGDIR"] = previous_logdir
             _reap_cell_processes(reap_marker, cell_dir)
-    try:
-        usage_event = llm_usage.extract_usage(
-            str(raw), str(cell_dir / "prompt.txt"), backend=backend,
-        )
-    except (Exception, SystemExit):  # noqa: BLE001 - usage accounting is fail-open
-        usage_event = {}
+    usage_event = _sum_usage_rows(usage_rows)
+    usage_event["reentries"] = reentries
     usage_event["resolved_effort"] = llm_invoke.default_effort(backend)
     usage_event["usage_complete"] = llm_usage.usage_is_complete(usage_event, rc)
     (cell_dir / "logs" / "index.jsonl").write_text(
@@ -3324,6 +3401,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             "finalize_wall": getattr(args, "finalize_wall", 0),
             "finalize_workers": getattr(args, "finalize_workers", 4),
             "model_direct_agents": 1, "conditions": conditions,
+            "model_direct_hold": bool(getattr(args, "hold_direct", False)),
             "target_sha": target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target),
             "tokenfuzz_sha": _git_rev(SCRIPT_ROOT), "harness_sha": _git_rev(SCRIPT_ROOT, True),
             "finding_confirmation": metrics.FINDING_CONFIRMATION_VERSION,
@@ -3557,6 +3635,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     rc = run_model_direct(
                         cell_dir, target_root, args.backend, model,
                         args.budget_wall, config_snapshot,
+                        hold=bool(getattr(args, "hold_direct", False)),
                     )
                 else:
                     log(f"Cell {name} live log: {(cell_dir / 'audit.log').resolve()}")

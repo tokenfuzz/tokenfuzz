@@ -1731,6 +1731,36 @@ class BenchmarkMetricsTests(unittest.TestCase):
             attributed["model-direct"]["class_histogram"], {"auth": 1},
         )
 
+    def test_a_finding_behind_a_conditions_own_crash_counts_once(self) -> None:
+        crashes = benchmark.attribute_clusters(
+            {"clusters": [{
+                "id": "CL-write", "primitive": "SEGV",
+                "signature": "ns::app_write src/app.cpp:219 -> ns::dispatch src/app.cpp:246",
+                "members": ["CRASH-h"],
+            }]},
+            {"CRASH-h": "harness"},
+        )
+        findings = benchmark.attribute_clusters(
+            {"clusters": [
+                {"id": "FCL-write", "class": "arbitrary-write", "key_kind": "loc",
+                 "key": ["memory-safety", "src/app.cpp", "app_write"],
+                 "file": "src/app.cpp", "line": "219",
+                 "members": ["FIND-h", "FIND-d"]},
+                {"id": "FCL-other", "class": "null-deref", "key_kind": "loc",
+                 "key": ["memory-safety", "src/app.cpp", "app_null"],
+                 "file": "src/app.cpp", "line": "227", "members": ["FIND-h2"]},
+            ]},
+            {"FIND-h": "harness", "FIND-d": "model-direct", "FIND-h2": "harness"},
+            covered=benchmark._finding_covered_by_crash(crashes),
+        )["by_condition"]
+        # The harness holds the crash: its write-up is that crash, not a
+        # second issue. The direct condition has no crash there, so its
+        # finding is its only evidence and still counts.
+        self.assertEqual(findings["harness"]["unique_clusters"], 1)
+        self.assertEqual(findings["harness"]["behind_crash"], 1)
+        self.assertEqual(findings["model-direct"]["unique_clusters"], 1)
+        self.assertEqual(findings["model-direct"]["behind_crash"], 0)
+
     def test_withheld_member_cannot_supply_cluster_severity(self) -> None:
         for survivor_scores in ({"FIND-kept": {"level": "Low", "rank": 1, "score": 2.5}}, {}):
             with self.subTest(scored=bool(survivor_scores)):

@@ -297,6 +297,9 @@ def render_validator_prompt(args, facts: dict) -> str:
     return prompt_render.render_template(template, {
         "target_path": str(Path(args.target_path).resolve()),
         "candidate_json": json.dumps(facts, sort_keys=True),
+        # One home for the exclusion list: the reviewer reads the same
+        # contract the author was held to, so neither side can drift.
+        "bug_contract": prompt_render.render_template("audit_bug_contract.md.j2", {}),
         "attacker_controls": os.environ.get("TARGET_ATTACKER_CONTROLS_CSV", "bytes"),
         "product_boundary_block": product_boundary_block,
         "reviewer_intro": reviewer_intro,

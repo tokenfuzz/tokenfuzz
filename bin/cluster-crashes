@@ -32,7 +32,9 @@ The tool is read-mostly for the report bundles: it only edits the
 the sanitizer.txt, or the harness, and it is idempotent.
 
 The rendered Root signature column is the representative crash's exact
-top-three dedup frame chain (function plus source location) when available.
+top-three dedup frame chain (function plus source location) when available;
+for a lifetime bug it is the "freed by" chain with the use site appended as
+`(use: ...)`, since the free is the defect and the use only where it showed.
 The internal ClusterFuzz crash state remains function-oriented for duplicate
 matching, but the index should show the source lines that explain why
 similar-looking crashes stayed separate.
@@ -533,6 +535,30 @@ def _extract_strategy(report_text: str) -> str:
     return ""
 
 
+_FREED_BY_RE = re.compile(r"^.*\bfreed by thread .*here:\s*$", re.MULTILINE)
+_LIFETIME_SECTION_END_RE = re.compile(
+    r"^\s*(?:previously allocated by|SUMMARY:|==\d+==)", re.MULTILINE,
+)
+
+
+def _lifetime_root_stack(diagnostic: str) -> str:
+    """The `freed by` stack of a lifetime diagnostic, or "" when it has none.
+
+    A use-after-free or double-free trips wherever the dangling owner is next
+    touched, but its defect lives where the object was freed without clearing
+    that owner: one such free surfaces as a read in one handler, a second
+    free in another, and a third at teardown. Keying those on the free stack
+    makes them one cluster, as they are one fix.
+    """
+    match = _FREED_BY_RE.search(diagnostic)
+    if match is None:
+        return ""
+    tail = diagnostic[match.end():]
+    end = _LIFETIME_SECTION_END_RE.search(tail)
+    section = tail[:end.start()] if end else tail
+    return section if stack_frames.interesting_frames(section, want=1) else ""
+
+
 def _signature(crash_dir: Path) -> dict:
     asan = _find_sanitizer(crash_dir)
     asan_text = symbol_names.demangle_text(_read_text(asan)) if asan else ""
@@ -548,9 +574,14 @@ def _signature(crash_dir: Path) -> dict:
     if not stack_frames.interesting_frames(diagnostic, want=1):
         diagnostic = asan_text
 
-    frames = _extract_top_frames(diagnostic)
+    use_frames = _extract_top_frames(diagnostic)
+    root_text = _lifetime_root_stack(diagnostic)
+    # Lifetime bug: the free stack is the defect and keys the state; the use
+    # site stays in the display. The headline (primitive) is read as printed.
+    state_text = root_text or diagnostic
+    frames = _extract_top_frames(root_text) if root_text else use_frames
     top_func = frames[0][0] if frames else ""
-    inline_group = stack_frames.leading_inline_group(diagnostic)
+    inline_group = stack_frames.leading_inline_group(state_text)
     # Innermost first, as printed: the order is what tells an expanded
     # rendering's own leaf from an outer name it shares with a sibling bug.
     top_funcs: list[str] = []
@@ -560,12 +591,14 @@ def _signature(crash_dir: Path) -> dict:
     if not top_funcs and top_func:
         top_funcs = [top_func]
     top_chain = " -> ".join(_frame_display(frame) for frame in frames[:3])
+    if root_text and use_frames:
+        top_chain += f" (use: {_frame_display(use_frames[0])})"
     top_frame_set = _frame_set_signature(frames, want=3)
-    cf_state = _cf_crash_state(diagnostic)
+    cf_state = _cf_crash_state(state_text)
     # Preserve the same three logical frames when symbolization expands one
     # faulting instruction into several inline names. Pairwise comparison
     # supplies the common name and compares the next two callers.
-    cf_tail_state = _cf_crash_state(diagnostic, skip=len(inline_group), want=2)
+    cf_tail_state = _cf_crash_state(state_text, skip=len(inline_group), want=2)
     if not cf_state:
         cf_state = _fallback_crash_state(asan_text, report_text, crash_dir.name)
     primitive = _extract_primitive(diagnostic)
@@ -591,6 +624,9 @@ def _signature(crash_dir: Path) -> dict:
         "id": crash_dir.name,
         "path": str(crash_dir),
         "report": str(report) if report else "",
+        # Keyed on the free stack: a use-after-free and a double-free that
+        # share it are one defect, whatever primitive each tripped.
+        "lifetime_root": bool(root_text),
         "top_func": top_func,
         "top_funcs": top_funcs,
         "top_chain": top_chain,
@@ -654,8 +690,10 @@ def _same_cf_cluster(a: dict, b: dict) -> bool:
     if common_leaf:
         state_a = common_leaf + "\n" + a.get("cf_tail_state", "")
         state_b = common_leaf + "\n" + b.get("cf_tail_state", "")
+    same_free_site = bool(a.get("lifetime_root") and b.get("lifetime_root"))
     return (
-        _cf_is_similar(a.get("primitive", ""), b.get("primitive", ""))
+        (same_free_site
+         or _cf_is_similar(a.get("primitive", ""), b.get("primitive", "")))
         and _cf_is_similar(state_a, state_b)
     )
 

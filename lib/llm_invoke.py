@@ -1275,6 +1275,15 @@ def run_agent_prompt(
             pass
         return 127
     environment = os.environ.copy()
+    # A target checked out inside this repository (the shipped samples) must
+    # not expose the harness's own history to the agent it is auditing: the
+    # commit log and committed answer keys describe the planted bugs. Git stops
+    # its upward discovery at the ceiling, so such a tree is "not a repository";
+    # a target that is its own clone finds its .git first and is unaffected.
+    environment.setdefault(
+        "GIT_CEILING_DIRECTORIES",
+        os.path.realpath(Path(__file__).resolve().parent.parent / "targets"),
+    )
     environment.update(invocation_env(
         backend,
         model,

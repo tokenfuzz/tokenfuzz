@@ -41,10 +41,14 @@ source/object fallback instead of all collapsing into an empty signature.
    anonymous-namespace markers, ABI suffixes, and unstable addresses are
    normalized.
 2. **Classify the primitive and access direction.** Incompatible sanitizer
-   primitives do not merge.
+   primitives do not merge, with one exception: a use-after-free and a
+   double-free that share a "freed by" stack are one defect and merge.
 3. **Build the state** from the top three interesting frames of the faulting
-   stack, continuing into the "freed by" stack when the faulting stack is
-   short. The "previously allocated by" history is never part of the state.
+   stack. For a lifetime bug — a diagnostic carrying a "freed by" stack — the
+   state comes from that stack instead: the defect is the free that left an
+   owner dangling, and the later read or second free is only where it was
+   noticed. The index then shows the free site followed by `(use: …)`. The
+   "previously allocated by" history is never part of the state.
 4. **Require the same faulting leaf**, allowing the inline-equivalent case
    where one symbolizer expands an instruction and another prints only its
    outer function. This prevents a shared dispatcher and callers from fusing
