@@ -3440,15 +3440,20 @@ def _pinned_gate_versions(previous: dict | None) -> dict[str, str]:
     therefore records the versions in effect when it started and keeps them for
     every later cell and finalization of that same run.
     """
-    recorded = (previous or {}).get("gate_versions")
-    if isinstance(recorded, dict) and recorded.get("trigger") and recorded.get("find_quality"):
-        return {
-            "trigger": str(recorded["trigger"]),
-            "find_quality": str(recorded["find_quality"]),
-        }
-    return {
+    live = {
         "trigger": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+        "trigger_resolution": triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
         "find_quality": report_identity.FIND_QUALITY_DECISION_VERSION,
+    }
+    recorded = (previous or {}).get("gate_versions")
+    if not isinstance(recorded, dict):
+        return live
+    # A run recorded before a key existed keeps the versions it did record and
+    # takes the live value for the rest: dropping the whole pin would strand
+    # every vote already cast under it.
+    return {
+        name: str(recorded.get(name) or fallback)
+        for name, fallback in live.items()
     }
 
 
@@ -3463,6 +3468,8 @@ def _apply_gate_pin(versions: dict[str, str] | None) -> None:
     """
     for key, value in (
         ("GATE_VERSION_TRIGGER", (versions or {}).get("trigger", "")),
+        ("GATE_VERSION_TRIGGER_RESOLUTION",
+         (versions or {}).get("trigger_resolution", "")),
         ("GATE_VERSION_FIND_QUALITY", (versions or {}).get("find_quality", "")),
     ):
         if value:

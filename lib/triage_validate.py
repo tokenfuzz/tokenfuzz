@@ -31,6 +31,16 @@ def trigger_gate_decision_version() -> str:
     return os.environ.get("GATE_VERSION_TRIGGER") or TRIGGER_GATE_DECISION_VERSION
 
 
+def trigger_resolution_decision_version() -> str:
+    """The resolution version this run adjudicates under; pinned like the
+    trigger version, because a bump to either one strands the votes a run has
+    already cast."""
+    return (
+        os.environ.get("GATE_VERSION_TRIGGER_RESOLUTION")
+        or TRIGGER_RESOLUTION_DECISION_VERSION
+    )
+
+
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.

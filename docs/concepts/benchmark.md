@@ -173,13 +173,17 @@ a review batch that returns no keyed output leaves its ids unadjudicated even
 on an unlimited budget. Cached receipts make each repeat pay only for what is
 still missing.
 
-A run records the gate prompt versions in effect when it started and
-adjudicates every cell and finalization under them. A bump landing mid-run
-would otherwise split one cell's votes across two versions: the first-cast
-vote reads stale to the post-cell drain, the finding can never be finalized
-from its cached votes, and the whole cell publishes as an unjudged remainder.
-`--regenerate` deliberately does not pin, because re-scoring exists to apply
-current policy to artifacts already on disk.
+A run records the three gate prompt versions in effect when it started — the
+trigger gate, its resolver, and the find-quality gate — and adjudicates every
+cell, crash triage, and finalization under them. A bump to any one landing
+mid-run would otherwise split a cell's votes across two versions: the
+first-cast vote reads stale to the post-cell drain, neither the finding nor
+the crash can be finalized from its cached votes, and the whole cell publishes
+as an unjudged remainder. A run recorded before one of the keys existed keeps
+what it did record and takes the live value for the rest, so adding a key stands
+none of its votes down. `--regenerate` deliberately does not pin, because
+re-scoring exists to apply current policy to artifacts already on disk; it is
+the way to settle a run whose verdicts predate a rule you have since changed.
 
 ### What happens to anything unsettled
 

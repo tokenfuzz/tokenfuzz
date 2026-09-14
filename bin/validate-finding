@@ -184,7 +184,7 @@ def stamp_trigger_vote(
     )
     stamped.update({
         "decision_version": (
-            triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION
+            triage_validate.trigger_resolution_decision_version()
             if args.resolve_trigger
             else triage_validate.trigger_gate_decision_version()
         ),

@@ -924,7 +924,7 @@ def _current_trigger_vote(
     if (
         version in {
             triage_validate.trigger_gate_decision_version(),
-            triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
+            triage_validate.trigger_resolution_decision_version(),
         }
         # Harvest is intentionally environment-free: it validates that the
         # current scoped schema recorded controls, while live triage is the
@@ -933,7 +933,7 @@ def _current_trigger_vote(
         and isinstance(payload.get("attacker_controls"), list)
         and vote in {"Promote", "Reject", "Uncertain"}
     ):
-        if version == triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION:
+        if version == triage_validate.trigger_resolution_decision_version():
             prior_paths = _trigger_resolution_sources(
                 report_sha1s, directory,
             )

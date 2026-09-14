@@ -1284,29 +1284,41 @@ class FinalizationDrainTests(unittest.TestCase):
 
         live = {
             "trigger": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "trigger_resolution": triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
             "find_quality": report_identity.FIND_QUALITY_DECISION_VERSION,
         }
         self.assertEqual(benchmark_runner._pinned_gate_versions(None), live)
         self.assertEqual(benchmark_runner._pinned_gate_versions({}), live)
-        recorded = {"trigger": "trigger-vOLD", "find_quality": "qOLD"}
+        recorded = {
+            "trigger": "trigger-vOLD",
+            "trigger_resolution": "resolution-vOLD",
+            "find_quality": "qOLD",
+        }
         self.assertEqual(
             benchmark_runner._pinned_gate_versions({"gate_versions": recorded}), recorded,
         )
-        # A half-written record cannot pin half a policy.
+        # A record written before a key existed keeps what it pinned and takes
+        # the live value for the rest; dropping the whole pin would strand the
+        # votes already cast under it.
         self.assertEqual(
             benchmark_runner._pinned_gate_versions(
                 {"gate_versions": {"trigger": "trigger-vOLD"}},
             ),
-            live,
+            {**live, "trigger": "trigger-vOLD"},
         )
-        environment = {
-            k: v for k, v in os.environ.items()
-            if k not in ("GATE_VERSION_TRIGGER", "GATE_VERSION_FIND_QUALITY")
-        }
+        pinned = (
+            "GATE_VERSION_TRIGGER", "GATE_VERSION_TRIGGER_RESOLUTION",
+            "GATE_VERSION_FIND_QUALITY",
+        )
+        environment = {k: v for k, v in os.environ.items() if k not in pinned}
         with mock.patch.dict(os.environ, environment, clear=True):
             benchmark_runner._apply_gate_pin(recorded)
             self.assertEqual(
                 triage_validate.trigger_gate_decision_version(), "trigger-vOLD",
+            )
+            self.assertEqual(
+                triage_validate.trigger_resolution_decision_version(),
+                "resolution-vOLD",
             )
             self.assertEqual(
                 report_identity.find_quality_decision_version(), "qOLD",
@@ -1315,6 +1327,10 @@ class FinalizationDrainTests(unittest.TestCase):
             benchmark_runner._apply_gate_pin(None)
             self.assertEqual(
                 triage_validate.trigger_gate_decision_version(), live["trigger"],
+            )
+            self.assertEqual(
+                triage_validate.trigger_resolution_decision_version(),
+                live["trigger_resolution"],
             )
             self.assertEqual(
                 report_identity.find_quality_decision_version(), live["find_quality"],

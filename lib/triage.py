@@ -2109,9 +2109,9 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
     version = payload.get("decision_version")
     if version in {
         triage_validate.trigger_gate_decision_version(),
-        triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
+        triage_validate.trigger_resolution_decision_version(),
     }:
-        if version == triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION:
+        if version == triage_validate.trigger_resolution_decision_version():
             if vote_file.name != _TRIGGER_RESOLUTION_NAME:
                 return None
             prior_paths = _trigger_resolution_sources(report, vote_file.parent)
