@@ -1280,10 +1280,6 @@ def run_agent_prompt(
     # commit log and committed answer keys describe the planted bugs. Git stops
     # its upward discovery at the ceiling, so such a tree is "not a repository";
     # a target that is its own clone finds its .git first and is unaffected.
-    environment.setdefault(
-        "GIT_CEILING_DIRECTORIES",
-        os.path.realpath(Path(__file__).resolve().parent.parent / "targets"),
-    )
     environment.update(invocation_env(
         backend,
         model,
@@ -1293,6 +1289,16 @@ def run_agent_prompt(
     ))
     if extra_env:
         environment.update({str(key): str(value) for key, value in extra_env.items()})
+    required_ceiling = os.path.realpath(
+        Path(__file__).resolve().parent.parent / "targets"
+    )
+    ceilings = [
+        item for item in environment.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep)
+        if item
+    ]
+    if required_ceiling not in map(os.path.realpath, ceilings):
+        ceilings.append(required_ceiling)
+    environment["GIT_CEILING_DIRECTORIES"] = os.pathsep.join(ceilings)
     configured_wrappers = str((extra_env or {}).get("AGENT_WRAPPERS_PATH", ""))
     _apply_agent_shell_environment(environment, configured_wrappers)
     if backend == "claude":

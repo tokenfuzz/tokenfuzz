@@ -860,6 +860,25 @@ with tempfile.TemporaryDirectory() as td:
         os.path.realpath(ROOT / "targets"), guarded_env["GIT_CEILING_DIRECTORIES"],
         "agent launch hides the harness's own history from an in-tree target",
     )
+    with mock.patch.object(
+        inv, "backend_bin", return_value="codex",
+    ), mock.patch.object(
+        inv, "_run_agent_process", return_value=0,
+    ) as inherited_ceiling_process:
+        inv.run_agent_prompt(
+            "codex", "prompt", 0, raw, cwd=launch_root,
+            extra_env={"GIT_CEILING_DIRECTORIES": "/operator/ceiling"},
+        )
+    inherited_ceilings = inherited_ceiling_process.call_args.args[4][
+        "GIT_CEILING_DIRECTORIES"
+    ].split(os.pathsep)
+    ok(
+        inherited_ceilings == [
+            "/operator/ceiling", os.path.realpath(ROOT / "targets"),
+        ],
+        "an inherited Git ceiling cannot remove the target-history boundary",
+        repr(inherited_ceilings),
+    )
 
     # A benchmark cell points AGENT_WRAPPERS_PATH at its facade so the agent
     # sees its own repo root. The process guards remain first, followed by the
