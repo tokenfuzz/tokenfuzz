@@ -15,23 +15,28 @@ import sanitizer_run
 from timeout import capture_timeout, run_timeout
 
 
-# Version switches for the standard language runners emitted by lib/languages.py.
+# Startup checks for the standard language runners emitted by lib/languages.py.
+# An interpreter runs an empty program: printing a version proves the binary
+# resolves, while a broken loader (a ts-node whose TypeScript peer it cannot
+# drive, a Python with a wrecked site directory) fails only once a program is
+# actually loaded, and every probe of the audit would then fail the same way.
+# Build tools have no program to run and keep their version switch.
 # Target-owned executables are only required to resolve and be executable: there
 # is no portable, side-effect-free argument that every application must accept.
-_VERSION_ARGS = {
-    "Rscript": ("--version",),
+_STARTUP_ARGS = {
+    "Rscript": ("-e", "invisible(0)"),
     "cargo": ("--version",),
     "go": ("version",),
     "java": ("-version",),
     "kotlinc": ("-version",),
-    "node": ("--version",),
-    "perl": ("--version",),
-    "php": ("--version",),
-    "python": ("--version",),
-    "python3": ("--version",),
-    "ruby": ("--version",),
+    "node": ("-e", "0"),
+    "perl": ("-e", "0"),
+    "php": ("-r", ";"),
+    "python": ("-c", "pass"),
+    "python3": ("-c", "pass"),
+    "ruby": ("-e", "0"),
     "swift": ("--version",),
-    "ts-node": ("--version",),
+    "ts-node": ("-e", "0"),
 }
 
 # Fatal diagnostics the process loader emits before the configured program
@@ -307,7 +312,7 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
         else list(dict.fromkeys(config.sanitizers_enabled or ["asan"]))
     )
     sanitizer_name = sanitizer_names[0]
-    version_args = _VERSION_ARGS.get(Path(raw).name)
+    startup_args = _STARTUP_ARGS.get(Path(raw).name)
     language = languages.for_build_system(getattr(config, "build_system", ""))
     preflight_args = (
         languages.runner_preflight_args(language, config.runner_args)
@@ -323,15 +328,15 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
             environments[name] = runner_environment(config, name)
         return environments[name]
 
-    if version_args:
+    if startup_args:
         completed = run_timeout(
-            [str(binary), *version_args], 10,
+            [str(binary), *startup_args], 10,
             env=environment_for(sanitizer_name),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
         if completed.returncode != 0:
-            command = " ".join((str(binary), *version_args))
+            command = " ".join((str(binary), *startup_args))
             reason = (
                 "timed out after 10s" if completed.returncode == 124
                 else f"exited {completed.returncode}: {_output_summary(completed.stdout)}"

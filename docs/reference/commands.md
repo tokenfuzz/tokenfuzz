@@ -46,6 +46,16 @@ For a Meson-built Python extension with no CLI, setup stages the installed
 package and builds a tiny ASan-linked Python host, then records that proved
 execution route in `[runner]`.
 
+Setup and audit preflight check the configured `[runner].bin` before any model
+budget is spent. A registry interpreter (`node`, `ts-node`, `python3`, `ruby`,
+`perl`, `php`, `Rscript`) runs an empty program, so a loader that starts but
+cannot execute anything fails here rather than in every probe of the audit;
+build tools print their version. A native sanitizer route the host compiler
+cannot build at all (MemorySanitizer has no Darwin runtime) is reported as
+`unsupported by the host toolchain` and skipped without a recipe repair loop;
+`--build` still fails on it, and `bin/benchmark` refuses the target with exit
+code 3.
+
 Useful flags:
 
 | Flag | Meaning |
@@ -433,7 +443,11 @@ bin/benchmark score "$RESULTS" --ground-truth "output/$TARGET/.ground-truth.json
 
 `bin/benchmark score` runs the answer-key scorer over an existing results or
 pool tree and launches nothing; it needs a `.ground-truth.json` manifest, which
-every shipped sample target has.
+every shipped sample target has. A run whose target ships one also gets an
+**Answer key** section in `benchmark-result.md`, beside the headline counts.
+A target whose enabled sanitizer the host compiler cannot build is refused
+before any cell starts, with exit code 3, so a launcher can tell it from a
+build it should fix.
 
 See [Benchmarking](../concepts/benchmark.md) for experiment design,
 resumption, and regeneration.

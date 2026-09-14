@@ -19,6 +19,70 @@ _NATIVE_SANITIZERS = {"ubsan", "msan", "tsan"}
 _ALTERNATE_PREFLIGHT_TIMEOUT_SECONDS = 600
 BENCHMARK_BUILD_PIN_ENV = "_TOKENFUZZ_BENCHMARK_BUILD_PIN"
 
+# The phrase every host-toolchain refusal carries, so a caller can tell "this
+# host cannot build the route" from "the build failed" without parsing prose.
+HOST_UNSUPPORTED = "unsupported by the host toolchain"
+# Harness route name -> the clang/gcc `-fsanitize=` argument that builds it.
+SANITIZER_CC_FLAGS = {
+    "asan": "address",
+    "ubsan": "undefined",
+    "msan": "memory",
+    "tsan": "thread",
+}
+_HOST_SUPPORT_TIMEOUT_SECONDS = 60
+_host_support: dict[tuple[str, str], str] = {}
+
+
+def host_unsupported_sanitizer(config, sanitizer: str) -> str:
+    """Why the host compiler cannot build *sanitizer* for a native target, or "".
+
+    Compiles and links an empty program with `-fsanitize=<name>` under the
+    compiler the generated recipes use (`$CC`, else clang). A refusal is a
+    property of the host — MemorySanitizer has no Darwin runtime — not of the
+    target: no recipe repair can fix it, so callers say so once and skip the
+    route instead of spending a bounded repair loop on it. Cached per compiler
+    and sanitizer for the process.
+    """
+    build_system = str(getattr(config, "build_system", "") or "")
+    if (
+        sanitizer not in SANITIZER_CC_FLAGS
+        or build_system not in target_config.NATIVE_BUILD_SYSTEMS
+    ):
+        return ""
+    compiler = os.environ.get("CC") or "clang"
+    key = (compiler, sanitizer)
+    if key not in _host_support:
+        _host_support[key] = _probe_host_support(compiler, sanitizer)
+    return _host_support[key]
+
+
+def _probe_host_support(compiler: str, sanitizer: str) -> str:
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="sanitizer-support-") as name:
+        source = Path(name) / "probe.c"
+        source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        command = [
+            compiler, f"-fsanitize={SANITIZER_CC_FLAGS[sanitizer]}", str(source),
+            "-o", str(Path(name) / "probe"),
+        ]
+        try:
+            completed = run_timeout(
+                command, _HOST_SUPPORT_TIMEOUT_SECONDS,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+        except OSError as exc:
+            return f"{sanitizer} is {HOST_UNSUPPORTED} ({compiler}: {exc})"
+    if completed.returncode == 0:
+        return ""
+    output = (completed.stdout or b"").decode("utf-8", "replace")
+    detail = next(
+        (line.strip() for line in output.splitlines() if "error" in line.lower()),
+        output.strip().splitlines()[0] if output.strip()
+        else f"{compiler} exited {completed.returncode}",
+    )
+    return f"{sanitizer} is {HOST_UNSUPPORTED} ({detail})"
+
 
 def _refresh_alternates(
     root: Path, target_root: Path, target_slug: str, config, environment: dict,

@@ -17,8 +17,9 @@ from pathlib import Path
 SCRIPT_ROOT = Path(os.environ.get("AUDIT_ROOT", Path(__file__).resolve().parent.parent)).resolve()
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 
-import build_materialize
 import build_lease
+import build_materialize
+import build_preflight
 import cli_help
 import coverage_build
 import fuzz_harness
@@ -1348,6 +1349,15 @@ class Setup:
             build_errors: list[str] = []
             for sanitizer_name in sanitizers:
                 if sanitizer_name not in {"asan", "ubsan", "msan", "tsan"}:
+                    continue
+                unsupported = build_preflight.host_unsupported_sanitizer(
+                    config, sanitizer_name,
+                )
+                if unsupported:
+                    # A host refusal is not a recipe problem: no generated or
+                    # repaired recipe can build a runtime the compiler lacks.
+                    log(f"bootstrap: {unsupported}; not attempting this build here")
+                    build_errors.append(unsupported)
                     continue
                 recipe = target_config.build_recipe_path(
                     self.target_root, sanitizer_name

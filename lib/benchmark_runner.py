@@ -3178,6 +3178,14 @@ def preflight_build(
         # ValueError included: a [runner].bin that escapes the target root is a
         # config the operator has to fix, not a traceback.
         return [str(exc)]
+    # A route this host's compiler cannot build is refused before anything
+    # converges: running setup-target would only spend a repair loop on it.
+    unsupported = [
+        reason for name in build_preflight.enabled_sanitizers(config)
+        if (reason := build_preflight.host_unsupported_sanitizer(config, name))
+    ]
+    if unsupported:
+        return unsupported
     if args.regenerate or pinned is not None:
         # Nothing is converged here. A regeneration replays existing evidence,
         # and a resumed run already has cells measured on the build it pinned —
@@ -3532,6 +3540,15 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         else:
             for reason in blocking:
                 print(f"FATAL: {reason}", file=sys.stderr)
+            if all(build_preflight.HOST_UNSUPPORTED in reason for reason in blocking):
+                # Not a path to fix: this host cannot build the route at all.
+                # A distinct exit code keeps a launcher from retrying it here.
+                print(
+                    f"FATAL: {args.target} needs a host whose compiler builds "
+                    "the routes above; no benchmark cell was launched",
+                    file=sys.stderr,
+                )
+                return 3
             print(
                 f"FATAL: fix the paths above and rerun, or build with "
                 f"`bin/setup-target {args.target} --build`; no benchmark cell "

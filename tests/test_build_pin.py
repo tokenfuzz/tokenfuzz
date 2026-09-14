@@ -1133,5 +1133,65 @@ class PruneOrphanTreeTests(unittest.TestCase):
         self.assertTrue(self.orphan.is_dir())
 
 
+class HostToolchainSupportTests(unittest.TestCase):
+    """A sanitizer the host compiler cannot build is a host fact, not a recipe
+    to repair: name it once and skip the route."""
+
+    def setUp(self) -> None:
+        build_preflight._host_support.clear()
+
+    def tearDown(self) -> None:
+        build_preflight._host_support.clear()
+
+    def test_a_language_target_is_never_probed(self) -> None:
+        config = SimpleNamespace(build_system="npm")
+        with mock.patch.object(build_preflight, "run_timeout") as compile_probe:
+            self.assertEqual("", build_preflight.host_unsupported_sanitizer(config, "asan"))
+        compile_probe.assert_not_called()
+
+    def test_a_compiler_refusal_is_named_once_per_process(self) -> None:
+        config = SimpleNamespace(build_system="cmake")
+        refused = SimpleNamespace(
+            returncode=1,
+            stdout=b"clang: error: unsupported option '-fsanitize=memory' for target 'arm64-apple-darwin'\n",
+        )
+        with mock.patch.dict(os.environ, {"CC": "clang"}), \
+             mock.patch.object(build_preflight, "run_timeout", return_value=refused) as compile_probe:
+            reason = build_preflight.host_unsupported_sanitizer(config, "msan")
+            again = build_preflight.host_unsupported_sanitizer(config, "msan")
+        self.assertIn(build_preflight.HOST_UNSUPPORTED, reason)
+        self.assertIn("unsupported option '-fsanitize=memory'", reason)
+        self.assertTrue(reason.startswith("msan is "))
+        self.assertEqual(reason, again)
+        self.assertEqual(1, compile_probe.call_count)
+        self.assertIn("-fsanitize=memory", compile_probe.call_args.args[0])
+
+    def test_a_supported_sanitizer_is_silent(self) -> None:
+        config = SimpleNamespace(build_system="autotools")
+        built = SimpleNamespace(returncode=0, stdout=b"")
+        with mock.patch.object(build_preflight, "run_timeout", return_value=built):
+            self.assertEqual("", build_preflight.host_unsupported_sanitizer(config, "asan"))
+
+    def test_the_benchmark_refuses_an_unsupported_route_before_converging(self) -> None:
+        args = SimpleNamespace(
+            target="samples/sampleproj", dry_run=False, regenerate=False,
+            backend="codex", agents=None,
+        )
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(benchmark_runner, "_benchmark_config",
+                               return_value=SimpleNamespace(build_system="cmake")), \
+             mock.patch.object(benchmark_runner, "runner_preflight"), \
+             mock.patch.object(benchmark_runner.build_preflight, "enabled_sanitizers",
+                               return_value=["msan"]), \
+             mock.patch.object(benchmark_runner.build_preflight, "host_unsupported_sanitizer",
+                               return_value="msan is unsupported by the host toolchain (clang: no runtime)"), \
+             mock.patch.object(benchmark_runner.build_preflight, "refresh") as refresh:
+            blocking = benchmark_runner.preflight_build(args, Path(directory), "m")
+        self.assertEqual(
+            ["msan is unsupported by the host toolchain (clang: no runtime)"], blocking,
+        )
+        refresh.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

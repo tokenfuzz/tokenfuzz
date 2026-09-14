@@ -171,7 +171,7 @@ without changing persistent policy.
 | --- | --- | --- |
 | `asan` | Native memory-safety work; the default. | Moderate runtime and memory overhead. |
 | `ubsan` | Undefined-behavior classes relevant to the target, such as bounds, vptr, object size, or shifts. | Mature projects may intentionally use patterns that need triage or suppressions. |
-| `msan` | A self-contained native library whose dependencies can all be instrumented. | Uninstrumented dependencies create noise; browser-scale use is usually impractical. No Darwin runtime exists. |
+| `msan` | A self-contained native library whose dependencies can all be instrumented. | Uninstrumented dependencies create noise; browser-scale use is usually impractical. No Darwin runtime exists: on macOS the route is reported as unsupported by the host toolchain and a benchmark of an MSan-only target refuses to start. |
 | `tsan` | Native concurrency work with a maintained suppression policy. | High overhead and frequent benign reports. |
 | `race` | A Go runner or binary built with `-race`. | Routes through `[runner]`; there is no `race_bin`, `race_lib`, or suppression key. |
 

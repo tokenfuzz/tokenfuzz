@@ -457,6 +457,17 @@ class RunnerPreflightTests(unittest.TestCase):
                  "python3", "ruby", "swift", "ts-node"},
                 checked,
             )
+            # An interpreter proves its loader by running an empty program,
+            # not by printing a version: a ts-node that cannot drive its
+            # TypeScript peer still answers --version and then fails every
+            # probe of the audit.
+            programs = {
+                Path(call.args[0][0]).name: tuple(call.args[0][1:])
+                for call in launched.call_args_list
+            }
+            for interpreter in ("Rscript", "node", "perl", "php", "python3", "ruby", "ts-node"):
+                self.assertNotIn("--version", programs[interpreter], interpreter)
+                self.assertEqual(2, len(programs[interpreter]), interpreter)
 
     def test_audit_and_benchmark_call_shared_preflight_before_work(self):
         events = []
