@@ -1787,6 +1787,30 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertTrue(covered(finding, "harness"))
         self.assertFalse(covered(finding, "model-direct"))
 
+    def test_a_source_write_up_of_a_crash_is_still_that_crash(self) -> None:
+        # A report that explains the defect in source terms embeds no
+        # sanitizer stack, so the fault-stack match alone cannot see it. Its
+        # site still names the crash, and counting both would credit one
+        # defect to a condition twice.
+        crashes = benchmark.attribute_clusters(
+            {"clusters": [{
+                "id": "CL-df", "primitive": "double-free",
+                "signature": (
+                    "handle_push chtio.c:85 -> dispatch chtio.c:146 "
+                    "(use: cht_read chtio.c:194)"
+                ),
+                "members": ["CRASH-h"],
+            }]},
+            {"CRASH-h": "harness"},
+        )
+        covered = benchmark._finding_covered_by_crash(crashes)
+        finding = {
+            "key_kind": "loc", "key": ["memory-safety", "src/chtio.c", "85"],
+            "file": "src/chtio.c", "line": "85", "crash_state": [],
+        }
+        self.assertTrue(covered(finding, "harness"))
+        self.assertFalse(covered(finding, "model-direct"))
+
     def test_withheld_member_cannot_supply_cluster_severity(self) -> None:
         for survivor_scores in ({"FIND-kept": {"level": "Low", "rank": 1, "score": 2.5}}, {}):
             with self.subTest(scored=bool(survivor_scores)):

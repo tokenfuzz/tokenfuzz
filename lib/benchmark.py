@@ -4064,15 +4064,37 @@ def credited_pool_members(members: dict, kind: str) -> dict:
 
 
 def _finding_covered_by_crash(crash_attr: dict):
-    """Predicate: does this finding embed one of *cond*'s crash signatures?
+    """Predicate: is this finding cluster one of *cond*'s crashes written up?
 
     A finding is "a security issue reported without a sanitizer crash behind
     it". When the same condition also holds a reportable crash at the same
-    file and function, it can still describe a distinct trigger or consequence.
-    Suppress it only when cluster-findings extracted the exact sanitizer stack
-    state that cluster-crashes used. That is direct evidence the finding is the
-    crash's write-up rather than another claim at the same source location.
+    file and function (or line), the finding is that crash's write-up, and
+    counting both credits one defect twice. Crash and finding name the site
+    differently — a stack frame's `ns::fn file.c:12` against a report's
+    `src/file.c` and `fn` — so both reduce to (file basename, symbol leaf)
+    and (file basename, line) before comparing.
+
+    A lifetime cluster's own signature is rooted at the free site, so a
+    write-up of where the stale state was observed names neither. Embedding
+    the exact fault stack of one of that condition's crashes settles it too.
     """
+    sites: dict[str, set[tuple[str, str]]] = {}
+    for cluster in crash_attr.get("clusters", []):
+        first = str(cluster.get("signature") or "").split(" -> ")[0]
+        func, location = (
+            _sf.parse_frame_body(first) if _sf is not None else ("", "")
+        )
+        if not location:
+            continue
+        path, _, line = location.partition(":")
+        base = os.path.basename(path)
+        tokens = {(base, _symbol_leaf(func))} if func else set()
+        line = line.split(":", 1)[0]
+        if line.isdigit():
+            tokens.add((base, line))
+        for cond in cluster.get("conditions", []):
+            sites.setdefault(cond, set()).update(tokens)
+
     states: dict[str, set[tuple[str, ...]]] = {}
     for cluster in crash_attr.get("clusters", []):
         condition_states = cluster.get("condition_crash_signatures") or {}
@@ -4102,7 +4124,17 @@ def _finding_covered_by_crash(crash_attr: dict):
 
     def covered(cluster: dict, cond: str) -> bool:
         state = tuple(str(part).strip() for part in cluster.get("crash_state") or ())
-        return bool(state) and state in states.get(cond, ())
+        if state and state in states.get(cond, ()):
+            return True
+        key = cluster.get("key") or []
+        if str(cluster.get("key_kind")) != "loc" or len(key) < 3:
+            return False
+        base = os.path.basename(str(cluster.get("file") or key[1]))
+        own = sites.get(cond, ())
+        return (
+            (base, _symbol_leaf(str(key[2]))) in own
+            or (base, str(cluster.get("line") or "")) in own
+        )
 
     return covered
 
