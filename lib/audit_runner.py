@@ -4375,6 +4375,17 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
         return 2 if failures == len(states) else 0
 
 
+def bound_target_root(root: Path, target: str, target_path: str = "") -> Path:
+    """The canonical source root an audit binds.
+
+    Canonical, not merely absolute: a benchmark cell reaches the shared target
+    tree through its facade's `targets` symlink, and a build system that
+    records absolute paths (SwiftPM's module cache) treats a second spelling
+    of the same scratch directory as a conflicting build and crashes.
+    """
+    return Path(target_path or root / "targets" / target).expanduser().resolve()
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
@@ -4393,9 +4404,7 @@ def main(argv: list[str] | None = None) -> int:
         args.target if args.target_path
         else target_profile.effective_slug(root, args.target)
     )
-    target_root = Path(
-        args.target_path or root / "targets" / effective_target
-    ).expanduser().absolute()
+    target_root = bound_target_root(root, effective_target, args.target_path)
     if not target_root.is_dir():
         print(f"FATAL: target path does not exist: {target_root}", file=sys.stderr)
         return 1

@@ -760,7 +760,8 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
     check(
         overlay_rc == 0
         and len(overlay_args) >= 4
-        and overlay_args[1] == chromium_source
+        # The audit binds the canonical path (a temp root may sit under a symlink).
+        and overlay_args[1] == chromium_source.resolve()
         and overlay_args[2:4] == ("chromium/src", "chromium/src")
         # agent security then the delta base: no --since means "".
         and overlay_args[-2:] == ("sandboxed", ""),

@@ -139,5 +139,27 @@ class AuditCliTests(unittest.TestCase):
                 self.assertIn(expected, output)
 
 
+    def test_the_bound_target_root_is_canonical(self) -> None:
+        # A benchmark cell reaches targets/ through its facade's symlink; the
+        # audit must bind the one real path so a build system that records
+        # absolute paths does not see two spellings of one scratch directory.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            real = root / "checkout" / "targets" / "sampleproj"
+            real.mkdir(parents=True)
+            facade = root / "facade"
+            facade.mkdir()
+            (facade / "targets").symlink_to(root / "checkout" / "targets", target_is_directory=True)
+            self.assertEqual(
+                audit_runner.bound_target_root(facade, "sampleproj"), real.resolve(),
+            )
+            self.assertEqual(
+                audit_runner.bound_target_root(
+                    facade, "", str(facade / "targets" / "sampleproj"),
+                ),
+                real.resolve(),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
