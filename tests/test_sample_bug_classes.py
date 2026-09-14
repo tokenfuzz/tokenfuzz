@@ -201,6 +201,30 @@ class SampleBugClassTests(unittest.TestCase):
             self.assertTrue(header.startswith("op: "), entry["id"])
             self.assertIn(header.removeprefix("op: ").strip(), operations, entry["id"])
 
+    def test_a_trap_sharing_a_symbol_says_which_claim_it_refutes(self) -> None:
+        """A trap that declares no classes claims every report at its symbol.
+
+        Where a real bug sits at the same function, that silently turns a
+        correct report of the real bug into a fired trap, or the reverse. The
+        classes are what tell the two apart, so a shared symbol must declare
+        them.
+        """
+        manifests = sorted((ROOT / "output" / "samples").glob("sample-*/.ground-truth.json"))
+        for path in manifests:
+            manifest = json.loads(path.read_text())
+            planted = {
+                str(bug.get("signature_symbol", ""))
+                for bug in manifest["planted_bugs"]
+            }
+            for trap in manifest["false_positive_traps"]:
+                if str(trap.get("signature_symbol", "")) not in planted:
+                    continue
+                self.assertTrue(
+                    trap.get("classes"),
+                    f"{path}: trap {trap['id']} shares a symbol with a planted "
+                    "bug but declares no classes",
+                )
+
     def test_documented_sample_counts_match_the_answer_keys(self) -> None:
         page = (ROOT / "docs" / "getting-started" / "sample-targets.md").read_text()
         rows = {

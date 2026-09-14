@@ -113,7 +113,8 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "tokenAuthorised",
-      "refute_reason": "The answer supplied no feasible report id whose SHA-256 digest is a numeric magic hash; exercising == alone proves no bypass."
+      "classes": ["auth-bypass"],
+      "refute_reason": "The answer supplied no feasible report id whose SHA-256 digest is a numeric magic hash; exercising == alone proves no bypass. The two real bugs at this function declare what they are, so a bypass claim here is read as one of them first and fires this trap only when it is neither."
     }
   ]
 }
