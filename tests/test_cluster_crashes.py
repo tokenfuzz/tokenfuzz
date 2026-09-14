@@ -252,6 +252,15 @@ The parser writes past `{object_name}`.
         self.assertEqual(ids["CRASH-L1-1"], ids["CRASH-L2-1"])
         self.assertEqual(ids["CRASH-L1-1"], ids["CRASH-L3-1"])
         self.assertNotEqual(ids["CRASH-L1-1"], ids["CRASH-L4-1"])
+        payload = json.loads(self.run_cluster(None, "--json").stdout)
+        l1_cluster = next(
+            cluster for cluster in payload["clusters"]
+            if "CRASH-L1-1" in cluster["members"]
+        )
+        self.assertEqual(
+            l1_cluster["member_crash_signatures"]["CRASH-L1-1"],
+            "app_flush src/app.c:10 -> dispatch src/app.c:50 -> decode src/app.c:90",
+        )
         index = (self.results / "crashes" / "CRASH-CLUSTERS.md").read_text()
         self.assertIn("app_drop src/app.c:30", index)
         self.assertIn("(use: app_flush src/app.c:10)", index)

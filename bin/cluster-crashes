@@ -591,6 +591,10 @@ def _signature(crash_dir: Path) -> dict:
     if not top_funcs and top_func:
         top_funcs = [top_func]
     top_chain = " -> ".join(_frame_display(frame) for frame in frames[:3])
+    lifetime_use_chain = (
+        " -> ".join(_frame_display(frame) for frame in use_frames[:3])
+        if root_text else ""
+    )
     if root_text and use_frames:
         top_chain += f" (use: {_frame_display(use_frames[0])})"
     top_frame_set = _frame_set_signature(frames, want=3)
@@ -627,6 +631,7 @@ def _signature(crash_dir: Path) -> dict:
         # Keyed on the free stack: a use-after-free and a double-free that
         # share it are one defect, whatever primitive each tripped.
         "lifetime_root": bool(root_text),
+        "lifetime_use_chain": lifetime_use_chain,
         "top_func": top_func,
         "top_funcs": top_funcs,
         "top_chain": top_chain,
@@ -763,6 +768,16 @@ def _clusters_from_sigs(sigs: list[dict]) -> list[dict]:
                     "rank": m["severity_rank"],
                     "score": m["severity_score"],
                 }
+                for m in ordered
+            },
+            # The cluster signature is rooted at `freed by` for a lifetime
+            # bug. A finding that embeds the same sanitizer report shows
+            # the fault stack, so keep each member's fault-stack display
+            # for cross-artifact matching.
+            "member_crash_signatures": {
+                m.get("display_id", m["id"]): (
+                    m.get("lifetime_use_chain") or m.get("top_chain") or ""
+                )
                 for m in ordered
             },
             "size": len(members),

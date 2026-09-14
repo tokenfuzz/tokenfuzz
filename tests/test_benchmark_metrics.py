@@ -1745,6 +1745,10 @@ class BenchmarkMetricsTests(unittest.TestCase):
                 {"id": "FCL-write", "class": "arbitrary-write", "key_kind": "loc",
                  "key": ["memory-safety", "src/app.cpp", "app_write"],
                  "file": "src/app.cpp", "line": "219",
+                 "crash_state": [
+                     "ns::app_write src/app.cpp:219",
+                     "ns::dispatch src/app.cpp:246",
+                 ],
                  "members": ["FIND-h", "FIND-d"]},
                 {"id": "FCL-other", "class": "null-deref", "key_kind": "loc",
                  "key": ["memory-safety", "src/app.cpp", "app_null"],
@@ -1760,6 +1764,28 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(findings["harness"]["behind_crash"], 1)
         self.assertEqual(findings["model-direct"]["unique_clusters"], 1)
         self.assertEqual(findings["model-direct"]["behind_crash"], 0)
+
+    def test_lifetime_finding_matches_its_conditions_fault_stack(self) -> None:
+        crashes = benchmark.attribute_clusters(
+            {"clusters": [{
+                "id": "CL-uaf", "primitive": "heap-use-after-free",
+                "signature": "app_drop src/app.c:30 (use: app_flush src/app.c:10)",
+                "members": ["CRASH-h", "CRASH-d"],
+                "member_crash_signatures": {
+                    "CRASH-h": "app_flush src/app.c:10 -> dispatch src/app.c:50",
+                    "CRASH-d": "other_use src/app.c:20 -> dispatch src/app.c:50",
+                },
+            }]},
+            {"CRASH-h": "harness", "CRASH-d": "model-direct"},
+        )
+        covered = benchmark._finding_covered_by_crash(crashes)
+        finding = {
+            "crash_state": [
+                "app_flush src/app.c:10", "dispatch src/app.c:50",
+            ],
+        }
+        self.assertTrue(covered(finding, "harness"))
+        self.assertFalse(covered(finding, "model-direct"))
 
     def test_withheld_member_cannot_supply_cluster_severity(self) -> None:
         for survivor_scores in ({"FIND-kept": {"level": "Low", "rank": 1, "score": 2.5}}, {}):

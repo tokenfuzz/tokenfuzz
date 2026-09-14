@@ -4064,43 +4064,45 @@ def credited_pool_members(members: dict, kind: str) -> dict:
 
 
 def _finding_covered_by_crash(crash_attr: dict):
-    """Predicate: is this finding cluster the site of one of *cond*'s crashes?
+    """Predicate: does this finding embed one of *cond*'s crash signatures?
 
     A finding is "a security issue reported without a sanitizer crash behind
     it". When the same condition also holds a reportable crash at the same
-    file and function (or line), the finding is that crash's write-up, and
-    counting both credits one defect twice. Crash and finding name the site
-    differently — a stack frame's `ns::fn file.c:12` against a report's
-    `src/file.c` and `fn` — so both reduce to (file basename, symbol leaf)
-    and (file basename, line) before comparing.
+    file and function, it can still describe a distinct trigger or consequence.
+    Suppress it only when cluster-findings extracted the exact sanitizer stack
+    state that cluster-crashes used. That is direct evidence the finding is the
+    crash's write-up rather than another claim at the same source location.
     """
-    sites: dict[str, set[tuple[str, str]]] = {}
+    states: dict[str, set[tuple[str, ...]]] = {}
     for cluster in crash_attr.get("clusters", []):
-        first = str(cluster.get("signature") or "").split(" -> ")[0]
-        func, location = (
-            _sf.parse_frame_body(first) if _sf is not None else ("", "")
-        )
-        if not location:
+        condition_states = cluster.get("condition_crash_signatures") or {}
+        if isinstance(condition_states, dict):
+            for cond, signatures in condition_states.items():
+                if not isinstance(signatures, list):
+                    continue
+                for signature in signatures:
+                    state = tuple(
+                        part.strip()
+                        for part in str(signature or "").split(" -> ")
+                        if part.strip()
+                    )
+                    if state:
+                        states.setdefault(str(cond), set()).add(state)
+        if condition_states:
             continue
-        path, _, line = location.partition(":")
-        base = os.path.basename(path)
-        tokens = {(base, _symbol_leaf(func))} if func else set()
-        line = line.split(":", 1)[0]
-        if line.isdigit():
-            tokens.add((base, line))
+        state = tuple(
+            part.strip()
+            for part in str(cluster.get("signature") or "").split(" -> ")
+            if part.strip()
+        )
+        if not state:
+            continue
         for cond in cluster.get("conditions", []):
-            sites.setdefault(cond, set()).update(tokens)
+            states.setdefault(cond, set()).add(state)
 
     def covered(cluster: dict, cond: str) -> bool:
-        key = cluster.get("key") or []
-        if str(cluster.get("key_kind")) != "loc" or len(key) < 3:
-            return False
-        base = os.path.basename(str(cluster.get("file") or key[1]))
-        own = sites.get(cond, ())
-        return (
-            (base, _symbol_leaf(str(key[2]))) in own
-            or (base, str(cluster.get("line") or "")) in own
-        )
+        state = tuple(str(part).strip() for part in cluster.get("crash_state") or ())
+        return bool(state) and state in states.get(cond, ())
 
     return covered
 
@@ -4152,6 +4154,16 @@ def attribute_clusters(
             m: s for m, s in (cl.get("member_severity") or {}).items()
             if m in member_set
         }
+        member_crash_signatures = {
+            m: str(signature)
+            for m, signature in (cl.get("member_crash_signatures") or {}).items()
+            if m in member_set and signature
+        }
+        condition_crash_signatures: dict[str, list[str]] = {}
+        for member, signature in member_crash_signatures.items():
+            condition = member_conditions.get(member)
+            if condition is not None:
+                condition_crash_signatures.setdefault(condition, []).append(signature)
         severity = {
             "level": cl.get("severity_level") or "—",
             "rank": cl.get("severity_rank", 0),
@@ -4175,6 +4187,7 @@ def attribute_clusters(
                 "size": len(members),
                 "primitive": cl.get("primitive", "") or cl.get("signature", ""),
                 "signature": str(cl.get("signature") or ""),
+                "condition_crash_signatures": condition_crash_signatures,
                 "severity_level": severity.get("level") or "—",
                 "severity_rank": int(severity.get("rank", 0) or 0),
                 "severity_score": float(severity.get("score", 0) or 0),  # CVSS 4.0 score (0–10)
