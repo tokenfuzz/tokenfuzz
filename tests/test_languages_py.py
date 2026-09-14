@@ -372,6 +372,8 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap: empty python target -> no commands")
     assert_eq([], languages.bootstrap_for_target(tmp_root, "cargo"),
               "bootstrap: empty rust target -> no commands")
+    assert_eq([], languages.bootstrap_for_target(tmp_root, "maven"),
+              "bootstrap: Java source without a pom -> no Maven commands")
 
     # setup.py present -> python bootstrap fires (three-step recipe:
     # create .audit/venv, upgrade pip, then `pip install -e .` which

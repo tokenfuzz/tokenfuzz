@@ -2139,6 +2139,8 @@ def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]
     if not lang:
         return []
     if build_system == "maven":
+        if not any(target_root.rglob("pom.xml")):
+            return []
         tool = "./mvnw" if os.access(target_root / "mvnw", os.X_OK) else "mvn"
         return [
             [tool, "-q", "-DskipTests", "compile"],
