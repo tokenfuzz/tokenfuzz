@@ -2892,6 +2892,47 @@ tc.seed_toml(_bare_root, _bare_out)
 assert_eq("unknown", tc.parse_toml(_bare_out).get("build_system"),
           "seed_toml(default): a full re-seed still detects afresh")
 
+# With a manifest present the build system is re-derived, but a reviewed
+# runner, the sanitizer policy, and configured artifacts still outrank the
+# registry default: a route that runs is not replaced by a guess.
+_route_root = TEST_TMPDIR / "seed-route"
+_route_root.mkdir()
+(_route_root / "go.mod").write_text("module sample\n")
+_route_out = _route_root / "target.toml"
+_route_out.write_text(
+    'target = "seed-route"\nbuild_system = "go"\n'
+    '[sanitizer]\nenabled = ["msan"]\nmsan_bin = "build-msan/sample"\n'
+    '[runner]\nbin = "sample"\nargs = ["{TESTCASE}"]\nenv = ["GORACE=halt_on_error=1"]\n',
+    encoding="utf-8",
+)
+tc.seed_toml(_route_root, _route_out, preserve_curated=True)
+_route = tc.parse_toml(_route_out)
+assert_eq("go", _route.get("build_system"),
+          "seed_toml(preserve): the build system is still detected from the manifest")
+assert_eq(["msan"], _route.get("sanitizer", {}).get("enabled"),
+          "seed_toml(preserve): keeps the sanitizer policy")
+assert_eq("build-msan/sample", _route.get("sanitizer", {}).get("msan_bin"),
+          "seed_toml(preserve): keeps a configured sanitizer binary")
+assert_eq({"bin": "sample", "args": ["{TESTCASE}"], "env": ["GORACE=halt_on_error=1"]},
+          _route.get("runner"),
+          "seed_toml(preserve): keeps a reviewed runner over the registry default")
+tc.seed_toml(_route_root, _route_out)
+assert_eq("go", tc.parse_toml(_route_out).get("runner", {}).get("bin"),
+          "seed_toml(default): a full re-seed takes the registry runner")
+# A reviewed binary route with no runner stays a binary route: the registry
+# runner would be a second, unvalidated route beside it.
+_route_out.write_text(
+    'target = "seed-route"\nbuild_system = "go"\n'
+    'asan_bin = "build-asan/sample"\n[sanitizer]\nenabled = ["asan"]\n',
+    encoding="utf-8",
+)
+tc.seed_toml(_route_root, _route_out, preserve_curated=True)
+_binary_route = tc.parse_toml(_route_out)
+assert_eq("build-asan/sample", _binary_route.get("asan_bin"),
+          "seed_toml(preserve): keeps a configured asan_bin")
+assert_eq(None, _binary_route.get("runner"),
+          "seed_toml(preserve): seeds no registry runner beside a reviewed binary route")
+
 # JAVA_HOME comes from the JVM's own java.home: a platform launcher stub
 # forwards to a JDK it does not live in, and pointing JAVA_HOME at the stub's
 # prefix makes every tool that honours it hang.

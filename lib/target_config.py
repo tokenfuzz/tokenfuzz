@@ -3981,13 +3981,18 @@ def seed_toml(
     preserved_s6: Optional[tuple[str, list[str]]] = None
     preserved_build_widening: Optional[bool] = None
     preserved_build_configs: list[dict] = []
-    # A hand-authored file may name a build system and runner that no
-    # manifest in the tree can re-derive (a bare script with its interpreter
-    # named). Those are carried over only when detection comes back empty:
-    # "unknown" and a commented-out runner would replace a working route with
-    # nothing, and the runner belongs with the build system it was written
-    # for.
+    # Reviewed routing outranks a fresh guess. A configured [runner], the
+    # [sanitizer] policy, and any <san>_bin/<san>_lib already named are
+    # carried over: the seed's registry default is a starting point for a
+    # target with none, not a better answer than a route that already runs,
+    # and refresh_detected_build_fields re-validates the artifacts after the
+    # build. A declared build_system and upstream_url are carried over only
+    # when detection comes back empty: "unknown" would replace a working
+    # route for a bare script with nothing.
     _existing: dict = {}
+    preserved_runner: dict = {}
+    preserved_enabled: Optional[list[str]] = None
+    preserved_artifacts: dict[str, str] = {}
     if preserve_curated and out.exists():
         try:
             _existing = parse_toml(out)
@@ -4018,16 +4023,30 @@ def seed_toml(
                 dict(row) for row in _existing["build_config"]
                 if isinstance(row, dict)
             ]
+        _runner = _existing.get("runner")
+        if isinstance(_runner, dict) and (_runner.get("bin") or _runner.get("args")):
+            preserved_runner = dict(_runner)
+        _sanitizer = _existing.get("sanitizer")
+        if isinstance(_sanitizer, dict) and isinstance(_sanitizer.get("enabled"), list):
+            preserved_enabled = [
+                str(x) for x in _sanitizer["enabled"] if isinstance(x, str) and x
+            ]
+        # asan_* are top-level fields; the other sanitizers' artifacts are
+        # read from the [sanitizer] table, where the seed also writes them.
+        _tables = [_existing, _sanitizer if isinstance(_sanitizer, dict) else {}]
+        for _san in ("asan", "ubsan", "msan", "tsan"):
+            for _field in (f"{_san}_bin", f"{_san}_lib"):
+                for _table in _tables:
+                    _value = _table.get(_field)
+                    if isinstance(_value, str) and _value:
+                        preserved_artifacts.setdefault(_field, _value)
     # Detected up front: declared_cli_names() needs the build system to know
     # which manifest to read when biasing the asan_bin guess below.
     build_system = _detect_build_system(root)
-    preserved_runner: dict = {}
     if not build_system:
         _declared = _existing.get("build_system")
         if isinstance(_declared, str) and _declared and _declared != "unknown":
             build_system = _declared
-            if isinstance(_existing.get("runner"), dict):
-                preserved_runner = dict(_existing["runner"])
     if not upstream_url:
         _declared_url = _existing.get("upstream_url")
         if isinstance(_declared_url, str) and _declared_url != "FILL_ME":
@@ -4056,6 +4075,8 @@ def seed_toml(
         # (declared_cli_names), not a hardcoded per-project table. An
         # empty list just means we fall through to the free scan below.
         asan_bin, asan_lib = detect_sanitizer_build_artifacts(root, "asan")
+    asan_bin = preserved_artifacts.get("asan_bin", asan_bin)
+    asan_lib = preserved_artifacts.get("asan_lib", asan_lib)
 
     if not upstream_url:
         upstream_url = _detect_upstream_url(checkout_root)
@@ -4174,7 +4195,7 @@ def seed_toml(
     def _san_lib_toml_line(san: str) -> str:
         field = f"{san}_lib"
         pad = " " * (len("ubsan_lib") - len(field))
-        detected = (
+        detected = preserved_artifacts.get(field) or (
             detect_sanitizer_build_artifacts(root, san)[1]
             if native_artifacts and not is_browser else ""
         )
@@ -4182,9 +4203,20 @@ def seed_toml(
             return f"{field}{pad} = {toml_basic_string(detected)}"
         return f'# {field}{pad} = "{build_dir_name(san, suffix="")}/FILL_ME.a"'
 
+    def _san_bin_toml_line(san: str) -> str:
+        field = f"{san}_bin"
+        pad = " " * (len("ubsan_bin") - len(field))
+        configured = preserved_artifacts.get(field, "")
+        if configured:
+            return f"{field}{pad} = {toml_basic_string(configured)}"
+        return f'# {field}{pad} = "{build_dir_name(san, suffix="")}/{alternate_bin_name}"'
+
     ubsan_lib_line = _san_lib_toml_line("ubsan")
     msan_lib_line = _san_lib_toml_line("msan")
     tsan_lib_line = _san_lib_toml_line("tsan")
+    ubsan_bin_line = _san_bin_toml_line("ubsan")
+    msan_bin_line = _san_bin_toml_line("msan")
+    tsan_bin_line = _san_bin_toml_line("tsan")
 
     # Detect whether this target should default to findings-only mode.
     # Heuristic: a non-native ecosystem (cargo/go/python/...) where we
@@ -4198,6 +4230,7 @@ def seed_toml(
         and not asan_bin
         and build_system not in NATIVE_BUILD_SYSTEMS | {"", "unknown"}
         and build_system not in SANITIZER_RUNNER_BUILD_SYSTEMS
+        and not preserved_enabled
     )
 
     default_runner_sanitizers = languages.default_sanitizers_for_build_system(
@@ -4220,9 +4253,9 @@ def seed_toml(
             '# ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"',
             '# msan_suppressions  = "build-msan/msan-suppressions.txt"',
             '# tsan_suppressions  = "build-tsan/tsan-suppressions.txt"',
-            f'# ubsan_bin = "build-ubsan/{alternate_bin_name}"',
-            f'# msan_bin  = "build-msan/{alternate_bin_name}"',
-            f'# tsan_bin  = "build-tsan/{alternate_bin_name}"',
+            ubsan_bin_line,
+            msan_bin_line,
+            tsan_bin_line,
             ubsan_lib_line,
             msan_lib_line,
             tsan_lib_line,
@@ -4256,15 +4289,18 @@ def seed_toml(
             "[sanitizer]",
             "enabled = [" + ", ".join(
                 toml_basic_string(value)
-                for value in (default_runner_sanitizers or ("asan",))
+                for value in (
+                    preserved_enabled if preserved_enabled
+                    else default_runner_sanitizers or ("asan",)
+                )
             ) + "]",
             '# asan_suppressions  = "build-asan/asan-suppressions.txt"',
             '# ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"',
             '# msan_suppressions  = "build-msan/msan-suppressions.txt"',
             '# tsan_suppressions  = "build-tsan/tsan-suppressions.txt"',
-            f'# ubsan_bin = "build-ubsan/{alternate_bin_name}"',
-            f'# msan_bin  = "build-msan/{alternate_bin_name}"',
-            f'# tsan_bin  = "build-tsan/{alternate_bin_name}"',
+            ubsan_bin_line,
+            msan_bin_line,
+            tsan_bin_line,
             ubsan_lib_line,
             msan_lib_line,
             tsan_lib_line,
@@ -4281,6 +4317,10 @@ def seed_toml(
         browser_runner_defaults(build_system)
         if is_browser else language_runner_defaults(build_system, root, slug)
     )
+    # A reviewed config that names a sanitizer binary and no runner chose the
+    # binary route; the registry runner is seeded only for a file with none.
+    if not preserved_runner and any(k.endswith("_bin") for k in preserved_artifacts):
+        runner_default = {}
 
     _toml_string = toml_basic_string  # local alias for the existing call sites
 
@@ -4288,7 +4328,7 @@ def seed_toml(
         lines += [
             "",
             "# ── Runner (language / interpreter / driver invocation) ────────",
-            f"# Preserved from the prior config: no manifest re-derives build_system = {build_system!r}.",
+            "# Preserved from the prior config: a reviewed runner outranks the registry default.",
             "[runner]",
         ]
         for key in ("bin", "args", "env", "crash_patterns", "success_codes"):
@@ -4298,6 +4338,10 @@ def seed_toml(
             elif key == "success_codes" and isinstance(value, list):
                 codes = [str(v) for v in value if isinstance(v, int) and not isinstance(v, bool)]
                 lines.append(f"success_codes  = [{', '.join(codes)}]")
+            elif key == "crash_patterns" and isinstance(value, list) and value \
+                    and all(isinstance(v, str) for v in value):
+                patterns_str = ",\n  ".join(_toml_string(v) for v in value)
+                lines.append(f"crash_patterns = [\n  {patterns_str},\n]")
             elif isinstance(value, list) and all(isinstance(v, str) for v in value):
                 items = ", ".join(_toml_string(v) for v in value)
                 lines.append(f"{key:<14} = [{items}]")
