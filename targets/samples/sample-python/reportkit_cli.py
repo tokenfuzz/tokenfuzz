@@ -24,6 +24,12 @@ shape depends on the operation:
               content to write.
     config    the body is a literal configuration value to parse.
     command   the body is a single data argument echoed by a fixed tool.
+    request   the body is one raw HTTP request, answered by the reportkit
+              service's router exactly as a listening ``reportkit_serve.py``
+              would answer it.
+
+The remaining operations call one account or export helper directly; the
+service routes above reach the same helpers from a browser.
 
 Every operation prints a one-line summary of its result.
 """
@@ -34,6 +40,7 @@ import json
 import sys
 
 import reportkit
+import reportkit_service
 import security_examples
 
 
@@ -89,12 +96,15 @@ _OPERATIONS = {
     "save": _run_save,
     "config": _run_config,
     "command": _run_command,
+    "request": reportkit_service.respond,
     "query": lambda body: security_examples.query_reports(body.strip()),
     "login": lambda body: str(security_examples.authenticate(body.strip())),
     "document": security_examples.read_document,
     "role": security_examples.set_role,
     "delegate": security_examples.act_as_user,
     "session": security_examples.start_session,
+    "resume": security_examples.resume_session,
+    "payroll": security_examples.read_payroll,
     "change": security_examples.submit_change,
     "cors": security_examples.cors_headers,
     "redirect": security_examples.redirect_after_login,
@@ -102,6 +112,7 @@ _OPERATIONS = {
     "shared-asset": security_examples.read_shared_asset,
     "write": security_examples.write_export,
     "replace": security_examples.replace_export,
+    "link": security_examples.link_export,
     "publish": security_examples.publish_owned,
     "fetch": security_examples.fetch_preview,
     "certificate": lambda body: str(security_examples.verify_certificate(body)),
@@ -110,6 +121,7 @@ _OPERATIONS = {
     "alias": security_examples.expand_alias,
     "filter": lambda body: str(security_examples.validate_filter(body)),
     "refund": lambda body: str(security_examples.approve_refund(body.strip())),
+    "credit": security_examples.apply_refund,
     "required": security_examples.load_required_field,
     "diagnostic": security_examples.diagnostic,
     "debug": lambda body: str(security_examples.debug_access(body)),

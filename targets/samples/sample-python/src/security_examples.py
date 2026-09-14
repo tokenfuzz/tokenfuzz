@@ -26,6 +26,8 @@ DOCUMENTS = {
 }
 ROLES = {"alice": "viewer"}
 SETTINGS = {"email": "alice@example.test"}
+SESSIONS: dict[str, str] = {}
+BALANCES = {"alice": 40, "merchant": 1000}
 
 
 def query_reports(owner: str) -> str:
@@ -69,7 +71,24 @@ def act_as_user(user_and_action: str) -> str:
 
 def start_session(session_id: str) -> str:
     """Create a signed-in session after successful authentication."""
-    return f"Set-Cookie: session={session_id.strip()}; HttpOnly"
+    session_id = session_id.strip()
+    SESSIONS[session_id] = "alice"
+    return f"Set-Cookie: session={session_id}; HttpOnly"
+
+
+def resume_session(cookie: str) -> str:
+    """Name the signed-in user behind a session cookie."""
+    session_id = cookie.strip().removeprefix("session=")
+    if session_id not in SESSIONS:
+        raise PermissionError("no signed-in session")
+    return SESSIONS[session_id]
+
+
+def read_payroll(user: str) -> str:
+    """Return the payroll draft to an administrator."""
+    if ROLES.get(user.strip()) != "admin":
+        raise PermissionError("administrator role required")
+    return DOCUMENTS["private"][1]
 
 
 def submit_change(body: str) -> str:
@@ -111,6 +130,16 @@ def replace_export(name_and_text: str) -> int:
     """Replace an existing export, including one reached through a symlink."""
     name, text = name_and_text.split("\n", 1)
     return (EXPORT_ROOT / name).write_text(text, encoding="utf-8")
+
+
+def link_export(name_and_target: str) -> str:
+    """Publish an export under a second name that follows its current file."""
+    name, target = name_and_target.split("\n", 1)
+    EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
+    link = EXPORT_ROOT / name.strip()
+    link.unlink(missing_ok=True)
+    link.symlink_to(target.strip())
+    return str(link)
 
 
 def publish_owned(path: str) -> str:
@@ -164,6 +193,17 @@ def validate_filter(pattern_and_text: str) -> bool:
 def approve_refund(amount_text: str) -> bool:
     """Approve refunds within the operator's configured limit."""
     return int(amount_text) <= 1000
+
+
+def apply_refund(account_and_amount: str) -> str:
+    """Move an approved refund from the merchant to an account."""
+    account, amount_text = account_and_amount.split("\n", 1)
+    if not approve_refund(amount_text.strip()):
+        raise ValueError("refund exceeds the configured limit")
+    amount = int(amount_text)
+    BALANCES[account] = BALANCES.get(account, 0) + amount
+    BALANCES["merchant"] -= amount
+    return f"{account}:{BALANCES[account]} merchant:{BALANCES['merchant']}"
 
 
 def load_required_field(name: str) -> str:

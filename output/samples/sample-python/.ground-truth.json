@@ -2,7 +2,7 @@
   "target": "samples/sample-python",
   "language": "python",
   "findings_only": true,
-  "description": "Answer key for the findings-only Python sample. Each job reaches one short function with one security decision or sink. The classes array records every class the example establishes; primitive remains the primary scoring label.",
+  "description": "Answer key for the findings-only Python sample. Each job reaches one short function with one security decision or sink, and reportkit_service ships the consumer that turns the decision into an effect: a browser-facing router (driven from a job file through the request operation, or served by reportkit_serve.py), a session store, a role check on payroll, a refund ledger, and an export link route. The classes array records every class the example establishes; primitive remains the primary scoring label.",
   "runner": "reportkit_cli.py",
   "planted_bugs": [
     {
@@ -83,7 +83,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: role\nalice\nadmin",
       "cwe": "CWE-269",
-      "summary": "The role-change operation accepts the new privileged role without verifying an administrator."
+      "summary": "The role-change operation accepts the new privileged role without verifying an administrator; read_payroll and the /payroll route then release the payroll draft to whoever holds the admin role."
     },
     {
       "id": "service-account-confused-deputy",
@@ -105,7 +105,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: session\nknown-session",
       "cwe": "CWE-384",
-      "summary": "Authentication retains a session identifier chosen by the unauthenticated caller."
+      "summary": "Authentication keeps the session identifier the caller already carried, and resume_session binds every later /settings, /api/private, and /payroll request to the user signed in under it."
     },
     {
       "id": "state-change-without-csrf-token",
@@ -116,7 +116,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: change\nemail=attacker@example.test",
       "cwe": "CWE-352",
-      "summary": "The authenticated state-changing operation accepts a form body without a CSRF token."
+      "summary": "The /settings route applies a form body to the signed-in user's settings with only the session cookie, so a cross-site form changes them without a CSRF token."
     },
     {
       "id": "credentialed-origin-reflection",
@@ -127,7 +127,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: cors\nhttps://attacker.example",
       "cwe": "CWE-942",
-      "summary": "The private API reflects any Origin while allowing credentials."
+      "summary": "The /api/private route reflects any Origin with Allow-Credentials true while returning the signed-in user's private document to that origin."
     },
     {
       "id": "unvalidated-login-redirect",
@@ -138,7 +138,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: redirect\nhttps://attacker.example/phish",
       "cwe": "CWE-601",
-      "summary": "The post-login Location header is copied from caller input without an allowlist."
+      "summary": "The /login route copies the next parameter into the post-login Location header without an allowlist."
     },
     {
       "id": "unescaped-html-comment",
@@ -182,7 +182,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: replace\nlatest\noverwritten",
       "cwe": "CWE-59",
-      "summary": "Replacing an export follows an existing symlink without checking the final target."
+      "summary": "Replacing an export follows an existing symlink without checking the final target, and link_export (the /export/link route) lets the same caller place that symlink under the export root."
     },
     {
       "id": "unrestricted-link-preview",
@@ -204,7 +204,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: publish\n/tmp/reportkit-candidate",
       "cwe": "CWE-367",
-      "summary": "The path is checked with stat and opened later, so another process can replace it between authorization and use."
+      "summary": "The path is checked with stat and opened later, and the threaded service answers a concurrent /export/link request that swaps the path between the two."
     },
     {
       "id": "certificate-presence-check",
@@ -248,7 +248,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: alias\na\na=b\nb=a",
       "cwe": "CWE-674",
-      "summary": "Alias expansion has no cycle detection or depth bound."
+      "summary": "Alias expansion has no cycle detection or depth bound; the RecursionError propagates out of the /alias route and reportkit_service aborts the whole worker process on it."
     },
     {
       "id": "backtracking-filter-dos",
@@ -270,7 +270,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: refund\n-999999",
       "cwe": "CWE-840",
-      "summary": "The refund limit has an upper bound but no nonnegative lower bound."
+      "summary": "The refund limit has an upper bound but no nonnegative lower bound, so apply_refund (the /refund route) debits the named account and credits the merchant."
     },
     {
       "id": "uncaught-required-field",
@@ -281,7 +281,7 @@
       "file": "src/security_examples.py",
       "input_text": "op: required\nmissing",
       "cwe": "CWE-248",
-      "summary": "A missing caller-selected key raises an uncaught exception that terminates the CLI request process."
+      "summary": "A missing caller-selected key raises an uncaught KeyError that ends the CLI request and, through the /field route, aborts the whole reportkit_service worker."
     },
     {
       "id": "diagnostic-secret-disclosure",

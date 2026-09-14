@@ -244,6 +244,40 @@ class SampleBugClassTests(unittest.TestCase):
                 self.assertEqual(run.returncode, 0, run.stderr)
                 self.assertEqual(run.stdout.strip(), expected)
 
+    def test_python_service_routes_consume_the_boundary_examples(self) -> None:
+        """Each planted decision has a shipped consumer, so its effect is in the tree."""
+        target = ROOT / "targets" / "samples" / "sample-python"
+        env = {"PYTHONPATH": str(target / "src"), "REPORTKIT_EXPORT_ROOT": str(self.build / "exports")}
+
+        def run(job_text: str) -> subprocess.CompletedProcess:
+            job = self.build / "service.job"
+            job.write_text(job_text)
+            return subprocess.run(
+                [sys.executable, str(target / "reportkit_cli.py"), str(job)],
+                env=env, capture_output=True, text=True, check=False, timeout=10,
+            )
+
+        # A login keeps the session id the browser already carried and sends
+        # the caller-chosen post-login destination.
+        signed_in = run(
+            "op: request\nPOST /login?next=https://attacker.example/phish HTTP/1.1\n"
+            "Cookie: session=fixed\n\nadmin-token-2026"
+        )
+        self.assertEqual(signed_in.returncode, 0, signed_in.stderr)
+        self.assertIn("Set-Cookie: session=fixed", signed_in.stdout)
+        self.assertIn("Location: https://attacker.example/phish", signed_in.stdout)
+        # The credentialed private route names the signed-in user's document.
+        refused = run("op: request\nGET /api/private HTTP/1.1\nOrigin: https://attacker.example\n\n")
+        self.assertIn("403 Forbidden", refused.stdout)
+        # A negative refund moves the ledger the wrong way.
+        credited = run("op: credit\nalice\n-999999")
+        self.assertEqual(credited.stdout.strip(), "credit: alice:-999959 merchant:1000999")
+        # A handler failure propagates out of the router instead of being swallowed.
+        cycle = run("op: request\nPOST /alias HTTP/1.1\n\na\na=b\nb=a")
+        self.assertNotEqual(cycle.returncode, 0)
+        self.assertIn("RecursionError", cycle.stderr)
+
+
     def test_javascript_prototype_pollution_reaches_its_consumer(self) -> None:
         node = shutil.which("node")
         if not node:
