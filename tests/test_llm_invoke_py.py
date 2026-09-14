@@ -923,8 +923,10 @@ with tempfile.TemporaryDirectory() as td, \
               "Antigravity decision passes a non-empty -p value")
     ok(agy_run.call_args.kwargs["input"] is None,
        "Antigravity decision does not duplicate the prompt on stdin")
-    assert_eq(Path(td), agy_run.call_args.kwargs["cwd"],
-              "Antigravity decision is rooted at SCRIPT_ROOT")
+    agy_cwd = Path(agy_run.call_args.kwargs["cwd"])
+    ok(agy_cwd != Path(td) and not agy_cwd.exists(),
+       "Antigravity decision uses and removes an isolated project root",
+       repr(agy_cwd))
 
 # A decision reads its question from the prompt, so it needs no working
 # directory -- but inheriting the caller's is not neutral. The caller is the
@@ -955,6 +957,30 @@ ok(decide_cwd is not None and decide_cwd != Path.cwd(),
 ok(decide_cwd is not None and not decide_cwd.exists(),
    "the decision's working directory is removed with the answer",
    repr(decide_cwd))
+
+# Grok and Antigravity accept write-capable project flags. Their required
+# project boundary is disposable too, so a relative write cannot persist in
+# the harness checkout.
+for backend, environment in (
+    ("grok", {"GROK_BIN": "/fake/grok"}),
+    ("gemini", {"GEMINI_BIN": "/fake/agy"}),
+):
+    written: list[Path] = []
+
+    def _write_in_decision_root(*_args, **kwargs):
+        marker = Path(kwargs["cwd"]) / "relative-write.txt"
+        marker.write_text("backend output\n", encoding="utf-8")
+        written.append(marker)
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    with mock.patch.dict(os.environ, environment, clear=False), \
+            mock.patch.object(decide_mod, "_which", return_value="/fake/backend"), \
+            mock.patch.object(decide_mod, "run_timeout", side_effect=_write_in_decision_root):
+        os.environ.pop("USE_GEMINI_CLI", None)
+        assert_eq("ok", decide_mod._invoke_backend(backend, "PROMPT", 5),
+                  f"{backend} decision succeeds in its isolated project")
+    ok(written and not written[0].exists(),
+       f"{backend} relative writes are removed with the decision root")
 
 with mock.patch.dict(os.environ, {"MODEL": "qwen3-8b"}, clear=True), \
         mock.patch.object(decide_mod, "_which", return_value="/fake/opencode"), \

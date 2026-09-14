@@ -710,14 +710,13 @@ def _invoke_backend(
     child_env = os.environ.copy()
     child_env.update(_invocation_env(backend, model))
     run_input = prompt
-    launch_cwd = None
+    scratch = tempfile.mkdtemp(prefix="tokenfuzz-decide-")
+    launch_cwd = Path(scratch)
     if backend == "grok" or (backend == "gemini" and not gemini_cli):
-        launch_cwd = Path(
-            os.environ.get("SCRIPT_ROOT") or Path(__file__).resolve().parent.parent
-        ).absolute()
         try:
             _ensure_project_root(launch_cwd)
         except (OSError, RuntimeError) as exc:
+            shutil.rmtree(scratch, ignore_errors=True)
             raise _LaunchPreparationError(
                 f"project boundary unavailable: {exc}"
             ) from exc
@@ -736,12 +735,9 @@ def _invoke_backend(
     # caller is usually the harness process itself, whose cwd is the repository
     # root during a benchmark or a repo-rooted audit, and a reviewer that
     # writes a relative scratch file then lands it in the source tree. The two
-    # backends above need a real project root and keep it; every other one gets
-    # a throwaway directory that is removed with the answer.
-    scratch = None
-    if launch_cwd is None:
-        scratch = tempfile.mkdtemp(prefix="tokenfuzz-decide-")
-        launch_cwd = Path(scratch)
+    # backends above need a real project root, so initialize the throwaway
+    # directory for them. Every decision still gets an isolated directory that
+    # is removed with the answer.
     try:
         result = run_timeout(
             cmd,
@@ -757,8 +753,7 @@ def _invoke_backend(
     except OSError:
         return None
     finally:
-        if scratch:
-            shutil.rmtree(scratch, ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
 
     if result.returncode == 124:
         raise subprocess.TimeoutExpired(
