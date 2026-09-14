@@ -2742,6 +2742,11 @@ def manifest_errors(manifest: dict) -> list[str]:
             # a stray string like "false" (truthy) must not silently drop it.
             if "findings_only" in e and not isinstance(e["findings_only"], bool):
                 errors.append(f"{where} ({eid or '?'}) findings_only must be true or false")
+            # auto_quarantined drops a bug from both denominators, so a stray
+            # truthy string must not silently retire a scored entry.
+            if "auto_quarantined" in e and not isinstance(e["auto_quarantined"], bool):
+                errors.append(
+                    f"{where} ({eid or '?'}) auto_quarantined must be true or false")
             # An optional file pins which source the symbol must be in, so a
             # same-named function elsewhere cannot claim this entry. A
             # non-string would be compared against a path and never match,
@@ -2937,6 +2942,19 @@ def _findings_only_bug(manifest: dict, bug: dict) -> bool:
     return bool(bug.get("findings_only", manifest.get("findings_only")))
 
 
+def _auto_quarantined_bug(bug: dict) -> bool:
+    """A planted site the product tells agents not to report.
+
+    `AGENTS.md` lists the crash shapes the harness moves straight to
+    `crashes-rejected/` — a zero-page null deref, OOM, a bare abort, a runtime
+    panic — and says filing them wastes work. An obedient agent therefore files
+    nothing, so scoring such a site would mark obedience as a miss in whichever
+    denominator held it. The entry stays in the key because the class coverage
+    it documents is real; it simply scores in neither oracle.
+    """
+    return bool(bug.get("auto_quarantined"))
+
+
 def _declared_classes(entry: dict) -> set[str]:
     declared = entry.get("classes")
     if not isinstance(declared, list):
@@ -2992,7 +3010,7 @@ def score_findings_ground_truth(
     real = [
         b for b in manifest.get("planted_bugs", [])
         if isinstance(b, dict) and b.get("kind", "real") == "real"
-        and _findings_only_bug(manifest, b)
+        and _findings_only_bug(manifest, b) and not _auto_quarantined_bug(b)
     ]
     # Only a trap whose expected outcome is clean says "no artifact belongs
     # here". A trap that expects an abort or another benign crash refutes that
@@ -3404,12 +3422,18 @@ def score_ground_truth(
         b for b in manifest.get("planted_bugs", [])
         if isinstance(b, dict) and b.get("kind", "real") == "real"
     ]
-    real = [b for b in planted if not _findings_only_bug(manifest, b)]
+    real = [
+        b for b in planted
+        if not _findings_only_bug(manifest, b) and not _auto_quarantined_bug(b)
+    ]
     # A findings-only bug predicts no sanitizer class, so when one crashes
     # anyway (a wild write that faults instead of tripping a redzone) the crash
     # in its frame is attributed by symbol alone: it is that planted bug, not
     # an unexpected crash. It stays out of the crash-recall denominator.
-    prose_only = [b for b in planted if _findings_only_bug(manifest, b)]
+    prose_only = [
+        b for b in planted
+        if _findings_only_bug(manifest, b) or _auto_quarantined_bug(b)
+    ]
     traps = manifest.get("false_positive_traps", [])
     # Rust symbol demangling is applied only to a Rust target's frames (a
     # demangled C++ name is indistinguishable and must stay whole).

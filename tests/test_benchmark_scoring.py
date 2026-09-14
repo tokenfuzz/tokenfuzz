@@ -701,6 +701,44 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(overall["unexpected_crashes"], [])
         self.assertEqual(overall["precision"], 1.0)
 
+    def test_an_auto_quarantined_site_scores_in_neither_oracle(self) -> None:
+        # AGENTS.md tells agents that filing a zero-page null deref wastes
+        # work, because the harness discards it. Scoring that site would read
+        # obedience as a miss, so it sits in no denominator -- while a crash
+        # that does land in its frame is still that site, not an unexpected
+        # crash.
+        run = self.root / "quarantined"
+        self.make_crash(run, "N-0001", "pack_cells", "heap-buffer-overflow")
+        self.make_crash(run, "Z-0001", "handle_null", "SEGV")
+        self.make_finding(run, "FIND-0001", "render_template", klass="info-disclosure")
+        manifest = self.root / "quarantined-gt.json"
+        manifest.write_text(json.dumps({"planted_bugs": [
+            {"id": "native", "primitive": "heap-buffer-overflow",
+             "signature_symbol": "pack_cells"},
+            {"id": "leak", "findings_only": True, "primitive": "info-disclosure",
+             "signature_symbol": "render_template"},
+            {"id": "null-write", "findings_only": True, "auto_quarantined": True,
+             "primitive": "null-deref", "signature_symbol": "handle_null"},
+        ]}), encoding="utf-8")
+        _, score = self.score(run, manifest=manifest)
+        crash = score["overall"]
+        self.assertEqual(crash["real_total"], 1)
+        self.assertEqual(crash["recall"], 1.0)
+        self.assertEqual(crash["unexpected_crashes"], [])
+        self.assertEqual(crash["precision"], 1.0)
+        findings = score["findings"]["overall"]
+        self.assertEqual(findings["real_total"], 1)
+        self.assertEqual(findings["missed"], [])
+        self.assertEqual(findings["recall"], 1.0)
+        # A truthy non-bool would silently retire a scored entry.
+        manifest.write_text(json.dumps({"planted_bugs": [
+            {"id": "native", "primitive": "heap-buffer-overflow",
+             "signature_symbol": "pack_cells", "auto_quarantined": "yes"},
+        ]}), encoding="utf-8")
+        proc, _ = self.score(run, manifest=manifest)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("auto_quarantined must be true or false", proc.stdout + proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

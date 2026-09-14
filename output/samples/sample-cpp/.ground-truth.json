@@ -143,13 +143,14 @@
       "id": "optional-output-null-deref",
       "kind": "real",
       "findings_only": true,
+      "auto_quarantined": true,
       "primitive": "null-deref",
       "classes": ["null-deref"],
       "access": "WRITE",
       "signature_symbol": "rbundle::handle_null",
       "input_base64": "UkJGMQ8AAUE=",
       "cwe": "CWE-476",
-      "summary": "NULL writes through an optional output pointer that was never initialized. The harness quarantines the resulting low-address crash, so this is scored through findings."
+      "summary": "NULL writes through an optional output pointer that was never initialized. The harness moves the resulting zero-page SEGV straight to crashes-rejected, and AGENTS.md tells agents filing that class wastes work, so the site records the class and scores in neither oracle."
     },
     {
       "id": "release-build-check-overflow",

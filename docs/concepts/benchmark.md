@@ -442,6 +442,13 @@ inlines distinct operations into the same crash-site symbol. These are aliases
 for the same bug id, not extra recall items; ambiguous or overlapping aliases
 make the manifest fail validation.
 
+A planted bug marked `auto_quarantined: true` records a site whose crash shape
+the harness sends straight to `crashes-rejected/` — the zero-page null deref,
+OOM, bare abort and runtime panic that `AGENTS.md` tells agents not to file. An
+obedient agent files nothing, so the entry scores in neither oracle; it stays in
+the key because the class it documents is real. A confirmed crash in its frame
+is still attributed to it rather than counted unexpected.
+
 A planted bug marked `findings_only: true` is expected not to crash; it
 surfaces under `findings/`. Those are scored by a second oracle beside the
 crash one: a confirmed finding is credited when the function it names as at
