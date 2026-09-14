@@ -65,6 +65,11 @@ def runner_sanitizer(config) -> str:
 
 def skip_reason(config) -> str:
     """Why this target cannot be canary-checked, or "" when it can be."""
+    # Stand aside when every enabled route has its own binary: those routes
+    # are proved by launching the binary. In a mixed configuration, the runner
+    # still needs proving on the sanitizer it owns.
+    if not runner_sanitizer(config):
+        return "every enabled sanitizer route launches its own instrumented binary"
     language = languages.for_build_system(getattr(config, "build_system", ""))
     if language is None or not language.canary_source:
         return "the language registry has no canary for this build system"
@@ -102,10 +107,6 @@ def skip_reason(config) -> str:
         config.target_root,
     ):
         return "the Cargo workspace exposes no library to depend on"
-    # Stand aside only when every enabled route has its own binary. In a mixed
-    # configuration, the runner still needs proving on the sanitizer it owns.
-    if not runner_sanitizer(config):
-        return "configured sanitizer binaries own every enabled route"
     return ""
 
 

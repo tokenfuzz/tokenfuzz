@@ -177,7 +177,11 @@ def alternate_startup_failure(target, tree: Path) -> str:
 def materialize(
     root: Path, config: build_config.BuildConfig, target, *, base_suffix: str,
     force: bool, timeout_seconds: int,
-) -> bool:
+) -> str:
+    """Prepare one alternate; "ready", "unavailable", or "invalid".
+
+    "invalid" is a recipe rejected before any model ran: the same input fails
+    on every backend, and the caller stops rotating backends on it."""
     recipe = build_config.recipe_path(root, config)
     tree = build_config.build_dir(root, config, base_suffix=base_suffix)
     lock = root / ".audit" / "configs" / f".{config.config_id}.lock"
@@ -187,11 +191,11 @@ def materialize(
     # and then replacing it anyway.
     if build_lease.consumers_active(root, tree.name):
         log(f"{config.name}: {tree.name} is in use by another run; left in place")
-        return False
+        return "unavailable"
     with build_lock(lock), build_lease.exclusive(root, tree.name) as leased:
         if not leased:
             log(f"{config.name}: build lease unavailable for {tree.name}; left in place")
-            return False
+            return "unavailable"
         input_key = configuration_input_key(root, config, base_suffix)
         backend = (
             os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
@@ -203,18 +207,18 @@ def materialize(
             not_applicable.unlink(missing_ok=True)
         elif marker_matches(not_applicable, input_key):
             log(f"{config.name}: not applicable; regular ASan control is sufficient")
-            return True
+            return "ready"
         elif marker_matches(unavailable, input_key):
             log(
                 f"{config.name}: unavailable for this source/primary recipe; "
                 f"retry with --force"
             )
-            return False
+            return "unavailable"
         if not force and is_fresh(root, config, base_suffix):
             failure = alternate_startup_failure(target, tree)
             if not failure:
                 log(f"{config.name}: fresh ({tree.name})")
-                return True
+                return "ready"
             # Readiness is what lets the runtime router select this tree. Drop
             # it before rebuilding so a concurrent route scan cannot keep
             # offering an artifact that no longer starts.
@@ -240,11 +244,12 @@ def materialize(
                 write_marker(not_applicable, input_key)
                 unavailable.unlink(missing_ok=True)
                 log(f"{config.name}: not applicable; regular ASan control is sufficient")
-                return True
+                return "ready"
             if completed.returncode or not recipe.is_file():
                 log(f"{config.name}: recipe did not converge (rc={completed.returncode}); primary remains available")
                 write_marker(unavailable, input_key)
-                return False
+                # auto-build-script exits 2 for a usage or input error.
+                return "invalid" if completed.returncode == 2 else "unavailable"
             if config.widen:
                 write_marker(input_stamp_path(recipe), input_key)
             else:
@@ -266,21 +271,21 @@ def materialize(
             if completed.returncode or not build_config.produced_artifacts(tree):
                 log(f"{config.name}: build failed (rc={completed.returncode}; log: {output_path})")
                 write_marker(unavailable, input_key)
-                return False
+                return "unavailable"
             # Compiling is not readiness: an alternate an agent rotates into
             # must still start, or every probe it serves returns NO_EXEC.
             failure = alternate_startup_failure(target, tree)
             if failure:
                 log(f"{config.name}: build does not start; not marked ready: {failure.splitlines()[0][:200]}")
                 write_marker(unavailable, input_key)
-                return False
+                return "unavailable"
             target_config.build_write_stamp(root, "asan", recipe_path=recipe)
         build_config.write_recipe_stamp(tree, recipe)
         build_config.mark_ready(tree, recipe)
         unavailable.unlink(missing_ok=True)
         not_applicable.unlink(missing_ok=True)
         log(f"{config.name}: ready ({tree})")
-        return True
+        return "ready"
 
 
 def prune_orphan_trees(root: Path, configs: list, base_suffix: str) -> int:
@@ -392,17 +397,21 @@ def main(argv: list[str] | None = None) -> int:
             "audit and setup preflight supply this automatically"
         )
     base_suffix = os.environ.get("AUDIT_BUILD_SUFFIX", "")
-    succeeded = 0
-    for item in selected:
-        succeeded += materialize(
+    outcomes = [
+        materialize(
             root, item, config, base_suffix=base_suffix, force=args.force,
             timeout_seconds=args.timeout_seconds,
         )
+        for item in selected
+    ]
     if args.all:
         prune_orphan_trees(root, config.build_configs, base_suffix)
     # Callers treat this as additive/fail-open, but a direct invocation must
-    # still report incomplete alternate coverage visibly.
-    return 0 if succeeded == len(selected) else 1
+    # still report incomplete alternate coverage visibly. Exit 2 when nothing
+    # failed for a reason another backend could change.
+    if all(outcome == "ready" for outcome in outcomes):
+        return 0
+    return 2 if "unavailable" not in outcomes else 1
 
 
 if __name__ == "__main__":

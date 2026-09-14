@@ -1004,21 +1004,23 @@ class SetupTargetTests(unittest.TestCase):
         self.assertNotRegex(process.stdout, r"suggest-peers returned rc=\d+ on backend=claude")
         self.assertNotIn("LLM call failed or unavailable", process.stdout)
 
+        # The backend that answered is preferred within one run only. A later
+        # run starts from the default order again, so a backend that was down
+        # once is not skipped for good.
         second = self.setup(
             "second", str(self.remote), "--no-update", "--force",
             environment=env,
         )
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertRegex(second.stdout, r"suggest-threat-model returned rc=\d+ on backend=claude")
         self.assertIn("suggest-threat-model succeeded on backend=codex", second.stdout)
-        self.assertNotRegex(second.stdout, r"returned rc=\d+ on backend=claude")
+        self.assertIn("suggest-peers succeeded on backend=codex", second.stdout)
+        self.assertNotRegex(second.stdout, r"suggest-peers returned rc=\d+ on backend=claude")
         self.assertFalse(
             (self.harness / ".audit").exists(),
             "repository-wide setup state must not create a target overlay at the repository root",
         )
-        self.assertEqual(
-            (self.harness / "output" / ".setup-target" / "config-backend").read_text(),
-            "codex\n",
-        )
+        self.assertFalse((self.harness / "output" / ".setup-target").exists())
 
         self.config("demo").write_text(text.replace("rapidjson", "oldjson"))
         process = self.setup("demo", str(self.remote), "--no-update", "--force", environment=env)
@@ -1026,7 +1028,33 @@ class SetupTargetTests(unittest.TestCase):
         text = self.config("demo").read_text()
         self.assertIn("rapidjson", text)
         self.assertNotIn("oldjson", text)
-        self.assertNotRegex(process.stdout, r"returned rc=\d+ on backend=claude")
+        self.assertNotRegex(process.stdout, r"suggest-peers returned rc=\d+ on backend=claude")
+
+    def test_a_helper_failure_that_is_not_the_backends_is_not_retried(self) -> None:
+        self.assertEqual(self.setup("demo", str(self.remote)).returncode, 0)
+        capture = self.temp / "helper-backends"
+        fake = self.harness / "bin" / "suggest-threat-model"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            f"path = pathlib.Path({str(capture)!r})\n"
+            "with path.open('a') as stream:\n"
+            "    stream.write(os.environ.get('ACTIVE_BACKEND', '') + '\\n')\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        process = self.setup(
+            "demo", str(self.remote), "--no-update", "--force",
+            environment={"LLM_DECIDE_DISABLE": "0"},
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(capture.read_text().splitlines(), ["claude"])
+        self.assertIn(
+            "suggest-threat-model returned rc=1 on backend=claude - "
+            "not a backend failure, not retried",
+            process.stdout,
+        )
 
     def test_force_runner_bootstrap_propagates_regeneration(self) -> None:
         # --force regenerates inferred configuration whether or not --build is
@@ -2255,6 +2283,36 @@ class SetupTargetTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         self.assertEqual(capture.read_text().splitlines(), ["claude", "codex"])
         self.assertIn("retrying with backend=codex", process.stdout)
+
+    def test_build_widening_stops_on_an_invalid_recipe(self) -> None:
+        target = self.make_build_target("wideinvalid")
+        self.build_recipe(target)
+        config = self.config("wideinvalid")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "wideinvalid"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/wideinvalid"\nbuild_widening = true\n'
+        )
+        capture = self.temp / "build-config-invalid"
+        helper = self.harness / "bin" / "build-configs"
+        helper.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys\n"
+            f"path = pathlib.Path({str(capture)!r})\n"
+            "with path.open('a') as stream:\n"
+            "    stream.write(os.environ.get('ACTIVE_BACKEND', '') + '\\n')\n"
+            "raise SystemExit(2)\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        process = self.setup(
+            "wideinvalid", "--build",
+            environment={"LLM_DECIDE_DISABLE": "1"},
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(capture.read_text().splitlines(), ["claude"])
+        self.assertIn("not a backend failure, not retried", process.stdout)
+        self.assertIn("primary build is unaffected", process.stdout)
 
     def test_build_does_not_reseed_placeholder_configuration(self) -> None:
         (self.harness / "bin" / "auto-build-script").symlink_to(ROOT / "bin" / "auto-build-script")

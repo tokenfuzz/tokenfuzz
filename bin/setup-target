@@ -114,7 +114,17 @@ def validate_target(name: str) -> None:
             raise ValueError("target components may contain only letters, numbers, dot, underscore, or dash")
 
 
+# Exit codes the config helpers (bin/suggest-*) reserve for the model side of
+# a decision: 2 is a call that failed or was unavailable, 3 an answer that did
+# not validate. Every other failure describes the target or the host, and the
+# next backend would only repeat it.
+BACKEND_FAILURE_CODES = {2, 3}
+
+
 class Setup:
+    # The backend that answered a config helper in this process, if any.
+    answering_backend = ""
+
     def __init__(self, args: argparse.Namespace):
         validate_target(args.target)
         self.args = args
@@ -540,25 +550,20 @@ class Setup:
         )
         self.seeded_full = True
 
-    def backend_hint_paths(self) -> tuple[Path, Path]:
-        return (
-            self.target_root / ".audit" / "config-backend",
-            SCRIPT_ROOT / "output" / ".setup-target" / "config-backend",
-        )
-
     def backend_candidates(self) -> list[str]:
+        """Backends to try, in order: the requested one, then the defaults.
+
+        A backend that answered earlier in this run is tried first for the
+        next helper, so an unavailable default costs one failed call per run
+        rather than one per helper. That preference lives in this process
+        only. It was once written to disk and read back by every later run,
+        which silently reordered the defaults for every target on the host:
+        after one outage the first default was never tried first again.
+        """
         requested = os.environ.get("ACTIVE_BACKEND", os.environ.get("BACKEND", os.environ.get("AUDIT_BACKEND", "")))
-        remembered = []
-        for hint_path in self.backend_hint_paths():
-            try:
-                value = hint_path.read_text(encoding="utf-8").strip()
-            except OSError:
-                continue
-            if value in {"claude", "codex", "gemini", "grok", "oss"}:
-                remembered.append(value)
         result: list[str] = []
         preferred = [requested] if requested and requested != "all" else []
-        preferred += remembered
+        preferred += [self.answering_backend] if self.answering_backend else []
         for candidate in preferred + ["claude", "codex", "gemini", "grok"]:
             if candidate and candidate not in result:
                 result.append(candidate)
@@ -581,13 +586,7 @@ class Setup:
                 [str(executable), *helper_args], env=environment
             )
             if completed.returncode == 0:
-                for hint_path in self.backend_hint_paths():
-                    hint_path.parent.mkdir(parents=True, exist_ok=True)
-                    temporary = hint_path.with_name(
-                        f".{hint_path.name}.{os.getpid()}.tmp"
-                    )
-                    temporary.write_text(backend + "\n", encoding="utf-8")
-                    os.replace(temporary, hint_path)
+                self.answering_backend = backend
                 log(
                     f"config bootstrap: {helper} succeeded on "
                     f"backend={backend} - updated output/{self.name}/target.toml"
@@ -597,6 +596,16 @@ class Setup:
                 log(
                     f"config bootstrap: {helper} kept the existing curated "
                     f"section on backend={backend}"
+                )
+                return
+            if completed.returncode not in BACKEND_FAILURE_CODES:
+                # The helper's own inputs are the problem: no backend can
+                # answer for a target with no readable CLI or no target.toml,
+                # and retrying only repeats the same diagnostic per backend.
+                log(
+                    f"config bootstrap: {helper} returned "
+                    f"rc={completed.returncode} on backend={backend} - "
+                    "not a backend failure, not retried"
                 )
                 return
             next_backend = candidates[index + 1] if index + 1 < len(candidates) else ""
@@ -1586,6 +1595,14 @@ class Setup:
                 completed = subprocess.run(command, env=environment, check=False)
                 if completed.returncode == 0:
                     alternate_ready = True
+                    break
+                if completed.returncode == 2:
+                    # An invalid recipe or configuration fails the same way
+                    # on every backend.
+                    log(
+                        "bootstrap: alternate build configuration failed on "
+                        f"backend={backend}; not a backend failure, not retried"
+                    )
                     break
                 if index + 1 < len(candidates):
                     log(

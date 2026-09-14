@@ -147,6 +147,22 @@ ok(abs_mod.validate_proposed_script(_mach_script)[0],
    "validation accepts build-driver sanitizer configuration")
 ok(abs_mod.validate_proposed_script(_gn_script)[0],
    "validation accepts GN sanitizer configuration")
+# An operator recipe that guards its arguments spells them ${1:?...}; the
+# contract is the positional parameter, not one spelling of it.
+_guarded_script = (
+    "#!/usr/bin/env bash\nset -euo pipefail\n"
+    'src="${1:?source root required}"\nbuild="${2:?build dir required}"\n'
+    'cc -fsanitize=address "$src/main.c" -o "$build/app"\n'
+)
+ok(abs_mod.validate_proposed_script(_guarded_script)[0],
+   "validation accepts guarded ${N:?} positional parameters")
+ok(abs_mod.validate_proposed_script(
+       _guarded_script.replace('"${2:?build dir required}"', "out"))[1]
+   == "missing required positional parameter: $2",
+   "validation names the positional parameter a recipe never reads")
+ok(not abs_mod.validate_proposed_script(
+       _guarded_script.replace("${1:?source root required}", "$10"))[0],
+   "validation does not read $10 as $1")
 
 with tempfile.TemporaryDirectory() as _gn_exec_tmp:
     _gn_exec_root = Path(_gn_exec_tmp)

@@ -382,11 +382,12 @@ class BuildConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             recipe.chmod(0o755)
-            self.assertTrue(
+            self.assertEqual(
                 build_configs.materialize(
                     root, item, config, base_suffix="", force=False,
                     timeout_seconds=30,
-                )
+                ),
+                "ready",
             )
             tree = build_config.build_dir(root, item)
             binary = tree / "sample"
@@ -399,11 +400,12 @@ class BuildConfigTests(unittest.TestCase):
             )
             binary.chmod(0o755)
 
-            self.assertTrue(
+            self.assertEqual(
                 build_configs.materialize(
                     root, item, config, base_suffix="", force=False,
                     timeout_seconds=30,
-                )
+                ),
+                "ready",
             )
 
             self.assertTrue(build_config.is_ready(tree, recipe))

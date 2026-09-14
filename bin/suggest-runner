@@ -33,6 +33,11 @@ _HELP_TIMEOUT_SECONDS = 3
 _MAX_SUGGESTIONS = 2
 
 
+# A usage line is help however short it is: "usage: prog stream-file" is the
+# whole argv contract of a one-argument program.
+_USAGE_RE = re.compile(r"\busage\b", re.IGNORECASE)
+
+
 def read_help(binary: Path, env: dict | None = None, max_bytes: int = 16384) -> str:
     """Return the first useful bounded help response from a native CLI.
 
@@ -41,11 +46,13 @@ def read_help(binary: Path, env: dict | None = None, max_bytes: int = 16384) -> 
     the caller's input. One that does not answer within the deadline is left
     without help — it cannot be described to the model, and it is not a CLI
     whose help can be read."""
-    for flag in ("--help", "-h"):
+    # Last, no argument at all: a small CLI often answers only that with its
+    # usage line, and treats `--help` as a file it cannot open.
+    for arguments in (["--help"], ["-h"], []):
         with tempfile.TemporaryDirectory(prefix="suggest-runner-help-") as directory:
             try:
                 completed, output = runner_preflight.capture_probe(
-                    [str(binary), flag], _HELP_TIMEOUT_SECONDS, directory,
+                    [str(binary), *arguments], _HELP_TIMEOUT_SECONDS, directory,
                     max_bytes, env,
                 )
             except OSError:
@@ -59,7 +66,7 @@ def read_help(binary: Path, env: dict | None = None, max_bytes: int = 16384) -> 
                 completed.returncode, output
             ):
                 return ""
-            if len(output.strip()) >= 80:
+            if len(output.strip()) >= 80 or _USAGE_RE.search(output):
                 return output
     return ""
 

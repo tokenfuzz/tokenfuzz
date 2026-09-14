@@ -88,9 +88,12 @@ _FORBIDDEN_SUBSTRINGS = (
     "`wget", "$(wget",
 )
 
-_REQUIRED_SUBSTRINGS = (
-    "$1",
-    "$2",
+# The recipe contract is `build.sh <source-root> <build-dir>`. Either
+# parameter may be spelled `$1`, `${1}`, or `${1:?...}` — an operator recipe
+# that guards its arguments must pass the same check as a generated one.
+_REQUIRED_PARAMETERS = (
+    re.compile(r"\$\{?1(?![0-9])"),
+    re.compile(r"\$\{?2(?![0-9])"),
 )
 
 _SANITIZER_CONFIG_MARKERS = (
@@ -403,9 +406,9 @@ def validate_proposed_script(script: str) -> tuple[bool, str]:
     lo = script.lower()
     if not lo.startswith(("#!/usr/bin/env bash", "#!/bin/bash", "#!/usr/bin/bash")):
         return False, "missing bash shebang"
-    for needle in _REQUIRED_SUBSTRINGS:
-        if needle not in script:
-            return False, f"missing required token: {needle!r}"
+    for number, pattern in enumerate(_REQUIRED_PARAMETERS, start=1):
+        if not pattern.search(script):
+            return False, f"missing required positional parameter: ${number}"
     if not any(marker in script for marker in _SANITIZER_CONFIG_MARKERS):
         return False, "missing sanitizer configuration"
     for bad in _FORBIDDEN_SUBSTRINGS:

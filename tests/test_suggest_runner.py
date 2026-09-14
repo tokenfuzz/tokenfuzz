@@ -408,6 +408,22 @@ class SuggestRunnerTests(unittest.TestCase):
         self.assertIn("usage: sampleproj", help_text)
         self.assertEqual([], list(scratch.iterdir()))
 
+    def test_a_usage_line_printed_only_without_arguments_is_help(self) -> None:
+        # A one-argument CLI treats --help as the file it cannot open and
+        # states its whole contract in one line when given nothing.
+        self.binary.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            "if len(sys.argv) != 2:\n"
+            "    print('usage: sampleproj stream-file', file=sys.stderr)\n"
+            "    raise SystemExit(2)\n"
+            "print('could not read input', file=sys.stderr)\n"
+            "raise SystemExit(2)\n",
+            encoding="utf-8",
+        )
+        self.binary.chmod(0o755)
+        self.assertIn("usage: sampleproj stream-file", suggest_runner.read_help(self.binary))
+
     def test_loader_diagnostic_is_not_offered_as_cli_help(self) -> None:
         self.binary.write_text(
             "#!/bin/sh\n"

@@ -71,8 +71,17 @@ into `output/<target>/target.toml` and `--force` overwrites an existing
 section. They ask the model once, except that `bin/suggest-runner` permits one
 revision after launch validation rejects a proposal.
 
-`bin/suggest-runner` reads the `--help` output of a bounded set of
-instrumented CLIs the build declares, picks the one that parses input files,
+`bin/setup-target` runs each helper on the requested backend first, then in
+`claude → codex → gemini → grok` order. A call that fails or an answer that
+does not validate moves on to the next backend, and the backend that answered
+is tried first for the rest of that run only; the next run starts from the
+default order again. A failure the helper reports about the target itself,
+such as a CLI with no readable help, is logged once and not retried on
+another backend.
+
+`bin/suggest-runner` reads the help a bounded set of instrumented CLIs the
+build declares print for `--help`, `-h`, or no argument at all — a usage line
+counts however short — picks the one that parses input files,
 and proposes the matching `[runner]` invocation. When that is not the binary
 detection guessed, it retargets `<san>_bin` too: a build tree holds a
 project's tools next to its test drivers, and only the launch it validates
