@@ -673,6 +673,93 @@ raise SystemExit(23)
                 if name == "measured":
                     self.assertEqual(row["tokens"]["input"], 7)
 
+    def _direct_cell_through_capacity(self, cell: Path, wall: int, pause_cap: int):
+        """Run a direct cell whose first session the provider cuts at capacity."""
+        launches: list[tuple[str, int]] = []
+        sleeps: list[int] = []
+
+        def session(_backend, prompt, wall_left, raw, **_kwargs):
+            launches.append((prompt, wall_left))
+            with open(raw, "a", encoding="utf-8") as stream:
+                if len(launches) == 1:
+                    stream.write('{"type":"error","message":"Selected model is at '
+                                 'capacity. Please try a different model."}\n')
+                    return 1
+                (cell / "findings" / "FIND-1").mkdir(parents=True)
+                stream.write('{"type":"turn.completed"}\n')
+            return 0
+
+        usage = {"tokens": {"input": 5, "cached_input": 0, "cache_creation": 0, "output": 2},
+                 "probe": {}, "estimated": False}
+        # The clock keeps running through the sleep, as a wall clock would.
+        now = [0]
+
+        def monotonic():
+            return now[0]
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        def run(*args, **kwargs):
+            now[0] += 10
+            return session(*args, **kwargs)
+
+        with mock.patch.object(
+            benchmark_runner.benchmark_model_direct_render, "render", return_value="prompt",
+        ), mock.patch.object(
+            benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=run,
+        ), mock.patch.object(
+            benchmark_runner.llm_usage, "extract_usage_from_text", return_value=usage,
+        ), mock.patch.object(
+            benchmark_runner, "_reap_cell_processes",
+        ), mock.patch.object(
+            benchmark_runner, "_target_artifact_guard",
+            lambda *_args: contextlib.nullcontext(),
+        ), mock.patch.object(
+            benchmark_runner, "REENTRY_FLOOR_SECONDS", 15,
+        ), mock.patch.object(
+            benchmark_runner, "PROVIDER_PAUSE_MAX_SECONDS", pause_cap,
+        ), mock.patch.object(
+            benchmark_runner.time, "monotonic", side_effect=monotonic,
+        ), mock.patch.object(
+            benchmark_runner.time, "sleep", side_effect=sleep,
+        ):
+            rc = benchmark_runner.run_model_direct(cell, self.target, "codex", "", wall)
+        return rc, launches, sleeps
+
+    def test_a_direct_cell_waits_out_a_capacity_limit_and_re_enters(self) -> None:
+        cell = self.work / "capacity"
+        rc, launches, sleeps = self._direct_cell_through_capacity(cell, wall=100, pause_cap=7200)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sleeps, [benchmark_runner.CAPACITY_RETRY_SECONDS])
+        # Launched with the full wall; re-entered with what the session had
+        # left, the pause excluded.
+        self.assertEqual([wall for _prompt, wall in launches], [100, 90])
+        self.assertIn("re-entry 1", launches[1][0])
+        self.assertEqual(
+            (cell / "logs" / ".paused_secs").read_text(encoding="utf-8").strip(),
+            str(benchmark_runner.CAPACITY_RETRY_SECONDS),
+        )
+        self.assertFalse((cell / ".backend-unavailable").exists())
+        self.assertEqual(
+            (cell / ".run-quality").read_text(encoding="utf-8").strip(), "provider_recovered",
+        )
+        row = json.loads((cell / "logs" / "index.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(row["reentries"], 1)
+        self.assertEqual(row["tokens"]["input"], 10)
+
+    def test_a_direct_cell_past_the_pause_cap_is_excluded(self) -> None:
+        cell = self.work / "capacity-capped"
+        rc, launches, sleeps = self._direct_cell_through_capacity(cell, wall=100, pause_cap=0)
+        self.assertEqual(rc, 0)
+        self.assertEqual(sleeps, [])
+        self.assertEqual(len(launches), 1)
+        self.assertTrue((cell / ".backend-unavailable").exists())
+        self.assertEqual(
+            (cell / ".run-quality").read_text(encoding="utf-8").strip(), "provider_limited",
+        )
+
     def test_a_held_direct_cell_is_re_entered_until_the_wall(self) -> None:
         cell = self.work / "held"
         launches: list[tuple[str, int]] = []

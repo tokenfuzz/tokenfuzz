@@ -58,6 +58,10 @@ STRATEGY_DRY_THRESHOLD = 3
 STRATEGY_S1_DRY_THRESHOLD = 8
 STRATEGY_FORCE_EXTRA = 5
 PROVIDER_PAUSE_MAX_SECONDS = 6 * 60 * 60
+#: One retry interval when the provider names no reset time. Shared with the
+#: benchmark's direct control so both conditions wait out a capacity limit
+#: the same way.
+CAPACITY_RETRY_SECONDS = 30 * 60
 TRANSIENT_RETRY_MAX = 6
 _OWNED_INSTANCE_LOCKS: set[Path] = set()
 _CODEX_UPGRADE_REQUIRED = "requires a newer version of Codex"
@@ -4204,7 +4208,7 @@ def _recover_capacity(state: BackendState, results: list[AgentResult]) -> bool:
         return False
     now = int(time.time())
     reset_at = max((result.reset_at or 0 for result in results), default=0)
-    wait = max(0, reset_at - now + 30) if reset_at else min(30 * 60, remaining)
+    wait = max(0, reset_at - now + 30) if reset_at else min(CAPACITY_RETRY_SECONDS, remaining)
     wait = min(wait, remaining)
     if wait:
         index_log(state.runtime, f"Provider capacity limited; pausing {wait}s before retry")

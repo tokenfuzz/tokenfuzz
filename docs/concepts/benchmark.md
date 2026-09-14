@@ -657,12 +657,13 @@ cleanly, so half-written artifacts are never folded into the result.
 `--replicates` is the desired total, so you can raise it during resume to add
 more cells.
 
-Harness cells pause and retry provider-withheld capacity for up to six hours;
-that wait counts against neither their audit budget nor reported `Wall (h)`.
-The model-direct condition is one backend session and cannot be steered back
-into work after its CLI exits. A nonzero capacity-limited direct exit is
-excluded rather than scored at a truncated wall, its artifacts remain on disk,
-and resuming the run reruns that cell.
+Both conditions pause and retry provider-withheld capacity for up to six
+hours; that wait counts against neither their audit budget nor reported
+`Wall (h)`. A model-direct session that the provider cuts is re-entered after
+the pause with the wall it had left, and the cell records its `paused_seconds`
+like a harness cell. A direct cell the pause cannot bring back within its
+wall is excluded rather than scored short, its artifacts remain on disk, and
+resuming the run reruns that cell.
 
 ## Regenerating results after code changes
 

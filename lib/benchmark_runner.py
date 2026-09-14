@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import audit_helpers
+from audit_runner import CAPACITY_RETRY_SECONDS, PROVIDER_PAUSE_MAX_SECONDS
 import benchmark as metrics
 import benchmark_page
 import benchmark_model_direct_render
@@ -1509,6 +1510,15 @@ def _reentry_prompt(prompt: str, cell_dir: Path, reentries: int, remaining: int)
     return header + "\n" + prompt
 
 
+def _segment_issue(raw: Path, offset: int) -> str:
+    """Provider verdict for the part of *raw* one session appended."""
+    try:
+        text = raw.read_text(encoding="utf-8", errors="replace")[offset:]
+    except OSError:
+        return "none"
+    return audit_helpers._provider_issue_from_lines(text.splitlines())
+
+
 def _segment_usage(raw: Path, offset: int, prompt: str, backend: str) -> dict:
     """Usage row for the part of *raw* one session appended."""
     try:
@@ -1566,13 +1576,13 @@ def run_model_direct(
     reap_marker = process_tree.new_marker()
     started = time.monotonic()
     reentries = 0
+    paused = 0
     usage_rows: list[dict] = []
     with _target_artifact_guard(target, cell_dir):
         try:
             while True:
-                remaining = (
-                    max(1, wall - int(time.monotonic() - started)) if wall > 0 else wall
-                )
+                elapsed = int(time.monotonic() - started) - paused
+                remaining = max(1, wall - elapsed) if wall > 0 else wall
                 session_prompt = (
                     _reentry_prompt(prompt, cell_dir, reentries, remaining)
                     if reentries else prompt
@@ -1589,10 +1599,34 @@ def run_model_direct(
                     extra_env={process_tree.REAP_MARKER_VAR: reap_marker},
                 )
                 usage_rows.append(_segment_usage(raw, offset, session_prompt, backend))
-                left = wall - int(time.monotonic() - started)
+                left = wall - (int(time.monotonic() - started) - paused)
+                if (
+                    rc not in (0, 124) and wall > 0 and left > REENTRY_FLOOR_SECONDS
+                    and _segment_issue(raw, offset) == "capacity_limited"
+                ):
+                    # The provider withheld capacity, not the model. A harness
+                    # cell waits this out and its wall excludes the wait; the
+                    # direct CLI just exits, and excluding the cell for that
+                    # threw away the comparison whenever the provider hiccuped
+                    # once. Wait the same way, then re-enter with the wall the
+                    # session had left. `.paused_secs` is the ledger the cell's
+                    # accounting already reads.
+                    wait = min(CAPACITY_RETRY_SECONDS, PROVIDER_PAUSE_MAX_SECONDS - paused)
+                    if wait > 0:
+                        log(
+                            f"model-direct provider capacity limited with {left}s "
+                            f"left; pausing {wait}s before re-entry"
+                        )
+                        time.sleep(wait)
+                        paused += wait
+                        (cell_dir / "logs" / ".paused_secs").write_text(
+                            f"{paused}\n", encoding="utf-8"
+                        )
+                        reentries += 1
+                        continue
                 # A held control is re-entered only after a normal exit: a
-                # provider cut or a crash of the CLI is an outcome to record,
-                # not one to paper over with another launch.
+                # crash of the CLI is an outcome to record, not one to paper
+                # over with another launch.
                 if not (hold and rc == 0 and wall > 0 and left > REENTRY_FLOOR_SECONDS):
                     break
                 reentries += 1
@@ -1620,11 +1654,11 @@ def run_model_direct(
     ):
         return 0
     if issue == "capacity_limited" and rc not in (0, 124):
-        # The provider cut this cell short. A harness cell pauses through a
-        # capacity event and its wall excludes the pause; the direct CLI just
-        # exits, so scoring what it filed at its truncated wall would count a
-        # provider outage as a model outcome. Exclude it as an artifact-less
-        # cut is excluded; the artifacts stay on disk, and a resume reruns it.
+        # The provider cut this cell short and the pause above could not bring
+        # it back (the wait cap or the wall ran out). Scoring what it filed at
+        # its truncated wall would count a provider outage as a model outcome,
+        # so exclude it as an artifact-less cut is excluded; the artifacts
+        # stay on disk, and a resume reruns it.
         (cell_dir / ".backend-unavailable").touch()
         (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
         log(
