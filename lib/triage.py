@@ -2108,7 +2108,7 @@ def _cached_trigger_vote(report: Path, vote_file: Path) -> str | None:
         return None
     version = payload.get("decision_version")
     if version in {
-        triage_validate.TRIGGER_GATE_DECISION_VERSION,
+        triage_validate.trigger_gate_decision_version(),
         triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
     }:
         if version == triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION:
@@ -3159,7 +3159,7 @@ def _finding_cache(path: Path) -> dict:
         return {}
 
 
-_FIND_QUALITY_VERSION = report_identity.FIND_QUALITY_DECISION_VERSION
+
 
 
 def _quality_content_sha1(report_text: str) -> str:
@@ -3176,7 +3176,7 @@ def _quality_cache_matches(
     only while they are at least as new as the report. That preserves completed
     audits without letting a later report edit replay a stale verdict.
     """
-    if cache.get("decision_version") != _FIND_QUALITY_VERSION:
+    if cache.get("decision_version") != report_identity.find_quality_decision_version():
         return False
     cached_report_sha1 = cache.get("report_sha1")
     if isinstance(cached_report_sha1, str) and cached_report_sha1:
@@ -3224,7 +3224,7 @@ def _quality_payload(
     accepts = [vote for vote in normalized if vote["accept"] is True]
     rejects = [vote for vote in normalized if vote["accept"] is False]
     payload: dict = {
-        "decision_version": _FIND_QUALITY_VERSION,
+        "decision_version": report_identity.find_quality_decision_version(),
         "content_sha1": _quality_content_sha1(report_text),
         "votes": normalized,
         "accept_count": len(accepts),
@@ -3457,7 +3457,7 @@ def _prepare_accepted_finding(
     cache_path = finding_dir / ".llm-find-quality.json"
     cache = _finding_cache(cache_path)
     if (
-        cache.get("decision_version") == _FIND_QUALITY_VERSION
+        cache.get("decision_version") == report_identity.find_quality_decision_version()
         and cache.get("accept") is True
     ):
         cache["content_sha1"] = _quality_content_sha1(read_report_bounded(report))

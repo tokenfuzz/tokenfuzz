@@ -923,7 +923,7 @@ def _current_trigger_vote(
     version = payload.get("decision_version")
     if (
         version in {
-            triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            triage_validate.trigger_gate_decision_version(),
             triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
         }
         # Harvest is intentionally environment-free: it validates that the

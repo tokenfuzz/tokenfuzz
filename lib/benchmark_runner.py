@@ -48,6 +48,7 @@ import stack_frames
 import target_config
 import target_profile
 import triage
+import triage_validate
 import validation_receipt
 import workqueue
 from timeout import run_timeout
@@ -3430,6 +3431,46 @@ def _resume_refusal(reason: str, run_id: str) -> str:
     )
 
 
+def _pinned_gate_versions(previous: dict | None) -> dict[str, str]:
+    """The gate versions a run adjudicates under, kept across its resumes.
+
+    A prompt bump landing mid-run splits one cell's votes across two versions:
+    the first-cast vote reads stale to the post-cell drain, so the finding can
+    never be finalized from cache and publishes as an unjudged remainder. A run
+    therefore records the versions in effect when it started and keeps them for
+    every later cell and finalization of that same run.
+    """
+    recorded = (previous or {}).get("gate_versions")
+    if isinstance(recorded, dict) and recorded.get("trigger") and recorded.get("find_quality"):
+        return {
+            "trigger": str(recorded["trigger"]),
+            "find_quality": str(recorded["find_quality"]),
+        }
+    return {
+        "trigger": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+        "find_quality": report_identity.FIND_QUALITY_DECISION_VERSION,
+    }
+
+
+def _apply_gate_pin(versions: dict[str, str] | None) -> None:
+    """Adjudicate this process under *versions*; None keeps the live constants.
+
+    Set once per run, before any cell or finalization casts a vote, and
+    inherited by every reviewer subprocess. Regeneration passes None: re-scoring
+    exists to apply current policy to artifacts already on disk, so it must
+    re-review what a version bump invalidated rather than preserve the verdicts
+    that bump retired.
+    """
+    for key, value in (
+        ("GATE_VERSION_TRIGGER", (versions or {}).get("trigger", "")),
+        ("GATE_VERSION_FIND_QUALITY", (versions or {}).get("find_quality", "")),
+    ):
+        if value:
+            os.environ[key] = value
+        else:
+            os.environ.pop(key, None)
+
+
 def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions, previous=None) -> int:
     model = args.model or llm_invoke.default_model(args.backend)
     llm_invoke.apply_memory_policy(False)
@@ -3447,8 +3488,10 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
             "target_sha": target_config.detect_rev(SCRIPT_ROOT / "targets" / args.target),
             "tokenfuzz_sha": _git_rev(SCRIPT_ROOT), "harness_sha": _git_rev(SCRIPT_ROOT, True),
             "finding_confirmation": metrics.FINDING_CONFIRMATION_VERSION,
+            "gate_versions": _pinned_gate_versions(previous),
             "dry_run": args.dry_run,
         }
+        _apply_gate_pin(run_data["gate_versions"])
         # Written once, below, after the pin checks: a refused resume must not
         # overwrite the pin it was refused for, or the next attempt would find
         # nothing to contradict and proceed.
@@ -3458,6 +3501,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
         if args.dry_run:
             log("Dry run: synthetic cells, no LLM calls")
     else:
+        _apply_gate_pin(None)
         log(f"Regenerating run {run_id}: target={args.target} backend={args.backend} (no cells launched)")
     log(f"Output: {bench_dir}")
 

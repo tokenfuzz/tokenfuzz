@@ -186,7 +186,7 @@ def stamp_trigger_vote(
         "decision_version": (
             triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION
             if args.resolve_trigger
-            else triage_validate.TRIGGER_GATE_DECISION_VERSION
+            else triage_validate.trigger_gate_decision_version()
         ),
         "content_sha1": content_sha1,
         "attacker_controls": triage_validate.trigger_attacker_controls(),

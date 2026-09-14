@@ -173,6 +173,14 @@ a review batch that returns no keyed output leaves its ids unadjudicated even
 on an unlimited budget. Cached receipts make each repeat pay only for what is
 still missing.
 
+A run records the gate prompt versions in effect when it started and
+adjudicates every cell and finalization under them. A bump landing mid-run
+would otherwise split one cell's votes across two versions: the first-cast
+vote reads stale to the post-cell drain, the finding can never be finalized
+from its cached votes, and the whole cell publishes as an unjudged remainder.
+`--regenerate` deliberately does not pin, because re-scoring exists to apply
+current policy to artifacts already on disk.
+
 ### What happens to anything unsettled
 
 Nothing is guessed at. An unvalidated finding does not enter the finding

@@ -15,6 +15,20 @@ REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "READ
 PLACEHOLDER_FIELD_VALUES = frozenset(
     {"", "-", "—", "?", "tbd", "unknown / not assessed"}
 )
+
+
+def find_quality_decision_version() -> str:
+    """The quality version this run adjudicates under.
+
+    A benchmark run pins the version in effect when it started; see
+    triage_validate.trigger_gate_decision_version for why.
+    """
+    return (
+        os.environ.get("GATE_VERSION_FIND_QUALITY")
+        or FIND_QUALITY_DECISION_VERSION
+    )
+
+
 #: Stamped into a bundle's Cluster row before bin/cluster-crashes computes a
 #: real id. It is a stamp, not a value: a reader that takes it for one gets a
 #: cluster key every unclustered artifact shares, which merges unrelated bugs

@@ -1273,6 +1273,53 @@ class FinalizationDrainTests(unittest.TestCase):
         # a place to look rather than asserted to exist.
         self.assertIn("where one exists", warning)
 
+    def test_a_run_adjudicates_under_the_gate_versions_it_started_with(self) -> None:
+        # A prompt bump landing mid-run split one cell's votes across two
+        # versions: the first-cast vote read stale to the post-cell drain, the
+        # finding could never be finalized from cache, and it published as an
+        # unjudged remainder. A run pins the versions it started with and keeps
+        # them across resumes; regeneration re-reviews under current policy.
+        import report_identity
+        import triage_validate
+
+        live = {
+            "trigger": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "find_quality": report_identity.FIND_QUALITY_DECISION_VERSION,
+        }
+        self.assertEqual(benchmark_runner._pinned_gate_versions(None), live)
+        self.assertEqual(benchmark_runner._pinned_gate_versions({}), live)
+        recorded = {"trigger": "trigger-vOLD", "find_quality": "qOLD"}
+        self.assertEqual(
+            benchmark_runner._pinned_gate_versions({"gate_versions": recorded}), recorded,
+        )
+        # A half-written record cannot pin half a policy.
+        self.assertEqual(
+            benchmark_runner._pinned_gate_versions(
+                {"gate_versions": {"trigger": "trigger-vOLD"}},
+            ),
+            live,
+        )
+        environment = {
+            k: v for k, v in os.environ.items()
+            if k not in ("GATE_VERSION_TRIGGER", "GATE_VERSION_FIND_QUALITY")
+        }
+        with mock.patch.dict(os.environ, environment, clear=True):
+            benchmark_runner._apply_gate_pin(recorded)
+            self.assertEqual(
+                triage_validate.trigger_gate_decision_version(), "trigger-vOLD",
+            )
+            self.assertEqual(
+                report_identity.find_quality_decision_version(), "qOLD",
+            )
+            # Regeneration clears the pin so a retired verdict is re-reviewed.
+            benchmark_runner._apply_gate_pin(None)
+            self.assertEqual(
+                triage_validate.trigger_gate_decision_version(), live["trigger"],
+            )
+            self.assertEqual(
+                report_identity.find_quality_decision_version(), live["find_quality"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

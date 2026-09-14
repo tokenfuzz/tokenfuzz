@@ -1647,7 +1647,7 @@ def _accepted_finding_primitive(report_dir: Path) -> tuple[str, str]:
     except (OSError, ValueError, TypeError):
         return "", ""
     if (payload.get("decision_version")
-            != report_identity.FIND_QUALITY_DECISION_VERSION
+            != report_identity.find_quality_decision_version()
             or payload.get("accept") is not True or votes < 2):
         return "", ""
     label = str(payload.get("class") or "").strip().lower()

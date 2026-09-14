@@ -16,6 +16,21 @@ TRIGGER_GATE_DECISION_VERSION = "trigger-v12-shipped-base"
 # question. It has a separate identity so changing that policy never invalidates
 # the independent first-pass votes it is meant to adjudicate.
 TRIGGER_RESOLUTION_DECISION_VERSION = "trigger-resolution-v3"
+
+
+def trigger_gate_decision_version() -> str:
+    """The trigger version this run adjudicates under.
+
+    A benchmark run pins the version in effect when it started, because a bump
+    landing mid-run splits one cell's votes across two versions: the first-cast
+    vote reads stale to the post-cell drain, the finding can never be finalized
+    from its cached votes, and it publishes as an unjudged remainder.
+    Regeneration leaves the pin unset so old artifacts are re-adjudicated under
+    current policy.
+    """
+    return os.environ.get("GATE_VERSION_TRIGGER") or TRIGGER_GATE_DECISION_VERSION
+
+
 # A legacy non-negative vote cannot hide an issue, so triage may reuse it as a
 # fail-open keep decision. Legacy Rejects are never reused: they were not bound
 # to the target threat model and could otherwise create a false negative.
