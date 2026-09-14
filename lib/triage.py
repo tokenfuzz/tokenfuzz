@@ -362,6 +362,10 @@ def _reject(
 _TRIGGER_REJECTION_RE = re.compile(
     r"^trigger-provenance(?:\s|\(|:)", re.IGNORECASE,
 )
+# Older gates copied one finding's verdict to every report at its source site.
+# Distinct issues can share a function, so none of those inherited decisions
+# remains authoritative now that each distinct report is reviewed.
+_LEGACY_SAME_SITE_PREFIX = "same-site:"
 
 
 def _rejection_reason(directory: Path) -> str:
@@ -496,19 +500,12 @@ def _restore_stale_trigger_rejections(
         if not directory.is_dir():
             continue
         report = _report(directory)
-        if reason.startswith(SAME_SITE_PREFIX):
-            # Inherited from another finding at the same site: stands while
-            # its source stands, and is requeued with it.
-            source = reason[len(SAME_SITE_PREFIX):].split(":", 1)[0].strip()
-            if not any(
-                other.name == source or other.name.startswith(source + ".")
-                for other in rejected_root.glob(prefix)
-            ):
-                _restore_rejected_artifact(
-                    directory, active_root, kind=kind,
-                    detail="requeued with the same-site verdict it shared",
-                )
-                restored += 1
+        if kind == "finding" and reason.startswith(_LEGACY_SAME_SITE_PREFIX):
+            _restore_rejected_artifact(
+                directory, active_root, kind=kind,
+                detail="requeued after removal of same-site verdict sharing",
+            )
+            restored += 1
             continue
         if _publication_rejection(reason):
             # A publication verdict stands while the review behind it is
@@ -598,6 +595,29 @@ def restore_stale_trigger_rejections(
         _restore_stale_trigger_rejections(results, kind=kind)
         for kind in ("crash", "finding")
     )
+
+
+def _clear_legacy_same_site_receipts(results_dir: Path) -> int:
+    """Invalidate active findings whose final verdict was copied by site."""
+    cleared = 0
+    for directory in sorted((results_dir / "findings").glob("FIND-*")):
+        receipt = directory / "validation.json"
+        try:
+            payload = json.loads(receipt.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not str(payload.get("detail") or "").startswith(
+            _LEGACY_SAME_SITE_PREFIX
+        ):
+            continue
+        receipt.unlink(missing_ok=True)
+        cleared += 1
+    if cleared:
+        print(
+            f"INFO: requeued {cleared} finding verdict(s) inherited by source site",
+            file=sys.stderr,
+        )
+    return cleared
 
 
 def _refresh_or_restore_quality_rejections(
@@ -4300,134 +4320,6 @@ def _finding_review_order(directories: list[Path]) -> list[Path]:
     return ordered
 
 
-#: Detail/reason prefix of a verdict a finding inherited from another finding
-#: at the same site. Matched by the restore pass so the copy follows its source.
-SAME_SITE_PREFIX = "same-site:"
-
-
-def _finding_site(directory: Path) -> tuple | None:
-    """The finding's located cluster key, or None when it names no site."""
-    report = _report(directory)
-    if report is None:
-        return None
-    signature = finding_signature.finding_signature(read_report_bounded(report))
-    return tuple(signature["key"]) if signature.get("kind") == "loc" else None
-
-
-def _site_level_rejection(reason: str) -> bool:
-    """A rejection that judged the site, not the write-up."""
-    return bool(
-        _TRIGGER_REJECTION_RE.match(reason)
-        or reason.startswith(THREAT_MODEL_REJECTION_PREFIX)
-    )
-
-
-def _site_verdicts(results: Path) -> dict[tuple, tuple[Path, dict | None]]:
-    """Concluded verdict per site: (source, receipt) when kept, (source, None)
-    when rejected on site-level grounds."""
-    verdicts: dict[tuple, tuple[Path, dict | None]] = {}
-    for directory in sorted((results / "findings").glob("FIND-*")):
-        receipt = validation_receipt.read_current(directory)
-        if receipt is None or receipt.get("state") not in validation_receipt.FINAL_STATES:
-            continue
-        if str(receipt.get("detail", "")).startswith(SAME_SITE_PREFIX):
-            continue
-        site = _finding_site(directory)
-        if site is not None:
-            verdicts.setdefault(site, (directory, receipt))
-    rejected_root = results / "findings-rejected"
-    for directory in sorted(rejected_root.glob("FIND-*")) if rejected_root.is_dir() else []:
-        if not _site_level_rejection(_rejection_reason(directory)):
-            continue
-        site = _finding_site(directory)
-        if site is not None:
-            verdicts.setdefault(site, (directory, None))
-    return verdicts
-
-
-def _share_site_verdict(
-    directory: Path, results: Path, source: Path, receipt: dict | None,
-) -> str:
-    """Give *directory* the verdict *source* earned for the same site."""
-    if receipt is None:
-        _reject(
-            directory, results / "findings-rejected",
-            f"{SAME_SITE_PREFIX} {source.name}: {_rejection_reason(source)}",
-        )
-        return "rejected"
-    evidence = receipt.get("evidence") or {}
-    validation_receipt.write(
-        directory, kind="finding", state=str(receipt.get("state")),
-        detail=f"{SAME_SITE_PREFIX} {source.name}: {receipt.get('detail', '')}",
-        review_facts=evidence.get("review_facts") or None,
-        attacker_controls=evidence.get("attacker_controls") or None,
-    )
-    return "accepted"
-
-
-def _representative_verdict(
-    results: Path, representative: Path,
-) -> tuple[Path, dict | None] | None:
-    """Where the representative's review landed, once the drain is over."""
-    receipt = validation_receipt.read_current(representative)
-    if receipt is not None and receipt.get("state") in validation_receipt.FINAL_STATES:
-        return representative, receipt
-    rejected_root = results / "findings-rejected"
-    for directory in sorted(rejected_root.glob(representative.name + "*")):
-        if directory.name.startswith(representative.name) and (
-            directory.name == representative.name
-            or directory.name[len(representative.name)] == "."
-        ) and _site_level_rejection(_rejection_reason(directory)):
-            return directory, None
-    return None
-
-
-def _share_site_verdicts(
-    results: Path, directories: list[Path], counts: dict[str, int],
-) -> tuple[list[Path], dict[Path, Path]]:
-    """Review each site once; the rest of its findings inherit the verdict.
-
-    Every review is a fresh draw from a model, so N copies of one claim got
-    N chances to be accepted, and how many copies a condition filed decided
-    what it was credited with. A finding that has not been reviewed yet takes
-    the concluded verdict of its site when there is one; among unreviewed
-    findings that share a site, the first is reviewed and the others are
-    deferred to its outcome (returned as {duplicate: representative}). A
-    finding with its own review under way keeps it.
-    """
-    verdicts = _site_verdicts(results)
-    to_review: list[Path] = []
-    deferred: dict[Path, Path] = {}
-    first_at: dict[tuple, Path] = {}
-    for directory in directories:
-        current = validation_receipt.read_current(directory)
-        if (
-            current is not None
-            and current.get("state") in validation_receipt.FINAL_STATES
-            and str(current.get("detail", "")).startswith(SAME_SITE_PREFIX)
-        ):
-            counts["accepted"] += 1
-            continue
-        reviewed = any(
-            (directory / name).is_file()
-            for name in (_TRIGGER_PRIMARY_NAME, ".llm-find-quality.json")
-        )
-        site = None if reviewed else _finding_site(directory)
-        if site is None:
-            to_review.append(directory)
-            continue
-        if site in verdicts:
-            source, receipt = verdicts[site]
-            counts[_share_site_verdict(directory, results, source, receipt)] += 1
-            continue
-        if site in first_at:
-            deferred[directory] = first_at[site]
-            continue
-        first_at[site] = directory
-        to_review.append(directory)
-    return to_review, deferred
-
-
 def validate_find_gate(
     results_dir: str | os.PathLike[str],
     *,
@@ -4452,6 +4344,7 @@ def validate_find_gate(
     q = quorum or _positive_int_env("FIND_GATE_QUORUM", 2)
     aq = accept_quorum or _positive_int_env("FIND_GATE_ACCEPT_QUORUM", 2)
     if only is None:
+        _clear_legacy_same_site_receipts(results)
         _restore_stale_trigger_rejections(results, kind="finding")
         _refresh_or_restore_quality_rejections(
             results, quorum=q, accept_quorum=aq,
@@ -4475,7 +4368,6 @@ def validate_find_gate(
         directories = [path for path in directories if path in chosen]
     timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
-    directories, deferred = _share_site_verdicts(results, directories, counts)
     # Finish conclusive cached work before asking a provider for anything.
     # Regeneration often has a large legacy backlog alongside already-reviewed
     # artifacts. Letting the backlog consume the shared deadline first made
@@ -4642,16 +4534,6 @@ def validate_find_gate(
                         target_root_is_product, prepared=True,
                     )
                 counts[status] += 1
-    for directory, representative in deferred.items():
-        outcome = _representative_verdict(results, representative)
-        if outcome is None:
-            validation_receipt.write(
-                directory, kind="finding", state="pending",
-                detail=f"awaiting the same-site review of {representative.name}",
-            )
-            counts["pending"] += 1
-            continue
-        counts[_share_site_verdict(directory, results, *outcome)] += 1
     return counts
 
 
