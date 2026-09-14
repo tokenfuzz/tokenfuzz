@@ -4290,7 +4290,7 @@ def seed_toml(
             "enabled = [" + ", ".join(
                 toml_basic_string(value)
                 for value in (
-                    preserved_enabled if preserved_enabled
+                    preserved_enabled if preserved_enabled is not None
                     else default_runner_sanitizers or ("asan",)
                 )
             ) + "]",

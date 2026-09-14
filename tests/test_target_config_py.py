@@ -2933,6 +2933,18 @@ assert_eq("build-asan/sample", _binary_route.get("asan_bin"),
 assert_eq(None, _binary_route.get("runner"),
           "seed_toml(preserve): seeds no registry runner beside a reviewed binary route")
 
+# An explicitly empty policy is still a reviewed policy.  On a native target
+# the generated default is ASan, so treating [] as "not preserved" silently
+# changes a findings-only audit into a sanitizer audit during --force.
+_seed_out.write_text(
+    'target = "seed-preserve"\nbuild_system = "cmake"\n'
+    '[sanitizer]\nenabled = []\n',
+    encoding="utf-8",
+)
+tc.seed_toml(_seed_root, _seed_out, preserve_curated=True)
+assert_eq([], tc.parse_toml(_seed_out).get("sanitizer", {}).get("enabled"),
+          "seed_toml(preserve): keeps an explicitly empty sanitizer policy")
+
 # JAVA_HOME comes from the JVM's own java.home: a platform launcher stub
 # forwards to a JDK it does not live in, and pointing JAVA_HOME at the stub's
 # prefix makes every tool that honours it hang.
