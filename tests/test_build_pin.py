@@ -419,6 +419,75 @@ class BuildInputKeyTests(unittest.TestCase):
         self.assertNotEqual(first, target_config.build_input_key(self.target))
 
 
+class AlternateFailureClassificationTests(unittest.TestCase):
+    """Only recipe convergence failures rotate model backends."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="alternate-failure-"))
+        self.target_root = self.tmp / "target"
+        _native_target(self.target_root)
+        self.config = build_config.BuildConfig(
+            name="widened", label="widened", flags=(), widen=True,
+        )
+        self.target = SimpleNamespace(
+            is_browser="0", sanitizer_bin=lambda _name: "",
+        )
+
+    def tearDown(self) -> None:
+        subprocess.run(["rm", "-rf", str(self.tmp)], check=False)
+
+    def materialize(self, backend: str, returncode: int) -> tuple[str, int]:
+        completed = SimpleNamespace(returncode=returncode)
+        with mock.patch.dict(
+            os.environ, {"ACTIVE_BACKEND": backend}, clear=False,
+        ), mock.patch.object(
+            build_configs, "run_timeout", return_value=completed,
+        ) as run:
+            outcome = build_configs.materialize(
+                self.target_root, self.config, self.target,
+                base_suffix="", force=False, timeout_seconds=10,
+            )
+        return outcome, run.call_count
+
+    def test_backend_failure_marker_allows_another_backend(self) -> None:
+        self.assertEqual(("backend-unavailable", 1), self.materialize("claude", 3))
+        self.assertEqual(("backend-unavailable", 0), self.materialize("claude", 0))
+        self.assertEqual(("backend-unavailable", 1), self.materialize("codex", 3))
+
+    def test_a_shared_fresh_build_supersedes_backend_failure_markers(self) -> None:
+        self.assertEqual(("backend-unavailable", 1), self.materialize("claude", 3))
+        with mock.patch.dict(
+            os.environ, {"ACTIVE_BACKEND": "claude"}, clear=False,
+        ), mock.patch.object(
+            build_configs, "is_fresh", return_value=True,
+        ), mock.patch.object(
+            build_configs, "alternate_startup_failure", return_value="",
+        ), mock.patch.object(build_configs, "run_timeout") as run:
+            self.assertEqual(
+                "ready",
+                build_configs.materialize(
+                    self.target_root, self.config, self.target,
+                    base_suffix="", force=False, timeout_seconds=10,
+                ),
+            )
+        run.assert_not_called()
+
+    def test_missing_local_toolchain_marker_stops_every_backend(self) -> None:
+        self.assertEqual(("unavailable", 1), self.materialize("claude", 5))
+        self.assertEqual(("unavailable", 0), self.materialize("codex", 0))
+
+    def test_recoverable_outcome_wins_over_other_local_failures(self) -> None:
+        self.assertEqual(
+            3,
+            build_configs._outcomes_returncode(
+                ["ready", "unavailable", "backend-unavailable"],
+            ),
+        )
+        self.assertEqual(
+            2, build_configs._outcomes_returncode(["ready", "invalid"]),
+        )
+
+
 class DriftAccountingTests(unittest.TestCase):
     """A drifted cell keeps its artifacts and leaves the headline comparison."""
 

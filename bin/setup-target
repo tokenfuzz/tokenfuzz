@@ -568,7 +568,10 @@ class Setup:
         for candidate in preferred + ["claude", "codex", "gemini", "grok"]:
             if candidate and candidate not in result:
                 result.append(candidate)
-        if requested == "oss" or os.environ.get("MODEL", os.environ.get("AUDIT_MODEL", "")):
+        if (
+            "oss" not in result
+            and (requested == "oss" or os.environ.get("MODEL", os.environ.get("AUDIT_MODEL", "")))
+        ):
             result.append("oss")
         return result
 
@@ -1612,9 +1615,9 @@ class Setup:
                 if completed.returncode == 0:
                     alternate_ready = True
                     break
-                if completed.returncode == 2:
-                    # An invalid recipe or configuration fails the same way
-                    # on every backend.
+                if completed.returncode != 3:
+                    # Invalid configuration and local build failures are
+                    # independent of the model backend.
                     log(
                         "bootstrap: alternate build configuration failed on "
                         f"backend={backend}; not a backend failure, not retried"

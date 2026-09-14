@@ -108,6 +108,12 @@ def not_applicable_path(recipe: Path, base_suffix: str) -> Path:
     return recipe.with_suffix(recipe.suffix + f".{environment_id}.not-applicable")
 
 
+def invalid_path(recipe: Path, base_suffix: str) -> Path:
+    """Marker for configuration input no model backend can repair."""
+    environment_id = hashlib.sha256(base_suffix.encode()).hexdigest()[:10]
+    return recipe.with_suffix(recipe.suffix + f".{environment_id}.invalid")
+
+
 def write_marker(path: Path, value: str) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     temporary.write_text(value + "\n", encoding="utf-8")
@@ -178,10 +184,11 @@ def materialize(
     root: Path, config: build_config.BuildConfig, target, *, base_suffix: str,
     force: bool, timeout_seconds: int,
 ) -> str:
-    """Prepare one alternate; "ready", "unavailable", or "invalid".
+    """Prepare one alternate and classify its readiness failure.
 
-    "invalid" is a recipe rejected before any model ran: the same input fails
-    on every backend, and the caller stops rotating backends on it."""
+    ``backend-unavailable`` is the only result another model backend can
+    change. ``invalid`` is rejected before any model ran, and ``unavailable``
+    means the local build or launch failed; callers stop rotating on both."""
     recipe = build_config.recipe_path(root, config)
     tree = build_config.build_dir(root, config, base_suffix=base_suffix)
     lock = root / ".audit" / "configs" / f".{config.config_id}.lock"
@@ -200,21 +207,44 @@ def materialize(
         backend = (
             os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
         ) if config.widen else ""
-        unavailable = unavailable_path(recipe, base_suffix, backend=backend)
+        local_unavailable = unavailable_path(recipe, base_suffix)
+        backend_unavailable = unavailable_path(
+            recipe, base_suffix, backend=backend,
+        )
+        invalid = invalid_path(recipe, base_suffix)
         not_applicable = not_applicable_path(recipe, base_suffix)
+        fresh = False
         if force:
-            unavailable.unlink(missing_ok=True)
+            local_unavailable.unlink(missing_ok=True)
+            backend_unavailable.unlink(missing_ok=True)
+            invalid.unlink(missing_ok=True)
             not_applicable.unlink(missing_ok=True)
         elif marker_matches(not_applicable, input_key):
             log(f"{config.name}: not applicable; regular ASan control is sufficient")
             return "ready"
-        elif marker_matches(unavailable, input_key):
+        else:
+            # A successful recipe is shared by every backend. Prefer that
+            # positive proof over an older backend-specific failure marker.
+            fresh = is_fresh(root, config, base_suffix)
+        if not fresh and marker_matches(invalid, input_key):
+            log(
+                f"{config.name}: configuration is invalid for this "
+                "source/primary recipe; retry with --force"
+            )
+            return "invalid"
+        if not fresh and marker_matches(local_unavailable, input_key):
             log(
                 f"{config.name}: unavailable for this source/primary recipe; "
                 f"retry with --force"
             )
             return "unavailable"
-        if not force and is_fresh(root, config, base_suffix):
+        if not fresh and marker_matches(backend_unavailable, input_key):
+            log(
+                f"{config.name}: unavailable through backend={backend}; "
+                "another backend may retry it"
+            )
+            return "backend-unavailable"
+        if fresh:
             failure = alternate_startup_failure(target, tree)
             if not failure:
                 log(f"{config.name}: fresh ({tree.name})")
@@ -242,14 +272,21 @@ def materialize(
             if completed.returncode == 4 and config.widen:
                 build_config.ready_path(tree).unlink(missing_ok=True)
                 write_marker(not_applicable, input_key)
-                unavailable.unlink(missing_ok=True)
+                local_unavailable.unlink(missing_ok=True)
+                backend_unavailable.unlink(missing_ok=True)
+                invalid.unlink(missing_ok=True)
                 log(f"{config.name}: not applicable; regular ASan control is sufficient")
                 return "ready"
             if completed.returncode or not recipe.is_file():
                 log(f"{config.name}: recipe did not converge (rc={completed.returncode}); primary remains available")
-                write_marker(unavailable, input_key)
-                # auto-build-script exits 2 for a usage or input error.
-                return "invalid" if completed.returncode == 2 else "unavailable"
+                if completed.returncode == 2:
+                    write_marker(invalid, input_key)
+                    return "invalid"
+                if completed.returncode == 5:
+                    write_marker(local_unavailable, input_key)
+                    return "unavailable"
+                write_marker(backend_unavailable, input_key)
+                return "backend-unavailable"
             if config.widen:
                 write_marker(input_stamp_path(recipe), input_key)
             else:
@@ -270,19 +307,21 @@ def materialize(
             )
             if completed.returncode or not build_config.produced_artifacts(tree):
                 log(f"{config.name}: build failed (rc={completed.returncode}; log: {output_path})")
-                write_marker(unavailable, input_key)
+                write_marker(local_unavailable, input_key)
                 return "unavailable"
             # Compiling is not readiness: an alternate an agent rotates into
             # must still start, or every probe it serves returns NO_EXEC.
             failure = alternate_startup_failure(target, tree)
             if failure:
                 log(f"{config.name}: build does not start; not marked ready: {failure.splitlines()[0][:200]}")
-                write_marker(unavailable, input_key)
+                write_marker(local_unavailable, input_key)
                 return "unavailable"
             target_config.build_write_stamp(root, "asan", recipe_path=recipe)
         build_config.write_recipe_stamp(tree, recipe)
         build_config.mark_ready(tree, recipe)
-        unavailable.unlink(missing_ok=True)
+        local_unavailable.unlink(missing_ok=True)
+        backend_unavailable.unlink(missing_ok=True)
+        invalid.unlink(missing_ok=True)
         not_applicable.unlink(missing_ok=True)
         log(f"{config.name}: ready ({tree})")
         return "ready"
@@ -316,6 +355,19 @@ def prune_orphan_trees(root: Path, configs: list, base_suffix: str) -> int:
         log(f"prune: removed orphaned {tree.name}")
         removed += 1
     return removed
+
+
+def _outcomes_returncode(outcomes: list[str]) -> int:
+    """Encode whether another model backend can improve any alternate."""
+    if all(outcome == "ready" for outcome in outcomes):
+        return 0
+    # Recover every backend-dependent alternate even when a different
+    # configuration has an independent local failure.
+    if "backend-unavailable" in outcomes:
+        return 3
+    if "unavailable" in outcomes:
+        return 1
+    return 2
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -407,11 +459,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.all:
         prune_orphan_trees(root, config.build_configs, base_suffix)
     # Callers treat this as additive/fail-open, but a direct invocation must
-    # still report incomplete alternate coverage visibly. Exit 2 when nothing
-    # failed for a reason another backend could change.
-    if all(outcome == "ready" for outcome in outcomes):
-        return 0
-    return 2 if "unavailable" not in outcomes else 1
+    # still report incomplete alternate coverage visibly. Exit 3 only when a
+    # different model backend could change the result.
+    return _outcomes_returncode(outcomes)
 
 
 if __name__ == "__main__":

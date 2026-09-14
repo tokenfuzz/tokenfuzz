@@ -6,7 +6,7 @@ The script's LLM revision loop is the wrong tool for a missing
 toolchain: the safety rails in ``validate_proposed_script`` block sudo /
 apt-get / curl|sh, and a recipe that installed packages would be
 unshippable in reproduce.sh anyway. So we expect iter 1 to detect
-``command not found`` in the build log and exit 3 with an actionable
+``command not found`` in the build log and exit 5 with an actionable
 diagnostic, without ever calling the LLM.
 
 Output matches helpers.sh (✓/✗) so tests/run-tests.sh's pass/fail
@@ -482,7 +482,7 @@ with tempfile.TemporaryDirectory() as _repair_tmp:
        "repair: does not overwrite the durable recipe when validation fails")
 
 
-# ─── End-to-end: iter 1 detects missing toolchain, exits 3 ──────────
+# ─── End-to-end: iter 1 detects missing toolchain, exits 5 ──────────
 #
 # We can't run a real cmake build inside the test harness portably, so
 # instead we run auto-build-script against a fake source tree whose
@@ -529,8 +529,8 @@ with tempfile.TemporaryDirectory() as tmpd:
              "--build-timeout-secs", "30"],
             env=env, capture_output=True, text=True, check=False,
         )
-        ok(proc.returncode == 3,
-           f"e2e: exits 3 on missing toolchain (got {proc.returncode})",
+        ok(proc.returncode == 5,
+           f"e2e: exits 5 on missing toolchain (got {proc.returncode})",
            detail=f"stderr tail: {proc.stderr[-400:]!r}")
         ok("toolchain missing" in proc.stderr,
            "e2e: stderr names the failure as 'toolchain missing'",

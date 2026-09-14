@@ -72,6 +72,15 @@ class SetupTargetTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_backend_candidates_try_requested_oss_once(self) -> None:
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.answering_backend = ""
+        with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "oss"}, clear=True):
+            self.assertEqual(
+                setup.backend_candidates(),
+                ["oss", "claude", "codex", "gemini", "grok"],
+            )
+
     def test_generated_recipe_applies_only_to_its_detected_build_system(self) -> None:
         generated = self.temp / "generated.sh"
         generated.write_text(
@@ -2313,6 +2322,34 @@ class SetupTargetTests(unittest.TestCase):
         self.assertEqual(capture.read_text().splitlines(), ["claude"])
         self.assertIn("not a backend failure, not retried", process.stdout)
         self.assertIn("primary build is unaffected", process.stdout)
+
+    def test_build_widening_does_not_retry_a_local_build_failure(self) -> None:
+        target = self.make_build_target("widelocal")
+        self.build_recipe(target)
+        config = self.config("widelocal")
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'target = "widelocal"\nbuild_system = "cmake"\n'
+            'asan_bin = "build-asan/widelocal"\nbuild_widening = true\n'
+        )
+        capture = self.temp / "build-config-local"
+        helper = self.harness / "bin" / "build-configs"
+        helper.write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib\n"
+            f"path = pathlib.Path({str(capture)!r})\n"
+            "with path.open('a') as stream:\n"
+            "    stream.write(os.environ.get('ACTIVE_BACKEND', '') + '\\n')\n"
+            "raise SystemExit(1)\n",
+            encoding="utf-8",
+        )
+        helper.chmod(0o755)
+        process = self.setup(
+            "widelocal", "--build", environment={"LLM_DECIDE_DISABLE": "1"}
+        )
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(capture.read_text().splitlines(), ["claude"])
+        self.assertIn("not a backend failure, not retried", process.stdout)
 
     def test_build_does_not_reseed_placeholder_configuration(self) -> None:
         (self.harness / "bin" / "auto-build-script").symlink_to(ROOT / "bin" / "auto-build-script")

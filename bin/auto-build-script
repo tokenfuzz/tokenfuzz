@@ -1209,7 +1209,10 @@ def main(argv: list[str]) -> int:
                 f"install -y {' '.join(missing)}` or extend the install "
                 f"list in tests/run-tests.sh --install-container-deps."
             )
-            return 3
+            # Exit 5 distinguishes a missing local prerequisite from a model
+            # backend that could not converge the recipe. build-configs uses
+            # that distinction to avoid paying the same model work again.
+            return 5
 
         if i == args.max_iters:
             break
