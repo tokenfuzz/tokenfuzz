@@ -133,6 +133,11 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     product promises terminal-safe presentation, presents untrusted data as a
     trusted interactive UI, or the report demonstrates a concrete terminal
     capability or deceptive security effect under a supported configuration.
+  - A consequence that exists only on a platform, filesystem provider, or
+    runtime the audited build does not run on: Windows UNC or drive-letter
+    path semantics reviewed against a Linux or macOS build, a provider the
+    host never loads. Keep when the target is built and exercised on that
+    platform here, or the effect is demonstrated on the audited build.
   - Missing-feature, API-shape, or documentation complaint.
   - Speculative ("looks suspicious", "could be unsafe", "may be
     exploitable") with no concrete impact described.

@@ -101,6 +101,10 @@ state** and the report's **exact claimed security consequence**:
 >         elsewhere on every relevant path.
 >       This is affirmative disproof, not missing evidence. If the consequence
 >       is merely unproven, deployment-dependent, or ambiguous, vote Uncertain.
+>       A consequence that exists only on a platform, filesystem provider, or
+>       runtime the audited build does not run on (Windows UNC path semantics
+>       reviewed against a Linux or macOS build) is deployment-dependent, not
+>       established, unless the effect is demonstrated on the audited build.
 >       Review the report as written: a different scenario that might contain a
 >       real issue cannot rescue a source-refuted claim. It needs a rewritten
 >       report and a fresh review.
