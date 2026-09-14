@@ -335,6 +335,7 @@ class SampleBugClassTests(unittest.TestCase):
             "range-integer-underflow": "heap-buffer-overflow",
             "compact-record-type-confusion": "stack-buffer-overflow",
             "adjusted-pointer-invalid-free": "attempting free on address which was not malloc()-ed",
+            "encoded-address-arbitrary-write": "SEGV on unknown address",
         }
         entries = {entry["id"]: entry for entry in self._manifest(slug)["planted_bugs"]}
         for bug_id, diagnostic in wanted.items():
@@ -349,6 +350,8 @@ class SampleBugClassTests(unittest.TestCase):
                 self.assertIn(diagnostic, report)
                 symbol = entries[bug_id]["signature_symbol"].split("::")[-1]
                 self.assertIn(symbol, report)
+                if bug_id == "encoded-address-arbitrary-write":
+                    self.assertIn("deadbeef", report.lower())
 
 
 if __name__ == "__main__":

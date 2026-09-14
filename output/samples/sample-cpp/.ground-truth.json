@@ -135,7 +135,7 @@
       "classes": ["arbitrary-write", "segv"],
       "access": "WRITE",
       "signature_symbol": "rbundle::handle_write",
-      "input_base64": "UkJGMQ4ACQEAAAAAAAAAQQ==",
+      "input_base64": "UkJGMQ4ACe++rd4AAAAAQQ==",
       "cwe": "CWE-123",
       "summary": "WRITE decodes a native address from the field and stores a caller-controlled byte through it. An attacker-chosen address that is not in the quarantined low range faults as a confirmed SEGV, so this is crash-scored; the harness quarantines only the low-address shape."
     },

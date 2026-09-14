@@ -86,7 +86,7 @@
     },
     {
       "id": "escapeshellarg-command",
-      "classes": ["command-injection", "rce"],
+      "classes": ["command-injection", "code-injection", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "runCommand",
@@ -108,14 +108,6 @@
       "signature_symbol": "readAsset",
       "refute_reason": "Lexical traversal adds no file capability because the same job chooses both root and name; URL-wrapper network access is scored separately.",
       "classes": ["path-traversal", "info-disclosure"]
-    },
-    {
-      "id": "unproved-loose-token-bypass",
-      "kind": "fp",
-      "expected_outcome": "clean",
-      "signature_symbol": "tokenAuthorised",
-      "classes": ["auth-bypass"],
-      "refute_reason": "The answer supplied no feasible report id whose SHA-256 digest is a numeric magic hash; exercising == alone proves no bypass. The two real bugs at this function declare what they are, so a bypass claim here is read as one of them first and fires this trap only when it is neither."
     }
   ]
 }

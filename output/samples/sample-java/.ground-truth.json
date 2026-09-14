@@ -78,7 +78,7 @@
     },
     {
       "id": "processbuilder-fixed-command",
-      "classes": ["command-injection", "rce"],
+      "classes": ["command-injection", "code-injection", "rce"],
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "runCommand",
