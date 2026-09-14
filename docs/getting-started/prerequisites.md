@@ -129,11 +129,11 @@ does not replace the target's toolchain.
 - Browser targets can require Mercurial, large SDKs, and project-specific
   bootstrap tooling.
 
-Every audit and benchmark starts by running the configured `[runner].bin`
-with its version switch (`java -version`, `kotlinc -version`, `go version`,
-`node --version`, and so on) and stops before launching an agent when that
-fails, naming the command. Run the same command yourself after installing a
-runtime.
+Every audit and benchmark starts by exercising the configured `[runner].bin`
+and stops before launching an agent when that fails, naming the command.
+Interpreters run a minimal program in the configured language; build tools use
+their version command. For example, a Node route that names a `.ts` entry point
+runs a temporary typed source so an older JavaScript-only Node is rejected.
 
 On macOS, `/usr/bin/java` is a system stub that only works once a JDK is
 registered under `/Library/Java/JavaVirtualMachines`; Homebrew's `openjdk`
@@ -141,7 +141,7 @@ is keg-only, so install and link it, then add the Kotlin compiler:
 
 ```bash
 brew install openjdk kotlin
-sudo ln -sfn /opt/homebrew/opt/openjdk/libexec/openjdk.jdk \
+sudo ln -sfn "$(brew --prefix openjdk)/libexec/openjdk.jdk" \
   /Library/Java/JavaVirtualMachines/openjdk.jdk
 /usr/bin/java -version
 kotlinc -version

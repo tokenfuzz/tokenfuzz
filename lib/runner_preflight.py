@@ -39,6 +39,26 @@ _STARTUP_ARGS = {
     "ts-node": ("-e", "0"),
 }
 
+
+def _node_typescript_entrypoint(
+    raw: str, runner_args: list[str],
+) -> int | None:
+    """Index of Node's TypeScript program argument, when it names one.
+
+    Arguments after the first JavaScript/TypeScript source belong to that
+    program. Treating any later ``.ts`` value as Node's entry point rejects a
+    JavaScript runner that merely consumes a TypeScript file as data.
+    """
+    if Path(raw).name != "node":
+        return None
+    for index, argument in enumerate(runner_args):
+        suffix = Path(
+            argument.replace("{TARGET_ROOT}", "target")
+        ).suffix.lower()
+        if suffix in {".js", ".mjs", ".cjs", ".ts", ".tsx"}:
+            return index if suffix in {".ts", ".tsx"} else None
+    return None
+
 # Fatal diagnostics the process loader emits before the configured program
 # reaches main(), one alternative per libc/loader family — the inclusion
 # criterion is "the loader wrote it and the program never ran". Every family
@@ -312,6 +332,7 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
         else list(dict.fromkeys(config.sanitizers_enabled or ["asan"]))
     )
     sanitizer_name = sanitizer_names[0]
+    typescript_entrypoint = _node_typescript_entrypoint(raw, config.runner_args)
     startup_args = _STARTUP_ARGS.get(Path(raw).name)
     language = languages.for_build_system(getattr(config, "build_system", ""))
     preflight_args = (
@@ -328,20 +349,41 @@ def validate(config, logger: Callable[[str], object] | None = None) -> Path | No
             environments[name] = runner_environment(config, name)
         return environments[name]
 
-    if startup_args:
-        completed = run_timeout(
-            [str(binary), *startup_args], 10,
-            env=environment_for(sanitizer_name),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
+    if startup_args or typescript_entrypoint is not None:
+        with tempfile.TemporaryDirectory(prefix="runner-preflight-") as directory:
+            command = [str(binary), *(startup_args or ())]
+            if typescript_entrypoint is not None:
+                # Node only gained direct TypeScript type stripping in recent
+                # releases. A JavaScript eval accepts older runtimes that will
+                # reject every configured .ts entry point before target code.
+                entrypoint_suffix = Path(
+                    config.runner_args[typescript_entrypoint].replace(
+                        "{TARGET_ROOT}", "target",
+                    )
+                ).suffix.lower()
+                source = Path(directory) / f"probe{entrypoint_suffix}"
+                source.write_text("const value: number = 1;\n", encoding="utf-8")
+                prefix = [
+                    sanitizer_run.expand_runner_value(
+                        argument, config, sanitizer_name,
+                    )
+                    for argument in config.runner_args[:typescript_entrypoint]
+                ]
+                command = [str(binary), *prefix, str(source)]
+            completed = run_timeout(
+                command, 10, env=environment_for(sanitizer_name),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
         if completed.returncode != 0:
-            command = " ".join((str(binary), *startup_args))
+            rendered_command = " ".join(command)
             reason = (
                 "timed out after 10s" if completed.returncode == 124
                 else f"exited {completed.returncode}: {_output_summary(completed.stdout)}"
             )
-            raise RuntimeError(f"configured [runner].bin failed startup check `{command}`: {reason}")
+            raise RuntimeError(
+                "configured [runner].bin failed startup check "
+                f"`{rendered_command}`: {reason}"
+            )
 
     # Prepare exactly what this config will run for every runner-owned route.
     for selected in sanitizer_names if preflight_args else ():

@@ -68,6 +68,61 @@ class RunnerPreflightTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "runtime unavailable"):
                     runner_preflight.validate(self.config(root, "java"))
 
+    def test_node_preflight_exercises_a_configured_typescript_entrypoint(self):
+        with tempfile.TemporaryDirectory(prefix="node-ts-preflight-") as temporary:
+            root = Path(temporary)
+            node = root / "node"
+            executable(node)
+            config = self.config(root, "node")
+            config.build_system = "npm"
+            config.runner_args = [
+                "--import", "tsx", "{TARGET_ROOT}/app.ts", "{TESTCASE}",
+            ]
+            rejected = SimpleNamespace(
+                returncode=1,
+                stdout=b"SyntaxError: Missing initializer in const declaration\n",
+            )
+            with mock.patch.object(
+                runner_preflight.shutil, "which", return_value=str(node),
+            ), mock.patch.object(
+                runner_preflight, "run_timeout", return_value=rejected,
+            ) as launched:
+                with self.assertRaisesRegex(RuntimeError, "SyntaxError"):
+                    runner_preflight.validate(config)
+            command = launched.call_args.args[0]
+            self.assertEqual(str(node), command[0])
+            self.assertEqual(["--import", "tsx"], command[1:3])
+            self.assertEqual(".ts", Path(command[3]).suffix)
+
+            config.runner_args[2] = "{TARGET_ROOT}/app.tsx"
+            with mock.patch.object(
+                runner_preflight.shutil, "which", return_value=str(node),
+            ), mock.patch.object(
+                runner_preflight, "run_timeout", return_value=rejected,
+            ) as launched:
+                with self.assertRaisesRegex(RuntimeError, "SyntaxError"):
+                    runner_preflight.validate(config)
+            self.assertEqual(".tsx", Path(launched.call_args.args[0][3]).suffix)
+
+    def test_node_preflight_does_not_execute_a_typescript_data_argument(self):
+        with tempfile.TemporaryDirectory(prefix="node-js-preflight-") as temporary:
+            root = Path(temporary)
+            node = root / "node"
+            executable(node)
+            config = self.config(root, "node")
+            config.build_system = "npm"
+            config.runner_args = [
+                "{TARGET_ROOT}/app.js", "{TARGET_ROOT}/schema.ts", "{TESTCASE}",
+            ]
+            completed = SimpleNamespace(returncode=0, stdout=b"")
+            with mock.patch.object(
+                runner_preflight.shutil, "which", return_value=str(node),
+            ), mock.patch.object(
+                runner_preflight, "run_timeout", return_value=completed,
+            ) as launched, mock.patch("runner_canary.check", return_value=""):
+                runner_preflight.validate(config)
+            self.assertEqual([str(node), "-e", "0"], launched.call_args.args[0])
+
     def test_swift_preflight_builds_the_sanitized_package(self):
         with tempfile.TemporaryDirectory(prefix="swift-preflight-") as temporary:
             root = Path(temporary)
@@ -465,9 +520,10 @@ class RunnerPreflightTests(unittest.TestCase):
                 Path(call.args[0][0]).name: tuple(call.args[0][1:])
                 for call in launched.call_args_list
             }
-            for interpreter in ("Rscript", "node", "perl", "php", "python3", "ruby"):
+            for interpreter in ("Rscript", "perl", "php", "python3", "ruby"):
                 self.assertNotIn("--version", programs[interpreter], interpreter)
                 self.assertEqual(2, len(programs[interpreter]), interpreter)
+            self.assertEqual(".ts", Path(programs["node"][0]).suffix)
 
     def test_audit_and_benchmark_call_shared_preflight_before_work(self):
         events = []
