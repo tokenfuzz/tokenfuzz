@@ -112,6 +112,16 @@ class BenchmarkCliTests(unittest.TestCase):
             self.bench_root,
         )
 
+    def test_relative_bench_root_cannot_escape_output(self) -> None:
+        with mock.patch.object(benchmark, "SCRIPT_ROOT", self.root):
+            with self.assertRaisesRegex(ValueError, "stay under output"):
+                benchmark.resolve_bench_root("../nightly")
+            result = self.run_main(
+                "--rebuild-report", "--bench-root", "../nightly"
+            )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("stay under output", result.stdout)
+
     def test_public_cli_rejects_invalid_arguments(self) -> None:
         cases = (
             (("--dry-run",), "--target is required"),

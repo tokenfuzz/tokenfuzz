@@ -6544,7 +6544,13 @@ def resolve_bench_root(value: str | Path) -> Path:
     bench_root = Path(value)
     if bench_root.is_absolute():
         return bench_root
-    return (SCRIPT_ROOT / "output" / bench_root).resolve()
+    output_root = (SCRIPT_ROOT / "output").resolve()
+    resolved = (output_root / bench_root).resolve()
+    try:
+        resolved.relative_to(output_root)
+    except ValueError as exc:
+        raise ValueError("a relative --bench-root must stay under output/") from exc
+    return resolved
 
 
 def _benchmark_roots(bench_root: Path) -> list[Path]:

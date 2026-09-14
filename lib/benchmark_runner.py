@@ -4168,7 +4168,11 @@ def _main(argv: list[str] | None = None) -> int:
         # spellings share one argument contract and cannot drift.
         return metrics.main(arguments)
     args = parser().parse_args(arguments)
-    bench_root = metrics.resolve_bench_root(args.bench_root)
+    try:
+        bench_root = metrics.resolve_bench_root(args.bench_root)
+    except ValueError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        return 1
     if args.rebuild_report:
         artifact = _render_root_result(bench_root)
         log(f"Benchmark report rebuilt: {artifact} ({artifact.resolve().as_uri()})")

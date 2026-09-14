@@ -287,7 +287,11 @@ def main(argv: list[str]) -> int:
                     help="archive path, or directory with --format dir (default: <bench-root>/benchmark-share[-<backend>][-<target>][-<run-id>].<ext>)")
     args = ap.parse_args(argv)
 
-    bench_root = B.resolve_bench_root(args.bench_root)
+    try:
+        bench_root = B.resolve_bench_root(args.bench_root)
+    except ValueError as exc:
+        log(f"FATAL: {exc}")
+        return 1
     if not bench_root.is_dir():
         log(f"FATAL: bench root not found: {bench_root}")
         return 1
