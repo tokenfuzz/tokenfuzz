@@ -282,13 +282,23 @@ def swift_package_info(target_root: str | os.PathLike) -> SwiftPackageInfo:
             and "library" in product["type"]
             and product.get("targets")
         )
-        executables = tuple(
-            str(product["name"])
-            for product in products
-            if isinstance(product, dict)
-            and isinstance(product.get("type"), dict)
-            and "executable" in product["type"]
-        )
+        # SwiftPM runs an executable target by name whether or not the
+        # manifest declares a product for it; a package with no `products:`
+        # still exposes every executable target that way.
+        executables = tuple(dict.fromkeys(
+            [
+                str(product["name"])
+                for product in products
+                if isinstance(product, dict)
+                and isinstance(product.get("type"), dict)
+                and "executable" in product["type"]
+            ] + [
+                str(target["name"])
+                for target in raw.get("targets", [])
+                if isinstance(target, dict) and target.get("type") == "executable"
+                and target.get("name")
+            ]
+        ))
         version = str(raw.get("toolsVersion", {}).get("_version", "5.9.0"))
         platforms = tuple(
             (str(row["platformName"]), str(row["version"]))
@@ -2127,6 +2137,13 @@ def _go_embed_asset_commands(target_root: Path) -> list[list[str]]:
     return commands
 
 
+def _ruby_has_bundle(target_root: Path) -> bool:
+    """Whether `bundle install` has anything to read: the same manifests that
+    detect the build system. A bare script with its interpreter named has no
+    bundle, and Bundler exits 10 looking for one."""
+    return (target_root / "Gemfile").is_file() or any(target_root.glob("*.gemspec"))
+
+
 def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]]:
     """Return the bootstrap commands setup-target should run.
 
@@ -2157,6 +2174,8 @@ def bootstrap_for_target(target_root: Path, build_system: str) -> list[list[str]
             ".audit/tokenfuzz-gradle.init.gradle", "tokenfuzzPrepare",
         ]]
     if build_system == "bundler":
+        if not _ruby_has_bundle(target_root):
+            return []
         _ruby, bundle = preferred_ruby_toolchain()
         return [[bundle, "install"]]
     if build_system == "perl":
@@ -2236,6 +2255,8 @@ def bootstrap_plan_for_target(target_root: Path, build_system: str) -> dict:
         out["cmds"] = bootstrap_for_target(target_root, build_system)
         return out
     if build_system == "bundler":
+        if not _ruby_has_bundle(target_root):
+            return out
         _ruby, bundle = preferred_ruby_toolchain()
         out["cmds"] = [[bundle, "install"]]
         if os.environ.get("CONFIGURE_ARGS"):

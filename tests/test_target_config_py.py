@@ -2864,6 +2864,47 @@ except Exception as _e:  # noqa: BLE001
            f"re-render produced invalid TOML: {_e}")
 
 
+# A hand-authored config names a build system and runner for a tree with no
+# manifest. A forced reseed must carry both (and the upstream URL) rather than
+# replace them with "unknown" and a commented-out runner.
+_bare_root = TEST_TMPDIR / "seed-bare"
+_bare_root.mkdir()
+(_bare_root / "tool_cli.js").write_text("process.exit(0)\n")
+_bare_out = _bare_root / "target.toml"
+_bare_out.write_text(
+    'target = "seed-bare"\nupstream_url = "https://example.invalid/tool"\n'
+    'build_system = "npm"\n'
+    '[runner]\nbin = "node"\nargs = ["{TARGET_ROOT}/tool_cli.js", "{TESTCASE}"]\n'
+    'crash_patterns = ["^FATAL ERROR:"]\nsuccess_codes = [0, 2]\n',
+    encoding="utf-8",
+)
+tc.seed_toml(_bare_root, _bare_out, preserve_curated=True)
+_bare = tc.parse_toml(_bare_out)
+assert_eq("npm", _bare.get("build_system"),
+          "seed_toml(preserve): keeps a declared build_system detection cannot re-derive")
+assert_eq("https://example.invalid/tool", _bare.get("upstream_url"),
+          "seed_toml(preserve): keeps the declared upstream_url")
+assert_eq({"bin": "node", "args": ["{TARGET_ROOT}/tool_cli.js", "{TESTCASE}"],
+           "crash_patterns": ["^FATAL ERROR:"], "success_codes": [0, 2]},
+          _bare.get("runner"),
+          "seed_toml(preserve): keeps the runner written for that build system")
+tc.seed_toml(_bare_root, _bare_out)
+assert_eq("unknown", tc.parse_toml(_bare_out).get("build_system"),
+          "seed_toml(default): a full re-seed still detects afresh")
+
+# JAVA_HOME comes from the JVM's own java.home: a platform launcher stub
+# forwards to a JDK it does not live in, and pointing JAVA_HOME at the stub's
+# prefix makes every tool that honours it hang.
+with mock.patch.object(tc.subprocess, "run", return_value=subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="",
+        stderr="Property settings:\n    java.home = /opt/jdk/Contents/Home\n    java.version = 21\n")):
+    assert_eq("/opt/jdk/Contents/Home", tc._java_home_for_bin(Path("/usr/bin/java")),
+              "java home: the JVM's java.home wins over the launcher's prefix")
+with mock.patch.object(tc.subprocess, "run", side_effect=OSError("no launcher")):
+    assert_eq("/opt/jdk", tc._java_home_for_bin(Path("/opt/jdk/bin/java")),
+              "java home: falls back to the launcher's prefix when the JVM prints nothing")
+
+
 # ─── Cleanup + summary ──────────────────────────────────────────────
 
 # A JVM build tool may already be running with a usable JDK even when the

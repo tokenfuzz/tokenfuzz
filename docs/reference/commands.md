@@ -54,7 +54,7 @@ Useful flags:
 | `--browser` / `--no-browser` | Select browser execution mode explicitly. A browser-specific driver such as `mach` is inferred when neither flag is present; shared build systems such as GN require an explicit choice. |
 | `--pull` | Update an existing VCS checkout to the latest upstream source without re-passing its repo URL. Tracked local edits leave the checkout untouched; untracked build trees, `.audit/` overlays, and run leftovers do not block the update. |
 | `--no-update` | Do not pull or fetch an existing VCS checkout. |
-| `--force` | Regenerate inferred config, including suggested threat-model and peer sections. With `--build`, regenerate before building while preserving the target's build recipe. |
+| `--force` | Regenerate inferred config, including suggested threat-model and peer sections. A declared `build_system`, `upstream_url`, and `[runner]` survive when no manifest in the tree re-derives them, so a hand-authored route for a bare script is not replaced with `unknown`. With `--build`, regenerate before building while preserving the target's build recipe. |
 | `--no-alternates` | Build only the canonical sanitizer trees, skipping the cached alternate ASan configurations described below. |
 | `--no-llm-config` | Skip model suggestions for the threat model, S6 peers, and runner. Does not disable network access. A missing native recipe is still generated deterministically; only model-assisted repair of a failing recipe is skipped. |
 

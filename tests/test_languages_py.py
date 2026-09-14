@@ -106,6 +106,24 @@ with tempfile.TemporaryDirectory() as td:
     assert_true(environment["CLANG_MODULE_CACHE_PATH"].startswith(str(root)),
                 "SwiftPM metadata gives Clang the target-local module cache")
 
+# A package with no `products:` still runs each executable target by name.
+with tempfile.TemporaryDirectory() as td:
+    root = Path(td)
+    (root / "Package.swift").write_text("// swift-tools-version: 5.7\n")
+    described = subprocess.CompletedProcess(
+        [], 0, stderr="",
+        stdout='{"name": "sample", "products": [], '
+               '"targets": [{"name": "sample", "type": "executable"}, '
+               '{"name": "SampleCore", "type": "regular"}]}',
+    )
+    with mock.patch.object(languages.subprocess, "run", return_value=described):
+        info = languages.swift_package_info(root)
+        arguments = languages.swift_runner_args(root, "sample")
+    assert_true(info.executable_products == ("sample",),
+                "SwiftPM executable targets count as runnable products")
+    assert_true(arguments[-2:] == ("sample", "{TESTCASE}"),
+                "SwiftPM runner selects the lone executable target")
+
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)
     (root / "Package.swift").write_text("// swift-tools-version: 6.0\n")
@@ -374,6 +392,10 @@ with tempfile.TemporaryDirectory() as td:
               "bootstrap: empty rust target -> no commands")
     assert_eq([], languages.bootstrap_for_target(tmp_root, "maven"),
               "bootstrap: Java source without a pom -> no Maven commands")
+    assert_eq([], languages.bootstrap_for_target(tmp_root, "bundler"),
+              "bootstrap: Ruby source without a Gemfile -> no bundle commands")
+    assert_eq([], languages.bootstrap_plan_for_target(tmp_root, "bundler")["cmds"],
+              "bootstrap plan: Ruby source without a Gemfile -> no bundle commands")
 
     # setup.py present -> python bootstrap fires (three-step recipe:
     # create .audit/venv, upgrade pip, then `pip install -e .` which

@@ -2929,6 +2929,7 @@ def _detect_build_system(target_root: Path) -> str:
         (target_root / "Makefile.PL").is_file()
         or (target_root / "dist.ini").is_file()
         or any(target_root.glob("*.pm"))
+        or any(target_root.glob("lib/**/*.pm"))
     ):
         return "perl"
     return ""
@@ -3044,6 +3045,25 @@ def _java_home_candidates(home: str) -> list[Path]:
 
 
 def _java_home_for_bin(java_bin: Path) -> str:
+    """The JDK home the launcher actually runs, for JAVA_HOME.
+
+    Asked of the JVM rather than derived from the path: macOS ships
+    /usr/bin/java as a stub that forwards to the installed JDK, and a
+    JAVA_HOME of /usr points that stub at itself, so every tool that honours
+    it (kotlinc, Maven, Gradle) hangs. The path is the fallback for a
+    launcher that prints no settings."""
+    try:
+        completed = subprocess.run(
+            [str(java_bin), "-XshowSettings:properties", "-version"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    if completed is not None:
+        for line in (completed.stdout + completed.stderr).splitlines():
+            key, _, value = line.strip().partition("=")
+            if key.strip() == "java.home" and value.strip():
+                return value.strip()
     # .../Contents/Home/bin/java -> .../Contents/Home
     # .../bin/java               -> ...
     if java_bin.parent.name == "bin":
@@ -3961,6 +3981,13 @@ def seed_toml(
     preserved_s6: Optional[tuple[str, list[str]]] = None
     preserved_build_widening: Optional[bool] = None
     preserved_build_configs: list[dict] = []
+    # A hand-authored file may name a build system and runner that no
+    # manifest in the tree can re-derive (a bare script with its interpreter
+    # named). Those are carried over only when detection comes back empty:
+    # "unknown" and a commented-out runner would replace a working route with
+    # nothing, and the runner belongs with the build system it was written
+    # for.
+    _existing: dict = {}
     if preserve_curated and out.exists():
         try:
             _existing = parse_toml(out)
@@ -3994,6 +4021,17 @@ def seed_toml(
     # Detected up front: declared_cli_names() needs the build system to know
     # which manifest to read when biasing the asan_bin guess below.
     build_system = _detect_build_system(root)
+    preserved_runner: dict = {}
+    if not build_system:
+        _declared = _existing.get("build_system")
+        if isinstance(_declared, str) and _declared and _declared != "unknown":
+            build_system = _declared
+            if isinstance(_existing.get("runner"), dict):
+                preserved_runner = dict(_existing["runner"])
+    if not upstream_url:
+        _declared_url = _existing.get("upstream_url")
+        if isinstance(_declared_url, str) and _declared_url != "FILL_ME":
+            upstream_url = _declared_url
     if browser_mode is None:
         is_browser = build_system in _INFERRED_BROWSER_BUILD_SYSTEMS
         if out.exists():
@@ -4246,7 +4284,24 @@ def seed_toml(
 
     _toml_string = toml_basic_string  # local alias for the existing call sites
 
-    if runner_default:
+    if preserved_runner:
+        lines += [
+            "",
+            "# ── Runner (language / interpreter / driver invocation) ────────",
+            f"# Preserved from the prior config: no manifest re-derives build_system = {build_system!r}.",
+            "[runner]",
+        ]
+        for key in ("bin", "args", "env", "crash_patterns", "success_codes"):
+            value = preserved_runner.get(key)
+            if key == "bin" and isinstance(value, str) and value:
+                lines.append(f"bin            = {_toml_string(value)}")
+            elif key == "success_codes" and isinstance(value, list):
+                codes = [str(v) for v in value if isinstance(v, int) and not isinstance(v, bool)]
+                lines.append(f"success_codes  = [{', '.join(codes)}]")
+            elif isinstance(value, list) and all(isinstance(v, str) for v in value):
+                items = ", ".join(_toml_string(v) for v in value)
+                lines.append(f"{key:<14} = [{items}]")
+    elif runner_default:
         lines += [
             "",
             "# ── Runner (language / interpreter / driver invocation) ────────",

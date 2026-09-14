@@ -161,6 +161,14 @@ class MultiLanguageSupportTests(unittest.TestCase):
                 directory.mkdir()
                 (directory / manifest).touch()
                 self.assertEqual(target_config._detect_build_system(directory), expected)
+        # The CPAN layout keeps modules under lib/ beside the scripts that
+        # use them; the checkout root is the project, not lib/.
+        cpan = self.root / "cpan-layout"
+        (cpan / "lib").mkdir(parents=True)
+        (cpan / "lib" / "Sample.pm").touch()
+        (cpan / "sample_cli.pl").touch()
+        self.assertEqual(target_config._detect_build_system(cpan), "perl")
+        self.assertEqual(target_config.discover_source_subdir(cpan, "cpan-layout"), "")
         polyglot = self.root / "polyglot"
         polyglot.mkdir()
         (polyglot / "CMakeLists.txt").touch()
