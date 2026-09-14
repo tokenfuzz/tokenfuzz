@@ -430,14 +430,14 @@ inlines distinct operations into the same crash-site symbol. These are aliases
 for the same bug id, not extra recall items; ambiguous or overlapping aliases
 make the manifest fail validation.
 
-A planted bug marked `findings_only: true` never crashes; it surfaces under
-`findings/`. Those are scored by a second oracle beside the crash one: a
-confirmed finding is credited when the function it names as at fault is the
-bug's `signature_symbol`. An entry may also pin a `file`, which the finding
-must agree with: a report at `a.c:parse` must not credit a bug planted at
-`b.c:parse`. Only an entry that names a file is held to it. Two qualified
-paths are compared whole, so `src/a/parse.c` and `src/b/parse.c` are
-different files; a basename is compared only when one side is genuinely
+A planted bug marked `findings_only: true` is expected not to crash; it
+surfaces under `findings/`. Those are scored by a second oracle beside the
+crash one: a confirmed finding is credited when the function it names as at
+fault is the bug's `signature_symbol`. An entry may also pin a `file`, which
+the finding must agree with: a report at `a.c:parse` must not credit a bug
+planted at `b.c:parse`. Only an entry that names a file is held to it. Two
+qualified paths are compared whole, so `src/a/parse.c` and `src/b/parse.c`
+are different files; a basename is compared only when one side is genuinely
 basename-only, which happens because a report's location can come from a bare
 stack frame. A report that locates nothing against an entry that pins a file
 is **open-world** rather than credited: with no identity evidence it is
@@ -449,8 +449,14 @@ crash, not a source finding there). A trap refutes one claim, so it may
 declare the `classes` it refutes: a fixed-argv helper refutes
 `command-injection`, and a quadratic parser reported at the same function is
 open-world rather than a fired trap. A trap that declares none fires for every
-class. Every other confirmed finding is listed as **open-world**, since real
-code has bugs the answer key never planted, without counting for or against.
+class. A real bug's `classes` do the same job where it shares a function
+with another entry: two bugs at one function are told apart by the classes
+each declares, and a trap that declares the report's class claims it when the
+bug's classes exclude that class. A report at a bug's function that matches no
+declared class is still credited to the bug, since the class is the reporter's
+word for it and the gate has already judged the claim. Every other confirmed
+finding is listed as **open-world**, since real code has bugs the answer key
+never planted, without counting for or against.
 `bin/benchmark score` reports both blocks; pass `--findings-dir` to point it
 at a `findings/` tree that is not beside the crashes. The crosstab
 `benchmark-result.md` carries an **Answer key** section with the same recall
@@ -496,7 +502,9 @@ The crash oracle trusts only runtime sanitizer attribution. A separate finding
 oracle grades entries marked `findings_only: true` from confirmed report
 locations. A target with no applicable oracle is reported as unscored rather
 than as 0% recall, and a planted non-crashing bug stays out of the
-crash-recall denominator.
+crash-recall denominator. When such a bug crashes anyway, a confirmed crash in
+its frame is attributed to it by symbol alone, so it counts as a true positive
+rather than an unexpected crash.
 
 Score an existing results or pool tree directly, without launching a run:
 

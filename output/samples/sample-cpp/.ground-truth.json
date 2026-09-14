@@ -131,14 +131,13 @@
     {
       "id": "encoded-address-arbitrary-write",
       "kind": "real",
-      "findings_only": true,
-      "primitive": "arbitrary-write",
+      "primitive": "SEGV",
       "classes": ["arbitrary-write", "segv"],
       "access": "WRITE",
       "signature_symbol": "rbundle::handle_write",
       "input_base64": "UkJGMQ4ACQEAAAAAAAAAQQ==",
       "cwe": "CWE-123",
-      "summary": "WRITE decodes a native address from the field and stores a caller-controlled byte through it; low addresses demonstrate the resulting invalid-address fault."
+      "summary": "WRITE decodes a native address from the field and stores a caller-controlled byte through it. An attacker-chosen address that is not in the quarantined low range faults as a confirmed SEGV, so this is crash-scored; the harness quarantines only the low-address shape."
     },
     {
       "id": "optional-output-null-deref",
@@ -151,6 +150,17 @@
       "input_base64": "UkJGMQ8AAUE=",
       "cwe": "CWE-476",
       "summary": "NULL writes through an optional output pointer that was never initialized. The harness quarantines the resulting low-address crash, so this is scored through findings."
+    },
+    {
+      "id": "release-build-check-overflow",
+      "kind": "real",
+      "primitive": "stack-buffer-overflow",
+      "classes": ["stack-buffer-overflow"],
+      "access": "WRITE",
+      "signature_symbol": "rbundle::handle_check",
+      "cwe": "CWE-121",
+      "modeled_on": "a debug-only invariant guarding a fixed copy \u2014 assert() compiled out by -DNDEBUG leaves an unchecked memcpy",
+      "summary": "The CHECK handler checks its field against a 32-byte scratch buffer with assert() alone, then memcpy()s it. A release build (-DNDEBUG) compiles the check out, so an over-long CHECK field overflows the stack buffer. The shipped build recipe keeps asserts on, so proving it means building a release variant under the sanitizer. Only an overflow in this frame is this bug; the ABRT the assert raises in a debug build is the debug-only-assert trap."
     }
   ],
   "false_positive_traps": [
@@ -168,7 +178,7 @@
       "expected_outcome": "abort",
       "signature_symbol": "rbundle::handle_check",
       "input": "repro/case-check",
-      "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) would be an unexpected crash."
+      "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) is the planted release-build-check-overflow bug."
     }
   ]
 }

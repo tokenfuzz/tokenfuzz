@@ -25,9 +25,9 @@ and `.ground-truth.json` answer keys, is a gitignored working area.
 | Target | Language / build | Mode | Planted bugs | FP traps |
 | --- | --- | --- | --- | --- |
 | `canary` | C / cmake | ASan | 3 | 2 |
-| `samples/sample-c` | C / cmake | ASan | 5 | 2 |
-| `samples/sample-cpp` | C++ / cmake | ASan | 11 | 2 |
-| `samples/sample-c-doublefree` | C / cmake | ASan | 1 | 2 |
+| `samples/sample-c` | C / cmake | ASan | 6 | 2 |
+| `samples/sample-cpp` | C++ / cmake | ASan | 12 | 2 |
+| `samples/sample-c-doublefree` | C / cmake | ASan | 2 | 2 |
 | `samples/sample-c-uninit` | C / cmake | MSan (Linux only) | 1 | 2 |
 | `samples/sample-rust` | Rust / cargo | ASan (nightly `build-std`) | 3 | 4 |
 | `samples/sample-swift` | Swift / SwiftPM | ASan (via `[runner]`) | 3 | 4 |
@@ -38,10 +38,10 @@ and `.ground-truth.json` answer keys, is a gitignored working area.
 | `samples/sample-kotlin` | Kotlin | findings-only | 4 | 5 |
 | `samples/sample-javascript` | Node / npm | findings-only | 3 | 4 |
 | `samples/sample-typescript` | TypeScript / npm (`node`, type stripping) | findings-only | 3 | 4 |
-| `samples/sample-ruby` | Ruby / bundler | findings-only | 2 | 5 |
+| `samples/sample-ruby` | Ruby / bundler | findings-only | 3 | 4 |
 | `samples/sample-php` | PHP / composer | findings-only | 6 | 5 |
 | `samples/sample-perl` | Perl | findings-only | 4 | 3 |
-| `samples/sample-r` | R | findings-only | 2 | 5 |
+| `samples/sample-r` | R | findings-only | 4 | 5 |
 
 Each one is a small tool built around the same idea: read one attacker-supplied
 job file and do something with it. The common input shape makes runner behavior
@@ -53,10 +53,11 @@ the same job chooses both sides of it. A run that promotes a trap is a
 precision failure, and the answer key says so.
 
 Two targets are named for a bug class rather than a language.
-`samples/sample-c-doublefree` and `samples/sample-c-uninit` each plant exactly
-one class the per-language trees never covered on its own, so recall for that
+`samples/sample-c-doublefree` and `samples/sample-c-uninit` each isolate one
+class the per-language trees never covered on its own, so recall for that
 class can be read directly instead of inferred from a bug that happens to
-manifest that way. The uninitialized-read target is the only one that needs
+manifest that way. The C and C++ samples also plant a stack overflow that only
+a release build reaches, behind the assert their debug-only trap expects. The uninitialized-read target is the only one that needs
 MemorySanitizer, which has no Darwin runtime. Its build refuses on a host
 without one rather than producing an uninstrumented binary that would read as
 a clean run of the bug it plants.
@@ -67,7 +68,7 @@ a clean run of the bug it plants.
     path traversal or a command injection, is marked `findings_only: true` and
     stays out of the crash-recall denominator. A separate findings scorer
     credits a confirmed FIND when its report names the planted fault function.
-    On the four hybrid sanitizer samples, `samples/sample-cpp` counts 9 of 11
+    On the four hybrid sanitizer samples, `samples/sample-cpp` counts 11 of 12
     planted bugs toward crash recall, `samples/sample-go` counts 1 of 3, and
     `samples/sample-rust` and `samples/sample-swift` each count 2 of 3. Their
     remaining bugs exercise the finding path.

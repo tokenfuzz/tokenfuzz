@@ -2,7 +2,7 @@
   "target": "samples/sample-ruby",
   "language": "ruby",
   "findings_only": true,
-  "description": "Answer key for the synthetic sample-ruby target. Template eval and shell execution cross the attacker-supplied job-file boundary. Gadget-free Marshal reconstruction and read/write roots selected by that same job are precision traps.",
+  "description": "Answer key for the synthetic sample-ruby target. Template eval, shell execution, and Marshal reconstruction that reaches loaded RubyGems hooks cross the attacker-supplied job-file boundary. Read/write roots selected by that same job are precision traps.",
   "runner": "reportkit_cli.rb",
   "planted_bugs": [
     {
@@ -28,6 +28,17 @@
       "cwe": "CWE-78",
       "modeled_on": "OS command injection class \u2014 Kernel backticks on an attacker string",
       "summary": "run_export runs its hook string through a shell via backticks, so any export hook is arbitrary command execution. case-export runs 'true; echo injected' to prove the string is executed as a shell command."
+    },
+    {
+      "id": "marshal-load-object-injection",
+      "kind": "real",
+      "primitive": "deserialization",
+      "classes": ["deserialization", "rce"],
+      "access": "EXEC",
+      "signature_symbol": "load_state",
+      "cwe": "CWE-502",
+      "modeled_on": "Marshal.load on untrusted bytes with RubyGems loaded \u2014 its marshal_load hooks are the entry every known gadget chain uses",
+      "summary": "load_state passes job bytes straight to Marshal.load. With the default RubyGems environment loaded, a marshaled Gem::Specification reaches Gem::Specification._load and nested marshal_load hooks, so a state job selects loaded classes and their loading callbacks. A report is credited when it names that hook chain; reconstruction alone does not pass the gate."
     }
   ],
   "false_positive_traps": [
@@ -48,13 +59,6 @@
       "signature_symbol": "run_command",
       "input": "/tmp/rb-command.job",
       "refute_reason": "run_command spawns a fixed executable (echo) via IO.popen with an array (no shell), passing the caller argument as a single argv data element. The caller controls neither the program that runs nor a shell, so shell metacharacters are inert and no other binary can be selected. It looks like the sibling of run_export but is not exploitable; a command-injection report here is a false positive."
-    },
-    {
-      "id": "gadget-free-marshal-load",
-      "kind": "fp",
-      "expected_outcome": "clean",
-      "signature_symbol": "load_state",
-      "refute_reason": "The report reconstructs an object but names no loaded gadget or concrete security side effect."
     },
     {
       "id": "attacker-selected-asset-root",

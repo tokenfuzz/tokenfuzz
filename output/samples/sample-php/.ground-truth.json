@@ -33,7 +33,7 @@
       "id": "hardcoded-export-secret",
       "kind": "real",
       "primitive": "info-disclosure",
-      "classes": ["info-disclosure", "other"],
+      "classes": ["info-disclosure", "other", "auth-bypass", "crypto-failure"],
       "access": "READ",
       "signature_symbol": "tokenAuthorised",
       "cwe": "CWE-798",
@@ -44,12 +44,12 @@
       "id": "secret-prefix-mac-length-extension",
       "kind": "real",
       "primitive": "auth-bypass",
-      "classes": ["auth-bypass", "crypto-failure"],
+      "classes": ["signature-bypass"],
       "access": "EXEC",
       "signature_symbol": "tokenAuthorised",
       "cwe": "CWE-327",
       "modeled_on": "secret-prefix Merkle-Damgard digest used as a message authentication code",
-      "summary": "tokenAuthorised authenticates secret || reportId with plain SHA-256. Given one valid token and the secret length, a caller can continue the digest over glue padding and a suffix; a byte-exact job proves the forged longer identifier is accepted without learning the secret."
+      "summary": "tokenAuthorised authenticates secret || reportId with plain SHA-256. Given one valid token and the secret length, a caller can continue the digest over glue padding and a suffix; a byte-exact job proves the forged longer identifier is accepted without learning the secret. Reports of this bug describe a signature forgery; a report that only calls the digest a weak or shared secret is credited to hardcoded-export-secret, which shares this function."
     },
     {
       "id": "export-authorization-bypass",
@@ -66,7 +66,7 @@
       "id": "asset-url-wrapper-ssrf",
       "kind": "real",
       "primitive": "ssrf",
-      "classes": ["ssrf", "info-disclosure"],
+      "classes": ["ssrf"],
       "access": "READ",
       "signature_symbol": "readAsset",
       "cwe": "CWE-918",
@@ -105,7 +105,8 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "readAsset",
-      "refute_reason": "Lexical traversal adds no file capability because the same job chooses both root and name; URL-wrapper network access is scored separately."
+      "refute_reason": "Lexical traversal adds no file capability because the same job chooses both root and name; URL-wrapper network access is scored separately.",
+      "classes": ["path-traversal", "info-disclosure"]
     },
     {
       "id": "unproved-loose-token-bypass",

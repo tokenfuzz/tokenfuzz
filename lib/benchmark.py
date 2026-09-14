@@ -2937,19 +2937,26 @@ def _findings_only_bug(manifest: dict, bug: dict) -> bool:
     return bool(bug.get("findings_only", manifest.get("findings_only")))
 
 
-def _trap_refutes_class(trap: dict, klass: str) -> bool:
-    """Whether a confirmed finding of *klass* at the trap's symbol is the trap.
+def _declared_classes(entry: dict) -> set[str]:
+    declared = entry.get("classes")
+    if not isinstance(declared, list):
+        return set()
+    return {bug_classes.canonical_class(c) for c in declared}
+
+
+def _entry_admits_class(entry: dict, klass: str) -> bool:
+    """Whether a confirmed finding of *klass* at the entry's symbol is this entry.
 
     A trap refutes one claim: that a fixed-argv helper is command injection,
     that a literal-only config loader evaluates its input. A finding of another
     class at the same function — a quadratic parser, a pipe that never drains —
-    is open-world, not the refuted claim. A trap that declares ``classes`` fires
-    only for those; one that declares none keeps the symbol-only match.
+    is open-world, not the refuted claim. A real bug's classes do the same job
+    where it shares a function with another entry. An entry that declares
+    ``classes`` admits only those; one that declares none keeps the symbol-only
+    match.
     """
-    declared = trap.get("classes")
-    if not isinstance(declared, list) or not declared:
-        return True
-    return klass in {bug_classes.canonical_class(c) for c in declared}
+    declared = _declared_classes(entry)
+    return not declared or klass in declared
 
 
 def score_findings_ground_truth(
@@ -2996,13 +3003,16 @@ def score_findings_ground_truth(
         if isinstance(t, dict)
         and str(t.get("expected_outcome", "")).strip() in ("", "clean")
     ]
-    # A trap planted in the same function as a real bug cannot fire here: the
-    # oracle keys on the function (refined by `file` where an entry pins one),
-    # and a report's class vocabulary does not map onto the manifest's
-    # primitives. Say so rather than score it.
+    # A trap planted in the same function as a real bug fires there only when
+    # it declares the classes it refutes, so a report the bug's own classes
+    # exclude can be told apart from the bug. A trap that declares none can
+    # never fire at a shared function: the oracle keys on the function (refined
+    # by `file` where an entry pins one) and credits every report to the bug.
+    # Say so rather than score it.
     ambiguous = sorted(
         str(trap.get("id", "")) for trap in traps
-        if any(
+        if not _declared_classes(trap)
+        and any(
             _manifest_symbols(trap) & _manifest_symbols(bug)
             and _entries_may_share_a_site(trap, bug)
             for bug in real
@@ -3025,20 +3035,32 @@ def score_findings_ground_truth(
         traps_fired: dict[str, list[str]] = {}
         open_world: list[str] = []
         for name, file, func, klass in items:
-            hit = next((
+            bugs_here = [
                 b for b in real
-                if _finding_names_symbol(func, b)
-                and _manifest_file_allows(b, file)
-            ), None)
+                if _finding_names_symbol(func, b) and _manifest_file_allows(b, file)
+            ]
+            traps_here = [
+                t for t in traps
+                if _finding_names_symbol(func, t) and _manifest_file_allows(t, file)
+            ]
+            # Classes settle a shared function: two bugs there are told apart
+            # by the classes each declares, and a trap that declares the
+            # report's class claims it when the bug's classes exclude it. A
+            # report at a bug's function that matches no declared class is
+            # still that bug — the class is the reporter's word for it, and
+            # the gate has already judged the claim — so the planted bug wins
+            # over guessing the trap.
+            hit = next((b for b in bugs_here if _entry_admits_class(b, klass)), None)
+            trap = None
+            if hit is None and bugs_here:
+                trap = next((t for t in traps_here if klass in _declared_classes(t)), None)
+                if trap is None:
+                    hit = bugs_here[0]
             if hit:
                 detected.setdefault(str(hit["id"]), []).append(name)
                 continue
-            trap = next((
-                t for t in traps
-                if _finding_names_symbol(func, t)
-                and _manifest_file_allows(t, file)
-                and _trap_refutes_class(t, klass)
-            ), None)
+            if trap is None:
+                trap = next((t for t in traps_here if _entry_admits_class(t, klass)), None)
             if trap:
                 traps_fired.setdefault(str(trap["id"]), []).append(name)
             else:
@@ -3378,10 +3400,16 @@ def score_ground_truth(
     # also plant findings-only bugs (command injection, path traversal) that
     # surface under findings/ and never as a crash; each carries findings_only=true
     # so it is not stranded permanently "missed" in the crash-recall denominator.
-    real = [
+    planted = [
         b for b in manifest.get("planted_bugs", [])
-        if b.get("kind", "real") == "real" and not _findings_only_bug(manifest, b)
+        if isinstance(b, dict) and b.get("kind", "real") == "real"
     ]
+    real = [b for b in planted if not _findings_only_bug(manifest, b)]
+    # A findings-only bug predicts no sanitizer class, so when one crashes
+    # anyway (a wild write that faults instead of tripping a redzone) the crash
+    # in its frame is attributed by symbol alone: it is that planted bug, not
+    # an unexpected crash. It stays out of the crash-recall denominator.
+    prose_only = [b for b in planted if _findings_only_bug(manifest, b)]
     traps = manifest.get("false_positive_traps", [])
     # Rust symbol demangling is applied only to a Rust target's frames (a
     # demangled C++ name is indistinguishable and must stay whole).
@@ -3413,7 +3441,10 @@ def score_ground_truth(
                 unattributed.append(name)
                 continue
             primitive, crash_site, access = evidence
-            hit = _match_real(primitive, crash_site, access, real)
+            hit = _match_real(primitive, crash_site, access, real) or next((
+                b for b in prose_only
+                if str(b.get("signature_symbol", "")) in crash_site
+            ), None)
             if hit:
                 detected.setdefault(hit["id"], []).append(name)
                 continue
@@ -3422,7 +3453,7 @@ def score_ground_truth(
                 traps_fired.setdefault(trap["id"], []).append(name)
             else:
                 unexpected.append(name)
-        tp_bugs = len(detected)
+        tp_bugs = sum(1 for b in real if b["id"] in detected)
         tp_crashes = sum(len(v) for v in detected.values())
         fp_crashes = (sum(len(v) for v in traps_fired.values())
                       + len(unexpected) + len(unattributed))

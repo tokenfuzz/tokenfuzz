@@ -638,6 +638,69 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertTrue(any("classes must be a non-empty list" in e
                             for e in benchmark.manifest_errors(json.loads(bad.read_text()))))
 
+    def test_real_bug_classes_settle_a_shared_function(self) -> None:
+        # Two bugs planted in one function are told apart by the classes each
+        # declares; a trap that declares the report's class claims it when the
+        # bug's classes exclude it; a report matching no declared class at a
+        # bug's function is still that bug rather than a guessed trap.
+        manifest = self.root / "shared-symbols.json"
+        manifest.write_text(json.dumps({
+            "target": "sampleproj", "findings_only": True,
+            "planted_bugs": [
+                {"id": "fixed-secret", "kind": "real", "primitive": "info-disclosure",
+                 "signature_symbol": "token_check", "classes": ["info-disclosure"]},
+                {"id": "mac-extension", "kind": "real", "primitive": "auth-bypass",
+                 "signature_symbol": "token_check", "classes": ["auth-bypass", "crypto-failure"]},
+                {"id": "asset-fetch", "kind": "real", "primitive": "ssrf",
+                 "signature_symbol": "read_asset", "classes": ["ssrf"]},
+            ],
+            "false_positive_traps": [
+                {"id": "loose-compare", "kind": "fp", "expected_outcome": "clean",
+                 "signature_symbol": "token_check"},
+                {"id": "asset-root", "kind": "fp", "expected_outcome": "clean",
+                 "signature_symbol": "read_asset", "classes": ["path-traversal"]},
+            ],
+        }))
+        run = self.root / "shared"
+        self.make_finding(run, "FIND-0001", "token_check", klass="crypto-failure")
+        self.make_finding(run, "FIND-0002", "token_check", klass="info-disclosure")
+        self.make_finding(run, "FIND-0003", "token_check", klass="other")
+        self.make_finding(run, "FIND-0004", "read_asset", klass="ssrf")
+        self.make_finding(run, "FIND-0005", "read_asset", klass="path-traversal")
+        self.make_finding(run, "FIND-0006", "read_asset", klass="denial-of-service")
+        (run / "crashes").mkdir()
+        proc, score = self.score(run, manifest=manifest)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        overall = score["findings"]["overall"]
+        self.assertEqual(overall["detected"], ["asset-fetch", "fixed-secret", "mac-extension"])
+        self.assertEqual(overall["true_positive_findings"], 5)
+        self.assertEqual(overall["false_positive_traps_fired"], ["asset-root"])
+        self.assertEqual(overall["open_world_findings"], [])
+        # Only the trap without classes is undecidable beside its bug.
+        self.assertEqual(overall["traps_sharing_a_real_symbol"], ["loose-compare"])
+
+    def test_a_crash_at_a_findings_only_bug_is_that_bug(self) -> None:
+        # A wild write planted as findings-only faults under ASan instead of
+        # tripping a redzone; the crash in its frame is the planted bug, not an
+        # unexpected crash, and the bug stays out of the crash-recall denominator.
+        run = self.root / "prose-crash"
+        self.make_crash(run, "N-0001", "pack_cells", "heap-buffer-overflow")
+        self.make_crash(run, "W-0001", "handle_write", "SEGV")
+        manifest = self.root / "prose-crash-gt.json"
+        manifest.write_text(json.dumps({"planted_bugs": [
+            {"id": "native", "primitive": "heap-buffer-overflow", "signature_symbol": "pack_cells"},
+            {"id": "wild-write", "findings_only": True, "primitive": "arbitrary-write",
+             "signature_symbol": "handle_write"},
+        ]}), encoding="utf-8")
+        _, score = self.score(run, manifest=manifest)
+        overall = score["overall"]
+        self.assertEqual(overall["detected"], ["native", "wild-write"])
+        self.assertEqual(overall["real_total"], 1)
+        self.assertEqual(overall["recall"], 1.0)
+        self.assertEqual(overall["missed"], [])
+        self.assertEqual(overall["unexpected_crashes"], [])
+        self.assertEqual(overall["precision"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

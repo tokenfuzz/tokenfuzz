@@ -78,6 +78,17 @@
       "cwe": "CWE-416",
       "modeled_on": "classic missing pointer invalidation (CWE-416) — free without clearing the owner",
       "summary": "DROP frees the staged record without clearing ctx->pending, so a following FLUSH dereferences the freed record. (A STAGE+DROP stream with no FLUSH surfaces the same defect as a double-free at end of decode.)"
+    },
+    {
+      "id": "release-build-check-overflow",
+      "kind": "real",
+      "primitive": "stack-buffer-overflow",
+      "classes": ["stack-buffer-overflow"],
+      "access": "WRITE",
+      "signature_symbol": "handle_check",
+      "cwe": "CWE-121",
+      "modeled_on": "a debug-only invariant guarding a fixed copy \u2014 assert() compiled out by -DNDEBUG leaves an unchecked memcpy",
+      "summary": "The CHECK handler checks its field against a 32-byte scratch buffer with assert() alone, then memcpy()s it. A release build (-DNDEBUG) compiles the check out, so an over-long CHECK field overflows the stack buffer. The shipped build recipe keeps asserts on, so proving it means building a release variant under the sanitizer. Only an overflow in this frame is this bug; the ABRT the assert raises in a debug build is the debug-only-assert trap."
     }
   ],
   "false_positive_traps": [
@@ -95,7 +106,7 @@
       "expected_outcome": "abort",
       "signature_symbol": "handle_check",
       "input": "repro/case-check",
-      "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. With handle_abort=1 AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) would be an unexpected crash."
+      "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. With handle_abort=1 AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) is the planted release-build-check-overflow bug."
     }
   ]
 }
