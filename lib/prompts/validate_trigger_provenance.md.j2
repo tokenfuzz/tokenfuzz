@@ -111,6 +111,12 @@ state** and the report's **exact claimed security consequence**:
 >       - attacker-selected filesystem namespace: the same untrusted input
 >         chooses both the base/root and the child/name, and the operation
 >         adds no distinct capability. Use rejection_kind `no-added-boundary`.
+>         Decide it from the shipped callers of the operation, never from the
+>         reproducer: a harness or script that holds the base constant while
+>         varying the child shows the report's choice, not the product's, and
+>         a `library-api` surface does not by itself supply a caller that
+>         fixes the base from trusted configuration. Only a caller in the
+>         tree that does so — name it — keeps such a report standing.
 >       - debug-only `assert` / `*_CHECK`: the shipped configuration is the
 >         pinned build in this tree — its `.audit/build*.sh` recipe and the
 >         project's own build files. A guard that build compiles in is an

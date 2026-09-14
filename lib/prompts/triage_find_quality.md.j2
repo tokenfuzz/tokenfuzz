@@ -100,7 +100,13 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     distinct effect despite that control — for example a URL scheme turns a
     local read into a server-side network request, or a path-taking language API
     interprets the value as a command channel — or proves the base is
-    independently trusted.
+    independently trusted. That proof is a shipped caller in the tree that
+    fixes the base from trusted configuration while passing the child from
+    input: a reproducer or harness script that holds the base constant while
+    varying the child is the report's own choice, not the product's, and
+    "a library caller could hold the root fixed" does not establish one. When
+    every shipped caller takes the base from the same input as the child,
+    reject.
   - Code execution by loading or sourcing an outside file that the attacker
     cannot create or modify. Naming a path is not code injection when a trusted
     party must first place attacker code there. Keep when the report names an
