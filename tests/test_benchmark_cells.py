@@ -28,6 +28,7 @@ import benchmark_runner
 import build_preflight
 import llm_decide
 import llm_invoke
+import prompt_render
 
 
 class BenchmarkCellTests(unittest.TestCase):
@@ -507,6 +508,11 @@ raise SystemExit(23)
         """
         bench = self.work / "one-snapshot"
         snapshot = benchmark_runner.snapshot_harness(bench)
+        digest = benchmark_runner._harness_content_digest(snapshot)
+        self.assertEqual(
+            digest,
+            benchmark_runner._harness_content_digest(benchmark_runner.SCRIPT_ROOT),
+        )
         first = benchmark_runner.prepare_facade(
             self.work / "cell-a", self.slug, None, snapshot)
 
@@ -514,6 +520,11 @@ raise SystemExit(23)
         original = live.read_bytes()
         try:
             live.write_bytes(original + b"\n# edited between cells\n")
+            problem, saved_digest = benchmark_runner._harness_snapshot_problem(
+                snapshot, digest,
+            )
+            self.assertIn("differ", problem)
+            self.assertEqual(digest, saved_digest)
             second = benchmark_runner.prepare_facade(
                 self.work / "cell-b", self.slug, None, snapshot)
         finally:
@@ -528,6 +539,17 @@ raise SystemExit(23)
         self.assertNotIn(
             b"edited between cells",
             (snapshot / "lib" / "benchmark_runner.py").read_bytes(),
+        )
+        self.assertEqual(("", digest), benchmark_runner._harness_snapshot_problem(
+            snapshot, digest,
+        ))
+        (snapshot / "lib" / "benchmark_runner.py").write_bytes(
+            (snapshot / "lib" / "benchmark_runner.py").read_bytes()
+            + b"\n# changed snapshot\n"
+        )
+        self.assertIn(
+            "snapshot was modified",
+            benchmark_runner._harness_snapshot_problem(snapshot, digest)[0],
         )
 
     def test_the_snapshot_names_no_tree_the_checkout_lacks(self) -> None:
@@ -579,7 +601,8 @@ raise SystemExit(23)
             return 1
 
         with mock.patch.object(
-            benchmark_runner.benchmark_model_direct_render, "render", return_value="prompt",
+            benchmark_runner.benchmark_model_direct_render, "render",
+            side_effect=lambda _target, _cell, _root, budget, _config: f"prompt-{budget}",
         ), mock.patch.object(
             benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=cut_short,
         ) as launch, mock.patch.object(
@@ -673,7 +696,10 @@ raise SystemExit(23)
                 if name == "measured":
                     self.assertEqual(row["tokens"]["input"], 7)
 
-    def _direct_cell_through_capacity(self, cell: Path, wall: int, pause_cap: int):
+    def _direct_cell_through_capacity(
+        self, cell: Path, wall: int, pause_cap: int,
+        harness_snapshot: Path | None = None,
+    ):
         """Run a direct cell whose first session the provider cuts at capacity."""
         launches: list[tuple[str, int]] = []
         sleeps: list[int] = []
@@ -706,11 +732,13 @@ raise SystemExit(23)
             return session(*args, **kwargs)
 
         with mock.patch.object(
-            benchmark_runner.benchmark_model_direct_render, "render", return_value="prompt",
+            benchmark_runner.benchmark_model_direct_render, "render",
+            side_effect=lambda _target, _cell, _root, budget, _config: f"prompt-{budget}",
         ), mock.patch.object(
             benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=run,
         ), mock.patch.object(
-            benchmark_runner.llm_usage, "extract_usage_from_text", return_value=usage,
+            benchmark_runner.llm_usage, "extract_usage_from_text",
+            side_effect=[{}, usage],
         ), mock.patch.object(
             benchmark_runner, "_reap_cell_processes",
         ), mock.patch.object(
@@ -725,7 +753,10 @@ raise SystemExit(23)
         ), mock.patch.object(
             benchmark_runner.time, "sleep", side_effect=sleep,
         ):
-            rc = benchmark_runner.run_model_direct(cell, self.target, "codex", "", wall)
+            rc = benchmark_runner.run_model_direct(
+                cell, self.target, "codex", "", wall,
+                harness_snapshot=harness_snapshot,
+            )
         return rc, launches, sleeps
 
     def test_a_direct_cell_waits_out_a_capacity_limit_and_re_enters(self) -> None:
@@ -737,6 +768,7 @@ raise SystemExit(23)
         # left, the pause excluded.
         self.assertEqual([wall for _prompt, wall in launches], [100, 90])
         self.assertIn("re-entry 1", launches[1][0])
+        self.assertTrue(launches[1][0].endswith("prompt-90"))
         self.assertEqual(
             (cell / "logs" / ".paused_secs").read_text(encoding="utf-8").strip(),
             str(benchmark_runner.CAPACITY_RETRY_SECONDS),
@@ -745,9 +777,22 @@ raise SystemExit(23)
         self.assertEqual(
             (cell / ".run-quality").read_text(encoding="utf-8").strip(), "provider_recovered",
         )
-        row = json.loads((cell / "logs" / "index.jsonl").read_text(encoding="utf-8"))
-        self.assertEqual(row["reentries"], 1)
-        self.assertEqual(row["tokens"]["input"], 10)
+        rows = [
+            json.loads(line)
+            for line in (cell / "logs" / "index.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        self.assertEqual(len(rows), 2)
+        self.assertFalse(rows[0]["usage_complete"])
+        self.assertTrue(rows[1]["usage_complete"])
+        self.assertEqual(rows[1]["reentries"], 1)
+        self.assertEqual(rows[1]["tokens"]["input"], 5)
+        totals = benchmark.harvest_tokens(
+            cell / "logs" / "index.jsonl", default_backend="codex",
+        )
+        self.assertEqual(totals["input_tokens"], 5)
+        self.assertEqual(totals["token_source"], "unknown")
 
     def test_a_direct_cell_past_the_pause_cap_is_excluded(self) -> None:
         cell = self.work / "capacity-capped"
@@ -759,6 +804,21 @@ raise SystemExit(23)
         self.assertEqual(
             (cell / ".run-quality").read_text(encoding="utf-8").strip(), "provider_limited",
         )
+
+    def test_a_direct_reentry_uses_the_runs_prompt_snapshot(self) -> None:
+        cell = self.work / "capacity-snapshot"
+        snapshot = self.work / "direct-snapshot"
+        prompts = snapshot / "lib" / "prompts"
+        prompts.mkdir(parents=True)
+        (prompts / "benchmark_model_direct_reentry.md.j2").write_text(
+            "snapshot re-entry {{ reentry }} with {{ remaining }}; {{ filed }}\n",
+            encoding="utf-8",
+        )
+        rc, launches, _sleeps = self._direct_cell_through_capacity(
+            cell, wall=100, pause_cap=7200, harness_snapshot=snapshot,
+        )
+        self.assertEqual(rc, 0)
+        self.assertTrue(launches[1][0].startswith("snapshot re-entry 1"))
 
     def test_a_held_direct_cell_is_re_entered_until_the_wall(self) -> None:
         cell = self.work / "held"
@@ -775,7 +835,8 @@ raise SystemExit(23)
                  "probe": {}, "estimated": False}
         clock = iter([0, 0, 10, 10, 20, 20, 30, 30, 40])
         with mock.patch.object(
-            benchmark_runner.benchmark_model_direct_render, "render", return_value="prompt",
+            benchmark_runner.benchmark_model_direct_render, "render",
+            side_effect=lambda _target, _cell, _root, budget, _config: f"prompt-{budget}",
         ), mock.patch.object(
             benchmark_runner.llm_invoke, "run_agent_prompt", side_effect=finish,
         ), mock.patch.object(
@@ -799,14 +860,19 @@ raise SystemExit(23)
         # Launched at t=0 (40s left), re-entered at t=10 and t=20; at t=30 only
         # 10s remain, under the floor, so the cell ends there.
         self.assertEqual([wall for _prompt, wall in launches], [40, 30, 20])
-        self.assertEqual(launches[0][0], "prompt")
+        self.assertEqual(launches[0][0], "prompt-40")
         self.assertIn("re-entry 1", launches[1][0])
         self.assertIn("FIND-1", launches[1][0])
-        self.assertTrue(launches[1][0].endswith("prompt"))
-        row = json.loads((cell / "logs" / "index.jsonl").read_text(encoding="utf-8"))
-        self.assertEqual(row["reentries"], 2)
-        self.assertEqual(row["tokens"]["input"], 15)
-        self.assertTrue(row["usage_complete"])
+        self.assertTrue(launches[1][0].endswith("prompt-30"))
+        rows = [
+            json.loads(line)
+            for line in (cell / "logs" / "index.jsonl").read_text(
+                encoding="utf-8"
+            ).splitlines()
+        ]
+        self.assertEqual(rows[-1]["reentries"], 2)
+        self.assertEqual(sum(row["tokens"]["input"] for row in rows), 15)
+        self.assertTrue(all(row["usage_complete"] for row in rows))
 
     def test_agent_flags_harness_facade_and_cleanup(self) -> None:
         unlimited = llm_invoke.agent_flags("claude", max_turns=0, add_dirs="/tmp")
@@ -1335,6 +1401,26 @@ class FinalizationDrainTests(unittest.TestCase):
             self.assertEqual(
                 report_identity.find_quality_decision_version(), live["find_quality"],
             )
+
+    def test_a_run_finalizes_through_its_harness_snapshot(self) -> None:
+        snapshot = self.work / "snapshot"
+        prompts = snapshot / "lib" / "prompts"
+        prompts.mkdir(parents=True)
+        (prompts / "test.md.j2").write_text(
+            "snapshot {{ value }}\n", encoding="utf-8",
+        )
+        original_root = benchmark_runner.triage.SCRIPT_ROOT
+
+        with benchmark_runner._finalizer_harness(snapshot):
+            self.assertEqual(benchmark_runner.triage.SCRIPT_ROOT, snapshot)
+            self.assertEqual(
+                prompt_render.render_template("test.md.j2", {"value": "prompt"}),
+                "snapshot prompt\n",
+            )
+
+        self.assertEqual(benchmark_runner.triage.SCRIPT_ROOT, original_root)
+        with self.assertRaises(FileNotFoundError):
+            prompt_render.render_template("test.md.j2", {})
 
 
 if __name__ == "__main__":

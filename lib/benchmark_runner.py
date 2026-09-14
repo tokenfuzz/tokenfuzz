@@ -40,6 +40,7 @@ import llm_invoke
 import llm_usage
 import telemetry
 import process_tree
+import prompt_render
 import report_identity
 import runner_preflight
 import sanitizer as sanitizer_lib
@@ -1529,25 +1530,6 @@ def _segment_usage(raw: Path, offset: int, prompt: str, backend: str) -> dict:
         return {}
 
 
-def _sum_usage_rows(rows: list[dict]) -> dict:
-    """One usage row for a cell whose sessions each produced their own.
-
-    Numbers add up (tokens, cost); everything else is taken from the last
-    session, which is also the one whose exit status the cell reports.
-    """
-    total: dict = {}
-    for row in rows:
-        for key, value in row.items():
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                if isinstance(value, dict) and isinstance(total.get(key), dict):
-                    total[key] = _sum_usage_rows([total[key], value])
-                else:
-                    total[key] = value
-            else:
-                total[key] = total.get(key, 0) + value
-    return total
-
-
 def run_model_direct(
     cell_dir: Path,
     target: Path,
@@ -1556,13 +1538,16 @@ def run_model_direct(
     wall: int,
     config_snapshot: Path | None = None,
     hold: bool = False,
+    harness_snapshot: Path | None = None,
 ) -> int:
     for name in ("crashes", "findings", "logs"):
         (cell_dir / name).mkdir(parents=True, exist_ok=True)
-    prompt = benchmark_model_direct_render.render(
-        str(target), str(cell_dir), str(SCRIPT_ROOT), wall,
-        str(config_snapshot) if config_snapshot is not None else "",
-    )
+    render_root = harness_snapshot or SCRIPT_ROOT
+    with prompt_render.use_prompt_root(render_root / "lib" / "prompts"):
+        prompt = benchmark_model_direct_render.render(
+            str(target), str(cell_dir), str(render_root), wall,
+            str(config_snapshot) if config_snapshot is not None else "",
+        )
     (cell_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
     raw = cell_dir / "backend.raw.log"
     for marker in (
@@ -1578,16 +1563,25 @@ def run_model_direct(
     started = time.monotonic()
     reentries = 0
     paused = 0
-    usage_rows: list[dict] = []
+    usage_rows: list[tuple[dict, int]] = []
     with _target_artifact_guard(target, cell_dir):
         try:
             while True:
                 elapsed = int(time.monotonic() - started) - paused
                 remaining = max(1, wall - elapsed) if wall > 0 else wall
-                session_prompt = (
-                    _reentry_prompt(prompt, cell_dir, reentries, remaining)
-                    if reentries else prompt
-                )
+                if reentries:
+                    with prompt_render.use_prompt_root(
+                        render_root / "lib" / "prompts"
+                    ):
+                        fresh_prompt = benchmark_model_direct_render.render(
+                            str(target), str(cell_dir), str(render_root), remaining,
+                            str(config_snapshot) if config_snapshot is not None else "",
+                        )
+                        session_prompt = _reentry_prompt(
+                            fresh_prompt, cell_dir, reentries, remaining,
+                        )
+                else:
+                    session_prompt = prompt
                 offset = raw.stat().st_size if raw.is_file() else 0
                 rc = llm_invoke.run_agent_prompt(
                     backend, session_prompt, remaining, raw, model=model, max_turns=0,
@@ -1599,7 +1593,9 @@ def run_model_direct(
                     # as `delegation_events` on the cell's usage row.
                     extra_env={process_tree.REAP_MARKER_VAR: reap_marker},
                 )
-                usage_rows.append(_segment_usage(raw, offset, session_prompt, backend))
+                usage_rows.append((
+                    _segment_usage(raw, offset, session_prompt, backend), rc,
+                ))
                 left = wall - (int(time.monotonic() - started) - paused)
                 if (
                     rc not in (0, 124) and wall > 0 and left > REENTRY_FLOOR_SECONDS
@@ -1612,13 +1608,15 @@ def run_model_direct(
                     # once. Wait the same way, then re-enter with the wall the
                     # session had left. `.paused_secs` is the ledger the cell's
                     # accounting already reads.
-                    wait = min(CAPACITY_RETRY_SECONDS, PROVIDER_PAUSE_MAX_SECONDS - paused)
-                    if wait > 0:
+                    available = PROVIDER_PAUSE_MAX_SECONDS - paused
+                    if available > 0:
+                        wait = min(CAPACITY_RETRY_SECONDS, available)
                         log(
                             f"model-direct provider capacity limited with {left}s "
                             f"left; pausing {wait}s before re-entry"
                         )
-                        time.sleep(wait)
+                        if wait:
+                            time.sleep(wait)
                         paused += wait
                         (cell_dir / "logs" / ".paused_secs").write_text(
                             f"{paused}\n", encoding="utf-8"
@@ -1641,12 +1639,21 @@ def run_model_direct(
             else:
                 os.environ["LOGDIR"] = previous_logdir
             _reap_cell_processes(reap_marker, cell_dir)
-    usage_event = _sum_usage_rows(usage_rows)
-    usage_event["reentries"] = reentries
-    usage_event["resolved_effort"] = llm_invoke.default_effort(backend)
-    usage_event["usage_complete"] = llm_usage.usage_is_complete(usage_event, rc)
+    usage_events = []
+    for index, (usage, session_rc) in enumerate(usage_rows):
+        event = dict(usage)
+        event["reentry"] = index
+        event["resolved_effort"] = llm_invoke.default_effort(backend)
+        event["usage_complete"] = llm_usage.usage_is_complete(event, session_rc)
+        if index + 1 == len(usage_rows):
+            event["reentries"] = reentries
+        usage_events.append(event)
     (cell_dir / "logs" / "index.jsonl").write_text(
-        json.dumps(usage_event, separators=(",", ":")) + "\n", encoding="utf-8"
+        "".join(
+            json.dumps(event, separators=(",", ":")) + "\n"
+            for event in usage_events
+        ),
+        encoding="utf-8",
     )
     issue = _record_provider_quality(cell_dir, cell_dir, rc, model)
     if (
@@ -1741,6 +1748,48 @@ _SNAPSHOT_ROOT_FILES = (
     "AGENTS.md", "CHANGELOG.md", "LICENSE", "README.md", "SECURITY.md",
     "requirements.txt", ".gitignore",
 )
+
+
+def _harness_content_digest(root: Path) -> str:
+    """Content identity of the control-plane files copied into a run."""
+    digest = hashlib.sha256()
+    paths: list[Path] = []
+    for name in _SNAPSHOT_TREES:
+        tree = root / name
+        if tree.is_dir():
+            paths.extend(
+                path for path in tree.rglob("*")
+                if path.is_file() and "__pycache__" not in path.parts
+            )
+    paths.extend(
+        root / name for name in _SNAPSHOT_ROOT_FILES
+        if (root / name).is_file()
+    )
+    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(relative + b"\0")
+        digest.update(b"x" if os.access(path, os.X_OK) else b"-")
+        digest.update(b"\0")
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _harness_snapshot_problem(
+    snapshot: Path, recorded_digest: str = "",
+) -> tuple[str, str]:
+    """Why live imports cannot safely resume *snapshot*, plus its digest."""
+    snapshot_digest = _harness_content_digest(snapshot)
+    if recorded_digest and snapshot_digest != recorded_digest:
+        return "the run's harness snapshot was modified", snapshot_digest
+    if _harness_content_digest(SCRIPT_ROOT) != snapshot_digest:
+        return (
+            "the checkout's harness files differ from the run's saved snapshot",
+            snapshot_digest,
+        )
+    return "", snapshot_digest
 
 
 def _cell_started_at(cell_dir: Path) -> str:
@@ -3479,6 +3528,21 @@ def _apply_gate_pin(versions: dict[str, str] | None) -> None:
             os.environ.pop(key, None)
 
 
+@contextmanager
+def _finalizer_harness(snapshot: Path | None):
+    """Run in-process finalizers through the run's immutable harness copy."""
+    if snapshot is None:
+        yield
+        return
+    previous_root = triage.SCRIPT_ROOT
+    triage.SCRIPT_ROOT = snapshot
+    try:
+        with prompt_render.use_prompt_root(snapshot / "lib" / "prompts"):
+            yield
+    finally:
+        triage.SCRIPT_ROOT = previous_root
+
+
 def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, run_id, conditions, previous=None) -> int:
     model = args.model or llm_invoke.default_model(args.backend)
     llm_invoke.apply_memory_policy(False)
@@ -3550,6 +3614,19 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     file=sys.stderr,
                 )
                 return 1
+            if not args.regenerate:
+                harness_problem, harness_digest = _harness_snapshot_problem(
+                    harness_snapshot,
+                    str(previous.get("harness_snapshot_sha256") or ""),
+                )
+                if harness_problem:
+                    reason = (
+                        _resume_refusal(harness_problem, run_id)
+                        if previous else harness_problem
+                    )
+                    print(f"FATAL: {reason}", file=sys.stderr)
+                    return 1
+                run_data["harness_snapshot_sha256"] = harness_digest
             run_config = _benchmark_config(
                 target_root, args.target, config_snapshot,
             )
@@ -3739,6 +3816,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                         cell_dir, target_root, args.backend, model,
                         args.budget_wall, config_snapshot,
                         hold=bool(getattr(args, "hold_direct", False)),
+                        harness_snapshot=harness_snapshot,
                     )
                 else:
                     log(f"Cell {name} live log: {(cell_dir / 'audit.log').resolve()}")
@@ -3838,15 +3916,16 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             target_revision=revision,
                             target_config_sha256=config_digest,
                         ):
-                            with _finalization_phase(
-                                results, finalization_pass, "crash_triage",
-                            ):
-                                crash_counts = triage_cell_crashes(
-                                    results, target_root, args.target,
-                                    workers=finalize_workers,
-                                    deadline=_finalize_deadline(finalize_wall),
-                                    require_replay=condition == "model-direct",
-                                )
+                            with _finalizer_harness(harness_snapshot):
+                                with _finalization_phase(
+                                    results, finalization_pass, "crash_triage",
+                                ):
+                                    crash_counts = triage_cell_crashes(
+                                        results, target_root, args.target,
+                                        workers=finalize_workers,
+                                        deadline=_finalize_deadline(finalize_wall),
+                                        require_replay=condition == "model-direct",
+                                    )
                         log(
                             f"Cell {name} crash triage: promoted={crash_counts.get('promoted', 0)} "
                             f"rejected={crash_counts.get('rejected', 0)} "
@@ -3863,15 +3942,16 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                     # benchmark cell with fully adjudicated metrics.
                     log(f"Cell {name}: draining find-gate before metrics")
                     try:
-                        with _finalization_phase(
-                            results, finalization_pass, "result_gates",
-                        ):
-                            counts = drain_find_gate(
-                                results, args.backend, model,
-                                (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
-                                deadline=_finalize_deadline(finalize_wall),
-                                workers=finalize_workers,
-                            )
+                        with _finalizer_harness(harness_snapshot):
+                            with _finalization_phase(
+                                results, finalization_pass, "result_gates",
+                            ):
+                                counts = drain_find_gate(
+                                    results, args.backend, model,
+                                    (SCRIPT_ROOT / "targets" / args.target).resolve(), args.target,
+                                    deadline=_finalize_deadline(finalize_wall),
+                                    workers=finalize_workers,
+                                )
                         # A pause inside the drain sits in the untimed
                         # measurement phase, so it is not subtracted from the
                         # cell's wall — only the audit's own pauses are.

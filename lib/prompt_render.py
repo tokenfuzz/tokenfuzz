@@ -31,6 +31,7 @@ are ignored.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
 import re
 import sys
@@ -42,6 +43,19 @@ _PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 # token cost or confusing the model. Multiline-friendly.
 _COMMENT_RE = re.compile(r"\{#.*?#\}", re.DOTALL)
 _CONTROL_TAG_RE = re.compile(r"\{%.*?%\}", re.DOTALL)
+_prompt_root: Path | None = None
+
+
+@contextlib.contextmanager
+def use_prompt_root(path: str | Path):
+    """Resolve bare template names under *path* for one in-process phase."""
+    global _prompt_root
+    previous = _prompt_root
+    _prompt_root = Path(path)
+    try:
+        yield
+    finally:
+        _prompt_root = previous
 
 
 def _strip_and_validate(template_text: str) -> str:
@@ -99,7 +113,10 @@ def render_template(template: str | Path, context: dict[str, str]) -> str:
     """
     template_path = Path(template)
     if not template_path.is_absolute():
-        template_path = Path(__file__).resolve().parent / "prompts" / template_path
+        template_path = (
+            _prompt_root if _prompt_root is not None
+            else Path(__file__).resolve().parent / "prompts"
+        ) / template_path
     try:
         st = template_path.stat()
     except OSError:
