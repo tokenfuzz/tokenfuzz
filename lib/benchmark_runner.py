@@ -2996,10 +2996,7 @@ def update_live_result(bench_root: Path, reason: str) -> Path | None:
         # visible without aborting the cell sequence that produces it.
         log(f"WARN: benchmark-result live update failed ({reason}): {exc}")
         return None
-    log(
-        f"benchmark-result live update ({reason}): "
-        f"{artifact} ({artifact.resolve().as_uri()})"
-    )
+    log(f"benchmark-result live update ({reason}): {artifact}")
     return artifact
 
 
@@ -3015,7 +3012,7 @@ def update_result(bench_dir: Path, bench_root: Path, target: str, backend: str, 
     artifact = _render_root_result(bench_root)
     (bench_dir / ".result-signature").unlink(missing_ok=True)
     _RESULT_SIGNATURES[signature_key] = signature
-    log(f"benchmark-result update ({reason}): {artifact} ({artifact.resolve().as_uri()})")
+    log(f"benchmark-result update ({reason}): {artifact}")
     return report
 
 
@@ -4266,7 +4263,7 @@ def _main(argv: list[str] | None = None) -> int:
         return 1
     if args.rebuild_report:
         artifact = _render_root_result(bench_root)
-        log(f"Benchmark report rebuilt: {artifact} ({artifact.resolve().as_uri()})")
+        log(f"Benchmark report rebuilt: {artifact}")
         return 0
     if args.prune_cache:
         return _prune_all(args, bench_root)

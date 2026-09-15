@@ -598,6 +598,46 @@ class BuildTests(unittest.TestCase):
             self.assertEqual(benchmark_page.build(Path(empty))["runs"], [])
 
 
+class CrashCoverageTests(unittest.TestCase):
+    """The page counts the problems the ledger counts, not one more."""
+
+    def test_a_write_up_of_its_own_crash_is_not_a_second_problem(self) -> None:
+        # A condition holding both a crash and the finding that describes it
+        # found one problem. report.json keeps a cluster's identity but not
+        # its location, so the page has to read the site from the clusterer.
+        with tempfile.TemporaryDirectory(prefix="bench-page-cover-") as tmp:
+            run = Path(tmp)
+            (run / "pool-members.json").write_text(json.dumps({
+                "crashes": {"CRASH-h": "harness"},
+                "findings": {"FIND-h": "harness", "FIND-o": "harness"},
+            }), encoding="utf-8")
+            signature = "app_write src/app.c:219 -> dispatch src/app.c:246"
+            (run / "clusters-crashes.json").write_text(json.dumps({"clusters": [
+                {"id": "CL-1", "members": ["CRASH-h"], "signature": signature},
+            ]}), encoding="utf-8")
+            (run / "clusters-findings.json").write_text(json.dumps({"clusters": [
+                {"id": "FCL-dup", "members": ["FIND-h"], "class": "arbitrary-write",
+                 "key_kind": "loc", "key": ["memory-safety", "src/app.c", "219"],
+                 "file": "src/app.c", "line": "219"},
+                {"id": "FCL-own", "members": ["FIND-o"], "class": "auth-bypass",
+                 "key_kind": "loc", "key": ["auth", "src/auth.c", "12"],
+                 "file": "src/auth.c", "line": "12"},
+            ]}), encoding="utf-8")
+            report = {
+                "crash_clusters": [{
+                    "id": "CL-1", "members": ["CRASH-h"],
+                    "conditions": ["harness"], "signature": signature,
+                }],
+                "finding_clusters": [
+                    {"id": "FCL-dup", "members": ["FIND-h"], "conditions": ["harness"]},
+                    {"id": "FCL-own", "members": ["FIND-o"], "conditions": ["harness"]},
+                ],
+            }
+            clusters = benchmark_page._clusters(run, report, None)
+            self.assertEqual([c["id"] for c in clusters["find"]], ["FCL-own"])
+            self.assertEqual([c["id"] for c in clusters["crash"]], ["CL-1"])
+
+
 class SeverityTests(unittest.TestCase):
     def test_cluster_severity_from_its_field_or_its_members(self) -> None:
         self.assertEqual(benchmark_page._severity_of({"severity_level": "High"}), ("High", 3))

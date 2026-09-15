@@ -188,9 +188,18 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
     """
     members = _read_json(run_dir / "pool-members.json", {}) or {}
     out: dict[str, list[dict]] = {"find": [], "crash": []}
+    # Crashes first: a finding that is one of its own condition's crashes
+    # written up is that crash, and the metrics drop it. The page counts the
+    # same problems the ledger does, so it needs the same predicate.
+    covered = None
+    if members:
+        covered = benchmark._finding_covered_by_crash(benchmark.attribute_clusters(
+            {"clusters": report.get("crash_clusters") or []},
+            benchmark.credited_pool_members(members, "crashes"),
+        ))
     for kind, key, sub in (
-        ("find", "finding_clusters", "findings"),
         ("crash", "crash_clusters", "crashes"),
+        ("find", "finding_clusters", "findings"),
     ):
         index = _cluster_index(run_dir, kind)
         owner = benchmark.credited_pool_members(members, sub)
@@ -202,12 +211,22 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
             # against, and the report's own clusters stand.
             clusters = benchmark.attribute_clusters(
                 {"clusters": clusters}, owner,
+                covered=covered if kind == "find" else None,
             )["clusters"]
         for cluster in clusters:
             cid = str(cluster.get("id") or "")
             detail = index.get(cid, {})
             level, rank = _severity_of(cluster)
             conditions = [str(c) for c in (cluster.get("conditions") or [])]
+            if covered is not None and kind == "find" and detail:
+                # The ledger does not count a condition's own crash written up
+                # again as a second problem. Neither does this page, or the two
+                # disagree about how many problems a condition found. The site
+                # the predicate needs survives only on the clusterer's own
+                # record; report.json keeps the identity, not the location.
+                conditions = [c for c in conditions if not covered(detail, c)]
+                if not conditions:
+                    continue
             canonical = str(detail.get("canonical") or "")
             member_list = [str(m) for m in (cluster.get("members") or [])]
             severity_by = {
