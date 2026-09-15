@@ -499,6 +499,27 @@ raise SystemExit(23)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(result.stdout.strip())
 
+    def test_harness_digest_survives_a_mount_that_answers_x_ok_for_every_file(self) -> None:
+        """A bind-mounted checkout is not an edited checkout.
+
+        Docker's bind mount answers X_OK for every file when the suite runs as
+        root, while the snapshot copied to /tmp keeps the real mode bits, so a
+        digest built on os.access read the same tree as two and every cell of
+        the container lane failed to launch.
+        """
+        snapshot = benchmark_runner.snapshot_harness(self.work / "mount-snapshot")
+        real_access = os.access
+        checkout = benchmark_runner.SCRIPT_ROOT
+
+        def mount_access(path, mode, *args, **kwargs):
+            if mode == os.X_OK and Path(path).is_relative_to(checkout):
+                return True
+            return real_access(path, mode, *args, **kwargs)
+
+        with mock.patch.object(os, "access", mount_access):
+            problem, _ = benchmark_runner._harness_snapshot_problem(snapshot)
+        self.assertEqual(problem, "")
+
     def test_every_cell_of_a_run_holds_the_same_harness(self) -> None:
         """A per-cell copy pins a cell against edits during its own life only.
 

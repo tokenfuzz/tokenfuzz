@@ -1768,7 +1768,10 @@ def _harness_content_digest(root: Path) -> str:
     for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
         relative = path.relative_to(root).as_posix().encode("utf-8")
         digest.update(relative + b"\0")
-        digest.update(b"x" if os.access(path, os.X_OK) else b"-")
+        # The mode bits, not os.access: a bind mount answers X_OK for every
+        # file as root, and the snapshot copied to /tmp does not, so the
+        # same tree digested twice would read as edited.
+        digest.update(b"x" if path.stat().st_mode & 0o111 else b"-")
         digest.update(b"\0")
         with path.open("rb") as stream:
             while chunk := stream.read(1024 * 1024):
