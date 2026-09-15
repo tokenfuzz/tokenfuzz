@@ -3087,8 +3087,8 @@ def _regenerate_all(args: argparse.Namespace, bench_root: Path) -> int:
     if not runs:
         print(f"FATAL: --regenerate: no runs found under {bench_root}", file=sys.stderr)
         return 1
-    crosstab = _render_root_result(bench_root).with_suffix(".md")
-    log(f"Regenerate-all: rebuilt {crosstab} ({len(runs)} run(s), {failures} failed)")
+    artifact = _render_root_result(bench_root)
+    log(f"Regenerate-all: rebuilt {artifact} ({len(runs)} run(s), {failures} failed)")
     return 1 if failures else 0
 
 

@@ -162,7 +162,7 @@
       "signature_symbol": "rbundle::handle_check",
       "cwe": "CWE-121",
       "modeled_on": "a debug-only invariant guarding a fixed copy \u2014 assert() compiled out by -DNDEBUG leaves an unchecked memcpy",
-      "summary": "The CHECK handler checks its field against a 32-byte scratch buffer with assert() alone, then memcpy()s it. A supported release build (-DNDEBUG) compiles the check out, so an over-long CHECK field overflows the stack buffer. The configured sanitizer build keeps asserts on, so this source-proven release bug is scored as a finding; the ABRT the assert raises in the configured build is the debug-only-assert trap."
+      "summary": "The CHECK handler checks its field against the 32-byte buffer retained in the stack-resident decoder context with assert() alone, then memcpy()s it. A supported release build (-DNDEBUG) compiles the check out, so an over-long CHECK field overflows that buffer and the stack frame around it. The configured sanitizer build keeps asserts on, so this source-proven release bug is scored as a finding; the ABRT the assert raises in the configured build is the debug-only-assert trap."
     }
   ],
   "false_positive_traps": [
@@ -182,7 +182,7 @@
       "signature_symbol": "rbundle::handle_check",
       "input": "repro/case-check",
       "classes": ["stack-buffer-overflow", "buffer-overflow"],
-      "refute_reason": "A CHECK field longer than its 32-byte scratch trips assert() and aborts before the copy. AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) is the planted release-build-check-overflow bug."
+      "refute_reason": "A CHECK field longer than its 32-byte retained buffer trips assert() and aborts before the copy. AddressSanitizer reports this as ABRT, which lib/triage.py autodiscards: an assertion failure is a debug invariant check, not a memory-safety fault. Only an ABRT in this frame counts as the trap firing; a real overflow here (a release build with -DNDEBUG) is the planted release-build-check-overflow bug."
     }
   ]
 }

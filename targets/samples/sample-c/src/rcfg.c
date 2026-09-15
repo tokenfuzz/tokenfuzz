@@ -37,6 +37,8 @@ typedef struct {
   size_t       labels;     /* count of interned labels             */
   uint8_t      last_tag;   /* tag of the last committed record     */
   uint8_t      flag;       /* value of the last optional flag      */
+  uint16_t     check_len;  /* bytes retained from the last CHECK   */
+  uint8_t      check[RCFG_CHECK_CAP]; /* the last CHECK field       */
 } rcfg_ctx;
 
 /* ── Small endian / hashing helpers ──────────────────────────────────── */
@@ -187,15 +189,14 @@ static void handle_opt(rcfg_ctx *ctx, const uint8_t *val, uint16_t len)
   ctx->flag = flag[len - 1];
 }
 
-/* CHECK: a bounded self-check field. Its length must fit the scratch buffer;
- * a longer field indicates a corrupt stream and trips a debug invariant. */
+/* CHECK: a bounded self-check field, retained and verified once the stream
+ * ends. Its length must fit the retained buffer; a longer field indicates a
+ * corrupt stream and trips a debug invariant. */
 static void handle_check(rcfg_ctx *ctx, const uint8_t *val, uint16_t len)
 {
-  uint8_t scratch[RCFG_CHECK_CAP];
-
-  assert(len <= sizeof(scratch));
-  memcpy(scratch, val, len);
-  ctx->flag ^= scratch[0];
+  assert(len <= sizeof(ctx->check));
+  memcpy(ctx->check, val, len);
+  ctx->check_len = len;
 }
 
 /* ── Dispatch and top-level pass ─────────────────────────────────────── */
@@ -251,5 +252,10 @@ int rcfg_decode(const uint8_t *data, size_t len)
   }
 
   free(ctx.pending);
+
+  /* A stream that carries a CHECK must match the digest of its host blob. */
+  if (ctx.check_len != 0 && fnv1a(ctx.check, ctx.check_len) != ctx.host_hash) {
+    return -2;
+  }
   return fields;
 }

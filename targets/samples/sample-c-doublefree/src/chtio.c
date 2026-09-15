@@ -29,6 +29,8 @@ typedef struct {
   uint32_t digest;  /* digest of the last sealed transfer                   */
   size_t   labels;  /* count of recorded labels                             */
   uint8_t  mode;    /* value of the last optional note                      */
+  uint16_t trail_len; /* bytes retained from the last TRAIL                 */
+  uint8_t  trail[CHT_TRAIL_CAP]; /* the last TRAIL field                    */
 } cht_ctx;
 
 /* ── Small endian / hashing helpers ──────────────────────────────────── */
@@ -124,15 +126,14 @@ static void handle_note(cht_ctx *ctx, const uint8_t *val, uint16_t len)
   ctx->mode = note[len - 1];
 }
 
-/* TRAIL: a bounded stream trailer. Its length must fit the scratch buffer; a
- * longer trailer indicates a corrupt stream and trips a debug invariant. */
+/* TRAIL: a bounded stream trailer, retained and verified once the stream
+ * ends. Its length must fit the retained buffer; a longer trailer indicates a
+ * corrupt stream and trips a debug invariant. */
 static void handle_trail(cht_ctx *ctx, const uint8_t *val, uint16_t len)
 {
-  uint8_t scratch[CHT_TRAIL_CAP];
-
-  assert(len <= sizeof(scratch));
-  memcpy(scratch, val, len);
-  ctx->digest ^= fnv1a(scratch, len);
+  assert(len <= sizeof(ctx->trail));
+  memcpy(ctx->trail, val, len);
+  ctx->trail_len = len;
 }
 
 /* ── Dispatch and top-level pass ─────────────────────────────────────── */
@@ -192,5 +193,11 @@ int cht_read(const uint8_t *data, size_t len)
 
   /* Release the transfer buffer before returning. */
   free(ctx.chunk);
+
+  /* A stream that carries a TRAIL must match the digest of its last transfer. */
+  if (rc == 0 && ctx.trail_len != 0 &&
+      fnv1a(ctx.trail, ctx.trail_len) != ctx.digest) {
+    return -3;
+  }
   return rc == 0 ? fields : -2;
 }

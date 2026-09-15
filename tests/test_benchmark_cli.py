@@ -277,7 +277,10 @@ class BenchmarkCliTests(unittest.TestCase):
             "--regenerate", "--dry-run", "--bench-root", str(self.bench_root)
         )
         self.assertEqual(regenerated.returncode, 0, regenerated.stdout)
-        self.assertIn("Regenerate-all: rebuilt", regenerated.stdout)
+        self.assertIn(
+            f"Regenerate-all: rebuilt {self.bench_root / 'benchmark-result.html'}",
+            regenerated.stdout,
+        )
         self.assertNotIn("Cell model-direct-r1 starting", regenerated.stdout)
         for run in run_dirs:
             self.assertTrue((run / "pool").is_dir())

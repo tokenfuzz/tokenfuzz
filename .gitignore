@@ -40,6 +40,9 @@ targets/samples/sample-*/.build/
 targets/samples/sample-*/.audit/*
 !targets/samples/sample-*/.audit/build.sh
 !targets/samples/sample-*/.audit/build-*.sh
+# The uninit sample commits only its MSan recipe; the ASan build.sh that
+# bin/auto-build-script writes on a host without an MSan runtime is a local artifact.
+targets/samples/sample-c-uninit/.audit/build.sh
 # Compiled C-extension artifacts (sample-python's reportnative build)
 targets/samples/sample-*/build/
 targets/samples/sample-*/*.so
@@ -49,6 +52,8 @@ targets/samples/sample-*/*.egg-info/
 benchmark-results.md
 benchmark-results.html
 benchmark-results.*.bak.md
+# Result pages shipped with the handbook as static examples.
+!docs/assets/examples/**
 
 # OS artifacts
 .DS_Store

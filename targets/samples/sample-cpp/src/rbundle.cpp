@@ -38,6 +38,8 @@ struct Context {
   std::uint32_t slice_sum = 0;   /* checksum of the last slice window  */
   std::uint8_t last_tag = 0;     /* tag of the last committed record   */
   std::uint8_t flag = 0;         /* value of the last optional flag    */
+  std::uint16_t check_len = 0;   /* bytes retained from the last CHECK */
+  std::uint8_t check[CHECK_CAP] = {}; /* the last CHECK field          */
 };
 
 /* Small endian / hashing helpers. */
@@ -165,14 +167,13 @@ void handle_opt(Context &ctx, const std::uint8_t *val, std::uint16_t len) {
   ctx.flag = flag[len - 1];
 }
 
-/* CHECK: a bounded self-check field. Its length must fit the scratch buffer; a
- * longer field indicates a corrupt stream and trips a debug invariant. */
+/* CHECK: a bounded self-check field, retained and verified once the stream
+ * ends. Its length must fit the retained buffer; a longer field indicates a
+ * corrupt stream and trips a debug invariant. */
 void handle_check(Context &ctx, const std::uint8_t *val, std::uint16_t len) {
-  std::uint8_t scratch[CHECK_CAP];
-
-  assert(len <= sizeof(scratch));
-  std::memcpy(scratch, val, len);
-  ctx.flag ^= scratch[0];
+  assert(len <= sizeof(ctx.check));
+  std::memcpy(ctx.check, val, len);
+  ctx.check_len = len;
 }
 
 /* GLOBAL: replace the process-wide option bytes. */
@@ -282,6 +283,11 @@ int decode(const std::uint8_t *data, std::size_t len) {
   }
 
   delete ctx.pending;
+
+  /* A stream that carries a CHECK must match the digest of its host blob. */
+  if (ctx.check_len != 0 && fnv1a(ctx.check, ctx.check_len) != ctx.host_hash) {
+    return -2;
+  }
   return fields;
 }
 
