@@ -31,7 +31,7 @@ SCHEMA_VERSION = 5
 # Bump whenever scoring semantics change, so scores a previous scorer computed
 # are re-derived instead of being read as current. Named for the change that
 # introduced the version, the way the trigger gate names its decision version.
-SCORER_DECISION_VERSION = "severity-v4-graded-availability"
+SCORER_DECISION_VERSION = "severity-v5-negated-caller-actions"
 
 FILENAME = "severity.json"
 

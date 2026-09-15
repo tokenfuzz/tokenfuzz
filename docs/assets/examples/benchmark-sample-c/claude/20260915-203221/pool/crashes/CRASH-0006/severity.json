@@ -1,0 +1,11 @@
+{
+  "level": "High",
+  "primitive": "heap WRITE of 1 byte(s)",
+  "primitive_key": "heap_write",
+  "report_sha1": "c9743406fb312da8934f153634b9ce7cd584406c",
+  "schema_version": 5,
+  "score": 8.9,
+  "scored_at": "2026-09-15T21:33:54.869567+00:00",
+  "scorer_version": "severity-v5-negated-caller-actions",
+  "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P"
+}

@@ -511,12 +511,42 @@ def _outcome(status: str, artifact: str) -> str:
     return _OUTCOME.get(status, "open")
 
 
-def _subsystem(path: str) -> str:
-    """The top-level directory a hypothesis or cluster site names, or ""."""
-    location = str(path or "").split(":", 1)[0].strip().lstrip("./")
-    if "/" not in location:
-        return ""
-    return location.split("/", 1)[0]
+def _location(site: str) -> str:
+    """The file a site names: `src/a.c:fn:3` and `fn a.c:3 -> ...` both give it."""
+    words = str(site or "").split(":", 1)[0].split()
+    return (words[-1] if words else "").lstrip("./")
+
+
+def _subsystem(path: str, directories: dict[str, str] | None = None) -> str:
+    """The top-level directory a hypothesis or cluster site names, or "".
+
+    A crash site carries the bare file name from the stack frame, and agents
+    write some hypothesis sites the same way. *directories* maps such a name
+    to the subsystem the run's other sites place that file in, so one file
+    never splits between its real row and "(no path)".
+    """
+    location = _location(path)
+    if "/" in location:
+        return location.split("/", 1)[0]
+    return (directories or {}).get(location, "")
+
+
+def _directories(run: dict) -> dict[str, str]:
+    """Where the run's directory-bearing sites place each bare file name.
+
+    A name that different sites place in different subsystems stays
+    unresolved: guessing would move a row rather than merge one.
+    """
+    placed: dict[str, set[str]] = {}
+    sites = [hyp["file"] for cond in run["conditions"]
+             for trace in cond.get("traces") or [] for hyp in trace["hyps"]]
+    for kind in ("find", "crash"):
+        sites += [c["site"] for c in run["clusters"][kind] + run["rejected"][kind]]
+    for site in sites:
+        location = _location(site)
+        if "/" in location:
+            placed.setdefault(location.rsplit("/", 1)[-1], set()).add(location.split("/", 1)[0])
+    return {name: subs.pop() for name, subs in placed.items() if len(subs) == 1}
 
 
 def _clip(text: object, cap: int) -> str:
@@ -718,11 +748,11 @@ def _attention(run: dict) -> list[dict]:
             row["hits"] += hyp["outcome"] == "hit"
     for kind in ("find", "crash"):
         for cluster in run["clusters"][kind]:
-            row = slot(_subsystem(cluster["site"]))
+            row = slot(_subsystem(cluster["site"], run["directories"]))
             for cond in cluster["conditions"]:
                 row["harness" if cond == "harness" else "direct"] += 1
         for cluster in run["rejected"][kind]:
-            slot(_subsystem(cluster["site"]))["rejected"] += 1
+            slot(_subsystem(cluster["site"], run["directories"]))["rejected"] += 1
     return sorted(rows.values(), key=lambda r: (
         -(r["hypotheses"] + r["harness"] + r["direct"]), r["subsystem"]))
 
@@ -1002,7 +1032,9 @@ def _cross_attention(conditions: list[dict], problems: list[dict], runs: list[di
     found different things there — or looked in different places entirely.
     """
     traces = {}
+    directories: dict[str, str] = {}
     for run in runs:
+        directories.update(run["directories"])
         for cond in run["conditions"]:
             traces[_condition_key(run, cond)] = cond.get("traces") or []
     cells: dict[str, dict[str, dict]] = {c["key"]: {} for c in conditions}
@@ -1019,7 +1051,7 @@ def _cross_attention(conditions: list[dict], problems: list[dict], runs: list[di
                 slot(key, sub)["hits"] += hyp["outcome"] == "hit"
                 totals[sub] = totals.get(sub, 0) + 1
     for problem in problems:
-        sub = _subsystem(problem["site"]) or "(no path)"
+        sub = _subsystem(problem["site"], directories) or "(no path)"
         for key in problem["found"]:
             if key in cells:
                 slot(key, sub)["found"] += 1
@@ -1359,6 +1391,11 @@ def build(bench_root: Path) -> dict:
                 "clusters": clusters,
                 "rejected": rejected,
             })
+            runs[-1]["directories"] = _directories(runs[-1])
+            for cond in conditions:
+                for trace in cond.get("traces") or []:
+                    for hyp in trace["hyps"]:
+                        hyp["subsystem"] = _subsystem(hyp["file"], runs[-1]["directories"])
             _stamp_clusters(runs[-1], series)
             runs[-1]["attention"] = _attention(runs[-1])
     runs.sort(key=lambda r: (r["target"], r["backend"], r["run_id"]))
@@ -1642,7 +1679,7 @@ def _effort(run: dict) -> str:
             _tile("Confirmed / seat-h", "—" if eff["per_seat_hour"] is None else
                   f'{"≤" if eff["seat_floor"] else ""}{eff["per_seat_hour"]:g}'),
             _tile("$ / confirmed", "—" if eff["cost_per_confirmed"] is None else
-                  f'${eff["cost_per_confirmed"]:,.0f}'),
+                  f'${eff["cost_per_confirmed"]:,.2f}'),
         ]
         blocks.append(
             f'<div class="effort"><div class="ft"><span class="cond cond-{_e(cond["token"])}">'

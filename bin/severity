@@ -451,8 +451,10 @@ def _limited_caller_control(fields: dict) -> tuple[bool, str]:
     if parameter and re.search(r"\b(indirect|computed|configuration|config|harness-only|"
                                r"trusted|application-supplied)\b", parameter):
         return True, "parameter control is indirect/trusted → MAT:P"
-    if trusted and re.search(r"\b(private|internal|struct|mutation|harness-only|"
-                             r"ordering|sequence)\b", trusted):
+    # Negation-aware: "no internal state mutated" describes the public call
+    # path, not a precondition, and must not read as one.
+    if trusted and _unnegated_search(r"\b(private|internal|struct|mutation|harness-only|"
+                                     r"ordering|sequence)\b", trusted):
         if not re.search(r"\b(?:normal(?:ly)?|public|documented|no private)\b", trusted):
             return True, "trusted caller action required → MAT:P"
 

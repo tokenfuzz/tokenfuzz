@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.0 - 2026-09-14
+## 1.6.0 - 2026-09-15
 
 This release changes how an audit spends its wall and what it can prove
 afterwards. Slots refill the moment one finishes instead of waiting for the
@@ -70,6 +70,14 @@ shares one isolation policy, and target setup keeps a route that already runs.
   writes the refusal sidecar; rows carry `served_model` from the transcript's
   busiest billed model and are priced by it. The claude default stays
   `claude-opus-5`, which is not refused.
+
+- **A cell the provider served with another model is kept and named.** A
+  safeguard refusal makes the Claude CLI switch models mid-session and carry
+  on; the harness had read the substitution as a refused backend, marked the
+  cell unavailable, discarded its reproduced crashes, skipped every later
+  cell and exited 0. Substitution is now its own outcome: the cell is scored,
+  `.served-model` travels with it, the record and the run summary name the
+  model that served, and only a genuinely unavailable backend stops the run.
 
 - **One isolation policy for every launch.** Web tools are denied on every
   launch the harness makes — agents in both security modes and one-shot
@@ -142,6 +150,13 @@ shares one isolation policy, and target setup keeps a route that already runs.
   measure demotes to a finding, and a replay whose every run hit its deadline
   is unmeasured, not a verdict.
 
+- **Severity reads a negated caller action as the public path.** A report
+  whose trusted-caller field said "no internal state mutated" matched the
+  word and gained a caller-precondition metric, halving a crash's score
+  against the same signature scored Medium on the other side. The rule uses
+  the scorer's negation-aware search and bumps its decision version, so
+  receipts from the old rule are re-derived on regenerate.
+
 - **Evidence pages are built from the data.** The cluster, rejected and
   per-report pages were Markdown tables that never said when, where or by
   which lane a problem was found. `lib/evidence_pages.py` renders a discovery
@@ -163,6 +178,11 @@ shares one isolation policy, and target setup keeps a route that already runs.
   agent's own reasoning, and an attention table placing effort beside yield.
   Every count comes from the report, links are relative so a bench root can
   move, and the crosstab shows the answer key its headline counts include.
+  A Type column says whether a row is a crash or a finding; a bare file name
+  from a stack frame joins the row its directory-bearing sites use instead
+  of a "(no path)" row of its own; the per-confirmed cost tile keeps its
+  cents; and every console line, regenerate-all included, names the HTML
+  page.
 
 - **A run is pinned to the code and gates it started with.** The control plane
   is frozen once per run and every cell facade built from that copy; the
@@ -189,7 +209,10 @@ shares one isolation policy, and target setup keeps a route that already runs.
   open a diagnostic that scored a symbolized trace as an unexpected crash.
   Unjudged artifacts are out of every score, and a saved report is
   re-attributed on render, so `--rebuild-report` is enough for a run reported
-  before this change.
+  before this change. Where a symbol holds one planted bug and no trap, a
+  sibling class from the same family earns it: a correct authorization-bypass
+  write-up had scored as a miss against a key that said
+  broken-access-control.
 
 - **The direct control survives the provider and can be held to the wall.**
   A direct session that exited on "model at capacity" cost the cell and
@@ -282,14 +305,24 @@ shares one isolation policy, and target setup keeps a route that already runs.
   failed every probe; Java and Kotlin score an unfiltered `readObject` as the
   bug it is; and every key extends its bugs and traps against the disclosure
   taxonomy with declared classes. The MSan sample refuses a build on a host
-  without an MSan runtime rather than reporting a clean run of its bug.
+  without an MSan runtime rather than reporting a clean run of its bug, and
+  the ASan recipe preflight generates for it on such a host is ignored.
+  `sample-python` declares its HTTP service in the threat model, so a
+  correct finding about that surface is no longer rejected for a trigger the
+  target never admitted. The release-build overflow the C, C++ and doublefree
+  samples plant behind a debug assert now survives the optimizer: the copied
+  field was a local nothing observed, so a release build deleted it and a
+  direct agent correctly argued the bug away; the field is retained in the
+  decoder context and verified at end of stream.
 
 - **The handbook is checked against the code.** Every page is rewritten
   against `bin/`, `lib/`, `.agents/` and `AGENTS.md` with paths and anchors
   kept; the isolation policy, delegation and spend floors, the cache tier, and
   the macOS Java and Kotlin startup check are each stated once and linked.
   Tests no longer sample host properties such as configured targets or an
-  installed toolchain. Dependency bumps: pymdown-extensions 11.0.2,
+  installed toolchain. The benchmark page ships a finished sample-c result
+  exported with every count link resolving, with screenshots, linked from
+  the README and the docs home. Dependency bumps: pymdown-extensions 11.0.2,
   actions/deploy-pages 5.0.1.
 
 ## 1.5.3 - 2026-08-30

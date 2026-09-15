@@ -1,0 +1,40 @@
+ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic testcase=output/benchmark-sample-c/claude/20260915-203221/cells/harness-r1/repo-root/output/samples/sample-c-bench-20260915-203221-harness-r1/claude/results/scratch-1/check_overflow.rcf env_options_b64= started=2026-09-15T20:46:36Z
+COVERAGE_GATE: COVERAGE_NO_SANCOV - asan proceeding ungated (hits rc=3; the run wrote no sancov files (an uninstrumented binary, or one that never exited cleanly))
+[run-sanitizer-multi] BUDGET: 25/60 sanitizer invocations used this iteration
+=== Run 1/1 ===
+[sanitizer] WARN: output keeps unsymbolized frames (symbolizer left raw frames); some stack frames may lack source lines
+Assertion failed: (len <= sizeof(ctx->check)), function handle_check, file rcfg.c, line 197.
+AddressSanitizer:DEADLYSIGNAL
+=================================================================
+==4716==ERROR: AddressSanitizer: ABRT on unknown address 0x00018d5145e8 (pc 0x00018d5145e8 bp 0x00016f618a20 sp 0x00016f618a00 T0)
+SCARINESS: 10 (signal)
+    #0 0x00018d5145e8 in __pthread_kill (in libsystem_kernel.dylib) + 8
+    #1 0x00018d455974 (/usr/lib/system/libsystem_c.dylib:arm64e+0x78974)
+    #2 0x00018d454bd0 (/usr/lib/system/libsystem_c.dylib:arm64e+0x77bd0)
+    #3 0x0001007e5e1c in handle_check rcfg.c:197
+    #4 0x0001007e4de0 in dispatch rcfg.c:216
+    #5 0x0001007e4a4c in rcfg_decode rcfg.c:247
+    #6 0x0001007e6418 in main rcfg_cli.c:59
+    #7 0x00018d1844e0 in start (in dyld) + 6988
+
+==4716==Register values:
+ x[0] = 0x0000000000000000   x[1] = 0x0000000000000000   x[2] = 0x0000000000000000   x[3] = 0x0000000000000000
+ x[4] = 0x0000000000000000   x[5] = 0x000000000000002e   x[6] = 0x000000016ee20000   x[7] = 0x0000000000000001
+ x[8] = 0x2042a91a29ac0218   x[9] = 0x2042a91bd054e398  x[10] = 0x000000702dee3149  x[11] = 0x000000002dec3149
+x[12] = 0x000000002dec3149  x[13] = 0x0000000000000000  x[14] = 0x0000000000000000  x[15] = 0x0000000000000000
+x[16] = 0x0000000000000148  x[17] = 0x00000001fb5cf358  x[18] = 0x0000000000000000  x[19] = 0x0000000000000006
+x[20] = 0x0000000000000103  x[21] = 0x00000001f9f8e260  x[22] = 0x0000000100d10000  x[23] = 0x00000001007e6920
+x[24] = 0x00000001f74c2000  x[25] = 0x000000016f619020  x[26] = 0x00000001f9f8fa70  x[27] = 0x0000000000000000
+x[28] = 0x0000000000000000     fp = 0x000000016f618a20     lr = 0x000000018d54f8d8     sp = 0x000000016f618a00
+AddressSanitizer can not provide additional info.
+SUMMARY: AddressSanitizer: ABRT (/usr/lib/system/libsystem_kernel.dylib:arm64e+0x95e8)
+==4716==ABORTING
+tokenfuzz: timeout.py: child pid=4716 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+
+=== SUMMARY ===
+CRASH_RATE: 1/1
+[run-sanitizer-multi] EXECUTION_RATE: 1/1
+[run-sanitizer-multi] SUCCESS_RATE: 0/1
+[run-sanitizer-multi] CRASHES FOUND: 1/1 runs crashed

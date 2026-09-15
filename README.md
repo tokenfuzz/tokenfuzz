@@ -29,6 +29,7 @@ The harness supplies the parts a long audit needs beyond a prompt:
 - **Comparable evaluation.** A built-in benchmark runs TokenFuzz and a direct
   vulnerability prompt under matched target, model, and wall-clock budgets,
   then compares validated, deduplicated evidence instead of prose volume.
+  See an [example result page](https://tokenfuzz.github.io/tokenfuzz/assets/examples/benchmark-sample-c/benchmark-result.html) from a run against the C sample.
 
 It drives Claude Code, Codex CLI, Gemini through Antigravity or the Google
 Gemini CLI, Grok Build, and local models through OpenCode; `--backend all`

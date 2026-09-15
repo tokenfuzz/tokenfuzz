@@ -9,6 +9,15 @@ execution, and review produce stronger validated evidence within the same
 budget? That is useful to a security lead comparing approaches or a contributor
 checking a harness change. For routine target work, use `bin/audit`.
 
+!!! example "See a finished result"
+    [![Scoreboard of the example result page](../assets/examples/benchmark-sample-c/benchmark-result-scoreboard.png)](../assets/examples/benchmark-sample-c/benchmark-result.html)
+
+    The handbook ships a finished
+    [example result page](../assets/examples/benchmark-sample-c/benchmark-result.html)
+    from a run against the C sample, with every count link opening the
+    evidence behind it. [Example result](#example-result) has the command
+    that produced it and what to look for.
+
 This page has three reading paths:
 
 - **Run an experiment:** start with [Quick start](#quick-start), then read
@@ -411,6 +420,35 @@ count dominated by unjudged evidence, `~` marks non-exact usage or cost,
 `up to` marks an upper bound, and `‡` identifies superseded severity scoring.
 Do not subtract a floor from a control or compare severity subsets scored
 under different versions.
+
+### Example result
+
+The handbook ships a finished result as a static example, exported with
+`bin/export-benchmark` from this run against the planted-bug C sample on a
+30-minute budget with one replicate per condition:
+
+```bash
+bin/benchmark --target samples/sample-c --backend claude --model claude-opus-4-8 \
+  --replicates 1 --budget-wall 1800 --bench-root benchmark-sample-c
+```
+
+- [Cross-run comparison](../assets/examples/benchmark-sample-c/benchmark-result.html)
+  is the root `benchmark-result.html`, with every section above. Its count
+  links open the cluster indexes and the crash and finding reports they
+  count.
+- [Backend ledger](../assets/examples/benchmark-sample-c/claude/benchmark-results.html)
+  is the `claude/benchmark-results.html` the run appended to, with the answer
+  key scored against the sample's `.ground-truth.json`.
+
+[![Models side by side on the example result page](../assets/examples/benchmark-sample-c/benchmark-result-side-by-side.png)](../assets/examples/benchmark-sample-c/benchmark-result.html)
+
+The copy keeps the rendered pages and the evidence files they link to, and
+drops the run's cells and harness snapshot, so only the two links to a cell
+directory do not resolve in the handbook copy. Both conditions found all five
+crash-scored bugs and the release-build overflow the answer key scores as a
+finding; the harness filed that finding at two adjacent lines, which the
+finding clusterer keys on, so its column reads two distinct problems where
+the answer key credits one.
 
 ## Ground truth: precision and recall
 

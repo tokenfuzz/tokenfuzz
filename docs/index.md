@@ -27,6 +27,7 @@ The harness supplies the parts a long audit needs beyond a prompt:
 - **Comparable evaluation.** A built-in benchmark runs TokenFuzz and a direct
   vulnerability prompt under matched target, model, and wall-clock budgets,
   then compares validated, deduplicated evidence instead of prose volume.
+  See an [example result page](assets/examples/benchmark-sample-c/benchmark-result.html) from a run against the C sample.
 
 ## Supported targets
 
@@ -94,7 +95,7 @@ The complete walkthrough is in [First audit](getting-started/first-audit.md).
 | Operating a longer audit | [Backends and isolation](guides/backends.md) and [First audit](getting-started/first-audit.md) |
 | Reviewing a security-team handoff | [Triage and review](guides/triage-results.md) |
 | Receiving a crash as an upstream maintainer | [Reproduce a crash](guides/reproduce-a-crash.md) |
-| Deciding whether the harness earns its budget | [Benchmarking](concepts/benchmark.md) |
+| Deciding whether the harness earns its budget | [Benchmarking](concepts/benchmark.md) and an [example result page](assets/examples/benchmark-sample-c/benchmark-result.html) |
 | Looking up an exact command, field, or path | [Reference](reference/index.md) |
 | Diagnosing a run that failed | [Troubleshooting](reference/troubleshooting.md) |
 | Changing TokenFuzz itself | [Development](development.md) |
@@ -185,7 +186,7 @@ boundaries.
 | Choose a backend and execution boundary | [Backends and isolation](guides/backends.md) |
 | Review the output of a run | [Triage and review](guides/triage-results.md) |
 | Assess a bundle sent to your project | [Reproduce a crash](guides/reproduce-a-crash.md) |
-| Evaluate whether the harness helps | [Benchmarking](concepts/benchmark.md) |
+| Evaluate whether the harness helps | [Benchmarking](concepts/benchmark.md) and an [example result page](assets/examples/benchmark-sample-c/benchmark-result.html) |
 | Understand or change the implementation | [System architecture](concepts/system-architecture.md) and [Development](development.md) |
 | Look up a field or diagnose a failure | [Reference](reference/index.md) and [Troubleshooting](reference/troubleshooting.md) |
 

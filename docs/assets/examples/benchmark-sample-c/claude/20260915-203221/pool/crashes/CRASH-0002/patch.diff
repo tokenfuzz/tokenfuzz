@@ -1,0 +1,11 @@
+--- a/src/rcfg.c
++++ b/src/rcfg.c
+@@ -81,7 +81,7 @@ static void handle_str(rcfg_ctx *ctx, const uint8_t *val, uint16_t len)
+ {
+   char label[RCFG_LABEL_CAP];
+ 
+-  if (len <= sizeof(label)) {
++  if (len < sizeof(label)) {
+     memcpy(label, val, len);
+     label[len] = '\0';
+     ctx->labels += strlen(label) ? 1 : 0;

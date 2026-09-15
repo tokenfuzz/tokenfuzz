@@ -1,0 +1,10 @@
+--- a/src/rcfg.c
++++ b/src/rcfg.c
+@@ -166,5 +166,6 @@
+ /* DROP: discard the staged record without committing it. */
+ static void handle_drop(rcfg_ctx *ctx)
+ {
+-  free(ctx->pending);
++  free(ctx->pending);
++  ctx->pending = NULL;
+ }

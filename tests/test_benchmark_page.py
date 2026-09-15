@@ -424,6 +424,36 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(rows["(no path)"]["harness"], 1)
         self.assertEqual(benchmark_page._subsystem("libx/y.c:fn:3"), "libx")
         self.assertEqual(benchmark_page._subsystem("y.c:3"), "")
+
+    def test_a_bare_file_name_joins_the_row_its_directory_bearing_sites_use(self) -> None:
+        # Stack frames name the file alone and agents write some hypothesis
+        # sites the same way; the run's other sites say where that file is.
+        run = {
+            "conditions": [{"token": "harness", "traces": [{"hyps": [
+                {"file": "src/app_io.c:app_read:12", "subsystem": "src", "outcome": "hit", "probes": []},
+                {"file": "app_io.c:app_flush:99", "subsystem": "", "outcome": "open", "probes": []},
+                {"file": "app_io.c", "subsystem": "", "outcome": "open", "probes": []},
+            ]}]}],
+            "clusters": {"find": [], "crash": [
+                {"site": "app_io.c:12", "conditions": ["harness", "model-direct"]},
+                {"site": "orphan.c:3", "conditions": ["harness"]},
+            ]},
+            "rejected": {"find": [], "crash": []},
+        }
+        run["directories"] = benchmark_page._directories(run)
+        self.assertEqual(run["directories"], {"app_io.c": "src"})
+        self.assertEqual(benchmark_page._subsystem("child_free app_io.c:91 -> x", run["directories"]), "src")
+        for hyp in run["conditions"][0]["traces"][0]["hyps"]:
+            hyp["subsystem"] = benchmark_page._subsystem(hyp["file"], run["directories"])
+        rows = {r["subsystem"]: r for r in benchmark_page._attention(run)}
+        self.assertEqual(rows["src"]["hypotheses"], 3)
+        self.assertEqual(rows["src"]["harness"], 1)
+        self.assertEqual(rows["src"]["direct"], 1)
+        # a name no site places anywhere still gets its own row, never a guess
+        self.assertEqual(rows["(no path)"]["harness"], 1)
+        # one file placed in two subsystems by different sites is not resolved
+        run["clusters"]["find"] = [{"site": "lib/app_io.c:4", "conditions": ["harness"]}]
+        self.assertEqual(benchmark_page._directories(run), {})
         self.assertEqual(benchmark_page._outcome("CONFIRMED-NO-CRASH", ""), "refuted")
         self.assertEqual(benchmark_page._outcome("PROBED", ""), "open")
         self.assertEqual(benchmark_page._outcome("DISCARDED", "CRASH-001"), "hit")

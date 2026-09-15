@@ -1753,6 +1753,25 @@ class SeverityTests(unittest.TestCase):
         result = self.score(report)
         self.assert_metrics(result, AV="N", MAT="P", MVC="")
 
+    def test_negated_caller_action_is_not_a_precondition(self) -> None:
+        """A report that says the public call mutates *no* internal state
+        describes the ordinary path; reading the negated word as a required
+        trusted action halved the score of a crash the other side scored
+        Medium on the same signature."""
+        report = self.make_report(
+            "heap read past the stream while copying a slice window",
+            report_id="CRASH-NEGATED", trigger="bytes", controls="full stream bytes",
+            extra_fields=(("Trusted caller actions",
+                           "calls decode(data, len) over the exact input length; "
+                           "no internal state mutated"),),
+        )
+        self.assert_metrics(self.score(report), MAT="")
+        fields = {"trigger_source": "bytes", "caller_controls": "full stream bytes"}
+        self.assertFalse(severity._limited_caller_control({
+            **fields, "trusted_caller_actions": "no internal state mutated"})[0])
+        self.assertTrue(severity._limited_caller_control({
+            **fields, "trusted_caller_actions": "caller must mutate internal state first"})[0])
+
     def test_placeholder_cell_does_not_shadow_an_inferred_bare_label(self) -> None:
         """Triage writes inferred reach fields as bare labels below a table
         whose row is still a generated placeholder. The placeholder must not
