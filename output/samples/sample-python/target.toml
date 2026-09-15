@@ -43,8 +43,15 @@ is_browser    = "0"
 # byte-only default under-claims — run `bin/suggest-threat-model samples/sample-python`
 # for an LLM-suggested model, or edit attacker_controls by hand.
 [threat_model]
-# attacker_controls set by bin/suggest-threat-model — reportkit_cli reads one attacker-supplied job file and performs exactly one fixed library call on its body, so the attacker controls input bytes only; op dispatch is a single fixed call, not attacker-ordered API sequencing, and env/filesystem layout are set by the operator.
-attacker_controls = ["bytes"]
+# The seeded byte-only model saw reportkit_cli alone. The target also ships
+# reportkit_serve.py, which listens on a socket and answers each connection
+# with reportkit_service.respond on its own thread, and the CLI's `request`
+# op drives the same routes from job bytes. So: bytes (job file and request
+# body), protocol-state (respond resolves a session cookie a previous
+# request set, across requests on one port), and race (serve threads every
+# connection, and routes check then act on shared state). Not timing: an
+# attacker observes durations here but schedules nothing.
+attacker_controls = ["bytes", "protocol-state", "race"]
 
 # ── Sanitizer policy ─────────────────────────────────────────
 # python target with no ASan build detected — defaulting
