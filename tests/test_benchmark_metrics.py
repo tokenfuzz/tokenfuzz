@@ -1504,13 +1504,15 @@ class BenchmarkMetricsTests(unittest.TestCase):
         ran = benchmark.harvest_fuzz_campaign(results)
         self.assertTrue(ran["campaign_invoked"])
         self.assertEqual(ran["campaign_slices_recorded"], 1)
-    def _finding(self, findings: Path, name: str, file: str, func: str) -> None:
+    def _finding(self, findings: Path, name: str, file: str, func: str,
+                 klass: str = "") -> None:
         directory = findings / name
         directory.mkdir(parents=True)
         (directory / "report.md").write_text(
             "## Fields\n\n"
-            f"| File | `{file}` |\n"
-            f"| Function | `{func}` |\n",
+            + (f"| Class | {klass} |\n" if klass else "")
+            + f"| File | `{file}` |\n"
+            + f"| Function | `{func}` |\n",
             encoding="utf-8",
         )
         validation_receipt.write(
@@ -1589,6 +1591,54 @@ class BenchmarkMetricsTests(unittest.TestCase):
         }]}
         scored = benchmark.score_findings_ground_truth(findings, manifest)
         self.assertEqual(scored["overall"]["detected"], [])
+
+    def test_a_sibling_class_label_credits_a_bug_that_owns_its_symbol(self) -> None:
+        """One family, one planted bug, nothing there to tell apart.
+
+        The vocabulary carries several canonical classes per family, so a
+        correct report of an authorization bypass may say auth-bypass where
+        the key says broken-access-control — the finding clusterer keys on the
+        family for exactly that reason. Refusing the sibling label at a symbol
+        that holds one bug and no trap scores a report of the planted bug as a
+        miss. A shared or trapped symbol still needs the exact class: there,
+        the class is the only thing that tells the entries apart.
+        """
+        findings = self.root / "oracle-family" / "findings"
+        self._finding(findings, "FIND-0001", "cli.php", "run_export",
+                      klass="auth-bypass")
+        bug = {
+            "id": "export-authz", "kind": "real",
+            "primitive": "broken-access-control",
+            "classes": ["broken-access-control"],
+            "signature_symbol": "run_export", "file": "cli.php",
+            "findings_only": True,
+        }
+        scored = benchmark.score_findings_ground_truth(findings, {"planted_bugs": [bug]})
+        self.assertEqual(scored["overall"]["detected"], ["export-authz"])
+
+        # A clean trap at the same symbol claims that label, so the exact
+        # class decides again and the sibling no longer credits the bug.
+        trapped = benchmark.score_findings_ground_truth(findings, {
+            "planted_bugs": [bug],
+            "false_positive_traps": [{
+                "id": "documented-export", "kind": "fp",
+                "expected_outcome": "clean", "classes": ["auth-bypass"],
+                "signature_symbol": "run_export", "file": "cli.php",
+            }],
+        })
+        self.assertEqual(trapped["overall"]["detected"], [])
+        self.assertEqual(trapped["overall"]["false_positive_traps_fired"],
+                         ["documented-export"])
+
+        # So does a second planted bug there.
+        shared = benchmark.score_findings_ground_truth(findings, {"planted_bugs": [
+            bug,
+            {"id": "token-forgery", "kind": "real", "primitive": "signature-bypass",
+             "classes": ["signature-bypass"], "signature_symbol": "run_export",
+             "file": "cli.php", "findings_only": True},
+        ]})
+        self.assertEqual(shared["overall"]["detected"], [])
+        self.assertEqual(shared["overall"]["open_world_findings"], ["FIND-0001"])
 
     def test_two_bugs_sharing_a_symbol_in_different_files_are_distinct(self) -> None:
         """Pinning a file makes them separate entries, not a collision."""

@@ -3088,6 +3088,19 @@ def score_findings_ground_truth(
             # issue at the same function; assigning the first bug here would
             # manufacture recall credit.
             hit = next((b for b in bugs_here if _entry_admits_class(b, klass)), None)
+            # Sibling labels inside one family — auth-bypass and
+            # broken-access-control, say — name the same defect, which is why
+            # the finding clusterer keys on the family rather than the class.
+            # Where the symbol holds one planted bug and no declared trap there
+            # is nothing to tell apart, so the family settles it; a shared or
+            # trapped symbol still needs the exact class.
+            if hit is None and len(bugs_here) == 1 and not traps_here:
+                families = {
+                    bug_classes.family_of(c)
+                    for c in _declared_classes(bugs_here[0])
+                }
+                if bug_classes.family_of(klass) in families:
+                    hit = bugs_here[0]
             trap = None
             if hit is None and bugs_here:
                 trap = next((t for t in traps_here if klass in _declared_classes(t)), None)
