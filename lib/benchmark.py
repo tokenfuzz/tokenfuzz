@@ -79,6 +79,11 @@ CELL_RUN_QUALITIES = frozenset({
     "clean", "incomplete", "provider_recovered", "provider_limited",
     "source_drift", "build_drift", "unowned_artifacts", "backend_terminated",
     "processes_unreaped",
+    # The provider served a model other than the one asked for — a safeguard
+    # fallback, say. The cell ran its full budget and its evidence is real, so
+    # it is scored; what it is not is a measurement of the requested model, so
+    # every surface that names a model names the one that served.
+    "model_substituted",
 })
 NONCOMPARABLE_RUN_QUALITIES = frozenset({
     # A cell whose own work is still running was never bounded by its wall:
@@ -4796,6 +4801,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
             "experiment": cell.get("experiment", ""),
             "status": cell.get("status", "unknown"),
             "run_quality": cell.get("run_quality", "clean"),
+            "served_model": cell.get("served_model", ""),
             "wall_seconds": cell.get("wall_seconds"),
             "paused_seconds": cell.get("paused_seconds", 0) or 0,
             "wall_effective_seconds": (
@@ -4951,6 +4957,13 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
         # Wall column already shows that; with several, the median hides it.
         backend_terminated = [
             c for c in done if c.get("run_quality") == "backend_terminated"
+        ]
+        # Scored like any other cell, and named for the model that served it:
+        # a row that says only what was requested prices and labels work the
+        # requested model never did.
+        model_substituted = [
+            {"cell": c["cell"], "served_model": c.get("served_model", "")}
+            for c in cells if c.get("run_quality") == "model_substituted"
         ]
         crashes = [c["metrics"].get("confirmed_crashes", 0) for c in done]
         # Reproduced sanitizer crashes a reviewer placed outside the declared
@@ -5111,6 +5124,7 @@ def aggregate(bench_dir: Path, *, include_pool: bool = True) -> dict:
                 "replicates_provider_recovered": len(provider_recovered),
                 "replicates_backend_terminated": len(backend_terminated),
                 "incomplete_observed": incomplete_observed,
+                "model_substituted": model_substituted,
                 "crashes": crashes,
                 "crash_median": _median([float(x) for x in crashes]),
                 "crash_total": crash_total,

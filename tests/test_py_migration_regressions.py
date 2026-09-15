@@ -1593,6 +1593,50 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "a refused backend marks the cell unavailable rather than recovered",
     )
 
+    # A safeguard fallback is not an unavailable backend: the CLI switched
+    # models mid-session and ran the whole budget. The cell keeps its evidence
+    # and is scored, marked for the model that actually served it, and the run
+    # goes on to its remaining cells.
+    swapped_cell = root / "swapped-cell"
+    swapped_cell.mkdir()
+    (swapped_cell / "backend.raw.log").write_text(
+        json.dumps({
+            "type": "system", "subtype": "model_refusal_fallback",
+            "trigger": "refusal", "original_model": "claude-opus-5",
+            "fallback_model": "claude-opus-4-8", "api_refusal_category": "cyber",
+        }) + "\n" + json.dumps({
+            "type": "result",
+            "modelUsage": {
+                "claude-opus-5": {"inputTokens": 2, "outputTokens": 0},
+                "claude-opus-4-8": {"inputTokens": 44, "outputTokens": 18518},
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+    swapped_issue = benchmark_runner._record_provider_quality(
+        swapped_cell, swapped_cell, 0, "claude-opus-5",
+    )
+    check(
+        swapped_issue == "model_substituted"
+        and not (swapped_cell / ".backend-unavailable").exists()
+        and (swapped_cell / ".run-quality").read_text(encoding="utf-8").strip()
+        == "model_substituted"
+        and (swapped_cell / ".served-model").read_text(encoding="utf-8").strip()
+        == "claude-opus-4-8",
+        "a substituted model keeps the cell and names the model that served it",
+    )
+    # The cell record carries the served model, so every reader of the run —
+    # summary line, ledger, page — can say whose numbers these are.
+    benchmark_runner.write_cell(
+        swapped_cell / "cell.json", "model-direct", 1, "bench-x-model-direct-r1",
+        None, 300, "done", 1,
+    )
+    check(
+        json.loads((swapped_cell / "cell.json").read_text(encoding="utf-8")).get(
+            "served_model") == "claude-opus-4-8",
+        "the cell record names the model the provider served",
+    )
+
     # quota_dominates reads only a bounded tail: a huge transcript whose 429
     # burst sits in the last lines is still detected, and a progress line in the
     # tail vetoes it — without re-reading the whole file each poll.

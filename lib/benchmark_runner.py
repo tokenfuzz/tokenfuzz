@@ -61,24 +61,41 @@ _CLASSIFIER_NOTICE_RE = re.compile(
     r"^WARN: MODEL_REFUSAL: CYBER CLASSIFIER DETECTED "
     r"backend=[a-z0-9_-]+ provider_reason=[a-z0-9_.-]+(?: raw_log=.+)?$"
 )
+# The audit's own per-session substitution notice, which the harness cell
+# writes through index_log and this runner relays so the operator reads it
+# beside the cell it belongs to rather than only inside the audit log.
+_SUBSTITUTION_NOTICE_RE = re.compile(
+    r"WARN: agent \S+ requested model=\S+ but the provider served \S+"
+)
 
 
 def log(message: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] [benchmark] {message}", flush=True)
 
 
-def _relay_classifier_notice(audit_log: Path) -> None:
-    """Copy the first trusted audit classifier notice to benchmark stdout.
+def _relay_backend_notices(audit_log: Path) -> None:
+    """Copy the audit's classifier and model-substitution notices to stdout.
 
-    Read once after the cell exits. The nested audit prints the notice through
-    the shared launcher, which detects a refusal from the completed backend
-    log, so the line is already in audit.log by the time the cell returns.
+    Read once after the cell exits. The nested audit prints both through the
+    shared launcher — one from the completed backend log, one per session that
+    was served a model other than the one asked for — so the lines are already
+    in audit.log by the time the cell returns. The first of each is enough:
+    they repeat per session and say the same thing.
     """
+    relayed_classifier = relayed_substitution = False
     try:
         with audit_log.open("r", encoding="utf-8", errors="replace") as stream:
             for line in stream:
-                if _CLASSIFIER_NOTICE_RE.fullmatch(line.strip()):
-                    log(line.strip())
+                stripped = line.strip()
+                if not relayed_classifier and _CLASSIFIER_NOTICE_RE.fullmatch(stripped):
+                    log(stripped)
+                    relayed_classifier = True
+                elif not relayed_substitution:
+                    found = _SUBSTITUTION_NOTICE_RE.search(stripped)
+                    if found:
+                        log(found.group(0))
+                        relayed_substitution = True
+                if relayed_classifier and relayed_substitution:
                     return
     except OSError:
         return
@@ -926,6 +943,12 @@ def write_cell(
 ) -> None:
     # Run-quality markers must survive every rewrite of the cell record.
     quality = metrics.cell_run_quality(path.parent, status)
+    try:
+        served_model = (path.parent / ".served-model").read_text(
+            encoding="utf-8",
+        ).strip()
+    except OSError:
+        served_model = ""
     drift: dict = {}
     try:
         drift = json.loads((path.parent / "source-drift.json").read_text(encoding="utf-8"))
@@ -947,6 +970,8 @@ def write_cell(
         # this is the only origin it has.
         "started_at": started_at,
     }
+    if served_model:
+        payload["served_model"] = served_model
     # The wall's own origin. `started_at` is stamped before the shared
     # dashboard is regenerated, which is orchestration the audit wall
     # deliberately excludes, so a metric rebased on it counts time the cell
@@ -1352,23 +1377,20 @@ def prune_run_caches(bench_dir: Path, dry_run: bool = False) -> None:
             )
 
 
+def _substituted_model(cell_dir: Path, model: str) -> str:
+    """The model a provider served this cell instead of the one asked for.
+
+    Only the model-direct transcript is read: a harness cell asks the same
+    question in its own model preflight, off one small transcript, and its
+    per-session answer is relayed from the audit log instead. Re-reading every
+    session log here would cost more than the check is worth.
+    """
+    if not model:
+        return ""
+    return llm_usage.substituted_model(cell_dir / "backend.raw.log", model)
+
+
 def _provider_issue(cell_dir: Path, model: str = "") -> str:
-    # Checked before the quota marker, not after: a served-model mismatch is
-    # settled evidence about what this cell measured, while a capacity limit
-    # says only that it was cut short. A cell carrying both is a cell whose
-    # artifacts name a model that never ran, and reporting it as merely
-    # capacity-limited would let it be retried into the comparison.
-    #
-    # A provider that served a different model refused the request as surely as
-    # one that returned an error, and more expensively: the cell runs to
-    # completion and publishes a row priced at the requested model's rate.
-    # Retrying cannot change which model is served, so it ranks with
-    # backend_rejected. Only the model-direct transcript is read here -- a
-    # harness cell asks the same question in its own model preflight, off one
-    # small transcript, and re-reading every session log would cost more than
-    # the check is worth.
-    if model and llm_usage.substituted_model(cell_dir / "backend.raw.log", model):
-        return "backend_rejected"
     quota_marker = cell_dir / ".quota-exhausted"
     if quota_marker.is_file():
         return "capacity_limited"
@@ -1425,6 +1447,30 @@ def _record_provider_quality(
     cell_dir: Path, results: Path, rc: int = 1, model: str = "",
 ) -> str:
     """Persist provider quality, letting conclusive capacity evidence outrank rc."""
+    served = _substituted_model(cell_dir, model)
+    if served:
+        # Checked before every other reason: a served-model mismatch is settled
+        # evidence about what this cell measured, while a capacity limit says
+        # only that it was cut short, and retrying cannot change which model a
+        # provider serves.
+        #
+        # The cell is kept and scored. It ran its full budget and its crashes
+        # and findings are real work; discarding them would throw away the only
+        # result the run produced and, worse, say nothing about why. What it is
+        # not is a measurement of the requested model, so the marker travels
+        # with the cell and every surface that names a model names this one.
+        (cell_dir / ".served-model").write_text(f"{served}\n", encoding="utf-8")
+        (cell_dir / ".run-quality").write_text(
+            "model_substituted\n", encoding="utf-8",
+        )
+        log(
+            f"WARN: Cell {cell_dir.name}: the provider served {served}, not the "
+            f"requested {model}."
+            f"{llm_usage.substitution_note(cell_dir / 'backend.raw.log')}"
+            f" The cell is kept and scored, and its row is named and priced as "
+            f"{served} — these numbers do not measure {model}."
+        )
+        return "model_substituted"
     if (cell_dir / ".backend-unavailable").is_file():
         (cell_dir / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
         return "capacity_limited"
@@ -1918,10 +1964,10 @@ def run_harness(
                 # (OSError, timeout-helper failure) — the leak this guards
                 # against is exactly what an abnormal exit leaves behind.
                 _reap_cell_processes(reap_marker, cell_dir)
-        _relay_classifier_notice(audit_log)
+        _relay_backend_notices(audit_log)
         result_dir.mkdir(parents=True, exist_ok=True)
     logs = result_dir.parent / "logs"
-    for marker in (".run-quality", ".backend-unavailable"):
+    for marker in (".run-quality", ".backend-unavailable", ".served-model"):
         source = logs / marker
         if source.exists():
             shutil.copy2(source, cell_dir / marker)
@@ -4228,13 +4274,22 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 f"{observed.get('crashes', 0)} crashes / "
                 f"{observed.get('findings', 0)} findings; excluded from aggregate"
             )
+        for swapped in condition.get("model_substituted", []):
+            print(
+                f"    {swapped.get('cell')}: counted, but the provider served "
+                f"{swapped.get('served_model') or 'another model'} — these "
+                f"numbers are not {model or 'the requested model'}'s"
+            )
         for artifact in condition.get("pool_unjudged", []):
             print(
                 f"    {artifact.get('name')}: published unjudged, not credited — "
                 f"{artifact.get('why')}"
             )
     print()
-    log(f"Ledger: {ledger}")
+    # The rendered sibling is what an operator opens; the Markdown beside it
+    # is the source the renderer reads.
+    ledger_html = ledger.with_suffix(".html")
+    log(f"Ledger: {ledger_html if ledger_html.is_file() else ledger}")
     if not args.dry_run:
         prune_run_caches(bench_dir)
         collected = _collect_isolated_builds(target_root, bench_root, build_suffix)
