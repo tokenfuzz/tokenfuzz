@@ -1984,14 +1984,20 @@ def _convergence(group: dict) -> str:
             tag = ' <span class="dim">shared</span>'
         else:
             tag = ""
+        # The dot in a found cell already carries the kind, but a row no
+        # condition found has no dot to read it off, and the shape alone does
+        # not say which is which. The word does.
+        kind = "crash" if problem["kind"] == "crash" else "finding"
         rows.append(
             f'<tr class="prow" data-target="{_e(group["key"])}" data-problem="{index}">'
             f'<td class="pt-cell"><span class="ptitle">{_e(_clip(problem["title"], 110) or problem["site"] or problem["key"])}</span>'
             f'<span class="psite">{_e(problem["site"])} · {_e(problem["class"])}</span></td>'
+            f'<td><span class="kind kind-{problem["kind"]}">{kind}</span></td>'
             f'<td>{_severity_pill(problem["severity"])}</td>' + "".join(cells)
             + f'<td class="num">{n_found}/{len(conditions)}{tag}</td></tr>')
     return (
-        '<div class="tablewrap"><table class="conv"><thead><tr><th>Problem</th><th>Severity</th>'
+        '<div class="tablewrap"><table class="conv"><thead><tr><th>Problem</th><th>Type</th>'
+        '<th>Severity</th>'
         + head + '<th class="num">Found by</th></tr></thead><tbody>' + "".join(rows)
         + "</tbody></table></div>")
 
@@ -2401,6 +2407,7 @@ abbr.mark{text-decoration:none;cursor:help;color:var(--muted);border-bottom:1px 
 .cmap.hide-rejected .cmap-head,.cmap.hide-rejected .cmap-row{grid-template-columns:160px 1fr 1fr 1fr}
 .dot{display:inline-block;width:14px;height:14px;border:2px solid var(--surf);box-shadow:0 0 0 1px var(--ring);cursor:pointer}
 .dot-find{border-radius:50%}.dot-crash{border-radius:3px;transform:rotate(45deg) scale(.85)}
+.kind{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;border:1px solid var(--ring);color:var(--muted);white-space:nowrap}
 .dot.sev-critical{background:var(--crit)}.dot.sev-high{background:var(--high)}.dot.sev-medium{background:var(--med)}
 .dot.sev-low{background:var(--low)}.dot.sev-none{background:var(--none)}
 .dot:hover{box-shadow:0 0 0 2px var(--ink)}
