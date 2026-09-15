@@ -1966,19 +1966,30 @@ def _convergence(group: dict) -> str:
                     f'<td class="cv found"><span class="dot dot-{problem["kind"]} sev-{sev} demo"></span> '
                     f'{when}</td>')
             elif looked:
-                nearby = f' · {looked["filed_nearby"]} filed nearby' if looked["filed_nearby"] else ""
-                cells.append(f'<td class="cv looked">looked · {looked["n"]}{nearby}</td>')
+                # Each number carries its own noun: bare counts split by
+                # the same divider read as one list of two unrelated things.
+                nearby = f' · {looked["filed_nearby"]} nearby' if looked["filed_nearby"] else ""
+                cells.append(f'<td class="cv looked">looked {looked["n"]}{nearby}</td>')
             elif cond["traced"]:
                 cells.append('<td class="cv never">—</td>')
             else:
                 cells.append('<td class="cv none"></td>')
         n_found = len(problem["found"])
+        # A reader counting the rows one side owns is counting gross exclusives,
+        # while the yield summary above reports the net difference between the
+        # sides. Name each row so the two are not read as the same number.
+        if n_found == 1:
+            tag = ' <span class="dim">only</span>'
+        elif n_found == len(conditions):
+            tag = ' <span class="dim">shared</span>'
+        else:
+            tag = ""
         rows.append(
             f'<tr class="prow" data-target="{_e(group["key"])}" data-problem="{index}">'
             f'<td class="pt-cell"><span class="ptitle">{_e(_clip(problem["title"], 110) or problem["site"] or problem["key"])}</span>'
             f'<span class="psite">{_e(problem["site"])} · {_e(problem["class"])}</span></td>'
             f'<td>{_severity_pill(problem["severity"])}</td>' + "".join(cells)
-            + f'<td class="num">{n_found}/{len(conditions)}</td></tr>')
+            + f'<td class="num">{n_found}/{len(conditions)}{tag}</td></tr>')
     return (
         '<div class="tablewrap"><table class="conv"><thead><tr><th>Problem</th><th>Severity</th>'
         + head + '<th class="num">Found by</th></tr></thead><tbody>' + "".join(rows)
@@ -2010,9 +2021,9 @@ def _target_section(group: dict) -> str:
         + _checkpoint_table(group) + "</div>"
         '<div class="panel"><div class="pt">Who found what</div>'
         '<p class="pd">Every distinct problem any run reported on this revision, against every '
-        'condition. A dot is a find, with its hour. <i>looked · N</i>: the harness opened N '
+        'condition. A dot is a find, with its hour. <i>looked N</i>: the harness opened N '
         'hypotheses on that file and did not file this problem — a miss with a trace behind it. '
-        '<i>filed nearby</i>: it filed other problems in the same file. A dash: it never looked. '
+        '<i>· N nearby</i>: it filed N other problems in that same file. A dash: it never looked. '
         'The control leaves no trace, so its empty cell is unknowable, not a miss. Click a row for '
         'the problem\'s story.</p>' + _convergence(group) + "</div>"
         + ('<div class="panel"><div class="pt">Where each model looked, and where it found</div>'
