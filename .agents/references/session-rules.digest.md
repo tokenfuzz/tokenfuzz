@@ -93,7 +93,7 @@ and `<!-- TARGET: ... -->` for HTML. Orphan testcases (missing header) are disca
   `recent-hyps|recent-runs|recent-claims|recent-tried|recent-notes`, never
   `tail`/`sed`/`cat` directly.
 - Crash/finding reports: `bin/state show-crash|show-finding|list-*` first;
-  read full `REPORT.md` only when editing it.
+  read full `report.md` only when editing it.
 - Source ranges: `bin/peek <FILE>:<start>-<end>` (exact range + 50 KB byte cap),
   or `bin/peek -A N -B M PAT FILE` (A clamped to 30, B to 8). Bare `sed`
   is also output-capped. `--no-cap` or `OUTCAP_MAX_BYTES=0` to widen.
@@ -262,9 +262,9 @@ mechanics: `.agents/references/session-rules.md`.
 
 ## Pre-file checks
 
-- Before `crashes/CRASH-*/`: check `crashes-rejected/REJECTED-CRASHES.md`.
+- Before `crashes/CRASH-*/`: check `crashes-rejected/rejected-crashes.md`.
 - Before `findings/FIND-*/`: confirm security (above), scan
-  `findings/FINDING-CLUSTERS.md` for existing FINDs on same location
+  `findings/finding-clusters.md` for existing FINDs on same location
   (Status `NEEDS CONTENT` means fix in place, don't open a duplicate).
 
 ## Drill-down

@@ -1,6 +1,6 @@
 """cluster_common.py — shared helpers for bin/cluster-crashes + bin/cluster-findings.
 
-Both clustering tools emit a `*-CLUSTERS.md` report, write its HTML page
+Both clustering tools emit a `*-clusters.md` report, write its HTML page
 (lib/evidence_pages.py) next to it, and — when asked to aggregate a whole
 target root — serialize concurrent backends behind an advisory file lock. That scaffolding is identical between the
 two tools; only the signatures, file names, and stack-frame logic differ.
@@ -115,7 +115,7 @@ def artifact_cluster_id(directory: Path) -> str:
     """Read one artifact's deterministic cluster id without modifying it.
 
     The first readable report is canonical even when its stamp is blank. An
-    exported REPORT.md supersedes audit-side report.md/README.md; consulting a
+    exported report.md supersedes audit-side report.md/README.md; consulting a
     stale secondary file after finding an unfilled canonical row can resurrect
     an obsolete cluster and merge unrelated artifacts.
     """
@@ -167,7 +167,7 @@ def render_md_batch(md_paths: "list[Path]") -> None:
 def render_member_report_siblings(clusters: Iterable[dict]) -> None:
     """Render every markdown report referenced by *clusters*.
 
-    Cluster indexes link to ``REPORT.md`` / ``report.md`` / ``description.md``.
+    Cluster indexes link to each member's report.
     The HTML renderer rewrites those links to ``.html`` for browser use, so
     the member reports need matching HTML siblings in the same pass that emits
     the cluster index. Best-effort.

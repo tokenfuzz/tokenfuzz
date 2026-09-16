@@ -210,7 +210,7 @@ def _unique_destination(root: Path, name: str) -> Path:
 
 
 def _annotate_rejection(directory: Path, reason: str) -> None:
-    (directory / "REJECTION.md").write_text(
+    (directory / "rejection.md").write_text(
         "# Rejected artifact\n\n"
         f"Reason: {reason}\n\n"
         "The original evidence is retained for audit and can be restored after review.\n",
@@ -370,7 +370,7 @@ _LEGACY_SAME_SITE_PREFIX = "same-site:"
 
 def _rejection_reason(directory: Path) -> str:
     try:
-        text = (directory / "REJECTION.md").read_text(
+        text = (directory / "rejection.md").read_text(
             encoding="utf-8", errors="replace",
         )
     except OSError:
@@ -454,7 +454,7 @@ def _restore_rejected_artifact(
     # artifact under the same name would make the obsolete route live again.
     if had_route_advice:
         _retract_unreachable_route(directory, active_root.parent)
-    (destination / "REJECTION.md").unlink(missing_ok=True)
+    (destination / "rejection.md").unlink(missing_ok=True)
     (destination / "validation.json").unlink(missing_ok=True)
     validation_receipt.write(
         destination, kind=kind, state="pending", detail=detail,
@@ -1928,7 +1928,12 @@ def _nonempty(path: Path) -> bool:
 
 def _bundle_missing_artifacts(directory: Path) -> list[str]:
     missing: list[str] = []
-    for name in ("REPORT.md", "reproduce.sh"):
+    # The agent's draft and the exported report share a name; export moves
+    # the draft under .audit/, so that copy is what says the root report is
+    # the bundle's own rather than a draft still waiting for export.
+    if not _nonempty(directory / ".audit" / "report.md"):
+        missing.append(".audit/report.md")
+    for name in ("report.md", "reproduce.sh"):
         if not _nonempty(directory / name):
             missing.append(name)
 
@@ -1961,7 +1966,7 @@ def _bundle_needs_refresh(directory: Path) -> bool:
     if _bundle_missing_artifacts(directory):
         return True
     source = directory / ".audit" / "report.md"
-    rendered = directory / "REPORT.md"
+    rendered = directory / "report.md"
     try:
         return source.is_file() and source.stat().st_mtime_ns > rendered.stat().st_mtime_ns
     except OSError:
@@ -2814,7 +2819,7 @@ def triage_one_crash(
     report = _report(crash_dir)
     if report is None:
         return _hold_incomplete(
-            crash_dir, rejected_root, None, "bundle", ["REPORT.md"],
+            crash_dir, rejected_root, None, "bundle", ["report.md"],
             age_pending=age_pending,
         )
     if not _deadline_expired(deadline):
@@ -3062,7 +3067,7 @@ def triage_crash_dirs(
         TARGET_SLUG=target_slug,
     )
     # Trigger votes bind to report content. Export first so a vote cannot be
-    # invalidated immediately when report.md becomes the canonical REPORT.md.
+    # invalidated immediately when the draft becomes the exported report.
     # Incomplete bundles remain on triage_one_crash's ordinary pending path and
     # do not consume a source-review session.
     for directory in reach_directories:
@@ -3088,8 +3093,8 @@ def triage_crash_dirs(
                 "export-repro", directory.name, "--crash-dir", str(directory),
                 "--slug", target_slug, env=environment,
             )
-    # Export chooses the canonical REPORT.md and moves audit-side caches under
-    # .audit/.  Converge only after that boundary so the field decision, trigger
+    # Export rewrites report.md and moves the draft and audit-side caches
+    # under .audit/.  Converge only after that boundary so the field decision, trigger
     # review, and final receipt all bind the same report.  Doing this first
     # bought a second field review and then invalidated conservative trigger
     # votes when the canonical report was annotated later.

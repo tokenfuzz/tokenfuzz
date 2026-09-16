@@ -1,0 +1,9 @@
+--- a/src/rcfg.c
++++ b/src/rcfg.c
+@@ -167,4 +167,5 @@ static void handle_drop(rcfg_ctx *ctx)
+ static void handle_drop(rcfg_ctx *ctx)
+ {
+-  free(ctx->pending);
++  free(ctx->pending);
++  ctx->pending = NULL;
+ }

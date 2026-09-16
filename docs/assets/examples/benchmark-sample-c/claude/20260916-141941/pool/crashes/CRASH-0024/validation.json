@@ -1,0 +1,66 @@
+{
+  "detail": "source review placed the trigger within attacker_controls=bytes",
+  "evidence": {
+    "artifacts": {
+      ".audit/input": {
+        "sha256": "9fa038446280bdabd9448658816350010d147ef2d19ce97922231f2b9e993a76",
+        "size": 11
+      },
+      ".trigger-gate.json": {
+        "sha256": "0168d77fee037645c2ece69dabc711ab306898c59f6e88e1bd2d6cb78d7e0071",
+        "size": 2129
+      },
+      "reproduce.sh": {
+        "sha256": "4864933abb3d75f4d977e93b6e7a7e423dc4e4cf3e885ee65e8b9334954c9445",
+        "size": 6328
+      },
+      "sanitizer.txt": {
+        "sha256": "c0faa608b1615bd572ea4b5fdf6fff2a6db8bf893d9871978c7d32e776c65dce",
+        "size": 1815
+      }
+    },
+    "attacker_controls": [
+      "bytes"
+    ],
+    "evidence_id": "f94f763f08aef68e29e0e1c72a50bb01c8ea3857a882b5ab6f1d0d938eb7dc90",
+    "probe": {},
+    "report_sha1": "f8e82553844a04c7b5d2151bf4c366b0e0051478",
+    "review_facts": {
+      "reproducer_carrier": "cli",
+      "trigger_controls_fit": "within",
+      "vulnerable_boundary_surface": "library-api"
+    },
+    "source_attestations": [
+      {
+        "anchors": [
+          {
+            "excerpt": "free(ctx->pending);",
+            "excerpt_sha256": "a232f8b0be4077dbb230016f1fb5dbff2b70babbbf56fd14b413ab7c09342210",
+            "kind": "source",
+            "line": 169,
+            "path": "src/rcfg.c",
+            "symbol": "handle_drop"
+          },
+          {
+            "excerpt": "free(ctx.pending);",
+            "excerpt_sha256": "0dac897a95c5f3121d9959e80c2ece62240ecaacc62f2474f35a2954d0eb126e",
+            "kind": "source",
+            "line": 254,
+            "path": "src/rcfg.c",
+            "symbol": "rcfg_decode"
+          }
+        ],
+        "review_artifact": ".trigger-gate.json",
+        "review_sha256": "0168d77fee037645c2ece69dabc711ab306898c59f6e88e1bd2d6cb78d7e0071",
+        "verifier": "source-anchor-v1"
+      }
+    ],
+    "source_context": "root-path-sha256:abbc07ae1fcf1896f8592d2b72662431a1dada99eabf7b6b8b17c7c71ed23784",
+    "target_config_sha256": "4e70aa3606770719c168fa899d68b90da7d67ce71f6f24ad22cc6086504e4ef2",
+    "target_revision": "norev"
+  },
+  "kind": "crash",
+  "schema_version": 2,
+  "state": "reportable",
+  "validated_at": 1789570892.854859
+}

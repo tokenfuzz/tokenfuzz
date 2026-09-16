@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CRASH-0001</title>
+<style>
+:root{color-scheme:light;
+ --bg:#f9f9f7;--surf:#fcfcfb;--surf2:#f1f1ee;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;
+ --grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--link:#1c5cab;
+ --codex:#2a78d6;--claude:#eb6834;--gemini:#4a3aa7;--grok:#1baf7a;--oss:#eda100;--opencode:#e87ba4;
+ --other:#898781;--harness:#0b0b0b;--direct:#898781;
+ --crit:#d03b3b;--high:#ec835a;--med:#fab219;--low:#86b6ef;--none:#c3c2b7;--good:#0ca30c;
+ --S1:#2a78d6;--S2:#eb6834;--S3:#1baf7a;--S4:#eda100;--S5:#e87ba4;--S6:#008300;--S7:#4a3aa7;--S8:#e34948;
+ --da:#dcfce7;--da-ink:#166534;--dr:#fee2e2;--dr-ink:#991b1b;--dx:#dbeafe;--dx-ink:#1e3a8a;
+ --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+ --sans:system-ui,-apple-system,"Segoe UI",sans-serif}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;
+ --bg:#0d0d0d;--surf:#1a1a19;--surf2:#232321;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;
+ --grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);--link:#86b6ef;
+ --codex:#3987e5;--claude:#d95926;--gemini:#9085e9;--grok:#199e70;--oss:#c98500;--opencode:#d55181;
+ --harness:#fff;--direct:#898781;--low:#5598e7;--none:#55554f;
+ --S1:#3987e5;--S2:#d95926;--S3:#199e70;--S4:#c98500;--S5:#d55181;--S6:#008300;--S7:#9085e9;--S8:#e66767;
+ --da:#14361f;--da-ink:#86efac;--dr:#3f1414;--dr-ink:#fca5a5;--dx:#172554;--dx-ink:#93c5fd}}
+:root[data-theme="dark"]{color-scheme:dark;
+ --bg:#0d0d0d;--surf:#1a1a19;--surf2:#232321;--ink:#fff;--ink2:#c3c2b7;--muted:#898781;
+ --grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);--link:#86b6ef;
+ --codex:#3987e5;--claude:#d95926;--gemini:#9085e9;--grok:#199e70;--oss:#c98500;--opencode:#d55181;
+ --harness:#fff;--direct:#898781;--low:#5598e7;--none:#55554f;
+ --S1:#3987e5;--S2:#d95926;--S3:#199e70;--S4:#c98500;--S5:#d55181;--S6:#008300;--S7:#9085e9;--S8:#e66767;
+ --da:#14361f;--da-ink:#86efac;--dr:#3f1414;--dr-ink:#fca5a5;--dx:#172554;--dx-ink:#93c5fd}
+*{box-sizing:border-box}
+html{background:var(--bg);overflow-x:hidden}
+body{margin:0;font:15px/1.55 var(--sans);color:var(--ink);background:var(--bg);overflow-x:hidden}
+a{color:var(--link);text-decoration:none}a:hover{text-decoration:underline}
+.page{max-width:1400px;margin:0 auto;padding:28px 22px 60px}
+.mono{font-family:var(--mono);font-size:.9em}.dim{color:var(--muted)}.fine{font-size:.8em}.num{text-align:right;font-variant-numeric:tabular-nums}
+.hero{padding:6px 0 18px}
+.kick{font-size:.72em;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--ink2);margin:0 0 8px}
+.hero h1{font-size:2.1em;line-height:1.15;margin:0 0 12px;letter-spacing:-.01em}
+.lede{font-size:1.08em;color:var(--ink2);max-width:66em;margin:0 0 10px}
+.meta{font-size:.86em;color:var(--muted);margin:0}
+.banner{background:var(--surf2);border-left:3px solid var(--med);padding:10px 14px;border-radius:8px;margin:14px 0;color:var(--ink2)}
+.banner.reject{border-left-color:var(--crit)}
+.sec{margin:26px 0 0}.sec>h2,.sec>div>h2{font-size:1.25em;margin:0 0 8px;letter-spacing:-.005em}
+.sec.two{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+.pd{color:var(--ink2);font-size:.92em;margin:0 0 12px;max-width:74em}
+.empty{color:var(--muted);font-style:italic}
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:6px 0 14px}
+.tile{background:var(--surf2);border-radius:10px;padding:8px 10px;min-width:0}
+.tl{font-size:.74em;color:var(--ink2);text-transform:uppercase;letter-spacing:.05em}
+.tv{font-size:1.35em;font-weight:700;margin-top:2px;line-height:1.2}.tn{font-size:.74em;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sevbar .bar{display:flex;height:14px;border-radius:5px;overflow:hidden;background:var(--surf2);gap:2px}
+.sevbar .seg{display:block;height:100%;background:var(--none)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:.82em;color:var(--ink2);margin:6px 0 2px;align-items:center}
+.legend .k{display:inline-flex;align-items:center;gap:6px}
+.sw{display:inline-block;width:14px;height:0;border-top:2.5px solid var(--other)}
+.sw-total{border-top-color:var(--ink);border-top-style:dashed}
+.who-harness{--c:var(--harness)}.who-model-direct{--c:var(--direct)}.who-codex{--c:var(--codex)}.who-claude{--c:var(--claude)}
+.who-gemini{--c:var(--gemini)}.who-grok{--c:var(--grok)}.who-oss{--c:var(--oss)}.who-opencode{--c:var(--opencode)}.who-other{--c:var(--other)}
+.sw.who-harness,.sw.who-model-direct,.sw.who-codex,.sw.who-claude,.sw.who-gemini,.sw.who-grok,.sw.who-oss,.sw.who-opencode,.sw.who-other{border-top-color:var(--c)}
+.who{display:inline-block;font-size:.74em;font-weight:700;padding:1px 8px;border-radius:999px;color:#fff;background:var(--c,var(--other));white-space:nowrap;vertical-align:middle;margin-right:3px}
+.who.who-harness{color:var(--bg)}
+.sev,.dot,.seg,.ff{--s:var(--none)}
+.sev-critical,.sev-Critical{--s:var(--crit)}.sev-high,.sev-High{--s:var(--high)}.sev-medium,.sev-Medium{--s:var(--med)}.sev-low,.sev-Low{--s:var(--low)}
+.sev{display:inline-block;font-size:.78em;font-weight:700;padding:1px 8px;border-radius:999px;color:#fff;background:var(--s);white-space:nowrap;line-height:1.5;letter-spacing:.02em;text-transform:uppercase}
+.sev.sev-medium,.sev.sev-Medium,.sev.sev-low,.sev.sev-Low{color:#0b0b0b}
+.sev.sev-none,.sev.sev-None,.sev.sev-pending,.sev.sev-Pending,.sev.sev-unknown,.sev.sev-Unknown,.sev.sev-needs-review,.sev.sev-Needs-review,.sev.sev-not-a-security-report{background:var(--none);color:var(--ink2);text-transform:none;font-weight:600}
+.sev .score,.sev .sev-score{font-weight:500;opacity:.9;margin-left:5px}
+.seg.sev-critical,.seg.sev-high,.seg.sev-medium,.seg.sev-low,.ff.sev-critical,.ff.sev-high,.ff.sev-medium,.ff.sev-low{background:var(--s)}
+.dot{display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--s);border:2px solid var(--surf);box-shadow:0 0 0 1px var(--ring);vertical-align:middle}
+.fam-S1{--f:var(--S1)}.fam-S2{--f:var(--S2)}.fam-S3{--f:var(--S3)}.fam-S4{--f:var(--S4)}.fam-S5{--f:var(--S5)}.fam-S7{--f:var(--S7)}.fam-none{--f:var(--none)}
+.fam{display:inline-block;font-size:.76em;font-weight:700;padding:1px 8px;border-radius:6px;color:#fff;background:var(--f,var(--other));white-space:nowrap}
+.fam-S4{color:#3a2a00}.seg.fam-S1,.seg.fam-S2,.seg.fam-S3,.seg.fam-S4,.seg.fam-S5,.seg.fam-S7,.seg.fam-none,.dot.fam-S1,.dot.fam-S2,.dot.fam-S3,.dot.fam-S4,.dot.fam-S5,.dot.fam-S7,.dot.fam-none{background:var(--f)}
+.why{font-size:.92em}.why-more{margin-top:3px;color:var(--ink2)}.why-more summary{cursor:pointer;color:var(--muted)}
+.lane{display:inline-block;font-family:var(--mono);font-size:.78em;font-weight:700;padding:0 6px;border-radius:5px;color:#fff;background:var(--other);margin-right:3px;vertical-align:middle}
+.lane-S1{background:var(--S1)}.lane-S2{background:var(--S2)}.lane-S3{background:var(--S3)}.lane-S4{background:var(--S4);color:#3a2a00}
+.lane-S5{background:var(--S5)}.lane-S6{background:var(--S6)}.lane-S7{background:var(--S7)}.lane-S8{background:var(--S8)}
+.st{display:inline-block;font-size:.76em;font-weight:600;padding:1px 8px;border-radius:6px;background:var(--surf2);color:var(--ink2);border:1px solid var(--grid);white-space:nowrap}
+.st-ok{color:var(--good);border-color:var(--good)}.st-rejected{color:var(--crit);border-color:var(--crit)}
+.st-pending,.st-needs,.st-stale{color:#8a5a00;border-color:var(--med)}.st-not-reportable{color:var(--muted)}
+.klass{font-family:var(--mono);font-size:.86em}
+.chart{margin-top:6px}.chart svg{display:block;width:100%;height:auto;overflow:visible;font:inherit}
+.chart svg .pt{cursor:pointer}.chart svg .pt:hover{stroke:var(--ink);stroke-width:2}
+.funnel .fr{display:grid;grid-template-columns:150px 1fr 36px;align-items:center;gap:8px;font-size:.84em;margin:4px 0}
+.funnel .fl{color:var(--ink2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fb{display:flex;height:12px;background:var(--surf2);border-radius:4px;overflow:hidden;gap:1px}
+.ff{display:block;height:100%}.fv{text-align:right;font-variant-numeric:tabular-nums}
+.tablewrap{overflow-x:auto;background:var(--surf);border:1px solid var(--ring);border-radius:12px}
+.index table{border-collapse:collapse;width:100%;font-size:.88em}
+.index th,.index td{padding:7px 9px;text-align:left;vertical-align:top;border-bottom:1px solid var(--grid)}
+.index th{font-size:.76em;text-transform:uppercase;letter-spacing:.05em;color:var(--ink2);background:var(--surf2);position:sticky;top:0;white-space:nowrap}
+.index th[data-sort]{cursor:pointer;user-select:none}.index th[data-sort]:hover{color:var(--ink)}.index th.sorted::after{content:" ▾";color:var(--muted)}.index th.sorted.asc::after{content:" ▴"}
+.index tbody tr:hover{background:var(--surf2)}.index tr[hidden]{display:none}
+.heat td.hm{background:rgba(42,120,214,var(--a,0))}:root[data-theme="dark"] .heat td.hm{background:rgba(57,135,229,var(--a,0))}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]) .heat td.hm{background:rgba(57,135,229,var(--a,0))}}
+.heat th,.heat td{white-space:nowrap}
+.filters{display:flex;align-items:center;gap:6px;flex-wrap:wrap;position:sticky;top:0;z-index:5;background:var(--bg);padding:10px 0;border-bottom:1px solid var(--grid);margin:8px 0 10px}
+.filters .fl{font-size:.74em;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;margin:0 2px 0 6px}
+.filters .gap{width:8px}.filters .fsp{flex:1}
+.chip{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--grid);background:var(--surf);color:var(--ink);border-radius:999px;padding:3px 9px 3px 6px;font:inherit;font-size:.84em;cursor:pointer}
+.chip:not(.on){opacity:.4}.chip .sev,.chip .who,.chip .lane,.chip .fam{margin:0}
+.search{font:inherit;font-size:.86em;padding:5px 10px;border:1px solid var(--grid);border-radius:8px;background:var(--surf);color:var(--ink);min-width:220px}
+.c-prob{min-width:260px;max-width:520px}.ptitle{display:block;font-weight:600}.psite{display:block;font-family:var(--mono);font-size:.78em;color:var(--muted);overflow-wrap:anywhere}
+.c-lanes,.c-who{white-space:nowrap}.c-why{min-width:240px}
+.more{font:inherit;font-size:.9em;border:1px solid var(--grid);background:var(--surf);color:var(--link);border-radius:6px;padding:2px 8px;cursor:pointer;white-space:nowrap}
+.more[aria-expanded="true"]{background:var(--ink);color:var(--surf);border-color:var(--ink)}
+.pmore>td{background:var(--surf2);padding:10px 14px 14px}
+.members .fine{margin:2px 0}.mtable{margin-top:8px;font-size:.92em}.mtable th{position:static;background:transparent}
+.tcell{white-space:nowrap}
+.guide{margin:34px 0 0;scroll-margin-top:64px;background:var(--surf);border:1px solid var(--ring);border-radius:14px;padding:6px 18px}
+.guide summary{cursor:pointer;font-weight:700;padding:8px 0}
+.gbody{font-size:.93em;color:var(--ink2);max-width:76em}.gbody h3{font-size:.95em;color:var(--ink);margin:14px 0 4px}
+.gbody code,.rs code,.act code{font-family:var(--mono);font-size:.9em;background:var(--surf2);padding:0 4px;border-radius:4px}
+.tip{position:fixed;z-index:60;display:none;pointer-events:none;max-width:340px;background:var(--ink);color:var(--surf);font-size:.8em;line-height:1.5;padding:8px 10px;border-radius:9px;box-shadow:0 2px 10px rgba(0,0,0,.3)}
+.tip b{display:block;font-weight:700}.tip .src{font-family:var(--mono);word-break:break-all;color:var(--low)}.tip .dim{opacity:.75}
+@media(max-width:900px){.sec.two{grid-template-columns:1fr}.hero h1{font-size:1.6em}.funnel .fr{grid-template-columns:110px 1fr 36px}}
+@media print{.filters,.tip{display:none!important}}
+
+/* ── report shell ─────────────────────────────────────────────────────── */
+.report{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:32px;align-items:start}
+.report.plain{grid-template-columns:minmax(0,1fr)}
+.doc{min-width:0;max-width:960px}
+.rail{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow:auto;font-size:.88em}
+.rs{background:var(--surf);border:1px solid var(--ring);border-radius:12px;padding:10px 14px;margin-bottom:12px}
+.rs h4{font-size:.74em;text-transform:uppercase;letter-spacing:.06em;color:var(--ink2);margin:0 0 6px}
+.rs .fine{color:var(--ink2)}.rs>div{margin:3px 0}
+.outline,.files{list-style:none;margin:0;padding:0}.outline li{margin:2px 0}.outline .l3{padding-left:12px;font-size:.92em}.files li{margin:3px 0;overflow-wrap:anywhere}
+.cvhead{display:flex;align-items:center;gap:10px;margin-bottom:6px}.cvhead .big{font-size:1.5em;font-weight:700}
+.cvg{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:4px 0}.cvl{font-size:.74em;color:var(--muted);width:66px;text-transform:uppercase;letter-spacing:.05em}
+.cv{display:inline-block;font-family:var(--mono);font-size:.78em;padding:1px 6px;border-radius:5px;background:var(--surf2);color:var(--ink2);cursor:help}
+.cv b{margin-left:3px;color:var(--ink)}.cv.hi{background:var(--high);color:#0b0b0b}.cv.hi b{color:#0b0b0b}.cv.mid{background:var(--med);color:#0b0b0b}.cv.mid b{color:#0b0b0b}
+.band{display:flex;flex-wrap:wrap;align-items:center;gap:4px 8px;font-size:.86em;color:var(--ink2);margin:0 0 10px}
+.action{background:var(--surf);border:1px solid var(--ring);border-left:4px solid var(--ink);border-radius:12px;padding:12px 16px;margin:16px 0 22px}
+.at{font-size:.74em;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--ink2);margin-bottom:6px}
+.act{display:grid;grid-template-columns:96px 1fr;gap:10px;padding:5px 0;border-top:1px solid var(--grid)}
+.act:first-of-type{border-top:0}.al{font-weight:700;color:var(--ink)}.av{color:var(--ink2);overflow-wrap:anywhere}.av b{color:var(--ink)}
+@media(max-width:1100px){.report{grid-template-columns:minmax(0,1fr)}.rail{position:static;max-height:none}.act{grid-template-columns:80px 1fr}}
+
+/* ── report body (the classes bin/render-md emits) ────────────────────── */
+.doc h1{font-size:1.85em;line-height:1.2;margin:0 0 .5em;letter-spacing:-.01em}
+.doc h2{font-size:1.3em;margin:1.6em 0 .6em;letter-spacing:-.005em}
+.doc h3{font-size:1.05em;margin:1.4em 0 .5em}
+.doc h2 .anchor,.doc h3 .anchor{color:var(--muted);margin-left:.35em;opacity:0;font-weight:500}
+.doc h2:hover .anchor,.doc h3:hover .anchor{opacity:.55}
+.doc p,.doc ul,.doc ol{margin:.65em 0}.doc li{margin:.3em 0}
+.doc em,.doc em.note{color:var(--muted);font-style:normal}
+.doc a{text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--link) 45%,transparent);text-underline-offset:2px}
+.doc a:hover{text-decoration-color:currentColor}.doc a code{color:inherit}
+.doc code{background:var(--surf2);padding:2px 6px;border-radius:5px;font-family:var(--mono);font-size:.92em;overflow-wrap: anywhere;}
+.doc pre{background:var(--surf);padding:.9em 1.1em;border-radius:10px;overflow:auto;border:1px solid var(--ring);font-size:.9em}
+.doc pre code{background:transparent;padding:0}
+.doc blockquote{margin:1em 0;padding:.7em 1.1em;border-left:3px solid var(--axis);background:var(--surf2);border-radius:0 8px 8px 0;color:var(--ink2)}
+.doc hr{border:0;border-top:1px solid var(--grid);margin:1.2em 0}
+.doc table{border-collapse:separate;border-spacing:0;width:100%;min-width: 100%;font-size:.92em;background:var(--surf)}
+.table-wrap{margin:1em 0;overflow-x:auto;overflow-y:hidden;border-radius:10px;border:1px solid var(--ring);background:var(--surf)}
+.doc thead th{background:var(--surf2);border-bottom:1px solid var(--grid);text-align:left;font-weight:600;font-size:.86em;padding:9px 12px;position: sticky;top:0;z-index:2;white-space: nowrap;}
+.doc tbody td{border-top:1px solid var(--grid);padding:8px 12px;vertical-align:top;word-break:break-word}
+.doc tbody tr:first-child td{border-top:none}.doc tbody tr:hover td{background:var(--surf2)}
+.doc td.right,.doc th.right{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.doc td.center,.doc th.center{text-align:center}
+td code, th code{white-space:nowrap}
+td code.wrap, th code.wrap{white-space:normal;word-break:normal;overflow-wrap:anywhere}
+.chip-library,.chip-cli,.chip-maint,.chip-unknown{display:inline-block;padding:1px 8px;border-radius:5px;font-size:.85em;font-weight:500;white-space:nowrap;background:var(--surf2);color:var(--ink2)}
+.chip-library{background:var(--dx);color:var(--dx-ink)}.chip-maint{background:#fef3c7;color:#854d0e}
+.chip-reason{color:var(--muted);margin-left:.35em;font-weight:400}
+.fields-table th:first-child{width:220px}.fields-table td:first-child{font-weight:500;color:var(--muted)}
+.fields-table td:first-child abbr{text-decoration:underline dotted;text-underline-offset:3px;cursor: help;}
+.rejected-table{table-layout:fixed}.rejected-table th:nth-child(1),.rejected-table td:nth-child(1),.rejected-table th:nth-child(2),.rejected-table td:nth-child(2){width:14rem;overflow-wrap:anywhere}
+.rejected-table th:nth-child(4),.rejected-table td:nth-child(4){width:6rem;white-space:nowrap}.rejected-table td:nth-child(3){word-break:normal;overflow-wrap:anywhere}
+.benchmark-table{min-width:0;font-size:.88em}.benchmark-table thead th,.benchmark-table tbody td{padding:7px 6px;vertical-align:middle}
+.benchmark-table thead th{white-space:normal;line-height:1.25}
+dl.report-definition{display:grid;grid-template-columns:minmax(160px,240px) 1fr;margin:.8em 0 1em;border:1px solid var(--ring);border-radius:8px;overflow:hidden;background:var(--surf)}
+dl.report-definition dt,dl.report-definition dd{margin:0;padding:8px 11px;border-top:1px solid var(--grid)}
+dl.report-definition dt:nth-of-type(1),dl.report-definition dd:nth-of-type(1){border-top:none}
+dl.report-definition dt{color:var(--muted);font-weight:600;background:var(--surf2);white-space:nowrap}dl.report-definition dd{word-break:break-word}
+.triage-card{margin:1em 0 1.2em;padding:1em 1.2em;background:var(--surf);border:1px solid var(--ring);border-left:4px solid var(--s,var(--none));border-radius:12px}
+.triage-card.sev-Critical{--s:var(--crit)}.triage-card.sev-High{--s:var(--high)}.triage-card.sev-Medium{--s:var(--med)}.triage-card.sev-Low{--s:var(--low)}
+.triage-row{display:flex;flex-wrap:wrap;align-items:center;gap:.55em}
+.triage-row+.triage-row,.triage-card .triage-frames,.triage-card .triage-meta,.triage-card .triage-summary{margin-top:.55em}
+.triage-frames{display:grid;gap:.2em}.triage-frame{font-family:var(--mono);font-size:.9em}.triage-frame code{background:transparent;padding:0}
+.triage-frame .frame-func{font-weight:600}.triage-frame .frame-loc{color:var(--muted)}.frame-index{color:var(--muted)}
+.triage-meta{color:var(--muted);font-size:.92em;display:flex;flex-wrap:wrap;gap:.3em 1.2em}.triage-meta strong{color:var(--ink);font-weight:600}
+.triage-summary{font-size:.98em;line-height:1.55;border-top:1px solid var(--grid);padding-top:.65em;overflow-wrap:anywhere;word-break:break-word}
+.primitive{display:inline-block;padding:1px 8px;border-radius:5px;font-family:var(--mono);font-size:.85em;font-weight:500;background:var(--surf2);color:var(--ink2);white-space:nowrap}
+.primitive.cat-bounds{background:var(--dr);color:var(--dr-ink)}.primitive.cat-lifetime{background:#ffedd5;color:#9a3412}
+.primitive.cat-uninit{background:#fef3c7;color:#92400e}.primitive.cat-type{background:var(--dx);color:var(--dx-ink)}.primitive.cat-state{background:var(--da);color:var(--da-ink)}
+.enrich-card{background:var(--surf);border:1px solid var(--ring);border-radius:12px;padding:1em 1.3em;margin:1em 0 1.4em}
+.enrich-card>:first-child{margin-top:0}.enrich-card>:last-child{margin-bottom:0}
+.enrich-card pre{background:var(--surf2);border:0;border-radius:8px;margin:.5em 0 .75em}
+.enrich-snippets>p{margin:.4em 0}.enrich-snippets>hr{margin:1em -.4em}.enrich-patch pre{margin:0}
+code.language-diff > span{display:block;min-height:1.2em}
+code.language-diff .da{color:var(--da-ink);background:var(--da)}
+code.language-diff .dr{color:var(--dr-ink);background:var(--dr)}
+code.language-diff .dh{font-weight:600}code.language-diff .dx{color:var(--dx-ink);background:var(--dx)}
+details.collapsible{margin:1.6em 0 .6em}details.collapsible>summary{cursor:pointer;font-size:1.3em;font-weight:600;margin:1.6em 0 .6em;list-style:none}
+details.collapsible>summary::-webkit-details-marker{display:none}
+details.collapsible>summary::before{content:"▸";color:var(--muted);margin-right:.4em;font-size:.85em;display:inline-block;transition:transform .15s ease}
+details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collapsible td{vertical-align:top;line-height:1.55}
+@media(max-width:700px){.page{padding:14px 12px 40px}.doc table{font-size:.88em}dl.report-definition{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main class="page report"><article class="doc"><div class="band"><a href="../crash-clusters.html">← all crashes</a> · <span class="mono">CRASH-0001</span> · samples/sample-c · <span class="lane lane-S3" title="S3 — Spec vs. implementation">S3</span> · <span class="st st-ok" title="OK">accepted</span> · <span class="fine dim">filed 2026-09-16 14:31 UTC</span></div><h1>CRASH-001-1: stack-buffer-overflow in handle_blob</h1>
+<div class="triage-card sev-High">
+<div class="triage-row"><span class="sev sev-High">High<span class="sev-score">8.9</span></span><span class="primitive cat-bounds">stack-buffer-overflow</span><span class="chip chip-cli">cli</span></div>
+<div class="triage-frames">
+<div class="triage-frame"><span class="frame-index">#1</span> <span class="frame-func"><code>handle_blob</code></span> @ <span class="frame-loc"><code>rcfg.c:98</code></span></div>
+<div class="triage-frame"><span class="frame-index">#2</span> <span class="frame-func"><code>dispatch</code></span> @ <span class="frame-loc"><code>rcfg.c:209</code></span></div>
+<div class="triage-frame"><span class="frame-index">#3</span> <span class="frame-func"><code>rcfg_decode</code></span> @ <span class="frame-loc"><code>rcfg.c:247</code></span></div>
+</div>
+<div class="triage-meta"><span><strong>Repro</strong> 5/5</span><span><strong>Cluster</strong> CL-060f0cfb (5 reports: <a href="../CRASH-0002/report.html">CRASH-0002</a>, <a href="../CRASH-0003/report.html">CRASH-0003</a>, <a href="../CRASH-0020/report.html">CRASH-0020</a>, <a href="../CRASH-0015/report.html">CRASH-0015</a>)</span></div>
+<div class="triage-summary">The RCF decoder stages an opaque &quot;host/identity&quot; blob field into a small fixed on-stack buffer before hashing it. A stream consisting of the 4-byte magic plus one BLOB field whose value is longer than 128 bytes reaches the staging copy and writes past the buffer. The external party gets a caller-controlled linear stack overwrite of up to ~3968 bytes. The size guard at <code>rcfg.c:97</code> compares the field length to <code>RCFG_BLOB_LIMIT</code> (4096) while the destination <code>host</code> buffer (<code>rcfg.c:95</code>) is only <code>RCFG_HOST_CAP</code> (128) bytes, so <code class="wrap">memcpy(host, val, len)</code> at <code>rcfg.c:98</code> overruns it.</div>
+</div>
+<section class="action"><div class="at">Act on it</div><div class="act"><div class="al">Fix</div><div class="av"><a href="patch.diff">patch.diff</a> is captured beside this report — Bound the copy by the destination buffer, not by the format ceiling: guard with `len &lt;= sizeof(host)` (128) in `handle_blob`, or drop `RCFG_BLOB_LIMIT` from the admission test and reject/clamp anything larger than `RCFG_HOST_CAP`..</div></div><div class="act"><div class="al">Where</div><div class="av"><span class="mono">src/rcfg.c:handle_blob:98</span> <span class="fine dim">· reached through the cli surface</span></div></div><div class="act"><div class="al">Reproduce</div><div class="av">run <a href="reproduce.sh"><code>./reproduce.sh</code></a> — it clones the audited revision, builds with the sanitizer and replays the input; input <a href="input.bin"><code>input.bin</code></a> (207 B); input <a href="repro.cmd"><code>repro.cmd</code></a> (96 B); sanitizer log <a href="sanitizer.txt"><code>sanitizer.txt</code></a> (14 KB); reproduced 5/5 times when re-run.</div></div><div class="act"><div class="al">Confidence</div><div class="av"><b>reportable</b> — source review placed the trigger within attacker_controls=bytes; source-anchored trigger review voted <b>Promote</b> on 1 verified source anchors.</div></div><div class="act"><div class="al">Affects</div><div class="av"><b>boundary</b> RCF stream bytes decoded by rcfg_decode (CLI file input, attacker_controls=bytes); <b>attacker controls</b> entire input file — field type, big-endian u16 length, and value bytes; <b>needs the caller to</b> reads a file and calls rcfg_decode(data, len) once over the exact length.</div></div></section>
+<h2 id="summary">Summary<a class="anchor" href="#summary" aria-label="Permalink">¶</a></h2>
+<p>The RCF decoder stages an opaque &quot;host/identity&quot; blob field into a small fixed on-stack buffer before hashing it. A stream consisting of the 4-byte magic plus one BLOB field whose value is longer than 128 bytes reaches the staging copy and writes past the buffer. The external party gets a caller-controlled linear stack overwrite of up to ~3968 bytes. The size guard at <code>rcfg.c:97</code> compares the field length to <code>RCFG_BLOB_LIMIT</code> (4096) while the destination <code>host</code> buffer (<code>rcfg.c:95</code>) is only <code>RCFG_HOST_CAP</code> (128) bytes, so <code class="wrap">memcpy(host, val, len)</code> at <code>rcfg.c:98</code> overruns it.</p>
+<h2 id="fields">Fields<a class="anchor" href="#fields" aria-label="Permalink">¶</a></h2>
+<div class="table-wrap">
+<table class="fields-table">
+<thead><tr>
+  <th class="left">Field</th>
+  <th class="left">Value</th>
+</tr></thead>
+<tbody>
+  <tr>
+    <td class="left">Severity</td>
+    <td class="left"><span class="sev sev-High">High<span class="sev-score">8.9</span></span></td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="Bug class in standard vocabulary — memory-safety, auth, injection, info-disclosure, crypto, race, logic.">Class</abbr></td>
+    <td class="left">memory-safety</td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="The concrete security effect, such as a heap write, use-after-free, information disclosure, or check bypass.">Primitive</abbr></td>
+    <td class="left">stack-buffer-overflow</td>
+  </tr>
+  <tr>
+    <td class="left">Location</td>
+    <td class="left">src/rcfg.c:handle_blob:98</td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="Where the vulnerable boundary sits: network, public library API, file format, shipped CLI, non-shipping developer tool, internal code, or unknown.">Surface</abbr></td>
+    <td class="left"><span class="chip chip-cli">cli</span><span class="chip-reason">— report boundary is a shipped command-line tool</span></td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="The untrusted input path an attacker actually reaches this code through.">Boundary</abbr></td>
+    <td class="left">RCF stream bytes decoded by rcfg_decode (CLI file input, attacker_controls=bytes)</td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="What an external caller must supply to reach it: bytes, call-sequence, timing, race, protocol-state, environment, filesystem state, or both bytes and a call sequence.">Trigger source</abbr></td>
+    <td class="left">bytes</td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="What the external caller supplies — the part of the trigger an attacker gets to choose.">Caller controls</abbr></td>
+    <td class="left">entire input file — field type, big-endian u16 length, and value bytes</td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="Whether the trigger obeys the target&#x27;s documented API rules: obeyed, violated, or unspecified when the docs are silent. Violations receive explicit contract review.">Caller contract</abbr></td>
+    <td class="left">unspecified</td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="What the application around the target has to do for the bug to be reachable — normal calls, or an unusual sequence.">Trusted caller actions</abbr></td>
+    <td class="left">reads a file and calls rcfg_decode(data, len) once over the exact length</td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="How input reaches the decisive parameter: direct (the API consumes it), mapped (product code forwards it), harness-only (only the test driver supplies it), or none.">Parameter control</abbr></td>
+    <td class="left">direct</td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="How many confirmation runs reproduced the diagnostic.">Reproduction rate</abbr></td>
+    <td class="left">5/5</td>
+  </tr>
+  <tr>
+    <td class="left">Reproducer carrier</td>
+    <td class="left"><span class="chip chip-cli">cli</span></td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="yes means the report ships a prose fix direction rather than a directly applicable patch.diff.">Advisory</abbr></td>
+    <td class="left">no<span class="chip-reason">— patch.diff included</span></td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="The investigation strategy (S1, S2, S3, S5, S6, S7, S8, or REF) the agent was running when it filed this report.">Strategy</abbr></td>
+    <td class="left"><code>S3</code><span class="chip-reason">— Spec vs. implementation</span></td>
+  </tr>
+  <tr>
+    <td class="left"><abbr title="The top stack frames used to decide two crashes are the same bug.">Dedup frames</abbr></td>
+    <td class="left">handle_blob rcfg.c:98 -&gt; dispatch rcfg.c:209 -&gt; rcfg_decode rcfg.c:247</td>
+  </tr>
+</tbody>
+</table>
+</div>
+<h2 id="root-cause">Root Cause<a class="anchor" href="#root-cause" aria-label="Permalink">¶</a></h2>
+<p><code>handle_blob</code> declares <code class="wrap">char host[RCFG_HOST_CAP]</code> where <code>RCFG_HOST_CAP</code> is 128 (rcfg.c:20, rcfg.c:95). It admits the field with <code class="wrap">if (len &lt;= RCFG_BLOB_LIMIT)</code> — but <code>RCFG_BLOB_LIMIT</code> is 4096 (rcfg.c:23), the &quot;largest host blob the format accepts&quot;, not the size of the staging buffer. The code confuses the format&#x27;s accepted blob ceiling with the capacity of the buffer it copies into. Any field length in the range (128, 4096] passes the guard and <code class="wrap">memcpy(host, val, len)</code> writes <code>len</code> bytes into a 128-byte object. <code>len</code> is the field length <code>flen</code> from <code>rcfg_decode</code> (rcfg.c:237), a caller-supplied big-endian u16 that the decoder only clamps down to <code>remaining</code> (rcfg.c:243-245) — it is never clamped to 128. With a 200-byte value ASan reports a WRITE of size 200 into the <code>[32,160)</code> <code>host</code> frame slot, a 40-byte overwrite past the end; a maximal in-range value overwrites ~3968 bytes of adjacent stack (saved registers, return address).</p>
+<h2 id="data-flow">Data Flow<a class="anchor" href="#data-flow" aria-label="Permalink">¶</a></h2>
+<p>Caller-controlled file bytes flow from the CLI straight into the unguarded copy.</p>
+<ul><li>step: read_file (src/rcfg_cli.c:34) — reads the whole input file into a heap buffer sized to its exact length.</li><li>step: main (src/rcfg_cli.c:59) — passes the buffer and length to rcfg_decode.</li><li>step: rcfg_decode (src/rcfg.c:237) — parses a field header, reads big-endian u16 <code>flen</code>, clamps it only to <code>remaining</code>.</li><li>step: dispatch (src/rcfg.c:209) — routes RCFG_T_BLOB (0x02) to handle_blob with <code>val</code>=field bytes, <code>len</code>=flen.</li><li>step: handle_blob (src/rcfg.c:97) — admits the field because <code class="wrap">len &lt;= 4096</code>, not <code class="wrap">len &lt;= 128</code>.</li><li>step: handle_blob (src/rcfg.c:98) — <code class="wrap">memcpy(host, val, len)</code> writes <code>len</code> bytes into the 128-byte <code>host</code>, overflowing the stack frame.</li></ul>
+<section class="enrich-card enrich-snippets">
+<p><strong>Source snippets</strong> referenced in <em class="note">Data Flow</em>:</p>
+<p><strong>↳ Referenced in:</strong> step: read_file (src/rcfg_cli.c:34) — reads the whole input file into a heap buffer sized to its exact length.</p>
+<p><em class="note">From <code>src/rcfg_cli.c</code> (lines 32–36):</em></p>
+<pre><code class="language-text">32       return NULL;
+33     }
+34 ▶   if (fread(buf, 1, (size_t)size, fp) != (size_t)size) {
+35       free(buf);
+36       fclose(fp);</code></pre>
+<hr>
+<p><strong>↳ Referenced in:</strong> step: main (src/rcfg_cli.c:59) — passes the buffer and length to rcfg_decode.</p>
+<p><em class="note">From <code>src/rcfg_cli.c</code> (lines 57–61):</em></p>
+<pre><code class="language-text">57     }
+58   
+59 ▶   int fields = rcfg_decode(data, len);
+60     free(data);
+61   </code></pre>
+<hr>
+<p><strong>↳ Referenced in:</strong> step: rcfg_decode (src/rcfg.c:237) — parses a field header, reads big-endian u16 <code>flen</code>, clamps it only to <code>remaining</code>.</p>
+<p><em class="note">From <code>src/rcfg.c</code> (lines 235–239):</em></p>
+<pre><code class="language-text">235     while (remaining &gt;= RCFG_FIELD_HEADER) {
+236       uint8_t  type = p[0];
+237 ▶     uint16_t flen = read_be16(p + 1);
+238       p += RCFG_FIELD_HEADER;
+239       remaining -= RCFG_FIELD_HEADER;</code></pre>
+<hr>
+<p><strong>↳ Referenced in:</strong> step: dispatch (src/rcfg.c:209) — routes RCFG_T_BLOB (0x02) to handle_blob with <code>val</code>=field bytes, <code>len</code>=flen.</p>
+<p><em class="note">From <code>src/rcfg.c</code> (lines 207–211):</em></p>
+<pre><code class="language-text">207     switch (type) {
+208       case RCFG_T_STR:   handle_str(ctx, val, len); break;
+209 ▶     case RCFG_T_BLOB:  handle_blob(ctx, val, len); break;
+210       case RCFG_T_ARRAY: handle_array(val, len); break;
+211       case RCFG_T_SLICE: handle_slice(ctx, stream, stream_len, val, len); break;</code></pre>
+<hr>
+<p><strong>↳ Referenced in:</strong> step: handle_blob (src/rcfg.c:97) — admits the field because <code class="wrap">len &lt;= 4096</code>, not <code class="wrap">len &lt;= 128</code>.</p>
+<p><em class="note">From <code>src/rcfg.c</code> (lines 95–99):</em></p>
+<pre><code class="language-text">95     char host[RCFG_HOST_CAP];
+96   
+97 ▶   if (len &lt;= RCFG_BLOB_LIMIT) {
+98       memcpy(host, val, len);
+99       ctx-&gt;host_hash = fnv1a((const uint8_t *)host, len);</code></pre>
+<hr>
+<p><strong>↳ Referenced in:</strong> step: handle_blob (src/rcfg.c:98) — <code class="wrap">memcpy(host, val, len)</code> writes <code>len</code> bytes into the 128-byte <code>host</code>, overflowing the stack frame.</p>
+<p><em class="note">From <code>src/rcfg.c</code> (lines 96–100):</em></p>
+<pre><code class="language-text"> 96   
+ 97     if (len &lt;= RCFG_BLOB_LIMIT) {
+ 98 ▶     memcpy(host, val, len);
+ 99       ctx-&gt;host_hash = fnv1a((const uint8_t *)host, len);
+100     }</code></pre>
+</section>
+<h2 id="impact">Impact<a class="anchor" href="#impact" aria-label="Permalink">¶</a></h2>
+<p>Any consumer that decodes an untrusted RCF stream is exposed: a file/packet of ~135 bytes or more (magic + 3-byte header + &gt;128 value bytes) reaches the overflow. The overwrite is contiguous, fully caller-controlled in both length (up to 4096, ~3968 past the end) and content, and lands over the return address of <code>handle_blob</code>, so this is a stack-smash with realistic control-flow-hijack potential, not merely a crash.</p>
+<h2 id="fix-direction">Fix Direction<a class="anchor" href="#fix-direction" aria-label="Permalink">¶</a></h2>
+<p>Bound the copy by the destination buffer, not by the format ceiling: guard with <code class="wrap">len &lt;= sizeof(host)</code> (128) in <code>handle_blob</code>, or drop <code>RCFG_BLOB_LIMIT</code> from the admission test and reject/clamp anything larger than <code>RCFG_HOST_CAP</code>. Sizing <code>host</code> to <code>RCFG_BLOB_LIMIT</code> would also work but wastes stack; the format&#x27;s own 128-byte staging intent (rcfg.c:20) is the right bound.</p>
+<h2 id="expected-sanitizer-output">Expected sanitizer output<a class="anchor" href="#expected-sanitizer-output" aria-label="Permalink">¶</a></h2>
+<pre><code>==75600==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016b5a4a20 at pc 0x0001051f2bb4 bp 0x00016b5a4970 sp 0x00016b5a4120
+WRITE of size 200 at 0x00016b5a4a20 thread T0
+SCARINESS: 60 (multi-byte-write-stack-buffer-overflow)
+    #0 0x0001051f2bb0 in __asan_memcpy (in libclang_rt.asan_osx_dynamic.dylib) + 816
+    #1 0x00010485930c in handle_blob rcfg.c:98
+    #2 0x000104858d60 in dispatch rcfg.c:209
+    #3 0x000104858a4c in rcfg_decode rcfg.c:247
+    #4 0x00010485a418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+Address 0x00016b5a4a20 is located in stack of thread T0 at offset 160 in frame
+    #0 0x0001048591a8 in handle_blob rcfg.c:94
+
+  This frame has 1 object(s):
+    [32, 160) &#x27;host&#x27; (line 95) &lt;== Memory access at offset 160 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x10000130c)</code></pre>
+<p>Full original output: <code>sanitizer.txt</code>.</p>
+<section class="enrich-card enrich-snippets">
+<p><strong>Annotated stack frames</strong> (top-of-stack source):</p>
+<p><strong>#1 <code>handle_blob</code></strong> — rcfg.c:98</p>
+<p><em class="note">From <code>src/rcfg.c</code> (lines 96–100):</em></p>
+<pre><code class="language-text"> 96   
+ 97     if (len &lt;= RCFG_BLOB_LIMIT) {
+ 98 ▶     memcpy(host, val, len);
+ 99       ctx-&gt;host_hash = fnv1a((const uint8_t *)host, len);
+100     }</code></pre>
+<hr>
+<p><strong>#2 <code>dispatch</code></strong> — rcfg.c:209</p>
+<p><em class="note">From <code>src/rcfg.c</code> (lines 207–211):</em></p>
+<pre><code class="language-text">207     switch (type) {
+208       case RCFG_T_STR:   handle_str(ctx, val, len); break;
+209 ▶     case RCFG_T_BLOB:  handle_blob(ctx, val, len); break;
+210       case RCFG_T_ARRAY: handle_array(val, len); break;
+211       case RCFG_T_SLICE: handle_slice(ctx, stream, stream_len, val, len); break;</code></pre>
+<hr>
+<p><strong>#3 <code>rcfg_decode</code></strong> — rcfg.c:247</p>
+<p><em class="note">From <code>src/rcfg.c</code> (lines 245–249):</em></p>
+<pre><code class="language-text">245       }
+246   
+247 ▶     dispatch(&amp;ctx, data, len, type, p, flen);
+248   
+249       p += flen;</code></pre>
+<hr>
+<p><strong>#4 <code>main</code></strong> — rcfg_cli.c:59</p>
+<p><em class="note">From <code>src/rcfg_cli.c</code> (lines 57–61):</em></p>
+<pre><code class="language-text">57     }
+58   
+59 ▶   int fields = rcfg_decode(data, len);
+60     free(data);
+61   </code></pre>
+<hr>
+<p><strong>#0 <code>handle_blob</code></strong> — rcfg.c:94</p>
+<p><em class="note">From <code>src/rcfg.c</code> (lines 92–96):</em></p>
+<pre><code class="language-text">92    * into a rolling hash. Blobs larger than the accepted limit are rejected. */
+93   static void handle_blob(rcfg_ctx *ctx, const uint8_t *val, uint16_t len)
+94 ▶ {
+95     char host[RCFG_HOST_CAP];
+96   </code></pre>
+</section>
+<h2 id="reproduce">Reproduce<a class="anchor" href="#reproduce" aria-label="Permalink">¶</a></h2>
+<p><strong>Script</strong> — <a href="reproduce.sh">reproduce.sh</a></p>
+<p>Run the sibling <a href="reproduce.sh">reproduce.sh</a>:</p>
+<pre><code class="language-sh">./reproduce.sh                 # builds/runs with ASan against the in-place audit source
+./reproduce.sh /path/to/src    # or an existing checkout</code></pre>
+<h2 id="patch">Patch<a class="anchor" href="#patch" aria-label="Permalink">¶</a></h2>
+<section class="enrich-card enrich-patch">
+<p><strong>Captured patch</strong> — <a href="patch.diff">patch.diff</a> (11 lines)</p>
+<pre><code class="language-diff"><span class="dh">--- a/src/rcfg.c</span><span class="dh">+++ b/src/rcfg.c</span><span class="dx">@@ -94,7 +94,7 @@ static void handle_blob(rcfg_ctx *ctx, const uint8_t *val, uint16_t len)</span><span class="dc"> {</span><span class="dc">   char host[RCFG_HOST_CAP];</span><span class="dc"> </span><span class="dr">-  if (len &lt;= RCFG_BLOB_LIMIT) {</span><span class="da">+  if (len &lt;= sizeof(host)) {</span><span class="dc">     memcpy(host, val, len);</span><span class="dc">     ctx-&gt;host_hash = fnv1a((const uint8_t *)host, len);</span><span class="dc">   }</span></code></pre>
+</section>
+<details class="collapsible" id="severity-rationale"><summary>Severity rationale<a class="anchor" href="#severity-rationale" aria-label="Permalink">¶</a></summary>
+<p><em class="note">Severity is the <strong>CVSS v4.0 score</strong> — one industry-standard metric, computed by the vendored FIRST reference scorer. Base metrics come from the primitive and surface, with Attack Vector/Requirements also reflecting the trigger&#x27;s caller-control facts (a trusted local API/call-sequence reads as AV:L/AT:P). The Threat metric (E) is read locally, not from threat intelligence: it grades how far this audit got toward proving the bug — a reproducer that fires is E:P, an unproven argument is E:U — so a demonstrated bug outranks a written one. FIRST defines E against <em>public</em> exploit availability, which is not what is measured here, and nothing in this run is publicly disclosed. Read E as reproduction confidence. The Environmental Security Requirements (CR/IR/AR) are left Not Defined — they model a deploying organisation&#x27;s asset importance, which the scorer cannot derive, so a generic score keeps the CVSS-B worst case. Environmental <em>modified impacts</em> are set only to floor impact where reachability facts justify it (non-shipping surfaces, caller-only triggers). Cluster size remains a priority/verification fact because CVSS v4.0 has no cluster metric.</em></p>
+<p><strong>CVSS-BT v4.0</strong>: <code class="wrap">CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P</code> → <strong>8.9 (High)</strong> <strong>CVSS-B baseline</strong>: <code class="wrap">CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N</code> → <strong>9.3 (Critical)</strong></p>
+<div class="table-wrap">
+<table>
+<thead><tr>
+  <th class="left">Metric</th>
+  <th class="center">Value</th>
+  <th class="left">Derived from</th>
+</tr></thead>
+<tbody>
+  <tr>
+    <td class="left">Attack Vector (AV)</td>
+    <td class="center">N</td>
+    <td class="left">surface tier = <code>library</code></td>
+  </tr>
+  <tr>
+    <td class="left">Attack Complexity (AC)</td>
+    <td class="center">L</td>
+    <td class="left">fixed — not separately modelled</td>
+  </tr>
+  <tr>
+    <td class="left">Attack Requirements (AT)</td>
+    <td class="center">N</td>
+    <td class="left">intrinsic attack preconditions</td>
+  </tr>
+  <tr>
+    <td class="left">Privileges Required (PR)</td>
+    <td class="center">N</td>
+    <td class="left">worst case — no auth signal</td>
+  </tr>
+  <tr>
+    <td class="left">User Interaction (UI)</td>
+    <td class="center">N</td>
+    <td class="left">surface tier</td>
+  </tr>
+  <tr>
+    <td class="left">Vuln Conf/Integ/Avail</td>
+    <td class="center">H/H/H</td>
+    <td class="left">primitive class = <code>stack_write</code></td>
+  </tr>
+  <tr>
+    <td class="left">Subseq Conf/Integ/Avail</td>
+    <td class="center">N/N/N</td>
+    <td class="left">primitive class</td>
+  </tr>
+  <tr>
+    <td class="left">Threat Exploit Maturity (E)</td>
+    <td class="center">P</td>
+    <td class="left">local reproduction evidence — not public exploit availability</td>
+  </tr>
+  <tr>
+    <td class="left">Env Requirements (CR/IR/AR)</td>
+    <td class="center">X/X/X</td>
+    <td class="left">not defined — deployer-set asset importance (CVSS-B baseline)</td>
+  </tr>
+  <tr>
+    <td class="left">Env Modified AV/AC/AT/PR/UI</td>
+    <td class="center">X/X/X/X/X</td>
+    <td class="left">caller control / contract concern</td>
+  </tr>
+  <tr>
+    <td class="left">Env Modified C/I/A impacts</td>
+    <td class="center">X/X/X/X/X/X</td>
+    <td class="left">non-shipping / caller-only reachability floor; demonstrated disclosure / availability</td>
+  </tr>
+</tbody>
+</table>
+</div>
+<p><strong>Severity level: High</strong> — CVSS bands: Critical ≥ 9.0, High ≥ 7.0, Medium ≥ 4.0, Low ≥ 0.1, None = 0.0.</p>
+<p><strong>Verification facts</strong> (not part of severity — triage priority): reproduction rate 5/5; testcase + sanitizer log on disk.</p>
+<p><em class="note">Field derivation (each line is a reviewable claim):</em></p>
+<ul><li>surface=library → AV:N/UI:N</li><li>class=stack_write → VC:H/VI:H/VA:H/SC:N/SI:N/SA:N</li><li>class preconditions → AT:N</li><li>PR:N (worst case — no auth signal), AC:L</li><li>reproduction rate 5/5 → E:P</li><li>CR/IR/AR not defined — environmental requirements are a deployer concern (CVSS-B baseline)</li><li>caller controls input bytes → MAT:X</li></ul>
+</details>
+</article><aside class="rail"><div class="rs"><h4>On this page</h4><ul class="outline"><li class="l2"><a href="#summary">Summary</a></li><li class="l2"><a href="#fields">Fields</a></li><li class="l2"><a href="#root-cause">Root Cause</a></li><li class="l2"><a href="#data-flow">Data Flow</a></li><li class="l2"><a href="#impact">Impact</a></li><li class="l2"><a href="#fix-direction">Fix Direction</a></li><li class="l2"><a href="#expected-sanitizer-output">Expected sanitizer output</a></li><li class="l2"><a href="#reproduce">Reproduce</a></li><li class="l2"><a href="#patch">Patch</a></li></ul></div><div class="rs"><h4>Severity</h4><div class="cvhead"><span class="sev sev-high">High</span><span class="big">8.9</span><span class="fine dim">CVSS v4.0</span></div><div class="cvg"><span class="cvl">Reach</span><span class="cv hi" title="Attack vector: network">AV<b>N</b></span><span class="cv " title="Attack complexity: low">AC<b>L</b></span><span class="cv hi" title="Attack requirements: none">AT<b>N</b></span><span class="cv hi" title="Privileges required: none">PR<b>N</b></span><span class="cv hi" title="User interaction: none">UI<b>N</b></span></div><div class="cvg"><span class="cvl">Impact</span><span class="cv hi" title="Confidentiality impact: high">VC<b>H</b></span><span class="cv hi" title="Integrity impact: high">VI<b>H</b></span><span class="cv hi" title="Availability impact: high">VA<b>H</b></span><span class="cv " title="Subsequent confidentiality: none">SC<b>N</b></span><span class="cv " title="Subsequent integrity: none">SI<b>N</b></span><span class="cv " title="Subsequent availability: none">SA<b>N</b></span></div><div class="cvg"><span class="cvl">Confidence</span><span class="cv " title="Exploit maturity (reproduction confidence here): proof of concept">E<b>P</b></span></div><p class="fine dim">scored 2026-09-16 15:01 UTC</p></div><div class="rs"><h4>Same problem</h4><div class="fine">cluster <span class="mono">CL-060f0cfb</span> · 4 sibling reports of the same problem</div><ul class="files"><li><a href="../CRASH-0002/report.html" class="mono">CRASH-0002</a></li><li><a href="../CRASH-0003/report.html" class="mono">CRASH-0003</a></li><li><a href="../CRASH-0020/report.html" class="mono">CRASH-0020</a></li><li><a href="../CRASH-0015/report.html" class="mono">CRASH-0015</a></li></ul></div><div class="rs"><h4>Review</h4><div><b>reportable</b> <span class="fine">source review placed the trigger within attacker_controls=bytes</span></div><div>trigger review: <b>Promote</b> on 1 source anchors</div><div class="fine dim">bytes: &#x27;RCF1&#x27; (magic) + 0x02 (BLOB) + 0x00C8 (len=200) + 200 value bytes -&gt; rcfg_decode -&gt; dispatch -&gt; handle_blob memcpy into host[128]</div><div class="fine">1 source attestation bound to the receipt</div></div><div class="rs"><h4>Timeline</h4><ul class="files"><li><b>filed</b> 2026-09-16 14:31 UTC</li><li><b>scored</b> 2026-09-16 15:01 UTC</li><li><b>reviewed</b> 2026-09-16 15:01 UTC</li></ul></div><div class="rs"><h4>Bundle</h4><ul class="files"><li><a href="input.bin"><code>input.bin</code></a> <span class="fine dim">testcase · 207 B</span></li><li><a href="patch.diff"><code>patch.diff</code></a> <span class="fine dim">patch · 313 B</span></li><li><a href="repro.cmd"><code>repro.cmd</code></a> <span class="fine dim">testcase · 96 B</span></li><li><a href="reproduce.sh"><code>reproduce.sh</code></a> <span class="fine dim">reproduce · 6 KB</span></li><li><a href="sanitizer.txt"><code>sanitizer.txt</code></a> <span class="fine dim">sanitizer · 14 KB</span></li><li><a href="severity.json"><code>severity.json</code></a> <span class="fine dim">receipt · 393 B</span></li><li><a href="validation.json"><code>validation.json</code></a> <span class="fine dim">receipt · 3 KB</span></li></ul></div></aside></main>
+<div class="tip" id="tip" role="tooltip"></div>
+</body>
+</html>

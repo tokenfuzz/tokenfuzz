@@ -12,10 +12,10 @@ still decide what to fix and how to disclose it.
 Start with the generated HTML indexes:
 
 ```text
-output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
-output/<target>/<backend>/results/crashes/CRASH-CLUSTERS.html
-output/<target>/<backend>/results/findings-rejected/REJECTED-FINDINGS.html
-output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
+output/<target>/<backend>/results/findings/finding-clusters.html
+output/<target>/<backend>/results/crashes/crash-clusters.html
+output/<target>/<backend>/results/findings-rejected/rejected-findings.html
+output/<target>/<backend>/results/crashes-rejected/rejected-crashes.html
 ```
 
 Do not begin with a raw model transcript. The indexes join the report, current
@@ -41,7 +41,7 @@ A human-pinned FIND and legacy artifacts can remain `not-reportable` in place.
 For each canonical row in a cluster index:
 
 1. Read the Status or publication state.
-2. Open `REPORT.html` for a crash or `report.html` for a finding.
+2. Open `report.html` for a crash or `report.html` for a finding.
 3. Check the root `Location`, boundary, caller controls, trigger source, and
    caller contract against the source.
 4. For a crash, run `reproduce.sh` in an isolated build environment and compare
@@ -105,7 +105,7 @@ receipt says whether it is a security result to report.
 
 ### The finding Status column
 
-`findings/FINDING-CLUSTERS.html` presents common working states in a compact
+`findings/finding-clusters.html` presents common working states in a compact
 column:
 
 | Status | Meaning |
@@ -163,8 +163,8 @@ A strong crash contains:
 
 ```text
 CRASH-*/
-  REPORT.md
-  REPORT.html
+  report.md
+  report.html
   reproduce.sh
   input.<ext>
   harness.*             # when an API harness is required
@@ -264,10 +264,10 @@ Use backend-local indexes for one run and target-root indexes to compare all
 backends:
 
 ```text
-output/<target>/<backend>/results/crashes/CRASH-CLUSTERS.html
-output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
-output/<target>/CRASH-CLUSTERS.html
-output/<target>/FINDING-CLUSTERS.html
+output/<target>/<backend>/results/crashes/crash-clusters.html
+output/<target>/<backend>/results/findings/finding-clusters.html
+output/<target>/crash-clusters.html
+output/<target>/finding-clusters.html
 ```
 
 [Deduplication](../concepts/deduplication.md) documents the exact signatures

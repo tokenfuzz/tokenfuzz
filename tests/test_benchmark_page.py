@@ -172,20 +172,20 @@ class Fixture:
                      "<!-- enrich:tldr -->\n- **Bug** — I/O path frees a buffer twice\n")
         self._report("pool/findings/FIND-0003", "# FIND-003: Allocation grows without bound\n")
         self._report("pool/findings/FIND-0005", "## Fields\n")
-        self._report("pool/crashes/CRASH-0001", "# CRASH-001-1: SEGV in child_free\n", "REPORT.md")
+        self._report("pool/crashes/CRASH-0001", "# CRASH-001-1: SEGV in child_free\n", "report.md")
         self._report("pool/findings-rejected/FIND-REJECTED-0001", "# FIND-009 — Loop\n")
-        (self.run / "pool/findings-rejected/FIND-REJECTED-0001/REJECTION.md").write_text(
+        (self.run / "pool/findings-rejected/FIND-REJECTED-0001/rejection.md").write_text(
             "# Rejected\n\nReason: no attacker-controlled path reaches the loop\n",
             encoding="utf-8")
         for cond in ("harness", "model-direct"):
-            for kind, basename in (("findings", "FINDING-CLUSTERS"), ("crashes", "CRASH-CLUSTERS"),
-                                   ("findings-rejected", "REJECTED-FINDINGS")):
+            for kind, basename in (("findings", "finding-clusters"), ("crashes", "crash-clusters"),
+                                   ("findings-rejected", "rejected-findings")):
                 directory = self.run / "pool" / cond / kind
                 directory.mkdir(parents=True)
                 (directory / f"{basename}.html").write_text("<p>index</p>", encoding="utf-8")
         for name in ("FIND-0001", "FIND-0002", "FIND-0003"):
             self._report(f"pool/harness/findings/{name}", "# x\n", "report.html")
-        self._report("pool/harness/crashes/CRASH-0001", "<p>x</p>", "REPORT.html")
+        self._report("pool/harness/crashes/CRASH-0001", "<p>x</p>", "report.html")
         self._report("pool/model-direct/findings/FIND-0004", "# x\n", "report.html")
         self._report("pool/model-direct/findings/FIND-0005", "# x\n", "report.html")
         # harness state streams: two hypotheses in the wall, one after it
@@ -277,7 +277,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(direct["find"]["label"], "2 (1 M+, 2 classes, 1 unjudged)")
         self.assertEqual(harness["wall_label"], "3.00/3.00h")
         self.assertEqual(direct["wall_label"], "1.50/3.00h")
-        self.assertTrue(harness["find"]["href"].endswith("FINDING-CLUSTERS.html"))
+        self.assertTrue(harness["find"]["href"].endswith("finding-clusters.html"))
         self.assertIn("/pool/harness/", harness["find"]["href"])
         self.assertIn("/pool/model-direct/", direct["find"]["href"])
 
@@ -693,7 +693,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn('<script src=', html)
         self.assertIn("3 (2 M+, 2 classes)", html)
         self.assertIn("gpt-5.6-sol-direct", html)
-        self.assertIn("FINDING-CLUSTERS.html", html)
+        self.assertIn("finding-clusters.html", html)
         self.assertIn('data-site="src/app_io.c:12"', html)
         self.assertIn("sanitizer crash", html)
         self.assertIn("Spec vs. implementation", html)
@@ -753,7 +753,7 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn(str(ROOT), html)
         self.assertNotIn("file://", html)
         hrefs = re.findall(r'href="([^"]+)"', html)
-        self.assertIn("codex/20260101-000000/pool/harness/findings/FINDING-CLUSTERS.html", hrefs)
+        self.assertIn("codex/20260101-000000/pool/harness/findings/finding-clusters.html", hrefs)
         for href in hrefs:
             if href.startswith("#"):
                 continue
@@ -793,6 +793,33 @@ class RenderTests(unittest.TestCase):
         out = self.fixture.root / "benchmark-result.html"
         benchmark_page.write(self.fixture.root, out)
         self.assertIn("<h2>Ledger</h2>", out.read_text(encoding="utf-8"))
+
+
+class ArtifactHrefTests(unittest.TestCase):
+    """The page links the report a directory actually holds.
+
+    A probe for a guessed name answers yes on a case-insensitive disk for a
+    file spelled differently, and the published copy is served
+    case-sensitively; so the name comes from the directory listing, and a
+    spelling that differs only in case is not a report at all."""
+
+    def test_links_name_the_report_the_directory_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            current = Path(tmp) / "CRASH-0001"
+            current.mkdir()
+            (current / "report.md").write_text("# x\n", encoding="utf-8")
+            (current / "report.html").write_text("<p>x</p>", encoding="utf-8")
+            page_only = Path(tmp) / "FIND-0001"
+            page_only.mkdir()
+            (page_only / "report.html").write_text("<p>x</p>", encoding="utf-8")
+            other_case = Path(tmp) / "CRASH-0002"
+            other_case.mkdir()
+            (other_case / "REPORT.md").write_text("# x\n", encoding="utf-8")
+            (other_case / "REPORT.html").write_text("<p>x</p>", encoding="utf-8")
+            self.assertTrue(benchmark_page._artifact_href(current).endswith("/CRASH-0001/report.html"))
+            self.assertTrue(benchmark_page._artifact_href(page_only).endswith("/FIND-0001/report.html"))
+            self.assertEqual(benchmark_page._artifact_href(other_case), "")
+            self.assertEqual(benchmark_page._artifact_href(Path(tmp) / "missing"), "")
 
 
 if __name__ == "__main__":

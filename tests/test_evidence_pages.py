@@ -118,7 +118,7 @@ class EvidencePagesTests(unittest.TestCase):
             "validated_at": 1788698400, "evidence": {"source_attestations": [{}, {}]},
         }))
         rejected = _report(run / "pool" / "findings-rejected" / "FIND-REJECTED-0001", "report.md", _FINDING)
-        (rejected.parent / "REJECTION.md").write_text(
+        (rejected.parent / "rejection.md").write_text(
             "# Rejected artifact\n\nReason: trigger-provenance: triggering state not attacker-reachable\n")
         return run
 
@@ -128,7 +128,7 @@ class EvidencePagesTests(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(process.returncode, 0, process.stderr)
-        return results / "findings" / "FINDING-CLUSTERS.html"
+        return results / "findings" / "finding-clusters.html"
 
     def test_cluster_page_places_each_condition_on_its_own_clock(self) -> None:
         import benchmark
@@ -152,7 +152,7 @@ class EvidencePagesTests(unittest.TestCase):
         self.assertIn('class="who who-model-direct"', page)
         self.assertIn('href="FIND-0001/report.html"', page)
         self.assertIn("Session token reaches the log line", page)
-        self.assertIn('href="../findings-rejected/REJECTED-FINDINGS.html"', page)
+        self.assertIn('href="../findings-rejected/rejected-findings.html"', page)
         self.assertNotIn("Reviewer TL;DR", page)
         # lane by class heat table and the subsystem bars come from the same problems
         self.assertIn('class="lane lane-S3"', page)
@@ -172,18 +172,18 @@ class EvidencePagesTests(unittest.TestCase):
         self.cluster(run / "pool")
         rejected = run / "pool" / "findings-rejected"
         benchmark.write_rejected_findings_index(rejected)
-        page = (rejected / "REJECTED-FINDINGS.html").read_text(encoding="utf-8")
+        page = (rejected / "rejected-findings.html").read_text(encoding="utf-8")
         self.assertIn("did not hold up", page)
         # one family draws no filter chip; the family still labels the row
         self.assertNotIn('data-filter="why"', page)
         self.assertIn('class="fam fam-S7">trigger-provenance</span>', page)
         self.assertIn("triggering state not attacker-reachable", page)
         self.assertIn('href="FIND-REJECTED-0001/report.html"', page)
-        self.assertIn('href="../findings/FINDING-CLUSTERS.html"', page)
+        self.assertIn('href="../findings/finding-clusters.html"', page)
         empty = self.root / "empty-rejected"
         empty.mkdir()
         benchmark.write_rejected_findings_index(empty)
-        self.assertIn("Nothing was rejected", (empty / "REJECTED-FINDINGS.html").read_text())
+        self.assertIn("Nothing was rejected", (empty / "rejected-findings.html").read_text())
 
     def test_reason_families(self) -> None:
         self.assertEqual(
@@ -242,7 +242,7 @@ class EvidencePagesTests(unittest.TestCase):
 
     def test_crash_facts_read_the_site_from_the_dedup_frames(self) -> None:
         crash = self.root / "CRASH-0001"
-        _report(crash, "REPORT.md", _CRASH)
+        _report(crash, "report.md", _CRASH)
         (crash / "reproduce.sh").write_text("#!/bin/sh\n")
         (crash / "input.bin").write_bytes(b"\x00\x01")
         facts = evidence_pages.artifact_facts(crash, "crash")

@@ -215,7 +215,7 @@ Agent-inlined narrative that must be replaced by the sibling diff.
 
         exported = self.root / "exported"
         (exported / ".audit").mkdir(parents=True)
-        exported_report = exported / "REPORT.md"
+        exported_report = exported / "report.md"
         exported_report.write_text("# Exported\n\n## Summary\nA crash.\n")
         (exported / ".audit" / "patch.diff").write_text(
             "diff --git a/x.c b/x.c\n--- a/x.c\n+++ b/x.c\n@@ -1 +1 @@\n-old\n+new\n"

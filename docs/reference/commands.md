@@ -365,18 +365,18 @@ an agent has looked at them.
 Open the generated HTML before reading logs:
 
 ```text
-output/<target>/FINDING-CLUSTERS.html
-output/<target>/CRASH-CLUSTERS.html
-output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
-output/<target>/<backend>/results/crashes/CRASH-CLUSTERS.html
-output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
-output/<target>/<backend>/results/findings-rejected/REJECTED-FINDINGS.html
+output/<target>/finding-clusters.html
+output/<target>/crash-clusters.html
+output/<target>/<backend>/results/findings/finding-clusters.html
+output/<target>/<backend>/results/crashes/crash-clusters.html
+output/<target>/<backend>/results/crashes-rejected/rejected-crashes.html
+output/<target>/<backend>/results/findings-rejected/rejected-findings.html
 ```
 
 Target-level pages combine all backends; backend-level pages show one result
 tree. The two rejected indexes are per-backend only; there is no
 cross-backend rollup of rejections. Follow a cluster to `report.html` or
-`REPORT.html`, and edit only the Markdown source.
+`report.html`, and edit only the Markdown source.
 
 Normal triage performs export, severity, validation, and clustering
 automatically. These commands are for deliberate regeneration after a manual

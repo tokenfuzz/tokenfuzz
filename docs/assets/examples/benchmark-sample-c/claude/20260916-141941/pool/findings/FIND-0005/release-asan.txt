@@ -1,0 +1,57 @@
+=================================================================
+==73601==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016fde5c80 at pc 0x00010080abb4 bp 0x00016fde5b10 sp 0x00016fde52c0
+WRITE of size 100 at 0x00016fde5c80 thread T0
+SCARINESS: 60 (multi-byte-write-stack-buffer-overflow)
+==73601==WARNING: failed to spawn external symbolizer (errno: 9)
+==73601==WARNING: failed to spawn external symbolizer (errno: 9)
+==73601==WARNING: failed to spawn external symbolizer (errno: 9)
+==73601==WARNING: failed to spawn external symbolizer (errno: 9)
+==73601==WARNING: failed to spawn external symbolizer (errno: 9)
+==73601==WARNING: Failed to use and restart external symbolizer!
+    #0 0x00010080abb0 in __asan_memcpy+0x330 (/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin/libclang_rt.asan_osx_dynamic.dylib:arm64e+0x3ebb0)
+    #1 0x000100018a08 in rcfg_decode+0x228 (output/benchmark-sample-c/claude/20260916-141941/cells/model-direct-r1/scratch/rcfg_release:arm64+0x100000a08)
+    #2 0x000100018eb0 in main+0x148 (output/benchmark-sample-c/claude/20260916-141941/cells/model-direct-r1/scratch/rcfg_release:arm64+0x100000eb0)
+    #3 0x00018d1844e0 in start+0x1b4c (/usr/lib/dyld:arm64e+0x204e0)
+
+Address 0x00016fde5c80 is located in stack of thread T0 at offset 352 in frame
+    #0 0x0001000187ec in rcfg_decode+0xc (output/benchmark-sample-c/claude/20260916-141941/cells/model-direct-r1/scratch/rcfg_release:arm64+0x1000007ec)
+
+  This frame has 3 object(s):
+    [32, 160) 'host' (line 95)
+    [192, 256) 'label' (line 82)
+    [288, 352) 'ctx' (line 228) <== Memory access at offset 352 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (output/benchmark-sample-c/claude/20260916-141941/cells/model-direct-r1/scratch/rcfg_release:arm64+0x100000a08) in rcfg_decode+0x228
+Shadow bytes around the buggy address:
+  0x00016fde5a00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016fde5a80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016fde5b00: 00 00 00 00 f1 f1 f1 f1 f8 f8 f8 f8 f8 f8 f8 f8
+  0x00016fde5b80: f8 f8 f8 f8 f8 f8 f8 f8 f2 f2 f2 f2 f8 f8 f8 f8
+  0x00016fde5c00: f8 f8 f8 f8 f2 f2 f2 f2 00 00 00 00 00 00 00 00
+=>0x00016fde5c80:[f3]f3 f3 f3 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016fde5d00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016fde5d80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016fde5e00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016fde5e80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016fde5f00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==73601==ABORTING

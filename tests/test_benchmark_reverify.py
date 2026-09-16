@@ -350,7 +350,7 @@ class BenchmarkReverifyTests(unittest.TestCase):
         (finding / "sanitizer.txt").write_text(
             "    #0 0x1000 in app_parse+0x20 (/t/lib.dylib:arm64+0x30)\n", encoding="utf-8",
         )
-        (finding / "REPORT.md").write_text("# report\n", encoding="utf-8")
+        (finding / "report.md").write_text("# report\n", encoding="utf-8")
         validation_receipt.write(
             finding, kind="finding", state="reportable", detail="",
             target_revision="rev", target_config_sha256="cfg", attacker_controls=[],

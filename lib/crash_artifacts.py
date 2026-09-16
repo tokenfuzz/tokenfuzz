@@ -13,11 +13,10 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 import stack_frames
+import report_identity
 
 
 ARTIFACT_EXACT = {
-    "REPORT.md",
-    "REPORT.html",
     "report.md",
     "report.html",
     "description.md",
@@ -938,10 +937,8 @@ def _report_command_args(scan_dirs: Iterable[Path],
     if not bin_names:
         return []
     for d in (Path(x) for x in scan_dirs):
-        for name in ("report.md", "REPORT.md"):
-            p = d / name
-            if not p.is_file():
-                continue
+        p = report_identity.find_report(d)
+        if p is not None:
             try:
                 text = p.read_text(encoding="utf-8", errors="replace")
             except OSError:

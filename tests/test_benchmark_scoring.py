@@ -130,7 +130,7 @@ class BenchmarkScoringTests(unittest.TestCase):
         finding = run / "findings" / finding_id
         finding.mkdir(parents=True)
         class_row = f"| Class | {klass} |\n" if klass else ""
-        (finding / "REPORT.md").write_text(
+        (finding / "report.md").write_text(
             f"# {finding_id}\n\n| Field | Value |\n| --- | --- |\n{class_row}"
             f"| File | src/sample.c |\n| Function | {function} |\n| Line | 42 |\n\n"
             "## Summary\n\nA report.\n",
@@ -166,7 +166,7 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.make_finding(run, "FIND-0003-novel", "app_other_func")
         unconfirmed = run / "findings" / "FIND-0004-pending"
         unconfirmed.mkdir()
-        (unconfirmed / "REPORT.md").write_text("| Function | open_entry |\n")
+        (unconfirmed / "report.md").write_text("| Function | open_entry |\n")
         members = self.root / "find-members.json"
         members.write_text(json.dumps({"findings": {
             "FIND-0001-leak": "harness", "FIND-0002-trap": "model-direct",

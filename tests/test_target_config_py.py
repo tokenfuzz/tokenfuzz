@@ -230,7 +230,7 @@ assert_eq("timing", loaded.attacker_controls_csv(),
 # own target.toml below the original output/<slug> config, and the nearest
 # config must win without scanning another target's output tree.
 pool_root = slug_dir / "benchmark" / "pool" / "harness"
-pool_report = pool_root / "crashes" / "CRASH-001" / "REPORT.md"
+pool_report = pool_root / "crashes" / "CRASH-001" / "report.md"
 pool_report.parent.mkdir(parents=True)
 pool_toml = pool_root / "target.toml"
 pool_toml.write_text('target = "pooled-demo"\n', encoding="utf-8")

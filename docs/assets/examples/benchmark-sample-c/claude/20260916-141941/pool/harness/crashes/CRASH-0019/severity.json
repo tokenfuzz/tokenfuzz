@@ -1,0 +1,11 @@
+{
+  "level": "High",
+  "primitive": "double-free",
+  "primitive_key": "double_free",
+  "report_sha1": "b6c020eca85ac6e43996f4921f8a88d983195cd0",
+  "schema_version": 5,
+  "score": 8.2,
+  "scored_at": "2026-09-16T15:01:30.064243+00:00",
+  "scorer_version": "severity-v5-negated-caller-actions",
+  "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:P/MAT:P"
+}

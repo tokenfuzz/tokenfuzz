@@ -152,7 +152,7 @@ class SealTests(unittest.TestCase):
         self.assertEqual(self._sealed(worker), (set(), {skeleton.name, held.name}))
         # Held again after a stamp: first-seen restarts from the completion
         # that follows, not the stamp that preceded the hold.
-        (held / ".promotion_pending").write_text("missing: REPORT.md\n", encoding="utf-8")
+        (held / ".promotion_pending").write_text("missing: report.md\n", encoding="utf-8")
         worker.observe()
         self.assertEqual(self._sealed(worker), (set(), {skeleton.name}))
         worker.launch(1, continuation=False)
@@ -332,7 +332,7 @@ class SealTests(unittest.TestCase):
              "command": "mkdir -p $R/findings/FIND-004-mine && cat > $R/findings/FIND-004-mine/report.md",
              "aggregated_output": "FIND-009-not-mine listed here\n"}},
             {"type": "item.completed", "item": {"type": "file_change",
-             "changes": [{"path": "/r/crashes/CRASH-003-1/REPORT.md", "kind": "update"}]}},
+             "changes": [{"path": "/r/crashes/CRASH-003-1/report.md", "kind": "update"}]}},
             {"type": "item.completed", "item": {"type": "agent_message", "text": "see FIND-010-prose"}},
         ])
         claude = self._transcript("claude", [

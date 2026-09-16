@@ -144,11 +144,11 @@ class BenchmarkMetricsTests(unittest.TestCase):
         (provisional / "input.bin").write_bytes(b"fixture")
         rejected = results / "crashes-rejected"
         (rejected / "CRASH-009").mkdir(parents=True)
-        (rejected / "REJECTED-CRASHES.md").write_text(
+        (rejected / "rejected-crashes.md").write_text(
             "# Rejected crashes\n\n## Rejected crash directories\n\n"
             "| ID | Site | Reason | Report |\n|:--|:--|:--|:--|\n"
             "| `CRASH-009` | app_parse app.c:91 | rejected | "
-            "[Link](CRASH-009/REPORT.md) |\n"
+            "[Link](CRASH-009/report.md) |\n"
         )
 
         findings = results / "findings"
@@ -185,7 +185,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         # gate as `incomplete missing: missing report.md`: not a report review
         # turned down, so it is not a rejected finding.
         (results / "findings-rejected" / "FIND-EMPTY").mkdir(parents=True)
-        (results / "findings-rejected" / "FIND-EMPTY" / "REJECTION.md").write_text(
+        (results / "findings-rejected" / "FIND-EMPTY" / "rejection.md").write_text(
             "# Rejected artifact\n\nReason: incomplete missing: missing report.md\n",
             encoding="utf-8",
         )
@@ -251,7 +251,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
         legacy = self.root / "legacy-row-rejected"
         (legacy / "crashes-rejected").mkdir(parents=True)
-        (legacy / "crashes-rejected" / "REJECTED-CRASHES.md").write_text(
+        (legacy / "crashes-rejected" / "rejected-crashes.md").write_text(
             "| ID | Crash site | Rejected at |\n|:--|:--|:--|\n"
             "| CR-a | app_parse.c:10 | t1 |\n"
             "| CR-b | app_parse.c:20 | t2 |\n"
@@ -646,7 +646,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             directory = crashes / name
             directory.mkdir(parents=True)
             (directory / "sanitizer.txt").write_text(ASAN, encoding="utf-8")
-            (directory / "REPORT.md").write_text(
+            (directory / "report.md").write_text(
                 "# Bounds issue\n\nCluster: CL-same\n", encoding="utf-8"
             )
             self.finalize_fixture_crash(directory)
@@ -693,7 +693,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
                     (directory / "sanitizer.txt").write_text(
                         ASAN, encoding="utf-8",
                     )
-                    (directory / "REPORT.md").write_text(
+                    (directory / "report.md").write_text(
                         f"# {name}\n\n{row}", encoding="utf-8",
                     )
                     self.finalize_fixture_crash(directory)
@@ -707,7 +707,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
                 )
 
     def test_a_blank_canonical_cluster_does_not_resurrect_a_stale_secondary_stamp(self) -> None:
-        # REPORT.md/report.md is the artifact's current report. If more than
+        # report.md/report.md is the artifact's current report. If more than
         # one recognized report form exists, a stale secondary stamp must not
         # override the canonical report and merge unrelated artifacts.
         results = self.root / "canonical-cluster-results"
@@ -772,7 +772,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "accept": False, "accept_count": 1, "reject_count": 1,
         })
 
-        crash_report = crash / "REPORT.md"
+        crash_report = crash / "report.md"
         crash_report.write_text("# Bounds issue\n", encoding="utf-8")
         (crash / "sanitizer.txt").write_text(ASAN, encoding="utf-8")
         self.write_json(crash / ".trigger-gate.json", {
@@ -2086,12 +2086,12 @@ class BenchmarkMetricsTests(unittest.TestCase):
             self.assertIsNotNone(validation_receipt.read_current(crash))
             self.assertIsNotNone(validation_receipt.read_current(finding))
             (rejected / "report.md").write_text("# rejected\n")
-            (rejected_crash / "REPORT.md").write_text("# Rejected crash\n")
-            (results / "crashes-rejected" / "REJECTED-CRASHES.md").write_text(
+            (rejected_crash / "report.md").write_text("# Rejected crash\n")
+            (results / "crashes-rejected" / "rejected-crashes.md").write_text(
                 "# Rejected crashes\n\n## Rejected crash directories\n\n"
                 "| ID | Site | Reason | Report |\n|:--|:--|:--|:--|\n"
                 "| `CRASH-OLD` | app_parse app.c:91 | rejected | "
-                "[Link](CRASH-OLD/REPORT.md) |\n"
+                "[Link](CRASH-OLD/report.md) |\n"
             )
             cell = self.make_cell(bench, f"{condition}-r1", condition, 1, 1, findings=1, rejected_findings=1)
             data = json.loads((cell / "cell.json").read_text())
@@ -2128,7 +2128,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             self.assertTrue((directory / "severity.json").is_file())
             self.assertIsNotNone(validation_receipt.read_current(directory))
         self.assertFalse(any(
-            (bench / "pool" / "crashes-rejected").glob("CELL-REJECTIONS-*.md")
+            (bench / "pool" / "crashes-rejected").glob("cell-rejections-*.md")
         ))
         members = json.loads((bench / "pool-members.json").read_text())
         self.assertEqual(set(members["crashes"].values()), {"model-direct", "harness"})
@@ -2139,7 +2139,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             condition_pool = bench / "pool" / condition
             self.assertEqual(len(list((condition_pool / "crashes").glob("CRASH-*"))), 1)
             self.assertEqual(len(list((condition_pool / "findings").glob("FIND-*"))), 1)
-            self.assertTrue((condition_pool / "findings-rejected" / "REJECTED-FINDINGS.md").is_file())
+            self.assertTrue((condition_pool / "findings-rejected" / "rejected-findings.md").is_file())
             for directory in (
                 *condition_pool.joinpath("crashes").glob("CRASH-*"),
                 *condition_pool.joinpath("findings").glob("FIND-*"),
@@ -2491,7 +2491,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "reason": reason,
             "report_sha1": report_identity.content_sha1(report),
         })
-        (rejected / "REJECTION.md").write_text(
+        (rejected / "rejection.md").write_text(
             f"# Rejected artifact\n\nReason: {reason}\n\n"
             "The original evidence is retained for audit.\n",
             encoding="utf-8",
@@ -2507,7 +2507,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         benchmark.build_pool(bench)
 
         pooled = bench / "pool" / "findings-rejected" / "FIND-REJECTED-0001"
-        index = (pooled.parent / "REJECTED-FINDINGS.md").read_text()
+        index = (pooled.parent / "rejected-findings.md").read_text()
         self.assertIn(reason, index)
 
     def test_rejection_artifact_is_the_final_disposition(self) -> None:
@@ -2522,7 +2522,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             "report_sha1": report_identity.content_sha1(report),
         })
         final_reason = "triggering state is not attacker-reachable"
-        (finding / "REJECTION.md").write_text(
+        (finding / "rejection.md").write_text(
             f"# Rejected artifact\n\nReason: {final_reason}\n",
             encoding="utf-8",
         )
@@ -2532,13 +2532,13 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(rows[0]["reason"], final_reason)
 
     def test_rejected_crash_index_renders_the_rejection_reason(self) -> None:
-        # Triage writes REJECTION.md on the reject path before moving the
+        # Triage writes rejection.md on the reject path before moving the
         # directory, so it is the one reason a pooled rejected crash carries.
         rejected = self.root / "crash-reason"
         with_reason = rejected / "CRASH-REJECTED-0001"
         with_reason.mkdir(parents=True)
         reason = "trigger-provenance: state not attacker-reachable"
-        (with_reason / "REJECTION.md").write_text(
+        (with_reason / "rejection.md").write_text(
             f"# Rejected artifact\n\nReason: {reason}\n", encoding="utf-8",
         )
         # No artifact: the row still renders, with an em-dash reason.
@@ -2546,7 +2546,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
         benchmark.write_rejected_crashes_index(rejected)
 
-        index = (rejected / "REJECTED-CRASHES.md").read_text(encoding="utf-8")
+        index = (rejected / "rejected-crashes.md").read_text(encoding="utf-8")
         self.assertIn(f"| `CRASH-REJECTED-0001` | — | {reason} |", index)
         self.assertIn("| `CRASH-REJECTED-0002` | — | — |", index)
 

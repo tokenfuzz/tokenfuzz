@@ -230,7 +230,7 @@ class CrashIdentityTests(unittest.TestCase):
     def test_falls_back_to_sanitizer_evidence(self) -> None:
         # a valid bundle whose stack lives only in sanitizer.txt — the evidence
         # the real crash clusterer keys on
-        (self.dir / "REPORT.md").write_text("# Crash\n\nNo stack here.\n")
+        (self.dir / "report.md").write_text("# Crash\n\nNo stack here.\n")
         (self.dir / "sanitizer.txt").write_text(
             "ERROR: AddressSanitizer: heap-use-after-free\n"
             "    #0 0x1 in xmlFree parser.c:120\n"
@@ -244,7 +244,7 @@ class CrashIdentityTests(unittest.TestCase):
     def test_unidentifiable_crash_is_none_not_a_directory_name(self) -> None:
         # pooling renames CRASH-001-agent-name to CRASH-0001, so a name key
         # never joins; admit the unknown instead of faking a join
-        (self.dir / "REPORT.md").write_text("# Crash\n\nNo stack anywhere.\n")
+        (self.dir / "report.md").write_text("# Crash\n\nNo stack anywhere.\n")
         self.assertIsNone(benchmark_graph._signature(self.dir, "crash"))
 
 
@@ -259,7 +259,7 @@ class ClusterMembershipTimingTests(unittest.TestCase):
     def _crash(self, name: str, frame: str) -> None:
         d = self.run / "pool" / "crashes" / name
         d.mkdir(parents=True)
-        (d / "REPORT.md").write_text(
+        (d / "report.md").write_text(
             f"ERROR: AddressSanitizer: heap-use-after-free\n"
             f"    #0 0x1 in {frame}\n", encoding="utf-8")
 

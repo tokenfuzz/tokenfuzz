@@ -175,7 +175,7 @@ pre-demote such a crash to `findings/` or discard it: file the reproducer and
 let triage make that call. (Only source-disproved misuse and
 the auto-quarantine classes below are kept out of `crashes/`.) Filing one is
 cheap; re-reaching it is not — a `NOT-REPORTABLE` row in
-`crashes/CRASH-CLUSTERS.md` is a mechanism already reviewed and credited
+`crashes/crash-clusters.md` is a mechanism already reviewed and credited
 nothing, so another route to the same mechanism earns nothing either. A
 neighbouring code path is a separate question: reachability is per-trigger,
 and one can be externally-reachable beside a crash that is not.
@@ -189,9 +189,9 @@ plain stack-overflow. Filing these wastes work — the harness moves them to
 same-origin, cross-origin, sandbox, privilege-boundary, auth, injection, info
 disclosure, crypto, race, logic flaw — with or without a reproducer.
 
-Before filing: grep `<RESULTS_DIR>/crashes-rejected/REJECTED-CRASHES.md` for your crash site.
+Before filing: grep `<RESULTS_DIR>/crashes-rejected/rejected-crashes.md` for your crash site.
 
-**Bundle layout (post-triage, automatic):** after a crash dir passes triage, the harness runs `bin/export-repro` to convert it into a maintainer-facing bundle. Root files become `REPORT.md`, `reproduce.sh`, `input.<ext>`, `harness.c` (if applicable), and `sanitizer.txt` — one command (`./reproduce.sh /path/to/src`) reproduces against a clean upstream checkout. Audit-side originals (your `report.md`, `reproducer.sh`, H-prefixed scratch artifacts) move into `<crash>/.audit/` for provenance.
+**Bundle layout (post-triage, automatic):** after a crash dir passes triage, the harness runs `bin/export-repro` to convert it into a maintainer-facing bundle. Root files become `report.md` (rewritten from yours), `reproduce.sh`, `input.<ext>`, `harness.c` (if applicable), and `sanitizer.txt` — one command (`./reproduce.sh /path/to/src`) reproduces against a clean upstream checkout. Audit-side originals (your `report.md` draft, `reproducer.sh`, H-prefixed scratch artifacts) move into `<crash>/.audit/` for provenance.
 
 ---
 
@@ -204,7 +204,7 @@ Required:
 - A report file at the FIND root — `report.md` or `description.md` (markdown). `report.html` is generated automatically by the harness; you do not need to write it. Other artifacts (testcase, sanitizer output, `affected-files.txt`) are welcome but optional.
 - Keep FIND/CRASH bundles self-contained: save evidence as regular files, never symlinks. For an impractically large input, save a compact generator instead.
 - The report must name a concrete location (file:function:line, endpoint, config key, etc.), state the security issue class, and give a rationale a reviewer can act on (impact, caller control, what is wrong).
-- Include the standard bare-label fields the crash gate expects, including `Strategy: S<N>` (S1, S2, S3, S4, S5, S6, S7, S8, or REF) so FINDING-CLUSTERS attributes the finding to the strategy that produced it.
+- Include the standard bare-label fields the crash gate expects, including `Strategy: S<N>` (S1, S2, S3, S4, S5, S6, S7, S8, or REF) so finding-clusters attributes the finding to the strategy that produced it.
 
 **Do NOT create FINDs for:** vague suspicions with no nameable location, "code looks suspicious" without saying why, provably unreachable code, OR pure correctness / data-integrity / robustness / spec-deviation bugs that don't cross a security boundary. "Empty input decodes to wrong bytes", "roundtrip drops whitespace", "format differs from spec" are upstream quality bugs, not security findings — record them with `bin/state add-note` and move on, don't file under `findings/`. The harness gate moves rejected FINDs to `findings-rejected/`; saving the cycles by not filing them in the first place is faster.
 

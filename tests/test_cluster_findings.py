@@ -96,7 +96,7 @@ class ClusterFindingsTests(unittest.TestCase):
         reports = self.populate_core_fixtures()
         process = self.run_cluster()
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-        index = self.results / "findings" / "FINDING-CLUSTERS.md"
+        index = self.results / "findings" / "finding-clusters.md"
         html = index.with_suffix(".html")
         self.assertTrue(index.is_file())
         self.assertTrue(html.is_file())
@@ -161,7 +161,7 @@ class ClusterFindingsTests(unittest.TestCase):
             "auth:bypass", severity="high", root=aggregate / "codex" / "results" / "findings",
         )
         self.assertEqual(self.run_cluster(aggregate).returncode, 0)
-        index = (aggregate / "FINDING-CLUSTERS.md").read_text(encoding="utf-8")
+        index = (aggregate / "finding-clusters.md").read_text(encoding="utf-8")
         self.assertIn("claude/FIND-AGG-1", index)
         self.assertIn("codex/FIND-AGG-2", index)
         self.assertIn("duplicate of codex/FIND-AGG-2", first.read_text())
@@ -176,7 +176,7 @@ class ClusterFindingsTests(unittest.TestCase):
             "auth:bypass", root=nested / "codex" / "results" / "findings",
         )
         self.assertEqual(self.run_cluster(nested).returncode, 0)
-        self.assertIn("codex/FIND-NEST-1", (nested / "FINDING-CLUSTERS.md").read_text())
+        self.assertIn("codex/FIND-NEST-1", (nested / "finding-clusters.md").read_text())
 
         process = self.run_cluster(self.root / "output" / "samples", "--json")
         self.assertEqual(process.returncode, 0, process.stderr)
@@ -222,8 +222,8 @@ class ClusterFindingsTests(unittest.TestCase):
         self.assertEqual(self.cluster_id(unproven), self.cluster_id(proven))
         self.assertTrue((unproven.parent / ".dup-of").is_file())
         self.assertFalse((proven.parent / ".dup-of").exists())
-        markdown = (self.results / "findings" / "FINDING-CLUSTERS.md").read_text()
-        html = (self.results / "findings" / "FINDING-CLUSTERS.html").read_text()
+        markdown = (self.results / "findings" / "finding-clusters.md").read_text()
+        html = (self.results / "findings" / "finding-clusters.html").read_text()
         self.assertIn("Needs review", markdown)
         self.assertIn("NEEDS REVIEW", markdown)
         self.assertIn("sev-Needs-review", html)
@@ -261,7 +261,7 @@ class ClusterFindingsTests(unittest.TestCase):
         process = self.run_cluster()
 
         self.assertEqual(process.returncode, 0, process.stderr)
-        rows = (self.results / "findings" / "FINDING-CLUSTERS.md").read_text()
+        rows = (self.results / "findings" / "finding-clusters.md").read_text()
         uncredited_row = next(
             line for line in rows.splitlines() if "FIND-N1" in line
         )
@@ -296,7 +296,7 @@ class ClusterFindingsTests(unittest.TestCase):
         self.assertEqual(process.returncode, 0, process.stderr)
         row = next(
             line for line in
-            (self.results / "findings" / "FINDING-CLUSTERS.md").read_text().splitlines()
+            (self.results / "findings" / "finding-clusters.md").read_text().splitlines()
             if "FIND-N3" in line
         )
         self.assertNotIn("NOT-REPORTABLE", row)

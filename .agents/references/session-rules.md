@@ -180,9 +180,9 @@ can dump tens of KB of JSONL into the transcript; use
   snapshot. Each accessor is ~6–10× smaller than the equivalent `tail` and
   returns only the columns triage actually needs. The full files stay on disk; reach for
   `--no-cap`/`--limit 0`/raw `tail` only when you genuinely need every field.
-- For `crashes/CRASH-*/REPORT.md` and `findings/FIND-*/REPORT.md`: use
+- For `crashes/CRASH-*/report.md` and `findings/FIND-*/report.md`: use
   `bin/state show-crash`, `list-crashes`, `show-finding`, and
-  `list-findings` first. Read the full `REPORT.md` only when editing that
+  `list-findings` first. Read the full `report.md` only when editing that
   report or reproducing that specific artifact.
 - For broad source/repo searches, use `bin/rg-safe <rg args>` instead of bare
   `rg`. It caps output at ~20 KiB, then lists every file's hit count so you
@@ -334,10 +334,10 @@ PATCH_CONTEXT=N | PATCH_MAX_LINES=N | PATCH_MAX_BYTES=N   widen show-patch
 
 ## Rejected Crashes & Findings
 
-Before filing `crashes/CRASH-*/`, check `crashes-rejected/REJECTED-CRASHES.md`.
+Before filing `crashes/CRASH-*/`, check `crashes-rejected/rejected-crashes.md`.
 Before filing `findings/FIND-*/`, do BOTH:
 1. Confirm the issue is a SECURITY finding — crosses or weakens a security boundary, lets an caller read/write/escalate/bypass/leak/corrupt. Pure correctness, data-integrity, robustness, or spec-deviation bugs are NOT security findings; log them as state notes only. The harness gate moves rejected FINDs to `findings-rejected/`.
-2. Scan `findings/FINDING-CLUSTERS.md` for an existing FIND on the same location. The Status column flags content-less directories (NEEDS CONTENT) — fix those in place instead of opening a duplicate.
+2. Scan `findings/finding-clusters.md` for an existing FIND on the same location. The Status column flags content-less directories (NEEDS CONTENT) — fix those in place instead of opening a duplicate.
 
 Don't re-file already-rejected crash classes.
 
@@ -357,7 +357,7 @@ value the docs do not forbid, reproduced through a public boundary — DO belong
 contract violation. Belonging in `crashes/` is a filing rule, not a prediction
 of credit: a trigger outside the target's `attacker_controls` earns none, so
 file such a crash as a by-product and do not spend a session re-reaching it —
-a `NOT-REPORTABLE` row in `crashes/CRASH-CLUSTERS.md` is a mechanism already
+a `NOT-REPORTABLE` row in `crashes/crash-clusters.md` is a mechanism already
 credited nothing. A neighbouring code path is judged on its own trigger, not
 the neighbour's. For a borderline caller-misuse / harness-artifact case, keep
 iterating toward a legitimate input boundary or mark the hypothesis DISCARDED.

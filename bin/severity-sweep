@@ -2,7 +2,7 @@
 """Re-score the UNIQUE cluster representatives of an audit results pool and emit
 one CSV row per finding/crash — a deterministic, reproducible severity sweep.
 
-Walking the *canonical* cluster reps (from FINDING-CLUSTERS.md / CRASH-CLUSTERS.md)
+Walking the *canonical* cluster reps (from finding-clusters.md / crash-clusters.md)
 rather than every CRASH-*/FIND-* copy avoids double-counting clustered duplicates,
 so the row counts match the benchmark's "Unique findings" / "Unique crashes".
 
@@ -28,7 +28,7 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
 _SEVERITY = _REPO / "bin" / "severity"
-# Canonical column in a *-CLUSTERS.md row: "... | [CRASH-0008](CRASH-0008/REPORT.md) | ..."
+# Canonical column in a *-clusters.md row: "... | [CRASH-0008](CRASH-0008/report.md) | ..."
 _CANON_RE = re.compile(r"\[((?:CRASH|FIND)-\d+)\]\([^)]*\)")
 
 
@@ -48,11 +48,11 @@ def _canonical_ids(clusters_md: Path) -> list[str]:
     return list(seen)
 
 
-def _dirs(pool: Path, kind: str, pref: str) -> list[Path]:
+def _dirs(pool: Path, kind: str, pref: str, index_name: str) -> list[Path]:
     base = pool / kind
     if not base.is_dir():
         return []
-    canon = _canonical_ids(base / f"{pref}-CLUSTERS.md")
+    canon = _canonical_ids(base / index_name)
     if canon:
         return [base / cid for cid in canon if (base / cid).is_dir()]
     return sorted(p for p in base.glob(f"{pref}-*") if p.is_dir())
@@ -70,9 +70,12 @@ def _score(item: Path) -> dict:
 
 def _emit(pool: Path, scope: str) -> int:
     n = 0
-    for kind, pref, itype in (("findings", "FIND", "finding"), ("crashes", "CRASH", "crash")):
-        canon = set(_canonical_ids(pool / kind / f"{pref}-CLUSTERS.md"))
-        for item in _dirs(pool, kind, pref):
+    for kind, pref, itype, index_name in (
+        ("findings", "FIND", "finding", "finding-clusters.md"),
+        ("crashes", "CRASH", "crash", "crash-clusters.md"),
+    ):
+        canon = set(_canonical_ids(pool / kind / index_name))
+        for item in _dirs(pool, kind, pref, index_name):
             s = _score(item)
             cv = s.get("cvss") or {}
             vec = cv.get("vector") or ""
@@ -91,8 +94,8 @@ def main(argv: list[str]) -> int:
     pools: list[Path] = []
     if argv and argv[0] == "--batch":
         root = Path(argv[1])
-        pools = sorted({p.parent.parent for p in root.rglob("findings/FINDING-CLUSTERS.md")}
-                       | {p.parent.parent for p in root.rglob("crashes/CRASH-CLUSTERS.md")})
+        pools = sorted({p.parent.parent for p in root.rglob("findings/finding-clusters.md")}
+                       | {p.parent.parent for p in root.rglob("crashes/crash-clusters.md")})
     else:
         pools = [Path(a) for a in argv]
     for pool in pools:

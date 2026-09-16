@@ -1,0 +1,11 @@
+{
+  "level": "Low",
+  "primitive": "heap READ of 512 byte(s)",
+  "primitive_key": "heap_read_big",
+  "report_sha1": "00e742a5ee21f72aadf08dd53d614d912155d4a3",
+  "schema_version": 5,
+  "score": 2.9,
+  "scored_at": "2026-09-16T15:01:30.060108+00:00",
+  "scorer_version": "severity-v5-negated-caller-actions",
+  "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:N/VI:N/VA:L/SC:N/SI:N/SA:N/E:P/MAT:P"
+}

@@ -37,6 +37,7 @@ from pathlib import Path
 
 import benchmark
 import benchmark_graph
+import report_identity
 import severity_receipt
 import stack_frames
 import strategies
@@ -106,10 +107,14 @@ def _report_href(directory: Path, basename: str) -> str:
 
 
 def _artifact_href(directory: Path) -> str:
-    for name in ("report.html", "REPORT.html", "report.md", "REPORT.md"):
-        if (directory / name).is_file():
-            return _href(directory / name)
-    return ""
+    # An exported pool copy may hold only the rendered page; a directory with
+    # both links the page. Both are read from the directory's own listing.
+    report = report_identity.exact_child_file(
+        directory, ("report.html", *report_identity.REPORT_NAMES))
+    if report is None:
+        return ""
+    rendered = report.with_suffix(".html")
+    return _href(rendered if rendered.is_file() else report)
 
 
 def _artifact_title(directory: Path) -> str:
@@ -120,10 +125,8 @@ def _artifact_title(directory: Path) -> str:
     summary stands in, trimmed to a title's length. Neither is invented: both
     are the report's own words.
     """
-    for name in ("report.md", "REPORT.md"):
-        candidate = directory / name
-        if not candidate.is_file():
-            continue
+    candidate = report_identity.find_report(directory)
+    if candidate is not None:
         fallback = ""
         try:
             with candidate.open(encoding="utf-8", errors="replace") as stream:
@@ -1140,7 +1143,7 @@ def _count_block(condition: dict, kind: str, bench_dir: Path | None,
         rejected = condition.get("unique_rejected_finding_clusters")
         rejected_upper = bool(condition.get("rejected_finding_clusters_upper_bound"))
         pool_sub, rejected_sub = "findings", "findings-rejected"
-        basename, rejected_basename = "FINDING-CLUSTERS", "REJECTED-FINDINGS"
+        basename, rejected_basename = "finding-clusters", "rejected-findings"
     else:
         unique = _int(condition.get("unique_crash_clusters"))
         mplus = _int(condition.get("medium_plus_bugs"))
@@ -1151,7 +1154,7 @@ def _count_block(condition: dict, kind: str, bench_dir: Path | None,
         rejected = condition.get("unique_rejected_crash_clusters")
         rejected_upper = bool(condition.get("rejected_crash_clusters_upper_bound"))
         pool_sub, rejected_sub = "crashes", "crashes-rejected"
-        basename, rejected_basename = "CRASH-CLUSTERS", "REJECTED-CRASHES"
+        basename, rejected_basename = "crash-clusters", "rejected-crashes"
     label = benchmark._unique_with_medium_plus(
         unique, mplus, unjudged, classes, floor=floor, retained=retained)
     href = rejected_href = ""

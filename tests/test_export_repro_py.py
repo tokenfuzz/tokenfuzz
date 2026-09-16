@@ -205,7 +205,7 @@ assert_eq(False, er._bundle_text_has_internal_ref(
     "leak scan: bare keyword in prose is not flagged")
 
 # ─── Path normalization ─────────────────────────────────────────
-# A REPORT.md inside Docker carries /root/work/... paths verbatim.
+# A report.md inside Docker carries /root/work/... paths verbatim.
 # The normalizer should rewrite target_root → targets/<slug> and
 # strip the results_dir prefix so the leak scan no longer fires.
 cfg_docker = er.target_config.Config()
@@ -249,7 +249,7 @@ with tempfile.TemporaryDirectory() as td:
     er._normalize_bundle_file(p, cfg_docker)
     assert_eq(payload, p.read_bytes(), "normalize: binary file untouched (NUL guard)")
 
-    q = Path(td) / "REPORT.md"
+    q = Path(td) / "report.md"
     q.write_text("see /root/work/targets/zlib/gzread.c\n", encoding="utf-8")
     er._normalize_bundle_file(q, cfg_docker)
     assert_in("targets/zlib/gzread.c", q.read_text(encoding="utf-8"),
@@ -257,50 +257,32 @@ with tempfile.TemporaryDirectory() as td:
     assert_not_in("/root/work/targets/zlib", q.read_text(encoding="utf-8"),
               "normalize: text file no longer leaks raw prefix")
 
-# _install_with_exact_case: guard against case-insensitive FS leaving
-# the bundled REPORT.md visible under the agent's lowercase report.md.
-# On macOS APFS (case-insensitive but case-preserving) and Docker
-# Desktop bind mounts that ride on top of it, writing to "REPORT.md"
-# when a "report.md" entry already exists silently overwrites the bytes
-# but leaves the directory entry under the original lowercase case. The
-# exact-case bundle gate in lib/triage.py then
-# reports "missing REPORT.md" and recycles the crash, eventually
-# auto-rejecting it after CRASH_PROMOTION_PENDING_MAX passes. This test
-# locks in the install helper that unlinks any case-different sibling
-# before copying and falls back to os.rename if the FS still serves the
-# old case.
+# _install_with_exact_case: on macOS APFS (case-insensitive but
+# case-preserving) and Docker Desktop bind mounts that ride on top of it,
+# writing "report.md" while a differently-cased entry exists silently
+# overwrites the bytes but leaves the directory entry under the old spelling,
+# which the exact-name bundle gate in lib/triage.py then reports as missing.
+# This test locks in the install helper that clears any case-different
+# sibling so the entry lands under the requested name.
 with tempfile.TemporaryDirectory() as td:
     out_dir = Path(td) / "out"
     out_dir.mkdir()
-    # Pre-seed the lowercase entry that would defeat a naive copy.
-    (out_dir / "report.md").write_text("stale agent draft\n", encoding="utf-8")
-    src = Path(td) / "stage" / "REPORT.md"
+    (out_dir / "REPORT.md").write_text("differently cased entry\n", encoding="utf-8")
+    src = Path(td) / "stage" / "report.md"
     src.parent.mkdir()
-    src.write_text("# canonical bundled report\n", encoding="utf-8")
+    src.write_text("# bundled report\n", encoding="utf-8")
 
-    # Detect host case-sensitivity by seeing whether the lowercase
-    # sibling above is even visible under the uppercase name. On
-    # case-sensitive filesystems the two are independent entries; on
-    # case-insensitive filesystems they resolve to one.
-    case_insensitive = (out_dir / "REPORT.md").is_file()
-
-    er._install_with_exact_case(src, out_dir / "REPORT.md")
+    er._install_with_exact_case(src, out_dir / "report.md")
     entries = sorted(p.name for p in out_dir.iterdir())
-    assert_in("REPORT.md", entries,
-              "install_with_exact_case: canonical case present after install")
-    assert_not_in("report.md", entries,
-                  "install_with_exact_case: lowercase sibling cleared")
-    if case_insensitive:
-        assert_eq(["REPORT.md"], entries,
-                  "install_with_exact_case: exactly one entry on "
-                  "case-insensitive FS (the staged bundle file)")
-    assert_in("canonical bundled report",
-              (out_dir / "REPORT.md").read_text(encoding="utf-8"),
+    assert_eq(["report.md"], entries,
+              "install_with_exact_case: exactly the requested spelling remains")
+    assert_in("bundled report",
+              (out_dir / "report.md").read_text(encoding="utf-8"),
               "install_with_exact_case: staged content installed")
 
     # Re-running on a clean dir is a no-op (idempotent).
-    er._install_with_exact_case(src, out_dir / "REPORT.md")
-    assert_eq(["REPORT.md"], sorted(p.name for p in out_dir.iterdir()),
+    er._install_with_exact_case(src, out_dir / "report.md")
+    assert_eq(["report.md"], sorted(p.name for p in out_dir.iterdir()),
               "install_with_exact_case: idempotent on clean dir")
 
 # ─── Advisory detection ─────────────────────────────────────────
@@ -971,7 +953,7 @@ assert_eq("cli", v7,
 # fallback, build_report_md emits an auto Fields table with `—` in every
 # slot, and the rendered HTML carries those empty placeholders. The
 # regression that surfaced this — multiple `Caller contract` /
-# `Boundary` rows showing `—` in REPORT.html — must not return.
+# `Boundary` rows showing `—` in report.html — must not return.
 table_report = TMP / "table-report.md"
 table_report.write_text("""\
 # CRASH-T-1
@@ -1103,7 +1085,7 @@ assert_eq("obeyed",
           "read_bare_field: bare label wins over table when both present")
 
 with tempfile.TemporaryDirectory() as td:
-    sev_report = Path(td) / "REPORT.md"
+    sev_report = Path(td) / "report.md"
     sev_report.write_text(
         "- **Severity**: High (CVSS-BTE 4.0: 8.7 High; "
         "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:P/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N; primitive=x)\n",
@@ -1155,7 +1137,7 @@ Body prose.
 # AFTER body prose (not in the H1 preamble). Some agents put a one-paragraph
 # intro between the H1 and the Fields section — without this rule, the
 # auto-header's `## Fields` plus the agent's leftover heading produce a
-# duplicate `## Fields` in the bundled REPORT.md.
+# duplicate `## Fields` in the bundled report.md.
 prose_then_fields_input = """\
 # CRASH-X-3 — short title
 
@@ -2141,7 +2123,7 @@ assert_not_in("STALE_WRAPPER", bound_repro,
 
 if ok:
     # Assert bundle files exist.
-    for f in ("REPORT.md", "reproduce.sh", "sanitizer.txt"):
+    for f in ("report.md", "reproduce.sh", "sanitizer.txt"):
         if (crash_dir / f).is_file():
             passed(f"end-to-end: {f} written")
         else:
@@ -2161,44 +2143,44 @@ if ok:
     else:
         failed("end-to-end: original report.md migrated into .audit/")
 
-    # REPORT.md content shape.
-    report_text = (crash_dir / "REPORT.md").read_text(encoding="utf-8")
-    assert_in("# CRASH-X-1", report_text, "end-to-end REPORT.md: h1 present")
-    assert_in("## Fields", report_text, "end-to-end REPORT.md: ## Fields present")
+    # report.md content shape.
+    report_text = (crash_dir / "report.md").read_text(encoding="utf-8")
+    assert_in("# CRASH-X-1", report_text, "end-to-end report.md: h1 present")
+    assert_in("## Fields", report_text, "end-to-end report.md: ## Fields present")
     # Layout: the `## Summary` section leads the report, placed ABOVE the
     # Fields table (matching the finding-report layout). Field lookups read by
     # label, not position, so the reorder is purely cosmetic.
     if 0 <= report_text.find("## Summary") < report_text.find("## Fields"):
-        passed("end-to-end REPORT.md: Summary section precedes Fields")
+        passed("end-to-end report.md: Summary section precedes Fields")
     else:
-        failed("end-to-end REPORT.md: Summary section precedes Fields")
-    assert_in("| Primitive", report_text, "end-to-end REPORT.md: Primitive row present")
-    assert_in("Surface: ", report_text, "end-to-end REPORT.md: bare Surface label present")
-    assert_in("Trigger source: bytes", report_text, "end-to-end REPORT.md: trigger source carried over")
-    assert_in("Caller contract: obeyed", report_text, "end-to-end REPORT.md: caller contract carried over")
-    assert_in("Parameter control: direct", report_text, "end-to-end REPORT.md: parameter control carried over")
-    assert_in("Dedup frames", report_text, "end-to-end REPORT.md: dedup frames row present")
+        failed("end-to-end report.md: Summary section precedes Fields")
+    assert_in("| Primitive", report_text, "end-to-end report.md: Primitive row present")
+    assert_in("Surface: ", report_text, "end-to-end report.md: bare Surface label present")
+    assert_in("Trigger source: bytes", report_text, "end-to-end report.md: trigger source carried over")
+    assert_in("Caller contract: obeyed", report_text, "end-to-end report.md: caller contract carried over")
+    assert_in("Parameter control: direct", report_text, "end-to-end report.md: parameter control carried over")
+    assert_in("Dedup frames", report_text, "end-to-end report.md: dedup frames row present")
     assert_in("foo /src/foo.c:1 -> bar /src/bar.c:2 -> baz /src/baz.c:3",
-              report_text, "end-to-end REPORT.md: top-three dedup frames present")
-    assert_in("## Expected sanitizer output", report_text, "end-to-end REPORT.md: expected sanitizer block")
+              report_text, "end-to-end report.md: top-three dedup frames present")
+    assert_in("## Expected sanitizer output", report_text, "end-to-end report.md: expected sanitizer block")
     assert_in("==12345==ERROR: AddressSanitizer: heap-buffer-overflow on address 0xbeef at pc 0xcafe",
-              report_text, "end-to-end REPORT.md: raw ASan top line retained")
+              report_text, "end-to-end report.md: raw ASan top line retained")
     assert_in("READ of size 16 at 0xbeef thread T0",
-              report_text, "end-to-end REPORT.md: raw ASan access line retained")
+              report_text, "end-to-end report.md: raw ASan access line retained")
     assert_in("allocated by thread T0 here:",
-              report_text, "end-to-end REPORT.md: allocation stack section retained")
+              report_text, "end-to-end report.md: allocation stack section retained")
     assert_in("#1 0xabcd in make_input /src/alloc.c:7",
-              report_text, "end-to-end REPORT.md: raw ASan stack section retained")
+              report_text, "end-to-end report.md: raw ASan stack section retained")
     assert_not_in("Shadow bytes around the buggy address:",
-                  report_text, "end-to-end REPORT.md: shadow dump omitted from excerpt")
+                  report_text, "end-to-end report.md: shadow dump omitted from excerpt")
     assert_not_in("[run-asan] generic runner timed out",
-                  report_text, "end-to-end REPORT.md: incomplete pre-summary run omitted")
+                  report_text, "end-to-end report.md: incomplete pre-summary run omitted")
     assert_in("Reproduction rate", report_text,
-              "end-to-end REPORT.md: reproduction rate present")
+              "end-to-end report.md: reproduction rate present")
     assert_in("5/5", report_text,
-              "end-to-end REPORT.md: 5/5 from CRASH_RATE captured")
+              "end-to-end report.md: 5/5 from CRASH_RATE captured")
     assert_in("(set by bin/cluster-crashes)", report_text,
-              "end-to-end REPORT.md: cluster placeholder present")
+              "end-to-end report.md: cluster placeholder present")
 
     # reproduce.sh content: cli-with-input template (cmake build, asan_bin resolve)
     repro = (crash_dir / "reproduce.sh").read_text(encoding="utf-8")
@@ -2263,7 +2245,7 @@ CRASH_RATE: 5/5
 
 # Agent's report.md uses the modern `## Fields` table form, NO bare-label
 # duplicates below. This is exactly the shape that previously yielded
-# empty `—` values + a duplicated Fields section in REPORT.html.
+# empty `—` values + a duplicated Fields section in report.html.
 (table_crash_dir / "report.md").write_text("""\
 # CRASH-T-1
 
@@ -2299,11 +2281,11 @@ assert_eq(0, result_t.returncode,
           f"export-repro (table form) exits 0 (stdout={result_t.stdout[-200:]!r} stderr={result_t.stderr[-200:]!r})")
 
 if result_t.returncode == 0:
-    report_t = (table_crash_dir / "REPORT.md").read_text(encoding="utf-8")
+    report_t = (table_crash_dir / "report.md").read_text(encoding="utf-8")
 
     # Single Fields section (no duplication of the agent's table).
     assert_eq(1, report_t.count("## Fields"),
-              "table form REPORT.md: exactly one ## Fields section")
+              "table form report.md: exactly one ## Fields section")
 
     # All required field rows are populated — no `—` placeholders, no `?`.
     required_rows = (
@@ -2317,53 +2299,53 @@ if result_t.returncode == 0:
     for label in required_rows:
         # Row exists.
         assert_in(f"| {label}", report_t,
-                  f"table form REPORT.md: '{label}' row present")
+                  f"table form report.md: '{label}' row present")
         # Row is NOT empty (no `| Label ... | — |` and no `| ? |`).
         empty_re = re.compile(
             rf"^\|\s*{re.escape(label)}\s*\|\s*[—?]\s*\|\s*$",
             re.MULTILINE,
         )
         if empty_re.search(report_t):
-            failed(f"table form REPORT.md: '{label}' row is non-empty",
+            failed(f"table form report.md: '{label}' row is non-empty",
                    f"row matched the empty pattern (— or ?)")
         else:
-            passed(f"table form REPORT.md: '{label}' row is non-empty")
+            passed(f"table form report.md: '{label}' row is non-empty")
 
     # Specific values flow through from the agent's table to the auto-
     # generated header.
     assert_in("call-sequence", report_t,
-              "table form REPORT.md: 'call-sequence' trigger flows through")
+              "table form report.md: 'call-sequence' trigger flows through")
     assert_in("obeyed", report_t,
-              "table form REPORT.md: 'obeyed' contract flows through")
+              "table form report.md: 'obeyed' contract flows through")
     assert_in("trusted caller adds, replaces, frees", report_t,
-              "table form REPORT.md: Boundary text flows through")
+              "table form report.md: Boundary text flows through")
     assert_in("call ordering and the entity name", report_t,
-              "table form REPORT.md: Caller controls text flows through")
+              "table form report.md: Caller controls text flows through")
     assert_in("root_attach_child", report_t,
-              "table form REPORT.md: Trusted caller actions text flows through")
+              "table form report.md: Trusted caller actions text flows through")
     # Reproduction rate populated, not '?'.
     assert_in("| Reproduction rate     | 5/5 |", report_t,
-              "table form REPORT.md: Reproduction rate is 5/5 (not '?')")
+              "table form report.md: Reproduction rate is 5/5 (not '?')")
 
     # Agent's body content survives.
     assert_in("Test summary body for table-form reports.", report_t,
-              "table form REPORT.md: agent's Summary body preserved")
+              "table form report.md: agent's Summary body preserved")
     assert_in("## Suggested fix", report_t,
-              "table form REPORT.md: agent's Suggested fix preserved")
+              "table form report.md: agent's Suggested fix preserved")
     assert_in("Mirror the unlink path.", report_t,
-              "table form REPORT.md: agent's Suggested fix prose preserved")
+              "table form report.md: agent's Suggested fix prose preserved")
 
-    # ── Render REPORT.html and check the same fields are non-empty ──
+    # ── Render report.html and check the same fields are non-empty ──
     render_proc = subprocess.run(
         [str(ROOT / "bin" / "render-md"), "--html-sibling",
-         str(table_crash_dir / "REPORT.md")],
+         str(table_crash_dir / "report.md")],
         capture_output=True, text=True, env=env,
     )
     assert_eq(0, render_proc.returncode,
               f"render-md exits 0 (stderr={render_proc.stderr[-200:]!r})")
-    html_path = table_crash_dir / "REPORT.html"
+    html_path = table_crash_dir / "report.html"
     if html_path.is_file():
-        passed("table form REPORT.html: emitted by render-md")
+        passed("table form report.html: emitted by render-md")
         report_html = html_path.read_text(encoding="utf-8")
         # No row in the Fields table should render as just `—` or `?` for
         # the required fields. Match the rendered HTML row pattern:
@@ -2375,38 +2357,38 @@ if result_t.returncode == 0:
                 rf'<td class="left">\s*[—?]\s*</td>',
             )
             if empty_html_re.search(report_html):
-                failed(f"table form REPORT.html: '{label}' row is non-empty",
+                failed(f"table form report.html: '{label}' row is non-empty",
                        "row rendered as empty (— or ?)")
             else:
-                passed(f"table form REPORT.html: '{label}' row is non-empty")
+                passed(f"table form report.html: '{label}' row is non-empty")
         # Specific value assertions in the HTML.
         assert_in("obeyed", report_html,
-                  "table form REPORT.html: 'obeyed' contract rendered")
+                  "table form report.html: 'obeyed' contract rendered")
         assert_in("call-sequence", report_html,
-                  "table form REPORT.html: 'call-sequence' trigger rendered")
+                  "table form report.html: 'call-sequence' trigger rendered")
         assert_in("5/5", report_html,
-                  "table form REPORT.html: '5/5' reproduction rate rendered")
+                  "table form report.html: '5/5' reproduction rate rendered")
         # No more than one fields-table is emitted (count of <th>Field</th>).
         # The collapsible Severity rationale section also has a Field-style
         # table header, so allow ≤2; the duplicate-bug variant produced ≥3.
         field_table_headers = report_html.count('<th class="left">Field</th>')
         if field_table_headers <= 1:
-            passed("table form REPORT.html: single Fields table (no duplicate)")
+            passed("table form report.html: single Fields table (no duplicate)")
         else:
-            failed("table form REPORT.html: single Fields table (no duplicate)",
+            failed("table form report.html: single Fields table (no duplicate)",
                    f"found {field_table_headers} '<th>Field</th>' occurrences")
     else:
-        failed("table form REPORT.html: emitted by render-md",
+        failed("table form report.html: emitted by render-md",
                f"missing {html_path}")
 
 
 # ─── End-to-end: severity is replayed on re-bundle ──
 #
-# Regression: bin/export-repro rebuilds REPORT.md from the agent's
+# Regression: bin/export-repro rebuilds report.md from the agent's
 # report.md, which never carries the `## Severity rationale` section
 # written by bin/severity. Without the replay step a second bundle drops
 # the section even though severity.json (the scored marker) is on disk.
-# This block writes that marker and asserts the rebuilt REPORT.md gets
+# This block writes that marker and asserts the rebuilt report.md gets
 # the Severity section re-applied.
 
 reach_crash_dir = results_dir / "crashes" / "CRASH-R-1"
@@ -2461,7 +2443,7 @@ if result_r.returncode == 0:
         [str(ROOT / "bin" / "severity"), "--report", str(reach_crash_dir)],
         capture_output=True, text=True, env=env, cwd=output_root,
     )
-    report_r = (reach_crash_dir / "REPORT.md").read_text(encoding="utf-8")
+    report_r = (reach_crash_dir / "report.md").read_text(encoding="utf-8")
     assert_in("## Severity rationale", report_r,
               "severity replay: '## Severity rationale' section emitted")
     # severity.json must remain at root (bundle filename, not migrated).
@@ -2480,7 +2462,7 @@ if result_r.returncode == 0:
               f"export-repro (second pass) exits 0 "
               f"(stderr={result_r2.stderr[-200:]!r})")
     if result_r2.returncode == 0:
-        report_r2 = (reach_crash_dir / "REPORT.md").read_text(encoding="utf-8")
+        report_r2 = (reach_crash_dir / "report.md").read_text(encoding="utf-8")
         assert_in("## Severity rationale", report_r2,
                   "severity replay: section preserved on second bundle")
         assert_eq(1, report_r2.count("## Severity rationale"),
@@ -2489,7 +2471,7 @@ if result_r.returncode == 0:
 # ─── End-to-end: post-export field convergence survives re-bundling ──
 #
 # Benchmark cells may be bundled before triage infers their reachability
-# fields. The inferred bare labels are written to the canonical REPORT.md,
+# fields. The inferred bare labels are written to the canonical report.md,
 # while the original agent report stays under .audit/. A pool regeneration
 # then runs severity and export-repro again. The visible table must absorb the
 # inferred values, render-md must not hide the only populated copy, and the
@@ -2528,7 +2510,7 @@ assert_eq(0, backfill_first.returncode,
           f"(stderr={backfill_first.stderr[-200:]!r})")
 
 if backfill_first.returncode == 0:
-    backfill_report = backfill_crash_dir / "REPORT.md"
+    backfill_report = backfill_crash_dir / "report.md"
     with backfill_report.open("a", encoding="utf-8") as stream:
         stream.write("""\
 
@@ -2552,7 +2534,7 @@ Strategy: S7
               f"post-export backfill: pre-severity render succeeds "
               f"(stderr={backfill_render.stderr[-200:]!r})")
     if backfill_render.returncode == 0:
-        backfill_html = (backfill_crash_dir / "REPORT.html").read_text(encoding="utf-8")
+        backfill_html = (backfill_crash_dir / "report.html").read_text(encoding="utf-8")
         assert_in("caller-supplied document", backfill_html,
                   "post-export backfill: renderer exposes Boundary fallback")
         assert_in("application-supplied", backfill_html,
@@ -2611,7 +2593,7 @@ Strategy: S7
 
 # ─── Re-export keeps the inferred surface out of its own inference ───
 #
-# A rebundled REPORT.md inlines the sanitizer diagnostic. Its harness frames
+# A rebundled report.md inlines the sanitizer diagnostic. Its harness frames
 # live under fuzz/ or tests/ by convention, which is exactly what the
 # dev-surface regex looks for — so folding the regenerated report back into
 # surface inference flips a shipping library crash to `maint-tool` on the
@@ -2657,12 +2639,12 @@ for attempt in (1, 2, 3):
     harness_frame_surfaces.append(
         re.search(
             r"^Surface: (.*)$",
-            (harness_frame_dir / "REPORT.md").read_text(encoding="utf-8"),
+            (harness_frame_dir / "report.md").read_text(encoding="utf-8"),
             re.MULTILINE,
         ).group(1)
     )
     if attempt == 1:
-        canonical = (harness_frame_dir / "REPORT.md").read_text(encoding="utf-8")
+        canonical = (harness_frame_dir / "report.md").read_text(encoding="utf-8")
         canonical = re.sub(
             r"^(\|\s*Surface\s*\|\s*)unknown(?:\s*—[^|]*)?(\s*\|)$",
             r"\1library-api\2",
@@ -2675,7 +2657,7 @@ for attempt in (1, 2, 3):
             canonical,
             flags=re.MULTILINE,
         )
-        (harness_frame_dir / "REPORT.md").write_text(canonical, encoding="utf-8")
+        (harness_frame_dir / "report.md").write_text(canonical, encoding="utf-8")
 
 if len(harness_frame_surfaces) == 3:
     assert_eq("library-api", harness_frame_surfaces[1],
@@ -2735,13 +2717,13 @@ def export_stored_surface(step: str) -> str:
         return ""
     return re.search(
         r"^Surface: (.*)$",
-        (stored_surface_dir / "REPORT.md").read_text(encoding="utf-8"),
+        (stored_surface_dir / "report.md").read_text(encoding="utf-8"),
         re.MULTILINE,
     ).group(1)
 
 
 def rewrite_stored_surface(kind: str) -> None:
-    report = stored_surface_dir / "REPORT.md"
+    report = stored_surface_dir / "report.md"
     text = re.sub(r"^(\|\s*Surface\s*\|\s*)[^|]*(\|)$", rf"\1{kind} \2",
                   report.read_text(encoding="utf-8"), flags=re.MULTILINE)
     report.write_text(
@@ -2757,7 +2739,7 @@ assert_true(
     "maint-tool" not in export_stored_surface("stale"),
     "stored surface: regeneration repairs a stale stored classification",
 )
-with (stored_surface_dir / "REPORT.md").open("a", encoding="utf-8") as stream:
+with (stored_surface_dir / "report.md").open("a", encoding="utf-8") as stream:
     stream.write("\nBoundary: the demo command-line tool\n")
 assert_eq("cli", export_stored_surface("boundary"),
           "stored surface: a boundary naming a shipped CLI still corrects it")
@@ -2767,7 +2749,7 @@ assert_eq("cli", export_stored_surface("boundary"),
 # Regression for the model-direct unification: export-repro used to
 # die("could not determine template") for a self-contained harness
 # (harness.c with main() but no separate testcase input), dropping the
-# whole bundle — REPORT.md included. Now it writes a stub reproduce.sh
+# whole bundle — report.md included. Now it writes a stub reproduce.sh
 # and continues. The stub must be a valid shell script that exits
 # non-zero (never mistaken for a working reproducer) and names the
 # harness so a human knows how to reproduce by hand.
@@ -2788,7 +2770,7 @@ assert_in("harness.c", stub_text,
           "write_stub_reproduce: names the harness for manual reproduction")
 assert_eq(True, os.access(stub_path, os.X_OK),
           "write_stub_reproduce: stub is executable")
-# No-harness variant: still valid, still exits 2, points at REPORT.md.
+# No-harness variant: still valid, still exits 2, points at report.md.
 stub2 = stub_dir / "reproduce2.sh"
 er.write_stub_reproduce(
     stub2, crash_id="CRASH-STUB-2", sanitizer="asan",
@@ -2797,8 +2779,8 @@ er.write_stub_reproduce(
 stub2_text = stub2.read_text(encoding="utf-8")
 assert_in("exit 2", stub2_text,
           "write_stub_reproduce: no-harness stub also exits non-zero")
-assert_in("REPORT.md", stub2_text,
-          "write_stub_reproduce: no-harness stub points at REPORT.md")
+assert_in("report.md", stub2_text,
+          "write_stub_reproduce: no-harness stub points at report.md")
 
 
 # ─── build_report_title: complete sentence, no dangling clause ───────

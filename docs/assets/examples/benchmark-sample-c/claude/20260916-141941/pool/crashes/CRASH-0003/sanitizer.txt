@@ -1,0 +1,292 @@
+ASAN_RUN_HEADER: sanitizer=asan runs=5 mode=generic testcase=output/benchmark-sample-c/claude/20260916-141941/cells/harness-r1/repo-root/output/samples/sample-c-bench-20260916-141941-harness-r1/claude/results/scratch-3/blob_overflow.rcf env_options_b64= started=2026-09-16T14:31:27Z
+COVERAGE_GATE: HIT - reached handle_blob
+[run-sanitizer-multi] BUDGET: 6/60 sanitizer invocations used this iteration
+=== Run 1/5 ===
+=================================================================
+==75684==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016f324a20 at pc 0x000101322bb4 bp 0x00016f324970 sp 0x00016f324120
+WRITE of size 200 at 0x00016f324a20 thread T0
+SCARINESS: 60 (multi-byte-write-stack-buffer-overflow)
+    #0 0x000101322bb0 in __asan_memcpy (in libclang_rt.asan_osx_dynamic.dylib) + 816
+    #1 0x000100ad930c in handle_blob rcfg.c:98
+    #2 0x000100ad8d60 in dispatch rcfg.c:209
+    #3 0x000100ad8a4c in rcfg_decode rcfg.c:247
+    #4 0x000100ada418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+Address 0x00016f324a20 is located in stack of thread T0 at offset 160 in frame
+    #0 0x000100ad91a8 in handle_blob rcfg.c:94
+
+  This frame has 1 object(s):
+    [32, 160) 'host' (line 95) <== Memory access at offset 160 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x10000130c)
+Shadow bytes around the buggy address:
+  0x00016f324780: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f324800: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f324880: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f324900: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f324980: f1 f1 f1 f1 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x00016f324a00: 00 00 00 00[f3]f3 f3 f3 00 00 00 00 00 00 00 00
+  0x00016f324a80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f324b00: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+  0x00016f324b80: 00 00 00 00 00 00 00 00 f3 f3 f3 f3 00 00 00 00
+  0x00016f324c00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f324c80: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==75684==ABORTING
+tokenfuzz: timeout.py: child pid=75684 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+
+=== Run 2/5 ===
+=================================================================
+==75717==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016ef20a20 at pc 0x000101562bb4 bp 0x00016ef20970 sp 0x00016ef20120
+WRITE of size 200 at 0x00016ef20a20 thread T0
+SCARINESS: 60 (multi-byte-write-stack-buffer-overflow)
+    #0 0x000101562bb0 in __asan_memcpy (in libclang_rt.asan_osx_dynamic.dylib) + 816
+    #1 0x000100edd30c in handle_blob rcfg.c:98
+    #2 0x000100edcd60 in dispatch rcfg.c:209
+    #3 0x000100edca4c in rcfg_decode rcfg.c:247
+    #4 0x000100ede418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+Address 0x00016ef20a20 is located in stack of thread T0 at offset 160 in frame
+    #0 0x000100edd1a8 in handle_blob rcfg.c:94
+
+  This frame has 1 object(s):
+    [32, 160) 'host' (line 95) <== Memory access at offset 160 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x10000130c)
+Shadow bytes around the buggy address:
+  0x00016ef20780: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016ef20800: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016ef20880: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016ef20900: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016ef20980: f1 f1 f1 f1 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x00016ef20a00: 00 00 00 00[f3]f3 f3 f3 00 00 00 00 00 00 00 00
+  0x00016ef20a80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016ef20b00: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+  0x00016ef20b80: 00 00 00 00 00 00 00 00 f3 f3 f3 f3 00 00 00 00
+  0x00016ef20c00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016ef20c80: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==75717==ABORTING
+tokenfuzz: timeout.py: child pid=75717 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 2/5: VERIFIED — same crash signature as run 1 (handle_blob rcfg.c:98)
+
+=== Run 3/5 ===
+=================================================================
+==75747==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016db30a20 at pc 0x000102972bb4 bp 0x00016db30970 sp 0x00016db30120
+WRITE of size 200 at 0x00016db30a20 thread T0
+SCARINESS: 60 (multi-byte-write-stack-buffer-overflow)
+    #0 0x000102972bb0 in __asan_memcpy (in libclang_rt.asan_osx_dynamic.dylib) + 816
+    #1 0x0001022cd30c in handle_blob rcfg.c:98
+    #2 0x0001022ccd60 in dispatch rcfg.c:209
+    #3 0x0001022cca4c in rcfg_decode rcfg.c:247
+    #4 0x0001022ce418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+Address 0x00016db30a20 is located in stack of thread T0 at offset 160 in frame
+    #0 0x0001022cd1a8 in handle_blob rcfg.c:94
+
+  This frame has 1 object(s):
+    [32, 160) 'host' (line 95) <== Memory access at offset 160 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x10000130c)
+Shadow bytes around the buggy address:
+  0x00016db30780: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016db30800: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016db30880: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016db30900: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016db30980: f1 f1 f1 f1 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x00016db30a00: 00 00 00 00[f3]f3 f3 f3 00 00 00 00 00 00 00 00
+  0x00016db30a80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016db30b00: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+  0x00016db30b80: 00 00 00 00 00 00 00 00 f3 f3 f3 f3 00 00 00 00
+  0x00016db30c00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016db30c80: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==75747==ABORTING
+tokenfuzz: timeout.py: child pid=75747 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 3/5: VERIFIED — same crash signature as run 1 (handle_blob rcfg.c:98)
+
+=== Run 4/5 ===
+=================================================================
+==75762==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016bb6ca20 at pc 0x0001049e2bb4 bp 0x00016bb6c970 sp 0x00016bb6c120
+WRITE of size 200 at 0x00016bb6ca20 thread T0
+SCARINESS: 60 (multi-byte-write-stack-buffer-overflow)
+    #0 0x0001049e2bb0 in __asan_memcpy (in libclang_rt.asan_osx_dynamic.dylib) + 816
+    #1 0x00010429130c in handle_blob rcfg.c:98
+    #2 0x000104290d60 in dispatch rcfg.c:209
+    #3 0x000104290a4c in rcfg_decode rcfg.c:247
+    #4 0x000104292418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+Address 0x00016bb6ca20 is located in stack of thread T0 at offset 160 in frame
+    #0 0x0001042911a8 in handle_blob rcfg.c:94
+
+  This frame has 1 object(s):
+    [32, 160) 'host' (line 95) <== Memory access at offset 160 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x10000130c)
+Shadow bytes around the buggy address:
+  0x00016bb6c780: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bb6c800: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bb6c880: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bb6c900: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bb6c980: f1 f1 f1 f1 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x00016bb6ca00: 00 00 00 00[f3]f3 f3 f3 00 00 00 00 00 00 00 00
+  0x00016bb6ca80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bb6cb00: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+  0x00016bb6cb80: 00 00 00 00 00 00 00 00 f3 f3 f3 f3 00 00 00 00
+  0x00016bb6cc00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bb6cc80: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==75762==ABORTING
+tokenfuzz: timeout.py: child pid=75762 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 4/5: VERIFIED — same crash signature as run 1 (handle_blob rcfg.c:98)
+
+=== Run 5/5 ===
+=================================================================
+==75777==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016d9c0a20 at pc 0x000102e5abb4 bp 0x00016d9c0970 sp 0x00016d9c0120
+WRITE of size 200 at 0x00016d9c0a20 thread T0
+SCARINESS: 60 (multi-byte-write-stack-buffer-overflow)
+    #0 0x000102e5abb0 in __asan_memcpy (in libclang_rt.asan_osx_dynamic.dylib) + 816
+    #1 0x00010243d30c in handle_blob rcfg.c:98
+    #2 0x00010243cd60 in dispatch rcfg.c:209
+    #3 0x00010243ca4c in rcfg_decode rcfg.c:247
+    #4 0x00010243e418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+Address 0x00016d9c0a20 is located in stack of thread T0 at offset 160 in frame
+    #0 0x00010243d1a8 in handle_blob rcfg.c:94
+
+  This frame has 1 object(s):
+    [32, 160) 'host' (line 95) <== Memory access at offset 160 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x10000130c)
+Shadow bytes around the buggy address:
+  0x00016d9c0780: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016d9c0800: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016d9c0880: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016d9c0900: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016d9c0980: f1 f1 f1 f1 00 00 00 00 00 00 00 00 00 00 00 00
+=>0x00016d9c0a00: 00 00 00 00[f3]f3 f3 f3 00 00 00 00 00 00 00 00
+  0x00016d9c0a80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016d9c0b00: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+  0x00016d9c0b80: 00 00 00 00 00 00 00 00 f3 f3 f3 f3 00 00 00 00
+  0x00016d9c0c00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016d9c0c80: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==75777==ABORTING
+tokenfuzz: timeout.py: child pid=75777 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 5/5: VERIFIED — same crash signature as run 1 (handle_blob rcfg.c:98)
+
+=== SUMMARY ===
+CRASH_RATE: 5/5
+[run-sanitizer-multi] EXECUTION_RATE: 5/5
+[run-sanitizer-multi] SUCCESS_RATE: 0/5
+[run-sanitizer-multi] CRASHES FOUND: 5/5 runs crashed

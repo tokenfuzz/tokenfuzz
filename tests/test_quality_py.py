@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory() as td:
     (p / "input.js").write_bytes(b"// js")
     (p / "input.mjs").write_bytes(b"// mjs")
     (p / "blob.bin").write_bytes(b"\x00\x01\x02")
-    (p / "REPORT.md").write_bytes(b"# report")
+    (p / "report.md").write_bytes(b"# report")
     (p / "asan.txt").write_bytes(b"log")
     (p / "harness.c").write_bytes(b"int main(){}")
     (p / "tc-1.txt").write_bytes(b"some input")
@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq("js", run(["testcase-mode", str(p / "input.js")]).stdout.strip(), "js → js")
     assert_eq("js", run(["testcase-mode", str(p / "input.mjs")]).stdout.strip(), "mjs → js")
     assert_eq("generic", run(["testcase-mode", str(p / "blob.bin")]).stdout.strip(), "blob → generic")
-    assert_eq(1, run(["testcase-mode", str(p / "REPORT.md")]).returncode, "REPORT.md skipped")
+    assert_eq(1, run(["testcase-mode", str(p / "report.md")]).returncode, "report.md skipped")
     assert_eq(1, run(["testcase-mode", str(p / "asan.txt")]).returncode, "asan.txt skipped")
     assert_eq(1, run(["testcase-mode", str(p / "harness.c")]).returncode, "harness.c skipped")
     assert_eq("generic", run(["testcase-mode", str(p / "tc-1.txt")]).stdout.strip(), "tc-* txt → generic")
@@ -244,7 +244,7 @@ with tempfile.TemporaryDirectory() as td:
     )
     ok(
         quality.regenerate_corpus_index(str(api_corpus))
-        and "COVER-001-8" in (api_corpus / "INDEX.md").read_text(),
+        and "COVER-001-8" in (api_corpus / "index.md").read_text(),
         "in-process index regeneration writes the same corpus index",
     )
 
@@ -262,7 +262,7 @@ with tempfile.TemporaryDirectory() as td:
 
     # Index regen should list both distinct inputs.
     run(["regenerate-corpus-index", str(corpus)], check=True)
-    idx_text = (corpus / "INDEX.md").read_text()
+    idx_text = (corpus / "index.md").read_text()
     ok("COVER-001-7" in idx_text, "index lists promoted COVER", idx_text)
     ok("COVER-002-7" in idx_text, "index lists same-name changed input", idx_text)
     ok("H-42ab7c9d10" in idx_text, "index includes hypothesis column", idx_text)

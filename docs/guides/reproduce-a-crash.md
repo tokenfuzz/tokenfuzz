@@ -1,7 +1,7 @@
 # Reproduce a Crash
 
 This page is for an upstream maintainer or security engineer who received a
-TokenFuzz crash bundle. The shortest path is: read `REPORT.md`, inspect
+TokenFuzz crash bundle. The shortest path is: read `report.md`, inspect
 `reproduce.sh`, run it against a disposable checkout, and compare the new
 diagnostic with `sanitizer.txt`.
 
@@ -22,8 +22,8 @@ The directory is named after the crash id. After unpacking you normally get:
 
 ```text
 CRASH-001-1/
-├── REPORT.md          # one-page summary: bug, root cause, candidate fix
-├── REPORT.html        # browser-friendly render of REPORT.md
+├── report.md          # one-page summary: bug, root cause, candidate fix
+├── report.html        # browser-friendly render of report.md
 ├── reproduce.sh       # ./reproduce.sh /path/to/checkout
 ├── input.<ext>        # the testcase bytes
 ├── harness.{c,cc,cpp,cxx} # only when the bug uses a C/C++ harness
@@ -39,7 +39,7 @@ only for a reportable result with a current score. Neither file is needed to
 reproduce; both let a reviewer trace generated claims back to the evidence
 that produced them.
 
-Read `REPORT.md` first. `REPORT.html` presents the same content with its field
+Read `report.md` first. `report.html` presents the same content with its field
 table and severity annotation rendered for a browser.
 
 It opens with a **Reviewer TL;DR** (one line each for the bug, its trigger,
@@ -54,8 +54,8 @@ name:
 - a candidate fix direction.
 
 It is normalized from the agent-authored report, sanitizer output, and
-structured fields gathered during triage. Hand-edit `REPORT.md` only;
-`REPORT.html` is regenerated automatically.
+structured fields gathered during triage. Hand-edit `report.md` only;
+`report.html` is regenerated automatically.
 
 ## Before you run it
 
@@ -155,7 +155,7 @@ Below the diagnostic line, the report has:
   access marked. The character at the access site (for example `fa` for
   heap-left-redzone or `fd` for freed-heap) tells you what was hit.
 
-`REPORT.md` normally points you at the line that matters. The full trace is in
+`report.md` normally points you at the line that matters. The full trace is in
 `sanitizer.txt` if you want the rest.
 
 ## Verifying your fix
@@ -193,9 +193,9 @@ revision *is* affected, the most common causes are:
 ## What the report does **not** claim
 
 - That the affected code path is reachable from every public entry point. The
-  recorded "Trigger source" in `REPORT.md` is the specific input shape that
+  recorded "Trigger source" in `report.md` is the specific input shape that
   fired the diagnostic. Reachability from other entry points is your call.
-- That the candidate fix in `REPORT.md` is the right one. It is a
+- That the candidate fix in `report.md` is the right one. It is a
   reviewer-actionable suggestion based on the audit run. The maintainer decides
   the actual patch.
 - That the recorded severity is final. Severity is advisory; your project's

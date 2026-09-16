@@ -10,11 +10,11 @@ for both QA and upstream maintainers.
 This tool collects all CRASH-* dirs under a results directory, computes a
 clustering signature per crash, and writes:
 
-  * <results>/crashes/CRASH-CLUSTERS.md
+  * <results>/crashes/crash-clusters.md
                                       — sortable markdown summary
-  * output/<target>/CRASH-CLUSTERS.md
+  * output/<target>/crash-clusters.md
                                       — cross-backend aggregate summary
-  * each CRASH-*/REPORT.md           — Cluster: <ID>  field (preserved
+  * each CRASH-*/report.md           — Cluster: <ID>  field (preserved
                                        across re-runs of export-repro)
 
 Clustering signature (deterministic, no LLM):
@@ -28,7 +28,7 @@ at least two common ordered crash-state frames, or average line similarity
 above the ClusterFuzz threshold.
 
 The tool is read-mostly for the report bundles: it only edits the
-"Cluster:" line in each REPORT.md. It does NOT touch any other section,
+"Cluster:" line in each report.md. It does NOT touch any other section,
 the sanitizer.txt, or the harness, and it is idempotent.
 
 The rendered Root signature column is the representative crash's exact
@@ -40,7 +40,7 @@ matching, but the index should show the source lines that explain why
 similar-looking crashes stayed separate.
 
 Usage:
-  bin/cluster-crashes <results-dir>            # writes crashes/CRASH-CLUSTERS.md + Cluster: lines
+  bin/cluster-crashes <results-dir>            # writes crashes/crash-clusters.md + Cluster: lines
   bin/cluster-crashes <results-dir> --dry-run  # print plan, write nothing
   bin/cluster-crashes <results-dir> --json     # emit JSON to stdout
 """
@@ -65,7 +65,7 @@ import clusterfuzz_stacktrace as cf_stack  # noqa: E402
 import finding_signature  # noqa: E402
 import validation_receipt  # noqa: E402
 import evidence_pages  # noqa: E402
-from report_identity import exact_child_file  # noqa: E402
+import report_identity  # noqa: E402
 from cluster_common import (  # noqa: E402
     promotion_pending_reasons,
     render_member_report_siblings,
@@ -158,7 +158,7 @@ def _find_sanitizer(crash_dir: Path) -> Path | None:
 
 
 def _find_report(crash_dir: Path) -> Path | None:
-    return exact_child_file(crash_dir, ("REPORT.md", "report.md"))
+    return report_identity.find_report(crash_dir)
 
 
 def _extract_top_frames(asan_text: str, want: int = 5) -> list[tuple[str, str]]:
@@ -519,7 +519,7 @@ _STRATEGY_TABLE_RE = re.compile(
 
 
 def _extract_strategy(report_text: str) -> str:
-    """Return an active strategy / REF token recorded in REPORT.md, or "".
+    """Return an active strategy / REF token recorded in report.md, or "".
 
     Both the bare-label line (`Strategy: S2`) and the Fields-table cell
     (`| Strategy | S2 |`) are accepted, in that order. Anything else —
@@ -810,7 +810,7 @@ def cluster_crashes(crashes_root: Path) -> list[dict]:
     return _clusters_from_sigs(sigs)
 
 
-# ─── Output: CRASH-CLUSTERS.md + Cluster: line in each REPORT.md ───────────
+# ─── Output: crash-clusters.md + Cluster: line in each report.md ───────────
 
 
 CLUSTER_LINE_RE = re.compile(r"^(Cluster:\s*).*$", re.MULTILINE)
@@ -890,26 +890,26 @@ def _set_cluster_line(report_text: str, cluster_id: str, members: list[str],
 
 
 def _resolve_report_basename(crash_dir: Path) -> str:
-    """Return the basename of the report inside crash_dir (REPORT.md or
-    report.md) so we can emit a working hyperlink. Falls back to REPORT.md
-    if neither exists yet — that's the shape new reports will take."""
+    """Return the basename of the report inside crash_dir so we can emit a
+    working hyperlink. Falls back to report.md if none exists yet — that's
+    the shape new reports will take."""
     report = _find_report(crash_dir)
     if report is not None:
         return report.name
-    return "REPORT.md"
+    return "report.md"
 
 
 def _member_link(crashes_root: Path, member_id: str, link_prefix: str = "") -> str:
-    """`[CRASH-XXX](<prefix>CRASH-XXX/REPORT.md)` — link points from the
+    """`[CRASH-XXX](<prefix>CRASH-XXX/report.md)` — link points from the
     file we are about to write back to the crash dir. link_prefix is empty
-    when CRASH-CLUSTERS.md lives inside crashes/ and is
-    "<agent>/results/crashes/" when CRASH-CLUSTERS.md is at the target root."""
+    when crash-clusters.md lives inside crashes/ and is
+    "<agent>/results/crashes/" when crash-clusters.md is at the target root."""
     name = _resolve_report_basename(crashes_root / member_id)
     return f"[{member_id}]({link_prefix}{member_id}/{name})"
 
 
 def _rejected_report_link(crashes_root: Path) -> str:
-    return "../crashes-rejected/REJECTED-CRASHES.md"
+    return "../crashes-rejected/rejected-crashes.md"
 
 
 def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
@@ -937,7 +937,7 @@ def _format_clusters_md(clusters: list[dict], crashes_root: Path) -> str:
     lines.append("| Severity | Cluster | Size | Primitive | Strategy | Root signature | Canonical | Members | Status |")
     lines.append("|:---------|:--------|-----:|:----------|:---------|:---------------|:----------|:--------|:-------|")
     for c in clusters:
-        # CRASH-CLUSTERS.md lives inside crashes/, so member links are
+        # crash-clusters.md lives inside crashes/, so member links are
         # relative to that directory.
         link_prefix = ""
         member_cells: list[str] = []
@@ -995,9 +995,9 @@ def update_reports(clusters: list[dict], dry_run: bool = False) -> int:
 
 def _aggregate_target_root(target_root: Path, dry_run: bool, want_json: bool) -> int:
     """Walk every <agent>/results/crashes/ under output/<slug>/, cluster
-    across all of them, and write output/<slug>/CRASH-CLUSTERS.md.
+    across all of them, and write output/<slug>/crash-clusters.md.
 
-    Each per-agent results dir still gets its own CRASH-CLUSTERS.md via the
+    Each per-agent results dir still gets its own crash-clusters.md via the
     in-tree path; this top-level file is the cross-agent summary the
     user asked for at the project root. Concurrent backends serialize
     through an advisory flock on <slug>/.cluster-lock — see
@@ -1035,7 +1035,7 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
         sys.stdout.write("\n")
         return 0
 
-    out_md = target_root / "CRASH-CLUSTERS.md"
+    out_md = target_root / "crash-clusters.md"
     md_lines = [f"# Crash Clusters — {target_root.name}", ""]
     md_lines.append(
         f"_Auto-generated by bin/cluster-crashes from agent(s): "
@@ -1096,11 +1096,11 @@ def _aggregate_target_root_locked(target_root: Path, dry_run: bool, want_json: b
     _atomic_write_text(out_md, md)
     evidence_pages.write_cluster_page("crash", clusters, target_root, out_md.with_suffix(".html"))
 
-    # Per-agent CRASH-CLUSTERS.md and REPORT.md Cluster: lines are owned by the
+    # Per-agent crash-clusters.md and report.md Cluster: lines are owned by the
     # single-results-dir invocation each backend already runs from its own
     # maintain_indexes (lib/triage.py). Rewriting them here would race with
     # those concurrent writers across backends; keep the target-root
-    # invocation strictly to <slug>/CRASH-CLUSTERS.md.
+    # invocation strictly to <slug>/crash-clusters.md.
 
     print(f"[cluster-crashes] {len(clusters)} cluster(s) over "
           f"{len(all_sigs)} crash dir(s) across {len(per_agent)} agent(s)")
@@ -1120,15 +1120,15 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     # Three layouts we accept:
-    #   * <results>/                 -> <results>/crashes/CRASH-CLUSTERS.md
-    #   * <results>/crashes          -> <results>/crashes/CRASH-CLUSTERS.md
+    #   * <results>/                 -> <results>/crashes/crash-clusters.md
+    #   * <results>/crashes          -> <results>/crashes/crash-clusters.md
     #   * output/<slug>/             -> aggregate every <agent>/results/crashes/
     if (args.results_dir / "crashes").is_dir():
         crashes_root = args.results_dir / "crashes"
-        out_md = crashes_root / "CRASH-CLUSTERS.md"
+        out_md = crashes_root / "crash-clusters.md"
     elif args.results_dir.name == "crashes":
         crashes_root = args.results_dir
-        out_md = crashes_root / "CRASH-CLUSTERS.md"
+        out_md = crashes_root / "crash-clusters.md"
     elif (args.results_dir / "target.toml").is_file():
         # Target-root mode: walk every <slug>/<agent>/results/crashes/. A target
         # root is identified only by its target.toml (the canonical rule in
@@ -1137,7 +1137,7 @@ def main(argv: list[str] | None = None) -> int:
         return _aggregate_target_root(args.results_dir, dry_run=args.dry_run, want_json=args.json)
     else:
         crashes_root = args.results_dir
-        out_md = args.results_dir / "CRASH-CLUSTERS.md"
+        out_md = args.results_dir / "crash-clusters.md"
 
     clusters = cluster_crashes(crashes_root)
 

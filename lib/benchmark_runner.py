@@ -4286,10 +4286,12 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 f"{artifact.get('why')}"
             )
     print()
-    # The rendered sibling is what an operator opens; the Markdown beside it
-    # is the source the renderer reads.
-    ledger_html = ledger.with_suffix(".html")
-    log(f"Ledger: {ledger_html if ledger_html.is_file() else ledger}")
+    # The result page is what an operator opens: the comparison, race clock
+    # and traces. The per-backend ledger the run also appended to is the
+    # append-only record behind export and --reset, not a page to read.
+    result_md = bench_root / "benchmark-result.md"
+    result_html = result_md.with_suffix(".html")
+    log(f"Result page: {result_html if result_html.is_file() else result_md}")
     if not args.dry_run:
         prune_run_caches(bench_dir)
         collected = _collect_isolated_builds(target_root, bench_root, build_suffix)

@@ -41,7 +41,7 @@ from report_enrich import (  # noqa: E402
 )
 
 
-_REPORT_CANDIDATES = ("report.md", "REPORT.md", "description.md")
+_REPORT_CANDIDATES = ("report.md", "description.md")
 
 
 def _resolve_report_path(arg: Path) -> Path | None:
@@ -203,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in paths:
         report = _resolve_report_path(path)
         if report is None:
-            print(f"enrich-report: no report.md / REPORT.md / description.md "
+            print(f"enrich-report: no report.md / description.md "
                   f"under {path}", file=sys.stderr)
             rc = rc or 2
             continue

@@ -90,9 +90,9 @@ Crash B: state [decode_body, read_record, run]
 
 ### Output
 
-`bin/cluster-crashes` writes `CRASH-CLUSTERS.md` (one row per cluster, sorted
+`bin/cluster-crashes` writes `crash-clusters.md` (one row per cluster, sorted
 by max-member severity then size) and stamps a `Cluster:` line into each member
-`REPORT.md`. Each row names a **Canonical** member: the highest-severity crash
+`report.md`. Each row names a **Canonical** member: the highest-severity crash
 in the cluster, with the CVSS score breaking ties inside a severity band and
 the lowest id breaking those. The **Members** column lists every crash sharing
 the signature, ordered by severity descending with the canonical in **bold**.
@@ -215,7 +215,7 @@ but it is never a merge edge.
 
 ### Output
 
-`bin/cluster-findings` writes `FINDING-CLUSTERS.md` (one row per cluster,
+`bin/cluster-findings` writes `finding-clusters.md` (one row per cluster,
 sorted by the canonical member's severity, then size), stamps a `Cluster:` line
 into each member report, and drops a `.dup-of` marker in every non-canonical
 member pointing at the canonical FIND. Canonical ordering is security-credit

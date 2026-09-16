@@ -307,7 +307,7 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         latest = json.loads((state / "hypotheses.jsonl").read_text().splitlines()[-1])
         self.assertEqual(latest["status"], "DISCARDED")
         self.assertIn("Triage rejected FIND-001", latest["note"])
-        self.assertTrue((self.root / "findings-rejected/FIND-001/REJECTION.md").is_file())
+        self.assertTrue((self.root / "findings-rejected/FIND-001/rejection.md").is_file())
 
     def test_full_semantic_identity_is_authoritative_for_new_cache(self) -> None:
         report_text = triage.read_report_bounded(self.report)
@@ -459,7 +459,7 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         self.assertFalse(self.finding.exists())
         self.assertIn(
             "Reason: threat-model: trigger outside bytes",
-            (rejected / "REJECTION.md").read_text(encoding="utf-8"),
+            (rejected / "rejection.md").read_text(encoding="utf-8"),
         )
         receipt = json.loads((rejected / "validation.json").read_text())
         self.assertEqual(receipt["state"], "rejected")
@@ -1807,7 +1807,7 @@ Generated score text.
             )
         self.assertFalse(self.finding.exists())
         rejection = (
-            self.root / "findings-rejected" / self.finding.name / "REJECTION.md"
+            self.root / "findings-rejected" / self.finding.name / "rejection.md"
         ).read_text(encoding="utf-8")
         self.assertIn(f"Reason: {triage.UNSETTLED_REJECTION_REASON}", rejection)
         self.assertNotIn("not attacker-reachable", rejection)
@@ -2305,13 +2305,13 @@ Generated score text.
         def run(tool, *_args, **_kwargs):
             self.assertEqual(tool, "export-repro")
             events.append("export")
-            report.rename(crash / "REPORT.md")
+            report.rename(crash / "report.md")
             return 0
 
         def converge(directories, *_args, **_kwargs):
             self.assertEqual(directories, [crash])
-            self.assertTrue((crash / "REPORT.md").is_file())
-            self.assertEqual(triage._report(crash).name, "REPORT.md")
+            self.assertTrue((crash / "report.md").is_file())
+            self.assertEqual(triage._report(crash).name, "report.md")
             events.append("converge")
 
         with mock.patch.object(
@@ -3012,7 +3012,7 @@ Generated score text.
         self.assertTrue(rejected.is_dir())
         self.assertIn(
             "exact claimed security consequence is source-disproved",
-            (rejected / "REJECTION.md").read_text(encoding="utf-8"),
+            (rejected / "rejection.md").read_text(encoding="utf-8"),
         )
         self.assertFalse(
             (self.root / "state" / "unreachable-routes.jsonl").exists(),
@@ -3107,7 +3107,7 @@ Generated score text.
         payload["decision_version"] = "trigger-v4-source-anchors"
         for name in (".trigger-gate.json", ".trigger-gate-2.json"):
             (moved / name).write_text(json.dumps(payload), encoding="utf-8")
-        (moved / "REJECTION.md").write_text(
+        (moved / "rejection.md").write_text(
             "# Rejected artifact\n\n"
             "Reason: trigger-provenance: state not attacker-reachable\n",
             encoding="utf-8",
@@ -3121,7 +3121,7 @@ Generated score text.
         )
         restored = self.root / "findings" / self.finding.name
         self.assertTrue(restored.is_dir())
-        self.assertFalse((restored / "REJECTION.md").exists())
+        self.assertFalse((restored / "rejection.md").exists())
         receipt = validation_receipt.read_current(restored)
         self.assertIsNotNone(receipt)
         self.assertEqual(receipt["state"], "pending")
@@ -3137,7 +3137,7 @@ Generated score text.
             (rejected_dir / name).write_text(
                 json.dumps(payload), encoding="utf-8",
             )
-        (rejected_dir / "REJECTION.md").write_text(
+        (rejected_dir / "rejection.md").write_text(
             "# Rejected artifact\n\n"
             "Reason: trigger-provenance: documented caller contract violated\n",
             encoding="utf-8",
@@ -3158,7 +3158,7 @@ Generated score text.
         moved = rejected / self.finding.name
         self.finding.rename(moved)
         report = moved / "report.md"
-        (moved / "REJECTION.md").write_text(
+        (moved / "rejection.md").write_text(
             "# Rejected artifact\n\n"
             f"Reason: {triage.UNSETTLED_REJECTION_REASON}\n",
             encoding="utf-8",
@@ -3185,12 +3185,12 @@ Generated score text.
         )
         restored = self.root / "findings" / self.finding.name
         self.assertTrue(restored.is_dir())
-        self.assertFalse((restored / "REJECTION.md").exists())
+        self.assertFalse((restored / "rejection.md").exists())
         # The stale vote leaves with the requeue: a verdict that never reads
         # it (a bypass, a direct proof) must not be requeued again next pass.
         self.assertFalse((restored / ".trigger-gate.json").exists())
         restored.rename(moved)
-        (moved / "REJECTION.md").write_text(
+        (moved / "rejection.md").write_text(
             "# Rejected artifact\n\n"
             "Reason: threat-model: report identifies caller-contract misuse\n",
             encoding="utf-8",
@@ -3223,7 +3223,7 @@ Generated score text.
         (current_dir / ".llm-find-quality.json").write_text(
             json.dumps(payload), encoding="utf-8",
         )
-        (current_dir / "REJECTION.md").write_text(
+        (current_dir / "rejection.md").write_text(
             "# Rejected artifact\n\nReason: not security relevant\n",
             encoding="utf-8",
         )
@@ -3704,7 +3704,7 @@ Generated score text.
         rejected = self.root / "findings-rejected" / self.finding.name
         self.assertIn(
             "Reason: threat-model: real defect that crosses no security boundary",
-            (rejected / "REJECTION.md").read_text(encoding="utf-8"),
+            (rejected / "rejection.md").read_text(encoding="utf-8"),
         )
         scorer.assert_not_called()
         record_productive.assert_not_called()
@@ -3748,7 +3748,7 @@ Generated score text.
         rejected = self.root / "findings-rejected" / self.finding.name
         self.assertIn(
             f"Reason: {triage.UNSETTLED_REJECTION_REASON}",
-            (rejected / "REJECTION.md").read_text(encoding="utf-8"),
+            (rejected / "rejection.md").read_text(encoding="utf-8"),
         )
         # Terminal: the restore passes that requeue a stale disproof or a
         # stale quality rejection leave a publication rejection where it is.

@@ -1,0 +1,58 @@
+{
+  "detail": "source review placed the trigger within attacker_controls=bytes",
+  "evidence": {
+    "artifacts": {
+      ".audit/input": {
+        "sha256": "3600890261ac2d62a094c05d737b73fa4a7618ccfece6ea64b8e5586ed2c5b25",
+        "size": 15
+      },
+      ".trigger-gate.json": {
+        "sha256": "10283f7e30339b1f52ad70d578b4f8761fcfe748a5c23e66ba23a154317941c7",
+        "size": 1676
+      },
+      "reproduce.sh": {
+        "sha256": "4864933abb3d75f4d977e93b6e7a7e423dc4e4cf3e885ee65e8b9334954c9445",
+        "size": 6328
+      },
+      "sanitizer.txt": {
+        "sha256": "2ddc9498136fb5021bbd8905b49949181169ee75b09170f0351d1b5bec5f2b50",
+        "size": 2986
+      }
+    },
+    "attacker_controls": [
+      "bytes"
+    ],
+    "evidence_id": "e8bf6b955a3ee77fd86aed5d9c7688e126189532157099ecc865dcd81470cac1",
+    "probe": {},
+    "report_sha1": "411111ef8eed1e289fcb8758c0b374d00be3edb0",
+    "review_facts": {
+      "reproducer_carrier": "cli",
+      "trigger_controls_fit": "within",
+      "vulnerable_boundary_surface": "library-api"
+    },
+    "source_attestations": [
+      {
+        "anchors": [
+          {
+            "excerpt": "uint32_t total = rows * width;",
+            "excerpt_sha256": "11bc5ea9e9048d5fbcdc623909ce86945acbca9b9130640533df23557296f602",
+            "kind": "source",
+            "line": 113,
+            "path": "src/rcfg.c",
+            "symbol": "handle_array"
+          }
+        ],
+        "review_artifact": ".trigger-gate.json",
+        "review_sha256": "10283f7e30339b1f52ad70d578b4f8761fcfe748a5c23e66ba23a154317941c7",
+        "verifier": "source-anchor-v1"
+      }
+    ],
+    "source_context": "root-path-sha256:abbc07ae1fcf1896f8592d2b72662431a1dada99eabf7b6b8b17c7c71ed23784",
+    "target_config_sha256": "4e70aa3606770719c168fa899d68b90da7d67ce71f6f24ad22cc6086504e4ef2",
+    "target_revision": "norev"
+  },
+  "kind": "crash",
+  "schema_version": 2,
+  "state": "reportable",
+  "validated_at": 1789570892.85241
+}

@@ -6027,11 +6027,7 @@ def _plain_markdown_cell(value: str) -> str:
 
 
 def _report_path(artifact_dir: Path) -> Path | None:
-    for name in ("REPORT.md", "report.md", "description.md"):
-        p = artifact_dir / name
-        if p.is_file():
-            return p
-    return None
+    return report_identity.find_report(artifact_dir)
 
 
 def _read_report_prefix(path: Path | None, max_bytes: int = 32_768) -> str:
@@ -6170,8 +6166,9 @@ def _agent_crash_dirs(ctx: Context, agent: str) -> list[Path]:
 def _crash_report_unfinished(artifact_dir: Path) -> bool:
     report = _report_path(artifact_dir)
     if report is None:
-        # An in-place export can leave the bundle between moving files under
-        # .audit/ and installing REPORT.md; that is unfinished, not an error.
+        # An in-place export can leave the bundle between moving the draft
+        # under .audit/ and installing report.md; that is unfinished, not an
+        # error.
         return True
     try:
         return "_TODO (agent):" in report.read_text(

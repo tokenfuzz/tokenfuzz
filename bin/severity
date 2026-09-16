@@ -1894,7 +1894,7 @@ def _contract_concern(fields: dict) -> tuple[bool, str]:
     return False, ""
 
 
-# Structured reach fields the harness's triage pass writes into REPORT.md.
+# Structured reach fields the harness's triage pass writes into report.md.
 # A report carrying none of them has not been triaged — the scorer is then
 # scoring raw sanitizer output, and an un-triaged report with no surface kind
 # stays at the conservative `unknown` tier (see _classify_surface).
@@ -1905,7 +1905,7 @@ def _report_is_triaged(fields: dict) -> bool:
     """True iff the report carries at least one structured reach field.
 
     The harness fills Surface / Trigger source / Caller contract / Caller
-    controls into a structured REPORT.md during triage. A bare crash dir
+    controls into a structured report.md during triage. A bare crash dir
     (e.g. a benchmark `model-direct` workspace, or any un-triaged dir fed
     straight to `bin/severity`) carries none of them — the surface then stays
     at the conservative `unknown` tier (see _classify_surface)."""
@@ -1973,7 +1973,7 @@ _FIELD_KEYS = {
 
 
 def extract_report_fields(report_text: str, report_dir: Path | None = None) -> dict:
-    """Pull the structured fields the harness emits into REPORT.md.
+    """Pull the structured fields the harness emits into report.md.
 
     Reads two shapes the templates write:
       * markdown table rows: ``| Surface | library-api — ... |``
@@ -3040,7 +3040,7 @@ def _run_batch(results_dir: Path) -> int:
 def _find_report_md_in_dir(report_dir: Path) -> Path | None:
     # Narrower than report_identity.find_report on purpose: severity rewrites
     # the report in place and only the two markdown spellings are its to edit.
-    return report_identity.exact_child_file(report_dir, ("report.md", "REPORT.md"))
+    return report_identity.find_report(report_dir)
 
 
 def _resolve_report_arg(report_arg: Path) -> tuple[Path, Path] | None:
@@ -3079,7 +3079,7 @@ def main(argv: list[str] | None = None) -> int:
 
     resolved = _resolve_report_arg(args.report)
     if resolved is None:
-        print(f"severity: report.md/REPORT.md not found under {args.report}", file=sys.stderr)
+        print(f"severity: no report.md under {args.report}", file=sys.stderr)
         return 2
     report_dir, report_md = resolved
     report_text = report_md.read_text("utf-8", errors="replace")

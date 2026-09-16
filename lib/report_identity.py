@@ -11,7 +11,10 @@ from pathlib import Path
 
 
 FIND_QUALITY_DECISION_VERSION = "v21-supported-config"
-REPORT_NAMES = ("REPORT.md", "report.md", "description.md", "analysis.md", "README.md")
+# The report an artifact directory holds, in priority order. Names are
+# matched exactly against the directory listing; a spelling that differs
+# only in case is not a report.
+REPORT_NAMES = ("report.md", "description.md", "analysis.md", "README.md")
 PLACEHOLDER_FIELD_VALUES = frozenset(
     {"", "-", "—", "?", "tbd", "unknown / not assessed"}
 )
@@ -381,7 +384,7 @@ def exact_child_files(parent: Path, names: Iterable[str]) -> tuple[Path, ...]:
     """Return exact-case file children in the requested priority order.
 
     A case-insensitive filesystem — APFS, or a Docker Desktop bind mount over
-    one — answers `(directory / "REPORT.md").is_file()` for an on-disk
+    one — answers `(directory / "report.md").is_file()` for an on-disk
     `report.md`, so probing by name hands back a path spelled a way the
     directory does not contain. That spelling escapes: triage feeds it to
     `render-md --html-sibling`, which derives the sibling's name from it, and

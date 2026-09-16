@@ -22,7 +22,7 @@ issue. Sanitizer and race diagnostics must meet the crash
 confirmation and review requirements.
 
 Every accepted crash is automatically converted to a maintainer bundle
-(`REPORT.md`, `reproduce.sh`, the sanitizer output, and the input) as part of
+(`report.md`, `reproduce.sh`, the sanitizer output, and the input) as part of
 triage. There is no extra step to get that.
 
 ## 1. Set up the target
@@ -252,11 +252,11 @@ What happens to each artifact:
 
 - Accepted crashes stay under `crashes/`.
 - Hard rejections move to `crashes-rejected/` with a reason rendered in
-  `REJECTED-CRASHES.html`.
+  `rejected-crashes.html`.
 - Runtime panics and tracebacks from findings-only targets remain report
   evidence under `findings/`; they were never sanitizer crashes.
 - Findings with no report get a `.needs-content` marker and surface as
-  `NEEDS CONTENT` in `findings/FINDING-CLUSTERS.html`.
+  `NEEDS CONTENT` in `findings/finding-clusters.html`.
 - Findings rejected twice by the substance gate are quarantined to
   `findings-rejected/`. They are not deleted, so you can review the reasoning.
 
@@ -296,8 +296,8 @@ Triage automatically runs `bin/export-repro` on every accepted crash. After
 bundling, each `crashes/CRASH-*` directory contains:
 
 ```text
-REPORT.md          one-page summary
-REPORT.html        generated sibling
+report.md          one-page summary
+report.html        generated sibling
 reproduce.sh       ./reproduce.sh /path/to/source
 input.<ext>        the testcase bytes
 harness.{c,cc,cpp,cxx} only when the bug uses a C/C++ harness
@@ -325,11 +325,11 @@ how to re-run it after editing a bundle.
 The paths worth knowing during a session:
 
 ```text
-output/<target>/CRASH-CLUSTERS.html
-output/<target>/FINDING-CLUSTERS.html
+output/<target>/crash-clusters.html
+output/<target>/finding-clusters.html
 output/<target>/<backend>/results/crashes/
 output/<target>/<backend>/results/findings/
-output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
+output/<target>/<backend>/results/crashes-rejected/rejected-crashes.html
 ```
 
 See [Artifact layout](../reference/artifacts.md) and

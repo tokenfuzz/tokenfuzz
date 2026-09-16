@@ -301,7 +301,7 @@ assert_eq("std::operator+<char>",
 
 # End-to-end: an un-symbolicated module-form frame from ASan must NOT carry
 # `+0x{hex}` into the crash state. Mirrors what CRASH-0006 was filing into
-# REPORT.html before the fix (`check_opcode_types+0xc4 (...)`).
+# report.html before the fix (`check_opcode_types+0xc4 (...)`).
 module_form_with_offset = """\
 ==40839==ERROR: AddressSanitizer: heap-use-after-free on address 0x1 at pc 0x2
 READ of size 1 at 0x1 thread T0

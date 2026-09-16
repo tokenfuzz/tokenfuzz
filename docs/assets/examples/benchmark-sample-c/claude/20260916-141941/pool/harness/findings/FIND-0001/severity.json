@@ -1,0 +1,11 @@
+{
+  "level": "High",
+  "primitive": "stack write",
+  "primitive_key": "stack_write",
+  "report_sha1": "e3bc348f6ba2f1cad1f2613a81c576296d97a954",
+  "schema_version": 5,
+  "score": 8.1,
+  "scored_at": "2026-09-16T15:01:30.091243+00:00",
+  "scorer_version": "severity-v5-negated-caller-actions",
+  "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:U"
+}

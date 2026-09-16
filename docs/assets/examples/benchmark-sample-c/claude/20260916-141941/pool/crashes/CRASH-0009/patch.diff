@@ -1,0 +1,14 @@
+--- a/src/rcfg.c
++++ b/src/rcfg.c
+@@ -142,7 +142,10 @@ static void handle_slice(rcfg_ctx *ctx, const uint8_t *stream,
+     return;
+   }
+ 
+   uint8_t window[RCFG_SLICE_CAP];
+   size_t  n = want < sizeof(window) ? want : sizeof(window);
++  if (n > stream_len - off) {
++    n = stream_len - off;
++  }
+   memcpy(window, stream + off, n);
+   ctx->slice_sum = checksum(window, n);
+ }

@@ -1,0 +1,16 @@
+--- a/src/rcfg.c
++++ b/src/rcfg.c
+@@ -108,9 +108,12 @@ static void handle_array(const uint8_t *val, uint16_t len)
+     return;
+   }
+ 
+   uint32_t rows  = read_be32(val);
+   uint32_t width = read_be32(val + 4);
+-  uint32_t total = rows * width;
++  size_t   total;
++  if (__builtin_mul_overflow((size_t)rows, (size_t)width, &total)) {
++    return;
++  }
+ 
+   uint8_t *table = malloc(total ? total : 1);
+   if (table == NULL) {

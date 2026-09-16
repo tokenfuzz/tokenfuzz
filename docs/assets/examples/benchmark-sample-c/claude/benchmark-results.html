@@ -201,8 +201,8 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
 <body>
 <main class="page report plain"><article class="doc"><h1>Benchmark results</h1>
 <p>Append-only ledger written by <code>bin/benchmark</code>. Each section below is one benchmark run: the audit harness measured against a bare CTF-prompt baseline on the same target, backend, and budget. Newest runs are at the bottom. Use <code class="wrap">bin/benchmark --reset</code> to archive this file and start fresh.</p>
-<h2 id="benchmark-run-20260915-203221">Benchmark run <code>20260915-203221</code><a class="anchor" href="#benchmark-run-20260915-203221" aria-label="Permalink">¶</a></h2>
-<ul><li><strong>Target</strong> <code>samples/sample-c</code>  ·  <strong>Backend</strong> <code>claude</code>  ·  <strong>TokenFuzz</strong> <code>tokenfuzz</code> (<code>0d73b3f</code>)</li><li><strong>Budget</strong> 1800s/cell  ·  <strong>Replicates</strong> 1/condition  ·  <strong>Harness agents</strong> audit default  ·  <strong>Direct agents</strong> 1  ·  <strong>Generated</strong> 2026-09-15T21:34:02Z</li></ul>
+<h2 id="benchmark-run-20260916-141941">Benchmark run <code>20260916-141941</code><a class="anchor" href="#benchmark-run-20260916-141941" aria-label="Permalink">¶</a></h2>
+<ul><li><strong>Target</strong> <code>samples/sample-c</code>  ·  <strong>Backend</strong> <code>claude</code>  ·  <strong>TokenFuzz</strong> <code>tokenfuzz</code> (<code>6b728bc</code>)</li><li><strong>Budget</strong> 1800s/cell  ·  <strong>Replicates</strong> 1/condition  ·  <strong>Harness agents</strong> audit default  ·  <strong>Direct agents</strong> 1  ·  <strong>Generated</strong> 2026-09-16T15:01:36Z</li></ul>
 <h3 id="verdict">Verdict<a class="anchor" href="#verdict" aria-label="Permalink">¶</a></h3>
 <p>The strongest bug this run is <strong>High</strong> <code>CL-060f0cfb</code>, severity score 8.9, found by <strong>tokenfuzz and claude-opus-4-8-direct</strong>.</p>
 <h3 id="scoreboard">Scoreboard<a class="anchor" href="#scoreboard" aria-label="Permalink">¶</a></h3>
@@ -225,21 +225,21 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td class="right">1/1</td>
     <td class="right">0.50/0.50h</td>
     <td class="right">1.50h</td>
-    <td class="right"><a href="20260915-203221/pool/harness/findings-rejected/REJECTED-FINDINGS.html">0</a></td>
-    <td class="right"><a href="20260915-203221/pool/harness/findings/FINDING-CLUSTERS.html">2 (2 M+, 1 class)</a></td>
-    <td class="right"><a href="20260915-203221/pool/harness/crashes-rejected/REJECTED-CRASHES.html">0</a></td>
-    <td class="right"><a href="20260915-203221/pool/harness/crashes/CRASH-CLUSTERS.html">5 (5 M+)</a></td>
+    <td class="right"><a href="20260916-141941/pool/harness/findings-rejected/rejected-findings.html">0</a></td>
+    <td class="right"><a href="20260916-141941/pool/harness/findings/finding-clusters.html">2 (2 M+, 1 class)</a></td>
+    <td class="right"><a href="20260916-141941/pool/harness/crashes-rejected/rejected-crashes.html">0</a></td>
+    <td class="right"><a href="20260916-141941/pool/harness/crashes/crash-clusters.html">5 (4 M+, 1 unjudged)</a></td>
     <td class="center"><span class="sev sev-High">High</span></td>
   </tr>
   <tr>
     <td><code>claude-opus-4-8-direct</code></td>
     <td class="right">1/1</td>
-    <td class="right">0.07/0.50h</td>
-    <td class="right">0.07h</td>
-    <td class="right"><a href="20260915-203221/pool/model-direct/findings-rejected/REJECTED-FINDINGS.html">0</a></td>
-    <td class="right"><a href="20260915-203221/pool/model-direct/findings/FINDING-CLUSTERS.html">1 (1 M+, 1 class)</a></td>
-    <td class="right"><a href="20260915-203221/pool/model-direct/crashes-rejected/REJECTED-CRASHES.html">0</a></td>
-    <td class="right"><a href="20260915-203221/pool/model-direct/crashes/CRASH-CLUSTERS.html">5 (5 M+)</a></td>
+    <td class="right">0.09/0.50h</td>
+    <td class="right">0.09h</td>
+    <td class="right"><a href="20260916-141941/pool/model-direct/findings-rejected/rejected-findings.html">0</a></td>
+    <td class="right"><a href="20260916-141941/pool/model-direct/findings/finding-clusters.html">1 (1 M+, 1 class)</a></td>
+    <td class="right"><a href="20260916-141941/pool/model-direct/crashes-rejected/rejected-crashes.html">0</a></td>
+    <td class="right"><a href="20260916-141941/pool/model-direct/crashes/crash-clusters.html">5 (5 M+)</a></td>
     <td class="center"><span class="sev sev-High">High</span></td>
   </tr>
 </tbody>
@@ -265,9 +265,9 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td><code>tokenfuzz</code></td>
     <td class="right">99%</td>
     <td class="right">0%</td>
-    <td class="right">47s</td>
-    <td class="right">1m</td>
-    <td class="right">1m</td>
+    <td class="right">63s</td>
+    <td class="right">2m</td>
+    <td class="right">2m</td>
     <td class="right">30m</td>
     <td class="right">0%</td>
     <td class="right">0%</td>
@@ -278,13 +278,13 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td><code>claude-opus-4-8-direct</code></td>
     <td class="right">—</td>
     <td class="right">—</td>
-    <td class="right">4s</td>
-    <td class="right">3m</td>
+    <td class="right">38s</td>
+    <td class="right">4m</td>
     <td class="right">—</td>
-    <td class="right">9m</td>
+    <td class="right">10m</td>
     <td class="right">—</td>
     <td class="right">0%</td>
-    <td class="right">81.20</td>
+    <td class="right">64.48</td>
     <td class="right">$1</td>
   </tr>
 </tbody>
@@ -308,17 +308,17 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
   <tr>
     <td>tokenfuzz</td>
     <td>crashes</td>
-    <td class="right">23</td>
-    <td class="right">23</td>
+    <td class="right">20</td>
+    <td class="right">19</td>
     <td class="right">0</td>
-    <td class="right">0</td>
+    <td class="right">1</td>
     <td class="right">0</td>
   </tr>
   <tr>
     <td>tokenfuzz</td>
     <td>findings</td>
-    <td class="right">5</td>
-    <td class="right">5</td>
+    <td class="right">4</td>
+    <td class="right">4</td>
     <td class="right">0</td>
     <td class="right">0</td>
     <td class="right">0</td>
@@ -326,8 +326,8 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
   <tr>
     <td>claude-opus-4-8-direct</td>
     <td>crashes</td>
-    <td class="right">5</td>
-    <td class="right">5</td>
+    <td class="right">6</td>
+    <td class="right">6</td>
     <td class="right">0</td>
     <td class="right">0</td>
     <td class="right">0</td>
@@ -344,17 +344,17 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
   <tr>
     <td>all conditions</td>
     <td>crashes</td>
-    <td class="right">28</td>
-    <td class="right">28</td>
+    <td class="right">26</td>
+    <td class="right">25</td>
     <td class="right">0</td>
-    <td class="right">0</td>
+    <td class="right">1</td>
     <td class="right">0</td>
   </tr>
   <tr>
     <td>all conditions</td>
     <td>findings</td>
-    <td class="right">6</td>
-    <td class="right">6</td>
+    <td class="right">5</td>
+    <td class="right">5</td>
     <td class="right">0</td>
     <td class="right">0</td>
     <td class="right">0</td>
@@ -383,7 +383,7 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td class="right">5/5</td>
     <td>—</td>
     <td class="right">100%</td>
-    <td class="right">23</td>
+    <td class="right">19</td>
     <td class="right">0</td>
     <td>—</td>
   </tr>
@@ -393,7 +393,7 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td class="right">5/5</td>
     <td>—</td>
     <td class="right">100%</td>
-    <td class="right">5</td>
+    <td class="right">6</td>
     <td class="right">0</td>
     <td>—</td>
   </tr>
@@ -403,7 +403,7 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td class="right">5/5</td>
     <td>—</td>
     <td class="right">100%</td>
-    <td class="right">28</td>
+    <td class="right">25</td>
     <td class="right">0</td>
     <td>—</td>
   </tr>
@@ -431,9 +431,9 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td class="right">1/1</td>
     <td>—</td>
     <td class="right">100%</td>
-    <td class="right">5</td>
+    <td class="right">4</td>
     <td>—</td>
-    <td class="right">0</td>
+    <td class="right">1</td>
   </tr>
   <tr>
     <td><code>claude-opus-4-8-direct</code></td>
@@ -451,9 +451,9 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td class="right">1/1</td>
     <td>—</td>
     <td class="right">100%</td>
-    <td class="right">6</td>
+    <td class="right">5</td>
     <td>—</td>
-    <td class="right">0</td>
+    <td class="right">1</td>
   </tr>
 </tbody>
 </table>
@@ -480,16 +480,16 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
   <tr>
     <td><code>tokenfuzz</code></td>
     <td class="right">1</td>
-    <td><a href="20260915-203221/cells/harness-r1"><code class="wrap">bench-20260915-203221-harness-r1</code></a></td>
+    <td><a href="20260916-141941/cells/harness-r1"><code class="wrap">bench-20260916-141941-harness-r1</code></a></td>
     <td class="right">0.50h</td>
     <td>mixed</td>
-    <td class="right">2.7M</td>
-    <td class="right">2.1M</td>
-    <td class="right">29.0M</td>
-    <td class="right">459k</td>
+    <td class="right">2.2M</td>
+    <td class="right">1.7M</td>
+    <td class="right">24.3M</td>
+    <td class="right">424k</td>
     <td class="right">0</td>
     <td class="right">0</td>
-    <td class="right">~$39.4735</td>
+    <td class="right">~$34.1407</td>
   </tr>
   <tr>
     <td><strong><code>tokenfuzz</code></strong></td>
@@ -497,41 +497,41 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
     <td><strong>1 cell</strong></td>
     <td class="right"><strong>0.50h</strong></td>
     <td>mixed</td>
-    <td class="right"><strong>2.7M</strong></td>
-    <td class="right"><strong>2.1M</strong></td>
-    <td class="right"><strong>29.0M</strong></td>
-    <td class="right"><strong>459k</strong></td>
+    <td class="right"><strong>2.2M</strong></td>
+    <td class="right"><strong>1.7M</strong></td>
+    <td class="right"><strong>24.3M</strong></td>
+    <td class="right"><strong>424k</strong></td>
     <td class="right"><strong>0</strong></td>
     <td class="right"><strong>0</strong></td>
-    <td class="right"><strong>~$39.4735</strong></td>
+    <td class="right"><strong>~$34.1407</strong></td>
   </tr>
   <tr>
     <td><code>claude-opus-4-8-direct</code></td>
     <td class="right">1</td>
-    <td><a href="20260915-203221/cells/model-direct-r1"><code class="wrap">bench-20260915-203221-model-direct-r1</code></a></td>
-    <td class="right">0.07h</td>
+    <td><a href="20260916-141941/cells/model-direct-r1"><code class="wrap">bench-20260916-141941-model-direct-r1</code></a></td>
+    <td class="right">0.09h</td>
     <td>measured</td>
-    <td class="right">311k</td>
-    <td class="right">229k</td>
+    <td class="right">327k</td>
+    <td class="right">240k</td>
     <td class="right">1.3M</td>
     <td class="right">43k</td>
     <td class="right">0</td>
     <td class="right">0</td>
-    <td class="right">$3.2366</td>
+    <td class="right">$3.3294</td>
   </tr>
   <tr>
     <td><strong><code>claude-opus-4-8-direct</code></strong></td>
     <td class="right">—</td>
     <td><strong>1 cell</strong></td>
-    <td class="right"><strong>0.07h</strong></td>
+    <td class="right"><strong>0.09h</strong></td>
     <td>measured</td>
-    <td class="right"><strong>311k</strong></td>
-    <td class="right"><strong>229k</strong></td>
+    <td class="right"><strong>327k</strong></td>
+    <td class="right"><strong>240k</strong></td>
     <td class="right"><strong>1.3M</strong></td>
     <td class="right"><strong>43k</strong></td>
     <td class="right"><strong>0</strong></td>
     <td class="right"><strong>0</strong></td>
-    <td class="right"><strong>$3.2366</strong></td>
+    <td class="right"><strong>$3.3294</strong></td>
   </tr>
 </tbody>
 </table>
@@ -553,52 +553,52 @@ details.collapsible[open]>summary::before{transform:rotate(90deg)}details.collap
   <tr>
     <td class="left"><span class="sev sev-High">High</span></td>
     <td class="right">8.9</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0001"><code>CL-060f0cfb</code></a></td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0001"><code>CL-060f0cfb</code></a></td>
     <td>stack-buffer-overflow-WRITE</td>
     <td>tokenfuzz, claude-opus-4-8-direct</td>
     <td class="right">5</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0001/REPORT.html">REPORT.html</a></td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0001/report.html">report.html</a></td>
   </tr>
   <tr>
     <td class="left"><span class="sev sev-High">High</span></td>
     <td class="right">8.9</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0004"><code>CL-5d86ee93</code></a></td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0021"><code>CL-5d86ee93</code></a></td>
     <td>heap-buffer-overflow-WRITE</td>
     <td>tokenfuzz, claude-opus-4-8-direct</td>
     <td class="right">5</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0004/REPORT.html">REPORT.html</a></td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0021/report.html">report.html</a></td>
   </tr>
   <tr>
     <td class="left"><span class="sev sev-High">High</span></td>
     <td class="right">8.9</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0013"><code>CL-af1113b8</code></a></td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0013"><code>CL-af1113b8</code></a></td>
     <td>double-free</td>
     <td>tokenfuzz, claude-opus-4-8-direct</td>
-    <td class="right">8</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0013/REPORT.html">REPORT.html</a></td>
+    <td class="right">6</td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0013/report.html">report.html</a></td>
   </tr>
   <tr>
     <td class="left"><span class="sev sev-High">High</span></td>
     <td class="right">8.9</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0002"><code>CL-e86de570</code></a></td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0006"><code>CL-e86de570</code></a></td>
     <td>stack-buffer-overflow-WRITE</td>
     <td>tokenfuzz, claude-opus-4-8-direct</td>
-    <td class="right">5</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0002/REPORT.html">REPORT.html</a></td>
+    <td class="right">4</td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0006/report.html">report.html</a></td>
   </tr>
   <tr>
     <td class="left"><span class="sev sev-Medium">Medium</span></td>
     <td class="right">5.5</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0007"><code>CL-80016dd9</code></a></td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0022"><code>CL-80016dd9</code></a></td>
     <td>heap-buffer-overflow-READ</td>
     <td>tokenfuzz, claude-opus-4-8-direct</td>
     <td class="right">5</td>
-    <td><a href="20260915-203221/pool/crashes/CRASH-0007/REPORT.html">REPORT.html</a></td>
+    <td><a href="20260916-141941/pool/crashes/CRASH-0022/report.html">report.html</a></td>
   </tr>
 </tbody>
 </table>
 </div>
-<p>The <strong>Bug</strong> id links to the crash directory; <strong>Reproducer</strong> links its rendered report. Each bug is bundled as <code>REPORT.md</code>, <code>REPORT.html</code>, and <code>reproduce.sh</code> under <a href="20260915-203221/pool/crashes">pool/crashes/</a>.</p>
+<p>The <strong>Bug</strong> id links to the crash directory; <strong>Reproducer</strong> links its rendered report. Each bug is bundled as <code>report.md</code>, <code>report.html</code>, and <code>reproduce.sh</code> under <a href="20260916-141941/pool/crashes">pool/crashes/</a>.</p>
 <hr>
 </article></main>
 <div class="tip" id="tip" role="tooltip"></div>

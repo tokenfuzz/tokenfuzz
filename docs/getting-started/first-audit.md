@@ -93,12 +93,12 @@ Then check the generated review pages:
 
 | Path | What it shows |
 | --- | --- |
-| `$RESULTS/findings/FINDING-CLUSTERS.html` | Concrete security findings, including reports without a reproducer. |
-| `$RESULTS/crashes/CRASH-CLUSTERS.html` | Confirmed crash clusters and maintainer bundles. |
-| `$RESULTS/crashes-rejected/REJECTED-CRASHES.html` | Rejected crash candidates with reasons. |
-| `$RESULTS/findings-rejected/REJECTED-FINDINGS.html` | Rejected findings with reasons. |
-| `output/$TARGET/FINDING-CLUSTERS.html` | Cross-backend finding summary. |
-| `output/$TARGET/CRASH-CLUSTERS.html` | Cross-backend crash summary. |
+| `$RESULTS/findings/finding-clusters.html` | Concrete security findings, including reports without a reproducer. |
+| `$RESULTS/crashes/crash-clusters.html` | Confirmed crash clusters and maintainer bundles. |
+| `$RESULTS/crashes-rejected/rejected-crashes.html` | Rejected crash candidates with reasons. |
+| `$RESULTS/findings-rejected/rejected-findings.html` | Rejected findings with reasons. |
+| `output/$TARGET/finding-clusters.html` | Cross-backend finding summary. |
+| `output/$TARGET/crash-clusters.html` | Cross-backend crash summary. |
 
 An empty `findings/` or `crashes/` after one iteration is normal. A filed FIND
 is also not automatically a confirmed security result: read its Status column

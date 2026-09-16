@@ -525,12 +525,12 @@ class BenchmarkReportTests(unittest.TestCase):
         })
         self.write_json(cell / "metrics.json", metrics)
         benchmark.build_pool(bench)
-        roster = bench / "pool" / "crashes-rejected" / "DISCARDED-harness-d-r1.md"
+        roster = bench / "pool" / "crashes-rejected" / "discarded-harness-d-r1.md"
         self.assertTrue(roster.is_file())
         roster_text = roster.read_text(encoding="utf-8")
         for text in ("| 1 |", "| 2 |", "three clean variants", "bounds in parse"):
             self.assertIn(text, roster_text)
-        index = (bench / "pool" / "crashes-rejected" / "REJECTED-CRASHES.md").read_text()
+        index = (bench / "pool" / "crashes-rejected" / "rejected-crashes.md").read_text()
         self.assertIn("## Discarded hypotheses", index)
         self.assertIn(roster.name, index)
 
@@ -587,13 +587,13 @@ class BenchmarkReportTests(unittest.TestCase):
 
     def test_rejected_indexes_and_cluster_links(self) -> None:
         rejected = self.root / "rejected"
-        report = rejected / "CRASH-REJECTED-0001" / "REPORT.md"
+        report = rejected / "CRASH-REJECTED-0001" / "report.md"
         report.parent.mkdir(parents=True)
         report.write_text("# Rejected crash\nTrigger source: bytes\n", encoding="utf-8")
         benchmark.write_rejected_crashes_index(rejected)
-        index = rejected / "REJECTED-CRASHES.md"
+        index = rejected / "rejected-crashes.md"
         text = index.read_text(encoding="utf-8")
-        self.assertIn("[Link](CRASH-REJECTED-0001/REPORT.md)", text)
+        self.assertIn("[Link](CRASH-REJECTED-0001/report.md)", text)
         self.assertIn("| ID | Site | Reason | Report |", text)
         self.assertNotIn("[CRASH-REJECTED-0001/](CRASH-REJECTED-0001/)", text)
         rendered = subprocess.run(
@@ -602,16 +602,16 @@ class BenchmarkReportTests(unittest.TestCase):
         )
         self.assertEqual(rendered.returncode, 0, rendered.stderr)
         self.assertIn(
-            'href="CRASH-REJECTED-0001/REPORT.html"',
-            (rejected / "REJECTED-CRASHES.html").read_text(encoding="utf-8"),
+            'href="CRASH-REJECTED-0001/report.html"',
+            (rejected / "rejected-crashes.html").read_text(encoding="utf-8"),
         )
 
         layouts = [self.root / "regular", self.root / "pool" / "harness"]
         for layout in layouts:
             for directory in ("crashes", "crashes-rejected", "findings", "findings-rejected"):
                 (layout / directory).mkdir(parents=True)
-            (layout / "crashes-rejected" / "REJECTED-CRASHES.md").write_text("# Rejected\n")
-            (layout / "findings-rejected" / "REJECTED-FINDINGS.md").write_text("# Rejected\n")
+            (layout / "crashes-rejected" / "rejected-crashes.md").write_text("# Rejected\n")
+            (layout / "findings-rejected" / "rejected-findings.md").write_text("# Rejected\n")
             for command in ("cluster-crashes", "cluster-findings"):
                 process = subprocess.run(
                     [sys.executable, str(ROOT / "bin" / command), str(layout)],
@@ -619,12 +619,12 @@ class BenchmarkReportTests(unittest.TestCase):
                 )
                 self.assertEqual(process.returncode, 0, process.stderr)
             self.assertIn(
-                'href="../crashes-rejected/REJECTED-CRASHES.html"',
-                (layout / "crashes" / "CRASH-CLUSTERS.html").read_text(),
+                'href="../crashes-rejected/rejected-crashes.html"',
+                (layout / "crashes" / "crash-clusters.html").read_text(),
             )
             self.assertIn(
-                'href="../findings-rejected/REJECTED-FINDINGS.html"',
-                (layout / "findings" / "FINDING-CLUSTERS.html").read_text(),
+                'href="../findings-rejected/rejected-findings.html"',
+                (layout / "findings" / "finding-clusters.html").read_text(),
             )
 
     def write_cell(self, path: Path, results: Path, requested: str) -> dict:

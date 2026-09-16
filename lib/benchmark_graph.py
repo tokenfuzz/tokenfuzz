@@ -29,16 +29,16 @@ import crash_artifacts
 import finding_dedup
 import finding_signature
 import stack_frames
+import report_identity
 
 _TS = re.compile(r"^\[(\d\d):(\d\d):(\d\d)\]")
 
 
 def _report_text(directory: Path) -> str:
-    for name in ("report.md", "REPORT.md"):
-        candidate = directory / name
-        if candidate.is_file():
-            return candidate.read_text(encoding="utf-8", errors="replace")
-    return ""
+    candidate = report_identity.find_report(directory)
+    if candidate is None:
+        return ""
+    return candidate.read_text(encoding="utf-8", errors="replace")
 
 
 def _signature(directory: Path, kind: str) -> tuple | None:

@@ -7,7 +7,7 @@ Usage:
                    [--target-root <dir>] [--target-rev <rev>]
 
 Produces (replacing any previous content of <out>):
-  <out>/REPORT.md           — bug summary, root cause, candidate fix
+  <out>/report.md           — bug summary, root cause, candidate fix
   <out>/reproduce.sh        — one shell command, no env vars
   <out>/input.<ext>         — testcase bytes (renamed from internal stem)
   <out>/harness.c/.cpp      — present iff the bug uses a C/C++ harness
@@ -1463,7 +1463,7 @@ def rewrite_audit_script_body(in_path: Path, slug: str = "",
     return "".join(out)
 
 
-# ─── REPORT.md helpers ──────────────────────────────────────────────
+# ─── report.md helpers ──────────────────────────────────────────────
 
 # strip_audit_sections — remove the leading h1+table, audit-internal
 # `## Reproduction`, auto-appended `## Reproduce` / `## Expected ...`,
@@ -1505,7 +1505,7 @@ _SANITIZER_DUMP_RE = re.compile(
     re.MULTILINE,
 )
 # Agents commonly wrap the field table under a `## Fields` heading. The
-# auto-generated REPORT.md prepends its own Fields table, so we drop the
+# auto-generated report.md prepends its own Fields table, so we drop the
 # agent's heading + immediately-following table to avoid duplication.
 _FIELDS_HEADING_RE = re.compile(r"^#{1,6}\s+Fields\s*$", re.IGNORECASE)
 # Whole-section kills. `Expected sanitizer output` / `ASan top frames` are
@@ -2126,6 +2126,18 @@ def read_severity_from(path: Optional[Path]) -> str:
     return ""
 
 
+def exported_report(crash_dir: Path) -> Optional[Path]:
+    """The root report a previous export installed, or None before the first.
+
+    The agent's draft and the exported report share a name; export moves the
+    draft to .audit/report.md, so that copy is what says the root report is
+    the bundle's own and carries fields a later pass wrote into it.
+    """
+    if not (crash_dir / ".audit" / "report.md").is_file():
+        return None
+    return report_identity.find_report(crash_dir)
+
+
 def read_auto_severity_line(path: Optional[Path]) -> str:
     """Return the existing generated `**Severity**: ...` line minus any
     leading `-` bullet, or "" if absent.
@@ -2231,7 +2243,7 @@ def extract_asan_diagnostic(asan_file: Path) -> str:
     The maintainer-facing report should show the real sanitizer view: the
     ERROR line, access primitive (`READ/WRITE of size ...`), every stack
     section the sanitizer prints before SUMMARY, and the SUMMARY line. Stop before the
-    shadow-byte dump so REPORT.md stays readable while `sanitizer.txt`
+    shadow-byte dump so report.md stays readable while `sanitizer.txt`
     remains the canonical full log.
     """
     if not asan_file.is_file():
@@ -2598,10 +2610,8 @@ def _install_with_exact_case(src: Path, dst: Path) -> None:
     with ``dst`` or any bundle filename. This sidesteps two Docker
     Desktop / case-insensitive bind-mount quirks observed in practice:
       * ``shutil.copyfile(src, dst)`` when a case-different sibling
-        (e.g. lowercase ``report.md``) exists at ``dst.parent`` writes
-        through the sibling's dirent (inode-aliased into ``.audit/``
-        once the migration step has moved that sibling), leaving the
-        bundle root without ``REPORT.md`` at all.
+        exists at ``dst.parent`` writes through the sibling's dirent,
+        leaving the bundle root without an entry spelled ``dst.name``.
       * ``unlink(sibling)`` followed by ``open(dst, 'wb')`` can fail
         ``ENOENT`` because the bind-mount dirent cache has not made
         the freed name re-creatable yet.
@@ -2638,7 +2648,7 @@ def _install_with_exact_case(src: Path, dst: Path) -> None:
 
 
 def _is_bundle_filename(name: str) -> bool:
-    if name in {"REPORT.md", "REPORT.html", "reproduce.sh", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "severity.json", "validation.json"}:
+    if name in {"report.md", "report.html", "reproduce.sh", "sanitizer.txt", "msan.txt", "tsan.txt", "ubsan.txt", "harness.c", "harness.cc", "harness.cpp", "harness.cxx", "severity.json", "validation.json"}:
         return True
     if name in {".llm-find-quality.json", ".severity_ok", ".severity_pending",
                 ".severity_failed"}:
@@ -2656,7 +2666,7 @@ def _is_bundle_filename(name: str) -> bool:
         return True
     # patch.diff stays at bundle root so a) maintainers see the patch as
     # a standalone file, and b) bin/enrich-report inlines it into the
-    # `## Patch` section of REPORT.md / REPORT.html. The filename is
+    # `## Patch` section of report.md / report.html. The filename is
     # fixed in .agents/references/session-rules.md.
     if name == "patch.diff":
         return True
@@ -2986,12 +2996,12 @@ def write_stub_reproduce(out: Path, *, crash_id: str, sanitizer: str,
     """Last-resort reproduce.sh when no runnable template can be built.
 
     A bundle is still worth shipping without an automated reproducer: the
-    REPORT.md (Fields, inlined sanitizer stack, root-cause prose, captured
+    report.md (Fields, inlined sanitizer stack, root-cause prose, captured
     patch) is the maintainer-facing artifact, and the reproducer is a
     convenience. This used to `die()` — dropping the whole bundle — which
     is how model-direct crashes (a self-contained harness with no separate
     testcase, or a pooled crash with no converged build recipe) ended up
-    with no REPORT.md at all.
+    with no report.md at all.
 
     The stub is a valid shell script that documents what IS known (the
     sibling artifacts, the build hint when a harness is present) and exits
@@ -3003,7 +3013,7 @@ def write_stub_reproduce(out: Path, *, crash_id: str, sanitizer: str,
         "#!/usr/bin/env bash",
         "# Auto-generated stub reproducer — NO runnable template could be",
         f"# determined for {crash_id}" + (f" ({reason})." if reason else "."),
-        "# The maintainer-facing artifact is REPORT.md in this directory;",
+        "# The maintainer-facing artifact is report.md in this directory;",
         f"# sanitizer.txt holds the full {label} diagnostic. Reproduce by hand:",
         "set -euo pipefail",
         "here=\"$(cd \"$(dirname \"$0\")\" && pwd)\"",
@@ -3016,13 +3026,13 @@ def write_stub_reproduce(out: Path, *, crash_id: str, sanitizer: str,
             f"To reproduce: build {harness_name} against an {label}-instrumented",
             "build of the target library and run it. The harness is self-contained",
             "(it constructs its own triggering input); no separate input file is",
-            "needed. See REPORT.md \"Reproduce\"/\"Root cause\" for specifics.",
+            "needed. See report.md \"Reproduce\"/\"Root cause\" for specifics.",
             "EOF",
         ]
     else:
         lines += [
             'cat >&2 <<EOF',
-            "No harness or testcase was captured with this crash. See REPORT.md",
+            "No harness or testcase was captured with this crash. See report.md",
             f"for the root cause and sanitizer.txt for the full {label} stack.",
             "EOF",
         ]
@@ -3207,7 +3217,7 @@ def build_report_md(*, crash_id: str, primitive_label: str, severity_value: str,
     if severity_value == "—":
         parts.append("- **Severity**: TBD\n")
     else:
-        auto_line = read_auto_severity_line(crash_dir / "REPORT.md")
+        auto_line = read_auto_severity_line(exported_report(crash_dir))
         if auto_line:
             parts.append(f"- {auto_line}\n")
         else:
@@ -3412,17 +3422,15 @@ def main(argv: list[str]) -> int:
     run_mode = run_header.get("mode", "")
     recorded_env_options = decode_header_b64(run_header.get("env_options_b64", ""))
 
-    report_md = find_first_in_scan(scan_dirs, "report.md")
-    if report_md is None:
-        report_md = find_first_in_scan(scan_dirs, "REPORT.md")
-    # Keep the audit-side original as the narrative source, but read fields
-    # from the canonical root report when a prior triage/severity pass enriched
-    # it. Re-bundling from .audit/report.md alone silently discards fields
-    # learned after the first export.
-    field_report_md = (
-        report_identity.exact_child_file(crash_dir, ("REPORT.md",))
-        or report_md
-    )
+    # The agent's draft is the narrative source: the root report.md on the
+    # first export, .audit/report.md once export has moved it there. A
+    # re-export keeps reading fields from the root report, where a later
+    # triage or severity pass wrote them; rebuilding from the draft alone
+    # would silently discard them.
+    draft_md = audit_subdir / "report.md"
+    exported = draft_md.is_file()
+    report_md = draft_md if exported else find_first_in_scan(scan_dirs, "report.md")
+    field_report_md = exported_report(crash_dir) or report_md
 
     shell_wrapper = None
     recorded_args: list[str] | None = None
@@ -3471,7 +3479,7 @@ def main(argv: list[str]) -> int:
         # report.md. Older bundles still have it under .audit/ because
         # _is_bundle_filename used to demote it; scan_dirs already
         # covers both locations. Stage it so it lands back at the
-        # bundle root and bin/enrich-report can inline it into REPORT.md.
+        # bundle root and bin/enrich-report can inline it into report.md.
         patch_src = find_first_in_scan(scan_dirs, "patch.diff")
         if patch_src is not None:
             shutil.copyfile(patch_src, stage / "patch.diff")
@@ -3680,10 +3688,10 @@ def main(argv: list[str]) -> int:
         else:
             # No runnable template (self-contained harness with no separate
             # testcase, browser/CLI input absent, no shell wrapper). Ship a
-            # stub reproducer and STILL build REPORT.md — the bundle's value
+            # stub reproducer and STILL build report.md — the bundle's value
             # is the report, not the convenience script. Previously this
             # die()'d and dropped the whole bundle, which is why model-direct
-            # crashes never got the canonical REPORT.md.
+            # crashes never got the canonical report.md.
             repro_is_stub = True
             _stub_reason = "self-contained harness, no separate testcase" \
                 if harness_src is not None else "no harness/testcase/wrapper captured"
@@ -3695,7 +3703,7 @@ def main(argv: list[str]) -> int:
             sys.stderr.write(
                 f"[export-repro] no runnable reproduce.sh template for "
                 f"{args.crash_id} ({_stub_reason}); wrote a stub and continued "
-                f"with the REPORT.md bundle.\n"
+                f"with the report.md bundle.\n"
             )
 
         # ── Guard: the audit recipe must not be silently dropped ─────
@@ -3719,7 +3727,7 @@ def main(argv: list[str]) -> int:
                 f"the reproducer build matches the audit build."
             )
 
-        # ── Build REPORT.md ──────────────────────────────────────────
+        # ── Build report.md ──────────────────────────────────────────
         asan_top = extract_asan_top(asan_file)
         asan_summary = extract_asan_summary(asan_file)
         dedup_frames = extract_dedup_frames(asan_file)
@@ -3738,7 +3746,7 @@ def main(argv: list[str]) -> int:
         canonical_surface_value = ""
         canonical_surface_reason = ""
         # Surface correction reads the report's Boundary and Trusted caller
-        # actions only, never the narrative or a rebundled REPORT.md: the
+        # actions only, never the narrative or a rebundled report.md: the
         # inlined sanitizer diagnostic and a passing mention of the shipped
         # tool or an in-tree harness would otherwise flip a library-API
         # report on every export.
@@ -3782,11 +3790,9 @@ def main(argv: list[str]) -> int:
             )
 
         severity_value = "—"
-        for cand in (
-            crash_dir / "REPORT.md",
-            crash_dir / "report.md",
-            report_md,
-        ):
+        for cand in (field_report_md, report_md):
+            if cand is None:
+                continue
             v = read_severity_from(cand)
             if v:
                 severity_value = v
@@ -3822,7 +3828,7 @@ def main(argv: list[str]) -> int:
             advisory_value=advisory_value,
             local_src=local_src,
         )
-        (stage / "REPORT.md").write_text(report_text, encoding="utf-8")
+        (stage / "report.md").write_text(report_text, encoding="utf-8")
 
         # ── Path normalization: rewrite this session's absolute audit
         #    paths to portable relative form *before* the leak scan
@@ -3832,7 +3838,7 @@ def main(argv: list[str]) -> int:
         #    reject every bundle on every container layout. After
         #    rewriting, anything the scan still flags is a real escape
         #    that needs an explicit code fix.
-        normalize_candidates = [stage / "REPORT.md", stage / "reproduce.sh"]
+        normalize_candidates = [stage / "report.md", stage / "reproduce.sh"]
         normalize_candidates += list(stage.glob("harness.*"))
         normalize_candidates += list(stage.glob("input.*"))
         # Stable dedupe — list.unique-preserve-order.
@@ -3869,6 +3875,11 @@ def main(argv: list[str]) -> int:
         # ── Migrate junk into .audit/ ────────────────────────────────
         if out_dir == crash_dir:
             audit_subdir.mkdir(parents=True, exist_ok=True)
+            # The draft shares the bundle report's name, so it moves aside
+            # before the install below rather than through the bundle-file
+            # filter.
+            if not exported and report_md is not None and report_md.parent == crash_dir:
+                shutil.move(str(report_md), str(draft_md))
             # Dotfiles migrate too, so walk iterdir() rather than a
             # visible-entries glob.
             for f in sorted(crash_dir.iterdir()):
@@ -3895,7 +3906,7 @@ def main(argv: list[str]) -> int:
 
         # ── Install staged files atomically ──────────────────────────
         install_candidates = [
-            stage / "REPORT.md",
+            stage / "report.md",
             stage / "reproduce.sh",
             stage / "sanitizer.txt",
         ]
@@ -3923,7 +3934,7 @@ def main(argv: list[str]) -> int:
         )
 
     # ── Re-apply severity ────────────────────────────────────────────
-    # build_report_md rebuilds REPORT.md from the agent's report.md, which
+    # build_report_md rebuilds report.md from the agent's report.md, which
     # never carries the `## Severity rationale` section written by
     # bin/severity. If a prior run already scored this dir (severity.json
     # present), replay the offline scorer now so the rebuild does not lose
@@ -3941,8 +3952,8 @@ def main(argv: list[str]) -> int:
         except (OSError, subprocess.SubprocessError):
             pass
 
-    # REPORT.html is rendered by maintain_indexes after severity and
-    # cluster post-processing have made their final REPORT.md edits. Rendering
+    # report.html is rendered by maintain_indexes after severity and
+    # cluster post-processing have made their final report.md edits. Rendering
     # here would create a stale pre-severity/pre-cluster HTML sibling.
 
     # ── Mark this dir as bundled for triage. ─────────────────────────

@@ -1,0 +1,13 @@
+--- a/src/rcfg.c
++++ b/src/rcfg.c
+@@ -194,7 +194,9 @@
+  * corrupt stream and trips a debug invariant. */
+ static void handle_check(rcfg_ctx *ctx, const uint8_t *val, uint16_t len)
+ {
+-  assert(len <= sizeof(ctx->check));
++  if (len > sizeof(ctx->check)) {
++    return;
++  }
+   memcpy(ctx->check, val, len);
+   ctx->check_len = len;
+ }

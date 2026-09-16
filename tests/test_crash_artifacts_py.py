@@ -92,13 +92,13 @@ with tempfile.TemporaryDirectory() as td:
 
 
 # Generated report projections are metadata, never reproducing inputs. The
-# lowercase report.html shape is used before maintainer export; REPORT.html is
+# lowercase report.html shape is used before maintainer export; report.html is
 # used after export.
 with tempfile.TemporaryDirectory() as td:
     cd = Path(td)
     (cd / "report.html").write_text("<html>generated report</html>",
                                     encoding="utf-8")
-    (cd / "REPORT.html").write_text("<html>exported report</html>",
+    (cd / "report.html").write_text("<html>exported report</html>",
                                     encoding="utf-8")
     assert_eq(None, ca.find_testcase([cd]),
               "find_testcase: generated HTML reports are not testcases")

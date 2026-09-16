@@ -5,7 +5,7 @@ Two outputs from one tool, both deterministic and idempotent:
 
   1. The markdown file is rewritten in place with each GFM table padded
      to the widest cell per column (alignment markers — `:--`, `--:`,
-     `:--:` — are honoured). This makes `cat INDEX.md` actually align.
+     `:--:` — are honoured). This makes `cat index.md` actually align.
 
   2. With `--html` (or `--html-sibling`) a self-contained HTML file is
      emitted next to the input, in the evidence-page shell shared with the
@@ -24,13 +24,13 @@ adding dependencies:
     chips so QA can scan input surface at a glance.
   * **Cluster ids**: monospace + light background so they read like the
     code references they are.
-  * **Sticky table headers**: long INDEX.md tables stay scannable when
+  * **Sticky table headers**: long index.md tables stay scannable when
     you scroll.
   * **Auto link rewrite**: `[…](foo.md)` is rewritten to `…/foo.html` in
     the HTML output so cross-document links land on the styled sibling.
 
 Markdown features supported (this is not a general renderer — only what
-INDEX.md / CLUSTERS.md / REPORT.md actually use):
+index.md / CLUSTERS.md / report.md actually use):
 
     # / ## / ### headings, paragraphs, GFM tables (with alignment markers),
     inline links [text](url), inline `code`, **bold**, _italic_, fenced
@@ -209,7 +209,7 @@ def _format_inline_code(content: str) -> str:
 _URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 # Schemes safe to emit as a clickable href in maintainer-facing local HTML.
 # `file:` is included: a report bundle is opened from a file:// origin and
-# links to its sibling artifacts (crash dirs, REPORT.html, reproduce.sh) by
+# links to its sibling artifacts (crash dirs, report.html, reproduce.sh) by
 # absolute file:// URI — that is navigation, not execution. javascript:,
 # data: and vbscript: are NOT here: they would run script in the origin.
 _SAFE_URL_SCHEME_RE = re.compile(r"^(?:https?|mailto|ftp|file):", re.IGNORECASE)
@@ -343,7 +343,7 @@ _SEV_CELL_RE = re.compile(
     r"(?:\s*\(\s*CVSS(?:-[A-Z]+)?(?:\s*4\.0)?\s*:?\s*(\d+(?:\.\d+)?)\s*\))?\s*$"
 )
 
-# Strategy short-codes used in the REPORT.md `Strategy:` field; the registry
+# Strategy short-codes used in the report.md `Strategy:` field; the registry
 # carries the words so the field shows `S1 — Prior-fix variant`.
 _STRATEGY_NAMES = strategies.NAMES
 _STRATEGY_CELL_RE = re.compile(
@@ -358,20 +358,22 @@ _ADVISORY_HINTS = {
     "yes": "advisory only — no patch",
 }
 
-# CRASH-* / FIND-* sibling IDs that appear inside cluster cells. Each
-# resolves to `../<ID>/REPORT.html` (the bundle layout is uniform).
+# CRASH-* / FIND-* sibling IDs that appear inside cluster cells.
 _CLUSTER_SIBLING_RE = re.compile(r"\b((?:CRASH|FIND)-\d+(?:-\d+)?)\b")
 
 
-def _linkify_cluster_siblings(rendered_html: str) -> str:
-    """Wrap each CRASH-NNN-N / FIND-NNN-N token in a relative link to
-    its sibling REPORT.html. Operates on already-rendered HTML so we
-    don't accidentally rewrite a sibling that the author already
-    linkified — only bare textual tokens get wrapped."""
+def _linkify_cluster_siblings(rendered_html: str, directory: Path | None) -> str:
+    """Wrap each CRASH-NNN-N / FIND-NNN-N token in a relative link to the
+    sibling's rendered report, resolved from the sibling's own directory
+    beside *directory*; a token with no such report stays plain text.
+    Operates on already-rendered HTML so we don't accidentally rewrite a
+    sibling that the author already linkified — only bare textual tokens
+    get wrapped."""
 
     def _wrap(m: re.Match) -> str:
         sid = m.group(1)
-        return f'<a href="../{sid}/REPORT.html">{sid}</a>'
+        href = evidence_pages.sibling_report_href(directory, sid) if directory else ""
+        return f'<a href="{html.escape(href)}">{sid}</a>' if href else sid
 
     # Avoid re-linkifying tokens that already sit inside an <a>…</a>.
     # Simple split on existing anchors keeps the rule cheap and robust
@@ -442,7 +444,8 @@ def _gloss_field_name(rendered_html: str, raw_cell: str) -> str:
             f'{rendered_html}</abbr>')
 
 
-def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
+def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "",
+                   directory: Path | None = None) -> str:
     """Wrap severity / surface tokens in styled spans so the HTML view
     shows pill-shaped badges and chips. Operates on the raw cell text
     (pre-render) so Critical/High/Medium/Low don't have to be matched
@@ -514,13 +517,13 @@ def _decorate_cell(rendered_html: str, raw_cell: str, row_key: str = "") -> str:
     # one — carries sibling CRASH-* / FIND-* ids. Linkify them so the grid
     # offers the same click-through the hero would have.
     if key == "cluster":
-        return _linkify_cluster_siblings(rendered_html)
+        return _linkify_cluster_siblings(rendered_html, directory)
 
     return rendered_html
 
 
 def _table_extra_class(header: list[str]) -> str:
-    """Identify the small REPORT.md "Fields" key/value table so we can
+    """Identify the small report.md "Fields" key/value table so we can
     style the leading column as a label column."""
     if [c.lower() for c in header[:2]] == ["field", "value"]:
         return "fields-table"
@@ -557,7 +560,8 @@ def _ordered_field_rows(rows: list[list[str]],
 
 def _render_table_html(header: list[str], align: list[str], body: list[list[str]],
                        extra_rows: list[tuple[str, str]] | None = None,
-                       omitted: frozenset[str] = frozenset()) -> str:
+                       omitted: frozenset[str] = frozenset(),
+                       directory: Path | None = None) -> str:
     extra = _table_extra_class(header)
     if extra == "fields-table":
         # Fill the field's existing row when it has one — the table
@@ -593,7 +597,7 @@ def _render_table_html(header: list[str], align: list[str], body: list[list[str]
         for i, c in enumerate(row):
             a = align[i] if i < len(align) else "none"
             row_key = row[0] if (is_kv_table and i > 0 and row) else ""
-            inner = _decorate_cell(_render_inline(c), c, row_key)
+            inner = _decorate_cell(_render_inline(c), c, row_key, directory)
             if is_kv_table and i == 0:
                 inner = _gloss_field_name(inner, c)
             out.append(f"    <td{_align_class(a)}>{inner}</td>")
@@ -848,7 +852,7 @@ def _is_hidden_label_line(line: str, hidden_labels: set[str]) -> bool:
     return match.group("key").strip().casefold() in hidden_labels
 
 
-def _synthesized_fields_grid(rows: list[tuple[str, str]]) -> str:
+def _synthesized_fields_grid(rows: list[tuple[str, str]], directory: Path | None) -> str:
     """Render a report's bare-label block as its Fields grid.
 
     `bin/severity` writes a `## Fields` table only when it resolved more than
@@ -860,6 +864,7 @@ def _synthesized_fields_grid(rows: list[tuple[str, str]]) -> str:
     empty grid would mean the fields went nowhere."""
     return _render_table_html(
         ["Field", "Value"], ["left", "left"], [[key, value] for key, value in rows],
+        directory=directory,
     ) if rows else ""
 
 
@@ -1060,7 +1065,7 @@ def _frames_from_dedup_value(value: str) -> list[stack_frames.StackFrame]:
 
 
 def _extract_hero(text: str) -> dict:
-    """Pull the verdict-at-a-glance signals from REPORT.md so the HTML
+    """Pull the verdict-at-a-glance signals from report.md so the HTML
     can show them in a hero card before the user has to scroll."""
     h: dict = {}
     cluster_seen = False
@@ -1193,9 +1198,9 @@ def _primitive_category(prim: str) -> str:
     return ""
 
 
-def _render_hero(h: dict) -> str:
+def _render_hero(h: dict, directory: Path | None) -> str:
     """Render the triage hero card. Skipped entirely if no useful
-    signal was extracted (small docs, INDEX.md, etc.)."""
+    signal was extracted (small docs, index.md, etc.)."""
     if not (h.get("severity_level") or h.get("primitive") or h.get("top_frame_func")):
         return ""
     parts: list[str] = []
@@ -1255,7 +1260,7 @@ def _render_hero(h: dict) -> str:
         # Linkify CRASH-* / FIND-* sibling references in the cluster
         # string so the reviewer can hop between siblings from the
         # hero card. Escape first, then linkify the safe tokens.
-        cluster_html = _linkify_cluster_siblings(html.escape(h["cluster"]))
+        cluster_html = _linkify_cluster_siblings(html.escape(h["cluster"]), directory)
         meta.append(f'<span><strong>Cluster</strong> {cluster_html}</span>')
     if meta:
         parts.append('<div class="triage-meta">' + "".join(meta) + "</div>")
@@ -1278,12 +1283,13 @@ def markdown_to_html(text: str, title: str = "Report",
     *directory* is the artifact directory the markdown lives in. When it is a
     CRASH-*/FIND-* bundle, the shell adds the action card and evidence rail
     read from the sidecars beside the report; any other document gets the
-    plain shell."""
+    plain shell. Sibling CRASH-*/FIND-* ids in cluster cells link to the
+    report each sibling directory holds."""
     lines = text.splitlines()
     # Render the hero first: what it shows decides what the grid may omit, so
     # a value is only ever suppressed once its replacement is on the page.
     hero = _extract_hero(text)
-    hero_html = _render_hero(hero)
+    hero_html = _render_hero(hero, directory)
     facts = evidence_pages.report_context(directory)
     # The action card sits under the hero: the verdict first, then what to do
     # about it, then the report's own argument.
@@ -1297,7 +1303,7 @@ def markdown_to_html(text: str, title: str = "Report",
     # index or a crosstab never grows a Fields table out of a stray label.
     field_rows, hidden_labels = _report_fields(lines, omitted_labels)
     synthesized_grid = (
-        "" if _has_fields_table(lines) else _synthesized_fields_grid(field_rows)
+        "" if _has_fields_table(lines) else _synthesized_fields_grid(field_rows, directory)
     )
     orphan_fields = [] if synthesized_grid else field_rows
     body: list[str] = []
@@ -1530,7 +1536,8 @@ def markdown_to_html(text: str, title: str = "Report",
             is_fields = _table_extra_class(header) == "fields-table"
             body.append(_render_table_html(
                 header, align, body_rows,
-                orphan_fields if is_fields else None, omitted_labels))
+                orphan_fields if is_fields else None, omitted_labels,
+                directory=directory))
             if is_fields:
                 orphan_fields = []
             i = j
@@ -1568,7 +1575,7 @@ def markdown_to_html(text: str, title: str = "Report",
             # shallower closes back. The stack tracks open `<ul>` / `<ol>`
             # tags by indent level so emitted HTML stays well-formed even
             # when a list mixes single and multi-level rows. Only handles
-            # the shape REPORT.md / Calibration notes actually use —
+            # the shape report.md / Calibration notes actually use —
             # not full CommonMark loose-list / lazy-continuation rules.
             list_stack: list[tuple[int, str]] = []  # (indent, tag)
             html_chunks: list[str] = []
@@ -1653,7 +1660,7 @@ def markdown_to_html(text: str, title: str = "Report",
     # suppressed (the `hero` dict carried signal). Emit it once at the top here
     # so every report with triage signal shows the header card regardless of
     # whether the author wrote an H1. `_render_hero` returns "" when there is no
-    # useful signal, so non-report docs (INDEX.md, crosstabs) stay heroless.
+    # useful signal, so non-report docs (index.md, crosstabs) stay heroless.
     if not hero_emitted:
         body[0:0] = [part for part in (hero_html, action_html, synthesized_grid) if part]
     return evidence_pages.report_document(title, "\n".join(body) + "\n", facts)
@@ -1718,7 +1725,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--html", type=Path, default=None,
                     help="write HTML output to this path (single input only; default: none unless --html-sibling)")
     ap.add_argument("--html-sibling", action="store_true",
-                    help="write HTML to <input>.html (e.g. INDEX.md → INDEX.html)")
+                    help="write HTML to <input>.html (e.g. index.md → index.html)")
     ap.add_argument("--title", default=None,
                     help="HTML <title> (single input only; default: chosen by --title-from)")
     ap.add_argument("--title-from", choices=("stem", "parent"), default="stem",

@@ -184,6 +184,21 @@ shares one isolation policy, and target setup keeps a route that already runs.
   cents; and every console line, regenerate-all included, names the HTML
   page.
 
+- **Generated file names are lowercase.** A crash bundle's report is now
+  `report.md` with a `report.html` twin, the same as a finding's; the agent's
+  draft moves to `.audit/report.md` on export, and that copy, not a spelling
+  difference, is what marks a bundle as exported. The cluster and rejection
+  indexes are `crash-clusters`, `finding-clusters`, `rejected-crashes` and
+  `rejected-findings`, a rejection note is `rejection.md`, and the corpus
+  index is `index.md`. The shipped sample linked crash reports as
+  `report.html` while the file was `REPORT.html`: the pages are generated and
+  checked on case-insensitive disks, where either spelling opens, and served
+  case-sensitively, where one is a dead link. Every reader now locates a
+  report through `report_identity`, which lists the directory, and links
+  between cluster siblings resolve the sibling's own file; a spelling that
+  differs only in case is not a report. A test holds the shipped example to
+  exact-case links.
+
 - **A run is pinned to the code and gates it started with.** The control plane
   is frozen once per run and every cell facade built from that copy; the
   closing pass now runs from the same snapshot, where `bin/validate-finding`

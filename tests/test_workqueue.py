@@ -1738,7 +1738,7 @@ class WorkQueueTests(unittest.TestCase):
 
         crash = self.results / "crashes" / "CRASH-1"
         crash.mkdir(parents=True)
-        (crash / "REPORT.md").write_text(
+        (crash / "report.md").write_text(
             "# Crash\n\n| Field | Value |\n|:--|:--|\n"
             "| Primitive | heap-use-after-free |\n| Surface | library-api — public |\n"
             "| Severity | Medium (5.5) |\n| Crash site | app_free child.c:91 |\n| Cluster | CL-one |\n"
@@ -3007,7 +3007,7 @@ class WorkQueueTests(unittest.TestCase):
         self.write_cards([self.card("WORK-A", "src/app.c")])
         crash = self.results / "crashes" / "CRASH-2-1"
         (crash / ".audit").mkdir(parents=True)
-        (crash / ".audit" / ".promotion_pending").write_text("missing: REPORT.md\n")
+        (crash / ".audit" / ".promotion_pending").write_text("missing: report.md\n")
         self.assertTrue(workqueue.crash_bundle_unfinished(crash))
         resume = workqueue.state_resume(self.ctx, "1", "generic")
         self.assertIn("CRASH-2-1", resume)

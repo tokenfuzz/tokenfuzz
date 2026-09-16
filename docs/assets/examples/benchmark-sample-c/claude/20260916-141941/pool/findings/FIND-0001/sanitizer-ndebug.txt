@@ -1,0 +1,56 @@
+=================================================================
+==81122==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016f829140 at pc 0x000100e66bb4 bp 0x00016f828fd0 sp 0x00016f828780
+WRITE of size 200 at 0x00016f829140 thread T0
+==81122==WARNING: failed to spawn external symbolizer (errno: 9)
+==81122==WARNING: failed to spawn external symbolizer (errno: 9)
+==81122==WARNING: failed to spawn external symbolizer (errno: 9)
+==81122==WARNING: failed to spawn external symbolizer (errno: 9)
+==81122==WARNING: failed to spawn external symbolizer (errno: 9)
+==81122==WARNING: Failed to use and restart external symbolizer!
+    #0 0x000100e66bb0 in __asan_memcpy+0x330 (/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin/libclang_rt.asan_osx_dynamic.dylib:arm64e+0x3ebb0)
+    #1 0x0001005d4a08 in rcfg_decode+0x228 (output/benchmark-sample-c/claude/20260916-141941/cells/harness-r1/repo-root/output/samples/sample-c-bench-20260916-141941-harness-r1/claude/results/scratch-2/rcfg_ndebug_r2:arm64+0x100000a08)
+    #2 0x0001005d4eb0 in main+0x148 (output/benchmark-sample-c/claude/20260916-141941/cells/harness-r1/repo-root/output/samples/sample-c-bench-20260916-141941-harness-r1/claude/results/scratch-2/rcfg_ndebug_r2:arm64+0x100000eb0)
+    #3 0x00018d1844e0 in start+0x1b4c (/usr/lib/dyld:arm64e+0x204e0)
+
+Address 0x00016f829140 is located in stack of thread T0 at offset 352 in frame
+    #0 0x0001005d47ec in rcfg_decode+0xc (output/benchmark-sample-c/claude/20260916-141941/cells/harness-r1/repo-root/output/samples/sample-c-bench-20260916-141941-harness-r1/claude/results/scratch-2/rcfg_ndebug_r2:arm64+0x1000007ec)
+
+  This frame has 3 object(s):
+    [32, 160) 'host' (line 95)
+    [192, 256) 'label' (line 82)
+    [288, 352) 'ctx' (line 228) <== Memory access at offset 352 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (output/benchmark-sample-c/claude/20260916-141941/cells/harness-r1/repo-root/output/samples/sample-c-bench-20260916-141941-harness-r1/claude/results/scratch-2/rcfg_ndebug_r2:arm64+0x100000a08) in rcfg_decode+0x228
+Shadow bytes around the buggy address:
+  0x00016f828e80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f828f00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f828f80: 00 00 00 00 00 00 00 00 00 00 00 00 f1 f1 f1 f1
+  0x00016f829000: f8 f8 f8 f8 f8 f8 f8 f8 f8 f8 f8 f8 f8 f8 f8 f8
+  0x00016f829080: f2 f2 f2 f2 f8 f8 f8 f8 f8 f8 f8 f8 f2 f2 f2 f2
+=>0x00016f829100: 00 00 00 00 00 00 00 00[f3]f3 f3 f3 00 00 00 00
+  0x00016f829180: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f829200: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f829280: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f829300: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016f829380: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07 
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==81122==ABORTING

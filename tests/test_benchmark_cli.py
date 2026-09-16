@@ -390,7 +390,7 @@ class BenchmarkCliTests(unittest.TestCase):
         shutil.move(str(self.bench_root), str(moved))
         rebuilt = self.run_main("--rebuild-report", "--bench-root", str(moved))
         self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout)
-        clusters = "codex/20260101-000000/pool/harness/findings/FINDING-CLUSTERS.html"
+        clusters = "codex/20260101-000000/pool/harness/findings/finding-clusters.html"
         for name in ("benchmark-result.md", "benchmark-result.html"):
             links = self.assert_links_relative(moved / name)
             self.assertIn(clusters, links, name)
@@ -403,7 +403,7 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertEqual(rebuilt.returncode, 0, rebuilt.stdout)
         clusters = (
             f"codex/{urllib.parse.quote(run_name, safe='')}/"
-            "pool/harness/findings/FINDING-CLUSTERS.html"
+            "pool/harness/findings/finding-clusters.html"
         )
         for name in ("benchmark-result.md", "benchmark-result.html"):
             self.assertIn(clusters, self.assert_links_relative(self.bench_root / name))

@@ -19,14 +19,14 @@ state (lib/finding_dedup.py). Both signals are deterministic and LLM-free.
 See lib/finding_signature.py for the per-field extraction.
 
 Output (mirrors bin/cluster-crashes):
-  * <results>/findings/FINDING-CLUSTERS.md
+  * <results>/findings/finding-clusters.md
                                            — sortable markdown summary
-  * output/<target>/FINDING-CLUSTERS.md   — cross-backend aggregate summary
-  * each FIND-*/{report.md,REPORT.md}    — Cluster: <ID> field
+  * output/<target>/finding-clusters.md   — cross-backend aggregate summary
+  * each FIND-*/report.md                — Cluster: <ID> field
   * non-canonical members get .dup-of    — pointer to canonical FIND id
 
 Usage:
-  bin/cluster-findings <results-dir>            # writes FINDING-CLUSTERS.md
+  bin/cluster-findings <results-dir>            # writes finding-clusters.md
   bin/cluster-findings <results-dir> --dry-run  # print plan only
   bin/cluster-findings <results-dir> --json     # emit JSON to stdout
 """
@@ -147,7 +147,7 @@ def _extract_strategy(report_text: str) -> str:
 
     Matches bin/cluster-crashes' extractor; accepts both the bare-label and
     Fields-table forms. Free-form labels collapse to the first S<N>/REF token
-    so FINDING-CLUSTERS.md's Strategy column stays terse."""
+    so finding-clusters.md's Strategy column stays terse."""
     for rx in (_STRATEGY_BARE_RE, _STRATEGY_TABLE_RE):
         m = rx.search(report_text)
         if not m:
@@ -379,7 +379,7 @@ def _lex_rank(s: str) -> int:
     return sum((256 ** (8 - i)) * ord(c) for i, c in enumerate(s[:8]))
 
 
-# ── Output: FINDING-CLUSTERS.md + Cluster: stamp + .dup-of markers ──
+# ── Output: finding-clusters.md + Cluster: stamp + .dup-of markers ──
 
 
 _CLUSTER_LINE_RE = re.compile(r"^(Cluster:\s*).*$", re.MULTILINE)
@@ -677,7 +677,7 @@ def _member_link(findings_root: Path, member_id: str, link_prefix: str = "") -> 
 
 
 def _rejected_report_link(findings_root: Path) -> str:
-    return "../findings-rejected/REJECTED-FINDINGS.md"
+    return "../findings-rejected/rejected-findings.md"
 
 
 def _derive_target_root(path: Path) -> str:
@@ -721,7 +721,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--target-root", default=os.environ.get("TARGET_ROOT", ""),
                     help="Strip this prefix from absolute paths in report text")
     ap.add_argument("--dry-run", action="store_true",
-                    help="Don't write FINDING-CLUSTERS.md, report.md, or .dup-of markers")
+                    help="Don't write finding-clusters.md, report.md, or .dup-of markers")
     ap.add_argument("--json", action="store_true",
                     help="Emit cluster JSON to stdout")
     ap.add_argument("--json-out", type=Path, default=None,
@@ -736,16 +736,16 @@ def main(argv: list[str] | None = None) -> int:
     target_root = args.target_root or _derive_target_root(rd)
 
     # Layouts:
-    #   * <results>/                       -> writes findings/FINDING-CLUSTERS.md
-    #   * <results>/findings              -> findings/FINDING-CLUSTERS.md
+    #   * <results>/                       -> writes findings/finding-clusters.md
+    #   * <results>/findings              -> findings/finding-clusters.md
     #   * output/<slug>/                   -> aggregate every agent
     if (rd / "findings").is_dir():
         findings_root = rd / "findings"
-        out_md = findings_root / "FINDING-CLUSTERS.md"
+        out_md = findings_root / "finding-clusters.md"
         link_prefix = ""
     elif rd.name == "findings":
         findings_root = rd
-        out_md = findings_root / "FINDING-CLUSTERS.md"
+        out_md = findings_root / "finding-clusters.md"
         link_prefix = ""
     elif (rd / "target.toml").is_file():
         # A target root is identified only by its target.toml (the canonical
@@ -755,7 +755,7 @@ def main(argv: list[str] | None = None) -> int:
                                       want_json=args.json)
     else:
         findings_root = rd
-        out_md = rd / "FINDING-CLUSTERS.md"
+        out_md = rd / "finding-clusters.md"
         link_prefix = ""
 
     clusters = cluster_findings(findings_root, target_root=target_root)
@@ -792,9 +792,9 @@ def main(argv: list[str] | None = None) -> int:
 def _aggregate_target_root(target_root: Path, llm_target_root_prefix: str,
                            dry_run: bool, want_json: bool) -> int:
     """Walk every <agent>/results/findings/ under output/<slug>/, cluster
-    across all of them, and write output/<slug>/FINDING-CLUSTERS.md.
+    across all of them, and write output/<slug>/finding-clusters.md.
 
-    Per-agent FINDING-CLUSTERS.md files are still owned by per-results
+    Per-agent finding-clusters.md files are still owned by per-results
     invocations from lib/triage.py; this top-level write is the
     cross-agent rollup. Concurrent backends serialize through an
     advisory flock on <slug>/.find-cluster-lock — see
@@ -835,7 +835,7 @@ def _aggregate_target_root_locked(target_root: Path, llm_target_root_prefix: str
         sys.stdout.write("\n")
         return 0
 
-    out_md = target_root / "FINDING-CLUSTERS.md"
+    out_md = target_root / "finding-clusters.md"
     md_lines = [f"# Finding Clusters — {target_root.name}", ""]
     md_lines.append(
         f"_Auto-generated by bin/cluster-findings from agent(s): "

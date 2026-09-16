@@ -1,0 +1,90 @@
+{
+  "detail": "source review placed the trigger within attacker_controls=bytes",
+  "evidence": {
+    "artifacts": {
+      ".llm-find-quality.json": {
+        "sha256": "44ded915b0f147f607418feb63f4329a2538cb01bdcf94b74e633ff58849f19d",
+        "size": 991
+      },
+      ".trigger-gate-2.json": {
+        "sha256": "e14c78d8856c3ef382fe06920b1a12f0c34c1a671f7dd015b29aa53d33f5728a",
+        "size": 1984
+      },
+      ".trigger-gate.json": {
+        "sha256": "143242e84781f79f9fc2f400382abb7604ffb441d5b093ef2deb1b8952d86c4f",
+        "size": 1889
+      },
+      "check-overflow.bin": {
+        "sha256": "b2bdb93fb4341e327def0cb45d926534a63f1b820cd18c988d951e2576ce415d",
+        "size": 107
+      }
+    },
+    "attacker_controls": [
+      "bytes"
+    ],
+    "evidence_id": "bae2c081f9a72758772d4bd544d6750584160f6a3f23480f2547fcecb65a4fc5",
+    "probe": {},
+    "report_sha1": "faeea29260da72eb14fd796a148b165416c25e13",
+    "review_facts": {
+      "rejection_kind": "unknown",
+      "reproducer_carrier": "cli",
+      "trigger_controls_fit": "within",
+      "vulnerable_boundary_surface": "library-api"
+    },
+    "source_attestations": [
+      {
+        "anchors": [
+          {
+            "excerpt": "assert(len <= sizeof(ctx->check));",
+            "excerpt_sha256": "3ca267c07075a6988df79bad54cc9638a70c7970319ae9a7244e3a8f71516f3b",
+            "kind": "source",
+            "line": 197,
+            "path": "src/rcfg.c",
+            "symbol": "handle_check"
+          },
+          {
+            "excerpt": "memcpy(ctx->check, val, len);",
+            "excerpt_sha256": "b50427500a5e709948c44f612425ff32f0da4df499caff29bac1c37587f505f1",
+            "kind": "source",
+            "line": 198,
+            "path": "src/rcfg.c",
+            "symbol": "handle_check"
+          }
+        ],
+        "review_artifact": ".trigger-gate.json",
+        "review_sha256": "143242e84781f79f9fc2f400382abb7604ffb441d5b093ef2deb1b8952d86c4f",
+        "verifier": "source-anchor-v1"
+      },
+      {
+        "anchors": [
+          {
+            "excerpt": "memcpy(ctx->check, val, len);",
+            "excerpt_sha256": "b50427500a5e709948c44f612425ff32f0da4df499caff29bac1c37587f505f1",
+            "kind": "source",
+            "line": 198,
+            "path": "src/rcfg.c",
+            "symbol": "handle_check"
+          },
+          {
+            "excerpt": "# Both ordinary Debug and Release configurations are supported. The audit",
+            "excerpt_sha256": "f81c45c20c494812b83605d938908b3e8f5374b46878be0574e9f1545193ea64",
+            "kind": "build",
+            "line": 7,
+            "path": "CMakeLists.txt",
+            "symbol": "project"
+          }
+        ],
+        "review_artifact": ".trigger-gate-2.json",
+        "review_sha256": "e14c78d8856c3ef382fe06920b1a12f0c34c1a671f7dd015b29aa53d33f5728a",
+        "verifier": "source-anchor-v1"
+      }
+    ],
+    "source_context": "root-path-sha256:abbc07ae1fcf1896f8592d2b72662431a1dada99eabf7b6b8b17c7c71ed23784",
+    "target_config_sha256": "4e70aa3606770719c168fa899d68b90da7d67ce71f6f24ad22cc6086504e4ef2",
+    "target_revision": "norev"
+  },
+  "kind": "finding",
+  "schema_version": 2,
+  "state": "reportable",
+  "validated_at": 1789570892.8578959
+}

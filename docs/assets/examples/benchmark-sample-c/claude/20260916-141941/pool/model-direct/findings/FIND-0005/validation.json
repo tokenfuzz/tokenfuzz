@@ -1,0 +1,82 @@
+{
+  "detail": "source review placed the trigger within attacker_controls=bytes",
+  "evidence": {
+    "artifacts": {
+      ".llm-find-quality.json": {
+        "sha256": "cced2fd540f3143f7d23dd3ac89270aa8fea82cdf3b03bb0969379d6b00e53de",
+        "size": 1048
+      },
+      ".trigger-gate-2.json": {
+        "sha256": "79add84a77ff877cfb8dd43d15e17f850c36e076f05db928f7e8ee9d2f3b4eea",
+        "size": 2392
+      },
+      ".trigger-gate.json": {
+        "sha256": "ba8f4228106d3139cccb2efe40a6562b5a0db2e1f86422a5f72a83bf60ba3b8b",
+        "size": 2464
+      },
+      "input": {
+        "sha256": "b2bdb93fb4341e327def0cb45d926534a63f1b820cd18c988d951e2576ce415d",
+        "size": 107
+      }
+    },
+    "attacker_controls": [
+      "bytes"
+    ],
+    "evidence_id": "7b9fc5e743a58f3fdf2309edd5c6676a500e71cd9117af140b1d0170a4a8f54c",
+    "probe": {},
+    "report_sha1": "4a49401b844d3577e7c26388f73d48d68573c711",
+    "review_facts": {
+      "rejection_kind": "unknown",
+      "reproducer_carrier": "cli",
+      "trigger_controls_fit": "within",
+      "vulnerable_boundary_surface": "file-format"
+    },
+    "source_attestations": [
+      {
+        "anchors": [
+          {
+            "excerpt": "memcpy(ctx->check, val, len);",
+            "excerpt_sha256": "b50427500a5e709948c44f612425ff32f0da4df499caff29bac1c37587f505f1",
+            "kind": "source",
+            "line": 198,
+            "path": "src/rcfg.c",
+            "symbol": "handle_check"
+          },
+          {
+            "excerpt": "uint8_t      check[RCFG_CHECK_CAP]; /* the last CHECK field       */",
+            "excerpt_sha256": "c77e72f235f8e6d561a8d7f47a26016e847ea3623ed7bd99d5f0d60cb406a686",
+            "kind": "source",
+            "line": 41,
+            "path": "src/rcfg.c",
+            "symbol": "rcfg_ctx"
+          }
+        ],
+        "review_artifact": ".trigger-gate.json",
+        "review_sha256": "ba8f4228106d3139cccb2efe40a6562b5a0db2e1f86422a5f72a83bf60ba3b8b",
+        "verifier": "source-anchor-v1"
+      },
+      {
+        "anchors": [
+          {
+            "excerpt": "memcpy(ctx->check, val, len);",
+            "excerpt_sha256": "b50427500a5e709948c44f612425ff32f0da4df499caff29bac1c37587f505f1",
+            "kind": "source",
+            "line": 198,
+            "path": "src/rcfg.c",
+            "symbol": "handle_check"
+          }
+        ],
+        "review_artifact": ".trigger-gate-2.json",
+        "review_sha256": "79add84a77ff877cfb8dd43d15e17f850c36e076f05db928f7e8ee9d2f3b4eea",
+        "verifier": "source-anchor-v1"
+      }
+    ],
+    "source_context": "root-path-sha256:abbc07ae1fcf1896f8592d2b72662431a1dada99eabf7b6b8b17c7c71ed23784",
+    "target_config_sha256": "4e70aa3606770719c168fa899d68b90da7d67ce71f6f24ad22cc6086504e4ef2",
+    "target_revision": "norev"
+  },
+  "kind": "finding",
+  "schema_version": 2,
+  "state": "reportable",
+  "validated_at": 1789570896.2552152
+}

@@ -128,8 +128,8 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
         target_slug="sampleproj", repo_type="git", index=root / "index.log",
         config=SimpleNamespace(attacker_controls=["bytes"]),
     )
-    (results / "crashes" / "CRASH-CLUSTERS.md").write_text(
-        "[CRASH-010-2](CRASH-010-2/REPORT.md)\n", encoding="utf-8"
+    (results / "crashes" / "crash-clusters.md").write_text(
+        "[CRASH-010-2](CRASH-010-2/report.md)\n", encoding="utf-8"
     )
     audit_runner._migrate_cluster_backlog(runtime)
     check((crash / ".cluster_expanded").is_file(), "one-time migration skips already-indexed backlog crashes")

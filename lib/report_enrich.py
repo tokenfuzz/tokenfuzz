@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Optional
 
 import languages
+import report_identity
 import target_config  # sibling lib/ module; callers put lib/ on sys.path
 
 
@@ -628,11 +629,7 @@ def _build_cluster_siblings(ctx: EnrichContext, text: str) -> Optional[str]:
             continue
         if sib.resolve() == ctx.report_dir.resolve():
             continue
-        report = None
-        for cand in ("report.md", "REPORT.md", "description.md"):
-            if (sib / cand).is_file():
-                report = sib / cand
-                break
+        report = report_identity.find_report(sib)
         if report is None:
             continue
         try:

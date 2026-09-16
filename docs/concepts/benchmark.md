@@ -305,15 +305,17 @@ validation are done. The full pooled comparison (revalidation, bundling,
 clustering) is computed once at the end. `benchmark-result.md` beside it is
 the same scoreboard as a Markdown table, for terminals and diffs.
 
-Each backend also has a ledger,
-`output/benchmark/<backend>/benchmark-results.html`, with one section per run.
-A new run adds a section; resuming or regenerating an existing run replaces
-that run's section instead of appending a duplicate. Open the backend ledger
-when you want the full run narrative; open the root crosstab when you want to
-compare targets, backends, conditions, and reruns in one table.
+Each backend also keeps a ledger,
+`output/benchmark/<backend>/benchmark-results.md`, with one section per run,
+rendered beside it as HTML. A new run adds a section; resuming or
+regenerating an existing run replaces that run's section instead of appending
+a duplicate. The ledger is the append-only record that `bin/export-benchmark`
+rebuilds and `--reset` archives; the result page above shows everything a
+section holds and more, so the run's console output names only the result
+page.
 
 Every pooled crash that survives triage is bundled under the run's
-`pool/crashes/` tree with a `REPORT.md`, a rendered `REPORT.html`, and a
+`pool/crashes/` tree with a `report.md`, a rendered `report.html`, and a
 `reproduce.sh`.
 
 Every cell is pinned to the same primary build. Alternate ASan builds are an
@@ -448,7 +450,9 @@ directory do not resolve in the handbook copy. Both conditions found all five
 crash-scored bugs and the release-build overflow the answer key scores as a
 finding; the harness filed that finding at two adjacent lines, which the
 finding clusterer keys on, so its column reads two distinct problems where
-the answer key credits one.
+the answer key credits one. One further harness crash, outside the answer
+key, was still under review when the wall ended, so the page carries it as
+unjudged and credits nothing for it.
 
 ## Ground truth: precision and recall
 

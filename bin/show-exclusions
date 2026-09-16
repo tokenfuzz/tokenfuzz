@@ -11,10 +11,8 @@ from pathlib import Path
 
 REASON_RE = re.compile(r"^(?:#\s*)?reason:\s*(.*)$", re.IGNORECASE)
 REJECTION_FILES = (
-    "REJECTION.md",
     "rejection.md",
     ".rejection",
-    ".audit/REJECTION.md",
     ".audit/rejection.md",
 )
 

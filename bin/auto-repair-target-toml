@@ -145,7 +145,7 @@ def _strip_target_root(item: str, target_root: str) -> str:
 
     target.toml fields are documented as target_root-relative; an absolute
     path under target_root would otherwise leak the auditor's host layout
-    into bundle artifacts (reproduce.sh, REPORT.md) and break the existing
+    into bundle artifacts (reproduce.sh, report.md) and break the existing
     `build-<san>/...` prefix conventions every downstream consumer assumes.
     """
     if not target_root:

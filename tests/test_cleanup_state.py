@@ -31,10 +31,10 @@ class CleanupTests(unittest.TestCase):
             (root / backend / "results" / "scratch-1" / "tc.input").write_text("tc\n")
             (root / backend / "logs" / "index.log").write_text("log\n")
         (root / "target.toml").write_text("[meta]\n")
-        (root / "CRASH-CLUSTERS.html").write_text("<html>\n")
-        (root / "CRASH-CLUSTERS.md").write_text("# crash\n")
-        (root / "FINDING-CLUSTERS.html").write_text("<html>\n")
-        (root / "FINDING-CLUSTERS.md").write_text("# find\n")
+        (root / "crash-clusters.html").write_text("<html>\n")
+        (root / "crash-clusters.md").write_text("# crash\n")
+        (root / "finding-clusters.html").write_text("<html>\n")
+        (root / "finding-clusters.md").write_text("# find\n")
         (root / ".target-state").write_text("state\n")
         return root
 
@@ -57,8 +57,8 @@ class CleanupTests(unittest.TestCase):
             self.assertTrue((root / "target.toml").is_file())
             self.assertFalse((root / "codex").exists())
             self.assertFalse((root / "claude").exists())
-            self.assertFalse((root / "CRASH-CLUSTERS.md").exists())
-            self.assertFalse((root / "FINDING-CLUSTERS.md").exists())
+            self.assertFalse((root / "crash-clusters.md").exists())
+            self.assertFalse((root / "finding-clusters.md").exists())
             self.assertFalse((root / ".target-state").exists())
         canary_output = self.root / "canary-output"
         canary = self.make_target(canary_output, "canary")
@@ -76,7 +76,7 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         self.assertIn("would remove", proc.stdout)
         self.assertTrue((target / "codex").is_dir())
-        self.assertTrue((target / "CRASH-CLUSTERS.md").is_file())
+        self.assertTrue((target / "crash-clusters.md").is_file())
 
         filtered = self.root / "filtered"
         selected = self.make_target(filtered, "libxml2")
@@ -95,14 +95,14 @@ class CleanupTests(unittest.TestCase):
             ).returncode, 0)
             self.assertFalse((target / "codex").exists())
             self.assertTrue((target / "claude").is_dir())
-            self.assertTrue((target / "CRASH-CLUSTERS.md").is_file())
+            self.assertTrue((target / "crash-clusters.md").is_file())
 
         keep_output = self.root / "keep"
         kept = self.make_target(keep_output, "libxml2")
         self.run_command(CLEAN_STATE, keep_output, "--target", "libxml2", "--keep", "codex", "--quiet")
         self.assertTrue((kept / "codex").is_dir())
         self.assertFalse((kept / "claude").exists())
-        self.assertFalse((kept / "CRASH-CLUSTERS.md").exists())
+        self.assertFalse((kept / "crash-clusters.md").exists())
         only_output = self.root / "only"
         only = self.make_target(only_output, "libxml2")
         self.run_command(CLEAN_STATE, only_output, "--target", "libxml2", "--keep-only", "codex", "--quiet")

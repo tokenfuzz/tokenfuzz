@@ -64,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         "audit run metadata records the selected agent security profile",
     )
 
-    # On a case-insensitive filesystem a `directory / "REPORT.md"` probe
+    # On a case-insensitive filesystem a `directory / "report.md"` probe
     # answers for an on-disk `report.md` and hands back the case it was asked
     # for. Every consumer must agree on the one spelling the directory has:
     # triage feeds it to `render-md --html-sibling`, which names the sibling

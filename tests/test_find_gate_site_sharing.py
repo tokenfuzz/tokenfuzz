@@ -36,7 +36,7 @@ class SiteReviewTests(unittest.TestCase):
             denied = rejected / "FIND-0002"
             denied.mkdir()
             (denied / "report.md").write_text("# Second claim\n", encoding="utf-8")
-            (denied / "REJECTION.md").write_text(
+            (denied / "rejection.md").write_text(
                 "# Rejected artifact\n\n"
                 "Reason: same-site: FIND-0000: inherited reject\n",
                 encoding="utf-8",
@@ -47,7 +47,7 @@ class SiteReviewTests(unittest.TestCase):
 
             restored = findings / "FIND-0002"
             self.assertTrue(restored.is_dir())
-            self.assertFalse((restored / "REJECTION.md").exists())
+            self.assertFalse((restored / "rejection.md").exists())
             self.assertNotEqual(
                 "reportable",
                 (validation_receipt.read_current(accepted) or {}).get("state"),

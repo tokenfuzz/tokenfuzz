@@ -70,7 +70,7 @@ class ClusterCrashesTests(unittest.TestCase):
         if severity:
             level, score = severity
             report += f"\n## Classification\n- **Severity**: {level} (CVSS-BTE 4.0: {score} {level}; primitive=x)\n"
-        (crash / "REPORT.md").write_text(report, encoding="utf-8")
+        (crash / "report.md").write_text(report, encoding="utf-8")
         return crash
 
     def make_simple_crash(
@@ -79,7 +79,7 @@ class ClusterCrashesTests(unittest.TestCase):
         crash = parent / "crashes" / crash_id
         crash.mkdir(parents=True)
         (crash / "sanitizer.txt").write_text(sanitizer.rstrip() + "\n", encoding="utf-8")
-        (crash / "REPORT.md").write_text(report.rstrip() + "\n", encoding="utf-8")
+        (crash / "report.md").write_text(report.rstrip() + "\n", encoding="utf-8")
         return crash
 
     def make_cli_fallback(self, crash_id: str, line: int, object_name: str, object_line: int) -> Path:
@@ -157,14 +157,14 @@ The parser writes past `{object_name}`.
         crashes = self.populate_core()
         process = self.run_cluster()
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
-        index = self.results / "crashes" / "CRASH-CLUSTERS.md"
+        index = self.results / "crashes" / "crash-clusters.md"
         html = index.with_suffix(".html")
         self.assertTrue(index.is_file())
         self.assertTrue(html.is_file())
-        self.assertTrue((crashes["A1"] / "REPORT.html").is_file())
-        self.assertIn('href="CRASH-A1-1/REPORT.html"', html.read_text())
+        self.assertTrue((crashes["A1"] / "report.html").is_file())
+        self.assertIn('href="CRASH-A1-1/report.html"', html.read_text())
 
-        ids = {key: self.cluster_id(crash / "REPORT.md") for key, crash in crashes.items()}
+        ids = {key: self.cluster_id(crash / "report.md") for key, crash in crashes.items()}
         self.assertEqual(ids["A1"], ids["A2"])
         self.assertNotEqual(ids["A1"], ids["B1"])
         self.assertNotEqual(ids["A1"], ids["C1"])
@@ -173,7 +173,7 @@ The parser writes past `{object_name}`.
 
         text = index.read_text(encoding="utf-8")
         for pattern in (
-            r"\[CRASH-A1-1\]\(CRASH-A1-1/REPORT\.md\).*CRASH-A2-1",
+            r"\[CRASH-A1-1\]\(CRASH-A1-1/report\.md\).*CRASH-A2-1",
             r"\[CRASH-B1-1\]", r"\[CRASH-C1-1\]", r"\[CRASH-D1-1\]",
             r"\[CRASH-E1-1\]", r"\[CRASH-F1-1\]", r"\[CRASH-I1-1\]",
             r"ubsan-out-of-bounds", r"parse_config", r"abc",
@@ -184,7 +184,7 @@ The parser writes past `{object_name}`.
         ):
             self.assertRegex(text, pattern)
         self.assertNotIn("strlen", text)
-        report = (crashes["E1"] / "REPORT.md").read_text()
+        report = (crashes["E1"] / "report.md").read_text()
         signature = "shared_leaf src/foo.c:42 -> abc src/bar.c:99 -> def src/baz.c:123"
         self.assertIn(f"Dedup frames: {signature}", report)
         self.assertIn(f"| Dedup frames | {signature} |", report)
@@ -196,20 +196,20 @@ The parser writes past `{object_name}`.
         high_row = next(line for line in text.splitlines() if "| High (CVSS 8.7)" in line)
         self.assertRegex(
             high_row,
-            r"\| \[CRASH-A1-1\]\(CRASH-A1-1/REPORT\.md\) \| "
-            r"\*\*\[CRASH-A1-1\]\(CRASH-A1-1/REPORT\.md\)\*\*, \[CRASH-A2-1\]",
+            r"\| \[CRASH-A1-1\]\(CRASH-A1-1/report\.md\) \| "
+            r"\*\*\[CRASH-A1-1\]\(CRASH-A1-1/report\.md\)\*\*, \[CRASH-A2-1\]",
         )
 
         index_before = index.read_bytes()
-        report_before = (crashes["A1"] / "REPORT.md").read_bytes()
+        report_before = (crashes["A1"] / "report.md").read_bytes()
         self.assertEqual(self.run_cluster().returncode, 0)
         self.assertEqual(index.read_bytes(), index_before)
-        self.assertEqual((crashes["A1"] / "REPORT.md").read_bytes(), report_before)
+        self.assertEqual((crashes["A1"] / "report.md").read_bytes(), report_before)
         index.unlink()
-        mtime = (crashes["A1"] / "REPORT.md").stat().st_mtime_ns
+        mtime = (crashes["A1"] / "report.md").stat().st_mtime_ns
         self.assertEqual(self.run_cluster(None, "--dry-run").returncode, 0)
         self.assertFalse(index.exists())
-        self.assertEqual((crashes["A1"] / "REPORT.md").stat().st_mtime_ns, mtime)
+        self.assertEqual((crashes["A1"] / "report.md").stat().st_mtime_ns, mtime)
 
     def test_lifetime_crashes_cluster_on_their_free_site(self) -> None:
         def lifetime(crash_id: str, headline: str, use_fn: str, free_fn: str) -> Path:
@@ -246,7 +246,7 @@ The parser writes past `{object_name}`.
         process = self.run_cluster()
         self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
         ids = {
-            name: self.cluster_id(self.results / "crashes" / name / "REPORT.md")
+            name: self.cluster_id(self.results / "crashes" / name / "report.md")
             for name in ("CRASH-L1-1", "CRASH-L2-1", "CRASH-L3-1", "CRASH-L4-1")
         }
         self.assertEqual(ids["CRASH-L1-1"], ids["CRASH-L2-1"])
@@ -261,7 +261,7 @@ The parser writes past `{object_name}`.
             l1_cluster["member_crash_signatures"]["CRASH-L1-1"],
             "app_flush src/app.c:10 -> dispatch src/app.c:50 -> decode src/app.c:90",
         )
-        index = (self.results / "crashes" / "CRASH-CLUSTERS.md").read_text()
+        index = (self.results / "crashes" / "crash-clusters.md").read_text()
         self.assertIn("app_drop src/app.c:30", index)
         self.assertIn("(use: app_flush src/app.c:10)", index)
 
@@ -277,9 +277,9 @@ The parser writes past `{object_name}`.
         )
         process = self.run_cluster(parent.parent)
         self.assertEqual(process.returncode, 0, process.stderr)
-        self.assertEqual(self.cluster_id(low / "REPORT.md"), self.cluster_id(high / "REPORT.md"))
+        self.assertEqual(self.cluster_id(low / "report.md"), self.cluster_id(high / "report.md"))
         row = next(
-            line for line in (parent / "CRASH-CLUSTERS.md").read_text().splitlines()
+            line for line in (parent / "crash-clusters.md").read_text().splitlines()
             if "High (CVSS 8.7)" in line
         )
         self.assertRegex(row, r"\| \[CRASH-ZZZ-1\].*\| \*\*\[CRASH-ZZZ-1\]")
@@ -302,7 +302,7 @@ The parser writes past `{object_name}`.
             "# Aggregate B\nSurface: library-api",
         )
         self.assertEqual(self.run_cluster(aggregate).returncode, 0)
-        text = (aggregate / "CRASH-CLUSTERS.md").read_text()
+        text = (aggregate / "crash-clusters.md").read_text()
         self.assertIn("claude/CRASH-AGG-1", text)
         self.assertIn("codex/CRASH-AGG-2", text)
 
@@ -315,7 +315,7 @@ The parser writes past `{object_name}`.
             "# Nested aggregate crash\nSurface: library-api",
         )
         self.assertEqual(self.run_cluster(nested).returncode, 0)
-        self.assertIn("codex/CRASH-NEST-1", (nested / "CRASH-CLUSTERS.md").read_text())
+        self.assertIn("codex/CRASH-NEST-1", (nested / "crash-clusters.md").read_text())
         process = self.run_cluster(self.root / "output" / "samples", "--json")
         self.assertEqual(process.returncode, 0, process.stderr)
         payload = json.loads(process.stdout)
@@ -353,15 +353,15 @@ The parser writes past `{object_name}`.
             "# Copy overlap\nSurface: library-api\nTarget: app.c:app_copy:42",
         )
         self.assertEqual(self.run_cluster(parent).returncode, 0)
-        text = (parent / "crashes" / "CRASH-CLUSTERS.md").read_text()
+        text = (parent / "crashes" / "crash-clusters.md").read_text()
         for primitive in (
             "ubsan-shift-base", "ubsan-signed-integer-overflow",
             "ubsan-out-of-bounds", "strcpy-param-overlap",
         ):
             self.assertIn(primitive, text)
-        self.assertNotEqual(self.cluster_id(shift / "REPORT.md"), self.cluster_id(overflow / "REPORT.md"))
-        self.assertTrue(self.cluster_id(fallback / "REPORT.md"))
-        self.assertTrue(self.cluster_id(overlap / "REPORT.md"))
+        self.assertNotEqual(self.cluster_id(shift / "report.md"), self.cluster_id(overflow / "report.md"))
+        self.assertTrue(self.cluster_id(fallback / "report.md"))
+        self.assertTrue(self.cluster_id(overlap / "report.md"))
 
     def make_lcs_pair(
         self, parent: Path, prefix: str = "LCS", *, second_top: str = "shared_leaf",
@@ -386,16 +386,16 @@ The parser writes past `{object_name}`.
         lcs = self.root / "lcs"
         first, second = self.make_lcs_pair(lcs)
         self.assertEqual(self.run_cluster(lcs).returncode, 0)
-        self.assertEqual(self.cluster_id(first / "REPORT.md"), self.cluster_id(second / "REPORT.md"))
+        self.assertEqual(self.cluster_id(first / "report.md"), self.cluster_id(second / "report.md"))
         for crash in (first, second):
-            report = crash / "REPORT.md"
+            report = crash / "report.md"
             report.write_text(
                 "\n".join(line for line in report.read_text().splitlines() if not line.startswith("Cluster: ")) + "\n"
             )
-        (lcs / "crashes" / "CRASH-CLUSTERS.md").unlink()
+        (lcs / "crashes" / "crash-clusters.md").unlink()
         env = os.environ | {"CLUSTER_LCS_THRESHOLD": "3"}
         self.assertEqual(self.run_cluster(lcs, environment=env).returncode, 0)
-        self.assertNotEqual(self.cluster_id(first / "REPORT.md"), self.cluster_id(second / "REPORT.md"))
+        self.assertNotEqual(self.cluster_id(first / "report.md"), self.cluster_id(second / "report.md"))
 
         siblings = self.root / "sibling-leaves"
         first, second = self.make_lcs_pair(
@@ -403,8 +403,8 @@ The parser writes past `{object_name}`.
         )
         self.assertEqual(self.run_cluster(siblings).returncode, 0)
         self.assertNotEqual(
-            self.cluster_id(first / "REPORT.md"),
-            self.cluster_id(second / "REPORT.md"),
+            self.cluster_id(first / "report.md"),
+            self.cluster_id(second / "report.md"),
         )
 
         # One faulting instruction may be rendered as an inline expansion by
@@ -443,12 +443,12 @@ The parser writes past `{object_name}`.
         )
         self.assertEqual(self.run_cluster(inlined).returncode, 0)
         self.assertEqual(
-            self.cluster_id(expanded / "REPORT.md"),
-            self.cluster_id(collapsed / "REPORT.md"),
+            self.cluster_id(expanded / "report.md"),
+            self.cluster_id(collapsed / "report.md"),
         )
         self.assertNotEqual(
-            self.cluster_id(expanded / "REPORT.md"),
-            self.cluster_id(sibling / "REPORT.md"),
+            self.cluster_id(expanded / "report.md"),
+            self.cluster_id(sibling / "report.md"),
         )
         # The same three with the collapsed rendering sorting first: a group
         # it opens must not absorb both expansions through containment.
@@ -481,12 +481,12 @@ The parser writes past `{object_name}`.
         )
         self.assertEqual(self.run_cluster(first).returncode, 0)
         self.assertEqual(
-            self.cluster_id(collapsed_0 / "REPORT.md"),
-            self.cluster_id(expanded_a / "REPORT.md"),
+            self.cluster_id(collapsed_0 / "report.md"),
+            self.cluster_id(expanded_a / "report.md"),
         )
         self.assertNotEqual(
-            self.cluster_id(expanded_a / "REPORT.md"),
-            self.cluster_id(sibling_c / "REPORT.md"),
+            self.cluster_id(expanded_a / "report.md"),
+            self.cluster_id(sibling_c / "report.md"),
         )
 
         # A confirmation transcript concatenates every repetition, and frame
@@ -512,11 +512,11 @@ The parser writes past `{object_name}`.
             "# The same first fault, reported whole\nSurface: library-api",
         )
         self.assertEqual(self.run_cluster(repeated).returncode, 0)
-        rows = (repeated / "crashes" / "CRASH-CLUSTERS.md").read_text()
+        rows = (repeated / "crashes" / "crash-clusters.md").read_text()
         self.assertIn("parse_value", rows)
         self.assertNotEqual(
-            self.cluster_id(truncated / "REPORT.md"),
-            self.cluster_id(whole / "REPORT.md"),
+            self.cluster_id(truncated / "report.md"),
+            self.cluster_id(whole / "report.md"),
         )
 
         fuzzy = self.root / "fuzzy"
@@ -533,7 +533,7 @@ The parser writes past `{object_name}`.
             "# B\nSurface: library-api",
         )
         self.assertEqual(self.run_cluster(fuzzy).returncode, 0)
-        self.assertNotEqual(self.cluster_id(fuzz_a / "REPORT.md"), self.cluster_id(fuzz_b / "REPORT.md"))
+        self.assertNotEqual(self.cluster_id(fuzz_a / "report.md"), self.cluster_id(fuzz_b / "report.md"))
 
         table = self.root / "table"
         self.make_simple_crash(
@@ -545,7 +545,7 @@ The parser writes past `{object_name}`.
         )
         self.assertEqual(self.run_cluster(table).returncode, 0)
         row = next(
-            line for line in (table / "crashes" / "CRASH-CLUSTERS.md").read_text().splitlines()
+            line for line in (table / "crashes" / "crash-clusters.md").read_text().splitlines()
             if "CRASH-TBLONLY" in line
         )
         self.assertRegex(row, r"^\|\s*Low \(CVSS 3\.3\) ")
@@ -569,7 +569,7 @@ The parser writes past `{object_name}`.
         self.assertEqual(self.run_cluster().returncode, 0)
         row = next(
             line for line in
-            (self.results / "crashes" / "CRASH-CLUSTERS.md").read_text().splitlines()
+            (self.results / "crashes" / "crash-clusters.md").read_text().splitlines()
             if "CRASH-P1-1" in line
         )
         self.assertIn("PENDING", row)
@@ -583,7 +583,7 @@ The parser writes past `{object_name}`.
         )
         self.assertEqual(self.run_cluster().returncode, 0)
         cluster_text = (
-            self.results / "crashes" / "CRASH-CLUSTERS.md"
+            self.results / "crashes" / "crash-clusters.md"
         ).read_text()
         self.assertIn("not a guaranteed unique root cause or fix", cluster_text)
         row = next(
@@ -617,7 +617,7 @@ The parser writes past `{object_name}`.
         rows = {
             crash_id: next(
                 line for line in
-                (self.results / "crashes" / "CRASH-CLUSTERS.md").read_text().splitlines()
+                (self.results / "crashes" / "crash-clusters.md").read_text().splitlines()
                 if crash_id in line
             )
             for crash_id in ("CRASH-N1-1", "CRASH-N2-1")

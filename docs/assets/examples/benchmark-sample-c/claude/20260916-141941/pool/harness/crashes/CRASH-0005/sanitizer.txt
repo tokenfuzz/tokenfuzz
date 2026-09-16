@@ -1,0 +1,297 @@
+ASAN_RUN_HEADER: sanitizer=asan runs=5 mode=generic testcase=output/benchmark-sample-c/claude/20260916-141941/cells/harness-r1/repo-root/output/samples/sample-c-bench-20260916-141941-harness-r1/claude/results/scratch-2/H-e8e824308f-array.rcf env_options_b64= started=2026-09-16T14:32:58Z
+COVERAGE_GATE: HIT - reached handle_array
+[run-sanitizer-multi] BUDGET: 12/60 sanitizer invocations used this iteration
+=== Run 1/5 ===
+=================================================================
+==76293==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x605000000721 at pc 0x000104fb157c bp 0x00016ae4ca90 sp 0x00016ae4ca88
+WRITE of size 1 at 0x605000000721 thread T0
+SCARINESS: 31 (1-byte-write-heap-buffer-overflow)
+    #0 0x000104fb1578 in handle_array rcfg.c:122
+    #1 0x000104fb0d70 in dispatch rcfg.c:210
+    #2 0x000104fb0a4c in rcfg_decode rcfg.c:247
+    #3 0x000104fb2418 in main rcfg_cli.c:59
+    #4 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000721 is located 0 bytes after 1-byte region [0x605000000720,0x605000000721)
+allocated by thread T0 here:
+    #0 0x000105555164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x000104fb14dc in handle_array rcfg.c:115
+    #2 0x000104fb0d70 in dispatch rcfg.c:210
+    #3 0x000104fb0a4c in rcfg_decode rcfg.c:247
+    #4 0x000104fb2418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x100001578)
+Shadow bytes around the buggy address:
+  0x605000000480: fa fa fa fa fd fa fa fa fa fa fa fa fa fa fd fa
+  0x605000000500: fa fa fa fa fa fa fa fa fd fa fa fa fa fa fa fa
+  0x605000000580: fa fa 00 07 fa fa fa fa fa fa fa fa 00 00 fa fa
+  0x605000000600: fa fa fa fa fa fa 00 06 fa fa fa fa fa fa fa fa
+  0x605000000680: 00 04 fa fa fa fa fa fa fa fa 00 07 fa fa fa fa
+=>0x605000000700: fa fa fa fa[01]fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000780: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000800: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000880: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000900: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000980: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==76293==ABORTING
+tokenfuzz: timeout.py: child pid=76293 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+
+=== Run 2/5 ===
+=================================================================
+==76317==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x605000000721 at pc 0x0001028d557c bp 0x00016d528a90 sp 0x00016d528a88
+WRITE of size 1 at 0x605000000721 thread T0
+SCARINESS: 31 (1-byte-write-heap-buffer-overflow)
+    #0 0x0001028d5578 in handle_array rcfg.c:122
+    #1 0x0001028d4d70 in dispatch rcfg.c:210
+    #2 0x0001028d4a4c in rcfg_decode rcfg.c:247
+    #3 0x0001028d6418 in main rcfg_cli.c:59
+    #4 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000721 is located 0 bytes after 1-byte region [0x605000000720,0x605000000721)
+allocated by thread T0 here:
+    #0 0x000102e75164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x0001028d54dc in handle_array rcfg.c:115
+    #2 0x0001028d4d70 in dispatch rcfg.c:210
+    #3 0x0001028d4a4c in rcfg_decode rcfg.c:247
+    #4 0x0001028d6418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x100001578)
+Shadow bytes around the buggy address:
+  0x605000000480: fa fa fa fa fd fa fa fa fa fa fa fa fa fa fd fa
+  0x605000000500: fa fa fa fa fa fa fa fa fd fa fa fa fa fa fa fa
+  0x605000000580: fa fa 00 07 fa fa fa fa fa fa fa fa 00 00 fa fa
+  0x605000000600: fa fa fa fa fa fa 00 06 fa fa fa fa fa fa fa fa
+  0x605000000680: 00 04 fa fa fa fa fa fa fa fa 00 07 fa fa fa fa
+=>0x605000000700: fa fa fa fa[01]fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000780: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000800: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000880: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000900: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000980: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==76317==ABORTING
+tokenfuzz: timeout.py: child pid=76317 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 2/5: VERIFIED — same crash signature as run 1 (handle_array rcfg.c:122)
+
+=== Run 3/5 ===
+=================================================================
+==76354==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x605000000721 at pc 0x00010094157c bp 0x00016f4bca90 sp 0x00016f4bca88
+WRITE of size 1 at 0x605000000721 thread T0
+SCARINESS: 31 (1-byte-write-heap-buffer-overflow)
+    #0 0x000100941578 in handle_array rcfg.c:122
+    #1 0x000100940d70 in dispatch rcfg.c:210
+    #2 0x000100940a4c in rcfg_decode rcfg.c:247
+    #3 0x000100942418 in main rcfg_cli.c:59
+    #4 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000721 is located 0 bytes after 1-byte region [0x605000000720,0x605000000721)
+allocated by thread T0 here:
+    #0 0x00010102d164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x0001009414dc in handle_array rcfg.c:115
+    #2 0x000100940d70 in dispatch rcfg.c:210
+    #3 0x000100940a4c in rcfg_decode rcfg.c:247
+    #4 0x000100942418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x100001578)
+Shadow bytes around the buggy address:
+  0x605000000480: fa fa fa fa fd fa fa fa fa fa fa fa fa fa fd fa
+  0x605000000500: fa fa fa fa fa fa fa fa fd fa fa fa fa fa fa fa
+  0x605000000580: fa fa 00 07 fa fa fa fa fa fa fa fa 00 00 fa fa
+  0x605000000600: fa fa fa fa fa fa 00 06 fa fa fa fa fa fa fa fa
+  0x605000000680: 00 04 fa fa fa fa fa fa fa fa 00 07 fa fa fa fa
+=>0x605000000700: fa fa fa fa[01]fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000780: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000800: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000880: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000900: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000980: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==76354==ABORTING
+tokenfuzz: timeout.py: child pid=76354 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 3/5: VERIFIED — same crash signature as run 1 (handle_array rcfg.c:122)
+
+=== Run 4/5 ===
+=================================================================
+==76382==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x605000000721 at pc 0x00010426157c bp 0x00016bb9ca90 sp 0x00016bb9ca88
+WRITE of size 1 at 0x605000000721 thread T0
+SCARINESS: 31 (1-byte-write-heap-buffer-overflow)
+    #0 0x000104261578 in handle_array rcfg.c:122
+    #1 0x000104260d70 in dispatch rcfg.c:210
+    #2 0x000104260a4c in rcfg_decode rcfg.c:247
+    #3 0x000104262418 in main rcfg_cli.c:59
+    #4 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000721 is located 0 bytes after 1-byte region [0x605000000720,0x605000000721)
+allocated by thread T0 here:
+    #0 0x0001048cd164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x0001042614dc in handle_array rcfg.c:115
+    #2 0x000104260d70 in dispatch rcfg.c:210
+    #3 0x000104260a4c in rcfg_decode rcfg.c:247
+    #4 0x000104262418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x100001578)
+Shadow bytes around the buggy address:
+  0x605000000480: fa fa fa fa fd fa fa fa fa fa fa fa fa fa fd fa
+  0x605000000500: fa fa fa fa fa fa fa fa fd fa fa fa fa fa fa fa
+  0x605000000580: fa fa 00 07 fa fa fa fa fa fa fa fa 00 00 fa fa
+  0x605000000600: fa fa fa fa fa fa 00 06 fa fa fa fa fa fa fa fa
+  0x605000000680: 00 04 fa fa fa fa fa fa fa fa 00 07 fa fa fa fa
+=>0x605000000700: fa fa fa fa[01]fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000780: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000800: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000880: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000900: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000980: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==76382==ABORTING
+tokenfuzz: timeout.py: child pid=76382 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 4/5: VERIFIED — same crash signature as run 1 (handle_array rcfg.c:122)
+
+=== Run 5/5 ===
+=================================================================
+==76402==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x605000000721 at pc 0x000102a3957c bp 0x00016d3c4a90 sp 0x00016d3c4a88
+WRITE of size 1 at 0x605000000721 thread T0
+SCARINESS: 31 (1-byte-write-heap-buffer-overflow)
+    #0 0x000102a39578 in handle_array rcfg.c:122
+    #1 0x000102a38d70 in dispatch rcfg.c:210
+    #2 0x000102a38a4c in rcfg_decode rcfg.c:247
+    #3 0x000102a3a418 in main rcfg_cli.c:59
+    #4 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000721 is located 0 bytes after 1-byte region [0x605000000720,0x605000000721)
+allocated by thread T0 here:
+    #0 0x0001032d9164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x000102a394dc in handle_array rcfg.c:115
+    #2 0x000102a38d70 in dispatch rcfg.c:210
+    #3 0x000102a38a4c in rcfg_decode rcfg.c:247
+    #4 0x000102a3a418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: heap-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x100001578)
+Shadow bytes around the buggy address:
+  0x605000000480: fa fa fa fa fd fa fa fa fa fa fa fa fa fa fd fa
+  0x605000000500: fa fa fa fa fa fa fa fa fd fa fa fa fa fa fa fa
+  0x605000000580: fa fa 00 07 fa fa fa fa fa fa fa fa 00 00 fa fa
+  0x605000000600: fa fa fa fa fa fa 00 06 fa fa fa fa fa fa fa fa
+  0x605000000680: 00 04 fa fa fa fa fa fa fa fa 00 07 fa fa fa fa
+=>0x605000000700: fa fa fa fa[01]fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000780: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000800: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000880: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000900: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+  0x605000000980: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==76402==ABORTING
+tokenfuzz: timeout.py: child pid=76402 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 5/5: VERIFIED — same crash signature as run 1 (handle_array rcfg.c:122)
+
+=== SUMMARY ===
+CRASH_RATE: 5/5
+[run-sanitizer-multi] EXECUTION_RATE: 5/5
+[run-sanitizer-multi] SUCCESS_RATE: 0/5
+[run-sanitizer-multi] CRASHES FOUND: 5/5 runs crashed

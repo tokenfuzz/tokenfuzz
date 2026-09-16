@@ -59,7 +59,7 @@ def _crash_dir(root: Path, name: str, *, report: str | None, sanitizer: str | No
     directory = root / "crashes" / name
     directory.mkdir(parents=True)
     if report is not None:
-        (directory / "REPORT.md").write_text(report, encoding="utf-8")
+        (directory / "report.md").write_text(report, encoding="utf-8")
     if sanitizer is not None:
         (directory / "sanitizer.txt").write_text(sanitizer, encoding="utf-8")
     if testcase:
@@ -105,7 +105,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
             crash = results / "crashes" / f"CRASH-00{index}-1"
             crash.mkdir(parents=True)
             (crash / "sanitizer.txt").write_text(_ASAN, encoding="utf-8")
-            (crash / "REPORT.md").write_text(
+            (crash / "report.md").write_text(
                 _GOOD_REPORT if index < 3 else "## Root Cause\n_TODO (agent): fill in\n",
                 encoding="utf-8",
             )
@@ -354,7 +354,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     stale_crash = stale_results / "crashes" / "CRASH-001-1"
     stale_crash.mkdir(parents=True)
     (stale_crash / "sanitizer.txt").write_text(_ASAN, encoding="utf-8")
-    (stale_crash / "REPORT.md").write_text(_GOOD_REPORT, encoding="utf-8")
+    (stale_crash / "report.md").write_text(_GOOD_REPORT, encoding="utf-8")
     validation_receipt.write(
         stale_crash, kind="crash", state="reportable",
         attacker_controls=["bytes"],
@@ -601,15 +601,15 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         "bundle failure uses an independent TTL signature",
     )
 
-    # export-repro moves report.md under .audit and creates REPORT.md. The
-    # trigger gate must review the new canonical path, not the stale source.
+    # export-repro moves the draft report.md under .audit and installs the
+    # bundle's report.md. The trigger gate must review the installed report,
+    # not the stale draft.
     gate_root = root / "post-export-gate"
     (gate_root / "crashes-rejected").mkdir(parents=True)
     gate_crash = _crash_dir(
         gate_root, "CRASH-026", report=_GOOD_REPORT,
         sanitizer=_ASAN, testcase=True,
     )
-    (gate_crash / "REPORT.md").rename(gate_crash / "report.md")
     reviewed_paths: list[Path] = []
 
     def _fake_export(tool_name, *_args, **_kwargs):
@@ -618,7 +618,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         audit_dir = gate_crash / ".audit"
         audit_dir.mkdir(exist_ok=True)
         shutil.move(gate_crash / "report.md", audit_dir / "report.md")
-        (gate_crash / "REPORT.md").write_text(_GOOD_REPORT, encoding="utf-8")
+        (gate_crash / "report.md").write_text(_GOOD_REPORT, encoding="utf-8")
         (gate_crash / "reproduce.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         (gate_crash / "input.bin").write_bytes(b"input")
         return 0
@@ -643,8 +643,8 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         )
     check(gate_status == "promoted", "post-export crash reaches the trigger gate", gate_status)
     check(
-        reviewed_paths == [gate_crash / "REPORT.md"],
-        "trigger gate receives the canonical post-export REPORT.md",
+        reviewed_paths == [gate_crash / "report.md"],
+        "trigger gate receives the canonical post-export report.md",
         repr(reviewed_paths),
     )
 
@@ -782,8 +782,8 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     )
 
     # A harness-only ASan crash (no testcase; export-repro stages harness.c and a
-    # runnable reproduce.sh) is complete and must promote, not age out on a
-    # spurious missing-input.* signature.
+    # runnable reproduce.sh, and moves the draft under .audit/) is complete and
+    # must promote, not age out on a spurious missing-input.* signature.
     harness_root = root / "harness-only"
     (harness_root / "crashes-rejected").mkdir(parents=True)
     harness_crash = _crash_dir(
@@ -791,6 +791,8 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     )
     (harness_crash / "reproduce.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     (harness_crash / "harness.c").write_text("int main(){return 0;}\n", encoding="utf-8")
+    (harness_crash / ".audit").mkdir()
+    shutil.copy2(harness_crash / "report.md", harness_crash / ".audit" / "report.md")
     with mock.patch.object(triage, "_run_tool", return_value=0):
         harness_status = triage.triage_one_crash(
             harness_root / "crashes" / "CRASH-040", harness_root, root, "sampleproj", ["bytes"],
@@ -831,7 +833,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     check(runtime_finding.is_dir(), "runtime-only crash is demoted to findings/FIND-*", str(runtime_finding))
     check(not runtime_crash.exists(), "demoted runtime artifact no longer remains in crashes/")
     check(
-        "runtime diagnostic without a sanitizer-class" in (runtime_finding / "REPORT.md").read_text(),
+        "runtime diagnostic without a sanitizer-class" in (runtime_finding / "report.md").read_text(),
         "demoted finding records its triage disposition",
     )
 
@@ -2335,7 +2337,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         )
     check(live_status == "promoted", "live crash triage fills reach fields before its verdict")
     check(
-        "Caller contract: obeyed" in (live_crash / "REPORT.md").read_text(encoding="utf-8")
+        "Caller contract: obeyed" in (live_crash / "report.md").read_text(encoding="utf-8")
         and any(call.args[:2] == ("severity", "--report") for call in live_tools.call_args_list),
         "live crash finalization persists fields before severity scoring",
     )

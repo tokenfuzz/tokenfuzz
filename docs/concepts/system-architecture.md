@@ -182,12 +182,12 @@ or a retained non-reportable engineering defect. Rejected artifacts move to
 the corresponding `*-rejected/` tree with their reason.
 
 Each of the four result trees carries its own generated HTML index:
-`CRASH-CLUSTERS.html`, `FINDING-CLUSTERS.html`, `REJECTED-CRASHES.html`,
-`REJECTED-FINDINGS.html`. Cross-backend rollups exist for the two active
+`crash-clusters.html`, `finding-clusters.html`, `rejected-crashes.html`,
+`rejected-findings.html`. Cross-backend rollups exist for the two active
 evidence trees, but not for rejected artifacts:
 
-- `output/<target>/CRASH-CLUSTERS.html`
-- `output/<target>/FINDING-CLUSTERS.html`
+- `output/<target>/crash-clusters.html`
+- `output/<target>/finding-clusters.html`
 
 ## Backends and modes
 

@@ -178,7 +178,7 @@ class FindingCrashRoutingTests(unittest.TestCase):
         )
         (directory / "sanitizer.txt").write_text(DIAGNOSTIC, encoding="utf-8")
         (directory / "input.bin").write_bytes(b"input")
-        (directory / "REJECTION.md").write_text(
+        (directory / "rejection.md").write_text(
             "Reason: finding quality reject\n", encoding="utf-8",
         )
         validation_receipt.write(
@@ -192,7 +192,7 @@ class FindingCrashRoutingTests(unittest.TestCase):
         )
         routed = self.results / "crashes" / "CRASH-008"
         self.assertTrue(routed.is_dir())
-        self.assertFalse((routed / "REJECTION.md").exists())
+        self.assertFalse((routed / "rejection.md").exists())
 
     def test_a_newer_replay_verdict_is_not_reopened_by_the_old_marker(self) -> None:
         directory = self.finding("FIND-009")

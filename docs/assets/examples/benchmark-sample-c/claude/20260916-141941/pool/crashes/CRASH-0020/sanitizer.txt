@@ -1,0 +1,60 @@
+=================================================================
+==73414==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x00016bbb9a40 at pc 0x000104a56bb4 bp 0x00016bbb9990 sp 0x00016bbb9140
+WRITE of size 200 at 0x00016bbb9a40 thread T0
+SCARINESS: 60 (multi-byte-write-stack-buffer-overflow)
+==73414==WARNING: failed to spawn external symbolizer (errno: 9)
+==73414==WARNING: failed to spawn external symbolizer (errno: 9)
+==73414==WARNING: failed to spawn external symbolizer (errno: 9)
+==73414==WARNING: failed to spawn external symbolizer (errno: 9)
+==73414==WARNING: failed to spawn external symbolizer (errno: 9)
+==73414==WARNING: Failed to use and restart external symbolizer!
+    #0 0x000104a56bb0 in __asan_memcpy (in libclang_rt.asan_osx_dynamic.dylib) + 816
+    #1 0x00010424530c in handle_blob rcfg.c:98
+    #2 0x000104244d60 in dispatch rcfg.c:209
+    #3 0x000104244a4c in rcfg_decode rcfg.c:247
+    #4 0x000104246418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+Address 0x00016bbb9a40 is located in stack of thread T0 at offset 160 in frame
+    #0 0x0001042451a8 in handle_blob rcfg.c:94
+
+  This frame has 1 object(s):
+    [32, 160) 'host' (line 95) <== Memory access at offset 160 overflows this variable
+HINT: this may be a false positive if your program uses some custom stack unwind mechanism, swapcontext or vfork
+      (longjmp and C++ exceptions *are* supported)
+SUMMARY: AddressSanitizer: stack-buffer-overflow (targets/samples/sample-c/build-asan/rcfg:arm64+0x10000130c) in handle_blob+0x170
+Shadow bytes around the buggy address:
+  0x00016bbb9780: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bbb9800: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bbb9880: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bbb9900: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bbb9980: 00 00 00 00 f1 f1 f1 f1 00 00 00 00 00 00 00 00
+=>0x00016bbb9a00: 00 00 00 00 00 00 00 00[f3]f3 f3 f3 00 00 00 00
+  0x00016bbb9a80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bbb9b00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bbb9b80: f1 f1 f1 f1 00 00 00 00 00 00 00 00 f3 f3 f3 f3
+  0x00016bbb9c00: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+  0x00016bbb9c80: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+Shadow byte legend (one shadow byte represents 8 application bytes):
+  Addressable:           00
+  Partially addressable: 01 02 03 04 05 06 07
+  Heap left redzone:       fa
+  Freed heap region:       fd
+  Stack left redzone:      f1
+  Stack mid redzone:       f2
+  Stack right redzone:     f3
+  Stack after return:      f5
+  Stack use after scope:   f8
+  Global redzone:          f9
+  Global init order:       f6
+  Poisoned by user:        f7
+  Container overflow:      fc
+  Array cookie:            ac
+  Intra object redzone:    bb
+  ASan internal:           fe
+  Left alloca redzone:     ca
+  Right alloca redzone:    cb
+==73414==ABORTING
+
+CRASH_RATE: 5/5
+[run-sanitizer-multi] REVERIFY: 5/5 - reproduced in 5/5 reverification runs

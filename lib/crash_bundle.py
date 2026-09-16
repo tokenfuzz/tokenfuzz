@@ -484,7 +484,7 @@ def restore_probe_context(sources: Sequence[Path], destination: Path) -> bool:
     try:
         testcase_sha1 = context["testcase_sha1"]
         excluded = {
-            "sanitizer.txt", "report.md", "REPORT.md", "reproduce.sh", "reproducer.sh",
+            "sanitizer.txt", "report.md", "reproduce.sh", "reproducer.sh",
         }
         testcases = [
             path for path in destination.iterdir()

@@ -58,7 +58,7 @@ _Auto-generated_
 | ID | Score | Note |
 |:---|------:|:-----|
 | [thing](other.md) | 7 | a short one |
-| [really-long-id-here](deep/nested/path/REPORT.md) | 12345 | longer note here |
+| [really-long-id-here](deep/nested/path/report.md) | 12345 | longer note here |
 """,
         )
         self.assertEqual(self.render(document).returncode, 0)
@@ -67,7 +67,7 @@ _Auto-generated_
         self.assertRegex(text, r"\| +7 \|")
         self.assertIn("# Sample", text)
         self.assertIn("_Auto-generated_", text)
-        self.assertIn("[really-long-id-here](deep/nested/path/REPORT.md)", text)
+        self.assertIn("[really-long-id-here](deep/nested/path/report.md)", text)
         before = document.read_bytes()
         self.assertEqual(self.render(document).returncode, 0)
         self.assertEqual(document.read_bytes(), before)
@@ -868,6 +868,34 @@ Memory Safety
         self.assertNotEqual(process.returncode, 0)
         self.assertTrue(third.with_suffix(".html").is_file())
         self.assertTrue(fourth.with_suffix(".html").is_file())
+
+    def test_cluster_sibling_links_name_the_report_the_sibling_holds(self) -> None:
+        """Sibling links come from the sibling directory's own file, never a
+        guessed name — the published copy is served case-sensitively. An id
+        whose directory holds no report, or one spelled in another case,
+        stays plain text."""
+        self.markdown("FIND-0002/report", "# FIND-0002\n\ntext\n")
+        self.markdown("CRASH-0002/report", "# CRASH-0002\n\ntext\n")
+        self.markdown("CRASH-0003/REPORT", "# CRASH-0003\n\ntext\n")
+        finding = self.markdown(
+            "FIND-0001/report",
+            "# FIND-0001\n\n| Field | Value |\n|:--|:--|\n"
+            "| Severity | High (CVSS-BT 4.0: 7.8) |\n"
+            "| Cluster | FCL-a (3 reports: FIND-0002, FIND-0009) |\n\n## Summary\n\nprose\n",
+        )
+        crash = self.markdown(
+            "CRASH-0001/REPORT",
+            "# CRASH-0001\n\n| Field | Value |\n|:--|:--|\n"
+            "| Severity | High (CVSS-BT 4.0: 7.8) |\n"
+            "| Cluster | CL-a (3 reports: CRASH-0002, CRASH-0003) |\n\n## Summary\n\nprose\n",
+        )
+        finding_html, crash_html = self.html_all(finding, crash)
+        self.assertIn('<a href="../FIND-0002/report.html">FIND-0002</a>', finding_html)
+        self.assertNotIn("FIND-0009/", finding_html)
+        self.assertIn("FIND-0009", finding_html)
+        self.assertIn('<a href="../CRASH-0002/report.html">CRASH-0002</a>', crash_html)
+        self.assertNotIn("CRASH-0003/", crash_html)
+        self.assertIn("CRASH-0003", crash_html)
 
 
 if __name__ == "__main__":

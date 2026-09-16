@@ -15,11 +15,11 @@ export RESULTS="output/$TARGET/$BACKEND/results"
 Open the generated HTML pages first:
 
 ```text
-$RESULTS/crashes/CRASH-CLUSTERS.html
-$RESULTS/findings/FINDING-CLUSTERS.html
-$RESULTS/crashes-rejected/REJECTED-CRASHES.html
-$RESULTS/findings-rejected/REJECTED-FINDINGS.html
-$RESULTS/crashes/CRASH-*/REPORT.html
+$RESULTS/crashes/crash-clusters.html
+$RESULTS/findings/finding-clusters.html
+$RESULTS/crashes-rejected/rejected-crashes.html
+$RESULTS/findings-rejected/rejected-findings.html
+$RESULTS/crashes/CRASH-*/report.html
 $RESULTS/findings/FIND-*/report.html
 ```
 
@@ -56,10 +56,10 @@ harness keeps its own build recipes, leases, and caches under
 ```text
 output/<target>/
   target.toml
-  CRASH-CLUSTERS.md
-  CRASH-CLUSTERS.html
-  FINDING-CLUSTERS.md
-  FINDING-CLUSTERS.html
+  crash-clusters.md
+  crash-clusters.html
+  finding-clusters.md
+  finding-clusters.html
   <backend>/
 ```
 
@@ -67,7 +67,7 @@ What each file is:
 
 - `target.toml`: the generated static configuration you review when
   inference leaves placeholders or target-specific values.
-- `CRASH-CLUSTERS.html` and `FINDING-CLUSTERS.html`: cross-backend aggregate
+- `crash-clusters.html` and `finding-clusters.html`: cross-backend aggregate
   review tables for every backend under this target. The `.md` siblings are
   the source files used to generate them.
 
@@ -94,9 +94,9 @@ The paths an operator inspects after a run:
 | Path | Purpose |
 | --- | --- |
 | `crashes/` | Crash candidates, including final and pending artifacts. |
-| `crashes-rejected/` | Rejected crash artifacts and `REJECTED-CRASHES.html` / `REJECTED-CRASHES.md`. |
+| `crashes-rejected/` | Rejected crash artifacts and `rejected-crashes.html` / `rejected-crashes.md`. |
 | `findings/` | Security finding candidates of any class, with or without a reproducer. See the note below. |
-| `findings-rejected/` | FIND directories that failed substance, source, or publication review, plus `REJECTED-FINDINGS.html` / `REJECTED-FINDINGS.md` listing the reasons, including unresolved scope after completed review. |
+| `findings-rejected/` | FIND directories that failed substance, source, or publication review, plus `rejected-findings.html` / `rejected-findings.md` listing the reasons, including unresolved scope after completed review. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
 | `coverage/` | Per-agent edge journals (`edges-agent-N.journal`) written by `bin/hits`, keyed by target-relative path; `bin/coverage-summary` and `bin/rank-work` read them. |
 | `hits-N.log` | One HIT/MISSED/COVERAGE_UNAVAILABLE row per coverage replay by agent `N`, at the results root. |
@@ -158,7 +158,7 @@ without changing the campaign's schedule or any security-evidence decision.
 These are agent-facing diagnostics, not maintainer finding or crash fields.
 
 FIND directories without a report get a `.needs-content` marker and surface
-as `NEEDS CONTENT` in `FINDING-CLUSTERS.html`. A gate pass with Reject votes
+as `NEEDS CONTENT` in `finding-clusters.html`. A gate pass with Reject votes
 below quorum leaves `.pending-drop`; reaching quorum moves the directory to
 `findings-rejected/` rather than deleting it. `touch .reviewed` (or `.keep`)
 inside a FIND directory requests a human override; the report must still
@@ -230,8 +230,8 @@ After export, the maintainer-facing bundle has:
 
 ```text
 CRASH-001-1/
-  REPORT.md             # field table + sanitizer summary; hand-edit this
-  REPORT.html           # auto-generated sibling of REPORT.md
+  report.md             # field table + sanitizer summary; hand-edit this
+  report.html           # auto-generated sibling of report.md
   reproduce.sh          # ./reproduce.sh /path/to/source
   input.<ext>           # the testcase bytes
   harness.{c,cc,cpp,cxx} # only when the bug uses a C/C++ harness
@@ -249,9 +249,9 @@ Accepted crashes may carry other dot-files the triage gates leave behind
 (vote caches, timing and scoring markers, and the like). All of them are
 harness internals, safe to ignore when reviewing.
 
-`REPORT.md` carries a `Cluster: <ID>` line naming the cluster and this
-member's role in it. The auto-generated `REPORT.html` is regenerated on every
-triage pass; edit `REPORT.md` only. See
+`report.md` carries a `Cluster: <ID>` line naming the cluster and this
+member's role in it. The auto-generated `report.html` is regenerated on every
+triage pass; edit `report.md` only. See
 [Triage and review](../guides/triage-results.md#clusters-and-duplicates) for
 the cluster model.
 
@@ -263,10 +263,10 @@ Crash directories are intentionally narrow. They should contain the evidence
 needed to rerun and prioritise a crash. Broader security observations belong
 in `findings/`.
 
-`crashes/` also contains `CRASH-CLUSTERS.md` and `CRASH-CLUSTERS.html`, the
+`crashes/` also contains `crash-clusters.md` and `crash-clusters.html`, the
 generated review table for crashes in this backend's `results/` tree. The
-cross-backend aggregate lives at `output/<target>/CRASH-CLUSTERS.md` and
-`output/<target>/CRASH-CLUSTERS.html`.
+cross-backend aggregate lives at `output/<target>/crash-clusters.md` and
+`output/<target>/crash-clusters.html`.
 
 ## Finding directory
 
@@ -286,10 +286,10 @@ FIND-001/
 `report.md` carries `Cluster: <ID>` and `Dedup key:` lines. `report.html` is
 regenerated on every triage pass; hand-edit only `report.md`.
 
-`findings/` also contains `FINDING-CLUSTERS.md` and `FINDING-CLUSTERS.html`,
+`findings/` also contains `finding-clusters.md` and `finding-clusters.html`,
 the review table grouping reports that share an evidence signature. The
-cross-backend aggregate lives at `output/<target>/FINDING-CLUSTERS.md` and
-`output/<target>/FINDING-CLUSTERS.html`.
+cross-backend aggregate lives at `output/<target>/finding-clusters.md` and
+`output/<target>/finding-clusters.html`.
 
 See [Triage and review](../guides/triage-results.md#clusters-and-duplicates)
 for how cluster membership and `.dup-of` markers are used during review.
@@ -377,11 +377,11 @@ Logs are useful for:
 
 For normal audit progress, prefer the generated HTML:
 
-- `crashes/CRASH-CLUSTERS.html`;
-- `findings/FINDING-CLUSTERS.html`;
-- `crashes-rejected/REJECTED-CRASHES.html`;
-- `findings-rejected/REJECTED-FINDINGS.html`;
-- per-result `REPORT.html` / `report.html`.
+- `crashes/crash-clusters.html`;
+- `findings/finding-clusters.html`;
+- `crashes-rejected/rejected-crashes.html`;
+- `findings-rejected/rejected-findings.html`;
+- per-result `report.html`.
 
 For debugging a run, start with `logs/README.md`, then `index.log`. Open the
 matching `session_*.log` for the session named in the timeline. Use

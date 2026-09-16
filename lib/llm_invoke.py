@@ -1417,8 +1417,6 @@ def _agent_has_unfinished_crash(environment: dict) -> bool:
         if not crash_dir.is_dir():
             continue
         report = crash_dir / "report.md"
-        if not report.is_file() and (crash_dir / "REPORT.md").is_file():
-            report = crash_dir / "REPORT.md"
         try:
             if "_TODO (agent):" in report.read_text(
                 encoding="utf-8", errors="replace"

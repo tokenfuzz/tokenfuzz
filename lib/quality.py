@@ -45,7 +45,7 @@ Subcommands (run as `python3 lib/quality.py <name> ...`):
       skipped_no_header=N skipped_no_new_edges=N` to stdout.
 
   regenerate-corpus-index <corpus_root>
-      Rebuild the corpus INDEX.md table from each COVER-*/metadata.md.
+      Rebuild the corpus index.md table from each COVER-*/metadata.md.
 """
 
 from __future__ import annotations
@@ -68,8 +68,7 @@ _BLACK_EXACT_LOWER = {
     ".severity_failed", ".severity_pending", ".severity_ok",
 }
 _BLACK_EXACT_PRESERVE_CASE = {
-    "REPORT.md", "REPORT.html", "description.md",
-    "reproduce.sh",
+    "report.md", "report.html", "description.md", "reproduce.sh",
     "severity.json", "promotion.log",
 }
 
@@ -623,8 +622,8 @@ _META_FIELD_RES = {
 
 
 def regenerate_corpus_index(corpus_root: str) -> bool:
-    """Rebuild ``INDEX.md`` and report whether the write succeeded."""
-    idx_path = os.path.join(corpus_root, "INDEX.md")
+    """Rebuild ``index.md`` and report whether the write succeeded."""
+    idx_path = os.path.join(corpus_root, "index.md")
     lines = [
         "# Corpus INDEX",
         "",

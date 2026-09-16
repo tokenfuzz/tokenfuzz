@@ -842,7 +842,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
             triage.triage_one_crash(crash, rejected_results, root / "target", "demo", ["bytes"]),
             "triage quarantines a crash that never produces sanitizer evidence",
         )
-    check((rejected_results / "crashes-rejected" / "CRASH-001" / "REJECTION.md").is_file(), "triage preserves a rejection rationale")
+    check((rejected_results / "crashes-rejected" / "CRASH-001" / "rejection.md").is_file(), "triage preserves a rejection rationale")
 
     findings = rejected_results / "findings"
     accepted = findings / "FIND-ACCEPTED"
@@ -889,7 +889,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     (rejected / "report.md").write_text("# Concrete issue\n\nsrc/b.c:20 state issue\n", encoding="utf-8")
     (rejected / ".llm-find-quality.json").write_text(json.dumps({"decision_version": triage.report_identity.FIND_QUALITY_DECISION_VERSION, "accept": False, "reject_count": 2, "reason": "not security relevant"}), encoding="utf-8")
     equal("rejected", triage.validate_one_finding(rejected, rejected_results), "finding gate quarantines cached reject quorums")
-    check((rejected_results / "findings-rejected" / "FIND-REJECTED" / "REJECTION.md").is_file(), "finding rejection keeps the validator rationale")
+    check((rejected_results / "findings-rejected" / "FIND-REJECTED" / "rejection.md").is_file(), "finding rejection keeps the validator rationale")
 
     check(crash_bundle.should_file("CRASH", "asan", 5), "crash bundle files confirmed sanitizer crashes")
     check(not crash_bundle.should_file("CLEAN", "asan", 5), "crash bundle rejects clean probes")

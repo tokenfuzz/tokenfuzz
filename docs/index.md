@@ -131,10 +131,10 @@ candidates as well as reviewed results; check the publication state in
 
 | Path | Purpose |
 | --- | --- |
-| `results/findings/FINDING-CLUSTERS.html` | Concrete security findings, grouped by exact evidence signature. |
-| `results/crashes/CRASH-CLUSTERS.html` | Crash candidates, reviewed diagnostics, and reproduction bundles. |
-| `results/crashes-rejected/REJECTED-CRASHES.html` | Crash candidates rejected with an explanation. |
-| `results/findings-rejected/REJECTED-FINDINGS.html` | Findings triage rejected, with the reason. |
+| `results/findings/finding-clusters.html` | Concrete security findings, grouped by exact evidence signature. |
+| `results/crashes/crash-clusters.html` | Crash candidates, reviewed diagnostics, and reproduction bundles. |
+| `results/crashes-rejected/rejected-crashes.html` | Crash candidates rejected with an explanation. |
+| `results/findings-rejected/rejected-findings.html` | Findings triage rejected, with the reason. |
 
 `results/` here means `output/<target>/<backend>/results/`. Cross-backend
 finding and crash summaries are written directly under `output/<target>/`.

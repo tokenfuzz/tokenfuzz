@@ -1173,14 +1173,11 @@ def count_crashes_rejected(rejected_dir: Path) -> int:
     sees 7 here can find 7 rejection records (subdir or row) below.
 
     """
-    rosters = sorted(rejected_dir.glob("CELL-REJECTIONS-*.md"))
+    rosters = sorted(rejected_dir.glob("cell-rejections-*.md"))
     if rosters:
         ledger_rows = sum(count_rejected_crash_rows(path) for path in rosters)
     else:
-        ledger = rejected_dir / "REJECTED-CRASHES.md"
-        if not ledger.is_file():
-            ledger = rejected_dir / "INDEX.md"
-        ledger_rows = count_rejected_crash_rows(ledger)
+        ledger_rows = count_rejected_crash_rows(rejected_dir / "rejected-crashes.md")
     return (
         count_subdirs(rejected_dir, "CRASH-")
         + ledger_rows
@@ -1234,7 +1231,7 @@ def count_discarded_hypotheses(results_dir: Path) -> int:
 
 
 def _count_discarded_roster_rows(roster_md: Path) -> int:
-    """Count data rows in a DISCARDED-*.md roster.
+    """Count data rows in a discarded-*.md roster.
 
     The roster table is rendered with a leading index column ("# | Agent
     | ..."); data rows have a numeric first cell, while the header and
@@ -1345,11 +1342,7 @@ def confirmed_finding_class_histogram(
         except (OSError, ValueError):
             value = ""
         if not value:
-            report = next(
-                (path for path in (directory / "report.md", directory / "REPORT.md")
-                 if path.is_file()),
-                None,
-            )
+            report = report_identity.find_report(directory)
             if report is not None:
                 try:
                     text = report.read_text(encoding="utf-8", errors="replace")
@@ -2891,13 +2884,11 @@ def manifest_errors(manifest: dict) -> list[str]:
 
 
 def _finding_report_text(finding_dir: Path) -> str:
-    for name in ("REPORT.md", "report.md", "description.md", "analysis.md"):
-        path = finding_dir / name
-        if path.is_file():
-            try:
-                return path.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
+    for path in report_identity.exact_child_files(finding_dir, report_identity.REPORT_NAMES):
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
     return ""
 
 
@@ -3738,10 +3729,10 @@ def _choose_find_quality(finding_dir: Path) -> dict:
 def _rejection_artifact_reason(artifact_dir: Path) -> str:
     """Read the final disposition triage recorded when it rejected an artifact.
 
-    REJECTION.md is written on the reject path before the directory moves, so
+    rejection.md is written on the reject path before the directory moves, so
     it is the one reason a pooled rejected crash or finding carries.
     """
-    rejection = artifact_dir / "REJECTION.md"
+    rejection = artifact_dir / "rejection.md"
     if not rejection.is_file():
         return ""
     try:
@@ -3772,8 +3763,7 @@ def _short(text: str, limit: int = 220) -> str:
 def _report_link_name(finding_dir: Path) -> str:
     report = report_identity.exact_child_file(
         finding_dir,
-        ("report.md", "REPORT.md", "description.md", "analysis.md",
-         "report.html", "REPORT.html", "description.html"),
+        (*report_identity.REPORT_NAMES, "report.html", "description.html"),
     )
     return report.name if report is not None else ""
 
@@ -3826,10 +3816,7 @@ def _crash_site(crash_dir: Path) -> str:
 
 def _finding_site(finding_dir: Path) -> str:
     """file:func:line for a rejected finding, read from its Fields table."""
-    for name in ("REPORT.md", "report.md", "description.md", "analysis.md"):
-        path = finding_dir / name
-        if not path.is_file():
-            continue
+    for path in report_identity.exact_child_files(finding_dir, report_identity.REPORT_NAMES):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -3850,10 +3837,7 @@ def _finding_site(finding_dir: Path) -> str:
 
 
 def _finding_title(finding_dir: Path) -> str:
-    for name in ("REPORT.md", "report.md", "description.md", "analysis.md"):
-        path = finding_dir / name
-        if not path.is_file():
-            continue
+    for path in report_identity.exact_child_files(finding_dir, report_identity.REPORT_NAMES):
         try:
             for line in path.read_text(
                     encoding="utf-8", errors="replace").splitlines():
@@ -3880,7 +3864,7 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
         reason = (
             vote.get("rationale")
             or vote.get("reason")
-            # REJECTION.md records the final disposition and remains stable
+            # rejection.md records the final disposition and remains stable
             # when pool-only link rewrites invalidate the copied quality cache.
             or _rejection_artifact_reason(finding_dir)
             or quality.get("reason")
@@ -3903,7 +3887,7 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
     Two sources are stitched together so the column can link to a single
     artifact: (1) any pooled `CRASH-REJECTED-NNNN/` subdirs (crash dirs
     moved out of crashes/ during triage), and (2) the per-cell
-    `CELL-REJECTIONS-<cond>-<cell>.md` rosters (auto-rejected signatures that
+    `cell-rejections-<cond>-<cell>.md` rosters (auto-rejected signatures that
     never got a full crash dir). Empty rosters still produce a page so
     the link target exists even when the count is 0.
     """
@@ -3914,8 +3898,8 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
         p for p in rejected_dir.iterdir()
         if p.is_dir() and p.name.startswith("CRASH-")
     )
-    rosters = sorted(rejected_dir.glob("CELL-REJECTIONS-*.md"))
-    discarded_rosters = sorted(rejected_dir.glob("DISCARDED-*.md"))
+    rosters = sorted(rejected_dir.glob("cell-rejections-*.md"))
+    discarded_rosters = sorted(rejected_dir.glob("discarded-*.md"))
 
     md = [
         "# Rejected crashes",
@@ -3998,7 +3982,7 @@ def write_rejected_crashes_index(rejected_dir: Path) -> None:
         md.append("_No DISCARDED hypotheses were pooled._")
     md.append("")
     text = "\n".join(md)
-    (rejected_dir / "REJECTED-CRASHES.md").write_text(text, encoding="utf-8")
+    (rejected_dir / "rejected-crashes.md").write_text(text, encoding="utf-8")
     rows = [{
         "id": p.name, "site": _crash_site(p),
         "reason": _rejection_artifact_reason(p), "report": _report_link_name(p),
@@ -4058,7 +4042,7 @@ def write_rejected_findings_index(rejected_dir: Path) -> None:
         md_lines.append("_No rejected findings._")
     md_lines.append("")
     text = "\n".join(md_lines)
-    (rejected_dir / "REJECTED-FINDINGS.md").write_text(text, encoding="utf-8")
+    (rejected_dir / "rejected-findings.md").write_text(text, encoding="utf-8")
     evidence_pages.write_rejected_page("find", rows, rejected_dir)
 
 
@@ -5606,12 +5590,10 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
             # caller-misuse classes, etc.). Copy it alongside so the
             # reviewer can see *why* a cell counted N rejections even when
             # zero rejection dirs exist.
-            index_md = rejected_crashes_dir / "REJECTED-CRASHES.md"
-            if not index_md.is_file():
-                index_md = rejected_crashes_dir / "INDEX.md"
+            index_md = rejected_crashes_dir / "rejected-crashes.md"
             if count_rejected_crash_rows(index_md):
                 dst = (pool / "crashes-rejected"
-                       / f"CELL-REJECTIONS-{cond}-{cell_dir.name}.md")
+                       / f"cell-rejections-{cond}-{cell_dir.name}.md")
                 shutil.copy2(index_md, dst)
         # DISCARDED hypotheses live in state/hypotheses.jsonl (one row
         # per investigated-then-dropped lead). Surface them in the
@@ -5624,7 +5606,7 @@ def build_pool(bench_dir: Path, pool_name: str = "pool") -> dict:
         )
         if discarded_md:
             dst = (pool / "crashes-rejected"
-                   / f"DISCARDED-{cond}-{cell_dir.name}.md")
+                   / f"discarded-{cond}-{cell_dir.name}.md")
             dst.write_text(discarded_md, encoding="utf-8")
 
     _copy_pool_target_toml(pool, target_toml_candidates,
@@ -5895,17 +5877,17 @@ def _replicates_cell(c: dict) -> str:
 def _reproducer_link(bench_dir: Path, members: list[str]) -> str:
     """Markdown link to a cluster's representative reproducer.
 
-    Prefers the rendered REPORT.html — bin/export-repro + bin/render-md
-    produce a REPORT.md / REPORT.html / reproduce.sh bundle for every
+    Prefers the rendered report.html — bin/export-repro + bin/render-md
+    produce a report.md / report.html / reproduce.sh bundle for every
     pooled crash — and falls back to the crash directory so the link is
     always live even if bundling was skipped (e.g. a --dry-run).
     """
     if not members:
         return "—"
     crash_dir = bench_dir / "pool" / "crashes" / members[0]
-    html = crash_dir / "REPORT.html"
+    html = crash_dir / "report.html"
     if html.is_file():
-        return _md_link("REPORT.html", html)
+        return _md_link("report.html", html)
     return _md_link(members[0], crash_dir)
 
 
@@ -6267,14 +6249,14 @@ def render_section(report: dict) -> str:
                         _as_int(c.get("unadjudicated_finding_total")),
                         finding_classes,
                         bool(c.get("finding_total_is_floor"))),
-                    cond_findings, "FINDING-CLUSTERS"),
+                    cond_findings, "finding-clusters"),
                 rfi=_artifact_report_link(
                     _rejected_label(
                         c.get("unique_rejected_finding_clusters", 0),
                         c.get("rejected_finding_clusters_upper_bound", False),
                     ),
                     cond_rejected_findings,
-                    "REJECTED-FINDINGS",
+                    "rejected-findings",
                 ),
                 uc=_cluster_report_link(
                     _unique_with_medium_plus(
@@ -6283,14 +6265,14 @@ def render_section(report: dict) -> str:
                         _as_int(c.get("unadjudicated_crash_total")),
                         floor=bool(c.get("crash_total_is_floor")),
                         retained=_as_int(c.get("retained_crash_total"))),
-                    cond_crashes, "CRASH-CLUSTERS"),
+                    cond_crashes, "crash-clusters"),
                 rcr=_artifact_report_link(
                     _rejected_label(
                         c.get("unique_rejected_crash_clusters", 0),
                         c.get("rejected_crash_clusters_upper_bound", False),
                     ),
                     cond_rejected_crashes,
-                    "REJECTED-CRASHES",
+                    "rejected-crashes",
                 ),
                 sev=_severity_cell(c.get("top_severity_level", "—")),
             )
@@ -6583,8 +6565,8 @@ def render_section(report: dict) -> str:
         lines.append("")
         lines.append(
             "The **Bug** id links to the crash directory; **Reproducer** "
-            "links its rendered report. Each bug is bundled as `REPORT.md`, "
-            "`REPORT.html`, and `reproduce.sh` under "
+            "links its rendered report. Each bug is bundled as `report.md`, "
+            "`report.html`, and `reproduce.sh` under "
             f"{_md_link('pool/crashes/', crashes_dir)}."
         )
         lines.append("")
@@ -6978,7 +6960,7 @@ def crosstab(bench_root: Path) -> str:
                 # row has no honest count to show and says Pending on both sides.
                 rfi=("Pending" if provisional else _rejected_cell(
                     c.get("unique_rejected_finding_clusters"),
-                    rejected_findings_dir, "REJECTED-FINDINGS",
+                    rejected_findings_dir, "rejected-findings",
                     c.get("rejected_finding_clusters_upper_bound", False),
                 )),
                 uf=("Pending" if provisional else _crosstab_count(
@@ -6988,10 +6970,10 @@ def crosstab(bench_root: Path) -> str:
                         _as_int(c.get("unadjudicated_finding_total")),
                         finding_classes,
                         bool(c.get("finding_total_is_floor"))),
-                    findings_dir, "FINDING-CLUSTERS")),
+                    findings_dir, "finding-clusters")),
                 rcr=("Pending" if provisional else _rejected_cell(
                     c.get("unique_rejected_crash_clusters"),
-                    rejected_crashes_dir, "REJECTED-CRASHES",
+                    rejected_crashes_dir, "rejected-crashes",
                     c.get("rejected_crash_clusters_upper_bound", False),
                 )),
                 uc=("Pending" if provisional else _crosstab_count(
@@ -7001,7 +6983,7 @@ def crosstab(bench_root: Path) -> str:
                         _as_int(c.get("unadjudicated_crash_total")),
                         floor=bool(c.get("crash_total_is_floor")),
                         retained=_as_int(c.get("retained_crash_total"))),
-                    crashes_dir, "CRASH-CLUSTERS")),
+                    crashes_dir, "crash-clusters")),
                 sev=("Pending" if provisional else
                      _severity_cell(c.get("top_severity_level", "—"))),
                 inp=_fmt_input_cell(c),
@@ -7405,8 +7387,8 @@ def split_pool(bench_dir: Path, pool_name: str = "pool") -> dict[str, int]:
     This reads pool-members.json (the crash/finding -> condition map) and
     copies each pooled dir into pool/<condition>/crashes|findings/. The
     combined pool is left intact. bin/benchmark then runs the same cluster
-    tools over each subtree, giving every condition its own CRASH-CLUSTERS
-    / FINDING-CLUSTERS report. Idempotent. Returns a {condition: count}.
+    tools over each subtree, giving every condition its own crash-clusters
+    / finding-clusters report. Idempotent. Returns a {condition: count}.
     """
     bench_dir = Path(bench_dir)
     pool = bench_dir / pool_name
@@ -7447,17 +7429,17 @@ def split_pool(bench_dir: Path, pool_name: str = "pool") -> dict[str, int]:
     write_rejected_findings_index(pool / "findings-rejected")
     write_rejected_crashes_index(pool / "crashes-rejected")
     # split_pool only copies the CRASH-REJECTED-* dirs into the
-    # per-condition tree. The per-cell CELL-REJECTIONS-*.md rosters live in the
+    # per-condition tree. The per-cell cell-rejections-*.md rosters live in the
     # combined pool's crashes-rejected/ — partition them by condition
-    # name embedded in the filename (CELL-REJECTIONS-<cond>-<cell>.md) so each
+    # name embedded in the filename (cell-rejections-<cond>-<cell>.md) so each
     # condition's index reflects only its own rejection rows.
     combined_rejected = pool / "crashes-rejected"
     if combined_rejected.is_dir():
-        for roster in sorted(combined_rejected.glob("CELL-REJECTIONS-*.md")):
+        for roster in sorted(combined_rejected.glob("cell-rejections-*.md")):
             # Take the longest known
             # condition prefix that matches so a hyphenated condition
             # name ("model-direct") is recognised correctly.
-            stem = roster.name[len("CELL-REJECTIONS-"):-len(".md")]
+            stem = roster.name[len("cell-rejections-"):-len(".md")]
             cond_match = None
             for cond_dir in pool.iterdir():
                 if not cond_dir.is_dir() or cond_dir.name in {

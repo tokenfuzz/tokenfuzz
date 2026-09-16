@@ -4,15 +4,15 @@ Three page kinds share one visual language with `lib/benchmark_page.py`, so a
 reader who clicks from the benchmark result page into a cluster index, and
 from there into a report, never changes idiom:
 
-  * the **cluster index** (`FINDING-CLUSTERS.html`, `CRASH-CLUSTERS.html`):
+  * the **cluster index** (`finding-clusters.html`, `crash-clusters.html`):
     every distinct problem a run surfaced — when each was first filed, where in
     the tree it sits, which strategy lane reached it, how often the model
     re-found it, and who filed it when several conditions or backends share
     the page;
-  * the **rejected index** (`REJECTED-FINDINGS.html`, `REJECTED-CRASHES.html`):
+  * the **rejected index** (`rejected-findings.html`, `rejected-crashes.html`):
     what did not hold up, grouped by why, so over-claiming reads as a property
     of a condition rather than noise to skip;
-  * the **report shell** around a single `report.html` / `REPORT.html`:
+  * the **report shell** around a single `report.html`:
     the Markdown body `bin/render-md` produces, framed by an action card (what
     to fix, where, how to reproduce, how sure the harness is) and an evidence
     rail (severity vector, review receipt, bundle files, timeline) read from
@@ -20,7 +20,7 @@ from there into a report, never changes idiom:
 
 Every number on these pages is read from what the clusterers and triage
 already wrote to disk — cluster JSON, `severity.json`, `validation.json`,
-`REJECTION.md`, the filing clock — never re-derived, so the pages cannot
+`rejection.md`, the filing clock — never re-derived, so the pages cannot
 disagree with the Markdown indexes beside them. The pages are self-contained
 (inline CSS and script, no network) and render without script as plain tables.
 """
@@ -52,13 +52,13 @@ __all__ = [
 _KIND = {
     "find": {
         "sub": "findings", "rejected_sub": "findings-rejected",
-        "index": "FINDING-CLUSTERS", "rejected_index": "REJECTED-FINDINGS",
+        "index": "finding-clusters", "rejected_index": "rejected-findings",
         "noun": "finding", "report": "finding report",
         "problem": "distinct problem", "problems": "distinct problems", "axis": "Class",
     },
     "crash": {
         "sub": "crashes", "rejected_sub": "crashes-rejected",
-        "index": "CRASH-CLUSTERS", "rejected_index": "REJECTED-CRASHES",
+        "index": "crash-clusters", "rejected_index": "rejected-crashes",
         "noun": "crash", "report": "sanitizer report",
         "problem": "distinct crash", "problems": "distinct crashes", "axis": "Primitive",
     },
@@ -422,7 +422,7 @@ def _bundle(directory: Path) -> list[dict]:
         ("testcase", lambda n: n.startswith(("input", "testcase", "repro", "seed")) or n.endswith(".raw")),
         ("harness", lambda n: n.startswith(("harness", "probe-harness")) and "." in n),
         ("sanitizer", lambda n: crash_artifacts.is_sanitizer_name(n)),
-        ("receipt", lambda n: n in ("severity.json", "validation.json", "REJECTION.md")),
+        ("receipt", lambda n: n in ("severity.json", "validation.json", "rejection.md")),
         ("report", lambda n: n in report_identity.REPORT_NAMES or n.lower().endswith(".html")),
     )
     out: list[dict] = []
@@ -460,7 +460,7 @@ def artifact_facts(directory: Path, kind: str, *, stamps: dict[str, float] | Non
     site = _site(fields, text)
     tldr = _tldr(text)
     sections = _sections(text)
-    rejection = _REJECTION_REASON_RE.search(_read_text(directory / "REJECTION.md"))
+    rejection = _REJECTION_REASON_RE.search(_read_text(directory / "rejection.md"))
     filed = (stamps or {}).get(directory.name)
     if filed is None:
         filed = crash_artifacts.filing_time(directory)
@@ -1491,17 +1491,24 @@ def report_context(directory: Path | None) -> dict | None:
     return facts
 
 
+def sibling_report_href(directory: Path, sid: str) -> str:
+    """Relative link from *directory*'s page to sibling *sid*'s rendered report.
+
+    The sibling's report is read from its own directory, never guessed from
+    this one: a probed name opens on a case-insensitive disk and is a dead
+    link once the pages are served case-sensitively. "" when the sibling has
+    no report to link.
+    """
+    view = _report_view(report_identity.find_report(directory.parent / sid))
+    return _href(view, directory, must_exist=False)
+
+
 def _sibling_links(facts: dict) -> list[tuple[str, str]]:
-    out = []
-    own = facts["view"].name if facts.get("view") else "report.html"
-    for sid in _SIBLING_RE.findall(facts.get("cluster") or ""):
-        if sid == facts["id"]:
-            continue
-        target = facts["dir"].parent / sid
-        view = _report_view(report_identity.find_report(target)) if target.is_dir() else None
-        href = _href(view, facts["dir"], must_exist=False) if view else f"../{sid}/{own}"
-        out.append((sid, href))
-    return out
+    return [
+        (sid, sibling_report_href(facts["dir"], sid))
+        for sid in _SIBLING_RE.findall(facts.get("cluster") or "")
+        if sid != facts["id"]
+    ]
 
 
 def action_card(facts: dict) -> str:
@@ -1714,7 +1721,10 @@ def _siblings_rail(facts: dict) -> str:
     if not links and not facts.get("cluster"):
         return ""
     cluster = facts["cluster"].split(" ", 1)[0]
-    rows = "".join(f'<li><a href="{_e(href)}" class="mono">{_e(sid)}</a></li>' for sid, href in links)
+    rows = "".join(
+        f'<li><a href="{_e(href)}" class="mono">{_e(sid)}</a></li>' if href
+        else f'<li><span class="mono">{_e(sid)}</span></li>'
+        for sid, href in links)
     note = f'<div class="fine">cluster <span class="mono">{_e(cluster)}</span>' + (
         f' · {len(links)} sibling report{"s" if len(links) != 1 else ""} of the same problem' if links else " · singleton") + "</div>"
     return f'<div class="rs"><h4>Same problem</h4>{note}<ul class="files">{rows}</ul></div>'

@@ -47,6 +47,7 @@ import triage
 import verdict
 import vocab_rules
 import workqueue
+import report_identity
 from timeout import run_timeout
 
 
@@ -2207,7 +2208,7 @@ def _migrate_cluster_backlog(runtime: Runtime) -> None:
     sentinel = runtime.results / "state" / ".cluster-expand-backlog-done"
     if sentinel.is_file():
         return
-    index = runtime.results / "crashes" / "CRASH-CLUSTERS.md"
+    index = runtime.results / "crashes" / "crash-clusters.md"
     try:
         indexed = set(re.findall(r"\bCRASH-[A-Za-z0-9._-]+", index.read_text(encoding="utf-8")))
     except OSError:
@@ -3226,9 +3227,7 @@ class SealedGateWorker:
         if directory.name.startswith("CRASH-"):
             return workqueue.crash_bundle_unfinished(directory)
         # A finding directory without its report is still being created.
-        return not any(
-            (directory / name).is_file() for name in ("report.md", "REPORT.md")
-        )
+        return report_identity.find_report(directory) is None
 
     def attribute(self, agent: int, raw_path: Path) -> set[str]:
         """Record which artifacts a session that just ended named."""

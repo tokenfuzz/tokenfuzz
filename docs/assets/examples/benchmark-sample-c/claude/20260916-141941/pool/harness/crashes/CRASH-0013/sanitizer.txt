@@ -1,0 +1,172 @@
+ASAN_RUN_HEADER: sanitizer=asan runs=5 mode=generic testcase=output/benchmark-sample-c/claude/20260916-141941/cells/harness-r1/repo-root/output/samples/sample-c-bench-20260916-141941-harness-r1/claude/results/scratch-1/drop-doublefree.bin env_options_b64= started=2026-09-16T14:37:07Z
+COVERAGE_GATE: HIT - reached handle_drop
+[run-sanitizer-multi] BUDGET: 31/60 sanitizer invocations used this iteration
+=== Run 1/5 ===
+=================================================================
+==78101==ERROR: AddressSanitizer: attempting double-free on 0x605000000720 in thread T0:
+SCARINESS: 42 (double-free)
+    #0 0x000100ab1258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x000100448a8c in rcfg_decode rcfg.c:254
+    #2 0x00010044a418 in main rcfg_cli.c:59
+    #3 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000720 is located 0 bytes inside of 4-byte region [0x605000000720,0x605000000724)
+freed by thread T0 here:
+    #0 0x000100ab1258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x000100449b04 in handle_drop rcfg.c:169
+    #2 0x000100448dac in dispatch rcfg.c:213
+    #3 0x000100448a4c in rcfg_decode rcfg.c:247
+    #4 0x00010044a418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+previously allocated by thread T0 here:
+    #0 0x000100ab1164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x0001004498cc in handle_stage rcfg.c:155
+    #2 0x000100448da0 in dispatch rcfg.c:212
+    #3 0x000100448a4c in rcfg_decode rcfg.c:247
+    #4 0x00010044a418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: double-free (targets/samples/sample-c/build-asan/rcfg:arm64+0x100000a8c)
+==78101==ABORTING
+tokenfuzz: timeout.py: child pid=78101 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+
+=== Run 2/5 ===
+=================================================================
+==78131==ERROR: AddressSanitizer: attempting double-free on 0x605000000720 in thread T0:
+SCARINESS: 42 (double-free)
+    #0 0x0001026f5258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x000102010a8c in rcfg_decode rcfg.c:254
+    #2 0x000102012418 in main rcfg_cli.c:59
+    #3 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000720 is located 0 bytes inside of 4-byte region [0x605000000720,0x605000000724)
+freed by thread T0 here:
+    #0 0x0001026f5258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x000102011b04 in handle_drop rcfg.c:169
+    #2 0x000102010dac in dispatch rcfg.c:213
+    #3 0x000102010a4c in rcfg_decode rcfg.c:247
+    #4 0x000102012418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+previously allocated by thread T0 here:
+    #0 0x0001026f5164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x0001020118cc in handle_stage rcfg.c:155
+    #2 0x000102010da0 in dispatch rcfg.c:212
+    #3 0x000102010a4c in rcfg_decode rcfg.c:247
+    #4 0x000102012418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: double-free (targets/samples/sample-c/build-asan/rcfg:arm64+0x100000a8c)
+==78131==ABORTING
+tokenfuzz: timeout.py: child pid=78131 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 2/5: VERIFIED — same crash signature as run 1 (rcfg_decode rcfg.c:254)
+
+=== Run 3/5 ===
+=================================================================
+==78155==ERROR: AddressSanitizer: attempting double-free on 0x605000000720 in thread T0:
+SCARINESS: 42 (double-free)
+    #0 0x000105915258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x000104f0ca8c in rcfg_decode rcfg.c:254
+    #2 0x000104f0e418 in main rcfg_cli.c:59
+    #3 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000720 is located 0 bytes inside of 4-byte region [0x605000000720,0x605000000724)
+freed by thread T0 here:
+    #0 0x000105915258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x000104f0db04 in handle_drop rcfg.c:169
+    #2 0x000104f0cdac in dispatch rcfg.c:213
+    #3 0x000104f0ca4c in rcfg_decode rcfg.c:247
+    #4 0x000104f0e418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+previously allocated by thread T0 here:
+    #0 0x000105915164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x000104f0d8cc in handle_stage rcfg.c:155
+    #2 0x000104f0cda0 in dispatch rcfg.c:212
+    #3 0x000104f0ca4c in rcfg_decode rcfg.c:247
+    #4 0x000104f0e418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: double-free (targets/samples/sample-c/build-asan/rcfg:arm64+0x100000a8c)
+==78155==ABORTING
+tokenfuzz: timeout.py: child pid=78155 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 3/5: VERIFIED — same crash signature as run 1 (rcfg_decode rcfg.c:254)
+
+=== Run 4/5 ===
+=================================================================
+==78195==ERROR: AddressSanitizer: attempting double-free on 0x605000000720 in thread T0:
+SCARINESS: 42 (double-free)
+    #0 0x0001056b9258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x000104e00a8c in rcfg_decode rcfg.c:254
+    #2 0x000104e02418 in main rcfg_cli.c:59
+    #3 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000720 is located 0 bytes inside of 4-byte region [0x605000000720,0x605000000724)
+freed by thread T0 here:
+    #0 0x0001056b9258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x000104e01b04 in handle_drop rcfg.c:169
+    #2 0x000104e00dac in dispatch rcfg.c:213
+    #3 0x000104e00a4c in rcfg_decode rcfg.c:247
+    #4 0x000104e02418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+previously allocated by thread T0 here:
+    #0 0x0001056b9164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x000104e018cc in handle_stage rcfg.c:155
+    #2 0x000104e00da0 in dispatch rcfg.c:212
+    #3 0x000104e00a4c in rcfg_decode rcfg.c:247
+    #4 0x000104e02418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: double-free (targets/samples/sample-c/build-asan/rcfg:arm64+0x100000a8c)
+==78195==ABORTING
+tokenfuzz: timeout.py: child pid=78195 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 4/5: VERIFIED — same crash signature as run 1 (rcfg_decode rcfg.c:254)
+
+=== Run 5/5 ===
+=================================================================
+==78228==ERROR: AddressSanitizer: attempting double-free on 0x605000000720 in thread T0:
+SCARINESS: 42 (double-free)
+    #0 0x000104c71258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x00010431ca8c in rcfg_decode rcfg.c:254
+    #2 0x00010431e418 in main rcfg_cli.c:59
+    #3 0x00018d1844e0 in start (in dyld) + 6988
+
+0x605000000720 is located 0 bytes inside of 4-byte region [0x605000000720,0x605000000724)
+freed by thread T0 here:
+    #0 0x000104c71258 in wrap_free (in libclang_rt.asan_osx_dynamic.dylib) + 124
+    #1 0x00010431db04 in handle_drop rcfg.c:169
+    #2 0x00010431cdac in dispatch rcfg.c:213
+    #3 0x00010431ca4c in rcfg_decode rcfg.c:247
+    #4 0x00010431e418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+previously allocated by thread T0 here:
+    #0 0x000104c71164 in wrap_malloc (in libclang_rt.asan_osx_dynamic.dylib) + 120
+    #1 0x00010431d8cc in handle_stage rcfg.c:155
+    #2 0x00010431cda0 in dispatch rcfg.c:212
+    #3 0x00010431ca4c in rcfg_decode rcfg.c:247
+    #4 0x00010431e418 in main rcfg_cli.c:59
+    #5 0x00018d1844e0 in start (in dyld) + 6988
+
+SUMMARY: AddressSanitizer: double-free (targets/samples/sample-c/build-asan/rcfg:arm64+0x100000a8c)
+==78228==ABORTING
+tokenfuzz: timeout.py: child pid=78228 (rcfg) killed by SIGABRT; exiting 134 (wrapper was not signaled, so the kill hit the child directly)
+
+[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=134)
+[run-sanitizer-multi] Run 5/5: VERIFIED — same crash signature as run 1 (rcfg_decode rcfg.c:254)
+
+=== SUMMARY ===
+CRASH_RATE: 5/5
+[run-sanitizer-multi] EXECUTION_RATE: 5/5
+[run-sanitizer-multi] SUCCESS_RATE: 0/5
+[run-sanitizer-multi] CRASHES FOUND: 5/5 runs crashed

@@ -113,22 +113,22 @@ have a reproducer; validation determines whether the filed report becomes a
 reportable result.
 
 **Rejected crash (`crashes-rejected/`).** A crash candidate that failed
-triage, kept on disk and indexed in `REJECTED-CRASHES.html` with a reason, so
+triage, kept on disk and indexed in `rejected-crashes.html` with a reason, so
 future sessions do not refile it.
 
 **Rejected finding (`findings-rejected/`).** A FIND that failed substance or
 source review, fell outside the threat model, or remained out of established
 scope after completed review. Kept on disk and indexed in
-`REJECTED-FINDINGS.html` with its reason, so the decision can be reviewed.
+`rejected-findings.html` with its reason, so the decision can be reviewed.
 
-**Cluster file (`CRASH-CLUSTERS.html`, `FINDING-CLUSTERS.html`).** A
+**Cluster file (`crash-clusters.html`, `finding-clusters.html`).** A
 browser-readable summary grouping reports that share a deterministic evidence
 signature. It is a deduplication proxy, not proof of one root cause per
 cluster. Per-backend at the result tree; cross-backend at the target root. The
 `.md` siblings are the generated markdown source.
 
 **Export bundle.** The maintainer-facing form of a crash, produced by
-`bin/export-repro`: `REPORT.md`, `reproduce.sh`, `input.<ext>`, optional
+`bin/export-repro`: `report.md`, `reproduce.sh`, `input.<ext>`, optional
 `harness.*`, and `sanitizer.txt`. When no runnable route was captured,
 `reproduce.sh` is a stub that says so and exits 2. See
 [Reproduce a crash](../guides/reproduce-a-crash.md).

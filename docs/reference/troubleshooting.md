@@ -137,7 +137,7 @@ A run refused by the per-iteration sanitizer budget is a `NO_EXEC` with class
 Open the rejected index in a browser:
 
 ```text
-output/<target>/<backend>/results/crashes-rejected/REJECTED-CRASHES.html
+output/<target>/<backend>/results/crashes-rejected/rejected-crashes.html
 ```
 
 Common reasons:
@@ -172,7 +172,7 @@ violation that does not depend on the rejected trigger.
 Open the finding cluster table in a browser:
 
 ```text
-output/<target>/<backend>/results/findings/FINDING-CLUSTERS.html
+output/<target>/<backend>/results/findings/finding-clusters.html
 ```
 
 Then open the FIND directory and read the marker file:
@@ -181,7 +181,7 @@ Then open the FIND directory and read the marker file:
   `description.md`. Write one.
 - `.pending-drop`: a substance-gate pass ended with Reject votes below
   quorum. Reaching quorum moves the directory to `findings-rejected/`, where
-  `REJECTED-FINDINGS.html` records the reason. Nothing is deleted, so a reject
+  `rejected-findings.html` records the reason. Nothing is deleted, so a reject
   you disagree with can be read and recovered.
 
 Add the missing concrete location, security impact, and reviewer-actionable
