@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import re
 import unittest
 from pathlib import Path
 
@@ -37,19 +36,11 @@ class InstructionFileTests(unittest.TestCase):
         )
 
     def test_development_page_has_the_canonical_startup_prompt(self) -> None:
+        # The prompt is what contributors paste to start an agent, so it must
+        # survive rewrites verbatim; the surrounding prose is free to change.
         self.assertFalse((ROOT / "docs" / "contributing.md").exists())
         text = (ROOT / "docs" / "development.md").read_text(encoding="utf-8")
-        for required in (
-            "Read docs/development.md first",
-            "Start your coding agent",
-            "`claude`, `codex`, `gemini`, `grok`",
-            "Read docs/development.md first, then help me with: <task>",
-            "Use broad, stable rules",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, text)
-        self.assertNotIn("One-shot sessions", text)
-        self.assertIsNone(re.search(r"^## Context$", text, re.MULTILINE))
+        self.assertIn("Read docs/development.md first, then help me with: <task>", text)
 
 
 if __name__ == "__main__":

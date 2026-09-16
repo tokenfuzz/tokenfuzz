@@ -61,7 +61,10 @@ Read docs/development.md first, then help me with: <task>
   itself.
 
 Before claiming done, run `bash tests/run-tests.sh`, plus `bin/docs build` when
-the change touches `docs/`. A behavior fix needs coverage that fails before the
+the change touches `docs/`. Documentation-only changes are not exempt from the
+suite: tests read `docs/` and `AGENTS.md` (for example
+`tests/test_instruction_files.py` and `tests/test_doc_example_links.py`), so a
+prose edit can fail CI. A behavior fix needs coverage that fails before the
 fix and passes afterwards. Confirm the diff contains only the task and its
 orphan cleanup.
 
