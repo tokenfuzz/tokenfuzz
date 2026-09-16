@@ -1,101 +1,74 @@
 #!/usr/bin/env python3
-"""Fail the suite when a test writes a tracked file of the checkout.
+"""Compare tracked-file metadata before and after the test run.
 
-The checkout is shared by every suite the runner has in flight, so a test that
-edits it — even one that restores the bytes a moment later — races every peer
-that reads the tree: a benchmark run snapshots the control plane and re-digests
-the checkout seconds later, and a test that patched ``lib/`` in between failed
-it as "the checkout's harness files differ from the run's saved snapshot".
-Whether the race lands depends on host speed and load, so the developer's
-machine stayed green while CI did not. The write is the defect, not the
-collision, and this guard reports the write itself.
+Usage: checkout_guard.py {record,check} ROOT SNAPSHOT_FILE
 
-Usage: checkout_guard.py ROOT STOP_FILE REPORT_FILE
-
-Every tracked path is polled by ``lstat`` until STOP_FILE exists; a changed
-mtime, size or mode, or a path that vanishes or reappears, is appended to
-REPORT_FILE as it is seen. Comparing mtimes makes a write-and-restore visible
-however quickly it happened, since the restore is itself a write. A checkout
-without git has nothing to compare against and the guard says so and exits.
+An ordinary write-and-restore changes timestamps even when bytes are restored.
+Two synchronous scans avoid startup races and a polling process per runner.
+This is a test-isolation check, not a filesystem event log: it cannot attribute
+changes to a process or guarantee detection on filesystems that retain identical
+metadata or transient paths absent at both scans. Do not edit the checkout
+while tests run. Existing dirty files are OK.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
-import time
+from collections.abc import Iterable
 from pathlib import Path
-
-POLL_SECONDS = 0.2
 
 
 def tracked_files(root: Path) -> list[str] | None:
-    """Every path git tracks under *root*, or None when git cannot say."""
-    try:
-        completed = subprocess.run(
-            # A bind-mounted checkout is owned by another uid than the container's
-            # root; without the safe.directory override git refuses to read it.
-            ["git", "-c", "safe.directory=*", "-C", str(root), "ls-files", "-z"],
-            capture_output=True, check=False,
-        )
-    except OSError:
+    if not (root / ".git").exists():
+        print("checkout guard: no .git; tracked-file check skipped", file=sys.stderr)
         return None
-    if completed.returncode:
-        return None
-    return [path for path in completed.stdout.decode("utf-8").split("\0") if path]
+    completed = subprocess.run(
+        # The container's uid may differ from the bind mount's owner.
+        ["git", "-c", f"safe.directory={root}", "-C", str(root), "ls-files", "-z"],
+        capture_output=True, check=True,
+    )
+    return [os.fsdecode(path) for path in completed.stdout.split(b"\0") if path]
 
 
-def snapshot(root: Path, paths: list[str]) -> dict[str, tuple[int, int, int] | None]:
-    state: dict[str, tuple[int, int, int] | None] = {}
+def snapshot(root: Path, paths: Iterable[str]) -> dict[str, list[int] | None]:
+    state = {}
     for relative in paths:
         try:
             stat = os.lstat(root / relative)
-        except FileNotFoundError:
+        except (FileNotFoundError, NotADirectoryError):
             state[relative] = None
         else:
-            state[relative] = (stat.st_mtime_ns, stat.st_size, stat.st_mode)
+            # ctime also catches a writer restoring mtime; inode catches replacement.
+            state[relative] = [stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size,
+                               stat.st_mode, stat.st_ino]
     return state
 
 
-def describe(state: tuple[int, int, int] | None) -> str:
-    if state is None:
-        return "absent"
-    mtime, size, mode = state
-    return f"mtime={mtime} size={size} mode={mode:o}"
-
-
 def main(argv: list[str]) -> int:
-    if len(argv) != 4:
+    if len(argv) != 4 or argv[1] not in {"record", "check"}:
         print(__doc__, file=sys.stderr)
         return 2
-    root = Path(argv[1]).resolve()
-    stop = Path(argv[2])
-    report = Path(argv[3])
-    paths = tracked_files(root)
-    if paths is None:
-        print(
-            "checkout guard: not a git checkout; tracked-file writes are not "
-            "watched",
-            file=sys.stderr,
-        )
-        return 0
-    previous = snapshot(root, paths)
-    with report.open("a", encoding="utf-8") as sink:
-        while True:
-            stopping = stop.exists()
-            current = snapshot(root, paths)
-            for relative in paths:
-                if previous[relative] != current[relative]:
-                    sink.write(
-                        f"{time.strftime('%H:%M:%S')} {relative}: "
-                        f"{describe(previous[relative])} -> "
-                        f"{describe(current[relative])}\n"
-                    )
-                    sink.flush()
-            previous = current
-            if stopping:
-                return 0
-            time.sleep(POLL_SECONDS)
+    operation, root, saved = argv[1], Path(argv[2]).resolve(), Path(argv[3])
+    try:
+        if operation == "record":
+            paths = tracked_files(root)
+            state = None if paths is None else snapshot(root, paths)
+            saved.write_text(json.dumps(state), encoding="utf-8")
+            return 0
+        previous = json.loads(saved.read_text(encoding="utf-8"))
+        if previous is None:
+            return 0
+        current = snapshot(root, previous)
+        changed = [path for path in previous if previous[path] != current[path]]
+        for path in changed:
+            print(f"{path}: tracked-file metadata changed")
+        # Keep detected changes distinct from Python failures (exit 1).
+        return 3 if changed else 0
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"checkout guard: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

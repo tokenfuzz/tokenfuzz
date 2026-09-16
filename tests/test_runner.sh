@@ -243,6 +243,7 @@ cat > "$container_root/bin/docker" <<EOF
 passed=()
 while [ "\$#" -gt 0 ] && [ "\$1" != stub-image ]; do
   [ "\$1" = -e ] && passed+=("\$2")
+  [ "\$1" = --platform ] && echo "RUNTIME PLATFORM: \$2"
   shift
 done
 shift
@@ -258,6 +259,13 @@ assert_match "SUITE: image toolchain reachable" "$output" \
   "runner: the container entry keeps the image toolchain on PATH"
 assert_match "SUITE: bytecode cached outside the mounted tree" "$output" \
   "runner: the container writes no bytecode into the mounted checkout"
+
+assert_match "RUNTIME PLATFORM: linux/amd64" "$output" \
+  "runner: the default container platform matches CI"
+output=$(PATH="$container_root/bin:$PATH" bash "$RUNNER" \
+  --image stub-image --platform linux/arm64 --no-install-deps 2>&1)
+assert_match "RUNTIME PLATFORM: linux/arm64" "$output" \
+  "runner: the explicit platform reaches the runtime"
 
 # A test that writes a tracked file races every suite beside it. The guard is
 # exercised on a throwaway checkout so the fixture's own write is never seen by
@@ -286,24 +294,51 @@ GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
   GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
   git -C "$guard_root" commit -q -m fixture
 
+# Slow Git enumeration must finish before the first test can write.
+mkdir -p "$guard_root/slow-git"
+real_git=$(command -v git)
+cat > "$guard_root/slow-git/git" <<EOF
+#!/usr/bin/env bash
+sleep 1
+exec "$real_git" "\$@"
+EOF
+chmod +x "$guard_root/slow-git/git"
 rc=0
-output=$(bash "$guard_root/tests/run-tests.sh" --jobs 1 test_writes_tracked.py 2>&1) || rc=$?
+output=$(PATH="$guard_root/slow-git:$PATH" bash "$guard_root/tests/run-tests.sh" --jobs 1 test_writes_tracked.py 2>&1) || rc=$?
 assert_eq "1" "$rc" "guard: a suite that writes a tracked file fails the run"
 assert_match "RESULTS: .*1 passed.*, .*0 failed" "$output" \
   "guard: the write is reported beside passing assertions, not as one"
-assert_match "Tracked files written during the suite" "$output" \
+assert_match "Tracked files changed during the suite" "$output" \
   "guard: the failure says what happened"
-assert_match "TRACKED.md: mtime=" "$output" "guard: the written file is named"
+assert_match "TRACKED.md: tracked-file metadata changed" "$output" "guard: the written file is named"
 assert_match "Failed suites: checkout-mutation" "$output" \
   "guard: the mutation is a failed suite"
 
 rc=0
 output=$(bash "$guard_root/tests/run-tests.sh" --jobs 1 test_leaves_checkout.py 2>&1) || rc=$?
 assert_eq "0" "$rc" "guard: a suite that leaves the checkout alone passes"
-if [[ "$output" != *"Tracked files written"* ]]; then
+if [[ "$output" != *"Tracked files changed"* ]]; then
   pass "guard: nothing is reported when nothing was written"
 else
   fail "guard: nothing is reported when nothing was written" "$output"
 fi
+
+# Final inspection failures must also be distinct from detected mutations.
+cat > "$guard_root/tests/test_breaks_guard.py" <<'PYTEST'
+from pathlib import Path
+Path(__file__).with_name("checkout_guard.py").write_text('raise RuntimeError("fixture final check failure")\n')
+print("  ✓ fixture completed")
+PYTEST
+rc=0
+output=$(bash "$guard_root/tests/run-tests.sh" --jobs 2 test_breaks_guard.py test_leaves_checkout.py 2>&1) || rc=$?
+assert_eq "1" "$rc" "guard: failure of final inspection fails the parallel run"
+assert_match "Failed suites: checkout-guard" "$output" "guard: inspection errors are not mutations"
+
+# A guard failure must not turn into an apparently clean checkout.
+printf 'raise RuntimeError("fixture guard failure")\n' > "$guard_root/tests/checkout_guard.py"
+rc=0
+output=$(bash "$guard_root/tests/run-tests.sh" --jobs 1 test_leaves_checkout.py 2>&1) || rc=$?
+assert_eq "1" "$rc" "guard: failure to inspect the checkout fails the run"
+assert_match "checkout-guard" "$output" "guard: inspection failure is identified"
 
 summary

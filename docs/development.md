@@ -160,11 +160,13 @@ that reads correctly but was never checked.
    18 s on a developer host takes over 60 s on a loaded CI runner.
    Never write a tracked file of the checkout, not even to restore it a
    moment later: every suite in flight shares the tree, and a benchmark run
-   that snapshots it re-digests it seconds later. The runner watches every
-   tracked file (`tests/checkout_guard.py`) and fails the run naming any
-   that changed, so the write is caught on the developer's machine rather
-   than as a race on CI; a test that needs an editable control plane copies
-   it first.
+   that snapshots it re-digests it seconds later. A test that needs an editable
+   control plane copies it first. `tests/checkout_guard.py` compares tracked-file
+   metadata before and after tests, detecting ordinary write-and-restore edits.
+   Inspection failures fail the run; archives without `.git` explicitly skip it.
+   This is not an event log: identical metadata or transient paths absent at both
+   scans can hide changes. Concurrent developer edits also fail the check, so
+   do not edit the checkout while tests run.
    `tests/run-tests.sh --image ubuntu:24.04` exercises the Linux CI container
    on fresh caches, pinned to `linux/amd64` — the CI architecture — and
    emulated on an arm64 host; `--platform` overrides it. It covers only the

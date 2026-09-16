@@ -588,38 +588,28 @@ format_elapsed_seconds() {
   fi
 }
 
-# The checkout is shared by every suite in flight, so a test that writes a
-# tracked file — even one it restores a moment later — races every peer that
-# reads the tree, and whether the race lands depends on host speed and load.
-# tests/checkout_guard.py reports the write itself, so the developer's machine
-# fails the way CI would.
+# Take the baseline synchronously: no suite may start before it is saved.
 start_checkout_guard() {
-  GUARD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/audit-tests-guard-XXXXXXXX")
-  GUARD_REPORT="$GUARD_DIR/report"
-  : > "$GUARD_REPORT"
-  python3 "$TESTS_DIR/checkout_guard.py" "$SCRIPT_ROOT" "$GUARD_DIR/stop" "$GUARD_REPORT" &
-  GUARD_PID=$!
-  # Out of the job table: the parallel runner waits on every job it owns.
-  disown "$GUARD_PID"
+  GUARD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/audit-tests-guard-XXXXXXXX") || return 1
+  trap 'rm -rf "$GUARD_DIR"' EXIT
+  if ! python3 "$TESTS_DIR/checkout_guard.py" record "$SCRIPT_ROOT" "$GUARD_DIR/snapshot"; then
+    echo "tests/run-tests.sh: checkout-guard could not record the baseline" >&2
+    return 1
+  fi
 }
 
 stop_checkout_guard() {
-  local waited=0 line
-  [ -n "${GUARD_PID:-}" ] || return 0
-  touch "$GUARD_DIR/stop"
-  while kill -0 "$GUARD_PID" 2>/dev/null && [ "$waited" -lt 100 ]; do
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  if [ -s "$GUARD_REPORT" ]; then
-    printf "${RED}  Tracked files written during the suite — a test constructs its fixture, never edits the checkout:${NC}\n"
-    while IFS= read -r line; do
-      printf "${RED}    %s${NC}\n" "$line"
-    done < "$GUARD_REPORT"
+  local rc
+  python3 "$TESTS_DIR/checkout_guard.py" check "$SCRIPT_ROOT" "$GUARD_DIR/snapshot" > "$GUARD_DIR/report"
+  rc=$?
+  if [ "$rc" -eq 3 ]; then
+    printf "${RED}  Tracked files changed during the suite — a test constructs its fixture, never edits the checkout; nor may you while it runs:${NC}\n"
+    cat "$GUARD_DIR/report"
     ERRORS+=("checkout-mutation")
+  elif [ "$rc" -ne 0 ]; then
+    echo "tests/run-tests.sh: checkout-guard could not check the checkout" >&2
+    ERRORS+=("checkout-guard")
   fi
-  rm -rf "$GUARD_DIR"
-  GUARD_PID=""
 }
 
 RUNNER_START_SECONDS=$SECONDS
@@ -640,7 +630,7 @@ fi
 load_prior_timings
 JOBS=$(detect_default_jobs)
 printf "${BOLD}Running %d test file(s) with %d job(s)${NC}\n\n" "${#TEST_FILES[@]}" "$JOBS"
-start_checkout_guard
+start_checkout_guard || exit 1
 
 if [ "$JOBS" -le 1 ] || [ "${#TEST_FILES[@]}" -eq 1 ]; then
   for tf in "${TEST_FILES[@]}"; do

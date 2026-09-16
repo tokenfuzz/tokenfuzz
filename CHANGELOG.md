@@ -315,7 +315,7 @@ isolation policy, and target setup keeps a route that already runs.
   on a host without an MSan runtime rather than reporting a clean run of its
   bug, and the C++ arbitrary-write example encodes an address that is
   application memory in every ASan shadow layout — `0xdeadbeef` sits inside
-  x86_64 Linux's low shadow, so the store tripped ASan's own check and
+  x86_64 Linux's shadow gap, so the store tripped ASan's own check and
   reported the shadow address as a read while aarch64 and macOS faulted where
   the key said.
 
@@ -330,12 +330,12 @@ isolation policy, and target setup keeps a route that already runs.
   pins `linux/amd64`, the CI architecture, and prints the architecture it
   ran on: an arm64 host had resolved the multi-arch image to aarch64 and
   passed a sample CI failed on (`--platform` overrides). The runner now
-  fails any run in which a test wrote a tracked file of the checkout, naming
-  the file: two tests had edited `lib/` in place to stage a mid-run change
-  and raced every benchmark snapshot beside them, a race only a loaded CI
-  runner lost. Probes that compile a target before running it get a
-  build-sized deadline, since a cold sanitized Swift build exceeds 60 s
-  there.
+  compares tracked-file metadata before and after the suites and fails the
+  run naming any file that changed, an ordinary write-and-restore included:
+  two tests had edited `lib/` in place to stage a mid-run change and raced
+  every benchmark snapshot beside them, a race only a loaded CI runner lost.
+  Probes that compile a target before running it get a build-sized deadline,
+  since a cold sanitized Swift build exceeds 60 s there.
   Dependency bumps: pymdown-extensions 11.0.2, actions/deploy-pages 5.0.1.
 
 ## 1.5.3 - 2026-08-30
