@@ -335,7 +335,13 @@ isolation policy, and target setup keeps a route that already runs.
   two tests had edited `lib/` in place to stage a mid-run change and raced
   every benchmark snapshot beside them, a race only a loaded CI runner lost.
   Probes that compile a target before running it get a build-sized deadline,
-  since a cold sanitized Swift build exceeds 60 s there.
+  since a cold sanitized Swift build exceeds 60 s there. The development page,
+  which every development agent loads at session start, drops about 40% of
+  its tokens with every section and repository-specific rule kept, and now
+  says that documentation-only changes still need the suite: tests read
+  `docs/` and `AGENTS.md`, and the consolidation itself shipped with only a
+  docs build and failed every CI lane on a test that pinned the page's prose.
+  That test now pins only the startup prompt contributors paste.
   Dependency bumps: pymdown-extensions 11.0.2, actions/deploy-pages 5.0.1.
 
 ## 1.5.3 - 2026-08-30
