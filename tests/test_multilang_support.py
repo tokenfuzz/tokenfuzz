@@ -20,6 +20,12 @@ PROBE = ROOT / "bin" / "probe"
 CARGO = shutil.which("cargo")
 GO = shutil.which("go")
 SWIFT = shutil.which("swift")
+#: A probe that compiles its target before running it is bounded by the build,
+#: not the run. A cold sanitized Swift build took 18s alone on an M-series host
+#: and over 60s on a four-vCPU CI runner beside three other suites, so the
+#: per-run deadline cannot also price the compiler; the suite timeout still
+#: bounds a hang.
+COLD_BUILD_TIMEOUT = 600
 sys.path.insert(0, str(ROOT / "lib"))
 
 import languages
@@ -88,13 +94,16 @@ class MultiLanguageSupportTests(unittest.TestCase):
         return path
 
     @staticmethod
-    def run_probe(testcase: Path, *arguments: str, environment: dict[str, str] | None = None):
+    def run_probe(
+        testcase: Path, *arguments: str,
+        environment: dict[str, str] | None = None, timeout: int = 60,
+    ):
         env = os.environ.copy()
         if environment:
             env.update(environment)
         return subprocess.run(
             [sys.executable, str(PROBE), *arguments, str(testcase)],
-            env=env, capture_output=True, text=True, timeout=60, check=False,
+            env=env, capture_output=True, text=True, timeout=timeout, check=False,
         )
 
     def test_language_registry_runner_defaults_detection_and_seed_modes(self) -> None:
@@ -795,7 +804,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
             'fn main() { println!("{}", sample_core::marker()); }\n',
         )
 
-        result = self.run_probe(testcase)
+        result = self.run_probe(testcase, timeout=COLD_BUILD_TIMEOUT)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         output = testcase.with_suffix(".asan.txt").read_text(encoding="utf-8")
@@ -910,7 +919,7 @@ class MultiLanguageSupportTests(unittest.TestCase):
             'std::env::args().nth(1).unwrap(), probe_target::marker()); }\n',
             encoding="utf-8",
         )
-        harnessed = self.run_probe(driven)
+        harnessed = self.run_probe(driven, timeout=COLD_BUILD_TIMEOUT)
         self.assertEqual(harnessed.returncode, 0, harnessed.stdout + harnessed.stderr)
         driven_output = driven.with_suffix(".asan.txt").read_text(encoding="utf-8")
         self.assertIn(f"ARG={driven.resolve()} TARGET_REACHED", driven_output)
@@ -934,7 +943,10 @@ class MultiLanguageSupportTests(unittest.TestCase):
                 source.unlink()
                 self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
 
-        result = self.run_probe(testcase, environment={"CARGO_HOME": "/dev/null"})
+        result = self.run_probe(
+            testcase, environment={"CARGO_HOME": "/dev/null"},
+            timeout=COLD_BUILD_TIMEOUT,
+        )
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         output = testcase.with_suffix(".asan.txt").read_text(encoding="utf-8")
@@ -977,7 +989,10 @@ class MultiLanguageSupportTests(unittest.TestCase):
             rejected.stdout + rejected.stderr,
         )
 
-        result = self.run_probe(testcase, environment={"SANITIZER_RUNS": "1"})
+        result = self.run_probe(
+            testcase, environment={"SANITIZER_RUNS": "1"},
+            timeout=COLD_BUILD_TIMEOUT,
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         output = testcase.with_suffix(".asan.txt").read_text(encoding="utf-8")
         self.assertIn("SWIFT_TARGET_REACHED", output)

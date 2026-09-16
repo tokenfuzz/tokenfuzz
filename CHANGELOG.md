@@ -329,7 +329,13 @@ isolation policy, and target setup keeps a route that already runs.
   mode bits so a root bind mount no longer reads as an edited tree. The lane
   pins `linux/amd64`, the CI architecture, and prints the architecture it
   ran on: an arm64 host had resolved the multi-arch image to aarch64 and
-  passed a sample CI failed on (`--platform` overrides).
+  passed a sample CI failed on (`--platform` overrides). The runner now
+  fails any run in which a test wrote a tracked file of the checkout, naming
+  the file: two tests had edited `lib/` in place to stage a mid-run change
+  and raced every benchmark snapshot beside them, a race only a loaded CI
+  runner lost. Probes that compile a target before running it get a
+  build-sized deadline, since a cold sanitized Swift build exceeds 60 s
+  there.
   Dependency bumps: pymdown-extensions 11.0.2, actions/deploy-pages 5.0.1.
 
 ## 1.5.3 - 2026-08-30

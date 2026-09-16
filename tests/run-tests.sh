@@ -588,6 +588,40 @@ format_elapsed_seconds() {
   fi
 }
 
+# The checkout is shared by every suite in flight, so a test that writes a
+# tracked file — even one it restores a moment later — races every peer that
+# reads the tree, and whether the race lands depends on host speed and load.
+# tests/checkout_guard.py reports the write itself, so the developer's machine
+# fails the way CI would.
+start_checkout_guard() {
+  GUARD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/audit-tests-guard-XXXXXXXX")
+  GUARD_REPORT="$GUARD_DIR/report"
+  : > "$GUARD_REPORT"
+  python3 "$TESTS_DIR/checkout_guard.py" "$SCRIPT_ROOT" "$GUARD_DIR/stop" "$GUARD_REPORT" &
+  GUARD_PID=$!
+  # Out of the job table: the parallel runner waits on every job it owns.
+  disown "$GUARD_PID"
+}
+
+stop_checkout_guard() {
+  local waited=0 line
+  [ -n "${GUARD_PID:-}" ] || return 0
+  touch "$GUARD_DIR/stop"
+  while kill -0 "$GUARD_PID" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if [ -s "$GUARD_REPORT" ]; then
+    printf "${RED}  Tracked files written during the suite — a test constructs its fixture, never edits the checkout:${NC}\n"
+    while IFS= read -r line; do
+      printf "${RED}    %s${NC}\n" "$line"
+    done < "$GUARD_REPORT"
+    ERRORS+=("checkout-mutation")
+  fi
+  rm -rf "$GUARD_DIR"
+  GUARD_PID=""
+}
+
 RUNNER_START_SECONDS=$SECONDS
 
 collect_tests
@@ -606,6 +640,7 @@ fi
 load_prior_timings
 JOBS=$(detect_default_jobs)
 printf "${BOLD}Running %d test file(s) with %d job(s)${NC}\n\n" "${#TEST_FILES[@]}" "$JOBS"
+start_checkout_guard
 
 if [ "$JOBS" -le 1 ] || [ "${#TEST_FILES[@]}" -eq 1 ]; then
   for tf in "${TEST_FILES[@]}"; do
@@ -628,6 +663,7 @@ else
   fi
 fi
 
+stop_checkout_guard
 echo ""
 printf "${BOLD}========================================${NC}\n"
 if [ "$TOTAL_FAILED" -eq 0 ]; then

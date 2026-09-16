@@ -259,4 +259,51 @@ assert_match "SUITE: image toolchain reachable" "$output" \
 assert_match "SUITE: bytecode cached outside the mounted tree" "$output" \
   "runner: the container writes no bytecode into the mounted checkout"
 
+# A test that writes a tracked file races every suite beside it. The guard is
+# exercised on a throwaway checkout so the fixture's own write is never seen by
+# the guard watching this run.
+guard_root="$TEST_TMPDIR/guarded-checkout"
+mkdir -p "$guard_root/tests" "$guard_root/lib"
+cp "$RUNNER" "$TESTS_DIR/checkout_guard.py" "$guard_root/tests/"
+cp "$SCRIPT_ROOT/lib/timeout.py" "$guard_root/lib/"
+printf 'tracked\n' > "$guard_root/TRACKED.md"
+cat > "$guard_root/tests/test_writes_tracked.py" <<'PY'
+import pathlib, time
+root = pathlib.Path(__file__).resolve().parent.parent
+path = root / "TRACKED.md"
+original = path.read_bytes()
+path.write_bytes(original + b"edited\n")
+time.sleep(0.5)
+path.write_bytes(original)
+print("  \u2713 wrote and restored a tracked file")
+PY
+cat > "$guard_root/tests/test_leaves_checkout.py" <<'PY'
+print("  \u2713 touched nothing")
+PY
+git -C "$guard_root" init -q
+git -C "$guard_root" add -A
+GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
+  GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid \
+  git -C "$guard_root" commit -q -m fixture
+
+rc=0
+output=$(bash "$guard_root/tests/run-tests.sh" --jobs 1 test_writes_tracked.py 2>&1) || rc=$?
+assert_eq "1" "$rc" "guard: a suite that writes a tracked file fails the run"
+assert_match "RESULTS: .*1 passed.*, .*0 failed" "$output" \
+  "guard: the write is reported beside passing assertions, not as one"
+assert_match "Tracked files written during the suite" "$output" \
+  "guard: the failure says what happened"
+assert_match "TRACKED.md: mtime=" "$output" "guard: the written file is named"
+assert_match "Failed suites: checkout-mutation" "$output" \
+  "guard: the mutation is a failed suite"
+
+rc=0
+output=$(bash "$guard_root/tests/run-tests.sh" --jobs 1 test_leaves_checkout.py 2>&1) || rc=$?
+assert_eq "0" "$rc" "guard: a suite that leaves the checkout alone passes"
+if [[ "$output" != *"Tracked files written"* ]]; then
+  pass "guard: nothing is reported when nothing was written"
+else
+  fail "guard: nothing is reported when nothing was written" "$output"
+fi
+
 summary

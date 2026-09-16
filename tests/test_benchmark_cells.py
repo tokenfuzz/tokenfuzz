@@ -66,6 +66,30 @@ class BenchmarkCellTests(unittest.TestCase):
             shutil.rmtree(path, ignore_errors=True)
         self.temporary.cleanup()
 
+    def editable_checkout(self) -> Path:
+        """A copy of the control plane a test may edit as a mid-run change.
+
+        The checkout is shared with every suite the runner has in flight — a
+        benchmark run in another process snapshots it and re-digests it
+        seconds later — so an edit is made on this copy, never on the tree
+        under test. ``targets/`` is linked, as the facade links it.
+        """
+        root = self.work / "checkout"
+        root.mkdir()
+        for name in benchmark_runner._SNAPSHOT_TREES:
+            source = ROOT / name
+            if source.is_dir():
+                shutil.copytree(
+                    source, root / name,
+                    ignore=shutil.ignore_patterns("__pycache__"),
+                )
+        for name in benchmark_runner._SNAPSHOT_ROOT_FILES:
+            if (ROOT / name).is_file():
+                shutil.copy2(ROOT / name, root / name)
+        (root / "targets").symlink_to(ROOT / "targets", target_is_directory=True)
+        (root / "output").mkdir()
+        return root
+
     def executable(self, name: str, body: str) -> Path:
         path = self.work / name
         path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
@@ -452,20 +476,18 @@ raise SystemExit(23)
         the edit is made after the facade exists, which is exactly the case a
         checkout that is never touched mid-run would not exercise.
         """
-        facade = benchmark_runner.prepare_facade(self.work / "pinned-cell", self.slug)
+        checkout = self.editable_checkout()
+        with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", checkout):
+            facade = benchmark_runner.prepare_facade(self.work / "pinned-cell", self.slug)
         snapshot = facade / "lib" / "benchmark_runner.py"
         self.assertTrue(snapshot.is_file())
         self.assertFalse((facade / "lib").is_symlink())
         self.assertFalse((facade / "bin").is_symlink())
         before = snapshot.read_text(encoding="utf-8")
 
-        live = benchmark_runner.SCRIPT_ROOT / "lib" / "benchmark_runner.py"
-        original = live.read_bytes()
-        try:
-            live.write_bytes(original + b"\n# edited mid-run\n")
-            self.assertEqual(snapshot.read_text(encoding="utf-8"), before)
-        finally:
-            live.write_bytes(original)
+        live = checkout / "lib" / "benchmark_runner.py"
+        live.write_bytes(live.read_bytes() + b"\n# edited mid-run\n")
+        self.assertEqual(snapshot.read_text(encoding="utf-8"), before)
 
         # The target tree stays shared: its build lease and source signature
         # are what every cell is measured against.
@@ -528,19 +550,18 @@ raise SystemExit(23)
         plane and every facade is a copy of it.
         """
         bench = self.work / "one-snapshot"
-        snapshot = benchmark_runner.snapshot_harness(bench)
-        digest = benchmark_runner._harness_content_digest(snapshot)
-        self.assertEqual(
-            digest,
-            benchmark_runner._harness_content_digest(benchmark_runner.SCRIPT_ROOT),
-        )
-        first = benchmark_runner.prepare_facade(
-            self.work / "cell-a", self.slug, None, snapshot)
+        checkout = self.editable_checkout()
+        with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", checkout):
+            snapshot = benchmark_runner.snapshot_harness(bench)
+            digest = benchmark_runner._harness_content_digest(snapshot)
+            self.assertEqual(
+                digest, benchmark_runner._harness_content_digest(checkout),
+            )
+            first = benchmark_runner.prepare_facade(
+                self.work / "cell-a", self.slug, None, snapshot)
 
-        live = benchmark_runner.SCRIPT_ROOT / "lib" / "benchmark_runner.py"
-        original = live.read_bytes()
-        try:
-            live.write_bytes(original + b"\n# edited between cells\n")
+            live = checkout / "lib" / "benchmark_runner.py"
+            live.write_bytes(live.read_bytes() + b"\n# edited between cells\n")
             problem, saved_digest = benchmark_runner._harness_snapshot_problem(
                 snapshot, digest,
             )
@@ -548,8 +569,6 @@ raise SystemExit(23)
             self.assertEqual(digest, saved_digest)
             second = benchmark_runner.prepare_facade(
                 self.work / "cell-b", self.slug, None, snapshot)
-        finally:
-            live.write_bytes(original)
 
         self.assertEqual(
             (first / "lib" / "benchmark_runner.py").read_bytes(),
