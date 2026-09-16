@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.0 - 2026-09-15
+## 1.6.0 - 2026-09-16
 
 This release changes how an audit spends its wall and what it can prove
 afterwards. Slots refill the moment one finishes instead of waiting for the
@@ -16,146 +16,83 @@ shares one isolation policy, and target setup keeps a route that already runs.
 
 - **Slots refill continuously.** The cohort pool held finished slots at a
   barrier for the slowest peer and ran every gate with the pool empty;
-  measured cells idled 27–40% of the wall. `run_continuous` refills a slot as
-  soon as it ends and steers on a timer: each steward tick scores a generation
-  for the slots that ended one, renews budgets and re-ranks the queue beside
-  the live sessions. Only the tree-wide sweep waits for the last slot, and a
-  sweep that outlives the last session bills its tail as housekeeping.
-  Fixed-lane, delta, ensemble and `--no-refill-workers` runs keep the cohort
-  model. The pool stays a fixed 3: a machine-sized default drained a weekly
-  provider quota in under three hours.
+  measured cells idled 27–40% of the wall. A slot now refills as soon as it
+  ends, a steward tick scores generations and re-ranks the queue beside the
+  live sessions, and only the tree-wide sweep waits for the last slot, billing
+  any tail past the last session as housekeeping. Fixed-lane, delta, ensemble
+  and `--no-refill-workers` runs keep the cohort model; the pool stays a fixed
+  3, since a machine-sized default drained a weekly provider quota in under
+  three hours.
 
-- **Gates run in the background, on writers and in batches.** A finding names
+- **Findings are gated when their writers end, in batches.** A finding names
   no slot, so its seal waited for the longest concurrent session; the harness
-  now reads which artifacts each session's commands and file writes touched
-  and seals once every writer has ended, crashes included. Sessions end one at
-  a time, so the gate had reviewed findings one or two at a time — 68 review
-  sessions for about 140 artifacts in one audit. Findings without a first
-  trigger vote now wait for `TRIGGER_BATCH_SIZE`, `GATE_BATCH_HOLD_SECONDS` or
-  the wall, and the worker wakes on the hold clock so nothing strands after
-  the last session. Reviewed findings and crashes never wait.
+  now reads which artifacts each session's commands and file writes touched,
+  seals once every writer has ended, and never seals a crash bundle a slot's
+  next session is still finishing. Findings without a first trigger vote wait
+  for four sealed findings, 180 seconds or the wall instead of being reviewed
+  one or two at a time — 68 review sessions for about 140 artifacts in one
+  audit.
 
-- **Every turn replays less.** The crash promotion gate shrinks from 10.9 KB to
-  about 7 KB with every rule kept; each playbook carries a brief the prompt
-  renders in place of a 10–24 KB read on turn one; `rg-safe` caps at 20 KiB
-  with a per-file digest; `--confirm` prints one line for a repeat identical
-  to run 1; `bin/state` renders results-relative paths and bounds a generated
-  classpath line; and a blocked card shows the proof a peer recorded to the
-  cards behind it. Heavy stdlib imports move to their use sites, so `bin/state`
-  (invoked 30+ times per session) starts 19% faster and `peek` and
-  `scratch-search` 39%.
+- **Every turn replays less prompt.** The crash promotion gate shrinks from
+  10.9 KB to about 7 KB with every rule kept, each playbook's brief is rendered
+  in place of a 10–24 KB read, `rg-safe` caps at 20 KiB with a per-file
+  digest, `--confirm` prints one line for a repeat identical to run 1,
+  `bin/state` renders results-relative paths, the sanitizer digest elides the
+  middle of a generated classpath line (`SANITIZER_DIGEST_LINE_CHARS`), and a
+  blocked card shows the proof a peer recorded to the cards behind it. Heavy stdlib imports move to their use sites, so `bin/state` starts 19%
+  faster and `peek` and `scratch-search` 39%.
 
-- **The agent guide reaches every session.** Deep and compact prompts told
-  non-codex sessions to follow `AGENTS.md` without embedding it: 39 of 41
-  claude deep sessions in one audit ran without the contract. It is embedded
-  for every backend that does not auto-load it and dropped for codex and grok,
-  which do — codex cold starts had replayed 5.4K duplicate tokens per request.
+- **The agent guide reaches every session.** Non-codex sessions were told to
+  follow `AGENTS.md` without seeing it — 39 of 41 claude deep sessions in one
+  audit ran without the contract. It is embedded for every backend that does
+  not auto-load it and dropped for codex and grok, which do; codex cold starts
+  had replayed 5.4K duplicate tokens per request.
 
-- **A session can roll over on context.** `CONTEXT_SOFT_CAP` ends a session on
-  the continue-from-state path once its reported context reaches the cap,
-  after every dispatched tool completes, on dialects that report usage per
-  request (Claude, Grok). It defaults to off: a cap that binds one benchmark
-  condition and not its comparison would distort the measurement.
-
-### Backends and provider accounting
-
-- **A provider that will not serve the model is caught and named.** Fable
-  5.1's safeguards flag the audit contract as `cyber` and Claude Code retries
-  on Opus, so a run requested as Fable was served by Opus while its rows named
-  Fable. Preflight now sends the audit guide under the same vocabulary
-  transform real prompts get, reads the declared original→fallback pair, and
-  fails the run naming the safeguard category. The shared launcher recognises
-  structured refusals from Claude, Codex, OpenCode, Gemini and Grok, prints one
-  `CYBER CLASSIFIER DETECTED` line with the backend, reason and raw log, and
-  writes the refusal sidecar; rows carry `served_model` from the transcript's
-  busiest billed model and are priced by it. The claude default stays
-  `claude-opus-5`, which is not refused.
-
-- **A cell the provider served with another model is kept and named.** A
-  safeguard refusal makes the Claude CLI switch models mid-session and carry
-  on; the harness had read the substitution as a refused backend, marked the
-  cell unavailable, discarded its reproduced crashes, skipped every later
-  cell and exited 0. Substitution is now its own outcome: the cell is scored,
-  `.served-model` travels with it, the record and the run summary name the
-  model that served, and only a genuinely unavailable backend stops the run.
-
-- **One isolation policy for every launch.** Web tools are denied on every
-  launch the harness makes — agents in both security modes and one-shot
-  decisions — on Claude, Codex, Gemini CLI, Grok and OpenCode; agy gets
-  `--disable-slash-commands`, its only skills switch; a Gemini launch that
-  drops the admin policy fails loudly. Delegation stays at each CLI's default,
-  including the model-direct control, with a session's `delegation_events`
-  recorded; a backend whose delegated spend is invisible reports a floor with
-  `$/confirmed` withheld.
-
-- **No launch can write into the harness tree.** One-shot decisions inherited
-  the harness process's directory, so a reviewer's relative scratch file
-  landed at `SCRIPT_ROOT/.audit`; every backend now gets a throwaway working
-  directory, removed with the answer. Agents launch with a Git ceiling at
-  `targets/` appended to any inherited one, so an in-tree sample cannot read
-  the harness's own history or committed answer keys, and the audit binds the
-  canonical target root once — a facade symlink had made SwiftPM crash on a
-  second spelling of the same tree.
-
-- **Provider failures are classified from trusted events only.** Structured
-  capacity errors count as provider-withheld capacity and structured policy
-  rejections as terminal refusals, including codex's second wording and its
-  bare usage-limit notices, which had billed a spent plan to the wall as
-  failed sessions. Matches stay inside backend error events where target
-  output cannot reach, and a classified failure is not retried by validation.
-
-- **Spend is measured at the right rate.** Over 122 sessions and three
-  model-direct cells a Claude prefix was almost never idle five minutes, so
-  launches bill the five-minute cache tier: 10% cheaper at Opus prices, 20% at
-  Fable. Fable 5.1, Mythos 5.1 and the OpenAI cyber models are priced and every
-  other row rechecked against the vendors' live pages. Grok's per-request
-  usage, tool calls and end-event cost are read from its stream; sessions had
-  been filed as character estimates with zero tool calls.
+- **Sessions can delegate mapping, and can roll over on context.** Deep and
+  compact prompts point caller and data-flow questions at a read-only delegate
+  on backends whose delegated spend lands in the session's own usage (claude,
+  Gemini CLI). `CONTEXT_SOFT_CAP` ends a session on the continue-from-state
+  path once its reported context reaches the cap and no tool is in flight, on
+  dialects that report usage per request; it defaults to off so it cannot bind
+  one benchmark condition and not its comparison.
 
 ### Findings, review and evidence
 
 - **One bug-class vocabulary.** Findings carried three class vocabularies that
   never met. `lib/bug_classes.py` is the one source — the 43 classes of
   Anthropic Red's public disclosure taxonomy plus eight harness-native classes
-  with stated reasons. Every class belongs to a family that keys clusters,
-  feeds breadth and the review rotation, and maps to a severity primitive;
-  legacy labels resolve through aliases.
+  with stated reasons — and every class belongs to a family that keys
+  clusters, feeds breadth and the review rotation, and maps to a severity
+  primitive; legacy labels resolve through aliases.
 
 - **Each finding gets its own review, and a promoted one gets two.** The gate
   shared one verdict across every finding at a source site, so a distinct
-  claim at a function that already carried a verdict inherited it; verdicts an
-  earlier drain copied by site are cleared and requeued. A finding no probe
-  reproduced had published on one reviewer's Promote while a rejection needed
-  two disproofs; it now gets a second, reachability-lens reviewer, agreement
-  publishes and a split goes to the focused resolver. Crashes and findings
-  with a machine-proved byte path keep the one-review flow, and one
-  reach-fields answer settles the conditional keys instead of a second
-  identical provider ask per accepted finding.
+  claim inherited its neighbour's; verdicts copied by site are cleared and
+  requeued. A finding no probe reproduced now needs a second, reachability-lens
+  reviewer to publish, a split going to the focused resolver, while crashes
+  and findings with a machine-proved byte path keep the one-review flow and
+  one reach-fields answer settles the conditional keys.
 
 - **The gate prompts say what a shipped product is.** A reproducer's choice of
-  base is not the product's: a path-traversal report stands only when a
-  caller in the tree fixes the base from trusted configuration. An effect that
-  exists only on a platform the audited build does not run on is
-  deployment-dependent. A release configuration the project's own source or
-  build docs name as supported is a shipping configuration, so an overflow
-  behind a compiled-out assert can be reported through a source-proven path.
-  The filing contract's exclusions are read as a clause rather than left to
-  each reviewer's memory. Every wording change bumps its decision version.
+  base is not the product's, an effect on a platform the audited build does
+  not run on is deployment-dependent, and a release configuration the
+  project's own source or build docs name as supported is a shipping
+  configuration, so an overflow behind a compiled-out assert can be reported
+  through a source-proven path. The filing contract's exclusions are read as a
+  clause, and every wording change bumps its decision version.
 
-- **Every review ends in a verdict.** Two dispositions left artifacts marked
-  "unjudged" and "retained" for good; once a lane has asked every review it
-  asks for, an unsettled scope review and an out-of-model defect both reject
-  with a recorded reason. A rejection whose gate vote the operator invalidated
-  by widening attacker controls is requeued, a direct crash a replay cannot
-  measure demotes to a finding, and a replay whose every run hit its deadline
-  is unmeasured, not a verdict.
+- **Every review ends in a verdict.** Artifacts left "unjudged" or "retained"
+  for good now reject with a recorded reason once a lane has asked every
+  review it asks for. A rejection the operator invalidated by widening
+  attacker controls is requeued, a direct crash a replay can never measure
+  demotes to a finding, and a replay whose every run hit its deadline is
+  unmeasured, not a verdict.
 
-- **Severity reads a negated caller action as the public path.** A report
-  whose trusted-caller field said "no internal state mutated" matched the
-  word and gained a caller-precondition metric, halving a crash's score
-  against the same signature scored Medium on the other side. The rule uses
-  the scorer's negation-aware search and bumps its decision version, so
-  receipts from the old rule are re-derived on regenerate.
+- **Severity reads a negated caller action as the public path.** "No internal
+  state mutated" matched the word and gained a caller-precondition metric,
+  halving one crash's score against the same signature scored Medium on the
+  other side. The rule uses the scorer's negation-aware search and bumps its
+  decision version, so old receipts are re-derived on regenerate.
 
 - **Evidence pages are built from the data.** The cluster, rejected and
   per-report pages were Markdown tables that never said when, where or by
@@ -164,143 +101,186 @@ shares one isolation policy, and target setup keeps a route that already runs.
   rejections grouped by gate, and a report shell with an action card and an
   evidence rail.
 
+- **Generated file names are lowercase.** The shipped sample linked
+  `report.html` to a file named `REPORT.html`, which opens on the
+  case-insensitive disk that generated it and is a dead link when served.
+  Every artifact directory now holds `report.md` with a `report.html` twin,
+  the indexes are `crash-clusters`, `finding-clusters`, `rejected-crashes`
+  and `rejected-findings`, a rejection note is `rejection.md` and the corpus
+  index `index.md`; readers locate a report through `report_identity`, a
+  spelling that differs only in case is not a report, and a test holds the
+  shipped example to exact-case links.
+
 ### Benchmark
 
 - **The result page is rebuilt around the comparison.** The root page was a
   crosstab that could say how many, not which. `lib/benchmark_page.py` builds
   one data model from each run's report, clusters and state streams and
-  renders a self-contained page: a leaderboard splitting each condition's
-  problems into the ones only it found and the ones others reached too; per
-  target revision, one race clock with a replay control, a behaviour profile
-  per condition, and a convergence matrix of every distinct problem against
-  every condition as found, looked-and-missed or never looked; per harness
-  cell, a mind trace of every hypothesis from written to resolved with the
-  agent's own reasoning, and an attention table placing effort beside yield.
-  Every count comes from the report, links are relative so a bench root can
-  move, and the crosstab shows the answer key its headline counts include.
-  A Type column says whether a row is a crash or a finding; a bare file name
-  from a stack frame joins the row its directory-bearing sites use instead
-  of a "(no path)" row of its own; the per-confirmed cost tile keeps its
-  cents; and every console line, regenerate-all included, names the HTML
-  page.
-
-- **Generated file names are lowercase.** A crash bundle's report is now
-  `report.md` with a `report.html` twin, the same as a finding's; the agent's
-  draft moves to `.audit/report.md` on export, and that copy, not a spelling
-  difference, is what marks a bundle as exported. The cluster and rejection
-  indexes are `crash-clusters`, `finding-clusters`, `rejected-crashes` and
-  `rejected-findings`, a rejection note is `rejection.md`, and the corpus
-  index is `index.md`. The shipped sample linked crash reports as
-  `report.html` while the file was `REPORT.html`: the pages are generated and
-  checked on case-insensitive disks, where either spelling opens, and served
-  case-sensitively, where one is a dead link. Every reader now locates a
-  report through `report_identity`, which lists the directory, and links
-  between cluster siblings resolve the sibling's own file; a spelling that
-  differs only in case is not a report. A test holds the shipped example to
-  exact-case links.
+  renders a leaderboard splitting each condition's problems into the ones only
+  it found and the ones others reached too; per target revision, one race
+  clock with replay, a behaviour profile per condition and a convergence
+  matrix of every distinct problem as found, looked-and-missed or never
+  looked; and per harness cell, a mind trace of every hypothesis with the
+  agent's own reasoning beside an attention table. Agent free text is scrubbed
+  of workspace paths before it reaches the page. Every count comes from the
+  report, a row says whether it is a crash or a finding and whether it is one
+  side's alone, a bare file name from a stack frame joins its directory's row,
+  links are relative so a bench root can move, and the crosstab shows the
+  answer key its headline counts include.
 
 - **A run is pinned to the code and gates it started with.** The control plane
-  is frozen once per run and every cell facade built from that copy; the
-  closing pass now runs from the same snapshot, where `bin/validate-finding`
-  and every prompt had run live and an edit landing mid-run changed verdicts
-  the run was still casting. A resume whose checkout no longer matches is
-  refused. The three gate decision versions are recorded in `run.json` and
-  held across resumes — a bump mid-run had stranded a whole cell as an
-  unjudged remainder with every vote present and positive. `--regenerate`
-  alone unpins, since re-scoring exists to apply current policy.
+  is frozen once per run, every cell facade is built from that copy, and the
+  closing pass now runs from the same snapshot — `bin/validate-finding` and
+  every prompt had run live, so an edit landing mid-run changed verdicts the
+  run was still casting. The three gate decision versions are recorded in
+  `run.json` and held across resumes, since a bump mid-run had stranded a
+  whole cell as an unjudged remainder; a resume whose checkout no longer
+  matches is refused, and `--regenerate` alone unpins.
 
-- **Answer keys score by declared class, and one defect counts once.** A
-  report earns a planted bug only through a class the key declares, so two
-  bugs in one function can both be credited; a trap declares the one claim it
-  refutes instead of swallowing every report at its symbol, which had cost the
-  harness a third of sample-go's finding precision; a key whose bug and trap
-  at one site overlap in class is rejected at load. A site the agent contract
-  says not to file scores in neither oracle, and a crash landing in a
-  findings-only bug's frame is attributed to it rather than counted
-  unexpected. A finding at the site of its condition's crash is that crash's
-  write-up; lifetime crashes key on their "freed by" stack so a use-after-free
-  and the double-frees one dangling owner causes are one cluster; symbols
-  compare on their leaf identifier; and ASan symbolizer warnings no longer
-  open a diagnostic that scored a symbolized trace as an unexpected crash.
-  Unjudged artifacts are out of every score, and a saved report is
-  re-attributed on render, so `--rebuild-report` is enough for a run reported
-  before this change. Where a symbol holds one planted bug and no trap, a
-  sibling class from the same family earns it: a correct authorization-bypass
-  write-up had scored as a miss against a key that said
-  broken-access-control.
+- **Answer keys score by declared class.** A report earns a planted bug only
+  through a class the key declares, so two bugs in one function can both be
+  credited; a trap declares the one claim it refutes instead of swallowing
+  every report at its symbol, which had cost the harness a third of sample-go's
+  finding precision; an entry may pin its file, so same-named statics in two
+  files stay distinct; and a key whose bug and trap overlap at one site is
+  rejected at load. Where a symbol holds one bug and no trap, a sibling class
+  from the same family earns it, and a site the agent contract says not to
+  file scores in neither oracle.
+
+- **One defect counts once.** A finding at the site of its condition's crash is
+  that crash's write-up, the page counts the problems the ledger counts,
+  lifetime crashes key on their "freed by" stack so a use-after-free and the
+  double-frees it causes are one cluster, symbols compare on their leaf
+  identifier, and ASan symbolizer warnings no longer open a diagnostic that
+  scored a symbolized trace as an unexpected crash. Unjudged artifacts are out
+  of every score, and a saved report is re-attributed on render, so
+  `--rebuild-report` is enough for a run reported before this change.
+
+- **A cell the provider served with another model is kept and named.** A
+  safeguard refusal makes the Claude CLI switch models mid-session and carry
+  on; the harness had read that as a refused backend, marked the cell
+  unavailable, discarded its reproduced crashes and skipped every later cell.
+  Substitution is now its own outcome: the cell is scored, `.served-model`
+  travels with it, the record and run summary name the model that served, and
+  only a genuinely unavailable backend stops the run.
 
 - **The direct control survives the provider and can be held to the wall.**
   A direct session that exited on "model at capacity" cost the cell and
-  skipped the run's other cells; it now waits the same interval the harness
-  does, excluded from its wall, and re-enters with a fresh prompt for the wall
-  it has left. `--hold-direct` re-enters a direct session that stops early
-  until the wall, labelled `<model>-direct-held` on every renderer, for an
-  equal-spend comparison; the default remains the product comparison. Each
-  session writes its own usage row, and a model-direct cell is clocked from
-  its own start rather than its finalization rows.
+  skipped the run's other cells; it now waits the interval the harness does,
+  excluded from its wall, and re-enters with a fresh prompt for the wall it
+  has left. `--hold-direct` re-enters a direct session that stops early until
+  the wall, labelled `<model>-direct-held` on every renderer, for an
+  equal-spend comparison; each session writes its own usage row, and a direct
+  cell is clocked from its own start rather than its finalization rows.
 
 - **Report-only rebuild, cache pruning and an operator scorer.**
   `bin/benchmark --rebuild-report` renders the root pages from run state
-  without rescoring. One ffmpeg run held 20 GiB of rebuildable harness
-  binaries plus 16.8 GiB of macOS `.dSYM` bundles; harnesses now compile and
-  link separately, leaving a debug map `atos` can follow and no dSYM, a
+  without rescoring, and `bin/benchmark score` exposes the answer-key scorer
+  the handbook had pointed at through an unstable library CLI. One ffmpeg run
+  held 20 GiB of rebuildable harness binaries and 16.8 GiB of macOS `.dSYM`
+  bundles: harnesses now compile and link separately so no dSYM is written, a
   settled run prunes every cache entry no evidence names, and `--prune-cache`
-  (`--dry-run`) does the same for runs on disk. `bin/benchmark score` exposes
-  the answer-key scorer the handbook had pointed at through an unstable
-  library CLI. A relative `--bench-root` lives under `output/` (default
-  `benchmark`); one escaping it is refused.
+  (`--dry-run`) does the same for runs on disk. A relative `--bench-root`
+  lives under `output/` (default `benchmark`); one escaping it is refused.
 
 - **Receipts say who scored what.** Each row's Medium+ count names the scorer
-  that produced it; S4 authored, built, invoked and ad-hoc harnesses are
-  separate facts; and per-lane telemetry records the share of ranked cards
+  that produced it, S4 authored, built, invoked and ad-hoc harnesses are
+  separate facts, and per-lane telemetry records the share of ranked cards
   each run examined, so a queue change that starves a lane cannot hide as a
   quiet yield drop.
+
+### Backends and provider accounting
+
+- **A provider that will not serve the model is caught and named.** Fable
+  5.1's safeguards flag the audit contract as `cyber` and Claude Code retries
+  on Opus, so a run requested as Fable was served by Opus while its rows named
+  Fable. Preflight now sends the audit guide under the same vocabulary
+  transform real prompts get and fails the run naming the safeguard category;
+  the shared launcher recognises structured refusals from Claude, Codex,
+  OpenCode, Gemini and Grok in the completed log, prints one `CYBER CLASSIFIER
+  DETECTED` line, and rows carry `served_model` and are priced by it.
+
+- **One isolation policy for every launch.** Web tools are denied on every
+  launch the harness makes — agents in both security modes and one-shot
+  decisions — on Claude, Codex, Gemini CLI, Grok and OpenCode, and a Gemini
+  launch that drops the admin policy fails loudly. Delegation stays at each
+  CLI's default, the model-direct control included, with `delegation_events`
+  recorded; a backend whose delegated spend is invisible reports a floor with
+  `$/confirmed` withheld.
+
+- **No launch can write into the harness tree.** One-shot decisions inherited
+  the harness process's directory, so a reviewer's relative scratch file
+  landed at `SCRIPT_ROOT/.audit`; every backend now gets a throwaway working
+  directory, removed with the answer. Agents launch with a Git ceiling at
+  `targets/` appended to any inherited one, so an in-tree sample cannot read
+  the harness's own history, and the audit binds the canonical target root
+  once — a facade symlink had made SwiftPM crash on a second spelling.
+
+- **Provider failures are classified from trusted events only.** Structured
+  capacity errors count as provider-withheld capacity and structured policy
+  rejections as terminal refusals, including codex's second wording, its bare
+  usage-limit notices and Ollama's `statusCode` quota errors, which had billed
+  a spent plan to the wall as failed sessions. Matches stay inside backend
+  error events where target output cannot reach, and a classified failure is
+  not retried by validation.
+
+- **Spend is measured at the right rate.** Over 122 sessions a Claude prefix
+  was almost never idle five minutes, so launches bill the five-minute cache
+  tier: 10% cheaper at Opus prices, 20% at Fable. Fable 5.1, Mythos 5.1 and
+  the OpenAI cyber models are priced, every other row is rechecked against
+  the vendors' pages, and Grok's usage, tool calls and cost are read from its
+  stream instead of being filed as character estimates. The claude default
+  stays `claude-opus-5`, which is not refused; gemini defaults to
+  `gemini-3.8-flash`.
 
 ### Target setup, coverage and cards
 
 - **A forced reseed keeps a route that already runs.** `setup-target --force`
   replaced working routes with the seed's guesses: MSan became ASan, two
-  samples lost their ASan binary, and four CLI runners became the registry
+  samples lost their ASan binary, and four CLI runners became a registry
   default that treats a testcase as a program. A configured `[runner]`, the
   `[sanitizer]` policy — an explicitly empty one included — and named
   sanitizer binaries survive a reseed, as do a hand-authored `build_system`,
   upstream URL and runner when detection comes back empty.
 
 - **Setup proves the route it hands the agent.** Cargo workspaces, Swift
-  products (executable targets included), Ruby entrypoints and JVM classpaths
-  derive from project metadata; runner canaries prove the target-backed
-  entrypoint; ambiguous opaque-input routes are rejected; CMake's install plan
-  names the public library and modular header roots a static-first scan had
-  missed; and bounded deterministic remediation runs before any LLM fallback.
-  Backends are tried in a fixed order with the requested one first, retried
-  only for backend failures, and a recipe rotates backends only when a
-  different model could change the outcome. `JAVA_HOME` comes from the JVM's
-  own `java.home`, Maven starts only from a root POM, Ruby without a Gemfile
-  skips `bundle install`, and a Perl checkout with modules under `lib/`
-  detects at the root.
+  products, Ruby entrypoints and JVM classpaths derive from project metadata,
+  runner canaries prove the target-backed entrypoint, ambiguous opaque-input
+  routes are rejected, CMake's install plan names the public library and
+  modular header roots, and bounded deterministic remediation runs before any
+  LLM fallback. Backends are tried in a fixed order with the requested one
+  first and rotated only when a different model could change the outcome;
+  `JAVA_HOME` comes from the JVM's own `java.home`, Maven starts only from a
+  root POM, Ruby without a Gemfile skips `bundle install`, a Perl checkout
+  with modules under `lib/` detects at the root, and a native build no longer
+  pulls a venv in because its tree carries a `pyproject.toml`.
 
 - **Preflight fails before model budget is spent.** Interpreters run an empty
   program — and a typed source when the runner names a `.ts` entry — so a
   loader failure surfaces before the first probe. A route the host compiler
   cannot build (MemorySanitizer has no Darwin runtime) had spent a five-round
-  recipe repair loop before failing; the compiler is probed once per process,
-  only for a route this run will build, and the benchmark exits 3 so a
-  launcher does not retry on the same host.
+  recipe repair loop before failing; the compiler is probed once, only for a
+  route this run will build, and the benchmark exits 3 so a launcher does not
+  retry on the same host.
 
 - **One coverage sibling per consumer.** libFuzzer exits at startup when any
   loaded object carries `trace-pc-guard`, so the single `build-asan+fuzz`
-  sibling served `bin/hits` and killed every `bin/fuzz` campaign. `+cov` is
+  sibling served `bin/hits` and killed every `bin/fuzz` campaign; `+cov` is
   built for replay and `+fuzz` for libFuzzer from the same recipe. A coverage
-  run that wrote no sancov, timed out, would not symbolize or only executed
-  the harness's own frames names that failure (`COVERAGE_NO_SANCOV`,
-  `COVERAGE_TIMEOUT`, `COVERAGE_SYMBOLIZE_FAIL`, `COVERAGE_HARNESS_ONLY`)
-  instead of one `EXEC_FAIL`, and a run's PCs are symbolized in one `atos`
-  call under a deadline.
+  run names its failure (`COVERAGE_NO_SANCOV`, `COVERAGE_TIMEOUT`,
+  `COVERAGE_SYMBOLIZE_FAIL`, `COVERAGE_HARNESS_ONLY`) instead of one
+  `EXEC_FAIL`, and a run's PCs are symbolized in one `atos` call under a
+  deadline.
 
 - **S7 cards require an input route.** Raw allocation and memory operations do
   not establish that testcase bytes reach a file; a parser, decoder or
   remote-peer route is required, and the verb match admits lowerCamelCase and
   prefixed names so whole Swift, Go and JavaScript files are not demoted.
+
+- **A whole-target `bin/cleanup_state` reset clears build state.** Without a
+  backend filter it removes the generated `build-<sanitizer>*` trees and transient
+  `.audit/` entries while preserving the build recipes, resolving the source
+  root from session state so a same-named checkout is never cleaned.
 
 ### Command line, samples and documentation
 
@@ -309,36 +289,32 @@ shares one isolation policy, and target setup keeps a route that already runs.
   and every option prints its help and any informative default. Options that
   duplicated a documented path or had no docs and no test are gone:
   `--new-target`, the `--<backend>-bin` flags (the `*_BIN` environment
-  variables remain), and the `BENCHMARK_VALIDATE_FINDINGS` default behind
-  `--no-validate-findings`.
+  variables remain), benchmark `--hard` and `--ledger`, and the
+  `BENCHMARK_VALIDATE_FINDINGS` default behind `--no-validate-findings`.
 
-- **Samples are regenerated and re-keyed.** Every sample config is the output
-  of `bin/setup-target --build --force`. `sample-c-doublefree` and
-  `sample-c-uninit` plant the two classes no fixture measured; `sample-python`
-  gains a service so every planted decision has a consumer the gate can trace;
-  `sample-typescript` runs natively under Node instead of a ts-node that
-  failed every probe; Java and Kotlin score an unfiltered `readObject` as the
-  bug it is; and every key extends its bugs and traps against the disclosure
-  taxonomy with declared classes. The MSan sample refuses a build on a host
-  without an MSan runtime rather than reporting a clean run of its bug, and
-  the ASan recipe preflight generates for it on such a host is ignored.
-  `sample-python` declares its HTTP service in the threat model, so a
-  correct finding about that surface is no longer rejected for a trigger the
-  target never admitted. The release-build overflow the C, C++ and doublefree
-  samples plant behind a debug assert now survives the optimizer: the copied
-  field was a local nothing observed, so a release build deleted it and a
-  direct agent correctly argued the bug away; the field is retained in the
-  decoder context and verified at end of stream.
+- **Samples are regenerated and re-keyed.** Every sample config but
+  `sample-c-uninit`'s, whose MSan route the generating host could not build,
+  is the output of `bin/setup-target --build --force`, and every key extends its bugs and
+  traps against the disclosure taxonomy with declared classes.
+  `sample-c-doublefree` and `sample-c-uninit` plant the two classes no fixture
+  measured, `sample-python` gains a service, declared in its threat model, so
+  every planted decision has a consumer the gate can trace, `sample-typescript`
+  runs natively under Node instead of a ts-node that failed every probe, and
+  Java and Kotlin score an unfiltered `readObject` as the bug it is. The
+  release-build overflow the C, C++ and doublefree samples plant behind a
+  debug assert now survives the optimizer, and the MSan sample refuses a build
+  on a host without an MSan runtime rather than reporting a clean run of its
+  bug.
 
 - **The handbook is checked against the code.** Every page is rewritten
   against `bin/`, `lib/`, `.agents/` and `AGENTS.md` with paths and anchors
-  kept; the isolation policy, delegation and spend floors, the cache tier, and
-  the macOS Java and Kotlin startup check are each stated once and linked.
-  Tests no longer sample host properties such as configured targets or an
-  installed toolchain. The benchmark page ships a finished sample-c result
-  exported with every count link resolving, with screenshots, linked from
-  the README and the docs home. Dependency bumps: pymdown-extensions 11.0.2,
-  actions/deploy-pages 5.0.1.
+  kept, and the isolation policy, delegation and spend floors, the cache tier,
+  and the macOS Java and Kotlin startup check are each stated once and linked.
+  The benchmark page ships a finished sample-c result with every count link
+  resolving, tests no longer sample host properties such as configured targets
+  or an installed toolchain, and the container lane digests the harness by
+  mode bits so a root bind mount no longer reads as an edited tree.
+  Dependency bumps: pymdown-extensions 11.0.2, actions/deploy-pages 5.0.1.
 
 ## 1.5.3 - 2026-08-30
 

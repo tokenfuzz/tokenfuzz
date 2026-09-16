@@ -343,8 +343,8 @@ domain = "XML / SGML"
 peers = ["expat", "libxslt", "html5ever"]
 ```
 
-`bin/audit --new-target` runs `bin/suggest-peers <slug> --apply` when an
-LLM backend is available. Existing targets can run `bin/suggest-peers
+`bin/setup-target <slug>` runs `bin/suggest-peers <slug> --apply` when it
+seeds a new config and an LLM backend is available. Existing targets can run `bin/suggest-peers
 <slug> --apply` manually. Review the generated list before relying on it.
 
 The work-card ranking regex intentionally matches only generic S6
