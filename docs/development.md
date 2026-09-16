@@ -157,8 +157,10 @@ that reads correctly but was never checked.
    targets before starting a per-run execution deadline: a cold `go run`, for
    example, may first compile the standard library.
    `tests/run-tests.sh --image ubuntu:24.04` exercises the Linux CI container
-   on fresh caches. It covers only the toolchains installed by
-   `--install-container-deps`; read the skips as well as failures.
+   on fresh caches, pinned to `linux/amd64` — the CI architecture — and
+   emulated on an arm64 host; `--platform` overrides it. It covers only the
+   toolchains installed by `--install-container-deps`; read the skips as
+   well as failures.
 6. **Reduce unnecessary process launches.** Import Python helpers rather than
    spawning Python entry points. Give a printing helper a return-value API
    and keep the CLI as a thin printer; threaded callers cannot safely capture
@@ -304,7 +306,10 @@ For a documentation review:
   ```
 
   Read the skips as well as the failures: a test whose toolchain is missing
-  reports as neither.
+  reports as neither. The container lane runs `linux/amd64` like CI; an
+  arm64 host emulates it, since sanitizer address layouts differ per
+  architecture and a lane on the host's own architecture proves nothing
+  about CI's.
 - **Pick the bump first** from commits since the last tagged section: patch
   (`x.y.Z`) is fixes, quality gates, and internal cleanup with no contract
   change; minor (`x.Y.0`) adds a capability or changes the audit contract or

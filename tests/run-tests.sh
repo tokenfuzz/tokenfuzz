@@ -30,6 +30,10 @@ Options:
   --list                List matched tests with categories, then exit.
   --image IMAGE          Run the suite inside a Linux container image; the
                          CI container job runs ubuntu:24.04.
+  --platform PLATFORM    Container platform (default: linux/amd64, the CI
+                         architecture; emulated on an arm64 host). A
+                         multi-arch image otherwise resolves to the host's
+                         architecture, and sanitizer address layouts differ.
   --runtime NAME         Container runtime: docker (default).
   --no-install-deps      Skip dependency installation inside the image.
   -h, --help            Show this help.
@@ -43,6 +47,7 @@ EOF
 }
 
 RUN_IMAGE=""
+RUN_PLATFORM="linux/amd64"
 CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 INSTALL_DEPS=1
 JOBS="${TEST_JOBS:-}"
@@ -77,6 +82,11 @@ while [ "$#" -gt 0 ]; do
       RUN_IMAGE="$2"; shift 2 ;;
     --image=*)
       RUN_IMAGE="${1#--image=}"; shift ;;
+    --platform)
+      [ "$#" -ge 2 ] || { echo "tests/run-tests.sh: --platform requires a value" >&2; exit 2; }
+      RUN_PLATFORM="$2"; shift 2 ;;
+    --platform=*)
+      RUN_PLATFORM="${1#--platform=}"; shift ;;
     --runtime)
       [ "$#" -ge 2 ] || { echo "tests/run-tests.sh: --runtime requires a value" >&2; exit 2; }
       CONTAINER_RUNTIME="$2"; shift 2 ;;
@@ -196,7 +206,7 @@ if [ -n "$RUN_IMAGE" ]; then
   if [ "${#inner_args[@]}" -gt 0 ]; then
     printf -v inner_cmd '%q ' "${inner_args[@]}"
   fi
-  suite_cmd="if [ $INSTALL_DEPS -eq 1 ]; then tests/run-tests.sh --install-container-deps; fi; bash tests/run-tests.sh ${inner_cmd}"
+  suite_cmd="echo \"tests/run-tests.sh: container architecture \$(uname -m)\"; if [ $INSTALL_DEPS -eq 1 ]; then tests/run-tests.sh --install-container-deps; fi; bash tests/run-tests.sh ${inner_cmd}"
   # A login shell re-runs the image's /etc/profile, which rebuilds PATH from
   # scratch and drops whatever the image itself put on it, so a toolchain the
   # image ships rather than installs disappears and its tests skip. Record the
@@ -206,7 +216,14 @@ if [ -n "$RUN_IMAGE" ]; then
   # developer's tree and the next run — a different image, a different Python,
   # or a concurrent job — reads a cache it did not write. Keep the container's
   # bytecode inside the container.
+  # CI runs the container on amd64. A multi-arch image resolves to the host's
+  # architecture unless the platform is pinned, and ASan's shadow layout is
+  # per-architecture: an address that is application memory on aarch64 can be
+  # shadow memory on x86_64, so a sample that faults where its answer key
+  # says on an arm64 host fails CI. Print what actually ran so the log says.
+  echo "tests/run-tests.sh: container platform $RUN_PLATFORM (host $(uname -m))"
   "$CONTAINER_RUNTIME" run --rm \
+    --platform "$RUN_PLATFORM" \
     -v "$SCRIPT_ROOT:/work" \
     -w /work \
     -e LLM_DECIDE_DISABLE="${LLM_DECIDE_DISABLE:-1}" \

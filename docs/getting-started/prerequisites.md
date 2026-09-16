@@ -166,7 +166,9 @@ checks are opt-in through `TOKENFUZZ_LIVE_BACKENDS`; without it, those tests
 are reported as skipped.
 
 Optional Linux image checks run the same suite in a clean Docker container.
-`ubuntu:24.04` is the image the CI container job runs:
+`ubuntu:24.04` is the image the CI container job runs, on `linux/amd64`; the
+lane pins that platform (emulated on an arm64 host) unless `--platform`
+says otherwise:
 
 ```bash
 bash tests/run-tests.sh --image ubuntu:24.04

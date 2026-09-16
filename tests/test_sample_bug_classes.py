@@ -351,7 +351,15 @@ class SampleBugClassTests(unittest.TestCase):
                 symbol = entries[bug_id]["signature_symbol"].split("::")[-1]
                 self.assertIn(symbol, report)
                 if bug_id == "encoded-address-arbitrary-write":
-                    self.assertIn("deadbeef", report.lower())
+                    # The store must fault at the encoded address itself. An
+                    # address inside an ASan shadow region trips the shadow
+                    # check first, which reports the shadow address as a READ
+                    # — that is what 0xdeadbeef did on x86_64 Linux while
+                    # passing on aarch64 and macOS.
+                    field = base64.b64decode(entries[bug_id]["input_base64"])[7:]
+                    address = int.from_bytes(field[:8], "little")
+                    self.assertIn(f"SEGV on unknown address 0x{address:012x}", report)
+                    self.assertIn("caused by a WRITE memory access", report)
 
 
 if __name__ == "__main__":

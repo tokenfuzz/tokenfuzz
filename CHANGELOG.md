@@ -2,15 +2,24 @@
 
 ## 1.6.0 - 2026-09-16
 
-This release changes how an audit spends its wall and what it can prove
-afterwards. Slots refill the moment one finishes instead of waiting for the
-slowest peer, and every turn replays less prompt. Findings share one bug-class
-vocabulary, each is reviewed on its own evidence, and every review ends in a
-verdict. The benchmark is rebuilt around the comparison — model against model,
-problem by problem — and is pinned to the code, gate versions and answer-key
-classes a run started with, so nothing landing mid-run can move a score.
-Around it, preflight catches a provider serving the wrong model, every launch
-shares one isolation policy, and target setup keeps a route that already runs.
+The benchmark result is a new page. What was a Markdown crosstab that could
+say how many is now a self-contained comparison built from every run's
+report, clusters and state streams: a leaderboard of every model, harness and
+plain, ranked by what each surfaced that the others did not; a race clock with
+replay; a behaviour profile per condition; a convergence matrix of every
+distinct problem against every condition as found, looked-and-missed or never
+looked; and, for each harness cell, a trace of every hypothesis from written
+to resolved in the agent's own words, beside the attention it cost. The
+cluster, rejected and per-report evidence pages are rebuilt in the same
+language, and a run is pinned to the code, gate versions and answer-key
+classes it started with, so nothing landing mid-run can move a score.
+
+Underneath, an audit spends its wall differently and proves more afterwards.
+Slots refill the moment one finishes instead of waiting for the slowest peer,
+and every turn replays less prompt. Findings share one bug-class vocabulary,
+each is reviewed on its own evidence, and every review ends in a verdict.
+Preflight catches a provider serving the wrong model, every launch shares one
+isolation policy, and target setup keeps a route that already runs.
 
 ### Scheduling and session cost
 
@@ -302,9 +311,13 @@ shares one isolation policy, and target setup keeps a route that already runs.
   runs natively under Node instead of a ts-node that failed every probe, and
   Java and Kotlin score an unfiltered `readObject` as the bug it is. The
   release-build overflow the C, C++ and doublefree samples plant behind a
-  debug assert now survives the optimizer, and the MSan sample refuses a build
+  debug assert now survives the optimizer, the MSan sample refuses a build
   on a host without an MSan runtime rather than reporting a clean run of its
-  bug.
+  bug, and the C++ arbitrary-write example encodes an address that is
+  application memory in every ASan shadow layout — `0xdeadbeef` sits inside
+  x86_64 Linux's low shadow, so the store tripped ASan's own check and
+  reported the shadow address as a read while aarch64 and macOS faulted where
+  the key said.
 
 - **The handbook is checked against the code.** Every page is rewritten
   against `bin/`, `lib/`, `.agents/` and `AGENTS.md` with paths and anchors
@@ -313,7 +326,10 @@ shares one isolation policy, and target setup keeps a route that already runs.
   The benchmark page ships a finished sample-c result with every count link
   resolving, tests no longer sample host properties such as configured targets
   or an installed toolchain, and the container lane digests the harness by
-  mode bits so a root bind mount no longer reads as an edited tree.
+  mode bits so a root bind mount no longer reads as an edited tree. The lane
+  pins `linux/amd64`, the CI architecture, and prints the architecture it
+  ran on: an arm64 host had resolved the multi-arch image to aarch64 and
+  passed a sample CI failed on (`--platform` overrides).
   Dependency bumps: pymdown-extensions 11.0.2, actions/deploy-pages 5.0.1.
 
 ## 1.5.3 - 2026-08-30

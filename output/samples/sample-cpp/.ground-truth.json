@@ -135,9 +135,9 @@
       "classes": ["arbitrary-write", "segv"],
       "access": "WRITE",
       "signature_symbol": "rbundle::handle_write",
-      "input_base64": "UkJGMQ4ACe++rd4AAAAAQQ==",
+      "input_base64": "UkJGMQ4ACQAA/38AAAAAQQ==",
       "cwe": "CWE-123",
-      "summary": "WRITE decodes a native address from the field and stores a caller-controlled byte through it. An attacker-chosen address that is not in the quarantined low range faults as a confirmed SEGV, so this is crash-scored; the harness quarantines only the low-address shape."
+      "summary": "WRITE decodes a native address from the field and stores a caller-controlled byte through it. An attacker-chosen address that is not in the quarantined low range faults as a confirmed SEGV, so this is crash-scored; the harness quarantines only the low-address shape. The example encodes 0x7fff0000: application memory in every ASan shadow layout (below x86_64 Linux's 0x7fff7fff low-memory end), so the store itself faults and the report names this address as a WRITE; an address inside a shadow region faults on ASan's own check instead and reports the shadow address as a READ."
     },
     {
       "id": "optional-output-null-deref",
