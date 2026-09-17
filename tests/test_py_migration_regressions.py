@@ -1288,8 +1288,12 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         }), encoding="utf-8")
         return 1
 
+    # validate_one_finding also runs the reachability-fields decision, which
+    # this check does not mock; block it so a bare run on a host with codex
+    # installed does not launch the real CLI and wait on it.
     with mock.patch.dict(os.environ, {
         "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(root), "MODEL": "fixture",
+        "LLM_DECIDE_DISABLE": "1",
     }, clear=False), mock.patch.object(
         triage, "_trigger_vote", side_effect=_reject_trigger,
     ):
