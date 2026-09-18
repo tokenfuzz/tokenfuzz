@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -162,6 +163,14 @@ class ReplyError(ValueError):
     """A reply the sweep cannot turn into a verified receipt."""
 
 
+class _Stopped(Exception):
+    """SIGTERM from the audit's shutdown; the loop ends and state is written."""
+
+
+def _covered(unit: Unit, receipted: dict[str, list[tuple[int, int]]]) -> bool:
+    return any(s <= unit.start and unit.end <= e for s, e in receipted.get(unit.file, []))
+
+
 def parse_reply(unit: Unit, reply: object) -> tuple[list[tuple[int, int]], list[dict], list[dict]]:
     """(examined ranges, verdicts, leads) from a decision reply, each checked
     against the unit: ranges must sit inside it, and a lead must name a
@@ -242,79 +251,112 @@ def run(
     spent = int(state.get("spent_tokens") or 0)
     counts = {key: int(state.get(key) or 0) for key in ("units", "receipts", "leads", "failures")}
     units = plan_units(ctx, unit_lines)
-    stop = "exhausted" if not units else ""
+    stop = "exhausted" if not units else "interrupted"
     consecutive = 0
+    done = 0
+
+    def persist(reason: str) -> dict:
+        # After every unit, not only at the end: the audit ends the sweep
+        # with SIGTERM whenever the slots finish first, and spend that was
+        # never written would be spent again on the next resume.
+        current = {
+            "spent_tokens": spent, "token_budget": token_budget, "stop": reason,
+            "units_remaining": max(0, len(units) - done),
+            "updated_at": workqueue.now_iso(), **counts,
+        }
+        _write_state(ctx.results_dir, current)
+        return current
+
+    def _on_term(signum, frame):
+        raise _Stopped()
+
     previous_model = os.environ.get("MODEL")
+    previous_handler = signal.getsignal(signal.SIGTERM)
     if model:
         os.environ["MODEL"] = model
+    signal.signal(signal.SIGTERM, _on_term)
     usage_index = llm_usage.find_usage_index(ctx.results_dir)
     try:
-        for index, unit in enumerate(units):
+        for unit in units:
             if token_budget and spent >= token_budget:
                 stop = "budget"
                 break
-            if max_units and index >= max_units:
+            if max_units and done >= max_units:
                 stop = "unit-cap"
                 break
-            text = build_prompt(ctx, unit, attacker_controls)
+            # A session may have receipted this unit since the plan was made.
+            if _covered(unit, coverage_ledger.examined_ranges_by_file(ctx.results_dir)):
+                done += 1
+                continue
+            try:
+                text = build_prompt(ctx, unit, attacker_controls)
+            except OSError as exc:
+                # The file changed or vanished under the plan; skip it, do
+                # not spend on it, and let the next plan see the tree.
+                say(f"sweep: cannot read {unit.key}: {exc}")
+                done += 1
+                continue
             reply = llm_decide.llm_decide(
                 DECISION, REQUIRED_KEYS, text,
                 timeout=llm_decide.decision_timeout(DECISION), usage_index=usage_index,
             )
             spent += llm_usage.estimate_tokens(text)
             counts["units"] += 1
+            done += 1
+            failure = ""
+            ranges: list[tuple[int, int]] = []
+            leads: list[dict] = []
             if reply is None:
+                failure = "no usable reply"
+            else:
+                spent += llm_usage.estimate_tokens(json.dumps(reply))
+                try:
+                    ranges, verdicts, leads = parse_reply(unit, reply)
+                    if ranges:
+                        summary = ", ".join(
+                            f"{v.get('function', '?')}={v.get('verdict', '?')}" for v in verdicts[:6]
+                        )
+                        coverage_ledger.record_receipt(
+                            ctx, AGENT, unit.file,
+                            lines=",".join(f"{s}-{e}" for s, e in ranges),
+                            source="sweep", note=summary[:240],
+                        )
+                        counts["receipts"] += 1
+                except (ReplyError, coverage_ledger.ReceiptError) as exc:
+                    # A receipt the manifest cannot verify (the file was
+                    # re-ranked or changed between plan and reply) is not
+                    # coverage; the unit stays open for the next plan.
+                    failure = f"rejected: {exc}"
+            if failure:
                 counts["failures"] += 1
                 consecutive += 1
-                say(f"sweep: no usable reply for {unit.key}")
-                if consecutive >= MAX_CONSECUTIVE_FAILURES:
-                    stop = "backend"
-                    break
-                continue
-            spent += llm_usage.estimate_tokens(json.dumps(reply))
-            try:
-                ranges, verdicts, leads = parse_reply(unit, reply)
-            except ReplyError as exc:
-                counts["failures"] += 1
-                consecutive += 1
-                say(f"sweep: rejected reply for {unit.key}: {exc}")
+                say(f"sweep: {unit.key} {failure}")
+                persist("interrupted")
                 if consecutive >= MAX_CONSECUTIVE_FAILURES:
                     stop = "backend"
                     break
                 continue
             consecutive = 0
-            if ranges:
-                summary = ", ".join(
-                    f"{v.get('function', '?')}={v.get('verdict', '?')}" for v in verdicts[:6]
-                )
-                coverage_ledger.record_receipt(
-                    ctx, AGENT, unit.file,
-                    lines=",".join(f"{s}-{e}" for s, e in ranges),
-                    source="sweep", note=summary[:240],
-                )
-                counts["receipts"] += 1
             for lead in leads:
                 _record_lead(ctx, unit, lead)
                 counts["leads"] += 1
+            persist("interrupted")
             say(
                 f"sweep: {unit.key} examined={len(ranges)} leads={len(leads)} "
                 f"spent={spent}{'/' + str(token_budget) if token_budget else ''}"
             )
         else:
             stop = "exhausted"
+    except _Stopped:
+        stop = "interrupted"
     finally:
+        signal.signal(signal.SIGTERM, previous_handler)
         if model:
             if previous_model is None:
                 os.environ.pop("MODEL", None)
             else:
                 os.environ["MODEL"] = previous_model
-    remaining = sum(1 for _ in plan_units(ctx, unit_lines))
-    state = {
-        "spent_tokens": spent, "token_budget": token_budget, "stop": stop,
-        "units_remaining": remaining, "updated_at": workqueue.now_iso(), **counts,
-    }
-    _write_state(ctx.results_dir, state)
-    return state
+    return persist(stop)
 
 
 def summary_lines(results_dir: Path) -> list[str]:

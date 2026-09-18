@@ -122,8 +122,11 @@ def main(argv: list[str]) -> int:
         )
     patch_cards = Path(args.patch_cards).expanduser().resolve() if args.patch_cards else None
     out = Path(args.output).expanduser().resolve() if args.output else ctx.results_dir / "work-cards.jsonl"
+    default_out = ctx.results_dir / "work-cards.jsonl"
     cards = rank_target(ctx, args.limit, patch_cards, strategy=args.strategy,
-                        delta_files=delta_files)
+                        delta_files=delta_files,
+                        # A preview written elsewhere never reached the run.
+                        record_manifest=out == default_out)
     cards = llm_rerank_cards(ctx, cards, args.llm_top_n, args.llm_timeout, args.llm_mode)
     # Merge S6 peer-fix cards. bin/peer-fix-cards writes these to a
     # separate s6-peer-cards.jsonl, refreshed each iteration alongside

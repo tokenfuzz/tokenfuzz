@@ -100,6 +100,7 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
         args = words[1:]
         if tool == "sed":
             script = ""
+            scripts = 0
             files: list[str] = []
             skip = False
             for index, arg in enumerate(args):
@@ -108,6 +109,7 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
                     continue
                 if arg in ("-e", "--expression"):
                     script = args[index + 1] if index + 1 < len(args) else ""
+                    scripts += 1
                     skip = True
                 elif arg.startswith("-"):
                     continue
@@ -116,7 +118,9 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
                 else:
                     files.append(arg)
             match = _SED_RANGE_RE.match(script.strip())
-            if not match or not files:
+            if scripts > 1 or not match or not files:
+                # Several -e scripts print several windows; recording only
+                # the last would under- or mis-count, so record none.
                 continue
             start = int(match.group(1))
             end_text = match.group(2)
@@ -127,37 +131,44 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
         elif tool in ("cat", "nl"):
             out.extend((arg, 1, None) for arg in args if not arg.startswith("-"))
         elif tool in ("head", "tail"):
-            count = None
+            count: int | None = 10
+            from_line = 0
             files = []
-            skip = False
+            skip = byte_mode = False
             for index, arg in enumerate(args):
                 if skip:
                     skip = False
                     continue
-                if arg in ("-n", "--lines"):
-                    try:
-                        count = int(args[index + 1])
-                    except (IndexError, ValueError):
+                if arg in ("-c", "--bytes") or (arg.startswith("-c") and arg != "-c"):
+                    # A byte window says nothing about lines.
+                    byte_mode = True
+                    skip = arg in ("-c", "--bytes")
+                elif arg in ("-n", "--lines") or (arg.startswith("-n") and len(arg) > 2):
+                    spec = args[index + 1] if arg in ("-n", "--lines") and index + 1 < len(args) else arg[2:]
+                    skip = arg in ("-n", "--lines")
+                    if tool == "tail" and spec.startswith("+"):
+                        # `tail -n +K` starts at line K, it is not a count.
+                        from_line = int(spec[1:]) if spec[1:].isdigit() else 0
                         count = None
-                    skip = True
-                elif arg.startswith("-n"):
-                    try:
-                        count = int(arg[2:])
-                    except ValueError:
-                        count = None
+                    else:
+                        count = int(spec) if spec.isdigit() else None
                 elif re.fullmatch(r"-\d+", arg):
                     count = int(arg[1:])
                 elif arg.startswith("-"):
                     continue
                 else:
                     files.append(arg)
+            if byte_mode:
+                continue
             if tool == "head":
                 out.extend((file, 1, count) for file in files)
+            elif from_line:
+                out.extend((file, from_line, None) for file in files)
             else:
                 # tail's window is anchored at the end; without the file's
                 # length here it records "somewhere in the file", which the
                 # ledger resolves against the manifest's line count.
-                out.extend((file, -(count or 0), None) for file in files)
+                out.extend((file, -(count or 10), None) for file in files)
         elif tool == "peek":
             for arg in args:
                 if arg.startswith("-"):

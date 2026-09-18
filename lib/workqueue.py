@@ -1966,8 +1966,13 @@ def structural_path_score(rel: str) -> tuple[int, list[str]]:
 def rank_target(
     ctx: Context, limit: int, patch_cards: Path | None = None,
     strategy: str = "", delta_files: dict[str, str] | None = None,
+    *, record_manifest: bool = True,
 ) -> list[dict]:
     """Rank the target's auditable sources into work cards.
+
+    `record_manifest` writes the coverage manifest from this enumeration;
+    a preview ranked into another file passes False so its window is not
+    recorded as offered to the run.
 
     `delta_files` (relpath -> why it is in scope) switches to delta mode:
     only those files are ranked, every one of them gets a card, the
@@ -2138,12 +2143,13 @@ def rank_target(
         )
     # The window is what the run is handed; the manifest is what the tree
     # holds. Written here, from the same enumeration, so the two cannot drift.
-    import coverage_ledger  # lazy: it imports this module
-    coverage_ledger.write_manifest(
-        ctx, source_paths,
-        {normalized_relpath(card.get("file", "")) for card in selected},
-        scope="delta" if delta_files is not None else "tree",
-    )
+    if record_manifest:
+        import coverage_ledger  # lazy: it imports this module
+        coverage_ledger.write_manifest(
+            ctx, source_paths,
+            {normalized_relpath(card.get("file", "")) for card in selected},
+            scope="delta" if delta_files is not None else "tree",
+        )
     return selected
 
 

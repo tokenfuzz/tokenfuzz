@@ -293,7 +293,24 @@ def write_manifest(
     every file; `offered` is carried forward because a file that left the
     window was still handed to the run.
     """
-    previous = {row.get("file", ""): row for row in read_manifest(ctx.results_dir)}
+    path = manifest_path(ctx.results_dir)
+    with workqueue.jsonl_lock(path):
+        previous = {row.get("file", ""): row for row in read_manifest(ctx.results_dir)}
+        rows = _manifest_rows(ctx, source_paths, offered_files, scope, previous)
+        if scope == "delta":
+            # The delta is a scope, not the tree: rows the delta does not
+            # touch keep their history rather than being dropped and reset.
+            listed = {row["file"] for row in rows}
+            rows.extend(row for rel, row in previous.items() if rel not in listed)
+        rows.sort(key=lambda row: row["file"])
+        workqueue._write_jsonl_unlocked(path, rows)
+    return rows
+
+
+def _manifest_rows(
+    ctx: workqueue.Context, source_paths: list[tuple[Path, str]],
+    offered_files: set[str], scope: str, previous: dict[str, dict],
+) -> list[dict]:
     rows: list[dict] = []
     for path, rel in source_paths:
         try:
@@ -324,10 +341,6 @@ def write_manifest(
             "offered": bool(rel in offered_files or (old or {}).get("offered")),
             "scope": scope,
         })
-    rows.sort(key=lambda row: row["file"])
-    path = manifest_path(ctx.results_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    workqueue.write_jsonl(path, rows)
     return rows
 
 
@@ -410,7 +423,7 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
     import sweep  # lazy: it imports this module
 
     return {
-        "scope": (manifest[0].get("scope") if manifest else "") or "",
+        "scope": "delta" if manifest and all(row.get("scope") == "delta" for row in manifest) else ("tree" if manifest else ""),
         "sweep": sweep.summary_lines(ctx.results_dir),
         "depth": depth,
         "totals": totals,

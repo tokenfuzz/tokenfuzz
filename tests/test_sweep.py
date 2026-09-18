@@ -191,6 +191,54 @@ class RunTests(unittest.TestCase):
             disabled = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
         self.assertEqual(disabled["stop"], "backend")
 
+    def test_state_is_written_after_every_unit_and_a_bad_receipt_is_a_failure(self) -> None:
+        # The audit ends the sweep with SIGTERM; spend written only at the end
+        # would be spent again on the next resume.
+        reply = {"examined": [[1, 50]], "verdicts": [], "leads": []}
+        seen: list[int] = []
+        real_receipt = coverage_ledger.record_receipt
+
+        def flaky(ctx, agent, file, **kwargs):
+            seen.append(len(seen))
+            if len(seen) == 1:
+                raise coverage_ledger.ReceiptError("file changed under the plan")
+            return real_receipt(ctx, agent, file, **kwargs)
+
+        with mock.patch.dict(os.environ, self.mock(reply), clear=False), \
+                mock.patch.object(coverage_ledger, "record_receipt", flaky):
+            state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
+        self.assertEqual((state["units"], state["failures"], state["receipts"], state["stop"]), (2, 1, 1, "exhausted"))
+        self.assertEqual(state["units_remaining"], 0)
+        # A stop mid-loop leaves the last persisted state, not nothing.
+        with mock.patch.dict(os.environ, self.mock(reply), clear=False), \
+                mock.patch.object(sweep, "_record_lead", side_effect=sweep._Stopped()):
+            (self.target / "src" / "c.c").write_text(_body(50), encoding="utf-8")
+            workqueue.rank_target(self.ctx, 10)
+            reply["leads"] = [{"function": "", "line": 3, "hypothesis": "h", "input_shape": "i",
+                               "guard_gap": "g", "diagnostic": "bounds"}]
+            os.environ["LLM_DECIDE_MOCK_SWEEP_UNIT"] = json.dumps(reply)
+            stopped = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
+        self.assertEqual(stopped["stop"], "interrupted")
+        self.assertEqual(stopped["receipts"], 2, "the receipt before the stop was kept")
+        self.assertGreater(stopped["spent_tokens"], state["spent_tokens"])
+
+    def test_units_receipted_by_a_session_since_the_plan_are_not_bought(self) -> None:
+        reply = {"examined": [[1, 50]], "verdicts": [], "leads": []}
+        calls: list[str] = []
+        real_prompt = sweep.build_prompt
+
+        def spy(ctx, unit, controls):
+            calls.append(unit.key)
+            if len(calls) == 1:
+                coverage_ledger.record_receipt(ctx, "1", "src/b.c", lines="1-50")
+            return real_prompt(ctx, unit, controls)
+
+        with mock.patch.dict(os.environ, self.mock(reply), clear=False), \
+                mock.patch.object(sweep, "build_prompt", spy):
+            state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
+        self.assertEqual(calls, ["src/a.c:1-50"])
+        self.assertEqual((state["units"], state["units_remaining"]), (1, 0))
+
     def test_prompt_carries_the_numbered_unit_and_the_shape_validator_accepts_it(self) -> None:
         unit = sweep.plan_units(self.ctx, 100)[0]
         text = sweep.build_prompt(self.ctx, unit, "bytes")

@@ -105,7 +105,7 @@ class ManifestTests(unittest.TestCase):
         empty = self.write_source("src/empty.c", "")
         self.assertEqual(coverage_ledger.file_identity(empty)[0], 0)
 
-    def test_delta_scope_is_recorded_on_the_manifest(self) -> None:
+    def test_delta_scope_is_recorded_and_keeps_the_rest_of_the_history(self) -> None:
         self.write_source("src/changed.c", PARSER)
         self.write_source("src/other.c", PARSER)
         workqueue.rank_target(
@@ -114,6 +114,28 @@ class ManifestTests(unittest.TestCase):
         manifest = coverage_ledger.read_manifest(self.results)
         self.assertEqual([row["file"] for row in manifest], ["src/changed.c"])
         self.assertEqual(manifest[0]["scope"], "delta")
+        self.assertEqual(coverage_ledger.coverage_report(self.ctx)["scope"], "delta")
+        # A whole-tree rank, then a delta: the delta is a scope, not the
+        # tree, so the other file's offered history survives the delta pass.
+        workqueue.rank_target(self.ctx, 10)
+        workqueue.rank_target(self.ctx, 10, delta_files={"src/changed.c": "changed again"})
+        rows = {row["file"]: row for row in coverage_ledger.read_manifest(self.results)}
+        self.assertEqual(set(rows), {"src/changed.c", "src/other.c"})
+        self.assertTrue(rows["src/other.c"]["offered"])
+        self.assertEqual(coverage_ledger.coverage_report(self.ctx)["scope"], "tree")
+
+    def test_a_preview_rank_does_not_mark_files_offered(self) -> None:
+        self.write_source("src/hot.c", PARSER * 4)
+        workqueue.rank_target(self.ctx, 5, record_manifest=False)
+        self.assertEqual(coverage_ledger.read_manifest(self.results), [])
+        proc = subprocess.run(
+            [str(ROOT / "bin" / "rank-work"), "--target-path", str(self.target),
+             "--target-slug", "sampleproj", "--results-dir", str(self.results),
+             "--limit", "5", "--quiet", "--output", str(self.root / "preview.jsonl")],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(coverage_ledger.read_manifest(self.results), [])
 
 
 class ReceiptTests(unittest.TestCase):

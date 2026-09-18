@@ -4338,10 +4338,11 @@ def launch_sweep(runtime: Runtime) -> "subprocess.Popen | None":
     })
     log_path = runtime.logs / "sweep.log"
     try:
-        process = subprocess.Popen(
-            command, cwd=runtime.root, env=environment,
-            stdout=log_path.open("a", encoding="utf-8"), stderr=subprocess.STDOUT,
-        )
+        with log_path.open("a", encoding="utf-8") as log_stream:
+            process = subprocess.Popen(
+                command, cwd=runtime.root, env=environment,
+                stdout=log_stream, stderr=subprocess.STDOUT,
+            )
     except OSError as exc:
         index_log(runtime, f"WARN: sweep did not start: {exc}")
         return None
@@ -4353,6 +4354,9 @@ def stop_sweep(runtime: Runtime, process: "subprocess.Popen | None") -> None:
     if process is None:
         return
     if process.poll() is None:
+        # The sweep writes its state on SIGTERM; its in-flight backend CLI
+        # child would otherwise finish one more paid decision unrecorded.
+        process_tree.kill_descendants(process.pid, signal.SIGTERM, 1.0)
         process.terminate()
         try:
             process.wait(timeout=10)
@@ -4393,57 +4397,62 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
             initialize_backend(runtime, args, guide, started_at=started_at)
             for runtime in runtimes
         ]
-        total_iterations = 0
-        failures = 0
-        while args.max_iterations == 0 or total_iterations < args.max_iterations:
-            available = [state for state in states if not state.stopped]
-            if not available:
-                break
-            for state in available:
-                if args.max_iterations and total_iterations >= args.max_iterations:
+        sweepers = [launch_sweep(runtime) for runtime in runtimes]
+        try:
+            total_iterations = 0
+            failures = 0
+            while args.max_iterations == 0 or total_iterations < args.max_iterations:
+                available = [state for state in states if not state.stopped]
+                if not available:
                     break
-                status, results = run_iteration(state)
-                total_iterations += status not in ("budget",)
-                if status != "budget" and _productive_wall_exhausted(state):
-                    continue
-                if status == "rejected":
-                    # Terminal for this backend, whatever the ensemble's peers
-                    # are doing: nothing it could wait for will change the answer.
-                    state.stopped = True
-                    failures += 1
-                    (state.runtime.logs / ".backend-unavailable").touch()
-                    (state.runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                    index_log(state.runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
-                elif status == "capacity":
-                    has_alternative = any(
-                        other is not state and not other.stopped for other in states
-                    )
-                    if has_alternative:
+                for state in available:
+                    if args.max_iterations and total_iterations >= args.max_iterations:
+                        break
+                    status, results = run_iteration(state)
+                    total_iterations += status not in ("budget",)
+                    if status != "budget" and _productive_wall_exhausted(state):
+                        continue
+                    if status == "rejected":
+                        # Terminal for this backend, whatever the ensemble's peers
+                        # are doing: nothing it could wait for will change the answer.
                         state.stopped = True
                         failures += 1
                         (state.runtime.logs / ".backend-unavailable").touch()
                         (state.runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                        index_log(state.runtime, "BACKEND_UNAVAILABLE: leaving this backend out of the remaining ensemble cycle")
-                    elif not _recover_capacity(state, results):
-                        state.stopped = True
-                        failures += 1
-                        (state.runtime.logs / ".backend-unavailable").touch()
-                        (state.runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                        index_log(state.runtime, "BACKEND_UNAVAILABLE: final ensemble backend exhausted its recovery budget")
-                elif status == "transient":
-                    state.transient_streak += 1
-                    no_retry_left = bool(
-                        args.max_iterations and total_iterations >= args.max_iterations
-                    )
-                    if no_retry_left or state.transient_streak > TRANSIENT_RETRY_MAX:
-                        state.stopped = True
-                        failures += 1
-                        (state.runtime.logs / ".backend-unavailable").touch()
-                        index_log(state.runtime, "BACKEND_UNAVAILABLE: transient failure left no healthy retry in this ensemble run")
-            cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
-            if cooldown and any(not state.stopped for state in states):
-                time.sleep(cooldown)
-        return 2 if failures == len(states) else 0
+                        index_log(state.runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
+                    elif status == "capacity":
+                        has_alternative = any(
+                            other is not state and not other.stopped for other in states
+                        )
+                        if has_alternative:
+                            state.stopped = True
+                            failures += 1
+                            (state.runtime.logs / ".backend-unavailable").touch()
+                            (state.runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                            index_log(state.runtime, "BACKEND_UNAVAILABLE: leaving this backend out of the remaining ensemble cycle")
+                        elif not _recover_capacity(state, results):
+                            state.stopped = True
+                            failures += 1
+                            (state.runtime.logs / ".backend-unavailable").touch()
+                            (state.runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                            index_log(state.runtime, "BACKEND_UNAVAILABLE: final ensemble backend exhausted its recovery budget")
+                    elif status == "transient":
+                        state.transient_streak += 1
+                        no_retry_left = bool(
+                            args.max_iterations and total_iterations >= args.max_iterations
+                        )
+                        if no_retry_left or state.transient_streak > TRANSIENT_RETRY_MAX:
+                            state.stopped = True
+                            failures += 1
+                            (state.runtime.logs / ".backend-unavailable").touch()
+                            index_log(state.runtime, "BACKEND_UNAVAILABLE: transient failure left no healthy retry in this ensemble run")
+                cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
+                if cooldown and any(not state.stopped for state in states):
+                    time.sleep(cooldown)
+            return 2 if failures == len(states) else 0
+        finally:
+            for runtime, sweeper in zip(runtimes, sweepers):
+                stop_sweep(runtime, sweeper)
 
 
 def bound_target_root(root: Path, target: str, target_path: str = "") -> Path:

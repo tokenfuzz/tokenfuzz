@@ -19,11 +19,13 @@ row per file:
 | `subsystem` | The same partition the queue uses for diversity. |
 | `card_id` | The id the ranker mints for the file's primary card, so claims resolve to files even after the queue is rewritten. |
 | `offered` | Whether the file has ever entered the ranked window. Sticky across rewrites: a file that left the window was still handed to the run. |
-| `scope` | `tree` for a whole-tree audit, `delta` for `bin/audit --since <rev>`, where the manifest lists only the delta's files. |
+| `scope` | `tree` for a whole-tree audit, `delta` for `bin/audit --since <rev>`. A delta pass rewrites only the delta's rows and keeps every other row's history, so a later whole-tree audit in the same results tree does not start from nothing. |
 
 The manifest is written from the same walk that produces the cards, so the
 two cannot disagree about what is in scope. It is a materialized view,
-rewritten atomically on every pass, not an append-only ledger.
+rewritten atomically under its own lock on every pass, not an append-only
+ledger. A preview ranked into another file with `bin/rank-work --output`
+leaves it alone, since a window the run never held was not offered.
 
 ## The report
 
