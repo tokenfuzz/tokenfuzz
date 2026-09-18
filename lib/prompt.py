@@ -807,10 +807,15 @@ def handoff_rows(context: PromptContext, agent: int) -> list[dict]:
         str(number) for number in range(1, context.num_agents + 1)
         if context.role(number) == "analysis"
     }
-    # The sweep files leads the same way an analysis session does, and has
-    # no session of its own to reproduce them.
-    analysis_agents.add("sweep")
     if not reproduce_agents:
+        return []
+    # The sweep files leads the same way an analysis session does, and has
+    # no session of its own to reproduce them. Its state file is the cheap
+    # sign that it ran; without one, or an analysis role, there is nothing
+    # to hand off and the hypotheses need not be read.
+    if (context.results_dir / "state" / "sweep.json").is_file():
+        analysis_agents.add("sweep")
+    if not analysis_agents:
         return []
     assigned: list[dict] = []
     for row in structured_state.rows(context.results_dir):

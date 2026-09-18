@@ -157,6 +157,16 @@ class RunTests(unittest.TestCase):
         self.assertEqual(workqueue.read_jsonl(workqueue.state_dir(self.results) / "claims.jsonl"), [],
                          "a lead never claims a card against real agents")
         self.assertEqual(sweep.read_state(self.results)["stop"], "exhausted")
+        # Leads reach the reproduce lane through the ordinary handoff.
+        import prompt
+        references = self.root / "references"
+        (references / "strategies").mkdir(parents=True)
+        (references / "session-rules.digest.md").write_text("digest\n", encoding="utf-8")
+        context = prompt.PromptContext(self.results, self.target, "sampleproj", references, 1)
+        self.assertEqual(context.role(1), "reproduce")
+        handed = prompt.handoff_rows(context, 1)
+        self.assertEqual([row["agent"] for row in handed], ["sweep", "sweep"])
+        self.assertIn("HANDOFF FROM ANALYSIS", prompt.handoff_directive(context, 1))
         self.assertIn("2 lead(s)", coverage_ledger.render_coverage(coverage_ledger.coverage_report(self.ctx)))
 
     def test_the_budget_stops_the_sweep_and_carries_across_runs(self) -> None:

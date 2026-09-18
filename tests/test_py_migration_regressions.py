@@ -1807,6 +1807,7 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         target_slug="sampleproj", repo_type="none",
     )
     skip_context = mock.Mock()
+    skip_context.results_dir = skip_results
     skip_context.num_agents = 2
     skip_context.mode.return_value = "generic"
     skip_context.role.return_value = "reproduce"
