@@ -365,15 +365,23 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
     """Per-directory buckets of the manifest joined to claims.
 
     `files` is what the ranker enumerated, `offered` what ever entered the
-    window, `claimed` what a session picked up, and `receipted` what a session
-    recorded reading (with `lines_examined` under those receipts). A file can
-    be claimed without being offered only through a non-ranked card (a patch
-    card), so the buckets are counted independently rather than nested.
+    window, `claimed` what a session picked up, `loaded` what a transcript
+    shows a session reading (`lines_loaded`), and `receipted` what a session
+    recorded reading (`lines_examined`). A file can be claimed without being
+    offered only through a non-ranked card (a patch card), and loaded without
+    either through discovery, so the buckets are counted independently
+    rather than nested.
     """
+    import read_ledger  # lazy: it imports this module
+
     manifest = read_manifest(ctx.results_dir)
     claimed = claimed_files(ctx, manifest)
     receipted = examined_ranges_by_file(ctx.results_dir)
-    empty = {"files": 0, "offered": 0, "claimed": 0, "receipted": 0, "lines": 0, "lines_examined": 0}
+    loaded = read_ledger.loaded_ranges_by_file(ctx.results_dir)
+    empty = {
+        "files": 0, "offered": 0, "claimed": 0, "loaded": 0, "receipted": 0,
+        "lines": 0, "lines_loaded": 0, "lines_examined": 0,
+    }
     buckets: dict[str, dict] = {}
     totals = dict(empty)
     never: list[dict] = []
@@ -386,12 +394,15 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
         offered = bool(row.get("offered"))
         is_claimed = rel in claimed
         examined = min(lines, examined_lines(receipted.get(rel, [])))
+        seen = min(lines, examined_lines(loaded.get(rel, [])))
         for target in (bucket, totals):
             target["files"] += 1
             target["lines"] += lines
+            target["lines_loaded"] += seen
             target["lines_examined"] += examined
             target["offered"] += int(offered)
             target["claimed"] += int(is_claimed)
+            target["loaded"] += int(seen > 0)
             target["receipted"] += int(examined > 0)
         if not offered and not is_claimed and not examined:
             never.append({"file": rel, "lines": lines})
@@ -431,17 +442,20 @@ def render_coverage(report: dict, fmt: str = "md") -> str:
         f"- Files enumerated: {totals['files']} ({totals['lines']} lines)",
         f"- Ever offered in the ranked window: {totals['offered']} ({_pct(totals['offered'], totals['files'])})",
         f"- Ever claimed by a session: {totals['claimed']} ({_pct(totals['claimed'], totals['files'])})",
+        f"- Loaded per transcripts: {totals['loaded']} files, "
+        f"{totals['lines_loaded']} lines ({_pct(totals['lines_loaded'], totals['lines'])})",
         f"- With an examined receipt: {totals['receipted']} files, "
         f"{totals['lines_examined']} lines ({_pct(totals['lines_examined'], totals['lines'])})",
         f"- Never offered, claimed, nor receipted: {report['never_offered']}",
         "",
-        "| Directory | Files | Offered | Claimed | Receipted | Lines | Examined |",
-        "|---|--:|--:|--:|--:|--:|--:|",
+        "| Directory | Files | Offered | Claimed | Loaded | Receipted | Lines | Loaded % | Examined % |",
+        "|---|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for row in report["directories"]:
         lines.append(
             f"| `{row['directory']}` | {row['files']} | {row['offered']} | "
-            f"{row['claimed']} | {row['receipted']} | {row['lines']} | "
+            f"{row['claimed']} | {row['loaded']} | {row['receipted']} | {row['lines']} | "
+            f"{_pct(row['lines_loaded'], row['lines'])} | "
             f"{_pct(row['lines_examined'], row['lines'])} |"
         )
     if report["untouched"]:

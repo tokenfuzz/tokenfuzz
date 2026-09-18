@@ -77,6 +77,22 @@ Receipts change three things:
 - **The report.** `bin/state coverage` adds receipted files and the examined
   line share per directory, and telemetry carries the same totals.
 
+## Loaded, from transcripts
+
+When a session ends, the harness scans its backend transcript for file reads
+and appends them to `state/reads.jsonl`: the native read tool of each backend
+(Claude `Read`, Gemini `read_file`, OpenCode `read`) with its offset and
+limit, and the shell idioms the audit shell wraps (`sed -n 'A,Bp'`, `cat`,
+`head`, `tail`, `nl`, `bin/peek FILE:A-B`). A pattern search loads matches,
+not a range, and is not recorded. Only reads inside the target tree count.
+
+The report shows these as **Loaded** beside **Receipted**. Loaded is what the
+transcript proves entered the context window, without any claim about
+attention. Receipted is the agent's own statement of what it read. The two
+disagree in useful ways: loaded without a receipt is a session that read and
+did not record, and a receipt on lines never loaded is worth a look. Neither
+is a gate, because a read the parser does not recognise is simply absent.
+
 ## What it does and does not say
 
 "Offered" and "claimed" are what the harness handed out. Neither proves an

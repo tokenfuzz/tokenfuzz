@@ -46,6 +46,7 @@ import target_profile
 import triage
 import verdict
 import vocab_rules
+import read_ledger
 import workqueue
 import report_identity
 from timeout import run_timeout
@@ -1811,6 +1812,10 @@ def run_agent(
             f"{llm_usage.substitution_note(raw_path)}",
         )
     issue, tools, events = _scan_transcript(raw_path, quota_marker)
+    # Evidence of what the session loaded, beside the receipts it wrote itself.
+    read_ledger.record_session_reads(
+        _queue_context(runtime), str(agent), runtime.backend, raw_path, session=stem,
+    )
     if (
         issue == "none"
         and runtime.backend == "claude"

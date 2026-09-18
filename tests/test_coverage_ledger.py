@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import callgraph
 import coverage_ledger
+import read_ledger
 import telemetry
 import workqueue
 
@@ -298,17 +299,23 @@ class ReportTests(unittest.TestCase):
             "file": "src/io/reader.c", "ranges": [[1, 80]], "sha1": "stale",
         })
 
+        # A transcript read is evidence beside the receipt, not a receipt.
+        workqueue.append_jsonl(read_ledger.reads_path(self.results), {
+            "file": "src/io/writer.c", "ranges": [[1, None]],
+        })
+
         report = coverage_ledger.coverage_report(self.ctx, depth=2, untouched=1)
         self.assertEqual(
             report["totals"],
-            {"files": 5, "offered": 2, "claimed": 2, "receipted": 1,
-             "lines": 1440, "lines_examined": 30},
+            {"files": 5, "offered": 2, "claimed": 2, "loaded": 1, "receipted": 1,
+             "lines": 1440, "lines_loaded": 900, "lines_examined": 30},
         )
         by_dir = {row["directory"]: row for row in report["directories"]}
         self.assertEqual(
             by_dir["src/parse"],
             {"directory": "src/parse", "files": 2, "offered": 2, "claimed": 1,
-             "receipted": 1, "lines": 420, "lines_examined": 30},
+             "loaded": 0, "receipted": 1, "lines": 420, "lines_loaded": 0,
+             "lines_examined": 30},
         )
         self.assertEqual(by_dir["src/io"]["offered"], 0)
         self.assertEqual(by_dir["tools"]["claimed"], 1)
@@ -319,7 +326,7 @@ class ReportTests(unittest.TestCase):
 
         text = coverage_ledger.render_coverage(report)
         self.assertIn("Never offered, claimed, nor receipted: 2", text)
-        self.assertIn("| `src/io` | 2 | 0 | 0 | 0 | 980 | 0% |", text)
+        self.assertIn("| `src/io` | 2 | 0 | 0 | 1 | 0 | 980 | 92% | 0% |", text)
         self.assertIn("`src/io/writer.c` (900 lines)", text)
         self.assertEqual(
             json.loads(coverage_ledger.render_coverage(report, "json"))["totals"],
