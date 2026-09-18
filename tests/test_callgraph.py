@@ -54,6 +54,7 @@ ARTIFACT = {
                 {"function": "app_reset", "path": []},
                 {"function": "app_open", "path": ["app_open"]},
             ],
+            "definitions": [["app_open", 12], ["app_parse", 40], ["app_reset", 88]],
         },
         "src/lonely.c": {
             "functions": 3, "reachable": 0, "callers": [], "callees": [], "paths": [],
@@ -863,6 +864,49 @@ class SymbolTableTests(unittest.TestCase):
         allowed = {"__future__", "subprocess", "pathlib", "os", "sys", "re"}
         self.assertTrue(imported <= allowed,
                         f"non-stdlib or unvetted imports: {imported - allowed}")
+
+
+class DefinitionTests(unittest.TestCase):
+    """The per-file function list the coverage ledger resolves receipts against."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="callgraph-defs-")
+        self.results = Path(self.temporary.name)
+        (self.results / "state").mkdir()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write(self, artifact: dict) -> None:
+        (self.results / "state" / callgraph.ARTIFACT_NAME).write_text(
+            json.dumps(artifact), encoding="utf-8",
+        )
+
+    def test_definitions_are_read_in_line_order(self) -> None:
+        self.write(ARTIFACT)
+        self.assertEqual(
+            callgraph.definitions_for(self.results, "./src/parse.c"),
+            [("app_open", 12), ("app_parse", 40), ("app_reset", 88)],
+        )
+
+    def test_missing_field_file_or_artifact_reads_as_no_definitions(self) -> None:
+        self.assertEqual(callgraph.definitions_for(self.results, "src/parse.c"), [])
+        self.write(ARTIFACT)
+        self.assertEqual(callgraph.definitions_for(self.results, "src/lonely.c"), [])
+        self.assertEqual(callgraph.definitions_for(self.results, "src/none.c"), [])
+        malformed = json.loads(json.dumps(ARTIFACT))
+        malformed["files"]["src/parse.c"]["definitions"] = [["x", "y"], ["", 3], [7]]
+        self.write(malformed)
+        self.assertEqual(callgraph.definitions_for(self.results, "src/parse.c"), [])
+
+    def test_builder_lists_every_located_function_once_by_line(self) -> None:
+        sidecar = _sidecar()
+        name_of = {"p:parse": "parse", "p:reset": "reset", "p:dup": "parse", "p:nowhere": "lost"}
+        line_of = {"p:parse": 40, "p:reset": 12, "p:dup": 40, "p:nowhere": 0}
+        self.assertEqual(
+            sidecar._definitions(name_of, name_of, line_of),
+            [["reset", 12], ["parse", 40]],
+        )
 
 
 class EntryBoundaryTests(unittest.TestCase):

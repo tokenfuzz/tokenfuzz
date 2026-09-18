@@ -33,7 +33,7 @@ ARTIFACT_NAME = "callgraph.json"
 
 # Bump when the artifact's shape or the policy that fills it changes, so a
 # stale artifact is rebuilt rather than read under new rules.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # The unit pack is bounded in tokens, not units: it carries the definitions
 # an agent would otherwise spend its first tool calls opening, and at 600
@@ -550,6 +550,29 @@ def block_for(results_dir: Path, file: str, target_root: Path | None = None) -> 
         "grounds to discard the card or downgrade a finding."
     )
     return lines
+
+
+def definitions_for(results_dir: Path, file: str) -> list[tuple[str, int]]:
+    """Parsed function definitions of one file as (name, start line), by line.
+
+    Empty when there is no graph, the file was never parsed, or the artifact
+    predates the field; callers fall back to line windows, never to a guess.
+    """
+    rel = workqueue.normalized_relpath(file)
+    data = load(results_dir) if rel else None
+    if data is None or data.get("skipped"):
+        return []
+    entry = (data.get("files") or {}).get(rel) or {}
+    out: list[tuple[str, int]] = []
+    for row in entry.get("definitions") or []:
+        if isinstance(row, list) and len(row) == 2 and isinstance(row[0], str):
+            try:
+                line = int(row[1])
+            except (TypeError, ValueError):
+                continue
+            if row[0] and line > 0:
+                out.append((row[0], line))
+    return sorted(out, key=lambda item: (item[1], item[0]))
 
 
 def callers_of(results_dir: Path, files: Iterable[str]) -> set[str] | None:

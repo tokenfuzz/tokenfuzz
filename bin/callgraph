@@ -51,7 +51,7 @@ from native_symbols import defined_symbols  # noqa: E402
 BROKEN_TREE_SITTER = ("0.26",)
 
 # Mirrors lib/callgraph.SCHEMA_VERSION; the reader refuses any other value.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # A rendered route longer than this is not a recipe an agent can act on, and
 # the block is a summary, not a trace.
@@ -182,6 +182,21 @@ def _key_units(node: str, callers: dict[str, set[str]], callees: dict[str, set[s
         default=None,
     )
     return caller, callee
+
+
+def _definitions(nodes, name_of: dict[str, str], line_of: dict[str, int]) -> list[list]:
+    """`[name, start line]` for every parsed function in a file, by line.
+
+    This is the file's unit list for the coverage ledger: a receipt names
+    functions, and the ledger resolves them to line ranges here. A unit
+    without a start line cannot bound a range and is left out.
+    """
+    rows = {
+        (name_of.get(node, ""), int(line_of.get(node, 0) or 0))
+        for node in nodes
+    }
+    return [[name, line] for name, line in sorted(rows, key=lambda r: (r[1], r[0]))
+            if name and line > 0]
 
 
 def _shortest_paths(roots: list[str], callees: dict[str, set[str]]) -> dict[str, list[str]]:
@@ -351,6 +366,7 @@ def build(args) -> dict:
             "caller_overflow": ranked_callers[args.neighbour_files:],
             "paths": entries,
             "excerpts": excerpts,
+            "definitions": _definitions(functions, name_of, line_of),
         }
 
     return {
