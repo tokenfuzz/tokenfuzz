@@ -11,6 +11,7 @@ from pathlib import Path
 
 import bug_classes
 import callgraph
+import coverage_ledger
 import structured_state
 import target_config
 import workqueue
@@ -525,6 +526,7 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
     fixes = card.get("fix_hashes") or []
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
     lines += workqueue.peer_fix_markdown(card)
+    lines += coverage_ledger.examined_markdown(context.results_dir, card.get("file", ""))
     lines += _ruled_out_routes(context, card.get("file", ""))
     lines += _blocked_routes(context, str(card.get("id", "")))
     lines += callgraph.block_for(

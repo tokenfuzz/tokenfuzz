@@ -131,6 +131,7 @@ update-card   --card-id ID --status claimed|discarded|crash|find|blocked [--note
 add-run       --agent N --hypothesis-id H-... --mode MODE --testcase TC \
               --asan-output ASAN --verdict VERDICT       # bin/probe sets these for you
 add-note      --agent N --hypothesis-id H-... --kind data-flow|guard|variants|decision|context --text '...'
+mark-examined --agent N --file path --lines 10-80[,120-140] | --functions a,b [--card-id ID]
 show-recent   [--agent N] [--hyps N] [--runs N] [--claims N] [--notes N]
 recent-hyps   [--agent N] [--card-id ID] [--status REGEX] [--strategy S] [--limit N]
 recent-runs   [--agent N] [--hypothesis-id H-...] [--verdict REGEX] [--limit N]
@@ -172,7 +173,10 @@ MISSED alone is not proof of unreachability.
   true ENV-BLOCKED — no alternate build helps.
 - After context compression: run `bin/state resume --agent N`, resume the top
   PENDING item before claiming new work, and do not re-read `PRIOR SESSION SEED`
-  ranges.
+  ranges or the card's **Examined so far** ranges.
+- Before closing or leaving a card: `bin/state mark-examined --agent N --file
+  <path> --lines A-B` (or `--functions a,b`) for what you actually read. The
+  receipt drives the next session's start point and the coverage report.
 
 ## CRASH promotion gate
 

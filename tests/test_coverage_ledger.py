@@ -15,6 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import callgraph
 import coverage_ledger
 import telemetry
 import workqueue
@@ -114,6 +115,134 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(manifest[0]["scope"], "delta")
 
 
+class ReceiptTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="coverage-receipts-")
+        self.root = Path(self.temporary.name)
+        self.target = self.root / "target"
+        self.results = self.root / "results"
+        (self.target / "src").mkdir(parents=True)
+        self.ctx = workqueue.Context(ROOT, self.target, "sampleproj", self.results, "")
+        workqueue.init_state(self.ctx)
+        self.source = self.target / "src" / "app_parse.c"
+        self.source.write_text("\n".join(f"line {n}" for n in range(1, 101)) + "\n", encoding="utf-8")
+        workqueue.write_cards(workqueue.work_cards_path(self.ctx), workqueue.rank_target(self.ctx, 5))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_callgraph(self, definitions: list[list]) -> None:
+        (self.results / "state" / callgraph.ARTIFACT_NAME).write_text(json.dumps({
+            "version": callgraph.SCHEMA_VERSION, "signature": "s", "root": str(self.target),
+            "languages": ["c"], "entry": {}, "coverage": {},
+            "files": {"src/app_parse.c": {
+                "functions": len(definitions), "reachable": 0, "callers": [], "callees": [],
+                "paths": [], "definitions": definitions,
+            }},
+        }), encoding="utf-8")
+
+    def test_a_line_receipt_is_recorded_against_the_manifest_hash(self) -> None:
+        row = coverage_ledger.record_receipt(
+            self.ctx, "1", "./src/app_parse.c", lines="10-20,15-30,50", card_id="WORK-x",
+        )
+        self.assertEqual(row["ranges"], [[10, 30], [50, 50]])
+        self.assertEqual(row["sha1"], coverage_ledger.manifest_row(self.results, "src/app_parse.c")["sha1"])
+        info = coverage_ledger.file_examined(self.results, "src/app_parse.c")
+        self.assertEqual((info["examined_lines"], info["fraction"]), (22, 0.22))
+        self.assertEqual(coverage_ledger.examined_fraction_by_file(self.results), {"src/app_parse.c": 0.22})
+
+    def test_receipts_outside_the_file_or_manifest_are_refused(self) -> None:
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "has 100 lines"):
+            coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="90-140")
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "not in the manifest"):
+            coverage_ledger.record_receipt(self.ctx, "1", "src/missing.c", lines="1-2")
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "needs --lines or --functions"):
+            coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c")
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "empty or starts before"):
+            coverage_ledger.parse_ranges("30-10")
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "not N or N-M"):
+            coverage_ledger.parse_ranges("ten")
+        self.assertEqual(workqueue.read_jsonl(coverage_ledger.receipts_path(self.results)), [])
+
+    def test_function_receipts_resolve_through_the_call_graph(self) -> None:
+        self.write_callgraph([["app_open", 10], ["app_parse", 40], ["app_reset", 80]])
+        self.assertEqual(
+            coverage_ledger.function_ranges(self.results, "src/app_parse.c", 100),
+            [("app_open", 10, 39), ("app_parse", 40, 79), ("app_reset", 80, 100)],
+        )
+        row = coverage_ledger.record_receipt(
+            self.ctx, "2", "src/app_parse.c", functions="app_parse, app_reset",
+        )
+        self.assertEqual(row["ranges"], [[40, 100]])
+        self.assertEqual(row["functions"], ["app_parse", "app_reset"])
+        info = coverage_ledger.file_examined(self.results, "src/app_parse.c")
+        self.assertEqual(info["unexamined_functions"], [("app_open", 10, 39)])
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "unknown function.*app_close.*parsed functions are"):
+            coverage_ledger.record_receipt(self.ctx, "2", "src/app_parse.c", functions="app_close")
+
+    def test_function_receipts_need_a_parsed_file(self) -> None:
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "parsed no definitions.*use --lines"):
+            coverage_ledger.record_receipt(self.ctx, "2", "src/app_parse.c", functions="app_parse")
+
+    def test_a_receipt_on_changed_content_stops_counting(self) -> None:
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-100")
+        self.assertEqual(coverage_ledger.file_examined(self.results, "src/app_parse.c")["fraction"], 1.0)
+        self.source.write_text("changed\n" * 100, encoding="utf-8")
+        os.utime(self.source, ns=(self.source.stat().st_mtime_ns + 10**9,) * 2)
+        workqueue.rank_target(self.ctx, 5)
+        self.assertEqual(coverage_ledger.file_examined(self.results, "src/app_parse.c")["fraction"], 0.0)
+        self.assertEqual(coverage_ledger.examined_fraction_by_file(self.results), {})
+
+    def test_examined_markdown_names_ranges_and_what_is_left(self) -> None:
+        self.assertEqual(coverage_ledger.examined_markdown(self.results, "src/none.c"), [])
+        fresh = coverage_ledger.examined_markdown(self.results, "src/app_parse.c")
+        self.assertIn("0% of 100 lines (no receipt yet)", fresh[0])
+        self.assertIn("mark-examined --agent N --file src/app_parse.c", fresh[-1])
+        self.write_callgraph([[f"fn{n:02d}", n * 5 + 1] for n in range(12)])
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-10")
+        lines = coverage_ledger.examined_markdown(self.results, "src/app_parse.c")
+        self.assertIn("10% of 100 lines (lines 1-10)", lines[0])
+        self.assertIn("`fn02` (l.11)", lines[1])
+        self.assertIn("+2 more", lines[1], "the list is bounded, not a file listing")
+        self.assertNotIn("fn00", lines[1], "a receipted function is not listed as unexamined")
+
+    def test_resume_and_card_directive_carry_the_examined_block(self) -> None:
+        import prompt
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-25")
+        brief = workqueue.state_resume(self.ctx, "3", claim=False)
+        self.assertIn("src/app_parse.c", brief)
+        self.assertIn("**Examined so far:** 25% of 100 lines (lines 1-25)", brief)
+        references = self.root / "references"
+        (references / "strategies").mkdir(parents=True)
+        (references / "session-rules.digest.md").write_text("digest\n", encoding="utf-8")
+        context = prompt.PromptContext(self.results, self.target, "sampleproj", references, 1)
+        directive = prompt.work_card_directive(context, 1, force=True)
+        self.assertIn("ASSIGNED WORK CARD", directive)
+        self.assertIn("**Examined so far:** 25% of 100 lines", directive)
+
+    def test_state_mark_examined_command_records_and_refuses(self) -> None:
+        base = [str(ROOT / "bin" / "state"), "--target-path", str(self.target),
+                "--target-slug", "sampleproj", "--results-dir", str(self.results)]
+        proc = subprocess.run(
+            [*base, "mark-examined", "--agent", "1", "--file", "src/app_parse.c",
+             "--lines", "1-40", "--card-id", "WORK-x"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(proc.stdout.startswith("OK: mark-examined"), proc.stdout)
+        refused = subprocess.run(
+            [*base, "mark-examined", "--agent", "1", "--file", "src/app_parse.c", "--lines", "1-400"],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn("has 100 lines", refused.stderr)
+        report = subprocess.run(
+            [*base, "coverage", "--format", "json"], capture_output=True, text=True, check=False,
+        )
+        totals = json.loads(report.stdout)["totals"]
+        self.assertEqual((totals["receipted"], totals["lines_examined"]), (1, 40))
+
+
 class ReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="coverage-report-")
@@ -131,6 +260,7 @@ class ReportTests(unittest.TestCase):
         workqueue.write_jsonl(coverage_ledger.manifest_path(self.results), [
             {
                 "file": rel, "lines": lines, "offered": offered, "scope": "tree",
+                "sha1": "h-" + Path(rel).stem,
                 "card_id": workqueue.ranked_card_id("sampleproj", rel),
                 "subsystem": workqueue.subsystem_for(rel),
             }
@@ -160,14 +290,25 @@ class ReportTests(unittest.TestCase):
         ])
         self.claim("PATCH-1")
 
+        # A receipt on the current hash counts; one on stale content does not.
+        workqueue.append_jsonl(coverage_ledger.receipts_path(self.results), {
+            "file": "src/parse/app_parse.c", "ranges": [[1, 30]], "sha1": "h-app_parse",
+        })
+        workqueue.append_jsonl(coverage_ledger.receipts_path(self.results), {
+            "file": "src/io/reader.c", "ranges": [[1, 80]], "sha1": "stale",
+        })
+
         report = coverage_ledger.coverage_report(self.ctx, depth=2, untouched=1)
         self.assertEqual(
-            report["totals"], {"files": 5, "offered": 2, "claimed": 2, "lines": 1440},
+            report["totals"],
+            {"files": 5, "offered": 2, "claimed": 2, "receipted": 1,
+             "lines": 1440, "lines_examined": 30},
         )
         by_dir = {row["directory"]: row for row in report["directories"]}
         self.assertEqual(
             by_dir["src/parse"],
-            {"directory": "src/parse", "files": 2, "offered": 2, "claimed": 1, "lines": 420},
+            {"directory": "src/parse", "files": 2, "offered": 2, "claimed": 1,
+             "receipted": 1, "lines": 420, "lines_examined": 30},
         )
         self.assertEqual(by_dir["src/io"]["offered"], 0)
         self.assertEqual(by_dir["tools"]["claimed"], 1)
@@ -177,8 +318,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report["directories"][0]["directory"], "src/io")
 
         text = coverage_ledger.render_coverage(report)
-        self.assertIn("Never offered nor claimed: 2", text)
-        self.assertIn("| `src/io` | 2 | 0 | 0 | 980 |", text)
+        self.assertIn("Never offered, claimed, nor receipted: 2", text)
+        self.assertIn("| `src/io` | 2 | 0 | 0 | 0 | 980 | 0% |", text)
         self.assertIn("`src/io/writer.c` (900 lines)", text)
         self.assertEqual(
             json.loads(coverage_ledger.render_coverage(report, "json"))["totals"],
@@ -191,7 +332,8 @@ class ReportTests(unittest.TestCase):
         self.assertIn("No manifest yet", coverage_ledger.render_coverage(report))
         self.assertEqual(
             telemetry.tree_coverage(self.results),
-            {"files": 0, "offered": 0, "offered_share": None},
+            {"files": 0, "offered": 0, "offered_share": None,
+             "receipted": 0, "lines_examined_share": None},
         )
 
     def test_state_coverage_command_renders_the_report(self) -> None:

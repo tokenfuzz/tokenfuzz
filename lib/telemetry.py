@@ -420,12 +420,21 @@ def tree_coverage(results_dir: Path) -> dict:
     rather than as fully examined.
     """
     manifest = coverage_ledger.read_manifest(Path(results_dir))
+    receipted = coverage_ledger.examined_ranges_by_file(Path(results_dir))
     files = len(manifest)
     offered = sum(1 for row in manifest if row.get("offered"))
+    lines = sum(int(row.get("lines") or 0) for row in manifest)
+    examined = sum(
+        min(int(row.get("lines") or 0),
+            coverage_ledger.examined_lines(receipted.get(str(row.get("file") or ""), [])))
+        for row in manifest
+    )
     return {
         "files": files,
         "offered": offered,
         "offered_share": round(offered / files, 4) if files else None,
+        "receipted": sum(1 for row in manifest if receipted.get(row.get("file"))),
+        "lines_examined_share": round(examined / lines, 4) if lines else None,
     }
 
 

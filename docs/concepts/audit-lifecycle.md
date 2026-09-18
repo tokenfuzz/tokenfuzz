@@ -140,9 +140,12 @@ cannot prove its unexamined functions exhausted. A surface that no configured
 build or mode can execute at all is marked blocked rather than counted as
 clean evidence.
 
-Work cards are leased so two agents do not step on each other. After a context
-compaction, the next iteration tells the agent which regions it has already
-read so it does not re-cover the same ground.
+Work cards are leased so two agents do not step on each other. An agent
+records the line ranges or functions it actually read with
+`bin/state mark-examined`; the card then carries an **Examined so far** block
+on every later pickup, including after a context compaction, so the next
+session starts from the unexamined functions instead of re-reading the file.
+See [Review coverage](coverage.md).
 
 When an agent confirms a crash or finding in a subsystem, the queue relaxes the
 usual subsystem-diversity rule for that agent. Neighbouring cards are cheaper

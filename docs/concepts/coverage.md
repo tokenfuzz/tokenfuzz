@@ -45,13 +45,48 @@ Directories are listed least-covered first, and the largest files that were
 never offered nor claimed are named, because those are what an operator acts
 on: widen `RANK_WORK_LIMIT`, pin a lane, or run a delta over that directory.
 
+## Receipts
+
+A claim says a card was handed out. A receipt says which lines were read:
+
+```bash
+bin/state mark-examined --agent 1 --file src/parse.c --lines 1-120,200-260
+bin/state mark-examined --agent 1 --file src/parse.c --functions app_parse,app_reset
+```
+
+Receipts append to `state/receipts.jsonl`, pinned to the file's content hash
+from the manifest. The harness verifies each one before recording it: the
+file must be in the manifest, every range must lie inside it, and a function
+name must be one the [call graph](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
+parsed in that file, resolved to the lines from its definition to the next
+one. A receipt that cannot be checked is refused, and a receipt on content
+that has since changed stops counting.
+
+The unit is a line range because every language has lines. Functions are a
+view over it: where the call graph parsed the file, the card and
+`bin/state resume` list the functions no receipt reaches.
+
+Receipts change three things:
+
+- **The next pickup.** Every card and resume brief carries an **Examined so
+  far** block with the receipted ranges and the unexamined functions, so a
+  session after a context compaction, or a different agent on the same broad
+  card, starts from what is left instead of the top of the file.
+- **Reoffer order.** Among broad cards with the same number of prior
+  conclusions, the claimer offers the least-read file first.
+- **The report.** `bin/state coverage` adds receipted files and the examined
+  line share per directory, and telemetry carries the same totals.
+
 ## What it does and does not say
 
 "Offered" and "claimed" are what the harness handed out. Neither proves an
-agent read the file, and a claim is not a verdict on the file's contents. The
-number to read a clean result against is the never-offered share: a tree
-where most files were never in the window has been sampled, not reviewed,
-and a clean result over it is silence, not evidence.
+agent read the file, and a claim is not a verdict on the file's contents. A
+receipt is the agent's own record of reading, checked for shape but not for
+attention, so it bounds what could have been reviewed rather than proving
+what was understood. The number to read a clean result against is the
+never-offered share together with the unexamined line share: a tree where
+most files were never in the window has been sampled, not reviewed, and a
+clean result over it is silence, not evidence.
 
 The benchmark telemetry carries the same totals as `coverage.tree`, beside the
 per-lane card shares, so a run report shows how much of the tree its window

@@ -304,7 +304,8 @@ class TelemetryTests(unittest.TestCase):
         ])
         self.assertEqual(telemetry.coverage(self.results), {
             "cards": 4, "examined": 3, "examined_share": 0.75,
-            "tree": {"files": 4, "offered": 2, "offered_share": 0.5},
+            "tree": {"files": 4, "offered": 2, "offered_share": 0.5,
+                     "receipted": 0, "lines_examined_share": None},
             "lanes": {
                 "S3": {"cards": 2, "examined": 1, "concluded": 1,
                        "files": 2, "files_examined": 1, "examined_share": 0.5},
@@ -387,7 +388,8 @@ class TelemetryTests(unittest.TestCase):
         )
         self.assertEqual(summary["coverage"], {
             "cards": 0, "examined": 0, "examined_share": None, "lanes": {},
-            "tree": {"files": 0, "offered": 0, "offered_share": None},
+            "tree": {"files": 0, "offered": 0, "offered_share": None,
+                     "receipted": 0, "lines_examined_share": None},
         })
         self.assertEqual(summary["lineage_rows"], 0)
 

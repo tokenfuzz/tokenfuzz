@@ -1671,6 +1671,33 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual(chosen["id"], "WORK-B")
 
+    def test_equally_mined_broad_cards_reoffer_the_least_read_file_first(self) -> None:
+        # Hypothesis counts cannot tell a file whose functions were mostly
+        # read from one nobody recorded reading; the receipt ledger can, so
+        # revisits go to what has the most left to find.
+        import coverage_ledger
+        self.write_cards([
+            self.card("WORK-A", "src/a.c", score=20),
+            self.card("WORK-B", "lib/b.c", score=10),
+        ])
+        for cid in ("WORK-A", "WORK-B"):
+            workqueue.append_jsonl(
+                workqueue.state_dir(self.results) / "claims.jsonl",
+                {"card_id": cid, "agent": "1", "status": "discarded",
+                 "updated_at": workqueue.now_iso(), "note": "dry pass"},
+            )
+        workqueue.write_jsonl(coverage_ledger.manifest_path(self.results), [
+            {"file": "src/a.c", "lines": 100, "sha1": "ha", "offered": True},
+            {"file": "lib/b.c", "lines": 100, "sha1": "hb", "offered": True},
+        ])
+        first = workqueue.claim_next_card(self.ctx, "2", mode="generic", claim=False)
+        self.assertEqual(first["id"], "WORK-A", "rank order holds without receipts")
+        workqueue.append_jsonl(coverage_ledger.receipts_path(self.results), {
+            "file": "src/a.c", "ranges": [[1, 90]], "sha1": "ha",
+        })
+        chosen = workqueue.claim_next_card(self.ctx, "2", mode="generic", claim=False)
+        self.assertEqual(chosen["id"], "WORK-B", "the mostly-read file yields")
+
     def test_artifact_scoped_rejections_never_retire_a_card(self) -> None:
         # Only a verdict about the surface generalises. A bad reproducer or a
         # duplicate says nothing about the card's other angles.

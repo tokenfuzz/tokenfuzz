@@ -233,6 +233,8 @@ bin/state add-run       --agent N --hypothesis-id H-... --mode MODE --testcase T
                         [--testcase-sha1 HEX] [--sanitizer-runs N]   # bin/probe sets these
 bin/state add-note      --agent N --hypothesis-id H-... \
                         --kind data-flow|guard|variants|decision|context --text '...'
+bin/state mark-examined --agent N --file path --lines 10-80[,120-140] | --functions a,b [--card-id ID]
+bin/state coverage      [--depth N] [--format md|json]   # files never offered/claimed/receipted
 bin/state show-recent   [--agent N] [--hyps N] [--runs N] [--claims N] [--notes N]
 bin/state recent-hyps   [--agent N] [--card-id ID] [--status REGEX] [--strategy S] [--limit N]
 bin/state recent-runs   [--agent N] [--hypothesis-id H-...] [--card-id ID] [--verdict REGEX] [--limit N]
@@ -248,6 +250,15 @@ hypotheses and workers on the same card. Five consecutive `input-rejected`
 rows recommend `bin/find-seed` only for a byte/parser card; API and
 call-sequence cards get setup/sequence repair guidance instead. This advice
 never closes, demotes, or re-ranks the card.
+
+Before you close, discard, or leave a card, record the lines you actually
+read with `bin/state mark-examined --agent N --file <path> --lines A-B[,C-D]`
+(or `--functions a,b` when the card lists parsed functions). A claim only
+says the card was handed out; the receipt is what lets the next session on
+the same file start from its unexamined functions, orders revisits toward
+the least-read files, and feeds `bin/state coverage`. Record what you read,
+not what you skimmed; the harness refuses ranges outside the file and
+function names the call graph did not parse.
 
 `update-card --status discarded` requires the configured evidence floor
 (default: three card-linked CLEAN runs across two distinct hypothesis shapes

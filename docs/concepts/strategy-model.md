@@ -144,6 +144,9 @@ hypothesis closes, so a wedged or killed agent does not poison the queue.
 
 These rules reduce duplicate work while allowing different strategies on the
 same target. A card an agent inspects but does not adopt remains available.
+Among broad cards with the same number of prior conclusions, the claimer
+offers the file with the smallest share of receipted lines first, so revisits
+go to what was read least (see [Review coverage](coverage.md)).
 
 ## Strategy rotation
 

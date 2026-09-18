@@ -126,6 +126,7 @@ state/run-config.json        the run's recorded mode, security profile, and delt
 state/unreachable-routes.jsonl   anchored disproofs later work cards render
 state/callgraph.json         optional call-neighbourhood context
 state/manifest.jsonl         every auditable file, with content identity and whether it was ever offered
+state/receipts.jsonl         line ranges a session recorded reading, pinned to the file's content hash
 ```
 
 `state/manifest.jsonl` is rewritten by every ranking pass and lists every

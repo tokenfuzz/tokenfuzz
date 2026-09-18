@@ -348,9 +348,10 @@ ledger each with filters. `card-yield` replays the queue: claims, probed
 cards, runs, and diagnostics per rank bucket, and the share of the queue that
 was ever touched, so a ranking change is judged by conversion rather than
 taste. `strategy-yield` reports per-strategy runs, seconds, and diagnostics.
-`coverage` joins the auditable-file manifest to the claims so the files the
-ranked window never offered are listed rather than inferred; see
-[Review coverage](../concepts/coverage.md).
+`coverage` joins the auditable-file manifest to the claims and to the
+`mark-examined` receipts, so the files the ranked window never offered, and
+the share of lines no session recorded reading, are listed rather than
+inferred; see [Review coverage](../concepts/coverage.md).
 The `list-*` commands emit compact JSONL suitable for scripts. Use
 `show-card`, `show-crash`, or `show-finding` with an id for one full compact
 record. Run `bin/state --help` and `bin/state <subcommand> --help` for filters

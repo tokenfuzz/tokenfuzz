@@ -298,6 +298,19 @@ def main(argv: list[str]) -> int:
     p_run.add_argument("--closest", default="", help="the frame coverage reached (HIT) or came closest to (MISSED)")
     p_run.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
+    p_examined = sub.add_parser(
+        "mark-examined",
+        help="record the line ranges or functions of a file this agent actually read",
+        formatter_class=formatter,
+    )
+    p_examined.add_argument("--agent", required=True, help="agent number recording the receipt")
+    p_examined.add_argument("--file", required=True, help="target-relative source path from the manifest")
+    p_examined.add_argument("--lines", default="", help="line ranges read, e.g. 10-80,120-140")
+    p_examined.add_argument("--functions", default="", help="comma-separated parsed function names read; resolved to lines through the call graph")
+    p_examined.add_argument("--card-id", default="", help="work card the reading belongs to")
+    p_examined.add_argument("--note", default="", help="short note stored on the receipt")
+    p_examined.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
+
     p_note = sub.add_parser(
         "add-note", help="record a structured note on a hypothesis or card", formatter_class=formatter,
     )
@@ -488,6 +501,17 @@ def main(argv: list[str]) -> int:
     if args.cmd == "list-findings":
         for row in list_findings(ctx, status_filter=args.status, limit=args.limit):
             print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "mark-examined":
+        try:
+            row = coverage_ledger.record_receipt(
+                ctx, args.agent, args.file, lines=args.lines,
+                functions=args.functions, card_id=args.card_id, note=args.note,
+            )
+        except coverage_ledger.ReceiptError as exc:
+            print(f"[state] mark-examined: {exc}", file=sys.stderr)
+            return 2
+        _emit_mutator("mark-examined", row, args.json)
         return 0
     if args.cmd == "coverage":
         report = coverage_ledger.coverage_report(ctx, args.depth, args.untouched)

@@ -4375,8 +4375,14 @@ def _claim_next_card_locked(
     # at all (the opening iteration), since a dry hypothesis is itself the
     # diminishing-returns signal for a card no conclusion can close.
     if len(preferred) > 1:
-        if conclusion_counts or unreachable_counts or distinct_counts:
-            def _demotion_key(c: dict) -> tuple[int, int]:
+        # Receipts order revisits among equally-mined broad cards: a file
+        # whose functions were mostly read already has less left to find than
+        # one nobody recorded reading, and hypothesis counts cannot tell the
+        # two apart.
+        import coverage_ledger  # lazy: it imports this module
+        examined = coverage_ledger.examined_fraction_by_file(ctx.results_dir)
+        if conclusion_counts or unreachable_counts or distinct_counts or examined:
+            def _demotion_key(c: dict) -> tuple[int, int, int]:
                 cid = c.get("id", "")
                 lc = latest.get(cid)
                 own_active_lease = bool(
@@ -4389,7 +4395,10 @@ def _claim_next_card_locked(
                     + unreachable_counts.get(cid, 0),
                     distinct_counts.get(cid, 0),
                 )
-                return (0 if own_active_lease else 1, outcomes)
+                read_share = int(round(
+                    examined.get(normalized_relpath(c.get("file", "")), 0.0) * 100
+                )) if _is_broad_file_card(c) else 0
+                return (0 if own_active_lease else 1, outcomes, read_share)
 
             preferred.sort(key=_demotion_key)
 
@@ -6439,6 +6448,8 @@ def state_resume(
             if patch_card_text:
                 lines.append(f"- Related patch cards: {patch_card_text}")
             lines.extend(peer_fix_markdown(card, include_diff=fresh_pickup))
+            import coverage_ledger  # lazy: it imports this module
+            lines.extend(coverage_ledger.examined_markdown(ctx.results_dir, card.get("file", "")))
             if str(card.get("kind", "")) == "s1-patch" or str(card.get("strategy", "")).upper() == "S1":
                 lines.extend(
                     [
