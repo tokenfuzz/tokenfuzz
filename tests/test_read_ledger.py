@@ -121,7 +121,7 @@ class RecordingTests(unittest.TestCase):
             ]}},
         ])
         self.assertEqual(
-            read_ledger.record_session_reads(self.ctx, "1", "claude", raw, session="s1"), 2,
+            read_ledger.record_session_reads(self.results, self.target, self.root, "1", "claude", raw, session="s1"), 2,
         )
         rows = workqueue.read_jsonl(read_ledger.reads_path(self.results))
         self.assertEqual([row["file"] for row in rows], ["src/a.c", "src/b.c"])
@@ -138,16 +138,16 @@ class RecordingTests(unittest.TestCase):
             {"type": "item.completed", "item": {"type": "command_execution",
              "command": f"cat {self.target}/src/b.c && head -n 900 {self.target}/src/a.c"}},
         ])
-        read_ledger.record_session_reads(self.ctx, "2", "codex", raw)
+        read_ledger.record_session_reads(self.results, self.target, self.root, "2", "codex", raw)
         self.assertEqual(
             read_ledger.loaded_ranges_by_file(self.results),
             {"src/a.c": [(1, 100)], "src/b.c": [(1, 50)]},
         )
 
     def test_a_missing_transcript_or_no_reads_records_nothing(self) -> None:
-        self.assertEqual(read_ledger.record_session_reads(self.ctx, "1", "claude", self.root / "none.raw"), 0)
+        self.assertEqual(read_ledger.record_session_reads(self.results, self.target, self.root, "1", "claude", self.root / "none.raw"), 0)
         raw = self.write_transcript([{"type": "result", "result": "done"}])
-        self.assertEqual(read_ledger.record_session_reads(self.ctx, "1", "claude", raw), 0)
+        self.assertEqual(read_ledger.record_session_reads(self.results, self.target, self.root, "1", "claude", raw), 0)
         self.assertFalse(read_ledger.reads_path(self.results).exists())
         self.assertEqual(coverage_ledger.coverage_report(self.ctx)["totals"]["loaded"], 0)
 

@@ -807,7 +807,10 @@ def handoff_rows(context: PromptContext, agent: int) -> list[dict]:
         str(number) for number in range(1, context.num_agents + 1)
         if context.role(number) == "analysis"
     }
-    if not reproduce_agents or not analysis_agents:
+    # The sweep files leads the same way an analysis session does, and has
+    # no session of its own to reproduce them.
+    analysis_agents.add("sweep")
+    if not reproduce_agents:
         return []
     assigned: list[dict] = []
     for row in structured_state.rows(context.results_dir):

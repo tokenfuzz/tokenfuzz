@@ -480,6 +480,11 @@ def _estimate_tokens(text: str) -> int:
     return math.ceil(len(text) / _CHARS_PER_TOKEN) if text else 0
 
 
+def estimate_tokens(text: str) -> int:
+    """The ledger's chars-per-token heuristic, for spend a backend does not report."""
+    return _estimate_tokens(text)
+
+
 def _sum_assistant_content_chars(raw: str) -> int:
     """Estimate assistant-content char count from a text/streaming raw log.
 

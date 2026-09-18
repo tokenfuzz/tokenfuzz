@@ -47,6 +47,7 @@ import triage
 import verdict
 import vocab_rules
 import read_ledger
+import sweep
 import workqueue
 import report_identity
 from timeout import run_timeout
@@ -1814,7 +1815,8 @@ def run_agent(
     issue, tools, events = _scan_transcript(raw_path, quota_marker)
     # Evidence of what the session loaded, beside the receipts it wrote itself.
     read_ledger.record_session_reads(
-        _queue_context(runtime), str(agent), runtime.backend, raw_path, session=stem,
+        runtime.results, runtime.target_root, runtime.root,
+        str(agent), runtime.backend, raw_path, session=stem,
     )
     if (
         issue == "none"
@@ -4267,38 +4269,103 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         )
         drive = run_iteration if bounded else run_continuous
         state.max_generations = 0 if bounded else args.max_iterations
-        while args.max_iterations == 0 or state.iteration < args.max_iterations:
-            status, results = drive(state)
-            if status in ("budget", "stalled"):
-                break
-            if _productive_wall_exhausted(state):
-                break
-            if status == "rejected":
-                # No recovery: the provider refused the request itself, so a
-                # pause buys nothing and would be subtracted from the wall as
-                # if the provider had withheld capacity it was going to return.
+        sweeper = launch_sweep(runtime)
+        try:
+            return _drive_backend(runtime, args, state, drive)
+        finally:
+            stop_sweep(runtime, sweeper)
+
+
+def _drive_backend(runtime: Runtime, args, state: "BackendState", drive) -> int:
+    while args.max_iterations == 0 or state.iteration < args.max_iterations:
+        status, results = drive(state)
+        if status in ("budget", "stalled"):
+            break
+        if _productive_wall_exhausted(state):
+            break
+        if status == "rejected":
+            # No recovery: the provider refused the request itself, so a
+            # pause buys nothing and would be subtracted from the wall as
+            # if the provider had withheld capacity it was going to return.
+            (runtime.logs / ".backend-unavailable").touch()
+            (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+            index_log(runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
+            return 2
+        if status == "capacity":
+            can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
+            if not can_retry or not _recover_capacity(state, results):
                 (runtime.logs / ".backend-unavailable").touch()
                 (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                index_log(runtime, "BACKEND_UNAVAILABLE: provider refused the request; retrying cannot clear it")
+                index_log(runtime, "BACKEND_UNAVAILABLE: provider did not recover within the pause budget")
                 return 2
-            if status == "capacity":
-                can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
-                if not can_retry or not _recover_capacity(state, results):
-                    (runtime.logs / ".backend-unavailable").touch()
-                    (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                    index_log(runtime, "BACKEND_UNAVAILABLE: provider did not recover within the pause budget")
-                    return 2
-            if status == "transient":
-                can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
-                if not can_retry or not _recover_transient(state):
-                    (runtime.logs / ".backend-unavailable").touch()
-                    (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
-                    index_log(runtime, "BACKEND_UNAVAILABLE: transient provider failures did not clear")
-                    return 2
-            cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
-            if cooldown and (args.max_iterations == 0 or state.iteration < args.max_iterations):
-                time.sleep(cooldown)
-        return 0
+        if status == "transient":
+            can_retry = args.max_iterations == 0 or state.iteration < args.max_iterations
+            if not can_retry or not _recover_transient(state):
+                (runtime.logs / ".backend-unavailable").touch()
+                (runtime.logs / ".run-quality").write_text("provider_limited\n", encoding="utf-8")
+                index_log(runtime, "BACKEND_UNAVAILABLE: transient provider failures did not clear")
+                return 2
+        cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
+        if cooldown and (args.max_iterations == 0 or state.iteration < args.max_iterations):
+            time.sleep(cooldown)
+    return 0
+
+
+def launch_sweep(runtime: Runtime) -> "subprocess.Popen | None":
+    """Start the budgeted sweep beside the agent slots when configured.
+
+    A separate process rather than a steward step: its calls are serial and
+    slow, and the steward tick must stay short so lane rotation and the
+    queue refresh are not delayed behind them. The state files it writes are
+    the locked JSONL ledgers the slots already share. Its decision counter is
+    its own, and its call cap is off, because the token budget bounds it.
+    """
+    budget = int(getattr(runtime.config, "sweep_token_budget", 0) or 0)
+    if budget <= 0 or getattr(runtime, "delta", None) is not None:
+        return None
+    if str(getattr(runtime, "fixed_strategy", "")).upper():
+        return None
+    command = [
+        str(runtime.root / "bin" / "sweep"), "--target-path", str(runtime.target_root),
+        "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
+    ]
+    environment = dict(os.environ)
+    environment.update({
+        "LOGDIR": str(runtime.logs),
+        "LLM_DECIDE_COUNTER_FILE": str(runtime.logs / ".llm_decisions_sweep"),
+        "LLM_DECIDE_MAX_CALLS": "0",
+        "SCRIPT_ROOT": str(runtime.root),
+    })
+    log_path = runtime.logs / "sweep.log"
+    try:
+        process = subprocess.Popen(
+            command, cwd=runtime.root, env=environment,
+            stdout=log_path.open("a", encoding="utf-8"), stderr=subprocess.STDOUT,
+        )
+    except OSError as exc:
+        index_log(runtime, f"WARN: sweep did not start: {exc}")
+        return None
+    index_log(runtime, f"sweep: started pid={process.pid} budget={budget} log={log_path.name}")
+    return process
+
+
+def stop_sweep(runtime: Runtime, process: "subprocess.Popen | None") -> None:
+    if process is None:
+        return
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+    state = sweep.read_state(runtime.results)
+    index_log(
+        runtime,
+        f"sweep: ended rc={process.returncode} receipts={state.get('receipts', 0)} "
+        f"leads={state.get('leads', 0)} spent={state.get('spent_tokens', 0)} "
+        f"stop={state.get('stop', 'interrupted')}",
+    )
 
 
 def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:

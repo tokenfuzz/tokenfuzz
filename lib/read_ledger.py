@@ -236,12 +236,15 @@ def _resolve(path: str, target_root: Path, script_root: Path) -> str:
 
 
 def record_session_reads(
-    ctx: workqueue.Context, agent: str, backend: str, raw_path: Path, session: str = "",
+    results_dir: Path, target_root: Path, script_root: Path,
+    agent: str, backend: str, raw_path: Path, session: str = "",
 ) -> int:
     """Append one row per file read in a finished session's transcript.
 
     Ranges are merged per file within the session. A read outside the target
     tree (a results directory, a scratch file) is not source and is skipped.
+    Takes paths rather than a queue context so a session's bookkeeping needs
+    nothing the queue does.
     """
     by_file: dict[str, list[tuple[int, int | None]]] = {}
     try:
@@ -257,7 +260,7 @@ def record_session_reads(
                 if not isinstance(event, dict):
                     continue
                 for path, start, end in reads_from_event(backend, event):
-                    rel = _resolve(path, ctx.target_root, ctx.script_root)
+                    rel = _resolve(path, Path(target_root), Path(script_root))
                     if rel:
                         by_file.setdefault(rel, []).append((start, end))
     except OSError:
@@ -271,7 +274,7 @@ def record_session_reads(
         for rel, ranges in sorted(by_file.items())
     ]
     if rows:
-        workqueue.append_jsonl_many(reads_path(ctx.results_dir), rows)
+        workqueue.append_jsonl_many(reads_path(Path(results_dir)), rows)
     return len(rows)
 
 

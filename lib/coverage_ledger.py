@@ -407,8 +407,11 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
         if not offered and not is_claimed and not examined:
             never.append({"file": rel, "lines": lines})
     never.sort(key=lambda item: (-item["lines"], item["file"]))
+    import sweep  # lazy: it imports this module
+
     return {
         "scope": (manifest[0].get("scope") if manifest else "") or "",
+        "sweep": sweep.summary_lines(ctx.results_dir),
         "depth": depth,
         "totals": totals,
         "never_offered": len(never),
@@ -447,6 +450,7 @@ def render_coverage(report: dict, fmt: str = "md") -> str:
         f"- With an examined receipt: {totals['receipted']} files, "
         f"{totals['lines_examined']} lines ({_pct(totals['lines_examined'], totals['lines'])})",
         f"- Never offered, claimed, nor receipted: {report['never_offered']}",
+        *report.get("sweep", []),
         "",
         "| Directory | Files | Offered | Claimed | Loaded | Receipted | Lines | Loaded % | Examined % |",
         "|---|--:|--:|--:|--:|--:|--:|--:|--:|",

@@ -962,6 +962,7 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
     known_decisions = {
         "find_quality", "find_quality_batch", "reachability_fields_batch",
         "work_rerank", "runner-suggest", "s6-peer-suggest", "threat-model-suggest",
+        "sweep_unit",
     }
     if decision not in known_decisions:
         return True
@@ -1009,6 +1010,14 @@ def _validate_decision_shape(decision: str, parsed) -> bool:
             ):
                 return False
         return True
+    if decision == "sweep_unit":
+        examined = parsed.get("examined")
+        return (
+            isinstance(examined, list)
+            and all(isinstance(pair, list) and len(pair) == 2 for pair in examined)
+            and isinstance(parsed.get("verdicts"), list)
+            and isinstance(parsed.get("leads"), list)
+        )
     if decision == "runner-suggest":
         return (
             _is_string_list(parsed.get("args"))

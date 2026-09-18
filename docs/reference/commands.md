@@ -338,6 +338,7 @@ bin/state --results-dir "$RESULTS" explain-queue
 bin/state --results-dir "$RESULTS" card-yield
 bin/state --results-dir "$RESULTS" coverage
 bin/state --results-dir "$RESULTS" strategy-yield
+bin/sweep --target <slug> --dry-run
 ```
 
 `show-recent` is the best general checkpoint: it combines recent claims,
@@ -352,6 +353,12 @@ taste. `strategy-yield` reports per-strategy runs, seconds, and diagnostics.
 `mark-examined` receipts, so the files the ranked window never offered, and
 the share of lines no session recorded reading, are listed rather than
 inferred; see [Review coverage](../concepts/coverage.md).
+
+`bin/sweep` runs the budgeted breadth pass by hand: `--dry-run` lists the
+unreceipted units in the order they would be swept, and `--token-budget N`
+sweeps them until the estimate reaches `N`. An audit starts it in the
+background when `[sweep] token_budget` is set, so the manual form is for
+inspection and for topping up a finished run.
 The `list-*` commands emit compact JSONL suitable for scripts. Use
 `show-card`, `show-crash`, or `show-finding` with an id for one full compact
 record. Run `bin/state --help` and `bin/state <subcommand> --help` for filters

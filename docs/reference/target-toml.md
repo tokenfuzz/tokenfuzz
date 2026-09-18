@@ -490,6 +490,23 @@ installation, and build preparation can still need network access. A
 missing native build recipe is still generated deterministically; only the
 model-assisted repair of a failing recipe is skipped.
 
+## The budgeted sweep: `[sweep]`
+
+`[sweep]` turns on the breadth pass described in
+[Review coverage](../concepts/coverage.md#the-budgeted-sweep):
+
+```toml
+[sweep]
+token_budget = 200000   # estimated tokens the sweep may spend over the run; 0 = off
+model = ""              # optional model for its one-shot decisions; empty = backend default
+unit_lines = 120        # window size for files the call graph did not parse
+```
+
+The budget is the only knob that spends money, and it is a ceiling on the
+run's total, carried across resumes in `state/sweep.json`. A negative or
+non-integer value is refused at load time. Delta and fixed-lane runs never
+start a sweep.
+
 ## The audited revision
 
 `target.toml` records no revision. A revision written once at setup goes

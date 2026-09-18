@@ -77,6 +77,34 @@ Receipts change three things:
 - **The report.** `bin/state coverage` adds receipted files and the examined
   line share per directory, and telemetry carries the same totals.
 
+## The budgeted sweep
+
+The ranked window buys depth on the files the scorer likes, and a session
+pays for every file it opens again on every later turn. The sweep buys
+breadth once: with `[sweep] token_budget` set, the audit starts `bin/sweep`
+beside the agent slots. It walks the unreceipted units gap first (files the
+window never offered, then the least-read files), hands each unit to a
+one-shot decision with no tools, and requires a receipt plus zero or more
+leads in return:
+
+- A **unit** is a parsed function, split into windows when it is long, or a
+  fixed window of `unit_lines` where the call graph parsed nothing.
+- The **reply** names the ranges it read, one verdict per function, and any
+  concrete lead. Ranges outside the unit and leads that name an unparsed
+  function or an unknown diagnostic are refused, and the unit stays
+  unreceipted.
+- **Receipts** land in `state/receipts.jsonl` with `source: sweep`. **Leads**
+  become `NEEDS_TESTCASE` hypotheses owned by agent `sweep`, which the
+  reproduce lane picks up through the ordinary handoff. The sweep never
+  probes, claims a card, or files a finding.
+- **Spend** is the estimated prompt and reply tokens of every call, failed
+  ones included, accumulated in `state/sweep.json` across resumes. The sweep
+  stops at the budget, after three consecutive unusable replies, or when no
+  unreceipted unit remains, and the coverage report says which.
+
+The sweep's calls are recorded in the run's usage ledger like every other
+decision, so the benchmark wall counts them.
+
 ## The second pass
 
 File coverage says nothing about interactions. Once every parsed function of

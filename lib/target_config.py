@@ -4476,6 +4476,13 @@ class Config:
     s6_peers: list[str] = field(default_factory=list)
     s6_domain: str = ""
 
+    # [sweep] table: the budgeted breadth pass (lib/sweep.py). Off until an
+    # operator gives it a token budget; the model falls back to the backend
+    # default when empty.
+    sweep_token_budget: int = 0
+    sweep_model: str = ""
+    sweep_unit_lines: int = 120
+
     # [runner] table — language-agnostic program invocation. `bin` selects an
     # interpreter or driver when no sanitizer binary is configured. `args`
     # also describes how a configured native sanitizer CLI consumes an input
@@ -4723,6 +4730,28 @@ def _apply_sanitizer_section(cfg: Config, raw: dict, source_path: str) -> None:
                 cfg.tsan_lib = raw[lib_key]
 
 
+def _apply_sweep_section(cfg: Config, raw: dict, source_path: str) -> None:
+    """Populate cfg.sweep_* from a [sweep] subtable.
+
+      token_budget = 200000   # estimated tokens the sweep may spend; 0 = off
+      model        = "..."    # optional model for the one-shot decisions
+      unit_lines   = 120      # window size where no functions are parsed
+
+    A non-integer or negative value is an operator error, not a default.
+    """
+    for key, attr, floor in (("token_budget", "sweep_token_budget", 0), ("unit_lines", "sweep_unit_lines", 20)):
+        if key not in raw:
+            continue
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < floor:
+            raise ValueError(f"{source_path}: [sweep] {key} must be an integer >= {floor} (got {value!r})")
+        setattr(cfg, attr, value)
+    model = raw.get("model", "")
+    if not isinstance(model, str):
+        raise ValueError(f"{source_path}: [sweep] model must be a string")
+    cfg.sweep_model = model.strip()
+
+
 def _apply_runner_section(cfg: Config, raw: dict, source_path: str) -> None:
     """Populate cfg.runner_* from a [runner] subtable.
 
@@ -4791,6 +4820,9 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     cfg.sanitizers_explicitly_disabled = False
     cfg.s6_peers = []
     cfg.s6_domain = ""
+    cfg.sweep_token_budget = 0
+    cfg.sweep_model = ""
+    cfg.sweep_unit_lines = 120
     cfg.ubsan_bin = ""
     cfg.msan_bin = ""
     cfg.tsan_bin = ""
@@ -4839,6 +4871,8 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
             _apply_sanitizer_section(cfg, v, p)
         elif k == "runner" and isinstance(v, dict):
             _apply_runner_section(cfg, v, p)
+        elif k == "sweep" and isinstance(v, dict):
+            _apply_sweep_section(cfg, v, p)
         elif k == "s6_peers" and isinstance(v, dict):
             peers = v.get("peers", [])
             if isinstance(peers, list):
