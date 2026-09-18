@@ -132,6 +132,7 @@ nav:
       - Audit lifecycle: concepts/audit-lifecycle.md
       - System architecture: concepts/system-architecture.md
       - Strategy model: concepts/strategy-model.md
+      - Review coverage: concepts/coverage.md
       - Cost model: concepts/cost-model.md
       - Deduplication: concepts/deduplication.md
       - Benchmarking: concepts/benchmark.md

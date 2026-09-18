@@ -336,6 +336,7 @@ bin/state --results-dir "$RESULTS" list-crashes
 bin/state --results-dir "$RESULTS" list-findings
 bin/state --results-dir "$RESULTS" explain-queue
 bin/state --results-dir "$RESULTS" card-yield
+bin/state --results-dir "$RESULTS" coverage
 bin/state --results-dir "$RESULTS" strategy-yield
 ```
 
@@ -347,6 +348,9 @@ ledger each with filters. `card-yield` replays the queue: claims, probed
 cards, runs, and diagnostics per rank bucket, and the share of the queue that
 was ever touched, so a ranking change is judged by conversion rather than
 taste. `strategy-yield` reports per-strategy runs, seconds, and diagnostics.
+`coverage` joins the auditable-file manifest to the claims so the files the
+ranked window never offered are listed rather than inferred; see
+[Review coverage](../concepts/coverage.md).
 The `list-*` commands emit compact JSONL suitable for scripts. Use
 `show-card`, `show-crash`, or `show-finding` with an id for one full compact
 record. Run `bin/state --help` and `bin/state <subcommand> --help` for filters

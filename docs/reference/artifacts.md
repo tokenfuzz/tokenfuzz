@@ -125,7 +125,13 @@ state/events.jsonl           audit events
 state/run-config.json        the run's recorded mode, security profile, and delta scope
 state/unreachable-routes.jsonl   anchored disproofs later work cards render
 state/callgraph.json         optional call-neighbourhood context
+state/manifest.jsonl         every auditable file, with content identity and whether it was ever offered
 ```
+
+`state/manifest.jsonl` is rewritten by every ranking pass and lists every
+auditable file the ranker enumerated, not only the files that received a
+card; `bin/state coverage` reads it. See
+[Review coverage](../concepts/coverage.md).
 
 `state/claims.jsonl` records every card claim with the `queue_rank`,
 `queue_size`, `score`, and `strategy` the card carried when it was offered,

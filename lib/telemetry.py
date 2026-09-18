@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import llm_usage
+import coverage_ledger
 import workqueue
 
 # Roles that are agent sessions rather than harness decisions. Decision rows
@@ -406,6 +407,25 @@ def coverage(results_dir: Path) -> dict:
         "examined": examined,
         "examined_share": round(examined / total, 4) if total else None,
         "lanes": out,
+        "tree": tree_coverage(results),
+    }
+
+
+def tree_coverage(results_dir: Path) -> dict:
+    """The manifest side of coverage: how much of the tree the window reached.
+
+    Lane shares are over cards, which only ever exist for files inside the
+    ranked window; this block is over every auditable file the ranker
+    enumerated, so a large tree with a small window reads as mostly unoffered
+    rather than as fully examined.
+    """
+    manifest = coverage_ledger.read_manifest(Path(results_dir))
+    files = len(manifest)
+    offered = sum(1 for row in manifest if row.get("offered"))
+    return {
+        "files": files,
+        "offered": offered,
+        "offered_share": round(offered / files, 4) if files else None,
     }
 
 

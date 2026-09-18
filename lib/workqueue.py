@@ -1179,6 +1179,16 @@ def is_non_audit_patch_description(desc: str, touched_files: list[str]) -> bool:
     return False
 
 
+def ranked_card_id(target_slug: str, rel: str, strategy: str = "") -> str:
+    """Deterministic id of a ranked-source card, primary or companion.
+
+    Shared with the coverage ledger so a claim on a card the rewritten queue
+    no longer lists still resolves to its file.
+    """
+    key = f"{target_slug}:{rel}:{strategy}" if strategy else f"{target_slug}:{rel}"
+    return "WORK-" + hashlib.sha1(key.encode()).hexdigest()[:12]
+
+
 def work_surface(card: dict) -> str:
     """Source-surface key for work-card deduplication.
 
@@ -2021,9 +2031,8 @@ def rank_target(
             reasons.append(delta_files.get(rel, "in delta"))
             if score <= 0:
                 score, primary_strategy = 1, "S1"
-        h = hashlib.sha1(f"{ctx.target_slug}:{rel}".encode()).hexdigest()[:12]
         card = {
-            "id": f"WORK-{h}",
+            "id": ranked_card_id(ctx.target_slug, rel),
             "kind": "ranked-source",
             "target_slug": ctx.target_slug,
             "subsystem": subsystem,
@@ -2068,10 +2077,7 @@ def rank_target(
             # selected file so their closure evidence remains independent.
             companions = complementary_strategies(reasons, primary_strategy)
             for idx, comp_strategy in enumerate(companions):
-                ch = hashlib.sha1(
-                    f"{ctx.target_slug}:{rel}:{comp_strategy}".encode()
-                ).hexdigest()[:12]
-                comp_id = f"WORK-{ch}"
+                comp_id = ranked_card_id(ctx.target_slug, rel, comp_strategy)
                 comp_card = dict(card)
                 comp_card["id"] = comp_id
                 comp_card["strategy"] = comp_strategy
@@ -2114,15 +2120,25 @@ def rank_target(
     cards.sort(key=lambda card: (_built_first(card), work_card_sort_key(card)))
     if delta_files is not None:
         # The window is the delta: every card, no floor, no rotation.
-        return cards
-    if diversity_floor <= 0 or not floor_cards or len(cards) >= limit and limit <= 1:
-        return select_strategy_window(cards, limit)
-    reserve = min(diversity_floor, max(1, limit // 5), len(floor_cards))
-    selected_floor = select_diversity_floor(floor_cards, reserve, seen_ids)
-    main_limit = max(0, limit - len(selected_floor))
-    return dedupe_work_cards(
-        select_strategy_window(cards, main_limit) + selected_floor
+        selected = cards
+    elif diversity_floor <= 0 or not floor_cards or len(cards) >= limit and limit <= 1:
+        selected = select_strategy_window(cards, limit)
+    else:
+        reserve = min(diversity_floor, max(1, limit // 5), len(floor_cards))
+        selected_floor = select_diversity_floor(floor_cards, reserve, seen_ids)
+        main_limit = max(0, limit - len(selected_floor))
+        selected = dedupe_work_cards(
+            select_strategy_window(cards, main_limit) + selected_floor
+        )
+    # The window is what the run is handed; the manifest is what the tree
+    # holds. Written here, from the same enumeration, so the two cannot drift.
+    import coverage_ledger  # lazy: it imports this module
+    coverage_ledger.write_manifest(
+        ctx, source_paths,
+        {normalized_relpath(card.get("file", "")) for card in selected},
+        scope="delta" if delta_files is not None else "tree",
     )
+    return selected
 
 
 def campaign_supported(config) -> bool:

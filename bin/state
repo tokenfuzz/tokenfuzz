@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 import cli_help
+import coverage_ledger
 from workqueue import (
     card_yield,
     add_common_args,
@@ -215,6 +216,15 @@ def main(argv: list[str]) -> int:
     )
     p_list_findings.add_argument("--status", default="", help="keep rows whose status or class equals this value")
     p_list_findings.add_argument("--limit", type=int, default=20, help="max rows (0 = no cap)")
+
+    p_coverage = sub.add_parser(
+        "coverage",
+        help="review coverage: auditable files enumerated versus offered and claimed, per directory",
+        formatter_class=formatter,
+    )
+    p_coverage.add_argument("--depth", type=int, default=2, help="directory depth to group by")
+    p_coverage.add_argument("--format", choices=("md", "json"), default="md", help="output format")
+    p_coverage.add_argument("--untouched", type=int, default=10, help="largest never-offered files to list")
 
     p_resume = sub.add_parser(
         "resume", help="compact structured startup brief for one agent", formatter_class=formatter,
@@ -478,6 +488,10 @@ def main(argv: list[str]) -> int:
     if args.cmd == "list-findings":
         for row in list_findings(ctx, status_filter=args.status, limit=args.limit):
             print(json.dumps(row, sort_keys=True))
+        return 0
+    if args.cmd == "coverage":
+        report = coverage_ledger.coverage_report(ctx, args.depth, args.untouched)
+        print(coverage_ledger.render_coverage(report, args.format), end="")
         return 0
     if args.cmd == "resume":
         try:

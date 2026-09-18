@@ -71,6 +71,7 @@ state/hypotheses.jsonl current hypothesis rows; atomically updated
 state/runs.jsonl       append-only probe verdicts
 state/notes.jsonl      append-only compact supporting notes
 state/events.jsonl     append-only audit events
+state/manifest.jsonl   every auditable file; rewritten on refresh
 ```
 
 An agent skips cards that are already claimed, on a surface another agent

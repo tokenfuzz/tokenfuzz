@@ -296,8 +296,15 @@ class TelemetryTests(unittest.TestCase):
             {"card_id": "WORK-4", "status": "done"},
             {"card_id": "WORK-9", "status": "blocked"},
         ])
+        _write_jsonl(self.results / "state" / "manifest.jsonl", [
+            {"file": "src/app_parse.c", "offered": True},
+            {"file": "src/child.c", "offered": True},
+            {"file": "src/other.c", "offered": False},
+            {"file": "src/quiet.c", "offered": False},
+        ])
         self.assertEqual(telemetry.coverage(self.results), {
             "cards": 4, "examined": 3, "examined_share": 0.75,
+            "tree": {"files": 4, "offered": 2, "offered_share": 0.5},
             "lanes": {
                 "S3": {"cards": 2, "examined": 1, "concluded": 1,
                        "files": 2, "files_examined": 1, "examined_share": 0.5},
@@ -380,6 +387,7 @@ class TelemetryTests(unittest.TestCase):
         )
         self.assertEqual(summary["coverage"], {
             "cards": 0, "examined": 0, "examined_share": None, "lanes": {},
+            "tree": {"files": 0, "offered": 0, "offered_share": None},
         })
         self.assertEqual(summary["lineage_rows"], 0)
 
