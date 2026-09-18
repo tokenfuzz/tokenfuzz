@@ -12,7 +12,8 @@
  * their outcomes — that is the answer key's job, not the fixture's.
  *
  * Input format: a selector line, then the payload that follows the first
- * newline. Selectors: render, format, recycle, lookup, pack.
+ * newline. Selectors: render, format, recycle, lookup, pack, scan, grow,
+ * release, index.
  */
 #include <assert.h>
 #include <stddef.h>
@@ -82,6 +83,67 @@ static int pack_field(const char *payload, size_t len)
   return buf[0];
 }
 
+__attribute__((noinline, optnone))
+static int scan_field(const char *payload, size_t len)
+{
+  if (len == 0) {
+    return 0;
+  }
+  char *buf = malloc(len);
+  if (buf == NULL) {
+    return 0;
+  }
+  memcpy(buf, payload, len);
+  int past = buf[len];
+  free(buf);
+  return past;
+}
+
+__attribute__((noinline, optnone))
+static int grow_table(const char *payload, size_t len)
+{
+  unsigned char cells = (unsigned char)(len * 2);
+  char *table = malloc(cells ? cells : 1);
+  if (table == NULL) {
+    return 0;
+  }
+  memcpy(table, payload, len);
+  int first = table[0];
+  free(table);
+  return first;
+}
+
+__attribute__((noinline, optnone))
+static int release_twice(const char *payload, size_t len)
+{
+  char *copy = malloc(RECORD_CAP);
+  int result = 0;
+  if (copy == NULL) {
+    return 0;
+  }
+  size_t n = len < RECORD_CAP ? len : RECORD_CAP;
+  memcpy(copy, payload, n);
+  if (n > 0 && copy[0] == '!') {
+    free(copy);
+  } else {
+    result = copy[0];
+  }
+  free(copy);
+  return result;
+}
+
+__attribute__((noinline, optnone))
+static int index_slot(const char *payload, size_t len)
+{
+  char slots[RECORD_CAP];
+  memset(slots, 0, sizeof slots);
+  size_t idx = len > 0 ? (unsigned char)payload[0] : 0;
+  if (idx > RECORD_CAP) {
+    return 0;
+  }
+  return slots[idx];
+}
+
 /* Split input into a selector line and the payload after the newline. */
 static int dispatch(const char *input, size_t len)
 {
@@ -104,6 +166,18 @@ static int dispatch(const char *input, size_t len)
   }
   if (sel_len == 4 && memcmp(input, "pack", 4) == 0) {
     return pack_field(payload, payload_len);
+  }
+  if (sel_len == 4 && memcmp(input, "scan", 4) == 0) {
+    return scan_field(payload, payload_len);
+  }
+  if (sel_len == 4 && memcmp(input, "grow", 4) == 0) {
+    return grow_table(payload, payload_len);
+  }
+  if (sel_len == 7 && memcmp(input, "release", 7) == 0) {
+    return release_twice(payload, payload_len);
+  }
+  if (sel_len == 5 && memcmp(input, "index", 5) == 0) {
+    return index_slot(payload, payload_len);
   }
   return 0;
 }

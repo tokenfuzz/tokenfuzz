@@ -2755,6 +2755,12 @@ def manifest_errors(manifest: dict) -> list[str]:
             # silently making the entry unreachable.
             if "file" in e and not (isinstance(e["file"], str) and e["file"].strip()):
                 errors.append(f"{where} ({eid or '?'}) file must be a non-empty string")
+            # The strategy family that should find a bug labels the per-class
+            # recall rows; a stray label would open a class no lane owns.
+            if "strategy" in e and not (
+                isinstance(e["strategy"], str) and re.fullmatch(r"S[1-8]", e["strategy"])
+            ):
+                errors.append(f"{where} ({eid or '?'}) strategy must be S1..S8")
             # A trap's classes name the claims it refutes; an empty or
             # non-list value would silently widen it back to every class.
             if "classes" in e and not (
@@ -3496,11 +3502,27 @@ def score_ground_truth(
         fp_crashes = (sum(len(v) for v in traps_fired.values())
                       + len(unexpected) + len(unattributed))
         total = tp_crashes + fp_crashes
+
+        def breakdown(key_of) -> dict:
+            # Recall per class: an overall figure hides which families a
+            # run finds and which it never reaches.
+            groups: dict[str, dict] = {}
+            for b in real:
+                group = groups.setdefault(key_of(b), {"real": 0, "detected": 0})
+                group["real"] += 1
+                group["detected"] += int(b["id"] in detected)
+            return {
+                key: {**value, "recall": round(value["detected"] / value["real"], 4)}
+                for key, value in sorted(groups.items())
+            }
+
         return {
             "real_total": len(real),
             "detected": sorted(detected),
             "missed": sorted(b["id"] for b in real if b["id"] not in detected),
             "recall": round(tp_bugs / len(real), 4) if real else None,
+            "by_primitive": breakdown(lambda b: str(b.get("primitive", "")) or "unlabelled"),
+            "by_strategy": breakdown(lambda b: str(b.get("strategy", "")) or "unlabelled"),
             "confirmed_crashes": total,
             "true_positive_crashes": tp_crashes,
             "false_positive_crashes": fp_crashes,
@@ -5994,6 +6016,22 @@ def _render_ground_truth(scoring: dict | None,
         ))
     lines.append(row("**overall**", overall))
     lines.append("")
+    classes = [
+        (f"`{name}`", stats) for name, stats in (overall.get("by_primitive") or {}).items()
+    ] + [
+        (f"strategy `{name}`", stats) for name, stats in (overall.get("by_strategy") or {}).items()
+    ]
+    if classes:
+        lines.append("Recall by class (overall):")
+        lines.append("")
+        lines.append("| Class | Detected | Recall |")
+        lines.append("| --- | --: | --: |")
+        for label, stats in classes:
+            lines.append(
+                f"| {label} | {stats.get('detected', 0)}/{stats.get('real', 0)} "
+                f"| {_fmt_ratio(stats.get('recall'))} |"
+            )
+        lines.append("")
     lines.append(
         "> **How to read this.** Scored against the target's "
         "`.ground-truth.json` answer key. **Recall** is the share of planted "

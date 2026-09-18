@@ -78,7 +78,7 @@ class BenchmarkScoringTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         _, via_lib = self.score(self.pool, members=self.members)
         self.assertEqual(via_bin, via_lib)
-        self.assertEqual(via_bin["overall"]["recall"], 1.0)
+        self.assertEqual(via_bin["overall"]["recall"], 0.4286)
         # A bad manifest fails the same way, and neither spelling launches a run.
         proc, _ = self.score(self.pool, manifest=self.root / "missing.json", command=OPERATOR_COMMAND)
         self.assertEqual(proc.returncode, 1)
@@ -102,20 +102,32 @@ class BenchmarkScoringTests(unittest.TestCase):
         proc, score = self.score(self.pool, members=self.members)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         overall = score["overall"]
-        self.assertEqual(overall["recall"], 1.0)
+        # The pool plants three of the seven answer-key bugs.
+        self.assertEqual(overall["recall"], 0.4286)
         self.assertEqual(overall["precision"], 0.6)
         self.assertEqual(overall["confirmed_crashes"], 5)
         self.assertEqual(overall["true_positive_crashes"], 3)
         self.assertEqual(overall["false_positive_crashes"], 2)
         self.assertEqual(overall["false_positive_traps_fired"], ["debug-only-assert"])
         self.assertEqual(overall["unexpected_crashes"], ["CRASH-0005"])
-        self.assertEqual(overall["missed"], [])
+        self.assertEqual(
+            overall["missed"],
+            ["double-free", "heap-oob-read", "int-overflow-alloc", "stack-oob-read"],
+        )
+        # Per-class recall says which families were found, not just how many.
+        self.assertEqual(overall["by_primitive"]["heap-buffer-overflow"], {"real": 3, "detected": 1, "recall": 0.3333})
+        self.assertEqual(overall["by_primitive"]["double-free"], {"real": 1, "detected": 0, "recall": 0.0})
+        self.assertEqual(overall["by_strategy"]["S7"], {"real": 3, "detected": 2, "recall": 0.6667})
+        self.assertEqual(overall["by_strategy"]["S2"]["detected"], 0)
+        rendered = "\n".join(benchmark._render_ground_truth(score))
+        self.assertIn("Recall by class (overall):", rendered)
+        self.assertIn("| strategy `S5` | 1/2 | 50% |", rendered)
         harness = score["by_condition"]["harness"]
-        self.assertEqual(harness["recall"], 0.6667)
+        self.assertEqual(harness["recall"], 0.2857)
         self.assertEqual(harness["precision"], 0.6667)
         self.assertEqual(harness["false_positive_crashes"], 1)
         direct = score["by_condition"]["model-direct"]
-        self.assertEqual(direct["recall"], 0.3333)
+        self.assertEqual(direct["recall"], 0.1429)
         self.assertEqual(direct["precision"], 0.5)
         self.assertEqual(direct["false_positive_traps_fired"], ["debug-only-assert"])
         _, explicit = self.score(
@@ -124,7 +136,10 @@ class BenchmarkScoringTests(unittest.TestCase):
         zero = explicit["by_condition"]["ablation"]
         self.assertEqual(zero["recall"], 0.0)
         self.assertEqual(zero["confirmed_crashes"], 0)
-        self.assertEqual(zero["missed"], ["heap-oob-write", "stack-oob-write", "use-after-free"])
+        self.assertEqual(zero["missed"], [
+            "double-free", "heap-oob-read", "heap-oob-write", "int-overflow-alloc",
+            "stack-oob-read", "stack-oob-write", "use-after-free",
+        ])
 
     def make_finding(self, run, finding_id, function, condition=None, klass=""):
         finding = run / "findings" / finding_id

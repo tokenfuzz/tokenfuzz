@@ -24,7 +24,7 @@ and `.ground-truth.json` answer keys, is a gitignored working area.
 
 | Target | Language / build | Mode | Planted bugs | FP traps |
 | --- | --- | --- | --- | --- |
-| `canary` | C / cmake | ASan | 3 | 2 |
+| `canary` | C / cmake | ASan | 7 | 2 |
 | `samples/sample-c` | C / cmake | ASan | 6 | 2 |
 | `samples/sample-cpp` | C++ / cmake | ASan | 12 | 2 |
 | `samples/sample-c-doublefree` | C / cmake | ASan | 2 | 2 |

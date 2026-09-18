@@ -462,10 +462,17 @@ oracle for that, so a run's precision and recall, and the triage gate
 thresholds tuned to them, go unmeasured.
 
 The **canary** target closes that gap. It is a small synthetic
-record-processing program at `targets/canary/`, carrying three planted
+record-processing program at `targets/canary/`, carrying seven planted
 memory-safety bugs and two deliberate false-positive traps (inputs that look
 dangerous to a reviewer but are not a memory-safety fault): enough to exercise
-detection, triage, clustering, and severity scoring end to end.
+detection, triage, clustering, and severity scoring end to end. Each planted
+bug names the strategy family that should reach it (an off-by-one guard for
+S2, an 8-bit size computation for S3, a double free on an error path for S5,
+exact-length copies for S7), and the score block reports recall per
+sanitizer class and per strategy beside the overall figure, so a run that
+finds every overflow and no lifetime bug reads as that rather than as a
+percentage. `tests/test_canary_planted.py` compiles the canary and checks
+every answer-key entry against the sanitizer's own report.
 
 The answer key is deliberately **not** in the target tree. It lives at
 `output/canary/.ground-truth.json`, outside the directory handed to the
