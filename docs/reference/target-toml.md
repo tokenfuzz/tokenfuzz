@@ -497,15 +497,18 @@ model-assisted repair of a failing recipe is skipped.
 
 ```toml
 [sweep]
-token_budget = 200000   # estimated tokens the sweep may spend over the run; 0 = off
+token_budget = 200000   # estimated prompt/reply accounting target; 0 = off
 model = ""              # optional model for its one-shot decisions; empty = backend default
-unit_lines = 120        # window size for files the call graph did not parse
+unit_lines = 120        # maximum source lines in one decision
 ```
 
-The budget is the only knob that spends money, and it is a ceiling on the
-run's total, carried across resumes in `state/sweep.json`. A negative or
-non-integer value is refused at load time. Delta and fixed-lane runs never
-start a sweep.
+The sweep is disabled unless `token_budget` is positive. Its estimate is
+carried across resumes in `state/sweep.json`; the sweep does not start a call
+whose known prompt cost exceeds the amount left, although that call's reply
+can take the final estimate beyond the configured value. `model` changes the
+per-token price, and `unit_lines` changes how the budget is divided. A
+negative or non-integer `token_budget` is refused at load time. Delta and
+fixed-lane runs never start a sweep.
 
 ## The audited revision
 

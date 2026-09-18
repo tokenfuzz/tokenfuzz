@@ -4735,7 +4735,7 @@ def _apply_sweep_section(cfg: Config, raw: dict, source_path: str) -> None:
 
       token_budget = 200000   # estimated tokens the sweep may spend; 0 = off
       model        = "..."    # optional model for the one-shot decisions
-      unit_lines   = 120      # window size where no functions are parsed
+      unit_lines   = 120      # maximum source lines in one decision
 
     A non-integer or negative value is an operator error, not a default.
     """

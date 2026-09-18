@@ -1,6 +1,6 @@
 {
   "target": "canary",
-  "description": "Answer key for the synthetic canary target. Kept here under output/canary/ \u2014 NOT inside targets/canary/ \u2014 so the audited agents (which are granted the target tree, and for the harness the repo root) are not handed the answer while being measured. The deterministic scorer reads it after the run. Every field is verifiable by running the listed input under AddressSanitizer. Each planted bug names the strategy family that should reach it, so recall is reported per class as well as overall.",
+  "description": "Answer key for the synthetic canary target. Kept here under output/canary/ \u2014 NOT inside targets/canary/ \u2014 so the audited agents (which are granted the target tree, and for the harness the repo root) are not handed the answer while being measured. The deterministic scorer reads it after the run. Every runtime field is verifiable by running the listed input under AddressSanitizer. Each planted bug names the strategy shape it was designed to exercise; this classifies the plant and does not attribute which lane found it.",
   "build": ".audit/build.sh",
   "asan_bin": "build-asan/canary",
   "planted_bugs": [

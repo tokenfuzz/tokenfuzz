@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -99,6 +100,17 @@ class ManifestTests(unittest.TestCase):
         self.assertNotEqual(third["src/hot.c"]["sha1"], first["src/hot.c"]["sha1"])
         self.assertEqual(third["src/hot.c"]["lines"], 4)
 
+    def test_same_size_edit_with_restored_mtime_invalidates_the_hash(self) -> None:
+        source = self.write_source("src/same.c", "int same(void) { return 1; }\n")
+        workqueue.rank_target(self.ctx, 5)
+        first = coverage_ledger.manifest_row(self.results, "src/same.c")
+        stat = source.stat()
+        source.write_text("int same(void) { return 2; }\n", encoding="utf-8")
+        os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        workqueue.rank_target(self.ctx, 5)
+        second = coverage_ledger.manifest_row(self.results, "src/same.c")
+        self.assertNotEqual(second["sha1"], first["sha1"])
+
     def test_file_identity_counts_a_trailing_partial_line(self) -> None:
         path = self.write_source("src/tail.c", "a\nb")
         self.assertEqual(coverage_ledger.file_identity(path)[0], 2)
@@ -174,6 +186,17 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual((info["examined_lines"], info["fraction"]), (22, 0.22))
         self.assertEqual(coverage_ledger.examined_fraction_by_file(self.results), {"src/app_parse.c": 0.22})
 
+    def test_a_planned_manifest_entry_avoids_reparsing_the_manifest(self) -> None:
+        entry = coverage_ledger.manifest_row(self.results, "src/app_parse.c")
+        with mock.patch.object(
+            coverage_ledger, "manifest_row", side_effect=AssertionError("unexpected manifest scan"),
+        ):
+            row = coverage_ledger.record_receipt(
+                self.ctx, "sweep", "src/app_parse.c", lines="1-10",
+                expected_sha1=entry["sha1"], manifest_entry=entry,
+            )
+        self.assertEqual(row["ranges"], [[1, 10]])
+
     def test_receipts_outside_the_file_or_manifest_are_refused(self) -> None:
         with self.assertRaisesRegex(coverage_ledger.ReceiptError, "has 100 lines"):
             coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="90-140")
@@ -185,6 +208,25 @@ class ReceiptTests(unittest.TestCase):
             coverage_ledger.parse_ranges("30-10")
         with self.assertRaisesRegex(coverage_ledger.ReceiptError, "not N or N-M"):
             coverage_ledger.parse_ranges("ten")
+        self.assertEqual(workqueue.read_jsonl(coverage_ledger.receipts_path(self.results)), [])
+
+    def test_a_touched_file_with_the_same_content_still_takes_receipts(self) -> None:
+        # A checkout or build step changes times without changing content, and
+        # a rerank happens only when tracked content changes; refusing here
+        # would refuse every receipt on the file until the next revision.
+        stat = self.source.stat()
+        os.utime(self.source, ns=(stat.st_atime_ns + 10**9, stat.st_mtime_ns + 10**9))
+        row = coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-10")
+        self.assertEqual(row["ranges"], [[1, 10]])
+
+    def test_a_receipt_is_refused_when_the_source_changed_after_the_manifest(self) -> None:
+        expected = coverage_ledger.manifest_row(self.results, "src/app_parse.c")["sha1"]
+        self.source.write_text("changed\n" * 100, encoding="utf-8")
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "changed since the coverage manifest"):
+            coverage_ledger.record_receipt(
+                self.ctx, "sweep", "src/app_parse.c", lines="1-100",
+                expected_sha1=expected,
+            )
         self.assertEqual(workqueue.read_jsonl(coverage_ledger.receipts_path(self.results)), [])
 
     def test_function_receipts_resolve_through_the_call_graph(self) -> None:
@@ -317,6 +359,37 @@ class CallEdgeCardTests(unittest.TestCase):
         self.assertTrue(workqueue.card_closed_for_run(self.ctx, edges[0], "discarded"),
                         "an edge card is concrete and closes like a patch card")
 
+    def test_edge_gate_uses_parsed_functions_instead_of_line_share(self) -> None:
+        source = self.target / "src" / "app_parse.c"
+        source.write_text("/* preamble */\n" * 20 + PARSER * 2, encoding="utf-8")
+        graph_path = self.results / "state" / callgraph.ARTIFACT_NAME
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["files"]["src/app_parse.c"]["definitions"] = [["parse_input", 21], ["parse_tail", 25]]
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        workqueue.rank_target(self.ctx, 10)
+        coverage_ledger.record_receipt(
+            self.ctx, "1", "src/app_parse.c", functions="parse_input,parse_tail",
+        )
+        self.assertEqual(len(self.edges(workqueue.rank_target(self.ctx, 10))), 2,
+                         "a preamble is not an unexamined function")
+
+        source.write_text("\n".join(["line"] * 1999 + ["short function"]) + "\n", encoding="utf-8")
+        graph["files"]["src/app_parse.c"]["definitions"] = [["large", 1], ["short", 2000]]
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        workqueue.rank_target(self.ctx, 10)
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-1998")
+        self.assertEqual(self.edges(workqueue.rank_target(self.ctx, 10)), [],
+                         "99.9% of lines must not hide one unexamined function")
+
+    def test_source_change_invalidates_edges_before_the_manifest_rewrite(self) -> None:
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
+        source = self.target / "src" / "app_parse.c"
+        source.write_text("changed\n" * 20, encoding="utf-8")
+        self.assertEqual(
+            self.edges(workqueue.rank_target(self.ctx, 10)), [],
+            "a receipt on the previous content cannot mint an edge during rerank",
+        )
+
     def test_edge_cards_ride_the_window_with_their_file(self) -> None:
         coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
         for index in range(6):
@@ -407,20 +480,20 @@ class ReportTests(unittest.TestCase):
 
         # A transcript read is evidence beside the receipt, not a receipt.
         workqueue.append_jsonl(read_ledger.reads_path(self.results), {
-            "file": "src/io/writer.c", "ranges": [[1, None]],
+            "file": "src/io/writer.c", "ranges": [[1, None]], "sha1": "h-writer",
         })
 
         report = coverage_ledger.coverage_report(self.ctx, depth=2, untouched=1)
         self.assertEqual(
             report["totals"],
-            {"files": 5, "offered": 2, "claimed": 2, "loaded": 1, "receipted": 1,
-             "lines": 1440, "lines_loaded": 900, "lines_examined": 30},
+            {"files": 5, "offered": 2, "claimed": 2, "read_requested": 1, "receipted": 1,
+             "lines": 1440, "lines_requested": 900, "lines_examined": 30},
         )
         by_dir = {row["directory"]: row for row in report["directories"]}
         self.assertEqual(
             by_dir["src/parse"],
             {"directory": "src/parse", "files": 2, "offered": 2, "claimed": 1,
-             "loaded": 0, "receipted": 1, "lines": 420, "lines_loaded": 0,
+             "read_requested": 0, "receipted": 1, "lines": 420, "lines_requested": 0,
              "lines_examined": 30},
         )
         self.assertEqual(by_dir["src/io"]["offered"], 0)
@@ -438,6 +511,17 @@ class ReportTests(unittest.TestCase):
             json.loads(coverage_ledger.render_coverage(report, "json"))["totals"],
             report["totals"],
         )
+
+    def test_historic_dynamic_claim_keeps_its_file_after_queue_rewrite(self) -> None:
+        self.manifest([("src/io/reader.c", 80, True)])
+        workqueue.append_jsonl(
+            workqueue.state_dir(self.results) / "claims.jsonl",
+            {"card_id": "WORK-edge", "file": "src/io/reader.c", "agent": "1", "status": "claimed"},
+        )
+        workqueue.write_jsonl(workqueue.work_cards_path(self.ctx), [])
+        self.assertEqual(coverage_ledger.claimed_files(
+            self.ctx, coverage_ledger.read_manifest(self.results),
+        ), {"src/io/reader.c"})
 
     def test_empty_tree_reports_nothing_rather_than_a_share(self) -> None:
         report = coverage_ledger.coverage_report(self.ctx)

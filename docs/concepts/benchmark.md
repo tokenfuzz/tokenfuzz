@@ -466,13 +466,19 @@ record-processing program at `targets/canary/`, carrying seven planted
 memory-safety bugs and two deliberate false-positive traps (inputs that look
 dangerous to a reviewer but are not a memory-safety fault): enough to exercise
 detection, triage, clustering, and severity scoring end to end. Each planted
-bug names the strategy family that should reach it (an off-by-one guard for
+bug names the strategy shape it was designed to exercise (an off-by-one guard for
 S2, an 8-bit size computation for S3, a double free on an error path for S5,
 exact-length copies for S7), and the score block reports recall per
-sanitizer class and per strategy beside the overall figure, so a run that
+sanitizer class and per planted strategy shape beside the overall figure, so a run that
 finds every overflow and no lifetime bug reads as that rather than as a
 percentage. `tests/test_canary_planted.py` compiles the canary and checks
 every answer-key entry against the sanitizer's own report.
+
+That label classifies the plant; it does not attribute the discovery to the
+lane that found it. Seven hand-crafted bugs are a regression calibration set,
+not a statistically representative sample of security bugs. The score is
+exact for this answer key and does not establish a confidence bound for an
+unseen target or bug class.
 
 The answer key is deliberately **not** in the target tree. It lives at
 `output/canary/.ground-truth.json`, outside the directory handed to the

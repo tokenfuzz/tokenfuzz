@@ -117,11 +117,11 @@ class BenchmarkScoringTests(unittest.TestCase):
         # Per-class recall says which families were found, not just how many.
         self.assertEqual(overall["by_primitive"]["heap-buffer-overflow"], {"real": 3, "detected": 1, "recall": 0.3333})
         self.assertEqual(overall["by_primitive"]["double-free"], {"real": 1, "detected": 0, "recall": 0.0})
-        self.assertEqual(overall["by_strategy"]["S7"], {"real": 3, "detected": 2, "recall": 0.6667})
-        self.assertEqual(overall["by_strategy"]["S2"]["detected"], 0)
+        self.assertEqual(overall["by_strategy_shape"]["S7"], {"real": 3, "detected": 2, "recall": 0.6667})
+        self.assertEqual(overall["by_strategy_shape"]["S2"]["detected"], 0)
         rendered = "\n".join(benchmark._render_ground_truth(score))
         self.assertIn("Recall by class (overall):", rendered)
-        self.assertIn("| strategy `S5` | 1/2 | 50% |", rendered)
+        self.assertIn("| strategy-shaped plant `S5` | 1/2 | 50% |", rendered)
         harness = score["by_condition"]["harness"]
         self.assertEqual(harness["recall"], 0.2857)
         self.assertEqual(harness["precision"], 0.6667)

@@ -117,7 +117,7 @@ format, not a promise that every file only grows.
 work-cards.jsonl             the ranked queue
 patch-cards.jsonl            prior-fix work cards (S1)
 s6-peer-cards.jsonl          peer-project fix cards (S6)
-state/claims.jsonl           card lease and release events
+state/claims.jsonl           card lease and release events; new claims retain their target-relative file
 state/hypotheses.jsonl       current hypothesis rows
 state/runs.jsonl             one row per bin/probe invocation
 state/notes.jsonl            compact supporting notes
@@ -127,7 +127,7 @@ state/unreachable-routes.jsonl   anchored disproofs later work cards render
 state/callgraph.json         optional call-neighbourhood context
 state/manifest.jsonl         every auditable file, with content identity and whether it was ever offered
 state/receipts.jsonl         line ranges a session recorded reading, pinned to the file's content hash
-state/reads.jsonl            file reads each session's transcript shows, recorded when the session ends
+state/reads.jsonl            observed transcript read requests, pinned to the file's content hash
 state/sweep.json             the budgeted sweep's spend, counts, and why it stopped
 ```
 

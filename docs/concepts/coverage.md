@@ -15,7 +15,7 @@ row per file:
 | Field | Meaning |
 | --- | --- |
 | `file` | Target-relative path. |
-| `lines`, `bytes`, `sha1` | Identity of the content the row describes. A rerank re-hashes only files whose size or modification time changed. |
+| `lines`, `bytes`, `sha1` | Identity of the content the row describes. A rerank re-hashes only files whose size, modification time, or change time changed. |
 | `subsystem` | The same partition the queue uses for diversity. |
 | `card_id` | The id the ranker mints for the file's primary card, so claims resolve to files even after the queue is rewritten. |
 | `offered` | Whether the file has ever entered the ranked window. Sticky across rewrites: a file that left the window was still handed to the run. |
@@ -49,7 +49,8 @@ on: widen `RANK_WORK_LIMIT`, pin a lane, or run a delta over that directory.
 
 ## Receipts
 
-A claim says a card was handed out. A receipt says which lines were read:
+A claim says a card was handed out. A receipt is an agent's attestation of
+which lines it read:
 
 ```bash
 bin/state mark-examined --agent 1 --file src/parse.c --lines 1-120,200-260
@@ -62,7 +63,9 @@ file must be in the manifest, every range must lie inside it, and a function
 name must be one the [call graph](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
 parsed in that file, resolved to the lines from its definition to the next
 one. A receipt that cannot be checked is refused, and a receipt on content
-that has since changed stops counting.
+that has since changed stops counting. Content is what is checked: a file a
+checkout or build step touched without changing keeps taking receipts, since
+a rerank happens only when tracked content changes.
 
 The unit is a line range because every language has lines. Functions are a
 view over it: where the call graph parsed the file, the card and
@@ -76,8 +79,8 @@ Receipts change three things:
   card, starts from what is left instead of the top of the file.
 - **Reoffer order.** Among broad cards with the same number of prior
   conclusions, the claimer offers the least-read file first.
-- **The report.** `bin/state coverage` adds receipted files and the examined
-  line share per directory, and telemetry carries the same totals.
+- **The report.** `bin/state coverage` adds receipted files and the attested
+  examined-line share per directory, and telemetry carries the same totals.
 
 ## The budgeted sweep
 
@@ -89,20 +92,27 @@ window never offered, then the least-read files), hands each unit to a
 one-shot decision with no tools, and requires a receipt plus zero or more
 leads in return:
 
-- A **unit** is a parsed function, split into windows when it is long, or a
-  fixed window of `unit_lines` where the call graph parsed nothing.
-- The **reply** names the ranges it read, one verdict per function, and any
-  concrete lead. Ranges outside the unit and leads that name an unparsed
-  function or an unknown diagnostic are refused, and the unit stays
-  unreceipted.
+- A **unit** is a parsed function no longer than `unit_lines`, a
+  `unit_lines` window of a longer function, or a fixed window where the call
+  graph parsed nothing.
+- The **reply** must attest the whole unit, give exactly one valid verdict per
+  parsed function (or the named line window), and may return concrete leads.
+  Incomplete ranges and missing, duplicate, or invalid verdicts refuse the
+  receipt, so the unit stays open. A lead is retained only when it names that
+  function or line window, lies inside the unit, carries a known diagnostic
+  and strategy, and agrees with a non-clean verdict; malformed leads are
+  dropped rather than becoming hypotheses or strategy metrics.
 - **Receipts** land in `state/receipts.jsonl` with `source: sweep`. **Leads**
   become `NEEDS_TESTCASE` hypotheses owned by agent `sweep`, which the
   reproduce lane picks up through the ordinary handoff. The sweep never
   probes, claims a card, or files a finding.
 - **Spend** is the estimated prompt and reply tokens of every call, failed
-  ones included, accumulated in `state/sweep.json` across resumes. The sweep
-  stops at the budget, after three consecutive unusable replies, or when no
-  unreceipted unit remains, and the coverage report says which.
+  ones included, accumulated in `state/sweep.json` across resumes. A call is
+  not started when its prompt alone exceeds the remaining budget; its reply
+  can take the final estimate beyond the budget. The sweep stops at
+  that boundary, after three consecutive unusable replies, or when no
+  unreceipted unit remains. Failed or incomplete units remain counted as
+  open.
 
 The sweep's calls are recorded in the run's usage ledger like every other
 decision, so the benchmark wall counts them.
@@ -119,32 +129,41 @@ close like concrete cards once probed. Without receipts, or without a call
 graph, no edge card exists; the pass follows the first one rather than
 competing with it.
 
-## Loaded, from transcripts
+## Observed read requests from transcripts
 
-When a session ends, the harness scans its backend transcript for file reads
+As a session transcript is tallied, the harness observes file-read requests
 and appends them to `state/reads.jsonl`: the native read tool of each backend
 (Claude `Read`, Gemini `read_file`, OpenCode `read`) with its offset and
 limit, and the shell idioms the audit shell wraps (`sed -n 'A,Bp'`, `cat`,
 `head`, `tail`, `nl`, `bin/peek FILE:A-B`). A pattern search loads matches,
 not a range, and is not recorded. Only reads inside the target tree count.
 
-The report shows these as **Loaded** beside **Receipted**. Loaded is what the
-transcript proves entered the context window, without any claim about
-attention. Receipted is the agent's own statement of what it read. The two
-disagree in useful ways: loaded without a receipt is a session that read and
-did not record, and a receipt on lines never loaded is worth a look. Neither
-is a gate, because a read the parser does not recognise is simply absent.
+The report shows these as **Read requested** beside **Receipted**. The request
+scope is an upper bound: a shell command such as `cat` proves what was asked
+for, while backend or tool truncation can mean less entered the context.
+Receipted is the agent's own statement of what it read. The two disagree in
+useful ways, but neither is a gate: transcript formats and shell idioms vary,
+and a read the parser does not recognise is simply absent. Both ledgers are
+pinned to the current manifest hash, so observations on changed content stop
+counting.
 
 ## What it does and does not say
 
 "Offered" and "claimed" are what the harness handed out. Neither proves an
 agent read the file, and a claim is not a verdict on the file's contents. A
-receipt is the agent's own record of reading, checked for shape but not for
-attention, so it bounds what could have been reviewed rather than proving
-what was understood. The number to read a clean result against is the
-never-offered share together with the unexamined line share: a tree where
-most files were never in the window has been sampled, not reviewed, and a
-clean result over it is silence, not evidence.
+receipt is the agent's own record of reading, checked for content identity,
+range, and sweep verdict completeness, but not for attention. It bounds what
+could have been reviewed rather than proving what was understood. The number
+to read a clean result against is the never-offered share together with the
+unattested line share: a tree where most files were never in the window has
+been sampled, not reviewed, and a clean result over it is silence, not
+evidence.
+
+No instrumentation can prove that a model understood every delivered unit.
+Repeated runs over planted defects estimate detection probability for the
+classes and target shapes represented by those plants; they do not establish
+recall for unplanted classes. Report manifest reach, attestations, and seeded
+recall separately.
 
 The benchmark telemetry carries the same totals as `coverage.tree`, beside the
 per-lane card shares, so a run report shows how much of the tree its window

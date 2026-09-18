@@ -431,8 +431,8 @@ def prepare_runtime(
     return runtime
 
 
-def _activate_runtime(runtime: Runtime) -> None:
-    os.environ.update(
+def _apply_runtime_environment(environment, runtime: Runtime) -> None:
+    environment.update(
         RESULTS_DIR=str(runtime.results), TARGET_ROOT=str(runtime.target_root),
         TARGET_SLUG=runtime.target_slug, TARGET_REV=runtime.target_rev,
         TARGET_REPO_TYPE=runtime.repo_type, LOGDIR=str(runtime.logs),
@@ -442,7 +442,7 @@ def _activate_runtime(runtime: Runtime) -> None:
         LLM_DECIDE_LOG=str(runtime.logs / "llm-decisions.log"),
         LLM_DECIDE_COUNTER_FILE=str(runtime.logs / ".llm_decisions_harness"),
     )
-    os.environ[llm_invoke.AGENT_SECURITY_ENV] = runtime.agent_security
+    environment[llm_invoke.AGENT_SECURITY_ENV] = runtime.agent_security
     try:
         config_digest = target_config.read_session_env(runtime.results).get(
             "TARGET_CONFIG_SHA256", "",
@@ -450,20 +450,24 @@ def _activate_runtime(runtime: Runtime) -> None:
     except (OSError, ValueError):
         config_digest = ""
     if config_digest:
-        os.environ["TARGET_CONFIG_SHA256"] = config_digest
+        environment["TARGET_CONFIG_SHA256"] = config_digest
     else:
         # A runtime activated before config pinning, or one with no pin, must
         # not inherit another runtime's publication scope.
-        os.environ.pop("TARGET_CONFIG_SHA256", None)
+        environment.pop("TARGET_CONFIG_SHA256", None)
     # Export only a real operator choice. Writing a resolved tier default back
     # would read downstream as an explicit setting and suppress the longer
     # per-decision defaults; clearing it when there is no choice keeps a value
     # from an earlier runtime in this process from leaking into this one.
     if runtime.decision_timeout:
-        os.environ["LLM_DECISION_TIMEOUT"] = str(runtime.decision_timeout)
+        environment["LLM_DECISION_TIMEOUT"] = str(runtime.decision_timeout)
     else:
-        os.environ.pop("LLM_DECISION_TIMEOUT", None)
-    os.environ.update(llm_invoke.memory_env(runtime.backend))
+        environment.pop("LLM_DECISION_TIMEOUT", None)
+    environment.update(llm_invoke.memory_env(runtime.backend))
+
+
+def _activate_runtime(runtime: Runtime) -> None:
+    _apply_runtime_environment(os.environ, runtime)
 
 
 def _operator_decision_timeout(override: str | None) -> int:
@@ -1643,7 +1647,7 @@ def _context_cap() -> int:
 
 
 def _scan_transcript(
-    raw_path: Path, quota_marker: Path | None = None,
+    raw_path: Path, quota_marker: Path | None = None, event_callback=None,
 ) -> tuple[str, int, int]:
     """(provider issue, tool calls, parsed events) from one transcript pass.
 
@@ -1658,6 +1662,8 @@ def _scan_transcript(
         nonlocal tools, events
         events += 1
         tools += audit_helpers._event_tool_counts(event)[1]
+        if event_callback is not None:
+            event_callback(event)
 
     try:
         with raw_path.open(encoding="utf-8", errors="replace") as raw_stream:
@@ -1812,12 +1818,23 @@ def run_agent(
             f"provider served {served}; its usage row is priced as {served}."
             f"{llm_usage.substitution_note(raw_path)}",
         )
-    issue, tools, events = _scan_transcript(raw_path, quota_marker)
-    # Evidence of what the session loaded, beside the receipts it wrote itself.
-    read_ledger.record_session_reads(
-        runtime.results, runtime.target_root, runtime.root,
-        str(agent), runtime.backend, raw_path, session=stem,
+    observed_reads: list[tuple[str, int, int | None]] = []
+    issue, tools, events = _scan_transcript(
+        raw_path, quota_marker,
+        lambda event: observed_reads.extend(read_ledger.reads_from_event(runtime.backend, event)),
     )
+    # Record request scope beside the receipts the session wrote itself. This
+    # shares the transcript pass above; long sessions are not parsed twice.
+    try:
+        read_ledger.record_observed_reads(
+            runtime.results, runtime.target_root, runtime.root,
+            str(agent), runtime.backend, observed_reads, stem,
+        )
+    except Exception as exc:
+        # Transcript reads are supporting evidence, never a session gate. A
+        # corrupt ledger or parser edge must not turn completed audit work
+        # into a failed harness iteration.
+        index_log(runtime, f"WARN: agent {agent} read-scope recording failed: {exc}")
     if (
         issue == "none"
         and runtime.backend == "claude"
@@ -4330,8 +4347,8 @@ def launch_sweep(runtime: Runtime) -> "subprocess.Popen | None":
         "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
     ]
     environment = dict(os.environ)
+    _apply_runtime_environment(environment, runtime)
     environment.update({
-        "LOGDIR": str(runtime.logs),
         "LLM_DECIDE_COUNTER_FILE": str(runtime.logs / ".llm_decisions_sweep"),
         "LLM_DECIDE_MAX_CALLS": "0",
         "SCRIPT_ROOT": str(runtime.root),
@@ -4363,7 +4380,11 @@ def stop_sweep(runtime: Runtime, process: "subprocess.Popen | None") -> None:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
-    state = sweep.read_state(runtime.results)
+    try:
+        state = sweep.read_state(runtime.results)
+    except sweep.SweepStateError as exc:
+        index_log(runtime, f"WARN: sweep state is unreadable: {exc}")
+        state = {}
     index_log(
         runtime,
         f"sweep: ended rc={process.returncode} receipts={state.get('receipts', 0)} "

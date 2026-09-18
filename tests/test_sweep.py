@@ -9,7 +9,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -17,6 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import callgraph
+import audit_runner
 import coverage_ledger
 import llm_decide
 import sweep
@@ -58,7 +61,10 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(units["src/parsed.c:1-9"].functions, [])
         self.assertEqual(units["src/parsed.c:10-39"].functions, ["open"])
         self.assertEqual(units["src/parsed.c:40-59"].functions, ["parse"])
-        self.assertEqual(units["src/parsed.c:60-300"].functions, ["huge"], "241 lines fits four windows")
+        self.assertEqual(
+            [key for key in units if key.startswith("src/parsed.c:") and units[key].functions == ["huge"]],
+            ["src/parsed.c:60-159", "src/parsed.c:160-259", "src/parsed.c:260-300"],
+        )
         self.assertEqual(
             [k for k in units if k.startswith("src/plain.c")],
             ["src/plain.c:1-100", "src/plain.c:101-200", "src/plain.c:201-250"],
@@ -78,6 +84,15 @@ class PlanningTests(unittest.TestCase):
             ["src/parsed.c:201-300", "src/parsed.c:301-400", "src/parsed.c:401-500", "src/parsed.c:501-600"],
         )
 
+    def test_ninety_nine_point_nine_percent_is_not_complete(self) -> None:
+        source = self.target / "src" / "almost.c"
+        source.write_text(_body(1000), encoding="utf-8")
+        workqueue.rank_target(self.ctx, 10)
+        coverage_ledger.record_receipt(self.ctx, "1", "src/almost.c", lines="1-999")
+        units = [unit for unit in sweep.plan_units(self.ctx, unit_lines=100)
+                 if unit.file == "src/almost.c"]
+        self.assertEqual([unit.key for unit in units], ["src/almost.c:901-1000"])
+
     def test_gap_order_puts_unoffered_and_least_read_files_first(self) -> None:
         for name, lines in (("hot", 40), ("cold", 40), ("half", 40)):
             (self.target / "src" / f"{name}.c").write_text(_body(lines), encoding="utf-8")
@@ -93,9 +108,12 @@ class PlanningTests(unittest.TestCase):
 
 class ReplyTests(unittest.TestCase):
     UNIT = sweep.Unit("src/a.c", 40, 79, ["parse"])
+    VERDICT = [{"function": "parse", "verdict": "suspicious"}]
 
     def test_ranges_are_held_inside_the_unit(self) -> None:
-        ranges, _, _ = sweep.parse_reply(self.UNIT, {"examined": [[40, 60], [55, 79]], "verdicts": [], "leads": []})
+        ranges, _, _ = sweep.parse_reply(self.UNIT, {
+            "examined": [[40, 60], [55, 79]], "verdicts": self.VERDICT, "leads": [],
+        })
         self.assertEqual(ranges, [(40, 79)])
         for bad in ([[30, 60]], [[60, 90]], [[70, 60]], [[1]], ["x"]):
             with self.assertRaises(sweep.ReplyError):
@@ -106,15 +124,55 @@ class ReplyTests(unittest.TestCase):
     def test_leads_are_kept_only_when_verifiable(self) -> None:
         good = {"function": "parse", "line": 50, "hypothesis": "h", "input_shape": "i",
                 "guard_gap": "g", "diagnostic": "bounds", "strategy": "S7"}
-        _, _, leads = sweep.parse_reply(self.UNIT, {"examined": [], "verdicts": [], "leads": [
+        _, _, leads = sweep.parse_reply(self.UNIT, {"examined": [[40, 79]], "verdicts": self.VERDICT, "leads": [
             good,
             {**good, "function": "invented"},
             {**good, "line": 200},
             {**good, "diagnostic": "vibes"},
             {**good, "hypothesis": ""},
             {**good, "strategy": "S1"},
+            {**good, "line": 60, "strategy": ""},
+            {**good, "function": "parse()", "line": 70},
         ]})
-        self.assertEqual([(l["function"], l["strategy"]) for l in leads], [("parse", "S7"), ("parse", "S3")])
+        self.assertEqual(
+            [(l["function"], l["line"], l["strategy"]) for l in leads],
+            [("parse", 50, "S7"), ("parse", 60, "S3"), ("parse", 70, "S7")],
+            "a repeat at one site is dropped; an absent or unknown strategy label "
+            "defaults, since it routes the lead and is not evidence; `parse()` is parse",
+        )
+
+        _, _, clean_leads = sweep.parse_reply(self.UNIT, {
+            "examined": [[40, 79]],
+            "verdicts": [{"function": "parse", "verdict": "clean"}],
+            "leads": [good],
+        })
+        self.assertEqual(clean_leads, [])
+
+    def test_line_window_leads_use_the_exact_window_label(self) -> None:
+        unit = sweep.Unit("src/a.c", 1, 20)
+        base = {"line": 7, "hypothesis": "h", "input_shape": "i",
+                "guard_gap": "g", "diagnostic": "bounds", "strategy": "S7"}
+        reply = {"examined": [[1, 20]],
+                 "verdicts": [{"function": "lines 1-20", "verdict": "suspicious"}],
+                 "leads": [{**base, "function": "invented"},
+                           {**base, "function": "lines 1-20"},
+                           {**base, "function": "lines 1-20"}]}
+        _, _, leads = sweep.parse_reply(unit, reply)
+        self.assertEqual([(lead["function"], lead["line"]) for lead in leads], [("lines 1-20", 7)])
+
+    def test_reply_needs_a_receipt_and_leads_must_be_inside_it(self) -> None:
+        with self.assertRaisesRegex(sweep.ReplyError, "no examined ranges"):
+            sweep.parse_reply(self.UNIT, {"examined": [], "verdicts": [], "leads": []})
+        lead = {"function": "parse", "line": 70, "hypothesis": "h", "input_shape": "i",
+                "guard_gap": "g", "diagnostic": "bounds", "strategy": "S7"}
+        with self.assertRaisesRegex(sweep.ReplyError, "whole unit"):
+            sweep.parse_reply(
+                self.UNIT, {"examined": [[40, 60]], "verdicts": self.VERDICT, "leads": [lead]},
+            )
+        with self.assertRaisesRegex(sweep.ReplyError, "verdicts do not cover"):
+            sweep.parse_reply(
+                self.UNIT, {"examined": [[40, 79]], "verdicts": [], "leads": []},
+            )
 
 
 class RunTests(unittest.TestCase):
@@ -140,9 +198,36 @@ class RunTests(unittest.TestCase):
             env["LLM_DECIDE_MOCK_SWEEP_UNIT"] = json.dumps(reply)
         return env
 
+    def test_run_holds_one_owner_lock_around_the_complete_state_machine(self) -> None:
+        events: list[str] = []
+
+        @contextmanager
+        def owner(results_dir):
+            self.assertEqual(results_dir, self.results)
+            events.append("acquired")
+            try:
+                yield
+            finally:
+                events.append("released")
+
+        def run_locked(*args, **kwargs):
+            self.assertEqual(events, ["acquired"])
+            events.append("ran")
+            return {"stop": "test"}
+
+        with mock.patch.object(sweep, "_owner_lock", owner), \
+                mock.patch.object(sweep, "_run_locked", run_locked):
+            self.assertEqual(sweep.run(self.ctx, token_budget=1), {"stop": "test"})
+        self.assertEqual(events, ["acquired", "ran", "released"])
+
+    def test_a_second_sweep_is_refused_rather_than_queued(self) -> None:
+        with sweep._owner_lock(self.results):
+            with self.assertRaisesRegex(sweep.SweepStateError, "another sweep holds"):
+                sweep.run(self.ctx, token_budget=1)
+
     def test_a_mocked_reply_becomes_a_receipt_and_a_lead(self) -> None:
         reply = {"examined": [[1, 50]], "verdicts": [{"function": "lines 1-50", "verdict": "suspicious"}],
-                 "leads": [{"function": "", "line": 7, "hypothesis": "copy overruns", "input_shape": "long",
+                 "leads": [{"function": "lines 1-50", "line": 7, "hypothesis": "copy overruns", "input_shape": "long",
                             "guard_gap": "no length check", "diagnostic": "bounds", "strategy": "S7"}]}
         with mock.patch.dict(os.environ, self.mock(reply), clear=False):
             state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100, log=lambda m: None)
@@ -170,14 +255,22 @@ class RunTests(unittest.TestCase):
         self.assertIn("2 lead(s)", coverage_ledger.render_coverage(coverage_ledger.coverage_report(self.ctx)))
 
     def test_the_budget_stops_the_sweep_and_carries_across_runs(self) -> None:
-        reply = {"examined": [[1, 50]], "verdicts": [], "leads": []}
+        reply = {"examined": [[1, 50]],
+                 "verdicts": [{"function": "lines 1-50", "verdict": "clean"}], "leads": []}
         with mock.patch.dict(os.environ, self.mock(reply), clear=False):
             first = sweep.run(self.ctx, token_budget=1, unit_lines=100)
-            self.assertEqual((first["units"], first["stop"]), (1, "budget"))
-            self.assertEqual(first["units_remaining"], 1)
+            self.assertEqual((first["units"], first["stop"]), (0, "budget"))
+            self.assertEqual(first["units_remaining"], 2)
             second = sweep.run(self.ctx, token_budget=1, unit_lines=100)
-        self.assertEqual((second["units"], second["stop"]), (1, "budget"), "spend persists; nothing more is bought")
+        self.assertEqual((second["units"], second["stop"]), (0, "budget"), "the known prompt cannot overspend")
         self.assertEqual(second["spent_tokens"], first["spent_tokens"])
+
+    def test_an_interrupted_provider_call_keeps_its_prompt_spend(self) -> None:
+        with mock.patch.object(llm_decide, "llm_decide", side_effect=sweep._Stopped()):
+            state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
+        self.assertEqual((state["units"], state["receipts"], state["stop"]), (1, 0, "interrupted"))
+        self.assertGreater(state["spent_tokens"], 0)
+        self.assertEqual(sweep.read_state(self.results), state)
 
     def test_unusable_replies_count_against_the_budget_and_stop_after_a_streak(self) -> None:
         for name in ("c", "d", "e"):
@@ -194,7 +287,8 @@ class RunTests(unittest.TestCase):
     def test_state_is_written_after_every_unit_and_a_bad_receipt_is_a_failure(self) -> None:
         # The audit ends the sweep with SIGTERM; spend written only at the end
         # would be spent again on the next resume.
-        reply = {"examined": [[1, 50]], "verdicts": [], "leads": []}
+        reply = {"examined": [[1, 50]],
+                 "verdicts": [{"function": "lines 1-50", "verdict": "clean"}], "leads": []}
         seen: list[int] = []
         real_receipt = coverage_ledger.record_receipt
 
@@ -207,15 +301,16 @@ class RunTests(unittest.TestCase):
         with mock.patch.dict(os.environ, self.mock(reply), clear=False), \
                 mock.patch.object(coverage_ledger, "record_receipt", flaky):
             state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
-        self.assertEqual((state["units"], state["failures"], state["receipts"], state["stop"]), (2, 1, 1, "exhausted"))
-        self.assertEqual(state["units_remaining"], 0)
+        self.assertEqual((state["units"], state["failures"], state["receipts"], state["stop"]), (2, 1, 1, "incomplete"))
+        self.assertEqual(state["units_remaining"], 1)
         # A stop mid-loop leaves the last persisted state, not nothing.
         with mock.patch.dict(os.environ, self.mock(reply), clear=False), \
                 mock.patch.object(sweep, "_record_lead", side_effect=sweep._Stopped()):
             (self.target / "src" / "c.c").write_text(_body(50), encoding="utf-8")
             workqueue.rank_target(self.ctx, 10)
-            reply["leads"] = [{"function": "", "line": 3, "hypothesis": "h", "input_shape": "i",
-                               "guard_gap": "g", "diagnostic": "bounds"}]
+            reply["verdicts"] = [{"function": "lines 1-50", "verdict": "suspicious"}]
+            reply["leads"] = [{"function": "lines 1-50", "line": 3, "hypothesis": "h", "input_shape": "i",
+                               "guard_gap": "g", "diagnostic": "bounds", "strategy": "S7"}]
             os.environ["LLM_DECIDE_MOCK_SWEEP_UNIT"] = json.dumps(reply)
             stopped = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
         self.assertEqual(stopped["stop"], "interrupted")
@@ -223,15 +318,22 @@ class RunTests(unittest.TestCase):
         self.assertGreater(stopped["spent_tokens"], state["spent_tokens"])
 
     def test_units_receipted_by_a_session_since_the_plan_are_not_bought(self) -> None:
-        reply = {"examined": [[1, 50]], "verdicts": [], "leads": []}
+        reply = {"examined": [[1, 50]],
+                 "verdicts": [{"function": "lines 1-50", "verdict": "clean"}], "leads": []}
         calls: list[str] = []
         real_prompt = sweep.build_prompt
 
-        def spy(ctx, unit, controls):
+        def spy(
+            ctx, unit, controls, source_cache=None,
+            neighbourhood_cache=None, graph=None,
+        ):
             calls.append(unit.key)
             if len(calls) == 1:
                 coverage_ledger.record_receipt(ctx, "1", "src/b.c", lines="1-50")
-            return real_prompt(ctx, unit, controls)
+            return real_prompt(
+                ctx, unit, controls, source_cache=source_cache,
+                neighbourhood_cache=neighbourhood_cache, graph=graph,
+            )
 
         with mock.patch.dict(os.environ, self.mock(reply), clear=False), \
                 mock.patch.object(sweep, "build_prompt", spy):
@@ -247,6 +349,47 @@ class RunTests(unittest.TestCase):
         self.assertIn('"examined":[[1,50]]', text)
         self.assertTrue(llm_decide._validate_decision_shape("sweep_unit", {"examined": [[1, 2]], "verdicts": [], "leads": []}))
         self.assertFalse(llm_decide._validate_decision_shape("sweep_unit", {"examined": "1-2", "verdicts": [], "leads": []}))
+
+    def test_prompt_does_not_hide_long_line_content(self) -> None:
+        marker = "tail-marker"
+        (self.target / "src" / "long.c").write_text("x" * 500 + marker + "\n", encoding="utf-8")
+        workqueue.rank_target(self.ctx, 10)
+        text = sweep.build_prompt(self.ctx, sweep.Unit("src/long.c", 1, 1), "bytes")
+        self.assertIn(marker, text)
+        self.assertIn("untrusted", text.lower())
+
+    def test_prompt_refuses_source_that_changed_after_the_manifest(self) -> None:
+        unit = sweep.plan_units(self.ctx, 100)[0]
+        (self.target / unit.file).write_text("changed\n" * 50, encoding="utf-8")
+        with self.assertRaisesRegex(OSError, "changed after the sweep plan"):
+            sweep.build_prompt(self.ctx, unit, "bytes")
+
+    def test_invalid_state_is_not_silently_reset(self) -> None:
+        sweep.state_path(self.results).write_text("not-json\n", encoding="utf-8")
+        with self.assertRaises(sweep.SweepStateError):
+            sweep.read_state(self.results)
+
+    def test_launch_uses_its_runtime_backend_in_an_ensemble(self) -> None:
+        config = target_config.Config(target_root=str(self.target))
+        config.sweep_token_budget = 100
+        runtime = SimpleNamespace(
+            root=ROOT, target_root=self.target, target_slug="sampleproj", results=self.results,
+            logs=self.root / "logs", backend="codex", model="gpt-test", target_rev="abc",
+            repo_type="git", agent_security="workspace-write", decision_timeout=17,
+            config=config, delta=None, fixed_strategy="",
+        )
+        runtime.logs.mkdir()
+        fake = SimpleNamespace(pid=123)
+        with mock.patch.dict(os.environ, {"ACTIVE_BACKEND": "gemini", "BACKEND": "gemini", "MODEL": "wrong",
+                                                   "RESULTS_DIR": "/wrong", "LLM_DECIDE_LOG": "/wrong/log"}, clear=False), \
+                mock.patch.object(audit_runner.subprocess, "Popen", return_value=fake) as popen, \
+                mock.patch.object(audit_runner, "index_log"):
+            self.assertIs(audit_runner.launch_sweep(runtime), fake)
+        environment = popen.call_args.kwargs["env"]
+        self.assertEqual((environment["ACTIVE_BACKEND"], environment["BACKEND"], environment["MODEL"]),
+                         ("codex", "codex", "gpt-test"))
+        self.assertEqual(environment["RESULTS_DIR"], str(self.results))
+        self.assertEqual(environment["LLM_DECIDE_LOG"], str(runtime.logs / "llm-decisions.log"))
 
     def test_cli_dry_run_lists_units_and_refuses_to_spend_without_a_budget(self) -> None:
         base = [str(ROOT / "bin" / "sweep"), "--target-path", str(self.target),

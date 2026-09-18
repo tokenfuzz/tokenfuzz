@@ -173,11 +173,12 @@ def status() -> str:
 
 
 def load(results_dir: Path) -> dict | None:
+    path = artifact_path(results_dir)
     try:
-        data = json.loads(artifact_path(results_dir).read_text(encoding="utf-8"))
+        parsed = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) and data.get("version") == SCHEMA_VERSION else None
+    return parsed if isinstance(parsed, dict) and parsed.get("version") == SCHEMA_VERSION else None
 
 
 def cache_signature(
@@ -465,7 +466,12 @@ def _unit_pack(entry: dict, target_root: Path) -> list[str]:
     return lines if kept else []
 
 
-def block_for(results_dir: Path, file: str, target_root: Path | None = None) -> list[str]:
+def block_for(
+    results_dir: Path,
+    file: str,
+    target_root: Path | None = None,
+    graph: dict | None = None,
+) -> list[str]:
     """Markdown lines describing who calls this file and how input reaches it.
 
     Returns [] whenever the answer would be partial or absent: the agent gets
@@ -476,7 +482,7 @@ def block_for(results_dir: Path, file: str, target_root: Path | None = None) -> 
     rel = workqueue.normalized_relpath(file)
     if not rel:
         return []
-    data = load(results_dir)
+    data = graph if graph is not None else load(results_dir)
     if data is None:
         return []
     entry = (data.get("files") or {}).get(rel)
@@ -552,14 +558,16 @@ def block_for(results_dir: Path, file: str, target_root: Path | None = None) -> 
     return lines
 
 
-def definitions_for(results_dir: Path, file: str) -> list[tuple[str, int]]:
+def definitions_for(
+    results_dir: Path, file: str, graph: dict | None = None,
+) -> list[tuple[str, int]]:
     """Parsed function definitions of one file as (name, start line), by line.
 
     Empty when there is no graph, the file was never parsed, or the artifact
     predates the field; callers fall back to line windows, never to a guess.
     """
     rel = workqueue.normalized_relpath(file)
-    data = load(results_dir) if rel else None
+    data = (graph if graph is not None else load(results_dir)) if rel else None
     if data is None or data.get("skipped"):
         return []
     entry = (data.get("files") or {}).get(rel) or {}
@@ -575,11 +583,13 @@ def definitions_for(results_dir: Path, file: str) -> list[tuple[str, int]]:
     return sorted(out, key=lambda item: (item[1], item[0]))
 
 
-def caller_files(results_dir: Path, file: str) -> list[str]:
+def caller_files(
+    results_dir: Path, file: str, graph: dict | None = None,
+) -> list[str]:
     """Files with a resolved call into `file`, most calls first; [] without
     a graph. Prompt rows and the overflow together are every certain edge."""
     rel = workqueue.normalized_relpath(file)
-    data = load(results_dir) if rel else None
+    data = (graph if graph is not None else load(results_dir)) if rel else None
     if data is None or data.get("skipped"):
         return []
     entry = (data.get("files") or {}).get(rel) or {}

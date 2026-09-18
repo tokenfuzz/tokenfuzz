@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""What a session loaded into context, read back from its transcript.
+"""What file scope a session requested, read back from its transcript.
 
 A receipt (`bin/state mark-examined`) is the agent's own claim about what it
 read. This ledger is the other side: the file reads its backend transcript
-shows, recorded per session after it ends. It is evidence, never a gate:
+shows was requested, recorded per session after it ends. It is evidence,
+never a gate:
 backends read files through different tools, shell idioms vary, and a read
 the parser does not recognise is simply absent, so a file with no row here
 was not proven unread. The coverage report shows the two side by side and
-names this one "loaded".
+names this one "read requested". Command logs do not prove that an
+untruncated response entered the model's context.
 
 Recognised shapes:
 
@@ -46,18 +48,19 @@ def reads_path(results_dir: Path) -> Path:
     return workqueue.state_dir(Path(results_dir)) / READS_NAME
 
 
-def _range(offset: object, limit: object) -> tuple[int, int | None]:
+def _range(offset: object, limit: object) -> tuple[int, int | None] | None:
     """(start, end) from a tool's offset/limit; offsets are 1-based lines and
-    an absent limit means to the end of the file."""
+    an absent limit means to the end of the file. Malformed explicit values
+    describe a failed request, not a whole-file read."""
     try:
-        start = max(1, int(offset)) if offset not in (None, "") else 1
-    except (TypeError, ValueError):
-        start = 1
-    try:
+        raw_start = int(offset) if offset not in (None, "") else 1
         count = int(limit) if limit not in (None, "") else None
     except (TypeError, ValueError):
-        count = None
-    if count is None or count <= 0:
+        return None
+    if raw_start < 0 or count is not None and count <= 0:
+        return None
+    start = max(1, raw_start)
+    if count is None:
         return start, None
     return start, start + count - 1
 
@@ -101,6 +104,7 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
         if tool == "sed":
             script = ""
             scripts = 0
+            quiet = False
             files: list[str] = []
             skip = False
             for index, arg in enumerate(args):
@@ -111,6 +115,8 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
                     script = args[index + 1] if index + 1 < len(args) else ""
                     scripts += 1
                     skip = True
+                elif arg in ("-n", "--quiet", "--silent"):
+                    quiet = True
                 elif arg.startswith("-"):
                     continue
                 elif not script:
@@ -118,13 +124,13 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
                 else:
                     files.append(arg)
             match = _SED_RANGE_RE.match(script.strip())
-            if scripts > 1 or not match or not files:
+            if not quiet or scripts > 1 or not match or not files:
                 # Several -e scripts print several windows; recording only
                 # the last would under- or mis-count, so record none.
                 continue
             start = int(match.group(1))
             end_text = match.group(2)
-            end = None if end_text in (None, "$") else int(end_text)
+            end = None if end_text == "$" else (start if end_text is None else int(end_text))
             if end is not None and end < start:
                 continue
             out.extend((file, start, end) for file in files)
@@ -143,15 +149,24 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
                     # A byte window says nothing about lines.
                     byte_mode = True
                     skip = arg in ("-c", "--bytes")
-                elif arg in ("-n", "--lines") or (arg.startswith("-n") and len(arg) > 2):
-                    spec = args[index + 1] if arg in ("-n", "--lines") and index + 1 < len(args) else arg[2:]
+                elif arg in ("-n", "--lines") or arg.startswith("--lines=") or (arg.startswith("-n") and len(arg) > 2):
+                    if arg in ("-n", "--lines"):
+                        spec = args[index + 1] if index + 1 < len(args) else ""
+                    elif arg.startswith("--lines="):
+                        spec = arg.partition("=")[2]
+                    else:
+                        spec = arg[2:]
                     skip = arg in ("-n", "--lines")
                     if tool == "tail" and spec.startswith("+"):
                         # `tail -n +K` starts at line K, it is not a count.
                         from_line = int(spec[1:]) if spec[1:].isdigit() else 0
                         count = None
+                    elif spec.isdigit():
+                        count = int(spec)
+                    elif tool == "tail" and re.fullmatch(r"-\d+", spec):
+                        count = int(spec[1:])
                     else:
-                        count = int(spec) if spec.isdigit() else None
+                        count = None
                 elif re.fullmatch(r"-\d+", arg):
                     count = int(arg[1:])
                 elif arg.startswith("-"):
@@ -159,6 +174,10 @@ def reads_from_command(command: str) -> list[tuple[str, int, int | None]]:
                 else:
                     files.append(arg)
             if byte_mode:
+                continue
+            if count is None and not from_line:
+                continue
+            if count == 0:
                 continue
             if tool == "head":
                 out.extend((file, 1, count) for file in files)
@@ -195,8 +214,9 @@ def reads_from_event(backend: str, event: dict) -> list[tuple[str, int, int | No
                 or params.get("filePath") or params.get("path") or ""
             )
             if isinstance(path, str) and path:
-                start, end = _range(params.get("offset"), params.get("limit"))
-                out.append((path, start, end))
+                bounds = _range(params.get("offset"), params.get("limit"))
+                if bounds is not None:
+                    out.append((path, *bounds))
         elif lowered in _SHELL_TOOL_NAMES:
             command = params.get("command") or params.get("cmd") or ""
             if isinstance(command, list):
@@ -246,18 +266,50 @@ def _resolve(path: str, target_root: Path, script_root: Path) -> str:
         return ""
 
 
+def record_observed_reads(
+    results_dir: Path, target_root: Path, script_root: Path,
+    agent: str, backend: str, observed: list[tuple[str, int, int | None]],
+    session: str,
+) -> int:
+    """Append one row per target file requested in a transcript.
+
+    Rows are pinned to the current manifest identity: a file whose content
+    changed after the manifest walk is skipped (stat first, hash on a
+    mismatch), so a request is never pinned to content it did not read.
+    """
+    import coverage_ledger
+
+    manifest = {
+        str(row.get("file") or ""): row
+        for row in coverage_ledger.read_manifest(results_dir)
+    }
+    by_file: dict[str, list[tuple[int, int | None]]] = {}
+    for path, start, end in observed:
+        rel = _resolve(path, Path(target_root), Path(script_root))
+        row = manifest.get(rel)
+        if not row or not coverage_ledger.content_matches_manifest(target_root, rel, row):
+            continue
+        by_file.setdefault(rel, []).append((start, end))
+    rows = [
+        {
+            "file": rel, "ranges": [[start, end] for start, end in ranges],
+            "sha1": manifest[rel].get("sha1", ""),
+            "agent": str(agent), "backend": backend, "session": session,
+            "source": "transcript", "at": workqueue.now_iso(),
+        }
+        for rel, ranges in sorted(by_file.items())
+    ]
+    if rows:
+        workqueue.append_jsonl_many(reads_path(Path(results_dir)), rows)
+    return len(rows)
+
+
 def record_session_reads(
     results_dir: Path, target_root: Path, script_root: Path,
     agent: str, backend: str, raw_path: Path, session: str = "",
 ) -> int:
-    """Append one row per file read in a finished session's transcript.
-
-    Ranges are merged per file within the session. A read outside the target
-    tree (a results directory, a scratch file) is not source and is skipped.
-    Takes paths rather than a queue context so a session's bookkeeping needs
-    nothing the queue does.
-    """
-    by_file: dict[str, list[tuple[int, int | None]]] = {}
+    """Standalone transcript scan used outside the audit runner."""
+    observed: list[tuple[str, int, int | None]] = []
     try:
         with raw_path.open(encoding="utf-8", errors="replace") as stream:
             for line in stream:
@@ -270,39 +322,37 @@ def record_session_reads(
                     continue
                 if not isinstance(event, dict):
                     continue
-                for path, start, end in reads_from_event(backend, event):
-                    rel = _resolve(path, Path(target_root), Path(script_root))
-                    if rel:
-                        by_file.setdefault(rel, []).append((start, end))
+                observed.extend(reads_from_event(backend, event))
     except OSError:
         return 0
-    rows = [
-        {
-            "file": rel, "ranges": [[start, end] for start, end in ranges],
-            "agent": str(agent), "backend": backend, "session": session or raw_path.name,
-            "source": "transcript", "at": workqueue.now_iso(),
-        }
-        for rel, ranges in sorted(by_file.items())
-    ]
-    if rows:
-        workqueue.append_jsonl_many(reads_path(Path(results_dir)), rows)
-    return len(rows)
+    return record_observed_reads(
+        results_dir, target_root, script_root, agent, backend, observed,
+        session or raw_path.name,
+    )
 
 
-def loaded_ranges_by_file(results_dir: Path) -> dict[str, list[tuple[int, int]]]:
-    """Merged loaded ranges per manifest file, open ends resolved against the
-    manifest's line count and `tail` windows anchored at its end."""
+def requested_ranges_by_file(results_dir: Path) -> dict[str, list[tuple[int, int]]]:
+    """Merged requested ranges per current manifest file.
+
+    Open ends resolve against the manifest line count and `tail` windows are
+    anchored at its end. These are request scopes, not proof of untruncated
+    tool output or model attention.
+    """
     import coverage_ledger
 
-    lengths = {
-        str(row.get("file") or ""): int(row.get("lines") or 0)
+    manifest = {
+        str(row.get("file") or ""): row
         for row in coverage_ledger.read_manifest(results_dir)
     }
     collected: dict[str, list[tuple[int, int]]] = {}
     for row in workqueue.read_jsonl(reads_path(results_dir)):
         rel = str(row.get("file") or "")
-        total = lengths.get(rel)
-        if not rel or not total:
+        current = manifest.get(rel) or {}
+        try:
+            total = int(current.get("lines") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not rel or not total or row.get("sha1") != current.get("sha1"):
             continue
         for pair in row.get("ranges") or []:
             if not isinstance(pair, list) or len(pair) != 2:

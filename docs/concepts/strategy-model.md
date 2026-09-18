@@ -111,7 +111,7 @@ diversity floor is off, and the queue never expands. The delta is the scope.
   available, the scheduler reserves one reproduce seat for this campaign while
   it remains eligible.
 - **Call-edge cards** (always S3): the second pass. Once every parsed
-  function of a file carries an examined receipt, one card is minted per
+  function of a file carries an examined attestation, one card is minted per
   file with a certain call into it, naming the caller. File cards cover
   functions; these cover the contract between caller and callee, where a
   size, lifetime, or encoding assumption changes hands. They ride the window

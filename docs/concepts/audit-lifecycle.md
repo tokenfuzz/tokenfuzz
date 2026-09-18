@@ -141,7 +141,7 @@ build or mode can execute at all is marked blocked rather than counted as
 clean evidence.
 
 Work cards are leased so two agents do not step on each other. An agent
-records the line ranges or functions it actually read with
+attests the line ranges or functions it read with
 `bin/state mark-examined`; the card then carries an **Examined so far** block
 on every later pickup, including after a context compaction, so the next
 session starts from the unexamined functions instead of re-reading the file.

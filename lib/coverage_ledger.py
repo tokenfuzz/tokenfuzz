@@ -15,7 +15,7 @@ Ledger files under `state/`:
   ranked window. Rewritten atomically on every ranking pass; `offered` is
   sticky across rewrites because the window moves.
 - `receipts.jsonl`: append-only. One row per `bin/state mark-examined` (or
-  sweep) call naming the line ranges of a file a session actually read,
+  sweep) call attesting the line ranges of a file a session read,
   pinned to the file's content hash so a receipt on stale content stops
   counting once the file changes. A claim says a card was handed out; a
   receipt says which lines were looked at.
@@ -96,7 +96,12 @@ def merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
-def function_ranges(results_dir: Path, file: str, lines: int) -> list[tuple[str, int, int]]:
+def function_ranges(
+    results_dir: Path,
+    file: str,
+    lines: int,
+    graph: dict | None = None,
+) -> list[tuple[str, int, int]]:
     """(name, start, end) per parsed definition; a definition runs to the next.
 
     The parser records where a function starts, not where it ends, and
@@ -104,7 +109,7 @@ def function_ranges(results_dir: Path, file: str, lines: int) -> list[tuple[str,
     the next definition (the last to end of file) over-counts only comments
     between functions, and never splits a body across two units.
     """
-    definitions = callgraph.definitions_for(results_dir, file)
+    definitions = callgraph.definitions_for(results_dir, file, graph)
     out: list[tuple[str, int, int]] = []
     for index, (name, start) in enumerate(definitions):
         if start > lines:
@@ -112,6 +117,36 @@ def function_ranges(results_dir: Path, file: str, lines: int) -> list[tuple[str,
         end = definitions[index + 1][1] - 1 if index + 1 < len(definitions) else lines
         out.append((name, start, max(start, min(end, lines))))
     return out
+
+
+def source_matches_manifest(ctx: workqueue.Context, rel: str, row: dict) -> bool:
+    return content_matches_manifest(ctx.target_root, rel, row)
+
+
+def content_matches_manifest(target_root: Path, rel: str, row: dict) -> bool:
+    """Whether the source on disk is the content the manifest row describes.
+
+    The stat triple is the fast path so recording many sweep units does not
+    reread a large file after every call. A mismatch is not a verdict: a
+    checkout, a build step, or a touch changes times without changing
+    content, and a rerank happens only when tracked content changes, so a
+    stale stat would otherwise refuse every receipt on the file until the
+    next source revision. The hash decides.
+    """
+    path = Path(target_root) / rel
+    try:
+        info = path.stat()
+        fields = (
+            ("bytes", info.st_size),
+            ("mtime_ns", info.st_mtime_ns),
+            ("ctime_ns", info.st_ctime_ns),
+        )
+        present = [(key, current) for key, current in fields if row.get(key) is not None]
+        if present and all(int(row[key]) == current for key, current in present):
+            return True
+        return file_identity(path)[1] == str(row.get("sha1") or "")
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 def record_receipt(
@@ -124,14 +159,22 @@ def record_receipt(
     card_id: str = "",
     source: str = "agent",
     note: str = "",
+    expected_sha1: str = "",
+    manifest_entry: dict | None = None,
 ) -> dict:
     """Append a verified receipt: the file is in the manifest, every range is
     inside it, and every function named was parsed there. A receipt that
     cannot be checked is refused rather than recorded as coverage."""
-    row = manifest_row(ctx.results_dir, file)
     rel = workqueue.normalized_relpath(file)
+    row = manifest_entry if manifest_entry is not None else manifest_row(ctx.results_dir, rel)
+    if row is not None and workqueue.normalized_relpath(row.get("file", "")) != rel:
+        raise ReceiptError(f"manifest entry for {row.get('file', '')!r} does not describe {rel!r}")
     if row is None:
         raise ReceiptError(f"{rel or file!r} is not in the manifest; run bin/rank-work or check the path")
+    if expected_sha1 and row.get("sha1") != expected_sha1:
+        raise ReceiptError(f"{rel} changed after the reviewed content was loaded")
+    if not source_matches_manifest(ctx, rel, row):
+        raise ReceiptError(f"{rel} changed since the coverage manifest was written")
     total = int(row.get("lines") or 0)
     ranges = parse_ranges(lines)
     names = [name.strip() for name in str(functions or "").split(",") if name.strip()]
@@ -289,9 +332,10 @@ def write_manifest(
 ) -> list[dict]:
     """Rewrite the manifest for this ranking pass.
 
-    Size and mtime gate the hash so a rerank on a large tree does not re-read
-    every file; `offered` is carried forward because a file that left the
-    window was still handed to the run.
+    Size, mtime, and ctime gate the hash so a rerank on a large tree does not
+    re-read every file. The ctime prevents a same-size edit with a restored
+    mtime from retaining stale coverage. `offered` is carried forward because
+    a file that left the window was still handed to the run.
     """
     path = manifest_path(ctx.results_dir)
     with workqueue.jsonl_lock(path):
@@ -322,6 +366,7 @@ def _manifest_rows(
             old is not None
             and old.get("bytes") == info.st_size
             and old.get("mtime_ns") == info.st_mtime_ns
+            and old.get("ctime_ns") == info.st_ctime_ns
             and old.get("sha1")
         ):
             lines, sha1 = int(old.get("lines") or 0), str(old["sha1"])
@@ -335,6 +380,7 @@ def _manifest_rows(
             "lines": lines,
             "bytes": info.st_size,
             "mtime_ns": info.st_mtime_ns,
+            "ctime_ns": info.st_ctime_ns,
             "sha1": sha1,
             "subsystem": workqueue.subsystem_for(rel),
             "card_id": workqueue.ranked_card_id(ctx.target_slug, rel),
@@ -346,15 +392,21 @@ def _manifest_rows(
 
 def claimed_files(ctx: workqueue.Context, manifest: list[dict]) -> set[str]:
     """Files any session ever claimed a card on, by deterministic card id."""
+    claim_rows = workqueue.read_jsonl(
+        workqueue.state_dir(ctx.results_dir) / "claims.jsonl",
+    )
     claimed_ids = {
         str(row.get("card_id") or "")
-        for row in workqueue.read_jsonl(
-            workqueue.state_dir(ctx.results_dir) / "claims.jsonl",
-        )
+        for row in claim_rows
+    }
+    out = {
+        workqueue.normalized_relpath(row.get("file", ""))
+        for row in claim_rows
+        if workqueue.normalized_relpath(row.get("file", ""))
     }
     claimed_ids.discard("")
     if not claimed_ids:
-        return set()
+        return out
     # Cards that carry a file the manifest may not list (patch cards on a
     # generated file, older queues) resolve through the current queue too.
     by_card_file: dict[str, str] = {}
@@ -362,7 +414,6 @@ def claimed_files(ctx: workqueue.Context, manifest: list[dict]) -> set[str]:
         rel = workqueue.normalized_relpath(card.get("file", ""))
         if rel and card.get("id"):
             by_card_file[str(card["id"])] = rel
-    out: set[str] = set()
     for row in manifest:
         rel = str(row.get("file") or "")
         if claimed_ids & card_ids_for_file(ctx.target_slug, rel):
@@ -378,22 +429,22 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
     """Per-directory buckets of the manifest joined to claims.
 
     `files` is what the ranker enumerated, `offered` what ever entered the
-    window, `claimed` what a session picked up, `loaded` what a transcript
-    shows a session reading (`lines_loaded`), and `receipted` what a session
-    recorded reading (`lines_examined`). A file can be claimed without being
-    offered only through a non-ranked card (a patch card), and loaded without
-    either through discovery, so the buckets are counted independently
-    rather than nested.
+    window, `claimed` what a session picked up, `read_requested` what a
+    transcript shows a session requesting (`lines_requested`), and
+    `receipted` what a session attested reading (`lines_examined`). A file can
+    be claimed without being offered only through a non-ranked card (a patch
+    card), and a read can be requested without either through discovery, so
+    the buckets are counted independently rather than nested.
     """
     import read_ledger  # lazy: it imports this module
 
     manifest = read_manifest(ctx.results_dir)
     claimed = claimed_files(ctx, manifest)
     receipted = examined_ranges_by_file(ctx.results_dir)
-    loaded = read_ledger.loaded_ranges_by_file(ctx.results_dir)
+    requested = read_ledger.requested_ranges_by_file(ctx.results_dir)
     empty = {
-        "files": 0, "offered": 0, "claimed": 0, "loaded": 0, "receipted": 0,
-        "lines": 0, "lines_loaded": 0, "lines_examined": 0,
+        "files": 0, "offered": 0, "claimed": 0, "read_requested": 0, "receipted": 0,
+        "lines": 0, "lines_requested": 0, "lines_examined": 0,
     }
     buckets: dict[str, dict] = {}
     totals = dict(empty)
@@ -407,15 +458,15 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
         offered = bool(row.get("offered"))
         is_claimed = rel in claimed
         examined = min(lines, examined_lines(receipted.get(rel, [])))
-        seen = min(lines, examined_lines(loaded.get(rel, [])))
+        seen = min(lines, examined_lines(requested.get(rel, [])))
         for target in (bucket, totals):
             target["files"] += 1
             target["lines"] += lines
-            target["lines_loaded"] += seen
+            target["lines_requested"] += seen
             target["lines_examined"] += examined
             target["offered"] += int(offered)
             target["claimed"] += int(is_claimed)
-            target["loaded"] += int(seen > 0)
+            target["read_requested"] += int(seen > 0)
             target["receipted"] += int(examined > 0)
         if not offered and not is_claimed and not examined:
             never.append({"file": rel, "lines": lines})
@@ -458,29 +509,28 @@ def render_coverage(report: dict, fmt: str = "md") -> str:
         f"- Files enumerated: {totals['files']} ({totals['lines']} lines)",
         f"- Ever offered in the ranked window: {totals['offered']} ({_pct(totals['offered'], totals['files'])})",
         f"- Ever claimed by a session: {totals['claimed']} ({_pct(totals['claimed'], totals['files'])})",
-        f"- Loaded per transcripts: {totals['loaded']} files, "
-        f"{totals['lines_loaded']} lines ({_pct(totals['lines_loaded'], totals['lines'])})",
-        f"- With an examined receipt: {totals['receipted']} files, "
+        f"- Read scope requested per transcripts: {totals['read_requested']} files, "
+        f"{totals['lines_requested']} lines ({_pct(totals['lines_requested'], totals['lines'])})",
+        f"- With an agent-attested examined receipt: {totals['receipted']} files, "
         f"{totals['lines_examined']} lines ({_pct(totals['lines_examined'], totals['lines'])})",
         f"- Never offered, claimed, nor receipted: {report['never_offered']}",
         *report.get("sweep", []),
         "",
-        "| Directory | Files | Offered | Claimed | Loaded | Receipted | Lines | Loaded % | Examined % |",
+        "| Directory | Files | Offered | Claimed | Read requested | Receipted | Lines | Requested % | Attested % |",
         "|---|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     for row in report["directories"]:
         lines.append(
             f"| `{row['directory']}` | {row['files']} | {row['offered']} | "
-            f"{row['claimed']} | {row['loaded']} | {row['receipted']} | {row['lines']} | "
-            f"{_pct(row['lines_loaded'], row['lines'])} | "
+            f"{row['claimed']} | {row['read_requested']} | {row['receipted']} | {row['lines']} | "
+            f"{_pct(row['lines_requested'], row['lines'])} | "
             f"{_pct(row['lines_examined'], row['lines'])} |"
         )
     if report["untouched"]:
-        lines.extend(["", "Largest untouched files:", ""])
+        lines.extend(["", "Largest files never offered, claimed, or receipted:", ""])
         lines.extend(
             f"- `{item['file']}` ({item['lines']} lines)" for item in report["untouched"]
         )
     if not report["totals"]["files"]:
         lines.extend(["", "No manifest yet: run `bin/rank-work` or start an audit."])
     return "\n".join(lines) + "\n"
-

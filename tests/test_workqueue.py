@@ -1122,6 +1122,7 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(by_card[second["id"]]["queue_rank"], 2)
         self.assertEqual(by_card[first["id"]]["score"], 50)
         self.assertEqual(by_card[first["id"]]["strategy"], "S7")
+        self.assertEqual(by_card[first["id"]]["file"], "src/a.c")
         self.add_run(card_id=first["id"], verdict="CRASH")
         self.add_run(card_id=first["id"], verdict="CLEAN", index=2)
         table = workqueue.card_yield(self.ctx)

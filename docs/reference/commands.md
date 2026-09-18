@@ -351,14 +351,17 @@ was ever touched, so a ranking change is judged by conversion rather than
 taste. `strategy-yield` reports per-strategy runs, seconds, and diagnostics.
 `coverage` joins the auditable-file manifest to the claims and to the
 `mark-examined` receipts, so the files the ranked window never offered, and
-the share of lines no session recorded reading, are listed rather than
-inferred; see [Review coverage](../concepts/coverage.md).
+the share of lines no session attested reading, are listed rather than
+inferred. Its transcript column is the scope of observed read requests, which
+can exceed what entered context when a tool truncated its output; see
+[Review coverage](../concepts/coverage.md).
 
 `bin/sweep` runs the budgeted breadth pass by hand: `--dry-run` lists the
 unreceipted units in the order they would be swept, and `--token-budget N`
-sweeps them until the estimate reaches `N`. An audit starts it in the
-background when `[sweep] token_budget` is set, so the manual form is for
-inspection and for topping up a finished run.
+sweeps them while the next prompt fits the remaining estimate. A final reply
+can take the total past `N`. An audit starts it in the background
+when `[sweep] token_budget` is set, so the manual form is for inspection and
+for topping up a finished run.
 The `list-*` commands emit compact JSONL suitable for scripts. Use
 `show-card`, `show-crash`, or `show-finding` with an id for one full compact
 record. Run `bin/state --help` and `bin/state <subcommand> --help` for filters

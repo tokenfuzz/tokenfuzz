@@ -2166,17 +2166,34 @@ def call_edge_cards(ctx: Context, cards: list[dict]) -> list[dict]:
     """
     import callgraph  # lazy: it imports this module
     import coverage_ledger  # lazy: it imports this module
-    examined = coverage_ledger.examined_fraction_by_file(ctx.results_dir)
-    if not examined:
+    receipted = coverage_ledger.examined_ranges_by_file(ctx.results_dir)
+    if not receipted:
         return []
+    manifest_by_file = {
+        str(row.get("file") or ""): row
+        for row in coverage_ledger.read_manifest(ctx.results_dir)
+    }
+    graph = callgraph.load(ctx.results_dir) or {}
     out: list[dict] = []
     for card in cards:
         if card.get("kind") != "ranked-source" or card.get("reason", "").startswith("companion strategy "):
             continue
         rel = normalized_relpath(card.get("file", ""))
-        if examined.get(rel, 0.0) < 0.999:
+        manifest = manifest_by_file.get(rel) or {}
+        # rank_target rewrites the manifest after it selects the new window.
+        # Refuse an old receipt immediately if source changed since the prior
+        # manifest, so that one transition pass cannot mint a stale edge card.
+        if not coverage_ledger.source_matches_manifest(ctx, rel, manifest):
             continue
-        for caller in callgraph.caller_files(ctx.results_dir, rel):
+        definitions = coverage_ledger.function_ranges(
+            ctx.results_dir, rel, int(manifest.get("lines") or 0), graph,
+        )
+        if not definitions or any(
+            not any(rs <= start and end <= re for rs, re in receipted.get(rel, []))
+            for _name, start, end in definitions
+        ):
+            continue
+        for caller in callgraph.caller_files(ctx.results_dir, rel, graph):
             out.append({
                 "id": ranked_card_id(ctx.target_slug, rel, f"edge:{caller}"),
                 "kind": "call-edge",
@@ -4513,6 +4530,7 @@ def _claim_next_card_locked(
             expires_at = (claim_time + ttl).strftime("%Y-%m-%dT%H:%M:%SZ")
             claim_row = {
                 "card_id": cid,
+                "file": normalized_relpath(card.get("file", "")),
                 "agent": agent,
                 "mode": mode,
                 "role": role,
@@ -4621,20 +4639,22 @@ def add_hypothesis(ctx: Context, args: argparse.Namespace) -> dict:
             if (not active_claim or same_agent_claim) and not adopted_claim:
                 claimed_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
                 expires_at = (now + ttl).strftime("%Y-%m-%dT%H:%M:%SZ")
-                _append_jsonl_unlocked(
-                    claims_path,
-                    {
-                        "card_id": args.card_id,
-                        "agent": args.agent,
-                        "mode": "",
-                        "role": "",
-                        "status": "claimed",
-                        "claimed_at": claimed_at,
-                        "expires_at": expires_at,
-                        "source": "add-hyp",
-                        "hypothesis_id": hid,
-                    },
-                )
+                claim_row = {
+                    "card_id": args.card_id,
+                    "agent": args.agent,
+                    "mode": "",
+                    "role": "",
+                    "status": "claimed",
+                    "claimed_at": claimed_at,
+                    "expires_at": expires_at,
+                    "source": "add-hyp",
+                    "hypothesis_id": hid,
+                }
+                for card in read_jsonl(work_cards_path(ctx)):
+                    if card.get("id") == args.card_id:
+                        claim_row["file"] = normalized_relpath(card.get("file", ""))
+                        break
+                _append_jsonl_unlocked(claims_path, claim_row)
     return row
 
 

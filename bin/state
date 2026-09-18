@@ -300,7 +300,7 @@ def main(argv: list[str]) -> int:
 
     p_examined = sub.add_parser(
         "mark-examined",
-        help="record the line ranges or functions of a file this agent actually read",
+        help="attest the line ranges or functions of a file this agent read",
         formatter_class=formatter,
     )
     p_examined.add_argument("--agent", required=True, help="agent number recording the receipt")

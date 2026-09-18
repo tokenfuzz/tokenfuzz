@@ -2755,8 +2755,8 @@ def manifest_errors(manifest: dict) -> list[str]:
             # silently making the entry unreachable.
             if "file" in e and not (isinstance(e["file"], str) and e["file"].strip()):
                 errors.append(f"{where} ({eid or '?'}) file must be a non-empty string")
-            # The strategy family that should find a bug labels the per-class
-            # recall rows; a stray label would open a class no lane owns.
+            # The strategy shape a plant exercises labels the per-class recall
+            # rows; a stray label would create a class the taxonomy does not own.
             if "strategy" in e and not (
                 isinstance(e["strategy"], str) and re.fullmatch(r"S[1-8]", e["strategy"])
             ):
@@ -3522,7 +3522,7 @@ def score_ground_truth(
             "missed": sorted(b["id"] for b in real if b["id"] not in detected),
             "recall": round(tp_bugs / len(real), 4) if real else None,
             "by_primitive": breakdown(lambda b: str(b.get("primitive", "")) or "unlabelled"),
-            "by_strategy": breakdown(lambda b: str(b.get("strategy", "")) or "unlabelled"),
+            "by_strategy_shape": breakdown(lambda b: str(b.get("strategy", "")) or "unlabelled"),
             "confirmed_crashes": total,
             "true_positive_crashes": tp_crashes,
             "false_positive_crashes": fp_crashes,
@@ -6019,7 +6019,8 @@ def _render_ground_truth(scoring: dict | None,
     classes = [
         (f"`{name}`", stats) for name, stats in (overall.get("by_primitive") or {}).items()
     ] + [
-        (f"strategy `{name}`", stats) for name, stats in (overall.get("by_strategy") or {}).items()
+        (f"strategy-shaped plant `{name}`", stats)
+        for name, stats in (overall.get("by_strategy_shape") or {}).items()
     ]
     if classes:
         lines.append("Recall by class (overall):")
@@ -6040,7 +6041,8 @@ def _render_ground_truth(scoring: dict | None,
         "real planted bugs — a fired false-positive trap, an unexpected crash, "
         "or a confirmed crash with no runtime artifact to attribute "
         "(unattributed prose) all count against it. These are the labelled "
-        "numbers the triage gate thresholds are tuned to."
+        "numbers the triage gate thresholds are tuned to. Strategy-shaped "
+        "rows classify the planted bug, not the lane that happened to find it."
     )
     lines.append("")
     return lines + _render_findings_ground_truth(
