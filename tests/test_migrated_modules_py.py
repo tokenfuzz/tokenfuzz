@@ -2494,8 +2494,8 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     cycle_order = []
     ensemble_runtimes = [
-        SimpleNamespace(backend="claude", config=mock.Mock()),
-        SimpleNamespace(backend="codex", config=mock.Mock()),
+        SimpleNamespace(backend="claude", config=mock.Mock(sweep_token_budget=0)),
+        SimpleNamespace(backend="codex", config=mock.Mock(sweep_token_budget=0)),
     ]
     def _initialize_cycle(runtime, _args, _guide, **_kwargs):
         return audit_runner.BackendState(runtime, mock.Mock(), started_at=1.0)
