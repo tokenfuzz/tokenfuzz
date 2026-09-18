@@ -110,6 +110,13 @@ diversity floor is off, and the queue never expands. The delta is the scope.
   than one feature-derived card per file. When more than one agent is
   available, the scheduler reserves one reproduce seat for this campaign while
   it remains eligible.
+- **Call-edge cards** (always S3): the second pass. Once every parsed
+  function of a file carries an examined receipt, one card is minted per
+  file with a certain call into it, naming the caller. File cards cover
+  functions; these cover the contract between caller and callee, where a
+  size, lifetime, or encoding assumption changes hands. They ride the window
+  with their file like companion cards, cost no distinct-file slot, and
+  close like concrete cards. See [Review coverage](coverage.md#the-second-pass).
 
 ## How a card gets to an agent
 

@@ -77,6 +77,18 @@ Receipts change three things:
 - **The report.** `bin/state coverage` adds receipted files and the examined
   line share per directory, and telemetry carries the same totals.
 
+## The second pass
+
+File coverage says nothing about interactions. Once every parsed function of
+a file carries a receipt, the ranker mints one **call-edge** card per file
+with a certain call into it, from the call graph's resolved edges. The card
+names the caller, and its next action is to compare what each call site
+guarantees against what the callee assumes. Edge cards ride the window with
+their file, so they add no distinct-file slot and no source scan, and they
+close like concrete cards once probed. Without receipts, or without a call
+graph, no edge card exists; the pass follows the first one rather than
+competing with it.
+
 ## Loaded, from transcripts
 
 When a session ends, the harness scans its backend transcript for file reads

@@ -515,6 +515,8 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
     ]
     if assigned_strategy != primary_strategy:
         lines.append(f"- **Card primary strategy:** {primary_strategy}")
+    if card.get("edge_from"):
+        lines.append(f"- **Edge from:** `{card['edge_from']}` (cross-file contract card)")
     if card.get("seed"):
         lines.append(f"- **Seed:** `{card['seed']}`")
     if card.get("buildability") == "not-built":

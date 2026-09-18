@@ -244,6 +244,90 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual((totals["receipted"], totals["lines_examined"]), (1, 40))
 
 
+class CallEdgeCardTests(unittest.TestCase):
+    """The second pass: edge cards appear only once a file is fully receipted."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="coverage-edges-")
+        self.root = Path(self.temporary.name)
+        self.target = self.root / "target"
+        self.results = self.root / "results"
+        (self.target / "src").mkdir(parents=True)
+        self.ctx = workqueue.Context(ROOT, self.target, "sampleproj", self.results, "")
+        workqueue.init_state(self.ctx)
+        (self.target / "src" / "app_parse.c").write_text(PARSER * 5, encoding="utf-8")
+        (self.target / "src" / "main.c").write_text(PARSER, encoding="utf-8")
+        (self.target / "src" / "io.c").write_text(PARSER, encoding="utf-8")
+        (self.results / "state" / callgraph.ARTIFACT_NAME).write_text(json.dumps({
+            "version": callgraph.SCHEMA_VERSION, "signature": "s", "root": str(self.target),
+            "languages": ["c"], "entry": {}, "coverage": {},
+            "files": {"src/app_parse.c": {
+                "functions": 2, "reachable": 0, "paths": [],
+                "callers": [["src/main.c", 3]], "caller_overflow": [["src/io.c", 1]],
+                "callees": [], "definitions": [["parse_input", 1], ["parse_tail", 9]],
+            }},
+        }), encoding="utf-8")
+        workqueue.rank_target(self.ctx, 10)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def edges(self, cards: list[dict]) -> list[dict]:
+        return [card for card in cards if card["kind"] == "call-edge"]
+
+    def test_no_edge_cards_until_every_function_is_receipted(self) -> None:
+        self.assertEqual(self.edges(workqueue.rank_target(self.ctx, 10)), [])
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", functions="parse_input")
+        self.assertEqual(self.edges(workqueue.rank_target(self.ctx, 10)), [])
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", functions="parse_tail")
+        cards = workqueue.rank_target(self.ctx, 10)
+        edges = self.edges(cards)
+        self.assertEqual(
+            [(card["file"], card["edge_from"], card["strategy"]) for card in edges],
+            [("src/app_parse.c", "src/main.c", "S3"), ("src/app_parse.c", "src/io.c", "S3")],
+        )
+        primary = next(c for c in cards if c["file"] == "src/app_parse.c" and c["kind"] == "ranked-source" and not c["reason"].startswith("companion"))
+        self.assertEqual(edges[0]["score"], primary["score"] - 1)
+        # Distinct surfaces from the file's own S3 companion, so dedupe keeps both.
+        surfaces = {workqueue.work_surface(card) for card in cards}
+        self.assertEqual(len(surfaces), len(cards))
+        self.assertIn("contract with its caller `src/main.c`", workqueue.card_next_action(edges[0]))
+        self.assertTrue(workqueue.card_closed_for_run(self.ctx, edges[0], "discarded"),
+                        "an edge card is concrete and closes like a patch card")
+
+    def test_edge_cards_ride_the_window_with_their_file(self) -> None:
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
+        for index in range(6):
+            (self.target / "src" / f"unit{index}.c").write_text(PARSER * (6 - index), encoding="utf-8")
+        cards = workqueue.rank_target(self.ctx, 2)
+        files = {c["file"] for c in cards if c["kind"] == "ranked-source"}
+        self.assertEqual(len(files), 2)
+        for edge in self.edges(cards):
+            self.assertIn(edge["file"], files, "an edge never buys a slot its file did not")
+        self.assertIn("src/app_parse.c", files)
+        self.assertEqual(len(self.edges(cards)), 2)
+
+    def test_delta_runs_mint_no_edge_cards(self) -> None:
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
+        cards = workqueue.rank_target(self.ctx, 10, delta_files={"src/app_parse.c": "changed"})
+        self.assertEqual(self.edges(cards), [])
+
+    def test_resume_and_directive_name_the_caller(self) -> None:
+        import prompt
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
+        cards = workqueue.rank_target(self.ctx, 10)
+        workqueue.write_cards(workqueue.work_cards_path(self.ctx), self.edges(cards))
+        brief = workqueue.state_resume(self.ctx, "3", claim=False)
+        self.assertIn("- Edge from: `src/main.c`", brief)
+        references = self.root / "references"
+        (references / "strategies").mkdir(parents=True)
+        (references / "session-rules.digest.md").write_text("digest\n", encoding="utf-8")
+        context = prompt.PromptContext(self.results, self.target, "sampleproj", references, 1)
+        # Edge cards are S3 work; a lane pinned elsewhere is rightly not offered one.
+        (self.results / "state" / "strategy-1").write_text("S3\n", encoding="utf-8")
+        self.assertIn("**Edge from:** `src/main.c`", prompt.work_card_directive(context, 1, force=True))
+
+
 class ReportTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="coverage-report-")

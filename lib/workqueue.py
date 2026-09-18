@@ -1210,6 +1210,10 @@ def work_surface(card: dict) -> str:
     file = normalized_relpath(card.get("file", ""))
     function = (card.get("function") or "").strip()
     strategy = (card.get("strategy") or "").strip().upper()
+    if file and card.get("kind") == "call-edge":
+        # One card per resolved caller file: the edge is the surface, so an
+        # S3 companion on the same file is a different card.
+        return f"{file.lower()}:edge:{normalized_relpath(card.get('edge_from', '')).lower()}"
     if file:
         if function:
             return f"{file.lower()}:{function.lower()}"
@@ -2101,6 +2105,8 @@ def rank_target(
                 existing["reason"] = "; ".join(merged)
                 existing["score"] = int(existing.get("score", 0)) + min(feature_score, 20)
                 break
+    if delta_files is None:
+        cards.extend(call_edge_cards(ctx, cards))
     # A fixed lane cannot claim its companion strategies. Select the lane
     # before buildability annotation and the bounded window so `limit` buys
     # that lane's best distinct files rather than a fraction of a mixed queue.
@@ -2139,6 +2145,50 @@ def rank_target(
         scope="delta" if delta_files is not None else "tree",
     )
     return selected
+
+
+def call_edge_cards(ctx: Context, cards: list[dict]) -> list[dict]:
+    """Second-pass cards over cross-file call edges into fully receipted files.
+
+    File cards cover functions; nothing covers the contract between a caller
+    in one file and a callee in another, which is where a size, lifetime, or
+    encoding assumption crosses hands. Minted only once every parsed function
+    of the callee's file carries a receipt, so the pass follows the first one
+    instead of competing with it, and only from the call graph's certain
+    edges. They ride the window with their file like companions, so they cost
+    no distinct-file slot and no extra source scan.
+    """
+    import callgraph  # lazy: it imports this module
+    import coverage_ledger  # lazy: it imports this module
+    examined = coverage_ledger.examined_fraction_by_file(ctx.results_dir)
+    if not examined:
+        return []
+    out: list[dict] = []
+    for card in cards:
+        if card.get("kind") != "ranked-source" or card.get("reason", "").startswith("companion strategy "):
+            continue
+        rel = normalized_relpath(card.get("file", ""))
+        if examined.get(rel, 0.0) < 0.999:
+            continue
+        for caller in callgraph.caller_files(ctx.results_dir, rel):
+            out.append({
+                "id": ranked_card_id(ctx.target_slug, rel, f"edge:{caller}"),
+                "kind": "call-edge",
+                "target_slug": ctx.target_slug,
+                "subsystem": card.get("subsystem", ""),
+                "file": rel,
+                "function": "",
+                "edge_from": caller,
+                "mode": card.get("mode", "auto"),
+                "strategy": "S3",
+                "score": max(1, int(card.get("score", 1)) - 1),
+                "seed": card.get("seed", ""),
+                "patch_cards": [],
+                "reason": f"second pass: every parsed function receipted; contract with caller {caller}",
+                "status": "unclaimed",
+                "created_at": now_iso(),
+            })
+    return out
 
 
 def campaign_supported(config) -> bool:
@@ -2235,6 +2285,9 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
     def rotate(tier: list[dict]) -> None:
         pools: dict[str, list[dict]] = {}
         for card in tier:
+            if card.get("kind") == "call-edge":
+                # Rides with its file, like a companion strategy card.
+                continue
             if card.get("kind") != "ranked-source":
                 # Patch and peer cards keep their own lane and their own cap.
                 if len(chosen_ids) < limit:
@@ -2275,7 +2328,7 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
         for card in tier:
             if len(chosen_ids) >= limit:
                 break
-            if card.get("id", "") not in chosen_ids:
+            if card.get("id", "") not in chosen_ids and card.get("kind") != "call-edge":
                 take(card)
 
     # Rotate inside each buildability tier, never across one. Spreading
@@ -2299,7 +2352,7 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
         card for card in cards
         if card.get("id", "") in chosen_ids
         or (
-            card.get("kind") == "ranked-source"
+            card.get("kind") in ("ranked-source", "call-edge")
             and normalized_relpath(card.get("file", "")) in selected_files
         )
     ]
@@ -5819,6 +5872,19 @@ def card_next_action(
         "another function. Do not file the sink-only claim again. "
         if has_prior_hypotheses else ""
     )
+    if str(card.get("kind", "")) == "call-edge":
+        return (
+            distinct_angle
+            + f"Every parsed function in this file already carries a receipt; "
+            f"this card is the contract with its caller `{card.get('edge_from', '')}`. "
+            "Read each resolved call site there and compare what the caller "
+            "guarantees (length, ownership, lifetime, encoding, error state) "
+            "against what the callee assumes at the point of use. Create one "
+            "hypothesis on a concrete mismatch with an attacker-reachable "
+            "input; otherwise `bin/state update-card --card-id <id> --status "
+            "discarded` once the evidence floor is met, or `--status blocked` "
+            "with source proof that no site can be reached."
+        )
     if str(card.get("kind", "")) == "s6-peer-fix":
         return (
             "Resolve and distill the exact peer fix, then search the target "
@@ -5901,6 +5967,7 @@ def _compact_card(ctx: Context, card: dict, status_row: dict | None = None, *, o
         "kind": card.get("kind", ""),
         "file": card.get("file", ""),
         "function": card.get("function", ""),
+        "edge_from": card.get("edge_from", ""),
         "subsystem": card.get("subsystem", ""),
         "strategy": card.get("strategy", ""),
         "mode": card.get("mode") or "auto",
@@ -6439,6 +6506,8 @@ def state_resume(
             )
             if assigned_strategy != card_strategy:
                 lines.append(f"- Card primary strategy: `{card_strategy}`")
+            if card.get("edge_from"):
+                lines.append(f"- Edge from: `{card.get('edge_from', '')}`")
             lines.extend([
                 f"- Reason: {card.get('reason','')}",
                 f"- Fix commits: {fix_hash_text}",

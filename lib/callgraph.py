@@ -575,6 +575,23 @@ def definitions_for(results_dir: Path, file: str) -> list[tuple[str, int]]:
     return sorted(out, key=lambda item: (item[1], item[0]))
 
 
+def caller_files(results_dir: Path, file: str) -> list[str]:
+    """Files with a resolved call into `file`, most calls first; [] without
+    a graph. Prompt rows and the overflow together are every certain edge."""
+    rel = workqueue.normalized_relpath(file)
+    data = load(results_dir) if rel else None
+    if data is None or data.get("skipped"):
+        return []
+    entry = (data.get("files") or {}).get(rel) or {}
+    out: list[str] = []
+    for row in [*(entry.get("callers") or []), *(entry.get("caller_overflow") or [])]:
+        if isinstance(row, list) and row and isinstance(row[0], str):
+            origin = workqueue.normalized_relpath(row[0])
+            if origin and origin != rel and origin not in out:
+                out.append(origin)
+    return out
+
+
 def callers_of(results_dir: Path, files: Iterable[str]) -> set[str] | None:
     """Audited files with a resolved call into any of `files`, or None.
 

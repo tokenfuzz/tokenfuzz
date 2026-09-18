@@ -997,7 +997,7 @@ def _write_rank_window(runtime: Runtime, limit: int) -> None:
     # campaign and peer cards never came from the window at all.
     core_surfaces = {
         ("file", workqueue.normalized_relpath(card.get("file", "")))
-        if card.get("kind") == "ranked-source"
+        if card.get("kind") in ("ranked-source", "call-edge")
         else ("card", str(card.get("id", "")))
         for card in cards
         if card.get("kind") not in {"s4-campaign", "s6-peer-fix"}
