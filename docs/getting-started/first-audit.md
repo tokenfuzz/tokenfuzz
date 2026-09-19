@@ -1,14 +1,14 @@
-# First Audit
+# First audit
 
 Run one bounded audit before committing time or model budget to a continuous
 session. The smoke test verifies the target config, build preflight, backend,
 state store, and output layout. An empty findings directory is a normal
-outcome of this check.
+outcome.
 
-Complete [Prerequisites](prerequisites.md) and
-[Add a target](add-a-target.md) first. Run the audit in a container or on an
-isolated host without long-lived credentials: target builds and agent-driven
-testcases execute code from the audited tree.
+Complete [Prerequisites](prerequisites.md) and [Add a target](add-a-target.md)
+first. Run the audit in a container or on an isolated host without long-lived
+credentials: target builds and agent-driven testcases execute code from the
+audited tree.
 
 Set short shell variables for the commands on this page. Use an explicit
 backend so the output path is predictable:
@@ -29,11 +29,11 @@ bin/audit --target "$TARGET" --backend "$BACKEND" 1
 The `oss` backend has no default model: add `--model <id>` here and on every
 later audit command.
 
-The trailing `1` has special smoke-test behavior:
+The trailing `1` is a smoke test:
 
-- one worker launches, regardless of the normal pool size;
-- the worker claims ranked work and investigates for one iteration;
-- result and log directories remain available for the next run.
+- one worker launches, whatever the normal pool size;
+- it claims ranked work and investigates for one iteration;
+- result and log directories stay in place for the next run.
 
 For a hosted backend, choose a model explicitly with `--model <name>` when
 reproducibility matters. Otherwise its default model and reasoning effort come
@@ -45,18 +45,13 @@ This pins the strategy and suspends normal rotation for the run.
 
 !!! warning "Do not edit the live session snapshot"
     Preflight copies the reviewed config to `$RESULTS/.target.toml` and binds
-    it to `$RESULTS/.session-env`. Every probe in that session reads the pinned
-    copy. Edit `output/$TARGET/target.toml` only between runs; never edit or
-    remove the backend-local snapshot.
+    it to `$RESULTS/.session-env`. Every probe in that session reads the
+    pinned copy. Edit `output/$TARGET/target.toml` only between runs; never
+    edit or remove the backend-local snapshot.
 
 ### What success looks like
 
-The startup timeline is written to:
-
-```text
-output/<target>/<backend>/logs/index.log
-```
-
+The startup timeline is written to `output/<target>/<backend>/logs/index.log`.
 It should identify the backend and model, the target source and revision, the
 worker pool, and the result and log roots. The result tree should contain at
 least:
@@ -101,17 +96,16 @@ Then check the generated review pages:
 | `output/$TARGET/crash-clusters.html` | Cross-backend crash summary. |
 
 An empty `findings/` or `crashes/` after one iteration is normal. A filed FIND
-is also not automatically a confirmed security result: read its Status column
-and its `validation.json`. To tell an uneventful iteration from a failed one,
-inspect in this order:
+is not automatically a confirmed security result either: read its Status
+column and its `validation.json`. To tell an uneventful iteration from a
+failed one, inspect in this order:
 
 1. `$LOGS/index.log` for preflight or backend failures.
 2. `bin/state --results-dir "$RESULTS" show-recent --agent 1` for claims and
    hypotheses.
-3. `$RESULTS/state/runs.jsonl` for recorded probe executions, if the file
-   exists.
-4. The two rejected pages, for candidates that reached triage but did not meet
-   the bar.
+3. `$RESULTS/state/runs.jsonl` for recorded probe executions, if it exists.
+4. The two rejected pages, for candidates that reached triage but did not
+   meet the bar.
 
 To see what the iteration never looked at, render the coverage report:
 
@@ -153,14 +147,12 @@ bin/cleanup_state --target "$TARGET" --backend "$BACKEND" --dry-run
 bin/cleanup_logs --target "$TARGET" --backend "$BACKEND" --dry-run
 ```
 
-Remove `--dry-run` only after checking the printed paths. Omitting `--backend`
-from `bin/cleanup_state` selects every backend and aggregate result under that
-target. It also removes generated sanitizer build trees and transient `.audit/`
-state from the target source while preserving `.audit/build*.sh` recipes. Use
-that form only when you intend a target-wide reset; a backend-scoped cleanup
-leaves the shared source builds intact. Source cleanup uses the target root
-recorded by an existing backend session, else `targets/<slug>` beside the
-output root; a checkout that no longer exists is skipped.
+Remove `--dry-run` only after checking the printed paths. Omitting
+`--backend` from `bin/cleanup_state` selects every backend and aggregate
+result under that target, and also removes generated sanitizer build trees and
+transient `.audit/` state from the target source while preserving
+`.audit/build*.sh` recipes. Use that form only for a deliberate target-wide
+reset; a backend-scoped cleanup leaves the shared source builds intact.
 
 ## Auditing with UBSan, MSan, or TSan
 
@@ -193,19 +185,18 @@ For one deliberate probe without changing list order:
 PROBE_SANITIZER=ubsan bin/probe "$RESULTS/scratch-1/testcase"
 ```
 
-The environment override affects that probe only; it does not change the
-session snapshot or future runs. See
-[Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for the
-trade-offs and the
-[target config reference](../reference/target-toml.md#sanitizers) for exact
-fields. Go's `race` detector uses the configured language runner rather than a
-`race_bin` or `race_lib`.
+The override affects that probe only; it does not change the session snapshot
+or future runs. See [Sanitizer policy](../guides/configure-target.md#sanitizer-policy)
+for the trade-offs and the
+[target config reference](../reference/target-toml.md#sanitizers) for the
+exact fields. Go's `race` detector uses the configured language runner rather
+than a `race_bin` or `race_lib`.
 
 ## Where to run the audit
 
 The recommended default is `bin/audit-container-shell`. It isolates target
-build scripts and agent tool use from most of the host filesystem while keeping
-the checkout and output in the mounted repository.
+build scripts and agent tool use from most of the host filesystem while
+keeping the checkout and output in the mounted repository.
 
 ```bash
 bin/audit-container-shell --rebuild   # first use
@@ -215,8 +206,8 @@ bin/audit-container-shell             # later uses
 The helper installs backend CLIs into a Docker image and opens a shell at
 `/root/work`; it does not start the audit. It does not mount host CLI
 credential directories. Authenticate inside the disposable shell, or pass
-`--forward-credentials` when you explicitly want supported credential variables
-forwarded.
+`--forward-credentials` when you explicitly want supported credential
+variables forwarded.
 
 For Docker installation, gVisor, and the container trust boundary, see
 [Container runtime](prerequisites.md#container-runtime-recommended). For all

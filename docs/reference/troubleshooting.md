@@ -6,9 +6,9 @@ runner, or backend. For result-review problems, open the artifact's report,
 `validation.json`, and any rejection reason.
 
 For normal audit progress, the generated index pages under `crashes/`,
-`findings/`, `crashes-rejected/`, and `findings-rejected/` are the right first
-stop. Raw logs are usually only useful when a backend CLI or wrapper itself
-failed.
+`findings/`, `crashes-rejected/`, and `findings-rejected/` are the right
+first stop. Raw logs are usually only useful when a backend CLI or wrapper
+itself failed.
 
 ## Preflight fails
 
@@ -20,8 +20,10 @@ FATAL: backend '<name>' is not installed or configured
 
 Fix:
 
-1. Install and log in to the named backend CLI, or pass a `--backend` that is.
-2. Re-run `bash tests/run-tests.sh` to confirm the harness itself is healthy.
+1. Install and log in to the named backend CLI, or pass a `--backend` that
+   is.
+2. Re-run `bash tests/run-tests.sh` to confirm the harness itself is
+   healthy.
 3. Start the audit again.
 
 Symptom:
@@ -32,11 +34,12 @@ FATAL: model preflight refused for backend=<name>: requested model=<a> but the p
 
 The CLI answered, but with a different model than you asked for. Retrying
 cannot change which model is served, so the run stops before an agent starts
-rather than recording rows that name a model that never ran. Pick a model the
-provider will actually serve, or drop `--model` to use the configured default.
-A safeguard refusal also stops preflight and names the category in the log.
-Check the provider's access requirements and permitted-use policy before
-retrying; changing the model name does not resolve an access restriction.
+rather than recording rows that name a model that never ran. Pick a model
+the provider will actually serve, or drop `--model` to use the configured
+default. A safeguard refusal also stops preflight and names the category in
+the log. Check the provider's access requirements and permitted-use policy
+before retrying; changing the model name does not resolve an access
+restriction.
 
 Symptom (Google Gemini CLI only):
 
@@ -44,13 +47,13 @@ Symptom (Google Gemini CLI only):
 FATAL: model preflight refused for backend=gemini: Gemini CLI ignored the harness admin policies
 ```
 
-Gemini CLI silently discards every `--admin-policy` file when a system policies
-directory holds any policy, which would leave cross-run memory and web tools
-enabled for the whole run. Remove or empty that directory on the audit host, or
-run under `USE_GEMINI_CLI=0` (Antigravity), then start again. A benchmark cell
-has no preflight; the launch itself reports the same condition with
-`ERROR: Gemini CLI ignored the harness admin policies` and exit code 46, and
-the cell counts as failed rather than measured.
+Gemini CLI silently discards every `--admin-policy` file when a system
+policies directory holds any policy, which would leave cross-run memory and
+web tools enabled for the whole run. Remove or empty that directory on the
+audit host, or run under `USE_GEMINI_CLI=0` (Antigravity), then start again.
+A benchmark cell has no preflight; the launch itself reports the same
+condition with `ERROR: Gemini CLI ignored the harness admin policies` and
+exit code 46, and the cell counts as failed rather than measured.
 
 Symptom:
 
@@ -60,8 +63,8 @@ FATAL: configured [runner].bin failed startup check `/usr/bin/java -version`: ex
 ```
 
 The language runtime the target's `[runner]` names is missing or cannot
-start, so no agent is launched. Install it and run the quoted command yourself
-until it succeeds; the macOS Java stub needs a registered JDK, see
+start, so no agent is launched. Install it and run the quoted command
+yourself until it succeeds; the macOS Java stub needs a registered JDK, see
 [Target-specific tools](../getting-started/prerequisites.md#3-target-specific-tools).
 
 ## Target config does not parse
@@ -76,8 +79,8 @@ Common fixes:
 
 ## Sanitizer binary does not run
 
-Run the configured binary by hand from the repository root. For a typical ASan
-path:
+Run the configured binary by hand from the repository root. For a typical
+ASan path:
 
 ```bash
 targets/<target>/build-asan/path/to/binary
@@ -87,8 +90,8 @@ Common fixes:
 
 - Rebuild with `clang` and `-fsanitize=address`.
 - Refresh generated config with `bin/setup-target <target>`.
-- Set `asan_bin` to the actual executable, or set `[sanitizer].<name>_bin` for
-  opt-in UBSan, MSan, or TSan runners.
+- Set `asan_bin` to the actual executable, or set `[sanitizer].<name>_bin`
+  for opt-in UBSan, MSan, or TSan runners.
 - Ensure runtime libraries are discoverable.
 - Install `llvm-symbolizer` so diagnostics are readable.
 
@@ -129,8 +132,9 @@ Read the class the probe prints beside the verdict:
 | `unverified-exit` | The process exited 0 but the runner's success marker never appeared, so nothing proves the input was processed. | Check that the testcase actually reaches the program's entry point and that the runner's argv is complete. |
 | `exit` | The process exited nonzero with no recognised diagnostic. | Read the tail of the saved output and compare the exit with the program's documented behaviour. |
 
-A run refused by the per-iteration sanitizer budget is a `NO_EXEC` with class
-`budget-exhausted`, not an `EXEC_FAIL`; it clears at the next iteration.
+A run refused by the per-iteration sanitizer budget is a `NO_EXEC` with
+class `budget-exhausted`, not an `EXEC_FAIL`; it clears at the next
+iteration.
 
 ## Triage rejects a crash
 
@@ -150,9 +154,9 @@ Common reasons:
 
 If the crash is still under `crashes/` with `.promotion_pending`, read that
 marker first. Triage is waiting for an enriched report, a valid sanitizer
-diagnostic, a testcase, or a complete exported bundle. Fix the named artifact
-and rerun triage. The adjacent signature and count files are internal progress
-state; do not delete or edit them.
+diagnostic, a testcase, or a complete exported bundle. Fix the named
+artifact and rerun triage. The adjacent signature and count files are
+internal progress state; do not delete or edit them.
 
 A trigger source outside `attacker_controls` rejects the crash once the
 source reviewer agrees: the directory moves to `crashes-rejected/` with a
@@ -181,8 +185,8 @@ Then open the FIND directory and read the marker file:
   `description.md`. Write one.
 - `.pending-drop`: a substance-gate pass ended with Reject votes below
   quorum. Reaching quorum moves the directory to `findings-rejected/`, where
-  `rejected-findings.html` records the reason. Nothing is deleted, so a reject
-  you disagree with can be read and recovered.
+  `rejected-findings.html` records the reason. Nothing is deleted, so a
+  reject you disagree with can be read and recovered.
 
 Add the missing concrete location, security impact, and reviewer-actionable
 rationale, then rerun triage. If a human has reviewed the terse report and
@@ -198,16 +202,16 @@ ls -lt output/<target>/<backend>/logs/session_*.log | head -3
 tail -5 output/<target>/<backend>/logs/index.log
 ```
 
-A long-running sanitizer build or a slow backend turn can look like a hang for
-several minutes; that is normal. If an agent genuinely wedges or is killed,
-the run self-heals: work-card claims expire on a timer, so the next iteration
-reclaims its card and resumes from structured state. You do not need to clean
-anything up by hand.
+A long-running sanitizer build or a slow backend turn can look like a hang
+for several minutes; that is normal. If an agent genuinely wedges or is
+killed, the run self-heals: work-card claims expire on a timer, so the next
+iteration reclaims its card and resumes from structured state. You do not
+need to clean anything up by hand.
 
 ## The run paused, or the backend went unavailable
 
-A hosted account or session usage limit does not end a run. `bin/audit` pauses
-and retries, and `logs/index.log` says so:
+A hosted account or session usage limit does not end a run. `bin/audit`
+pauses and retries, and `logs/index.log` says so:
 
 ```text
 Provider capacity limited; pausing 1800s before retry
@@ -217,13 +221,13 @@ What to expect:
 
 - The pause lasts until the provider's reported reset time, or 30 minutes if
   the backend reports none. Waiting is capped at six hours per run.
-- Paused time does **not** count against `AUDIT_WALL_BUDGET_SECS`, so a quota
-  pause never eats an overnight budget.
+- Paused time does **not** count against `AUDIT_WALL_BUDGET_SECS`, so a
+  quota pause never eats an overnight budget.
 - Transient (non-quota) failures are retried separately with backoff.
 
 If the backend never comes back, the run exits with status `2` after logging
-`BACKEND_UNAVAILABLE`. In ensemble mode (`--backend all`) the exhausted backend
-is dropped from the rotation and the others keep working.
+`BACKEND_UNAVAILABLE`. In ensemble mode (`--backend all`) the exhausted
+backend is dropped from the rotation and the others keep working.
 
 Nothing needs cleaning up. Rerunning the same command resumes from the run's
 saved state.
@@ -261,8 +265,8 @@ bin/audit --target <target> --backend <backend> 1
 ## A build was not replaced, or a cell refuses to start
 
 These messages all come from one rule: a build in use by a live run is never
-replaced, because the evidence that run already recorded was measured against
-it.
+replaced, because the evidence that run already recorded was measured
+against it.
 
 | Message | Meaning | What to do |
 | --- | --- | --- |
@@ -279,14 +283,14 @@ it.
 | `model-direct backend exited ... after writing substantive evidence` | The direct backend stopped nonzero after producing valid report or sanitizer evidence. The cell is retained as an early terminal outcome with `run_quality=backend_terminated`, counted behind a `(Nt)` replicate marker and its shorter actual wall. A cell already excluded for a provider limit or drift keeps that stronger reason instead. | Inspect `backend.raw.log` for the cause. Regeneration can recover an older cell that was failed for this reason; a fresh run is optional, not required to count its evidence. |
 | `<setting> was X for this run and is now Y` | A resume changed something that defines the experiment (model, effort, budget, agents, target revision). | Resume with the original settings, or start a new run id. `--replicates` and `--conditions` may still change. |
 
-Initial build freshness conservatively includes non-ignored untracked files,
-because they may be build inputs; ignored output and reverted edits leave it
-fresh. A build reported stale names the paths that made it so, which is what
-separates a by-product a previous run wrote into the checkout (delete it) from
-a real source edit (rebuild). Once a benchmark pins a build, its cells and
-resumes use only the run-owned config snapshot and exact recorded bytes. They
-do not call freshness, so those by-products cannot make an unchanged pinned
-build read as stale.
+Initial build freshness conservatively includes non-ignored untracked
+files, because they may be build inputs; ignored output and reverted edits
+leave it fresh. A build reported stale names the paths that made it so,
+which is what separates a by-product a previous run wrote into the checkout
+(delete it) from a real source edit (rebuild). Once a benchmark pins a build,
+its cells and resumes use only the run-owned config snapshot and exact
+recorded bytes. They do not call freshness, so those by-products cannot make
+an unchanged pinned build read as stale.
 
 ## Still unsure
 

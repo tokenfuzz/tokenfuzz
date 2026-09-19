@@ -1,13 +1,13 @@
-# Triage and Review
+# Triage and review
 
 Triage turns an agent's report into something a maintainer can assess: what
 went wrong, what evidence supports it, and whether it crosses the project's
 security boundary. A crash needs saved reproduction evidence; a finding can
 stand on a concrete source-based report.
 
-TokenFuzz records each review decision beside the files it judged and preserves
-rejected evidence with its reason. The security team and upstream maintainer
-still decide what to fix and how to disclose it.
+TokenFuzz records each review decision beside the files it judged and
+preserves rejected evidence with its reason. The security team and upstream
+maintainer still decide what to fix and how to disclose it.
 
 Start with the generated HTML indexes:
 
@@ -30,23 +30,24 @@ review state, severity, evidence signature, and canonical cluster member.
 | Rejected finding | `findings-rejected/` | A FIND that failed substance, source, or publication review; the reason distinguishes a disproved claim from unresolved scope. |
 | Rejected crash | `crashes-rejected/` | A crash candidate that was incomplete, low-value, contradicted by source, or rooted in harness-only misuse. |
 
-Nothing is silently deleted. Rejected directories move with their evidence and
-gain an index entry explaining why. A crash whose trigger crosses no configured
-security boundary is rejected the same way, with a `threat-model:` reason, so
-the active tree normally holds security reports and pending review.
-A human-pinned FIND and legacy artifacts can remain `not-reportable` in place.
+Nothing is silently deleted. Rejected directories move with their evidence
+and gain an index entry explaining why. A crash whose trigger crosses no
+configured security boundary is rejected the same way, with a `threat-model:`
+reason, so the active tree normally holds security reports and pending
+review. A human-pinned FIND, and artifacts from older runs, can remain
+`not-reportable` in place.
 
 ## A practical review order
 
 For each canonical row in a cluster index:
 
 1. Read the Status or publication state.
-2. Open `report.html` for a crash or `report.html` for a finding.
+2. Open the artifact's `report.html`.
 3. Check the root `Location`, boundary, caller controls, trigger source, and
    caller contract against the source.
-4. For a crash, run `reproduce.sh` in an isolated build environment and compare
-   the new diagnostic with `sanitizer.txt`. If the script is a diagnostic stub
-   (no runnable route was captured), it says so and exits 2.
+4. For a crash, run `reproduce.sh` in an isolated build environment and
+   compare the new diagnostic with `sanitizer.txt`. If the script is a
+   diagnostic stub (no runnable route was captured), it says so and exits 2.
 5. Read the severity rationale only after the technical claim holds.
 6. Skim duplicate members only when they provide a better input, another
    carrier, or useful variant evidence.
@@ -57,8 +58,8 @@ upstream maintainer's threat model.
 
 ## How automated review works
 
-Crashes and findings start from different evidence, so they do not use the same
-first gate.
+Crashes and findings start from different evidence, so they do not use the
+same first gate.
 
 | Stage | Crash | Finding |
 | --- | --- | --- |
@@ -66,27 +67,27 @@ first gate.
 | Source review | Reads the trigger and caller contract. Two source-anchored Reject votes can disprove sanitizer-confirmed evidence. Publication review separately decides scope. | Reads both the trigger and the exact claimed consequence. Two source-anchored Reject votes can disprove an admitted FIND. Publication review separately decides scope. |
 | Final state | `reportable`, `pending`, or `rejected`. | The same three states, plus `not-reportable` for a human-pinned FIND. |
 
-Both source-review paths preserve evidence when output is missing or malformed.
-The artifact remains pending while required review is incomplete. An
-`Uncertain` vote or split review can receive a focused resolution pass that
-sees the prior rationales.
+Both source-review paths preserve evidence when output is missing or
+malformed. The artifact remains pending while required review is incomplete.
+An `Uncertain` vote or split review can receive a focused resolution pass
+that sees the prior rationales.
 
 Once all required reviews have answered, scope that remains unresolved is a
-terminal rejection with an `unsettled-scope:` reason. This is different from a
-source disproof: it means the review could not establish that the trigger is
-inside the declared threat model. The report and evidence remain available in
-the rejected tree.
+terminal rejection with an `unsettled-scope:` reason. This is different from
+a source disproof: it means the review could not establish that the trigger
+is inside the declared threat model. The report and evidence remain available
+in the rejected tree.
 
-Review receipts are content-addressed. Changing the authored report, testcase,
-harness, diagnostic, invocation evidence, target revision, config, or threat
-model invalidates the old decision and reopens review. When the target checkout
-is available at the pinned revision, new receipts also carry host-normalized
-source attestations linked to the exact review artifact, so moving or changing
-a cited line reopens the review even if the recorded revision string did not
-change. Plain source trees use an opaque identity for the exact host checkout,
-and a different checkout cannot invalidate that historical attestation.
-Generated cluster, severity, patch-rendering, and enrichment annotations do not
-reopen anything.
+Review receipts are content-addressed. Changing the authored report,
+testcase, harness, diagnostic, invocation evidence, target revision, config,
+or threat model invalidates the old decision and reopens review. When the
+target checkout is available at the pinned revision, new receipts also carry
+host-normalized source attestations linked to the exact review artifact, so
+moving or changing a cited line reopens the review even if the recorded
+revision string did not change. Plain source trees use an opaque identity for
+the exact host checkout, and a different checkout cannot invalidate that
+historical attestation. Generated cluster, severity, patch-rendering, and
+enrichment annotations do not reopen anything.
 
 ## Publication state
 
@@ -118,10 +119,10 @@ column:
 | `OK (override)` | A `.reviewed` or `.keep` marker requests a human override. |
 
 `.pending-drop` is working state: at least one finding-quality Reject exists,
-but reject quorum has not been reached. Fix the report and let it receive fresh
-votes. A human override can pin an intentionally terse report past the quality
-gate, but complete boundary and trigger fields are still required before a
-final receipt is written.
+but reject quorum has not been reached. Fix the report and let it receive
+fresh votes. A human override can pin an intentionally terse report past the
+quality gate, but complete boundary and trigger fields are still required
+before a final receipt is written.
 
 ## Common rejection reasons
 
@@ -142,7 +143,7 @@ issue.
 ### Finding candidates
 
 A FIND needs a security boundary and a concrete consequence, not merely a
-dangerous-looking API. Common rejected shapes include:
+dangerous-looking API. Common rejected shapes:
 
 | Rejected shape | Evidence that would make it substantive |
 | --- | --- |
@@ -175,10 +176,10 @@ CRASH-*/
   .audit/               # audit-side originals
 ```
 
-Check that the saved output names a sanitizer class and faults in target code,
-that the bundled input or harness can be rerun, and that the report explains
-how a normal product entry reaches the fault. A confirmation rate is useful,
-but it does not turn harness-only state into attacker reachability.
+Check that the saved output names a sanitizer class and faults in target
+code, that the bundled input or harness can be rerun, and that the report
+explains how a normal product entry reaches the fault. A confirmation rate is
+useful, but it does not turn harness-only state into attacker reachability.
 
 The maintainer-side procedure is in
 [Reproduce a crash](reproduce-a-crash.md). Treat `reproduce.sh` and the
@@ -202,8 +203,8 @@ The minimum useful report contains:
 A reproducer, captured output, `affected-files.txt`, or a small generator is
 welcome but optional. Do not use symlinks inside a FIND bundle.
 
-The shared report narrative is Summary, Root Cause, Data Flow, Impact, and Fix
-Direction. The exact order and word budgets are in
+The shared report narrative is Summary, Root Cause, Data Flow, Impact, and
+Fix Direction. The exact order and word budgets are in
 [Artifact layout](../reference/artifacts.md#report-narrative). The generated
 `report.html` is the easiest reading view; edit the Markdown source only.
 
@@ -228,21 +229,21 @@ Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
 
 `Class` is one token from the [bug class reference](../reference/bug-classes.md);
 the quality gate re-labels an accepted finding with the class its reviewers
-establish, and severity scores a source-argued finding from that class when no
-sanitizer diagnostic or `Primitive` field is stronger.
+establish, and severity scores a source-argued finding from that class when
+no sanitizer diagnostic or `Primitive` field is stronger.
 
 `Surface` names the vulnerable product boundary; `Reproducer carrier` names
-the program or harness used to reach it. `Trigger source` records what actually
-decides the fault, not every setup call the driver makes. `Parameter control`
-matters when a compiled harness supplies a value the external input does not
-directly choose.
+the program or harness used to reach it. `Trigger source` records what
+actually decides the fault, not every setup call the driver makes.
+`Parameter control` matters when a compiled harness supplies a value the
+external input does not directly choose.
 
 Two fields are classified by the harness from the report rather than
 authored, and each can only lower a score. `Disclosed content` grades what an
-information-disclosure report shows reaching the attacker. `Availability loss`
-grades whether a source-argued resource-exhaustion report demonstrates the
-service dying (`total`, the only value that keeps the class's VA:H) or merely
-slowing in proportion to the attacker's own input (`degraded`).
+information-disclosure report shows reaching the attacker. `Availability
+loss` grades whether a source-argued resource-exhaustion report demonstrates
+the service dying (`total`, the only value that keeps the class's VA:H) or
+merely slowing in proportion to the attacker's own input (`degraded`).
 
 `Cluster`, `Dedup frames`, severity text, and patch rendering are written by
 the harness. Do not hand-author those generated sections.
@@ -256,9 +257,9 @@ The two accepted lanes use different deterministic signatures:
   or a matching crash state.
 
 Each cluster has a canonical member. Non-canonical members remain on disk
-(findings also get a `.dup-of` marker) because they may carry a useful input or
-route variant. A cluster is a review aid, not proof that every member shares
-one fix.
+(findings also get a `.dup-of` marker) because they may carry a useful input
+or route variant. A cluster is a review aid, not proof that every member
+shares one fix.
 
 Use backend-local indexes for one run and target-root indexes to compare all
 backends:
@@ -275,9 +276,9 @@ and canonical-member rules.
 
 ## Maintenance commands
 
-Normal triage performs validation, export, severity, rendering, and clustering
-automatically. After a deliberate manual edit, these commands regenerate the
-derived views:
+Normal triage performs validation, export, severity, rendering, and
+clustering automatically. After a deliberate manual edit, these commands
+regenerate the derived views:
 
 ```bash
 RESULTS_DIR=output/<target>/<backend>/results
@@ -291,8 +292,8 @@ bin/show-exclusions "$RESULTS_DIR"
 ```
 
 `export-repro` reads the nearest `.session-env` above its working directory,
-which is why it runs from inside the result tree; `--slug` alone would pick the
-first backend alphabetically.
+which is why it runs from inside the result tree; `--slug` alone would pick
+the first backend alphabetically.
 
 `bin/severity --batch` scores reportable crashes and findings. Pending and
 not-reportable artifacts remain unscored. Re-run clustering after changing a
@@ -307,7 +308,8 @@ A useful result should let the next reviewer answer three questions:
 - **What was established?** Saved diagnostics, source reasoning, and the
   current review receipt distinguish observations from assumptions.
 - **What can I do next?** A crash bundle provides its reproduction route;
-  every report should give a concrete fix direction where the evidence allows.
+  every report should give a concrete fix direction where the evidence
+  allows.
 
 Send ready evidence through the project's coordinated-disclosure process.
 [Reproduce a crash](reproduce-a-crash.md) is written for the maintainer

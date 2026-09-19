@@ -3,20 +3,20 @@
 A finding's `Class` field carries exactly one canonical bug-class token. The
 vocabulary is the one Anthropic Red's [coordinated vulnerability disclosure
 dashboard](https://red.anthropic.com/2026/cvd/) files findings under, so a
-TokenFuzz class breakdown reads on the same axis as a public disclosure ledger.
-The harness keeps a few classes of its own beside it where folding them into a
-dashboard class would change the CVSS impact shape or lose a sanitizer-grade
-distinction; each of those says why.
+TokenFuzz class breakdown reads on the same axis as a public disclosure
+ledger. The harness keeps a few classes of its own beside it where folding
+them into a dashboard class would change the CVSS impact shape or lose a
+sanitizer-grade distinction; each of those says why.
 
-`lib/bug_classes.py` is the source of truth for the vocabulary. It drives four
-parts of TokenFuzz:
+`lib/bug_classes.py` is the source of truth for the vocabulary. It drives
+four parts of TokenFuzz:
 
 - **Reports.** Agents and the model-direct baseline write one token in the
-  `## Fields` table; the find-quality gate re-labels each accepted finding with
-  the class its two reviewers establish.
+  `## Fields` table; the find-quality gate re-labels each accepted finding
+  with the class its two reviewers establish.
 - **Clusters.** Findings merge on `(family, file, line)`: every class belongs
-  to one family, so `integer-overflow` and `oob-write` at the same line are one
-  cluster. The class itself is the cluster's display label. See
+  to one family, so `integer-overflow` and `oob-write` at the same line are
+  one cluster. The class itself is the cluster's display label. See
   [Deduplication](../concepts/deduplication.md).
 - **Metrics.** Benchmark class breadth counts canonical classes, so two
   spellings of one class cannot inflate it.
@@ -96,17 +96,17 @@ class here when a report carries one.
 Any other spelling resolves to a canonical class before it is clustered,
 counted, or scored: sanitizer class names (`heap-use-after-free`,
 `stack-buffer-underflow`), common synonyms (`uaf`, `sqli`, `privesc`,
-`redos`), the six neutral categories, and the `top:sub` labels earlier quality
-gates wrote (`memory-safety:lifetime` is `use-after-free`; `injection:sql` is
-`sql-injection`). The top keeps the family the reviewer chose: a sub-label
-refines the class only inside that family, so `memory-safety:stack-overflow`
-stays memory-safety. A sub-label that names no class leaves the family alone
-(`auth:bypass` clusters as `auth` and stays `Needs review`, because
-authentication and authorization score differently). Anything
-unrecognised is `other`; an unrecognised `*overflow*` label is
+`redos`), the six neutral categories, and the `top:sub` labels earlier
+quality gates wrote (`memory-safety:lifetime` is `use-after-free`;
+`injection:sql` is `sql-injection`). The top keeps the family the reviewer
+chose: a sub-label refines the class only inside that family, so
+`memory-safety:stack-overflow` stays memory-safety. A sub-label that names no
+class leaves the family alone (`auth:bypass` clusters as `auth` and stays
+`Needs review`, because authentication and authorization score differently).
+Anything unrecognised is `other`; an unrecognised `*overflow*` label is
 `buffer-overflow`.
 
 Classes the dashboard folds into `other` fold there here too: request
-smuggling, cache poisoning and supply-chain confusion have no impact shape of
-their own. A side channel resolves to `info-disclosure`, the consequence it
-establishes.
+smuggling, cache poisoning, and supply-chain confusion have no impact shape
+of their own. A side channel resolves to `info-disclosure`, the consequence
+it establishes.

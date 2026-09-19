@@ -1,11 +1,11 @@
 # Concepts
 
-These pages explain how TokenFuzz works and why its components behave this
-way. For step-by-step tasks, use the [Guides](../guides/index.md).
+These pages explain how TokenFuzz works and why its components behave the way
+they do. For step-by-step tasks, use the [Guides](../guides/index.md).
 
-If you are reading them in order, start with
-[Audit lifecycle](audit-lifecycle.md) for the end-to-end story. The other pages
-explain individual components and cross-cutting design choices.
+If you read them in order, start with [Audit lifecycle](audit-lifecycle.md)
+for the end-to-end story. The other pages explain individual components and
+cross-cutting design choices.
 
 | Page | What it covers |
 | --- | --- |

@@ -1,4 +1,4 @@
-# Getting Help
+# Getting help
 
 For setup and runtime failures, start with
 [Troubleshooting](reference/troubleshooting.md). If that does not resolve the
@@ -22,15 +22,15 @@ Run through this list first. It catches most setup and run problems quickly.
 
 1. **Did the test suite pass?** Run `bash tests/run-tests.sh` from the
    repository root. The output names the failing test.
-2. **Did `bin/audit … 1` complete startup?** A one-iteration smoke test is the
-   cheapest way to confirm that prerequisites, `target.toml`, and the backend
-   CLI are wired up.
+2. **Did `bin/audit … 1` complete startup?** A one-iteration smoke test is
+   the cheapest way to confirm that prerequisites, `target.toml`, and the
+   backend CLI are wired up.
 3. **Have you checked [Troubleshooting](reference/troubleshooting.md)?**
    Common failure modes (missing tools, sanitizer build mismatches, backend
    authentication, stalled agents) are covered there.
 4. **Have you read your logs?** `output/<target>/<backend>/logs/` contains
-   the run timeline and per-agent logs. Start with the `README.md` inside that
-   directory, then `index.log`.
+   the run timeline and per-agent logs. Start with the `README.md` inside
+   that directory, then `index.log`.
 
 ## What to include in a bug report
 
@@ -60,10 +60,10 @@ Include:
    private upstream URLs, local source paths, runner environment values, and
    sensitive threat-model details.
 6. **What you expected** versus **what you got**.
-7. **Relevant logs**: paste the useful part of `$LOGS/index.log`. If it points
-   at one agent session, include the matching
-   `$LOGS/session_<TS>_<launch>-<n>.log`, where `<launch>` is `cold-start` or
-   `deep_investigation` and `<n>` is the agent number. Reach for the raw
+7. **Relevant logs**: paste the useful part of `$LOGS/index.log`. If it
+   points at one agent session, include the matching
+   `$LOGS/session_<TS>_<launch>-<n>.log`, where `<launch>` is `cold-start`
+   or `deep_investigation` and `<n>` is the agent number. Reach for the raw
    transcript under `$LOGS/.raw/` only as a last resort, and trim it to the
    failing section.
 
@@ -92,11 +92,12 @@ target.toml:
 ## What not to include
 
 - **Full raw backend transcripts or prompt dumps.** They are huge, expensive
-  to read, and almost never the first thing needed. Start with `index.log` and
-  the session log it points at.
+  to read, and almost never the first thing needed. Start with `index.log`
+  and the session log it points at.
 - **Private source or undisclosed target findings.** Start with the upstream
-  revision and a small neutral example. Share source only when it is necessary
-  to explain the harness problem and you have permission to publish it.
+  revision and a small neutral example. Share source only when it is
+  necessary to explain the harness problem and you have permission to
+  publish it.
 - **API keys, tokens, or anything from a backend CLI's config directory**
   (`~/.claude`, `~/.codex`, `~/.gemini`, and so on). A support report never
   needs them.
@@ -115,6 +116,6 @@ target details, reduce it to a sanitized reproducer before filing publicly.
 ## Helping the project
 
 After coordinated disclosure is complete, a public acknowledgement helps
-maintainers understand how TokenFuzz is being used. “Found using TokenFuzz” in
-an upstream advisory, issue, or acknowledgement is enough. Do not share
+maintainers understand how TokenFuzz is being used. "Found using TokenFuzz"
+in an upstream advisory, issue, or acknowledgement is enough. Do not share
 embargoed details here.

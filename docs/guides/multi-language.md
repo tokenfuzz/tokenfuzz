@@ -1,18 +1,13 @@
-# Language Runners
+# Language runners
 
 TokenFuzz supports C/C++, Rust, Go, Python, Java, and other ecosystems behind
 one probe and triage contract. This page covers the part that changes outside
 ordinary C/C++: how a testcase reaches the audited package, and which runtime
 diagnostics count as crash evidence.
 
-The language registry covers:
-
-- Rust, Go, Swift;
-- Java, Kotlin;
-- Python, Ruby, PHP;
-- JavaScript / TypeScript (Node);
-- Perl, R;
-- any other ecosystem with an explicit `[runner]` command.
+The language registry covers Rust, Go, Swift, Java, Kotlin, Python, Ruby, PHP,
+JavaScript and TypeScript (Node), Perl, and R. Any other ecosystem works with
+an explicit `[runner]` command.
 
 ## Choose the runtime posture
 
@@ -34,17 +29,14 @@ requirements as any other crash. An ordinary exception, panic, or traceback is
 not sanitizer evidence and is not a security finding by itself.
 
 `bin/setup-target` picks a conservative default by introspecting the source
-tree (`Cargo.toml`, `go.mod`, `pyproject.toml`, `package.json`, and so on). For
-a recognized non-native ecosystem with no maintained sanitizer runner, that
-default is findings-only. Go and Swift instead seed their registry-provided
-race/ASan routes. Other ecosystems receive:
-
-- `[sanitizer] enabled = []`;
-- a starter `[runner]`.
+tree (`Cargo.toml`, `go.mod`, `pyproject.toml`, `package.json`, and so on).
+Go and Swift seed their registry-provided race/ASan routes. Every other
+recognized ecosystem starts findings-only, with `[sanitizer] enabled = []`
+and a starter `[runner]`.
 
 Opt into `race` or another sanitizer by editing the shared
-`output/<target>/target.toml` between runs, then start a new session. A running
-session reads its pinned `.target.toml` snapshot.
+`output/<target>/target.toml` between runs, then start a new session. A
+running session reads its pinned `.target.toml` snapshot.
 
 ## What sanitizers exist per language
 
@@ -65,8 +57,8 @@ the runner; neither follows the ordinary native `<name>_bin` rule.
 
 ## What `target.toml` looks like for each ecosystem
 
-`bin/setup-target` seeds these automatically for ecosystems in its language
-registry. A configured findings-only target has the same outer shape:
+`bin/setup-target` seeds these automatically for ecosystems in its registry.
+A configured findings-only target always has the same outer shape:
 `[sanitizer] enabled = []` plus a `[runner]` block naming the interpreter or
 driver. A Python target, fully annotated:
 
@@ -110,6 +102,54 @@ The other ecosystems differ only in the `[runner]` fields:
 | R | `rlang` | `Rscript` | `["{TESTCASE}"]` | `R_LIBS_USER={TARGET_ROOT}/.audit/r-library` |
 | Perl | `perl` | newest discovered `perl` | `["{TESTCASE}"]` | target `blib`, ABI-isolated `.audit/perl5`, and source `lib` paths |
 
+To print the registry's current answer for any build system:
+
+```bash
+python3 lib/languages.py runner-block <build_system> --pretty
+```
+
+!!! tip "There is a worked example for every language"
+    Rather than starting from the table, copy a config that is known to run.
+    The repository ships a configured synthetic target for each of these
+    ecosystems under `targets/samples/sample-*`, with its hand-authored
+    `target.toml` committed at `output/samples/sample-*/target.toml`. See
+    [Sample targets](../getting-started/sample-targets.md).
+
+### How the runner is proved
+
+`bin/setup-target --build` proves that the seeded `[runner]` reaches the
+target. It runs one generated testcase in the target's own language through
+`bin/probe`, and fails setup if the runner executed outside `targets/<slug>/`
+or resolved its imports entirely outside it. `bin/audit` and `bin/benchmark`
+repeat that check before spending a model on the target, so a runner that
+starts but loads an installed copy of the audited package is rejected instead
+of auditing the wrong code.
+
+The check stands aside, and says so, when it cannot make that claim: a Cargo
+package or workspace that exposes no library for the canary to depend on, a
+changed `[runner].bin` or `args`, or configured `[sanitizer]` binaries that
+own every enabled testcase route. An unrecognized build system does not
+receive a guessed runner; configure its `[runner]` explicitly.
+
+## Ecosystem-specific setup notes
+
+Read the entry for your language. Each explains dependency installation,
+target ownership checks, and limits of the generated runner.
+
+### Python
+
+Plain Python targets need no build step. A CMake or Meson project whose
+native products are Python extension modules is staged into an isolated
+environment with an ASan-linked Python host; see
+[Target configuration](configure-target.md#review-the-execution-route).
+
+### Node and TypeScript
+
+Node setup uses the checkout's lockfile and `packageManager` metadata to
+choose npm, pnpm, or Yarn. After installation it runs the conventional root
+`build` script when one is declared, so package exports that point to
+generated files are usable before the runner canary and audit begin.
+
 TypeScript projects are detected as `npm` and receive the Node runner. Node
 22.18 and later run `.ts` sources directly by stripping their types, so a
 TypeScript entry point needs no loader when its imports name the `.ts`
@@ -117,65 +157,19 @@ extension; the committed `samples/sample-typescript` runs that way. A project
 that needs a loader such as `ts-node` sets `bin` to it, and preflight runs the
 loader on an empty program before any audit starts.
 
-For a Swift library, a direct `.swift` testcase is compiled in a detached
-SwiftPM package that path-depends on every exported library product. Compilation
-runs before the 15-second execution budget and the per-agent package cache
-reuses dependencies. Setup builds and runs a canary that imports a real
-exported module, so a library-only package cannot pass with an invented
-executable. For an executable-only package, structured SwiftPM metadata selects
-the declared product; the generated `swift run` route is prepared once per
-sanitizer in `.audit/swift-build-<sanitizer>`. SwiftPM's cache, configuration,
-security state, and clang module cache live under the target's `.audit/` tree,
-so the same route works inside a restricted audit-agent workspace.
+### PHP
 
-`bin/setup-target` writes the matching starter `[runner]` block for each
-recognized registry ecosystem, and `--build` then proves that block reaches the
-target: it runs one generated testcase in the target's own language through
-`bin/probe`, and fails setup if the runner executed outside `targets/<slug>/`
-or resolved its imports entirely outside it. `bin/audit` and `bin/benchmark`
-repeat that check before spending a model on the target, so a runner that
-starts but loads an installed copy of the audited package is rejected instead
-of auditing the wrong code. The check stands aside, and says so, when it cannot
-make that claim: a Cargo package or workspace that exposes no library for the
-canary to depend on, a changed `[runner].bin` or `args`, or configured `[sanitizer]`
-binaries that own every enabled testcase route, because the registry's
-generated source is then no longer proof of what runs. An unrecognized build
-system does not receive a guessed runner; configure its `[runner]` explicitly.
-
-Composer setup first installs the full dependency set. If that is blocked by a
-PHP extension declared only in the root package's `require-dev` section, setup
+Composer setup first installs the full dependency set. If a PHP extension
+declared only in the root package's `require-dev` section blocks that, setup
 retries with production dependencies and ignores only those development-only
 extension requirements. Extensions required by production dependencies remain
 mandatory.
 
-Node setup uses the checkout's lockfile and `packageManager` metadata to choose
-npm, pnpm, or Yarn. After installation it runs the conventional root `build`
-script when one is declared, so package exports that point to generated files
-are usable before the runner canary and audit begin.
-
-To print the registry's current answer for any build system:
-
-```bash
-python3 lib/languages.py runner-block <build_system> --pretty
-```
-
-!!! tip "There is a worked example for every language here"
-    Rather than starting from the table, copy a config that is known to run.
-    The repository ships a configured synthetic target for each of these
-    ecosystems under `targets/samples/sample-*`, with its hand-authored
-    `target.toml` committed at `output/samples/sample-*/target.toml`. See
-    [Sample targets](../getting-started/sample-targets.md).
-
-## Ecosystem-specific setup notes
-
-Read the entry for your language. These explain dependency installation,
-target ownership checks, and limits of the generated runner.
-
 ### Ruby
 
-Setup reads the root gemspec through RubyGems. If it declares a
-native extension, `--build` runs the project's standard `rake compile` task
-after Bundler installs dependencies. When the gem has a conventional root
+Setup reads the root gemspec through RubyGems. If it declares a native
+extension, `--build` runs the project's standard `rake compile` task after
+Bundler installs dependencies. When the gem has a conventional root
 entrypoint, the runner canary requires that exact checkout file; otherwise it
 verifies the target-local load path. Standard `CONFIGURE_ARGS` supplied to
 setup are saved in `.audit/bootstrap.sh` for extensions that need an external
@@ -184,9 +178,10 @@ prefix.
 ### Go
 
 Setup seeds `go run -race` with `[sanitizer] enabled = ["race"]`; the setup
-bootstrap primes the matching race build cache before the runner canary.
-You can instead point the `[runner]` at a pre-built `go build -race` binary
-(the `samples/sample-go` target demonstrates that route).
+bootstrap primes the matching race build cache before the runner canary. You
+can instead point the `[runner]` at a pre-built `go build -race` binary, as
+`samples/sample-go` does.
+
 When a checked-in Go source embeds an asset directory generated by an
 adjacent JavaScript package, `bin/setup-target --build` runs that package's
 declared `build` script through its lockfile-selected package manager before
@@ -194,91 +189,103 @@ compiling Go. It does this only while the declared embed input is absent.
 
 ### Rust
 
-A library-only crate has no `cargo run` route. Write the testcase
-as a direct `.rs` file calling the crate's public API, or a
-`// HARNESS: <name>.rs` driver beside an opaque input; `bin/probe` builds
-either against the audited crate in release mode (matching the bootstrap
-build, so `debug_assert!` is not mistaken for a finding).
+A library-only crate has no `cargo run` route. Write the testcase as a direct
+`.rs` file calling the crate's public API, or a `// HARNESS: <name>.rs`
+driver beside an opaque input. `bin/probe` builds either against the audited
+crate in release mode, matching the bootstrap build so `debug_assert!` is not
+mistaken for a finding.
+
 Virtual workspaces follow the same route: Cargo metadata supplies the member
 libraries, and a testcase is linked to the crates it names. If the workspace
-exposes several binaries without one declared default or a unique slug
-match, setup does not guess among them; opaque input requires a named Rust
-harness.
-`bin/setup-target --build` prefetches dependencies into
+exposes several binaries without one declared default or a unique slug match,
+setup does not guess among them; opaque input then requires a named Rust
+harness. `bin/setup-target --build` prefetches dependencies into
 `.audit/cargo-home`, which those builds then read offline.
 
-### Rust sanitizer builds
-
-Rust can opt into an AddressSanitizer build: set
-`[sanitizer] enabled = ["asan"]`, point `asan_bin` at the instrumented
-binary, and commit a `.audit/build.sh` that produces it with a nightly
+Rust can also opt into an AddressSanitizer build: set
+`[sanitizer] enabled = ["asan"]`, point `asan_bin` at the instrumented binary,
+and commit a `.audit/build.sh` that produces it with a nightly
 `-Zsanitizer=address -Zbuild-std` build. `bin/setup-target --build`
-materializes it (see the `samples/sample-rust` target).
+materializes it; `samples/sample-rust` shows the shape.
 
 ### Swift
 
 Swift's seeded `[runner]` compiles the package with
-`-sanitize={SWIFT_SANITIZER}`, so a sanitizer diagnostic routes to
-`crashes/` like a C/C++ target rather than staying findings-only.
+`-sanitize={SWIFT_SANITIZER}`, so a sanitizer diagnostic routes to `crashes/`
+like a C/C++ target rather than staying findings-only.
+
+For a Swift library, a direct `.swift` testcase is compiled in a detached
+SwiftPM package that path-depends on every exported library product.
+Compilation runs before the 15-second execution budget, and the per-agent
+package cache reuses dependencies. Setup builds and runs a canary that imports
+a real exported module, so a library-only package cannot pass with an
+invented executable. For an executable-only package, SwiftPM metadata selects
+the declared product, and the generated `swift run` route is prepared once
+per sanitizer in `.audit/swift-build-<sanitizer>`. SwiftPM's cache,
+configuration, security state, and clang module cache live under the
+target's `.audit/` tree, so the same route works inside a restricted
+audit-agent workspace.
 
 ### Java
 
 Single-file Java is supported (JEP 330). For Maven targets,
 `bin/setup-target --build` compiles the reactor and asks Maven's dependency
 plugin for each module's classpath. The generated Java argument file stays
-under `.audit/`, outside `target.toml` and model context. A direct testcase's
-`TARGET:` source location selects the nearest module; when that location is
-incomplete, imports map back to compiled module classes. Maven's dependency
-receipts then expand the local reactor and external runtime closure without
-activating unrelated modules or test providers. The setup canary loads a
-class whose code source is inside the checkout, so starting a JVM in the
-target directory is not enough to pass. JDK discovery tries
-`AUDIT_JAVA_HOME`, `JAVA_HOME`, and `PATH`, then reuses the runtime already
-reported by a working Maven or Gradle.
+under `.audit/`, outside `target.toml` and model context.
+
+A direct testcase's `TARGET:` source location selects the nearest module;
+when that location is incomplete, imports map back to compiled module
+classes. Maven's dependency receipts then expand the local reactor and
+external runtime closure without activating unrelated modules or test
+providers. The setup canary loads a class whose code source is inside the
+checkout, so starting a JVM in the target directory is not enough to pass.
+JDK discovery tries `AUDIT_JAVA_HOME`, `JAVA_HOME`, and `PATH`, then reuses
+the runtime already reported by a working Maven or Gradle.
 
 ### Kotlin
 
-`build_system = "kotlin"` seeds script-style `.kts` probes.
-Plain `.kt` sidecar harnesses compile through `kotlinc -include-runtime`. A
-detected `gradle` build currently receives the Java JEP 330 runner
-(`java {TESTCASE}`), not the Kotlin script runner. For a Gradle/Kotlin
-target, either use a Java-interoperable testcase with the required target
-classpath or configure a project-specific Kotlin/Gradle runner explicitly;
-do not assume the generated Java command loads Kotlin application code.
+`build_system = "kotlin"` seeds script-style `.kts` probes. Plain `.kt`
+sidecar harnesses compile through `kotlinc -include-runtime`. A detected
+`gradle` build currently receives the Java JEP 330 runner
+(`java {TESTCASE}`), not the Kotlin script runner. For a Gradle/Kotlin target,
+either use a Java-interoperable testcase with the required target classpath
+or configure a project-specific Kotlin/Gradle runner explicitly; do not
+assume the generated Java command loads Kotlin application code.
 
 ### R
 
-`bin/setup-target --build` installs a package with a `DESCRIPTION`
-manifest and its declared hard dependencies into `.audit/r-library`, so a
-compiled component is built rather than skipped and development-only
-packages do not inflate setup. The seeded runner points `R_LIBS_USER` at
-that target-local library. The install is a snapshot, so a later
-`bin/setup-target` without `--build` reinstalls it when the checkout has
-moved since.
+`bin/setup-target --build` installs a package with a `DESCRIPTION` manifest
+and its declared hard dependencies into `.audit/r-library`, so a compiled
+component is built rather than skipped and development-only packages do not
+inflate setup. The seeded runner points `R_LIBS_USER` at that target-local
+library. The install is a snapshot: a later `bin/setup-target` without
+`--build` reinstalls it when the checkout has moved since.
 
 ### Perl
 
-A repository with `Makefile.PL` uses the newest installed Perl,
+A repository with `Makefile.PL` uses the newest installed Perl. Setup
 installs declared dependencies into an ABI-specific directory under
-`.audit/perl5`, builds its native modules, and installs the result there.
+`.audit/perl5`, builds the native modules, and installs the result there.
 cpanm reads the standard CPAN mirror index and keeps its working state under
-the target's `.audit` directory, avoiding a separate metadata service and
-user-global installer state. A repository transfer that cpanm explicitly
-reports as failed gets one unchanged retry, reusing completed work from that
-local cache. Dependency tests run without the operator's
-`NO_COLOR` display preference, which can otherwise alter expected output in
-unrelated packages. A Dist::Zilla author checkout with `dist.ini`
-uses `dzil authordeps` to install the build dependencies declared by the
-project, generates a release tree under `.audit`, then installs that tree
-through the same target-local cpanm environment. If
-a repository checkout has no release `META` file and cpanm cannot execute
-`Makefile.PL` before its configure prerequisites exist, setup installs the
-prerequisite names from cpanm's own diagnostic and retries dependency
+the target's `.audit` directory, so there is no separate metadata service and
+no user-global installer state. A repository transfer that cpanm reports as
+failed gets one unchanged retry, reusing completed work from that local
+cache. Dependency tests run without the operator's `NO_COLOR` preference,
+which can otherwise alter expected output in unrelated packages.
+
+A Dist::Zilla author checkout with `dist.ini` uses `dzil authordeps` to
+install the build dependencies the project declares, generates a release tree
+under `.audit`, then installs that tree through the same target-local cpanm
+environment. If a checkout has no release `META` file and cpanm cannot
+execute `Makefile.PL` before its configure prerequisites exist, setup installs
+the prerequisite names from cpanm's own diagnostic and retries dependency
 discovery. This includes a module that `Makefile.PL` or `Build.PL` imports
-before metadata is available. An existing generated Makefile is cleaned before rebuilding, so
-a Perl upgrade cannot retain generated C or objects from the prior API. The
-canary requires and imports a real module from `lib/`, then verifies that
-Perl loaded its built copy from inside the audited checkout.
+before metadata is available.
+
+An existing generated Makefile is cleaned before rebuilding, so a Perl
+upgrade cannot retain generated C or objects from the prior API. The canary
+requires and imports a real module from `lib/`, then verifies that Perl
+loaded its built copy from inside the audited checkout.
 
 ## Crash and finding routing
 
@@ -294,8 +301,8 @@ and triage's publication decision.
 
 In findings-only mode the probe route is `runner`. `bin/probe` still prints a
 `CRASH` verdict for a recognised runtime banner so the investigator does not
-miss it, but it never files a crash bundle for that route; the verdict is not a
-filing decision.
+miss it, but it never files a crash bundle for that route; the verdict is not
+a filing decision.
 
 Triage keeps the lanes honest afterwards. A crash directory that holds only a
 managed-runtime diagnostic is relocated to `findings/` when it carries a
@@ -305,23 +312,15 @@ signal ends up in `crashes-rejected/`.
 
 ## Writing harnesses in non-C/C++ languages
 
-Name the sidecar with a `HARNESS:` header in the file's native comment syntax:
-`# HARNESS:` in Python, `// HARNESS:` in C or JavaScript,
+Name the sidecar with a `HARNESS:` header in the file's native comment
+syntax: `# HARNESS:` in Python, `// HARNESS:` in C or JavaScript,
 `<!-- HARNESS: … -->` in HTML. `bin/probe` reads the header fields from the
 first 16 lines of the file, and any comment prefix without letters works
 (`//`, `#`, `;`, `--`, `/*`, `<!--`). The same rule applies to `TARGET:`,
 `MODE:`, and `PROPERTY:`.
 
-The file extension, not the header, picks the build-or-interpret path.
-
-For the authoritative table, one row per language with its harness extensions
-and build systems, run:
-
-```bash
-python3 lib/languages.py list
-```
-
-The harness extensions split into two buckets:
+The file extension, not the header, picks the build-or-interpret path. The
+harness extensions split into two buckets:
 
 ```text
 # Compiled (cached binary):    .c .cc .cpp .cxx .C .go .kt .rs .swift
@@ -329,11 +328,14 @@ The harness extensions split into two buckets:
 #                              .java .kts .r .R .sh .bash
 ```
 
+For the authoritative table, one row per language with its harness extensions
+and build systems, run `python3 lib/languages.py list`.
+
 ## Crash patterns
 
 If your target has a project-specific runtime banner (for example, `[BUG]`
-from a custom panic handler, or `ASSERTION FAILED:` from a debug build), add it
-under `[runner].crash_patterns`:
+from a custom panic handler, or `ASSERTION FAILED:` from a debug build), add
+it under `[runner].crash_patterns`:
 
 ```toml
 [runner]

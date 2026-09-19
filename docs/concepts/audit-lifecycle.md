@@ -1,4 +1,4 @@
-# Audit Lifecycle
+# Audit lifecycle
 
 [![Audit lifecycle: setup and preflight, source-only finding or probe path, lane-specific validation, preserved outcomes, and crash bundle export](../assets/audit-lifecycle.svg)](../assets/audit-lifecycle.svg){target="_blank" title="Open full-size diagram in a new tab"}
 
@@ -18,8 +18,8 @@ A useful run can end in either evidence lane:
 These are parallel result paths. A managed-runtime panic or traceback can
 support a finding, and a runtime-only diagnostic is demoted into `findings/`
 as a candidate, but it is admitted only when a report establishes a security
-issue. Sanitizer and race diagnostics must meet the crash
-confirmation and review requirements.
+issue. Sanitizer and race diagnostics must meet the crash confirmation and
+review requirements.
 
 Every accepted crash is automatically converted to a maintainer bundle
 (`report.md`, `reproduce.sh`, the sanitizer output, and the input) as part of
@@ -38,9 +38,9 @@ The source checkout belongs to the upstream project. The harness reads it,
 builds against it, and records its revision, but audit output stays under
 `output/`.
 
-If `target.toml` is missing, `bin/audit --target <slug>` seeds a starter config
-automatically before loading it. You can also seed or refresh it explicitly
-with `bin/setup-target <slug>`.
+If `target.toml` is missing, `bin/audit --target <slug>` seeds a starter
+config automatically before loading it. You can also seed or refresh it
+explicitly with `bin/setup-target <slug>`.
 
 ## 2. Build the sanitizer artifact
 
@@ -48,15 +48,13 @@ For native C/C++ targets, the harness needs a sanitizer build. Outside a
 container the default location is `targets/<target>/build-asan/`; container
 runs add `${AUDIT_BUILD_SUFFIX}` so incompatible images use separate build
 trees. `target.toml` points the harness at the binary inside it (`asan_bin`,
-`asan_lib`). The same layout is used for browsers and generic CLI/library
-targets.
+`asan_lib`). Browsers and generic CLI/library targets use the same layout.
 
 Ordinary C/C++ setup enables ASan by default; UBSan, MSan, and TSan are
 opt-in. Language setup uses the registry's defaults: Go enables `race`, Swift
 enables ASan, and most other language runners start in findings-only mode.
-
-See [Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for the
-recommended posture.
+See [Sanitizer policy](../guides/configure-target.md#sanitizer-policy) for
+the recommended posture.
 
 Targets with `[sanitizer].enabled = []` (typical for interpreted or managed
 runtimes) skip sanitizer execution and ordinarily use the findings lane.
@@ -67,21 +65,21 @@ emits `WARNING: DATA RACE`, the race report goes to `crashes/`.
 Audit preflight can create or refresh ordinary non-browser native sanitizer
 builds. Browser builds use their project tooling; registered language package
 builds run explicitly through `bin/setup-target <target> --build`. After the
-required build exists, refresh the generated config and review only unresolved
-or incorrect values.
+required build exists, refresh the generated config and review only
+unresolved or incorrect values.
 
 For ordinary native targets the regular sanitizer build stays the control,
-while optional widened configurations take a minority of the audit's effort: a
-bug behind a non-default feature is still a bug. A crash found there is
+while optional widened configurations take a minority of the audit's effort:
+a bug behind a non-default feature is still a bug. A crash found there is
 replayed against the regular build and triaged with both results. Set
 `build_widening = false` in `target.toml` to skip this work.
 
 ## 3. Run the audit
 
 `bin/audit --target <slug> --backend <backend>` starts a session. It reads
-`target.toml`, detects the source revision, creates per-backend result and log
-directories, and launches one or more agents. The optional iteration count
-limits the run; omit it (or pass `0`) to run continuously.
+`target.toml`, detects the source revision, creates per-backend result and
+log directories, and launches one or more agents. The optional iteration
+count limits the run; omit it (or pass `0`) to run continuously.
 
 At preflight, the session copies the reviewed target configuration into its
 result tree. That snapshot is immutable for the run: change the source config
@@ -97,16 +95,16 @@ transcript, is the source of truth across resume, compaction, and crash
 recovery.
 
 `bin/audit --since <rev>` runs a **delta audit**: the work cards cover only
-the files changed in `<rev>..HEAD`, the files that call them (one hop over the
-call-neighbourhood graph's certain edges; with no graph, the run says so and
-covers the changed files alone), and one S1 card per commit in the range. The
-window is the delta: no diversity floor, no expansion. The tree records the
-base revision and changed-file set in `state/run-config.json`, and a resumed
-run must keep the same `HEAD` and pass the same `--since`. A revision the
-checkout cannot resolve (a shallow clone, a typo) stops the run rather than
-silently widening it to a full audit. The tracked working tree must match
-`HEAD`, because uncommitted code is outside the recorded `<rev>..HEAD` range.
-An empty or exhausted delta stops instead of opening the primary agent's
+the files changed in `<rev>..HEAD`, the files that call them (one hop over
+the call-neighbourhood graph's certain edges; with no graph, the run says so
+and covers the changed files alone), and one S1 card per commit in the range.
+The window is the delta: no diversity floor, no expansion. The tree records
+the base revision and changed-file set in `state/run-config.json`, and a
+resumed run must keep the same `HEAD` and pass the same `--since`. A revision
+the checkout cannot resolve (a shallow clone, a typo) stops the run rather
+than silently widening it to a full audit. The tracked working tree must
+match `HEAD`, because uncommitted code is outside the recorded range. An
+empty or exhausted delta stops instead of opening the primary agent's
 ordinary whole-tree discovery slot.
 
 ## 4. Agents investigate
@@ -115,21 +113,22 @@ Each agent keeps **one active investigation at a time**, with other candidate
 hypotheses parked in its compact state:
 
 1. Take an assigned piece of source from the work queue.
-2. Pick or refine a hypothesis: a file, a function, a line, an input shape, an
-   expected diagnostic.
+2. Pick or refine a hypothesis: a file, a function, a line, an input shape,
+   an expected diagnostic.
 3. Read a small region of the source.
-4. If the source already establishes a concrete security issue, file the FIND
-   now; a reproducer strengthens it but is not a precondition.
+4. If the source already establishes a concrete security issue, file the
+   FIND now; a reproducer strengthens it but is not a precondition.
 5. Find a seed or write one testcase and run it immediately. If it does not
-   reach the right code through the configured sanitizer or runner, revise the
-   input and try again.
-6. Confirm a diagnostic before crash promotion, then move the artifact through
-   its lane-specific validation.
+   reach the right code through the configured sanitizer or runner, revise
+   the input and try again.
+6. Confirm a diagnostic before crash promotion, then move the artifact
+   through its lane-specific validation.
 
 Investigation depth follows evidence. One clean probe that instantiates every
 named boundary or call step can close a deterministic hypothesis. Timing-,
-race-, scheduler-, GC-, allocator-, re-entrancy-, and state-dependent triggers
-cannot be closed that way: they need repetition or different input shapes.
+race-, scheduler-, GC-, allocator-, re-entrancy-, and state-dependent
+triggers cannot be closed that way: they need repetition or different input
+shapes.
 
 Closing one hypothesis does not retire its card. A dry card needs at least
 three clean probes across at least two distinct input shapes before it can be
@@ -141,22 +140,23 @@ build or mode can execute at all is marked blocked rather than counted as
 clean evidence.
 
 Work cards are leased so two agents do not step on each other. An agent
-attests the line ranges or functions it read with
-`bin/state mark-examined`; the card then carries an **Examined so far** block
-on every later pickup, including after a context compaction, so the next
-session starts from the unexamined functions instead of re-reading the file.
-See [Review coverage](coverage.md).
+attests the line ranges or functions it read with `bin/state mark-examined`;
+the card then carries an **Examined so far** block on every later pickup,
+including after a context compaction, so the next session starts from the
+unexamined functions instead of re-reading the file. See
+[Review coverage](coverage.md).
 
-When an agent confirms a crash or finding in a subsystem, the queue relaxes the
-usual subsystem-diversity rule for that agent. Neighbouring cards are cheaper
-and more valuable once the agent has working data-flow context for the area.
+When an agent confirms a crash or finding in a subsystem, the queue relaxes
+the usual subsystem-diversity rule for that agent. Neighbouring cards are
+cheaper and more valuable once the agent has working data-flow context for
+the area.
 
 ## 5. Run the testcase
 
 Every testcase runs through one execution gate: `bin/probe`. It reads the
-testcase header, picks the right runner (browser, JS shell, generic CLI, C/C++
-or language harness, or the configured `[runner]`), captures output, and
-records the verdict in `state/runs.jsonl`.
+testcase header, picks the right runner (browser, JS shell, generic CLI,
+C/C++ or language harness, or the configured `[runner]`), captures output,
+and records the verdict in `state/runs.jsonl`.
 
 Common outcomes:
 
@@ -185,30 +185,30 @@ Triage decides whether an artifact is useful and in scope.
 
 Review can happen while other agents are still working. The harness waits
 until a report's writers have finished before judging it, then makes a final
-pass after the workers drain. The scheduling details below explain how it
-avoids reviewing a half-written artifact.
+pass after the workers drain.
 
 ??? info "Scheduling and background review"
     An ordinary audit schedules continuously. A slot that finishes a session
-    relaunches at once if it has work, and nothing waits for the slowest peer.
-    While slots are busy, a background sweep adjudicates the artifacts no live
-    session can still write:
+    relaunches at once if it has work, and nothing waits for the slowest
+    peer. While slots are busy, a background sweep adjudicates the artifacts
+    no live session can still write:
 
     - a completed crash bundle, once the slot that filed it has no session in
-      flight and no other session has written into it (a `bin/probe` skeleton or a
-      held bundle stays with its owner until finished);
-    - a finding, once every session whose own commands or file writes named it has
-      ended, or, when no session named it, once every session still running
-      started after it was filed.
+      flight and no other session has written into it (a `bin/probe`
+      skeleton or a held bundle stays with its owner until finished);
+    - a finding, once every session whose own commands or file writes named
+      it has ended, or, when no session named it, once every session still
+      running started after it was filed.
 
-    A turn-capped session's continuation counts as the same session. A steward
-    tick every few minutes scores the generation, rotates starved strategy lanes,
-    and re-ranks the queue without stopping anyone. The one full pass over the
-    whole tree, including orphan-testcase enforcement and corpus promotion (which
-    touch a slot's own scratch), runs after the last slot drains. It reuses the
-    cached verdicts, so what the sweeps settled costs no further review, and what
-    they could not reach is judged there. Fixed-lane, delta, and ensemble runs keep
-    the older cohort model with a pass at the end of every iteration.
+    A turn-capped session's continuation counts as the same session. A
+    steward tick every few minutes scores the generation, rotates starved
+    strategy lanes, and re-ranks the queue without stopping anyone. The one
+    full pass over the whole tree, including orphan-testcase enforcement and
+    corpus promotion (which touch a slot's own scratch), runs after the last
+    slot drains. It reuses the cached verdicts, so what the sweeps settled
+    costs no further review, and what they could not reach is judged there.
+    Fixed-lane, delta, and ensemble runs keep the older cohort model with a
+    pass at the end of every iteration.
 
 **For crashes, the gates are strict:**
 
@@ -220,7 +220,7 @@ avoids reviewing a half-written artifact.
   `MOZ_CRASH`/panic, or a plain stack overflow.
 
 A trigger source outside the target's declared attacker surface is settled
-by the source reviewer: when the reviewer agrees the fault needs something
+by the source reviewer. When the reviewer agrees the fault needs something
 outside those controls, the crash is rejected with a `threat-model:` reason;
 when the reviews cannot place the trigger either way after the focused
 resolution, it is rejected as unsettled. Either way the evidence moves to
@@ -238,16 +238,17 @@ ends the claim as unsettled rather than leaving it without a verdict.
 **For findings, the gates are about substance:**
 
 - there is a report file at the FIND root;
-- the report is substantive: a concrete location, an explicit issue class, and
-  a rationale a reviewer can act on. A sanitizer reproducer is *not* required.
+- the report is substantive: a concrete location, an explicit issue class,
+  and a rationale a reviewer can act on. A sanitizer reproducer is *not*
+  required.
 
-Because no sanitizer vouches for a finding, each report is read independently,
-with none of the filing agent's context, and voted accept or reject. Two
-accepts promote it; two rejects move it to `findings-rejected/`. An admitted
-finding then receives source review of its trigger and claimed security
-consequence. Two anchored Reject votes can disprove the claim. Missing review
-output keeps it pending; completed review that cannot establish scope leads
-to an `unsettled-scope:` rejection. See
+Because no sanitizer vouches for a finding, each report is read
+independently, with none of the filing agent's context, and voted accept or
+reject. Two accepts promote it; two rejects move it to `findings-rejected/`.
+An admitted finding then receives source review of its trigger and claimed
+security consequence. Two anchored Reject votes can disprove the claim.
+Missing review output keeps it pending; completed review that cannot
+establish scope leads to an `unsettled-scope:` rejection. See
 [Triage and review](../guides/triage-results.md#how-automated-review-works)
 for the distinction between incomplete review and a terminal decision.
 
@@ -261,16 +262,17 @@ What happens to each artifact:
 - Findings with no report get a `.needs-content` marker and surface as
   `NEEDS CONTENT` in `findings/finding-clusters.html`.
 - Findings rejected twice by the substance gate are quarantined to
-  `findings-rejected/`. They are not deleted, so you can review the reasoning.
+  `findings-rejected/`. They are not deleted, so you can review the
+  reasoning.
 
 ### Rejections are kept as reusable knowledge
 
 Building a reproducer is the expensive half of an audit, so a disproof is
 worth as much as a finding. When a reviewer rejects an artifact because its
-triggering state is not attacker-reachable, the anchored reason is appended to
-`state/unreachable-routes.jsonl`, and a later work card on any file that
-disproof names renders it, newest first. Without this, later sessions can spend
-time re-deriving the same disproved route on the same source.
+triggering state is not attacker-reachable, the anchored reason is appended
+to `state/unreachable-routes.jsonl`, and a later work card on any file that
+disproof names renders it, newest first. Without this, later sessions can
+spend time re-deriving the same disproved route on the same source.
 
 Two properties keep the note honest:
 
@@ -278,17 +280,16 @@ Two properties keep the note honest:
   reaching the same code through a different attacker-controlled path still
   counts.
 - **It lives exactly as long as the rejection does.** A rejected artifact is
-  the record of its own rejection, so when the gate requeues one whose verdict
+  the record of its own rejection. When the gate requeues one whose verdict
   went stale, the directory leaves `findings-rejected/` and its route row is
-  retired before that path can be reused. A new source revision alone does not
-  make a rejection stale: the disproof is re-read against the lines it cites
-  and stands while they still match byte for byte, so a pin change spends no
-  review, and loses no advice, on a rejection the source still supports. Once
-  an anchored line moves, the artifact is requeued and the note goes with it.
-  Resumed runs reconcile stale trigger rejections before launching their first
-  agents, so an obsolete note cannot survive even one cohort. There is no
-  tombstone, and no second copy of the gate's validity rules to drift out of
-  step.
+  retired before that path can be reused. A new source revision alone does
+  not make a rejection stale: the disproof is re-read against the lines it
+  cites and stands while they still match byte for byte, so a pin change
+  spends no review, and loses no advice, on a rejection the source still
+  supports. Once an anchored line moves, the artifact is requeued and the
+  note goes with it. Resumed runs reconcile stale trigger rejections before
+  launching their first agents, so an obsolete note cannot survive even one
+  cohort.
 
 Severity annotation is best-effort post-processing on top of all this. A
 failed scoring run does not remove an otherwise complete crash or finding.
@@ -320,8 +321,8 @@ A maintainer runs:
 and compares the new diagnostic with the saved `sanitizer.txt`. Reproduction
 can depend on the recorded revision, toolchain, configuration, and runtime
 conditions. The first export happens during triage without operator action;
-[Maintenance commands](../guides/triage-results.md#maintenance-commands) shows
-how to re-run it after editing a bundle.
+[Maintenance commands](../guides/triage-results.md#maintenance-commands)
+shows how to re-run it after editing a bundle.
 
 ## 8. Where to look
 

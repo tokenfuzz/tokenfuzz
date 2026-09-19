@@ -1,9 +1,9 @@
-# Cost Model
+# Cost model
 
 Audit cost includes model input and output, testcase execution, and automated
-review. Larger contexts usually increase latency and input-token spend;
-additional workers multiply concurrent demand. TokenFuzz records these costs
-and limits repeated context, oversized output, and duplicate work.
+review. Larger contexts increase latency and input-token spend; additional
+workers multiply concurrent demand. TokenFuzz records these costs and limits
+repeated context, oversized output, and duplicate work.
 
 Use the [environment reference](../reference/environment.md) for worker,
 wall-time, and session limits. Use [Benchmarking](benchmark.md) to compare
@@ -25,8 +25,8 @@ Two principles explain most of these choices:
 - **Reuse context that still applies.** Compact state and session seeds help
   the next agent continue without reconstructing the run from raw logs.
 - **Reuse evidence that still holds.** Claims, recorded probes, and review
-  receipts reduce duplicate work while leaving room for confirmation runs and
-  fresh review when the source or evidence changes.
+  receipts reduce duplicate work while leaving room for confirmation runs
+  and fresh review when the source or evidence changes.
 
 The aim is to spend the budget on investigation and verification. A smaller
 transcript is useful only if it preserves the information that work needs.
@@ -38,12 +38,13 @@ task-specific guide, followed by agent-, card-, and state-specific material.
 Their long common rules are centralized in a stable suffix; compact
 continuation prompts use a smaller suffix.
 
-That stable suffix keeps prompt behavior consistent, but it does not by itself
-create a cross-agent cache hit: provider caching generally reuses matching
-prefixes, and the dynamic material before the suffix differs between agents.
-The shared safety-and-guide prefix may still qualify where a backend supports
-automatic prefix caching. Availability and price are provider-specific, so run
-logs record what the backend actually reports rather than assuming a discount.
+That stable suffix keeps prompt behavior consistent, but it does not by
+itself create a cross-agent cache hit: provider caching generally reuses
+matching prefixes, and the dynamic material before the suffix differs between
+agents. The shared safety-and-guide prefix may still qualify where a backend
+supports automatic prefix caching. Availability and price are
+provider-specific, so run logs record what the backend actually reports
+rather than assuming a discount.
 
 Both benchmark conditions use the same backend tool and delegation policy.
 The execution boundary and available controls differ by backend; see the
@@ -59,11 +60,11 @@ Two implementation choices reduce duplicated context and cache-write cost:
   `CLAUDE_CODE_PROMPT_CACHE_TTL` in the
   [environment reference](../reference/environment.md#model-selection).
 
-Cache reuse depends on the provider, prompt prefix, and time between requests.
-A shared rules suffix is not a reusable prefix. Local-server caching also
-depends on server configuration and available capacity. Use recorded cache
-usage and actual costs to assess savings; the harness cannot guarantee a
-cache hit or a fixed discount.
+Cache reuse depends on the provider, prompt prefix, and time between
+requests. A shared rules suffix is not a reusable prefix. Local-server
+caching also depends on server configuration and available capacity. Use
+recorded cache usage and actual costs to assess savings; the harness cannot
+guarantee a cache hit or a fixed discount.
 
 ## Capped source reading
 
@@ -83,12 +84,12 @@ conversation.
 
 ## Structured state over transcripts
 
-Agents and operators read the run through compact state views rather than raw
-JSON rows. The default `show-recent` view caps hypotheses, runs, and claims at
-ten rows each; it is row-bounded rather than byte-bounded, so long paths can
-make it larger than 4 KiB. Shell and file-reading wrappers separately cap raw
-output at roughly 50 KiB. Nothing rereads a transcript to work out what
-happened.
+Agents and operators read the run through compact state views rather than
+raw JSON rows. The default `show-recent` view caps hypotheses, runs, and
+claims at ten rows each; it is row-bounded rather than byte-bounded, so long
+paths can make it larger than 4 KiB. Shell and file-reading wrappers
+separately cap raw output at roughly 50 KiB. Nothing rereads a transcript to
+work out what happened.
 
 ## Receipts and the budgeted sweep
 
@@ -99,9 +100,9 @@ Receipts also order revisits toward the least-read files.
 
 Breadth is a separate budget. `[sweep] token_budget` in `target.toml` turns
 on a sweep that hands each unreceipted unit of source to one decision with no
-tools and no follow-up turns, on the model `[sweep] model` names. Each unit is
-paid for once, spend is recorded across resumes, and the sweep stops at the
-budget rather than when the tree is covered. It is off by default; the
+tools and no follow-up turns, on the model `[sweep] model` names. Each unit
+is paid for once, spend is recorded across resumes, and the sweep stops at
+the budget rather than when the tree is covered. It is off by default; the
 coverage report states how far it reached. See
 [Review coverage](coverage.md#the-budgeted-sweep).
 
@@ -149,29 +150,31 @@ replays it there (the configured CLI, or for a `// HARNESS:` route a twin of
 that harness linked against the sibling's library), maps the covered PCs to
 source, and writes the same HIT/MISSED rows, closest frame, and edge journal
 browser mode does. A native replay costs milliseconds, so a miss does not
-withhold the sanitizer: the run proceeds, the `.asan.txt` and tried-inputs row
-carry `MISSED` and the closest frame, and the agent revises the input with
-that evidence. When no instrumented sibling exists (a recipe that hardcodes an
-absolute compiler path, or a tree outside `targets/`), coverage is reported
-**unavailable** and the run proceeds; an unmeasurable input is never counted
-as a miss.
+withhold the sanitizer: the run proceeds, the `.asan.txt` and tried-inputs
+row carry `MISSED` and the closest frame, and the agent revises the input
+with that evidence. When no instrumented sibling exists (a recipe that
+hardcodes an absolute compiler path, or a tree outside `targets/`), coverage
+is reported **unavailable** and the run proceeds; an unmeasurable input is
+never counted as a miss.
 
 ## Work-card leases prevent duplicate spend
 
-Two agents probing the same source file with the same strategy is wasted work.
+Two agents probing the same source file with the same strategy is wasted
+work.
 
 - Card claims expire after 30 minutes, so a wedged agent does not poison the
   queue for an entire shift.
-- A diversity gate also blocks two agents from sharing a subsystem at the same
-  time.
+- A diversity gate also blocks two agents from sharing a subsystem at the
+  same time.
 - [Strategy model](strategy-model.md#how-a-card-gets-to-an-agent) has the
   full exclusion rules.
 
-A second kind of duplicate spend is a proven unexecutable route. On a concrete
-patch or site card, `ENV-BLOCKED` closes that card. On a broad source card it
-records and demotes only the failed route; the card can be reoffered for
-another route, and independent cards on the same file are not blocked by
-propagation. A fresh run with a repaired toolchain starts with fresh state.
+A second kind of duplicate spend is a proven unexecutable route. On a
+concrete patch or site card, `ENV-BLOCKED` closes that card. On a broad
+source card it records and demotes only the failed route; the card can be
+reoffered for another route, and independent cards on the same file are not
+blocked by propagation. A fresh run with a repaired toolchain starts with
+fresh state.
 
 ## Rejected indexes prevent refiling
 
@@ -184,8 +187,8 @@ Tuesday and Wednesday too.
 
 Each session's usage is recorded in `logs/index.jsonl`, one row per agent
 launch with a `tokens` object and the session's probe counts (`probes`,
-`probe_seconds`, `probe_diagnostics`, `first_probe_seconds`). Two numbers tell
-you most of what you need:
+`probe_seconds`, `probe_diagnostics`, `first_probe_seconds`). Two numbers
+tell you most of what you need:
 
 - **`tokens.cached_input`** shows how much input was served from cache.
   Compare sessions of similar length: a larger value can reflect more turns,
@@ -196,17 +199,17 @@ you most of what you need:
 
 The row also records `turn_soft_cap` and `turn_capped`, so cost comparisons
 can separate natural completions from sessions rolled over to fresh context,
-and `served_model` when the provider billed the session to a model other than
-the one requested.
+and `served_model` when the provider billed the session to a model other
+than the one requested.
 
-For ensembling, compare these numbers across backends. A backend that produces
-the same evidence with half the cached input tokens is a meaningful
+For ensembling, compare these numbers across backends. A backend that
+produces the same evidence with half the cached input tokens is a meaningful
 operational signal, regardless of model prose quality.
 
 ### Why some numbers are marked estimated
 
-Backends report usage differently, and the harness never presents an estimate
-as a measurement:
+Backends report usage differently, and the harness never presents an
+estimate as a measurement:
 
 | Backend | What it reports |
 | --- | --- |
@@ -217,14 +220,15 @@ as a measurement:
 | Antigravity, Grok | No native usage in the current transports. Rows are estimated from prompt and transcript size. |
 
 Where a backend leaves only one turn's counters standing in for a session,
-that row is flagged estimated: the counters are real, the coverage is a floor.
+that row is flagged estimated: the counters are real, the coverage is a
+floor.
 
-A cell's source is `unknown` only when a session reported no usage at all, not
-when a session exited nonzero after reporting it. An `unknown` total is
-missing that session's whole spend and reads low. Token and cost figures carry
-at most one marker, `~`, meaning "not exact"; the `Source` column beside them
-says which reason applies. `≥` is reserved for the unjudged remainder on
-finding and crash counts, so the two never appear on one number.
+A cell's source is `unknown` only when a session reported no usage at all,
+not when a session exited nonzero after reporting it. An `unknown` total is
+missing that session's whole spend and reads low. Token and cost figures
+carry at most one marker, `~`, meaning "not exact"; the `Source` column
+beside them says which reason applies. `≥` is reserved for the unjudged
+remainder on finding and crash counts, so the two never appear on one number.
 
 One-shot harness decisions use the same ledger. Claude, Codex, native Gemini,
 and OpenCode keep their structured usage transport, then separate the

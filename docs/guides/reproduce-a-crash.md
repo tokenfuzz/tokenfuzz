@@ -1,4 +1,4 @@
-# Reproduce a Crash
+# Reproduce a crash
 
 This page is for an upstream maintainer or security engineer who received a
 TokenFuzz crash bundle. The shortest path is: read `report.md`, inspect
@@ -7,8 +7,8 @@ diagnostic with `sanitizer.txt`.
 
 Use this page to [understand the bundle](#bundle-layout),
 [read its diagnostic](#reading-the-sanitizer-output), and
-[verify a fix](#verifying-your-fix). If you are the operator running TokenFuzz,
-see [Triage and review](triage-results.md) instead.
+[verify a fix](#verifying-your-fix). If you are the operator running
+TokenFuzz, see [Triage and review](triage-results.md) instead.
 
 Accepted crashes are exported in place during triage. The directory under
 `output/.../crashes/CRASH-*` is therefore the same self-contained shape an
@@ -39,13 +39,13 @@ only for a reportable result with a current score. Neither file is needed to
 reproduce; both let a reviewer trace generated claims back to the evidence
 that produced them.
 
-Read `report.md` first. `report.html` presents the same content with its field
-table and severity annotation rendered for a browser.
+Read `report.md` first. `report.html` presents the same content with its
+field table and severity annotation rendered for a browser.
 
 It opens with a **Reviewer TL;DR** (one line each for the bug, its trigger,
-and the suggested fix), then the severity badge, a `## Summary` paragraph, and
-a `## Fields` table of the structured claims triage parsed. Between them they
-name:
+and the suggested fix), then the severity badge, a `## Summary` paragraph,
+and a `## Fields` table of the structured claims triage parsed. Between them
+they name:
 
 - the affected `file:function:line`;
 - the issue class, using the
@@ -66,9 +66,9 @@ dependencies, and execute the target's build system. Review those network and
 build steps under your own policy.
 
 If no runnable route (testcase, harness, or wrapper) was captured,
-`reproduce.sh` is a stub: it names what is missing and exits 2. The report and
-saved diagnostic remain available for review, but the stub does not establish
-that the crash is reproducible.
+`reproduce.sh` is a stub: it names what is missing and exits 2. The report
+and saved diagnostic remain available for review, but the stub does not
+establish that the crash is reproducible.
 
 ## Reproduce in one command
 
@@ -79,19 +79,19 @@ Pass a source checkout:
 ```
 
 The argument may be omitted only when the bundle records a real upstream URL
-and a pinned revision, in which case the script clones next to itself (or when
-it runs in place on the machine that produced it). A local-only or unpinned
-target has no other fallback. Firefox/`mach` bundles always need the path
-unless you set `REPRO_AUTO_CLONE=1`, because that clone is very slow.
+and a pinned revision, in which case the script clones next to itself (or
+when it runs in place on the machine that produced it). A local-only or
+unpinned target has no other fallback. Firefox/`mach` bundles always need the
+path unless you set `REPRO_AUTO_CLONE=1`, because that clone is very slow.
 
 What it does:
 
 1. Selects the source tree to build against. A Git or Mercurial checkout you
-   pass is moved to the recorded revision; if that fails the script stops with
-   exit 3 rather than build a different commit. A plain source tree, or any
-   checkout given to a Firefox/`mach` bundle, is used as supplied, so check its
-   revision yourself. Local modifications that do not conflict are kept, so you
-   can test an applied candidate patch.
+   pass is moved to the recorded revision; if that fails the script stops
+   with exit 3 rather than build a different commit. A plain source tree, or
+   any checkout given to a Firefox/`mach` bundle, is used as supplied, so
+   check its revision yourself. Local modifications that do not conflict are
+   kept, so you can test an applied candidate patch.
 2. Configures and builds the project with the same sanitizer flags TokenFuzz
    used during discovery.
 3. Runs the recorded testcase against the resulting binary or harness.
@@ -99,23 +99,23 @@ What it does:
 
 ### Prerequisites on the build host
 
-The build steps in `reproduce.sh` depend on the project's build system: CMake,
-Meson, autotools, mach, cargo, go, npm, python, and so on. You need:
+The build steps in `reproduce.sh` depend on the project's build system:
+CMake, Meson, autotools, mach, cargo, go, npm, python, and so on. You need:
 
 - the same compiler and build tools you would normally use to build the
   project from source;
-- for ASan, UBSan, MSan, or TSan, a compatible LLVM toolchain that supports the
-  recorded `-fsanitize=<name>` mode;
+- for ASan, UBSan, MSan, or TSan, a compatible LLVM toolchain that supports
+  the recorded `-fsanitize=<name>` mode;
 - for Go `race`, a Go toolchain with race-detector support and the C compiler
   or cgo support that platform requires. Go `race` is not an LLVM sanitizer
   mode.
 
-Generated recipes do not provision operating-system packages for you. They may
-invoke package managers such as npm, pip, Bundler, Composer, Maven, Gradle, R,
-or cpanm; those tools use their normal configured cache and install locations.
-Use a disposable account or container if those locations are not already
-isolated. An offline or proxied environment may need its normal
-project-specific preparation first.
+Generated recipes do not provision operating-system packages for you. They
+may invoke package managers such as npm, pip, Bundler, Composer, Maven,
+Gradle, R, or cpanm; those tools use their normal configured cache and
+install locations. Use a disposable account or container if those locations
+are not already isolated. An offline or proxied environment may need its
+normal project-specific preparation first.
 
 ### Common one-off overrides
 
@@ -133,8 +133,8 @@ fails, the trailing few lines name the step and the error.
 
 `sanitizer.txt` contains the sanitizer report from discovery with full stack
 traces. Output over 8 MiB is truncated in the middle for storage and says so
-with a marker; the head and tail are always kept. The top of the file names the
-diagnostic class. For ASan, that is one of:
+with a marker; the head and tail are always kept. The top of the file names
+the diagnostic class. For ASan, that is one of:
 
 | Class | Meaning |
 | --- | --- |
@@ -155,8 +155,8 @@ Below the diagnostic line, the report has:
   access marked. The character at the access site (for example `fa` for
   heap-left-redzone or `fd` for freed-heap) tells you what was hit.
 
-`report.md` normally points you at the line that matters. The full trace is in
-`sanitizer.txt` if you want the rest.
+`report.md` normally points you at the line that matters. The full trace is
+in `sanitizer.txt` if you want the rest.
 
 ## Verifying your fix
 
@@ -178,9 +178,9 @@ If you cannot reproduce against your checkout but the bundle's recorded
 revision *is* affected, the most common causes are:
 
 - **A compiler or sanitizer version different from the recorded one.** Some
-  heap-layout-dependent bugs need a specific Clang. Try the Clang the bundle's
-  `reproduce.sh` selects (`clang` on `PATH`, or `CC` for a CMake bundle) at
-  the recorded target revision.
+  heap-layout-dependent bugs need a specific Clang. Try the Clang the
+  bundle's `reproduce.sh` selects (`clang` on `PATH`, or `CC` for a CMake
+  bundle) at the recorded target revision.
 - **A configure-time option that disables the affected code path**
   (`--without-zlib`, `--disable-foo`). Diff your configure flags against the
   ones in `reproduce.sh`.
@@ -192,12 +192,13 @@ revision *is* affected, the most common causes are:
 
 ## What the report does **not** claim
 
-- That the affected code path is reachable from every public entry point. The
-  recorded "Trigger source" in `report.md` is the specific input shape that
-  fired the diagnostic. Reachability from other entry points is your call.
+- That the affected code path is reachable from every public entry point.
+  The recorded "Trigger source" in `report.md` is the specific input shape
+  that fired the diagnostic. Reachability from other entry points is your
+  call.
 - That the candidate fix in `report.md` is the right one. It is a
-  reviewer-actionable suggestion based on the audit run. The maintainer decides
-  the actual patch.
+  reviewer-actionable suggestion based on the audit run. The maintainer
+  decides the actual patch.
 - That the recorded severity is final. Severity is advisory; your project's
   security team is authoritative.
 

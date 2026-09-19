@@ -1,18 +1,15 @@
 # Prerequisites
 
-Before an audit, prepare three things: the host, one model backend, and the
-target's own build dependencies. TokenFuzz supports macOS and Linux. If you only
-want to prove the orchestration works, start with the pure-Python sample
-target; it needs no native build while you verify the backend and result
-paths.
+An audit needs three things prepared: the host, one model backend, and the
+target's own build dependencies. TokenFuzz supports macOS and Linux. If you
+only want to prove the orchestration works, start with the pure-Python sample
+target; it needs no native build.
 
 Hosted backends receive the prompts, source excerpts, state, and reports the
 run needs. Use `--backend oss` with a local model server when policy requires
 source and audit context to stay on the machine.
 
 ## 1. Host tools
-
-TokenFuzz itself needs:
 
 | Tool | Purpose |
 | --- | --- |
@@ -22,12 +19,11 @@ TokenFuzz itself needs:
 | `file` | Testcase and executable classification. |
 | LLVM (`clang`, `clang++`, `llvm-symbolizer`) | Building and diagnosing native sanitizer targets. |
 | `sancov` (optional) | Coverage feedback for native probes and the coverage gate for browser/JS probes. Everything runs without it. |
-| [`trailmark`](https://github.com/trailofbits/trailmark) (experimental, optional) | Adds a static call map to each work-card prompt. Needs Python 3.12+. See [below](#experimental-call-neighbourhood-context). |
+| [`trailmark`](https://github.com/trailofbits/trailmark) (optional, experimental) | Adds a static call map to each work-card prompt. Needs Python 3.12+. See [below](#experimental-call-neighbourhood-context). |
 
-`bash` is needed by the repository test runner and its shell-behavior suites.
-Your target may also need CMake, Meson, an archiver, a language runtime, or
-other upstream build dependencies. Optional strategy-specific tools are named
-where they are used; they are not TokenFuzz or test-suite prerequisites.
+`bash` is needed by the repository test runner. Your target may also need
+CMake, Meson, an archiver, a language runtime, or other upstream build
+dependencies. Optional strategy-specific tools are named where they are used.
 
 ### macOS
 
@@ -53,8 +49,8 @@ sudo apt-get install -y \
   python3 python3-venv ripgrep
 ```
 
-The distro `llvm` package may omit `sancov`. Coverage-gated probes can then be
-unavailable even though ASan works; use a complete LLVM installation from
+The distro `llvm` package may omit `sancov`. Coverage-gated probes are then
+unavailable even though ASan works; install a complete LLVM from
 [apt.llvm.org](https://apt.llvm.org/) when that capability matters.
 
 ### Fedora / RHEL
@@ -66,15 +62,15 @@ sudo dnf install -y \
 ```
 
 Minimal containers may also need CA certificates and the standard process and
-text utilities. The test driver can provision a fresh container with its known
-dependencies: `bash tests/run-tests.sh --install-container-deps` installs them
-through `apt-get`, `dnf`, `microdnf`, or `yum`, and `--image` runs that step
-for you unless you pass `--no-install-deps`.
+text utilities. The test driver can provision a fresh container itself:
+`bash tests/run-tests.sh --install-container-deps` installs its known
+dependencies through `apt-get`, `dnf`, `microdnf`, or `yum`, and `--image`
+runs that step for you unless you pass `--no-install-deps`.
 
-The package lists above cover the core harness and sanitizer tooling. To run
-the full test suite without skipping its Node.js and Go runner checks, install
-`node` and `go` as well. The container dependency installer does this for you;
-read the suite's `SKIP` lines when those toolchains are absent.
+The package lists above cover the harness and sanitizer tooling. To run the
+full test suite without skipping its Node.js and Go runner checks, install
+`node` and `go` as well. The container dependency installer does this for
+you; otherwise read the suite's `SKIP` lines.
 
 ## 2. One agent backend
 
@@ -91,10 +87,10 @@ Install and authenticate at least one supported CLI:
 The `oss` backend has no default model; every audit command that selects it
 needs `--model`.
 
-Verify the chosen CLI directly before asking TokenFuzz to launch it. Exact
-installation links, authentication checks, model selection, local vLLM/Ollama
-setup, and ensemble behavior live in
-[Backends and isolation](../guides/backends.md).
+Run the chosen CLI directly once before asking TokenFuzz to launch it. A
+backend waiting for a login can look like a stalled agent. Installation links,
+authentication checks, model selection, local vLLM/Ollama setup, and ensemble
+behavior are in [Backends and isolation](../guides/backends.md).
 
 Codex sandboxing on Linux and WSL2 needs the distribution's `bubblewrap`
 package; see the
@@ -104,18 +100,17 @@ for the Ubuntu AppArmor notes.
 ### Cyber access for security research
 
 For authorised defensive research through a hosted model, register the
-organisation and use case through the provider's trusted-access program before
-a long run. OpenAI documents Daybreak and Trusted Access for Cyber under
+organisation and use case with the provider's trusted-access program before a
+long run. OpenAI documents Daybreak and Trusted Access for Cyber under
 [Models and Trusted Access](https://learn.chatgpt.com/docs/cyber-safety), and
 Anthropic offers a
 [Cyber Verification Program](https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude-opus-and-sonnet).
 
 Provider registration does not replace target authorisation or the provider's
-usage policy. Use a local backend when hosted-model data flow is not acceptable.
-A model whose safeguards refuse the audit workload fails preflight with the
-refusing category named, rather than being silently served by a different
-model; see
-[Troubleshooting](../reference/troubleshooting.md#preflight-fails).
+usage policy. Use a local backend when hosted-model data flow is not
+acceptable. A model whose safeguards refuse the audit workload fails preflight
+with the refusing category named, rather than being silently served by a
+different model; see [Troubleshooting](../reference/troubleshooting.md#preflight-fails).
 
 ## 3. Target-specific tools
 
@@ -126,18 +121,18 @@ does not replace the target's toolchain.
   libraries in addition to LLVM.
 - Rust, Go, Python, Java, and other ecosystems need their normal compiler,
   interpreter, package manager, and development headers.
-- Browser targets can require Mercurial, large SDKs, and project-specific
+- Browser targets can need Mercurial, large SDKs, and project-specific
   bootstrap tooling.
 
 Every audit and benchmark starts by exercising the configured `[runner].bin`
 and stops before launching an agent when that fails, naming the command.
-Interpreters run a minimal program in the configured language; build tools use
-their version command. For example, a Node route that names a `.ts` entry point
-runs a temporary typed source so an older JavaScript-only Node is rejected.
+Interpreters run a minimal program in the configured language; build tools
+run their version command. A Node route that names a `.ts` entry point runs a
+temporary typed source, so an older JavaScript-only Node is rejected.
 
 On macOS, `/usr/bin/java` is a system stub that only works once a JDK is
-registered under `/Library/Java/JavaVirtualMachines`; Homebrew's `openjdk`
-is keg-only, so install and link it, then add the Kotlin compiler:
+registered under `/Library/Java/JavaVirtualMachines`. Homebrew's `openjdk` is
+keg-only, so install and link it, then add the Kotlin compiler:
 
 ```bash
 brew install openjdk kotlin
@@ -147,9 +142,9 @@ sudo ln -sfn "$(brew --prefix openjdk)/libexec/openjdk.jdk" \
 kotlinc -version
 ```
 
-First establish that the project builds and runs with its documented
-toolchain. This makes it easier to distinguish a project dependency problem
-from an instrumentation or harness problem.
+Confirm that the project builds and runs with its documented toolchain first.
+That separates a project dependency problem from an instrumentation or
+harness problem.
 
 ## 4. Verify the harness
 
@@ -159,16 +154,16 @@ From the repository root:
 bash tests/run-tests.sh
 ```
 
-By default, the suite uses stubbed backend invocations and needs no backend
+The suite stubs backend invocations by default, so it needs no backend
 authentication or model tokens. It exercises config parsing, state, triage,
 runner dispatch, reporting, and shell/Python portability. Live backend sandbox
-checks are opt-in through `TOKENFUZZ_LIVE_BACKENDS`; without it, those tests
-are reported as skipped.
+checks are opt-in through `TOKENFUZZ_LIVE_BACKENDS`; without it they are
+reported as skipped.
 
 Optional Linux image checks run the same suite in a clean Docker container.
-`ubuntu:24.04` is the image the CI container job runs, on `linux/amd64`; the
-lane pins that platform (emulated on an arm64 host) unless `--platform`
-says otherwise:
+`ubuntu:24.04` on `linux/amd64` is what the CI container job runs; the lane
+pins that platform (emulated on an arm64 host) unless `--platform` says
+otherwise:
 
 ```bash
 bash tests/run-tests.sh --image ubuntu:24.04
@@ -202,17 +197,17 @@ Target build scripts and agent-driven testcases execute code from the audited
 tree. Run audits in a disposable container or on an isolated machine without
 long-lived credentials.
 
-TokenFuzz's helper currently supports Docker:
+The helper currently supports Docker:
 
 ```bash
 bin/audit-container-shell --rebuild   # first use
 bin/audit-container-shell             # reuse the image
 ```
 
-Install Docker through the normal package for your host and verify `docker
-info` first. The helper builds an image with the backend CLIs installed, mounts
-this repository at `/root/work`, and opens a shell. It never starts an audit
-for you.
+Install Docker through the normal package for your host and check `docker
+info` first. The helper builds an image with the backend CLIs installed,
+mounts this repository at `/root/work`, and opens a shell. It never starts an
+audit for you.
 
 ### Optional gVisor runtime
 
@@ -232,9 +227,10 @@ container as privileged, and do not mount the Docker socket into it.
   filesystem and process APIs.
 - System Bash is sufficient for the test driver and generated recipes.
 - Homebrew LLVM is auto-detected at `/opt/homebrew/opt/llvm` and
-  `/usr/local/opt/llvm`. Set `LLVM_PREFIX` only to select another installation.
+  `/usr/local/opt/llvm`. Set `LLVM_PREFIX` only to select another
+  installation.
 - Generated CMake and Meson recipes append Homebrew's installed package tree
-  to `CMAKE_PREFIX_PATH`. Any paths you set explicitly keep precedence.
+  to `CMAKE_PREFIX_PATH`. Paths you set explicitly keep precedence.
 
 ## If preflight fails
 
@@ -246,10 +242,10 @@ backend failures.
 
 ## Experimental: call-neighbourhood context
 
-This dependency is optional; skip it for a first install. With
+Skip this for a first install. With
 [trailmark](https://github.com/trailofbits/trailmark) available to a Python
-3.12+ interpreter, work cards can include a static caller/callee neighbourhood
-and a small source pack for resolved functions:
+3.12+ interpreter, work cards can include a static caller/callee
+neighbourhood and a small source pack for resolved functions:
 
 ```bash
 python3 -m pip install trailmark   # any Python 3.12+; bin/callgraph finds it

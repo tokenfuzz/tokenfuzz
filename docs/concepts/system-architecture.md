@@ -1,15 +1,15 @@
-# System Architecture
+# System architecture
 
 [![TokenFuzz system architecture: source and configuration feed audit preflight, work cards and state coordinate agents, findings can go directly to validation, and testcases run through probe](../assets/system-architecture.svg)](../assets/system-architecture.svg){target="_blank" title="Open full-size diagram in a new tab"}
 
 TokenFuzz separates three responsibilities: agents propose and investigate
-claims, the probe records what executed, and triage reviews the saved evidence.
-Structured state connects those steps so a run can continue after an agent
-exits or loses context.
+claims, the probe records what executed, and triage reviews the saved
+evidence. Structured state connects those steps so a run can continue after
+an agent exits or loses context.
 
 The directory boundary is simple: upstream source and builds live under
-`targets/`; audit evidence, progress, and logs live under `output/`. This page
-explains the components. For the sequence of a run, see
+`targets/`; audit evidence, progress, and logs live under `output/`. This
+page explains the components. For the sequence of a run, see
 [Audit lifecycle](audit-lifecycle.md).
 
 ## Directory model
@@ -22,12 +22,12 @@ repo root/
   output/<target>/<backend>/   per-backend results, state, and logs
 ```
 
-Audit evidence never goes into the target source tree. Build commands may write
-build artifacts there, and the automatic builder stores reusable recipes,
-logs, and its bootstrap virtualenv under `targets/<target>/.audit/`. That
-directory is the harness's workspace, never auditable source: the source walk
-skips it, along with VCS metadata, runtime caches, sanitizer build trees, and
-any directory Python marks as a virtualenv.
+Audit evidence never goes into the target source tree. Build commands may
+write build artifacts there, and the automatic builder stores reusable
+recipes, logs, and its bootstrap virtualenv under `targets/<target>/.audit/`.
+That directory is the harness's workspace, never auditable source: the source
+walk skips it, along with VCS metadata, runtime caches, sanitizer build trees,
+and any directory Python marks as a virtualenv.
 
 ## The audit run
 
@@ -37,9 +37,9 @@ execution routes, creates the result and log directories, and writes a
 results-local configuration snapshot. That snapshot is immutable for the run,
 so live agents cannot silently change the runner, build, or threat model
 behind recorded evidence. The harness then builds the ranked queue and
-launches the selected backend. Its job is to create a controlled loop in which
-agents must produce evidence, not to decide that any source pattern is a
-finding.
+launches the selected backend. Its job is to create a controlled loop in
+which agents must produce evidence, not to decide that any source pattern is
+a finding.
 
 The ranked queue is built from a few signals:
 
@@ -57,15 +57,15 @@ tiebreaker. If it is disabled, times out, or returns malformed JSON, the
 deterministic order stands, and in either mode the model only reorders the
 cards it was shown. The harness never lets a model decide what is *in scope*.
 
-Agents claim one entry from the queue at a time. Claims prevent duplicate work
-on the same card or active surface; different strategy cards for one file can
-still coexist when the scheduler's subsystem rules allow them.
+Agents claim one entry from the queue at a time. Claims prevent duplicate
+work on the same card or active surface; different strategy cards for one
+file can still coexist when the scheduler's subsystem rules allow them.
 
 ## Work queue and structured state
 
-The work queue is the scheduler's contract with the agents. Durability does not
-mean every file is append-only: materialized views are replaced atomically,
-while event-style ledgers append rows.
+The work queue is the scheduler's contract with the agents. Durability does
+not mean every file is append-only: materialized views are replaced
+atomically, while event-style ledgers append rows.
 
 ```text
 work-cards.jsonl       ranked materialized queue; rewritten on refresh
@@ -91,23 +91,23 @@ full ruleset and the rationale for each rule.
 
 Each agent is a small autonomous worker:
 
-- it has a role (`reproduce` or `analysis`) and an active strategy (S1 through
-  S8);
+- it has a role (`reproduce` or `analysis`) and an active strategy (S1
+  through S8);
 - it reads source through capped wrappers so prompts stay small;
 - a reproduce agent writes one testcase at a time and runs it immediately;
 - an analysis agent primarily traces source and may file a concrete
   source-only finding without first writing a testcase;
-- it records the line ranges or functions it read, so the next session on the
-  same file starts from what is left;
+- it records the line ranges or functions it read, so the next session on
+  the same file starts from what is left;
 - it keeps a compact state snippet so a context compaction does not lose the
   thread.
 
-Agents do not browse the source freely. The work queue points them at specific
-files, and the strategy decides what to look for inside those files: prior
-fixes, spec gaps, lifetime and state sequences, property oracles, and so on. If
-the current strategy goes dry, the harness rotates the agent to a different
-one, but only after structured state confirms the method was actually tried
-(see [Strategy model](strategy-model.md#strategy-rotation)).
+Agents do not browse the source freely. The work queue points them at
+specific files, and the strategy decides what to look for inside those files:
+prior fixes, spec gaps, lifetime and state sequences, property oracles, and
+so on. If the current strategy goes dry, the harness rotates the agent to a
+different one, but only after structured state confirms the method was
+actually tried (see [Strategy model](strategy-model.md#strategy-rotation)).
 
 ## Review coverage
 
@@ -140,25 +140,26 @@ A single execution gate (`bin/probe`) runs every testcase. It:
 - reads the testcase header;
 - picks the right runner (browser, JS shell, generic CLI, C/C++ or language
   harness, or the configured `[runner]`);
-- captures output and writes the verdict to `state/runs.jsonl`, with the wall
-  seconds the execution took.
+- captures output and writes the verdict to `state/runs.jsonl`, with the
+  wall seconds the execution took.
 
 That duration matters more than it looks. A harness can loop internally, so
-one recorded run may stand for a single call or for hundreds of thousands; the
-run count alone cannot tell those apart. `bin/state strategy-yield` therefore
-reports `seconds`, `timed_runs`, `untimed_runs`, and `seconds_per_timed_run`
-beside `runs`, so a strategy that consumed the session does not read as a
-cheap one. A row written by a caller that supplies no duration counts as
-untimed rather than as a free probe. The timing spans sibling-build routing,
-because the recorded verdict can come from a routed candidate.
+one recorded run may stand for a single call or for hundreds of thousands;
+the run count alone cannot tell those apart. `bin/state strategy-yield`
+therefore reports `seconds`, `timed_runs`, `untimed_runs`, and
+`seconds_per_timed_run` beside `runs`, so a strategy that consumed the
+session does not read as a cheap one. A row written by a caller that supplies
+no duration counts as untimed rather than as a free probe. The timing spans
+sibling-build routing, because the recorded verdict can come from a routed
+candidate.
 
-For API-level testcases, the runner can compile a sibling harness source file,
-cache the compiled binary, and link it against the configured sanitizer
+For API-level testcases, the runner can compile a sibling harness source
+file, cache the compiled binary, and link it against the configured sanitizer
 library. Browser and JS targets use their configured coverage artifacts as a
 gate: a miss stops before the sanitizer. Generic native targets can use a
 route-equivalent SanitizerCoverage sibling as feedback; a native miss still
-runs the configured sanitizer. When no native sibling exists, the run proceeds
-with coverage unavailable rather than reporting a false miss.
+runs the configured sanitizer. When no native sibling exists, the run
+proceeds with coverage unavailable rather than reporting a false miss.
 
 `bin/probe` discovers the active audit by walking upward from the testcase to
 `.session-env` in the result tree, so agents do not need to export target
@@ -172,17 +173,18 @@ through FIND validation instead.
 
 Triage checks the evidence and records a publication decision:
 
-- **Crashes** need a runnable testcase, a saved sanitizer or race diagnostic,
-  and complete report fields. Mechanical checks reject classes such as
-  OOM-only failures, assertion-only aborts, and plain null dereferences.
+- **Crashes** need a runnable testcase, a saved sanitizer or race
+  diagnostic, and complete report fields. Mechanical checks reject classes
+  such as OOM-only failures, assertion-only aborts, and plain null
+  dereferences.
 - **Findings** need a concrete location, an explicit issue class, and an
   actionable security rationale. A reproducer is optional.
 
 Findings receive substance review before source review. Source review checks
 the trigger, caller contract, claimed consequence, and threat model. Missing
-required review keeps an artifact pending. A source disproof, an out-of-scope
-trigger, or scope still unresolved after completed review moves it to the
-corresponding rejected tree with a reason. Evidence is preserved.
+required review keeps an artifact pending. A source disproof, an
+out-of-scope trigger, or scope still unresolved after completed review moves
+it to the corresponding rejected tree with a reason. Evidence is preserved.
 
 A current `validation.json` binds the decision to the evidence it evaluated.
 Only `reportable` results receive security credit. Human-pinned and legacy
@@ -244,14 +246,14 @@ is_browser = "1"   # browsers and browser-like runtime targets
 ```
 
 Browser mode enables HTML/JS testcase assumptions, browser and shell agents,
-and a pre-run coverage gate. Where the gate cannot run for a browser, the probe
-records why and falls open to the diagnostic run.
+and a pre-run coverage gate. Where the gate cannot run for a browser, the
+probe records why and falls open to the diagnostic run.
 
 Generic mode is for everything else. Findings-only mode is gated by
 `[sanitizer].enabled = []` in `target.toml`, not by the language itself:
 typical for interpreted runtimes like Python, Ruby, Node, Java, and PHP, but
-valid for any project where ASan is not appropriate. In findings-only mode the
-probe runner invokes the configured `[runner]` and records its runtime
+valid for any project where ASan is not appropriate. In findings-only mode
+the probe runner invokes the configured `[runner]` and records its runtime
 diagnostic. It does not turn a panic or traceback into a FIND automatically:
 an agent must still write a substantive security report, and that report
 passes the findings validation lane. Sanitizer-class signals remain crash

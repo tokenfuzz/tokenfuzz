@@ -1,10 +1,10 @@
-# Getting Started
+# Getting started
 
 Start with a sample target to check your installation. Then add the project
 you want to review and check its configuration before a longer run.
 
-Run examples from the repository root. Replace placeholders such as
-`<target>` and `<backend>` with your own values before running a command.
+Run every example from the repository root, and replace placeholders such as
+`<target>` and `<backend>` with your own values.
 
 ## Try the pipeline first
 

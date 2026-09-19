@@ -1,20 +1,20 @@
-# Sample Targets
+# Sample targets
 
-TokenFuzz ships eighteen small synthetic targets, committed in the repository
-with their configuration already written: the `canary` and seventeen
-`samples/sample-*` trees. They are the fastest way to see a real run, with no
-upstream project to pick, no `target.toml` to review, and nothing to clone.
+TokenFuzz ships eighteen small synthetic targets, committed with their
+configuration already written: the `canary` and seventeen `samples/sample-*`
+trees. They are the fastest way to see a real run, with no upstream project
+to pick, no `target.toml` to review, and nothing to clone.
 
 Use them to:
 
-- prove your host, backend, and toolchain work together before you spend a long
-  run on a real project;
+- prove your host, backend, and toolchain work together before you spend a
+  long run on a real project;
 - watch the whole pipeline once (work cards, probes, triage, clustering,
   reports) on a target small enough to read in a sitting;
 - measure the harness itself, because each one ships an **answer key**.
 
-These samples test the machinery and its scoring rules. Their results do not
-measure performance on an unfamiliar production codebase.
+These samples test the machinery and its scoring rules. Their results say
+nothing about performance on an unfamiliar production codebase.
 
 ## What is shipped
 
@@ -43,10 +43,10 @@ and `.ground-truth.json` answer keys, is a gitignored working area.
 | `samples/sample-perl` | Perl | findings-only | 4 | 3 |
 | `samples/sample-r` | R | findings-only | 4 | 5 |
 
-Each one is a small tool built around the same idea: read one attacker-supplied
-job file and do something with it. The common input shape makes runner behavior
-comparable while each language demonstrates vulnerabilities natural to its
-ecosystem. Most also carry deliberate
+Each one is a small tool built around the same idea: read one
+attacker-supplied job file and do something with it. The common input shape
+keeps runner behavior comparable, while each language demonstrates the
+vulnerabilities natural to its ecosystem. Most also carry deliberate
 **false-positive traps**: code that looks dangerous to a quick scan but is
 safe, or an operation that crosses no independent security boundary because
 the same job chooses both sides of it. A run that promotes a trap is a
@@ -55,12 +55,12 @@ precision failure, and the answer key says so.
 Two targets are named for a bug class rather than a language.
 `samples/sample-c-doublefree` and `samples/sample-c-uninit` each isolate one
 class the per-language trees never covered on its own, so recall for that
-class can be read directly instead of inferred from a bug that happens to
-manifest that way. The C and C++ samples also plant a stack overflow that only
-a release build reaches, behind the assert their debug-only trap expects. The uninitialized-read target is the only one that needs
-MemorySanitizer, which has no Darwin runtime. Its build refuses on a host
+class can be read directly. The C and C++ samples also plant a stack overflow
+that only a release build reaches, behind the assert their debug-only trap
+expects. The uninitialized-read target is the only one that needs
+MemorySanitizer, which has no Darwin runtime; its build refuses on a host
 without one rather than producing an uninstrumented binary that would read as
-a clean run of the bug it plants.
+a clean run.
 
 !!! note "Crash and finding scores are separate"
     The crash scorer trusts runtime diagnostics, not an agent's description of
@@ -91,25 +91,25 @@ uninitialized state, invalid frees, and races. The findings-only Python target
 adds short, independent examples for authorization, injection, cryptography,
 filesystem and network boundaries, resource exhaustion, and web security.
 
-An answer-key bug has one `primitive`, the exact label used to score its runtime
-diagnostic or finding. Its `classes` list records every established root cause
-and consequence. For example, an eight-bit subtraction can be both
-`integer-underflow` and a resulting `heap-buffer-overflow`; retaining both makes
-the sample-class coverage honest without asking the scorer to match two runtime
+An answer-key bug has one `primitive`, the exact label used to score its
+runtime diagnostic or finding. Its `classes` list records every established
+root cause and consequence. An eight-bit subtraction, for example, can be both
+`integer-underflow` and a resulting `heap-buffer-overflow`; keeping both makes
+the class coverage honest without asking the scorer to match two runtime
 diagnostics for one fault.
 
 The CVD dashboard includes low-address `null-deref` and unknown-address `segv`
-classes. The C++ sample carries a site for each. TokenFuzz quarantines the
-zero-page shape, because a null dereference alone establishes no memory-safety
-impact, so that site is `auto_quarantined: true` and scores in neither oracle.
-An unknown address the caller chose is a different fact: it reaches a
+classes, and the C++ sample carries a site for each. TokenFuzz quarantines
+the zero-page shape, because a null dereference alone establishes no
+memory-safety impact, so that site is `auto_quarantined: true`. An unknown
+address the caller chose is a different fact: it reaches a
 sanitizer-confirmed SEGV, and its site is scored as an ordinary crash.
 
 ## Run one
 
-**Findings-only samples** need their configured runtime or toolchain, but no
-sanitizer build. Their configuration is already committed, so go straight to a
-one-iteration smoke test:
+**Findings-only samples** need their configured runtime or toolchain but no
+sanitizer build. Their configuration is already committed, so go straight to
+a one-iteration smoke test:
 
 ```bash
 bin/audit --target samples/sample-python --backend <backend> 1
@@ -118,19 +118,19 @@ bin/audit --target samples/sample-python --backend <backend> 1
 **Sanitizer samples** need their instrumented build first. The C and C++
 samples build automatically during audit preflight. The Rust, Go, and
 C-extension samples use an ecosystem bootstrap. Preflight runs it only where
-the sample commits a `.audit/build.sh` recipe (Rust and the C extension do, Go
-does not), so run it yourself before the first audit:
+the sample commits a `.audit/build.sh` recipe (Rust and the C extension do,
+Go does not), so run it yourself before the first audit:
 
 ```bash
 bin/setup-target samples/sample-rust --build --no-llm-config
 bin/audit --target samples/sample-rust --backend <backend> 1
 ```
 
-This sample's checked-in build recipe needs no model to build;
-`--no-llm-config` skips configuration suggestions. It does not disable network
-access for dependency installation. `--force` regenerates inferred
-`target.toml` fields before an optional build while keeping the target's build
-recipe, curated threat model, peer list, and build-widening settings.
+The checked-in build recipe needs no model to build, and `--no-llm-config`
+skips configuration suggestions. It does not disable network access for
+dependency installation. `--force` regenerates inferred `target.toml` fields
+before an optional build while keeping the target's build recipe, curated
+threat model, peer list, and build-widening settings.
 
 `samples/sample-swift` needs no separate build step. Runner preflight builds
 the package under AddressSanitizer once, every run replays through that
@@ -143,27 +143,27 @@ describes.
 
 ## The answer keys
 
-Every sample ships a manifest at `output/<slug>/.ground-truth.json`. Note the
-path: it lives under `output/`, **not** inside the target tree handed to the
-agents. This separates scoring data from audited source; it is not an access
-control on other files the backend can read. Each entry pins one planted bug
-(its primitive, source symbol, classes, and a compact input or input path), and
+Every sample ships a manifest at `output/<slug>/.ground-truth.json`. It lives
+under `output/`, **not** inside the target tree handed to the agents. That
+separates scoring data from audited source; it is not an access control on
+other files the backend can read. Each entry pins one planted bug (its
+primitive, source symbol, classes, and a compact input or input path), and
 each trap declares the benign outcome it expects.
 
 `tests/test_sample_bug_classes.py` checks the class matrix, source receipts,
-embedded job routes, and sanitizer diagnostics so an answer key cannot silently
-drift away from the target.
+embedded job routes, and sanitizer diagnostics, so an answer key cannot
+silently drift away from its target.
 
 ```bash
 bin/benchmark score output/samples/sample-c/<backend>/results \
   --ground-truth output/samples/sample-c/.ground-truth.json
 ```
 
-The scorer is deterministic but uses different evidence for the two lanes. The
-crash oracle reads sanitizer artifacts, so merely naming a crash in prose earns
+The scorer is deterministic but reads different evidence for the two lanes.
+The crash oracle reads sanitizer artifacts, so naming a crash in prose earns
 nothing. The findings oracle reads the fault location from confirmed FIND
 reports; a vague mention without the exact function earns nothing. On a
-findings-only target, the empty crash lane is reported as not scored while the
+findings-only target the empty crash lane is reported as not scored while the
 findings lane still reports recall and precision.
 
 `targets/canary/run-benchmark.sh` wires the whole thing together: build, short
@@ -181,6 +181,6 @@ at a real target.
 ## Then move to a real target
 
 A sample proves the machinery runs. It cannot tell you whether the harness
-finds bugs in code that was not written to contain them. When the smoke test is
-green, go to [Add a target](add-a-target.md) and point TokenFuzz at something
-you are authorised to audit.
+finds bugs in code that was not written to contain them. When the smoke test
+is green, go to [Add a target](add-a-target.md) and point TokenFuzz at
+something you are authorised to audit.

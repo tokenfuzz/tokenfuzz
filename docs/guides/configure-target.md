@@ -1,8 +1,8 @@
-# Target Configuration
+# Target configuration
 
 Use this guide after `bin/setup-target` or `bin/audit --target <target>` has
-created `output/<target>/target.toml`. Most targets need a review, not a config
-written from scratch.
+created `output/<target>/target.toml`. Most targets need a review, not a
+config written from scratch.
 
 The file answers three operational questions:
 
@@ -11,15 +11,15 @@ The file answers three operational questions:
 2. Which diagnostics can that route actually observe?
 3. Which parts of the trigger may an external actor control?
 
-Those answers affect both execution and later reportability. Review them before
-a long run.
+Those answers affect both execution and later reportability, so review them
+before a long run.
 
 !!! warning "Edit only between runs"
     Audit preflight copies the reviewed config to
     `output/<target>/<backend>/results/.target.toml` and records its digest in
     `.session-env`. The session reads that immutable snapshot. Change the
-    shared `output/<target>/target.toml` for the next run; never edit the pinned
-    copy.
+    shared `output/<target>/target.toml` for the next run; never edit the
+    pinned copy.
 
 ## Start with the target shape
 
@@ -48,13 +48,13 @@ attacker_controls = ["bytes"]
 
 Relative paths resolve under the target root: `targets/<target>/`, or the
 overlay's `source_subdir` for nested layouts such as Chromium's `src/`. A
-CLI-only audit can proceed with a correct `asan_bin`; the library fields matter
-only when `bin/probe` compiles an API harness.
+CLI-only audit can proceed with a correct `asan_bin`; the library fields
+matter only when `bin/probe` compiles an API harness.
 
 ### Findings-only language target
 
-When there is no sanitizer build, declare that explicitly and provide the
-runner that executes a testcase:
+When there is no sanitizer build, say so explicitly and provide the runner
+that executes a testcase:
 
 ```toml
 target       = "samplepy"
@@ -78,8 +78,8 @@ attacker_controls = ["bytes"]
 ```
 
 Runtime tracebacks and panics from a findings-only target are diagnostic
-signals, not sanitizer proof. `bin/probe` does not auto-file a crash bundle for
-the `runner` route; the agent writes a substantive security report under
+signals, not sanitizer proof. `bin/probe` does not auto-file a crash bundle
+for the `runner` route; the agent writes a substantive security report under
 `findings/` when source analysis establishes one. The
 [language-runner guide](multi-language.md#crash-and-finding-routing) explains
 the probe, filing, and triage stages.
@@ -98,8 +98,8 @@ Then check that:
 - `asan_bin` starts the intended product, not a test helper or fuzzer binary;
 - `[runner].bin` and `args` load code from the target root, not an installed
   copy elsewhere on the host;
-- `{TESTCASE}` appears where the program expects input (when omitted, TokenFuzz
-  appends it);
+- `{TESTCASE}` appears where the program expects input (when omitted,
+  TokenFuzz appends it);
 - any documented normal nonzero exit is listed in `[runner].success_codes`;
 - browser page routes include `{PROFILE}` and `{TESTCASE}`;
 - optional sanitizer binaries belong to the matching build.
@@ -109,19 +109,21 @@ preflight run a canary when the registry can prove target ownership. A runner
 that starts but imports only an installed package is rejected rather than
 silently auditing the wrong code.
 
-For a CMake or Meson project whose native products are Python extension modules, setup
-treats the completed extension build as an intermediate artifact. It then
-stages the package, builds an ASan-first Python host, and requires a successful
-import from that staging tree before setup succeeds. The runner reuses the
-isolated environment containing declared native build dependencies. If the
-import names one missing runtime dependency that exactly matches a standard
-project requirement, setup installs that declaration and repeats the canary;
-ambiguous or undeclared imports still fail setup.
+For a CMake or Meson project whose native products are Python extension
+modules, setup treats the completed extension build as an intermediate
+artifact. It stages the package, builds an ASan-first Python host, and
+requires a successful import from that staging tree before setup succeeds.
+The runner reuses the isolated environment containing the declared native
+build dependencies. If the import names one missing runtime dependency that
+exactly matches a standard project requirement, setup installs that
+declaration and repeats the canary; ambiguous or undeclared imports still fail
+setup.
 
-Optional LLM-derived build widening is converged by `bin/setup-target --build`
-and cached beside the target. Audit preflight refreshes a prepared recipe, but
-does not spend audit startup time asking a model to invent a missing optional
-recipe; the regular sanitizer build remains available.
+Optional model-derived build widening is converged by
+`bin/setup-target --build` and cached beside the target. Audit preflight
+refreshes a prepared recipe but does not spend startup time asking a model
+to invent a missing optional recipe; the regular sanitizer build remains
+available.
 
 Use `bin/suggest-runner <target> --apply --force` only when the generated
 native CLI route is wrong. The helper selects from instrumented executables
@@ -154,8 +156,8 @@ bin/auto-repair-target-toml --toml output/<target>/target.toml \
 
 Drop `--dry-run` to write it; a timestamped backup is saved beside the config
 and the decision is logged. Nothing in an audit runs this command for you.
-Review the proposal: a compile fix is not evidence that the harness is faithful
-to a public API contract.
+Review the proposal: a compile fix is not evidence that the harness is
+faithful to a public API contract.
 
 Harnesses may also be written in the other compiled or interpreted languages
 registered by `lib/languages.py`. Run `python3 lib/languages.py list` for the
@@ -171,7 +173,7 @@ without changing persistent policy.
 | --- | --- | --- |
 | `asan` | Native memory-safety work; the default. | Moderate runtime and memory overhead. |
 | `ubsan` | Undefined-behavior classes relevant to the target, such as bounds, vptr, object size, or shifts. | Mature projects may intentionally use patterns that need triage or suppressions. |
-| `msan` | A self-contained native library whose dependencies can all be instrumented. | Uninstrumented dependencies create noise; browser-scale use is usually impractical. No Darwin runtime exists: on macOS the route is reported as unsupported by the host toolchain and a benchmark of an MSan-only target refuses to start. |
+| `msan` | A self-contained native library whose dependencies can all be instrumented. | Uninstrumented dependencies create noise; browser-scale use is usually impractical. No Darwin runtime exists: on macOS the route is reported as unsupported by the host toolchain, and a benchmark of an MSan-only target refuses to start. |
 | `tsan` | Native concurrency work with a maintained suppression policy. | High overhead and frequent benign reports. |
 | `race` | A Go runner or binary built with `-race`. | Routes through `[runner]`; there is no `race_bin`, `race_lib`, or suppression key. |
 
@@ -188,18 +190,19 @@ ubsan_lib          = "build-ubsan/lib/libsample.a"
 ubsan_suppressions = "build-ubsan/ubsan-suppressions.txt"
 ```
 
-Ordinary non-browser C/C++ preflight converges every enabled native sanitizer.
-ASan is required for that route; an optional sanitizer that fails to build
-warns without destroying the canonical ASan build. Ecosystem bootstraps and Go
-`race` remain explicit `bin/setup-target <target> --build` work.
+Ordinary non-browser C/C++ preflight converges every enabled native
+sanitizer. ASan is required for that route; an optional sanitizer that fails
+to build warns without destroying the canonical ASan build. Ecosystem
+bootstraps and Go `race` remain explicit `bin/setup-target <target> --build`
+work.
 
 The exact keys, defaults, suffix-aware path rules, and runtime-option fields
 are in the [target config reference](../reference/target-toml.md#sanitizers).
 
 ## Review the threat model
 
-`[threat_model].attacker_controls` describes what an external actor may supply
-through a normal product boundary:
+`[threat_model].attacker_controls` describes what an external actor may
+supply through a normal product boundary:
 
 | Token | External control |
 | --- | --- |
@@ -228,23 +231,23 @@ attacker_controls = ["bytes", "call-sequence", "protocol-state"]
 ```
 
 Keep the list narrow. A harness can choose arbitrary offsets, lengths, object
-states, or cleanup order; that does not make those choices attacker-controlled
-in the product. When a reproducible crash needs a control outside the list,
-triage preserves the evidence in the rejected tree with a `threat-model:`
-reason. Older artifacts may carry `not-reportable` in place.
-Do not widen the config merely to change that decision.
+states, or cleanup order; that does not make those choices
+attacker-controlled in the product. When a reproducible crash needs a control
+outside the list, triage preserves the evidence in the rejected tree with a
+`threat-model:` reason. Do not widen the config merely to change that
+decision.
 
 ## Browser mode
 
 Set `is_browser = "1"` for a browser or browser-like runtime. A `{PROFILE}`
-token in `[runner].args` declares a page-capable browser route. Without it, the
-target is treated as a script engine: generic execution, shell agents, and no
-invented browser profile.
+token in `[runner].args` declares a page-capable browser route. Without it,
+the target is treated as a script engine: generic execution, shell agents,
+and no invented browser profile.
 
 Verify the product executable, the temporary-profile argument, the testcase
 position, and the controls the web or script surface really exposes. The
-[browser guide](browser-targets.md) covers `mach`, GN, Chromium, coverage, and
-product reachability.
+[browser guide](browser-targets.md) covers `mach`, GN, Chromium, coverage,
+and product reachability.
 
 ## Validate the reviewed config
 
@@ -252,9 +255,10 @@ product reachability.
 bin/audit --target <target> --backend <backend> 1
 ```
 
-Both setup and audit parse and validate `target.toml`. A successful smoke test
-also proves that the selected backend can create state under the result tree.
-Inspect `logs/index.log` if startup stops before `work-cards.jsonl` appears.
+Both setup and audit parse and validate `target.toml`. A successful smoke
+test also proves that the selected backend can create state under the result
+tree. Inspect `logs/index.log` if startup stops before `work-cards.jsonl`
+appears.
 
 ## Common failures
 
@@ -266,7 +270,7 @@ Inspect `logs/index.log` if startup stops before `work-cards.jsonl` appears.
 | Macros are missing | Add the required compiler arguments to `defines`. |
 | Harness linking fails | Check the selected sanitizer library and add required system, archive, or source inputs to `link_libs`. |
 | Every language probe misses the audited package | Fix `[runner]` cwd or import paths; do not accept a globally installed copy. |
-| A real crash is `not-reportable` | Compare its actual trigger with `attacker_controls`; do not broaden the threat model unless the product exposes that control. |
+| A real crash was rejected with `threat-model:` | Compare its actual trigger with `attacker_controls`; do not broaden the threat model unless the product exposes that control. |
 
 For field-by-field syntax, continue to the
 [target config reference](../reference/target-toml.md).

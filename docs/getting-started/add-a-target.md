@@ -1,4 +1,4 @@
-# Add a Target
+# Add a target
 
 A TokenFuzz target has three parts:
 
@@ -8,7 +8,7 @@ output/<target>/target.toml         reviewed execution and threat-model config
 output/<target>/<backend>/results/  evidence produced by an audit
 ```
 
-This guide gets those pieces to a one-iteration smoke test. The
+This page gets those pieces to a one-iteration smoke test. The
 [target config reference](../reference/target-toml.md) documents every field,
 and the [configuration guide](../guides/configure-target.md) explains the
 review decisions.
@@ -24,8 +24,8 @@ A good first real target has:
 - enough implementation source for the ranker to work with.
 
 If you are still validating the installation, use a
-[sample target](sample-targets.md) first. It separates TokenFuzz setup from the
-project-specific work of making a build reproducible.
+[sample target](sample-targets.md) first. It separates TokenFuzz setup from
+the project-specific work of making a build reproducible.
 
 ## 1. Add or inspect the source
 
@@ -35,9 +35,8 @@ For a remote Git repository:
 bin/setup-target <target> <repo-url>
 ```
 
-The target slug may contain path components. For example,
-`samples/sample-python` maps to `targets/samples/sample-python/` and
-`output/samples/sample-python/target.toml`.
+The target slug may contain path components: `samples/sample-python` maps to
+`targets/samples/sample-python/` and `output/samples/sample-python/target.toml`.
 
 Other supported source forms:
 
@@ -57,15 +56,14 @@ bin/setup-target <target> /path/to/local/source
 
 A local Git or Mercurial tree is cloned into `targets/`. A plain directory is
 symlinked and audited in place; it is never copied, pulled, or fetched. Its
-generated config keeps `upstream_url = "FILL_ME"`, and exported reproducers ask
-the maintainer for a checkout path instead of inventing a clone URL.
+generated config keeps `upstream_url = "FILL_ME"`, and exported reproducers
+ask the maintainer for a checkout path instead of inventing a clone URL.
 
 Re-running `bin/setup-target` preserves reviewed values unless generated
 placeholders remain. `--no-llm-config` skips threat-model, peer, and runner
 suggestions; it does not make checkout or build preparation offline. Read the
 [command reference](../reference/commands.md#set-up-a-target) before using
-`--force`, because it deliberately behaves differently with and without
-`--build`.
+`--force`, because it behaves differently with and without `--build`.
 
 ### Chromium and Chrome checkouts
 
@@ -92,8 +90,8 @@ What happens next depends on the target:
 | Target shape | What to do |
 | --- | --- |
 | Ordinary native C/C++ | Nothing up front. Audit preflight builds or refreshes the enabled sanitizer builds from the generated recipe, plus `build-asan+cov` for probe HIT/MISSED feedback and `build-asan+fuzz` for libFuzzer guidance. Run `bin/setup-target <target> --build` to prove the build before launching a model; add `.audit/build.sh` when the project needs a custom route. |
-| Rust, Go, Swift, Python extensions, or another registered ecosystem build | Run `bin/setup-target <target> --build` when the runner needs compiled code, installed packages, or a primed toolchain cache. Audit preflight runs that bootstrap only when the target carries a `.audit/build.sh` recipe; without one it is yours to run. |
-| Findings-only script or managed runtime | No sanitizer build is needed. Setup writes `[sanitizer] enabled = []` and a language runner when it can identify one. |
+| Rust, Go, Swift, Python extension, or another registered ecosystem build | Run `bin/setup-target <target> --build` when the runner needs compiled code, installed packages, or a primed toolchain cache. Audit preflight repeats that bootstrap only when the target carries a `.audit/build.sh` recipe; without one it is yours to run. |
+| Findings-only script or managed runtime | No sanitizer build. Setup writes `[sanitizer] enabled = []` and a language runner when it can identify one. |
 | Browser | `mach` is detected as browser-specific. Pass `--browser` for GN, which also builds non-browser programs. Other browser build systems need a reusable `.audit/build.sh`. |
 
 The normal up-front check is:
@@ -110,7 +108,7 @@ build.sh <source-root> <build-directory>
 ```
 
 `bin/auto-build-script` is the supported generator for ordinary native
-projects. The same recipe is later embedded into exported crash bundles, so it
+projects. The same recipe is later embedded in exported crash bundles, so it
 must work from a clean build directory with documented dependencies.
 
 ### What native auto-build guarantees
@@ -122,14 +120,14 @@ The native builder:
 - treats a binary that dies in the dynamic loader as a failed build;
 - may revise a broken generated recipe up to three times, installing only a
   revision that builds and starts;
-- invalidates freshness when source content or the recipe changes;
+- invalidates freshness when the source content or the recipe changes;
 - keeps the canonical `build-asan` as the control and, for compatible CMake,
-  Meson, and autotools targets, prepares one widened ASan sibling for optional
-  in-tree features by default.
+  Meson, and autotools targets, prepares one widened ASan sibling with
+  optional in-tree features by default.
 
 A failed build is loud but does not erase source-review work. Set
-`build_widening = false` in `target.toml` to disable alternate build
-exploration when it is not appropriate for the project.
+`build_widening = false` in `target.toml` to skip alternate build exploration
+when it is not appropriate for the project.
 
 Inside `bin/audit-container-shell`, relative `build-asan/`, `build-ubsan/`,
 `build-msan/`, and `build-tsan/` paths resolve to image-specific directories
@@ -152,7 +150,8 @@ Open `output/<target>/target.toml` and verify:
 4. `[sanitizer].enabled` describes the diagnostics the target can really emit.
 5. `[threat_model].attacker_controls` describes the external boundary without
    widening it to accommodate a harness-only action.
-6. `upstream_url` and `build_system` are useful enough for a maintainer bundle.
+6. `upstream_url` and `build_system` are useful enough for a maintainer
+   bundle.
 
 Valid attacker-control tokens are `bytes`, `call-sequence`, `timing`, `race`,
 `protocol-state`, `env`, and `fs-state`. The
@@ -181,20 +180,22 @@ Do not edit either file during the session. Change the shared
 `output/<target>/target.toml` between runs; the next invocation pins the new
 version.
 
-A smoke test with eligible work creates `work-cards.jsonl`, `state/`, the result
-lanes, and a per-agent scratch directory even if it finds nothing. Continue
-with [First audit](first-audit.md) to inspect them.
+A smoke test with eligible work creates `work-cards.jsonl`, `state/`, the
+result lanes, and a per-agent scratch directory even if it finds nothing.
+Continue with [First audit](first-audit.md) to inspect them.
 
 ## Ready checklist
 
 The target is ready for a longer run when:
 
 - the source tree resolves to the project and revision you intended;
-- the configured sanitizer binary or language runner starts outside the audit;
+- the configured sanitizer binary or language runner starts outside the
+  audit;
 - a runner canary, when supported, proves imports resolve inside
   `targets/<target>/` rather than to an installed copy;
 - enabled sanitizer artifacts match their configured routes;
-- public-API harness fields are correct for any compiled harnesses you expect;
+- public-API harness fields are correct for any compiled harnesses you
+  expect;
 - the threat model matches the real external boundary;
 - one audit iteration writes state and work cards without a preflight error.
 

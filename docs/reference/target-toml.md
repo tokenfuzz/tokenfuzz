@@ -1,4 +1,4 @@
-# Target Config Reference
+# Target config reference
 
 Each target has one reviewed source configuration file:
 
@@ -18,20 +18,12 @@ Runtime values such as `RESULTS_DIR` and `TARGET_REV` are written separately
 to `.session-env`.
 
 Treat `target.toml` as **generated config plus a small review layer.** The
-tooling infers:
-
-- source metadata;
-- build system;
-- browser mode from browser-specific build drivers;
-- common ASan executables;
-- common static libraries;
-- default include paths;
-- default sanitizer policy;
-- default threat model controls.
-
-Review the inferred values against the actual project, especially its
-execution route and threat model. Edit unresolved or incorrect values before
-a run.
+tooling infers source metadata, the build system, browser mode from
+browser-specific build drivers, common ASan executables and static
+libraries, default include paths, the default sanitizer policy, and the
+default threat-model controls. Review the inferred values against the actual
+project, especially its execution route and threat model, and edit
+unresolved or incorrect values before a run.
 
 At audit preflight this file is copied to
 `output/<target>/<backend>/results/.target.toml`. That session snapshot is
@@ -46,12 +38,10 @@ snapshot to retarget probes whose evidence is already being recorded.
 | Go race run | `[sanitizer] enabled = ["race"]` plus a runner command built or invoked with `-race` |
 | Browser or JS engine | `is_browser = "1"`, the product executable, and route-appropriate runner arguments |
 
-The config is also part of triage:
-
-- `attacker_controls` is read when deciding whether a crash trigger is a
-  legitimate product input.
-- Reproduction export uses the repository URL, revision, build fields, and
-  sanitizer paths to build a clean maintainer bundle.
+The config is also part of triage: `attacker_controls` is read when deciding
+whether a crash trigger is a legitimate product input, and reproduction
+export uses the repository URL, revision, build fields, and sanitizer paths
+to build a clean maintainer bundle.
 
 ## A complete generic example
 
@@ -87,6 +77,7 @@ attacker_controls = ["bytes"]
 | `defines` | Compiler flags for C/C++ harness builds. Setup seeds the dominant C++ `-std=` flag from `compile_commands.json`; other flags can be reviewed or added as needed. |
 | `link_libs` | Extra linker inputs for C harness builds: system/library flags such as `-lm`, target-relative archives, or target-relative source files that must be compiled into the harness. Setup merges the transitive library list from a matching top-level CMake package config for a selected static product. A token containing `$` is passed verbatim and never resolved as a path. |
 | `is_browser` | `"1"` for browser mode, `"0"` for generic mode. |
+| `cmake_target` | Optional. CMake target name used when a generated bundle can rebuild a specific target. |
 
 Which fields you need depends on what the run will do:
 
@@ -95,10 +86,10 @@ Which fields you need depends on what the run will do:
   `defines`, and `link_libs`.
 - ASan uses top-level `asan_lib`. UBSan, MSan, and TSan harnesses use
   `[sanitizer].ubsan_lib`, `msan_lib`, or `tsan_lib`.
-- A generated Meson/Python extension runner points at the staged package under
-  `.audit/`. Setup adds the staged public and Python development include roots,
-  and disables a guessed archive only when Meson's install metadata proves
-  that the project does not publish it.
+- A generated Meson/Python extension runner points at the staged package
+  under `.audit/`. Setup adds the staged public and Python development
+  include roots, and disables a guessed archive only when Meson's install
+  metadata proves that the project does not publish it.
 
 If only the executable path is correct, a CLI-first audit can still run.
 Leave the C harness fields unresolved until you actually need public API
@@ -116,17 +107,11 @@ Some C++ libraries ship only headers, with no static archive to link against.
 - If the harness later starts needing a real archive, replace `FILL_ME` with
   the path. The rest of the config does not change.
 
-## Optional fields
-
-| Field | Meaning |
-| --- | --- |
-| `cmake_target` | CMake target name used when a generated bundle can rebuild a specific target. |
-
 ## Build configurations
 
 The canonical `build-asan` tree is always the regular-configuration control.
-Build configurations add isolated, content-addressed ASan siblings; they never
-replace that control or multiply the UBSan, MSan, and TSan build set.
+Build configurations add isolated, content-addressed ASan siblings; they
+never replace that control or multiply the UBSan, MSan, and TSan build set.
 
 `build_widening = true` asks TokenFuzz to derive one compatible widened
 sibling from the working primary recipe. It enables advertised, in-tree
@@ -165,11 +150,11 @@ suppression file.
 The loader defaults to `["asan"]` when the section is absent. Setup writes an
 explicit policy for recognized language targets: Go gets `["race"]`, Swift
 gets `["asan"]`, and most other language runners get `[]`. The supported
-sanitizer slugs are `asan`, `ubsan`, `msan`, `tsan`, and `race`.
-`race` (Go's runtime race detector) is valid only inside `enabled`. It
-routes through `[runner]` and takes none of the per-sanitizer `<name>_bin`,
-`<name>_lib`, or `<name>_suppressions` keys below. For when to enable each one
-and the false-positive trade-offs, see
+sanitizer slugs are `asan`, `ubsan`, `msan`, `tsan`, and `race`. `race`
+(Go's runtime race detector) is valid only inside `enabled`. It routes
+through `[runner]` and takes none of the per-sanitizer `<name>_bin`,
+`<name>_lib`, or `<name>_suppressions` keys below. For when to enable each
+one and the false-positive trade-offs, see
 [Sanitizer policy](../guides/configure-target.md#sanitizer-policy).
 
 ### Findings-only mode (no sanitizer)
@@ -195,8 +180,8 @@ With `enabled = []`:
   sanitizer-class memory-safety signals (ASan, TSan, MSan, Go race detector)
   still stay in `crashes/`.
 
-When `[sanitizer]` is **absent entirely** from `target.toml`, the default,
-`["asan"]`, applies. Only an explicit empty list opts the target out.
+Only an explicit empty list opts the target out. When `[sanitizer]` is
+absent entirely, the default `["asan"]` applies.
 
 ### Per-sanitizer keys
 
@@ -243,8 +228,8 @@ Notes:
 ## Language runner
 
 The `[runner]` section is the language-agnostic invocation contract. It is
-used by `bin/probe` and `bin/run-asan generic` whenever no sanitizer binary is
-configured: most commonly when `[sanitizer] enabled = []`, but also for
+used by `bin/probe` and `bin/run-asan generic` whenever no sanitizer binary
+is configured: most commonly when `[sanitizer] enabled = []`, but also for
 compiled-language targets that want to plug in a custom driver script.
 
 | Key | Meaning |
@@ -256,13 +241,13 @@ compiled-language targets that want to plug in a custom driver script.
 | `success_codes` | Process exit codes from 0 through 123 that mean the runner completed normally. Defaults to `[0]`. `bin/setup-target` records the exit observed while validating the configured input route, accepting a nonzero code only after review confirms malformed-input rejection rather than startup or argv failure. 124 and above is where the timeout wrapper's own status, exec failures, and signal deaths live, so it is never accepted. A run whose output carries a sanitizer diagnostic is classified as a crash before its exit code is read, and calibration refuses an exit observed with one. The set describes the configured program only; an agent-built harness keeps `0` as its only success. |
 
 Before model preflight or benchmark cells start, `bin/audit` and
-`bin/benchmark` resolve any configured `bin` and verify that it is executable.
-Standard language runners are also invoked with their version command, so an
-installed launcher with a missing runtime (a `java` stub with no JDK, say)
-fails immediately rather than burning model budget. `bin` is optional: a
-findings-only target with no runner audits in code-review mode (testcase
-execution is disabled, and probes report that); only a *configured* runner
-that is unusable is a fatal startup error.
+`bin/benchmark` resolve any configured `bin` and verify that it is
+executable. Standard language runners are also invoked with their version
+command, so an installed launcher with a missing runtime (a `java` stub with
+no JDK, say) fails immediately rather than burning model budget. `bin` is
+optional: a findings-only target with no runner audits in code-review mode
+(testcase execution is disabled, and probes report that); only a
+*configured* runner that is unusable is a fatal startup error.
 
 ### Runner tokens
 
@@ -277,12 +262,10 @@ that is unusable is a fatal startup error.
 | `{NULL_DEVICE}` | The platform's null device (`/dev/null`). |
 | `{PROFILE}` | A fresh temporary browser profile. Valid only in browser execution; elsewhere it is an error. |
 
-`{TESTCASE}` has one extra rule:
-
-- When `{TESTCASE}` appears in `args`, it is replaced in place and the runner
-  does *not* also append the testcase path.
-- When `{TESTCASE}` is absent, the runner adds the testcase path after the
-  expanded args, in the conventional last position.
+`{TESTCASE}` has one extra rule. When it appears in `args`, it is replaced in
+place and the runner does *not* also append the testcase path. When it is
+absent, the runner adds the testcase path after the expanded args, in the
+conventional last position.
 
 ### Examples
 
@@ -331,16 +314,18 @@ crash_patterns = []
 ```
 
 For an executable-only Swift package, `bin/setup-target` instead writes the
-`swift run` route with the executable product name obtained from `swift package
-dump-package`. It never assumes that the target slug is a product name.
+`swift run` route with the executable product name obtained from
+`swift package dump-package`. It never assumes that the target slug is a
+product name.
 
-Maven targets use a generated `@{TARGET_ROOT}/.audit/java-runner.args` file for
-their compiled module classes and resolved dependencies. Keeping that long,
-machine-local classpath outside `target.toml` prevents it from entering every
-audit prompt. A direct Java testcase's `TARGET:` location narrows dependencies
-to the nearest Maven module at runtime; if the header carries only a slug, its
-imports identify the compiled module instead. Local reactor dependencies are
-substituted for installed copies before the external runtime closure is added.
+Maven targets use a generated `@{TARGET_ROOT}/.audit/java-runner.args` file
+for their compiled module classes and resolved dependencies. Keeping that
+long, machine-local classpath outside `target.toml` prevents it from
+entering every audit prompt. A direct Java testcase's `TARGET:` location
+narrows dependencies to the nearest Maven module at runtime; if the header
+carries only a slug, its imports identify the compiled module instead. Local
+reactor dependencies are substituted for installed copies before the
+external runtime closure is added.
 
 ```toml
 # Custom wrapper script: useful for Java/Kotlin builds that need a classpath
@@ -353,21 +338,21 @@ crash_patterns = ['^DEFENSIVE-ASSERT-FAILED:']
 ```
 
 `bin/setup-target` emits a starter `[runner]` block driven by the detected
-build system. The seeded values are commented when the build system is unknown
-so the file is safe to parse before the operator fills it in.
+build system. The seeded values are commented when the build system is
+unknown so the file is safe to parse before the operator fills it in.
 
 ## Threat model
 
 `attacker_controls` describes what an external caller can legitimately
 control. Triage compares crash report `Trigger source` values against this
 list, then lets the source reviewer correct that comparison from the code. A
-settled review is reportable only when every required trigger component is in
-the list: crafted bytes deciding the fault is not enough when the fault also
-needs an application call order the list does not cover. A defect the
+settled review is reportable only when every required trigger component is
+in the list: crafted bytes deciding the fault is not enough when the fault
+also needs an application call order the list does not cover. A defect the
 reviewer confirms is outside the list is rejected with a `threat-model:`
 reason, its evidence kept under the rejected tree; one the reviews cannot
-settle after the focused resolution is rejected as unsettled rather than left
-without a verdict.
+settle after the focused resolution is rejected as unsettled rather than
+left without a verdict.
 
 | Token | Meaning |
 | --- | --- |
@@ -414,10 +399,8 @@ Browser or browser-like runtime targets:
 is_browser = "1"
 ```
 
-Browser mode enables:
-
-- browser and JS testcase assumptions;
-- coverage-gated browser or shell runs when available.
+Browser mode enables browser and JS testcase assumptions, and coverage-gated
+browser or shell runs when available.
 
 The browser binary and launch arguments are target metadata. For example:
 
@@ -440,16 +423,9 @@ At audit startup, `bin/audit` writes the active session file:
 output/<target>/<backend>/results/.session-env
 ```
 
-It contains dynamic values:
-
-- `RESULTS_DIR`;
-- `TARGET_ROOT`;
-- `TARGET_SLUG`;
-- `TARGET_REV`;
-- `TARGET_REPO_TYPE`;
-- `LOGDIR`;
-- `SESSION_STARTED`;
-- `TARGET_CONFIG_SHA256`.
+It contains the dynamic values `RESULTS_DIR`, `TARGET_ROOT`, `TARGET_SLUG`,
+`TARGET_REV`, `TARGET_REPO_TYPE`, `LOGDIR`, `SESSION_STARTED`, and
+`TARGET_CONFIG_SHA256`.
 
 `bin/probe` discovers the nearest `.session-env` by walking upward from the
 testcase path and current directory. Scratch testcases under `results/`
@@ -458,10 +434,10 @@ therefore do not need manual environment setup.
 After preflight, `bin/audit` copies the target configuration to
 `output/<target>/<backend>/results/.target.toml` and records its digest as
 `TARGET_CONFIG_SHA256`. Every config consumer in that session (probes,
-sanitizer runners, severity, report enrichment) reads the snapshot, so an edit
-to the shared `output/<target>/target.toml` applies to the next run rather
-than retargeting probes already contributing to this one. Editing or removing
-the snapshot itself is a contract violation and fails loudly.
+sanitizer runners, severity, report enrichment) reads the snapshot, so an
+edit to the shared `output/<target>/target.toml` applies to the next run
+rather than retargeting probes already contributing to this one. Editing or
+removing the snapshot itself is a contract violation and fails loudly.
 
 ## Strategy hints: `[s6_peers]`
 
@@ -503,12 +479,12 @@ unit_lines = 120        # maximum source lines in one decision
 ```
 
 The sweep is disabled unless `token_budget` is positive. Its estimate is
-carried across resumes in `state/sweep.json`; the sweep does not start a call
-whose known prompt cost exceeds the amount left, although that call's reply
-can take the final estimate beyond the configured value. `model` changes the
-per-token price, and `unit_lines` changes how the budget is divided. A
-negative or non-integer `token_budget` is refused at load time. Delta and
-fixed-lane runs never start a sweep.
+carried across resumes in `state/sweep.json`; the sweep does not start a
+call whose known prompt cost exceeds the amount left, although that call's
+reply can take the final estimate beyond the configured value. `model`
+changes the per-token price, and `unit_lines` changes how the budget is
+divided. A negative or non-integer `token_budget` is refused at load time.
+Delta and fixed-lane runs never start a sweep.
 
 ## The audited revision
 

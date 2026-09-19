@@ -1,8 +1,7 @@
-# Artifact Layout
+# Artifact layout
 
-This page describes the files and directories TokenFuzz creates while an audit
-is running, and where to look first when you want to understand the result of
-a run.
+This page describes the files and directories TokenFuzz creates while an
+audit is running, and where to look first to understand the result of a run.
 
 Set the active result directory once when you start inspecting:
 
@@ -25,20 +24,18 @@ $RESULTS/findings/FIND-*/report.html
 
 Each page has a different purpose:
 
-- A cluster index groups matching evidence and shows discovery time, subsystem,
-  strategy, and member reports. Benchmark pool pages separate the conditions.
+- A cluster index groups matching evidence and shows discovery time,
+  subsystem, strategy, and member reports. Benchmark pool pages separate the
+  conditions.
 - A rejected index groups artifacts by the gate and reason for rejection.
 - A report page presents the claim with its source location, suggested fix,
   reproduction details, review receipt, severity, and bundle files.
 
-These views use the Markdown indexes and receipts beside them. A cluster is an
-evidence grouping, not proof of one distinct root cause.
+These views are rendered from the Markdown indexes and receipts beside them.
+A cluster is an evidence grouping, not proof of one distinct root cause.
 
 Use `results/` for evidence and progress. Use `logs/` only to debug
 orchestration, backend authentication, or wrapper failures.
-
-The result tree is designed to surface which security results are ready for
-review, even when they are not sanitizer crashes.
 
 ## Target root
 
@@ -46,8 +43,8 @@ review, even when they are not sanitizer crashes.
 targets/<target>/
 ```
 
-This is the upstream source checkout. Build artifacts may also live here when
-the target's build system writes them under the source tree, and the
+This is the upstream source checkout. Build artifacts may also live here
+when the target's build system writes them under the source tree, and the
 harness keeps its own build recipes, leases, and caches under
 `targets/<target>/.audit/`.
 
@@ -63,10 +60,8 @@ output/<target>/
   <backend>/
 ```
 
-What each file is:
-
-- `target.toml`: the generated static configuration you review when
-  inference leaves placeholders or target-specific values.
+- `target.toml`: the generated configuration you review when inference
+  leaves placeholders or target-specific values.
 - `crash-clusters.html` and `finding-clusters.html`: cross-backend aggregate
   review tables for every backend under this target. The `.md` siblings are
   the source files used to generate them.
@@ -95,7 +90,7 @@ The paths an operator inspects after a run:
 | --- | --- |
 | `crashes/` | Crash candidates, including final and pending artifacts. |
 | `crashes-rejected/` | Rejected crash artifacts and `rejected-crashes.html` / `rejected-crashes.md`. |
-| `findings/` | Security finding candidates of any class, with or without a reproducer. See the note below. |
+| `findings/` | Security finding candidates of any class, with or without a reproducer. |
 | `findings-rejected/` | FIND directories that failed substance, source, or publication review, plus `rejected-findings.html` / `rejected-findings.md` listing the reasons, including unresolved scope after completed review. |
 | `corpus/` | Inputs that reached new coverage, saved after each iteration for reuse as seeds. Deduplicated by content. |
 | `coverage/` | Per-agent edge journals (`edges-agent-N.journal`) written by `bin/hits`, keyed by target-relative path; `bin/coverage-summary` and `bin/rank-work` read them. |
@@ -140,15 +135,15 @@ card; `bin/state coverage` reads it. See
 `queue_size`, `score`, and `strategy` the card carried when it was offered,
 which is what `bin/state card-yield` replays.
 
-`state/runs.jsonl` has one row per `bin/probe` invocation: verdict, sanitizer,
-duration, and, when a coverage replay ran, `coverage` (`HIT`, `MISSED`,
-`UNAVAILABLE`, and so on) with the `closest` frame it reached. An `EXEC_FAIL`
-carries a normalized `execution_failure_class` plus the detailed `reason`;
-resume aggregates a five-run same-class streak across the whole card and
-offers repair or seed guidance, but never closes or re-ranks work from that
-advisory signal. Older rows retain the same class token in `reason` and are
-read compatibly. A row can record `NO_EXEC`, so line count alone does not
-prove that target code ran; inspect the verdict and failure reason.
+`state/runs.jsonl` has one row per `bin/probe` invocation: verdict,
+sanitizer, duration, and, when a coverage replay ran, `coverage` (`HIT`,
+`MISSED`, `UNAVAILABLE`, and so on) with the `closest` frame it reached. An
+`EXEC_FAIL` carries a normalized `execution_failure_class` plus the detailed
+`reason`; resume aggregates a five-run same-class streak across the whole
+card and offers repair or seed guidance, but never closes or re-ranks work
+from that advisory signal. Older rows carry the same class token inside
+`reason` and are read compatibly. A row can record `NO_EXEC`, so line count alone
+does not prove that target code ran; inspect the verdict and failure reason.
 
 `state/callgraph.json` is present only with the optional
 [call-neighbourhood analysis](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
@@ -156,57 +151,58 @@ installed. It holds the per-file call maps work-card prompts quote, and
 deleting it costs prompt context and nothing else. The rest is internal
 bookkeeping.
 
-For S4, private `fuzz/bin/*.manifest.json` files use schema 2 for new builds.
-They bind an optional source-grounding `receipt` to one harness binary,
-alongside the source digest, guidance, sanitizer, and linked library or tree
-the manifest already recorded. A harness that carries no receipt (hand-written,
-or built before schema 2) records an empty one, so "is this harness grounded"
-is readable straight off the field. `fuzz/state.json` retains `first_slice`
-independently from later high-water totals; `bin/fuzz status` joins both
-without changing the campaign's schedule or any security-evidence decision.
-These are agent-facing diagnostics, not maintainer finding or crash fields.
+For S4, private `fuzz/bin/*.manifest.json` files use schema 2 for new
+builds. They bind an optional source-grounding `receipt` to one harness
+binary, alongside the source digest, guidance, sanitizer, and linked library
+or tree the manifest already recorded. A harness that carries no receipt
+(hand-written, or built before schema 2) records an empty one, so "is this
+harness grounded" is readable straight off the field. `fuzz/state.json`
+retains `first_slice` independently from later high-water totals;
+`bin/fuzz status` joins both without changing the campaign's schedule or any
+security-evidence decision. These are agent-facing diagnostics, not
+maintainer finding or crash fields.
 
 FIND directories without a report get a `.needs-content` marker and surface
 as `NEEDS CONTENT` in `finding-clusters.html`. A gate pass with Reject votes
 below quorum leaves `.pending-drop`; reaching quorum moves the directory to
 `findings-rejected/` rather than deleting it. `touch .reviewed` (or `.keep`)
 inside a FIND directory requests a human override; the report must still
-contain complete boundary and trigger fields before the harness writes a final
-receipt. Editing the report's substance re-opens its review; mechanical
-severity, patch, enrichment, and cluster annotations do not.
+contain complete boundary and trigger fields before the harness writes a
+final receipt. Editing the report's substance re-opens its review;
+mechanical severity, patch, enrichment, and cluster annotations do not.
 
 ### Publication receipts
 
-Every adjudicated artifact has a content-addressed `validation.json`. It binds
-the publication state to the report, saved evidence, target revision and
-config, and threat model. Its states are `reportable`, `pending`,
-`rejected`, and, for a human-pinned FIND only, `not-reportable`. Pending and legacy artifacts remain visible on disk. Only a
+Every adjudicated artifact has a content-addressed `validation.json`. It
+binds the publication state to the report, saved evidence, target revision
+and config, and threat model. Its states are `reportable`, `pending`,
+`rejected`, and, for a human-pinned FIND only, `not-reportable`. Only a
 current `reportable` receipt enters the security benchmark total or receives
-numeric severity. `pending` is an artifact a review is still due on, which is
-neither credited nor written off. A defect the reviewers place outside the
-threat model, or one they cannot place inside it once every review the lane
-asks for has answered, is rejected with that reason and keeps its evidence
-under the rejected tree. Only a human-pinned artifact still records
+numeric severity. `pending` is an artifact a review is still due on, which
+is neither credited nor written off. A defect the reviewers place outside
+the threat model, or one they cannot place inside it once every review the
+lane asks for has answered, is rejected with that reason and keeps its
+evidence under the rejected tree. Only a human-pinned artifact still records
 `not-reportable` in place; older trees may carry the state from before this
 rule.
 
 When `TARGET_ROOT` is available, new receipts join each source review to a
 `source_attestations` entry. The harness re-reads the review's path, line,
 symbol, and excerpt, replaces any reviewer-supplied excerpt digest with its
-own, and binds the normalized anchors plus the review artifact's SHA-256 into
-the receipt `evidence_id`. Reading with the checkout pinned to the receipt's
-target revision repeats that verification. For a plain source tree without a
-VCS revision, an opaque `source_context` binds re-verification to the exact
-host checkout that issued the attestation. An unrelated live checkout is not
-allowed to refute historical evidence; an exported bundle without its pinned
-checkout retains an attestation already recorded. Trusted
+own, and binds the normalized anchors plus the review artifact's SHA-256
+into the receipt `evidence_id`. Reading with the checkout pinned to the
+receipt's target revision repeats that verification. For a plain source tree
+without a VCS revision, an opaque `source_context` binds re-verification to
+the exact host checkout that issued the attestation. An unrelated live
+checkout is not allowed to refute historical evidence; an exported bundle
+without its pinned checkout retains an attestation already recorded. Trusted
 representation-only rewrites may update the bound review digest only while
-every verified anchor remains present. Older schema-2 receipts may omit these
-optional fields and gain them on their next review.
+every verified anchor remains present. Older schema-2 receipts may omit
+these optional fields and gain them on their next review.
 
 Changing the report, testcase, harness, sanitizer diagnostic, invocation
-evidence, cited source, target/config identity, or review evidence invalidates
-the receipt and returns the artifact to review.
+evidence, cited source, target/config identity, or review evidence
+invalidates the receipt and returns the artifact to review.
 
 A short run may leave `crashes/` and `findings/` empty. That is not a failed
 run by itself. Check the rejected indexes first to see whether the agent
@@ -226,9 +222,9 @@ CRASH-001-1/
 
 A crash that triage has accepted but not finished promoting carries a
 `.promotion_pending` marker naming what is still missing. It clears once the
-export bundle below is complete. A directory still missing the same artifacts
-after ten triage passes is moved to `crashes-rejected/`, with those artifacts
-named in its rejection report.
+export bundle below is complete. A directory still missing the same
+artifacts after ten triage passes is moved to `crashes-rejected/`, with those
+artifacts named in its rejection report.
 
 Pending promotion is resumable work. `bin/state resume --agent N` presents an
 unfinished bundle before active hypotheses or new work cards. Its saved
@@ -304,8 +300,8 @@ See [Triage and review](../guides/triage-results.md#clusters-and-duplicates)
 for how cluster membership and `.dup-of` markers are used during review.
 
 `findings/` accepts any concrete security issue: memory safety, logic, auth
-bypass, injection, info disclosure, crypto, races, boundary violations, and so
-on. A sanitizer reproducer or runnable testcase is **not** required; a
+bypass, injection, info disclosure, crypto, races, boundary violations, and
+so on. A sanitizer reproducer or runnable testcase is **not** required; a
 substantive report is. Each report needs:
 
 - a concrete location (`file:function:line`, an endpoint, a config key, and
@@ -315,9 +311,10 @@ substantive report is. Each report needs:
 
 Vacuous candidates are not moved out of `findings/` below reject quorum. The
 harness drops a `.pending-drop` marker in the FIND directory. Edit the report
-to address the marker, or `touch .reviewed` / `.keep` to override. Editing the
-report also invalidates saved quality votes so the revised content receives a
-fresh quorum. At quorum, the directory is moved to `findings-rejected/`.
+to address the marker, or `touch .reviewed` / `.keep` to override. Editing
+the report also invalidates saved quality votes so the revised content
+receives a fresh quorum. At quorum, the directory is moved to
+`findings-rejected/`.
 
 The severity scorer writes `severity.json` and updates severity text only
 after a current final-state validation receipt exists. A pending FIND remains
@@ -327,18 +324,18 @@ security bug.
 `severity.json` records the published level, score, and vector together with
 the scorer version and a hash of the report content they were derived from.
 Later passes rewrite reports (reach-field fills, enrichment, pool copies), so
-that binding is what distinguishes a current score from one an earlier scorer
-left behind. A score whose binding no longer matches is re-derived, never
-credited as-is.
+that binding is what distinguishes a current score from one an earlier
+scorer left behind. A score whose binding no longer matches is re-derived,
+never credited as-is.
 
 ## Report narrative
 
-Crash and finding reports share one narrative shape, so a reviewer reads every
-backend's output the same way. Before the narrative headings, one bare
-`Location: path/to/file.ext:function:line` names the root-cause operation. Use
-an endpoint, config key, or protocol step when no source location exists; do
-not list several candidate locations. Finding clustering uses this as the
-primary source identity. The narrative then follows this order:
+Crash and finding reports share one narrative shape, so a reviewer reads
+every backend's output the same way. Before the narrative headings, one bare
+`Location: path/to/file.ext:function:line` names the root-cause operation.
+Use an endpoint, config key, or protocol step when no source location
+exists; do not list several candidate locations. Finding clustering uses
+this as the primary source identity. The narrative then follows this order:
 
 | Section | Budget | Answers |
 | --- | --- | --- |
@@ -356,8 +353,8 @@ this set are written by the harness (`## Fields`, `## Patch`,
 report author.
 
 The contract lives in `lib/prompts/report_prose.md.j2` and is rendered into
-both the harness session prompt and the model-direct baseline, so prose shape
-is never a difference between benchmark conditions.
+both the harness session prompt and the model-direct baseline, so prose
+shape is never a difference between benchmark conditions.
 
 ## Logs
 
@@ -378,32 +375,25 @@ In the per-session filenames, `<TS>` is the launch timestamp, `<launch>` is
 files may appear alongside these (decision caches and similar bookkeeping);
 the listing above is what is worth opening, not an exhaustive inventory.
 
-Logs are useful for:
-
-- backend CLI failures;
-- orchestrator launch problems;
-- unexpected wrapper behaviour.
-
-For normal audit progress, prefer the generated HTML:
-
-- `crashes/crash-clusters.html`;
-- `findings/finding-clusters.html`;
-- `crashes-rejected/rejected-crashes.html`;
-- `findings-rejected/rejected-findings.html`;
-- per-result `report.html`.
+Logs are useful for backend CLI failures, orchestrator launch problems, and
+unexpected wrapper behaviour. For normal audit progress, prefer the generated
+HTML indexes and per-result `report.html` pages.
 
 For debugging a run, start with `logs/README.md`, then `index.log`. Open the
 matching `session_*.log` for the session named in the timeline. Use
-`index.jsonl` when you want the same session data in a scriptable form. Each
-session row carries `probes`, `probe_seconds`, `probe_diagnostics`, and
+`index.jsonl` when you want the same session data in a scriptable form.
+
+Each session row carries `probes`, `probe_seconds`, `probe_diagnostics`, and
 `first_probe_seconds`: how many `bin/probe` runs the session made, the wall
 they took, how many produced a diagnostic, and how long the session took to
 run its first. Usage rows also record `delegation_events` (subagent spawns
 the transcript shows, one per call id), `spend_lower_bound` (the delegated
 work ran where the row's usage cannot see it, so the row is a floor),
-`delegation_observable` (`false` where the backend cannot show its fan-out at
-all), and `served_model` when the provider billed the session to a model
+`delegation_observable` (`false` where the backend cannot show its fan-out
+at all), and `served_model` when the provider billed the session to a model
 other than the one requested. The [benchmark page](../concepts/benchmark.md)
-says how the report reads them. Full backend transcripts and exact prompt
-dumps live under `logs/.raw/`; they are intentionally out of the way because
-they can be large and are rarely the first artifact you need.
+says how the report reads them.
+
+Full backend transcripts and exact prompt dumps live under `logs/.raw/`.
+They are intentionally out of the way because they can be large and are
+rarely the first artifact you need.

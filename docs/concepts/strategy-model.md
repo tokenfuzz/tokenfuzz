@@ -1,23 +1,17 @@
-# Strategy Model
+# Strategy model
 
 A *strategy* is a named investigation method assigned to a work card. Each
-strategy specifies:
-
-- how to pick a hypothesis;
-- where to look for an input;
-- how to mutate it;
-- what the result means.
+strategy specifies how to pick a hypothesis, where to look for an input, how
+to mutate it, and what the result means.
 
 There are eight active strategies and a shared pattern-search reference.
 Strategies are **methods, not bug categories**. A single bounds bug can be
 reached by S1 (the recent fix nearby), S5 (an object-state sequence), or S7
 (an input-shape boundary), depending on which clue is strongest.
 
-They exist for two reasons:
-
-- to keep agents from drifting into open-ended browsing;
-- to make the next session's "what did the last one try?" question answerable
-  from disk.
+They exist for two reasons: to keep agents from drifting into open-ended
+browsing, and to make the next session's "what did the last one try?"
+question answerable from disk.
 
 ## The catalog
 
@@ -34,7 +28,7 @@ They exist for two reasons:
 | **REF** Pattern search | Shared grep recipes used alongside any strategy. | Candidate sites and guard shapes. |
 
 S1 is the **fallback** default, not a directive to always start with patch
-mining. Prior fixes happen to carry concrete information (what changed, what
+mining. Prior fixes carry concrete information (what changed, what
 assumption was wrong, what input shape reached the code, and what nearby code
 may still share that shape), but a high-signal parser surface or a
 peer-project fix can outrank ordinary S1 work. The agent follows the assigned
@@ -58,14 +52,12 @@ that fits:
 | Peer-project fix card | **S6** Cross-project variant mining | Another implementation already disclosed the shape worth checking. |
 | Nothing distinctive matches | **S1** Prior-fix and regression variant | The diversity floor still samples quiet source files instead of letting regexes define scope. |
 
-Most real files hit more than one row. When that happens, the file gets:
-
-- a *primary* card with the highest-priority strategy;
-- a *companion* card for every other angle its own code signals.
-
-So two agents can attack the same file from different directions without one
-starving the other. A parser function with input-consumption verbs, casts, and
-asserts becomes an S7 card with S2 and S3 companions.
+Most real files hit more than one row. When that happens, the file gets a
+*primary* card with the highest-priority strategy and a *companion* card for
+every other angle its own code signals. Two agents can then attack the same
+file from different directions without one starving the other. A parser
+function with input-consumption verbs, casts, and asserts becomes an S7 card
+with S2 and S3 companions.
 
 ### Why every fired angle gets a card
 
@@ -76,9 +68,9 @@ that owns no cards can never be assigned to an agent.
 
 ### How the visible window is filled
 
-Scores are not comparable across strategies: S8 scores once on presence, while
-S7 multiplies per match. Ordering the bounded window by score alone would
-therefore order it by whichever strategy scores highest, and the window would
+Scores are not comparable across strategies: S8 scores once on presence,
+while S7 multiplies per match. Ordering the bounded window by score alone
+would order it by whichever strategy scores highest, and the window would
 arrive on a handful of dense files carrying every angle of each.
 
 Instead the window is filled by **rotating the strategies**, each taking its
@@ -86,16 +78,17 @@ highest-ranked card on a file the window does not already hold, one
 buildability tier at a time. Every strategy keeps a share, and the slots buy
 distinct files.
 
-Each angle a file signals is its own card: a file that reads as both S7 and S5
-material yields one card per strategy, and each is claimed, worked, and closed
-on its own evidence. Collapsing them into one card made their completion state
-inseparable, so a dry S7 pass retired the S5 angle with it. Two agents can
-therefore hold the same file under different strategies at once; the subsystem
-preference (below) keeps that from becoming the norm.
+Each angle a file signals is its own card: a file that reads as both S7 and
+S5 material yields one card per strategy, and each is claimed, worked, and
+closed on its own evidence. Collapsing them into one card made their
+completion state inseparable, so a dry S7 pass retired the S5 angle with it.
+Two agents can therefore hold the same file under different strategies at
+once; the subsystem preference (below) keeps that from becoming the norm.
 
 A delta run (`bin/audit --since <rev>`) fills no window at all: every card on
-a file changed in `<rev>..HEAD`, or on a one-hop caller of one, is emitted, the
-diversity floor is off, and the queue never expands. The delta is the scope.
+a file changed in `<rev>..HEAD`, or on a one-hop caller of one, is emitted,
+the diversity floor is off, and the queue never expands. The delta is the
+scope.
 
 ### Other card sources
 
@@ -106,10 +99,10 @@ diversity floor is off, and the queue never expands. The delta is the scope.
 - **Peer-fix cards** (always S6): appended when `target.toml` declares peer
   projects, so a fix landing in one project becomes a probe against the
   unfixed analogue here.
-- **The S4 campaign card**: one target-wide boundary-fuzzing campaign, rather
-  than one feature-derived card per file. When more than one agent is
-  available, the scheduler reserves one reproduce seat for this campaign while
-  it remains eligible.
+- **The S4 campaign card**: one target-wide boundary-fuzzing campaign,
+  rather than one feature-derived card per file. When more than one agent is
+  available, the scheduler reserves one reproduce seat for this campaign
+  while it remains eligible.
 - **Call-edge cards** (always S3): the second pass. Once every parsed
   function of a file carries an examined attestation, one card is minted per
   file with a certain call into it, naming the caller. File cards cover
@@ -122,10 +115,10 @@ diversity floor is off, and the queue never expands. The delta is the scope.
 
 At run initialization, and again when its ranking inputs change:
 
-1. The harness materializes the ranked card list (source-feature cards, patch
-   cards, peer-fix cards, and the S4 campaign). An unchanged source,
-   configuration, and ranking signature reuses the existing queue; an explicit
-   window expansion also refreshes it.
+1. The harness materializes the ranked card list (source-feature cards,
+   patch cards, peer-fix cards, and the S4 campaign). An unchanged source,
+   configuration, and ranking signature reuses the existing queue; an
+   explicit window expansion also refreshes it.
 2. Each agent pulls the next eligible one.
 
 A card is skipped if it is:
@@ -157,10 +150,10 @@ go to what was read least (see [Review coverage](coverage.md)).
 
 ## Strategy rotation
 
-An agent rotates off its current strategy after a run of dry iterations (three
-by default) once its notes carry that strategy's evidence keywords, so a
-strategy the agent never actually worked is not rotated away from. S1 is held
-longer (eight dry iterations), since patch review often takes several
+An agent rotates off its current strategy after a run of dry iterations
+(three by default) once its notes carry that strategy's evidence keywords, so
+a strategy the agent never actually worked is not rotated away from. S1 is
+held longer (eight dry iterations), since patch review often takes several
 iterations to bear fruit.
 
 When it does rotate, the agent moves to the method with the most unclaimed
@@ -169,38 +162,32 @@ strategies instead of converging on one. An agent that never manages to
 produce evidence is rotated anyway, so a stuck method cannot stall the run.
 
 The rule of thumb: **rotate the method, not the subsystem.** A subsystem
-should not be abandoned merely because notes were written. There must be probe
-runs, discarded variants, or environment blockers on disk first.
+should not be abandoned merely because notes were written. There must be
+probe runs, discarded variants, or environment blockers on disk first.
 
 ## A good hypothesis
 
-A hypothesis:
+A hypothesis names:
 
-- names a specific `file:function:line`;
-- names the input shape that should reach it;
-- names the guard or assumption it is trying to violate;
-- names the expected diagnostic.
+- a specific `file:function:line`;
+- the input shape that should reach it;
+- the guard or assumption it is trying to violate;
+- the expected diagnostic.
 
-It is narrow enough to name a falsifiable trigger shape. One exact clean probe
-can close a deterministic hypothesis; allocator-, scheduler-, race-, GC-,
-timing-, re-entrancy-, and state-dependent hypotheses need repetition or
+It is narrow enough to name a falsifiable trigger shape. One exact clean
+probe can close a deterministic hypothesis; allocator-, scheduler-, race-,
+GC-, timing-, re-entrancy-, and state-dependent hypotheses need repetition or
 distinct shapes.
 
 Closing a hypothesis is not the same as retiring its card. Before a dry card
 is discarded, the audit contract requires at least three clean probes across
-at least two distinct input shapes, a minimum per card rather than a quota per
-hypothesis. A broad whole-file card remains reofferable after a dry pass
+at least two distinct input shapes, a minimum per card rather than a quota
+per hypothesis. A broad whole-file card remains reofferable after a dry pass
 because finite probes cannot exhaust its unexamined functions.
 
 ## Strategy quality bar
 
-A strategy is useful when it ends in concrete evidence on disk:
-
-- a saved seed;
-- a testcase;
-- a recorded probe verdict;
-- a documented variant on a clean hit;
-- an accepted crash;
-- a substantive finding report.
-
-Broad source summaries are not output.
+A strategy is useful when it ends in concrete evidence on disk: a saved
+seed, a testcase, a recorded probe verdict, a documented variant on a clean
+hit, an accepted crash, or a substantive finding report. Broad source
+summaries are not output.

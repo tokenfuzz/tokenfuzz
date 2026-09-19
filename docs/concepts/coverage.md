@@ -3,16 +3,16 @@
 A clean run answers "what did the agents find?" but not "what did they never
 look at?". The ranked queue is a bounded window over the source tree, so a
 file outside the window has no card, and a card rewritten out of the window
-leaves no trace in `work-cards.jsonl`. This page explains the ledger that
-makes the untouched share visible.
+leaves no trace in `work-cards.jsonl`. This page explains the ledgers that
+make the untouched share visible.
 
 ## The manifest
 
 Every ranking pass enumerates the auditable source tree before it scores
 anything. The walk applies the harness's scope rule (documentation, tests,
 examples, benchmarks, and fuzz trees are out) and prunes what holds no target
-source by definition: VCS metadata, runtime caches, sanitizer build trees, the
-harness's own `.audit/` workspace, and any directory Python marks as a
+source by definition: VCS metadata, runtime caches, sanitizer build trees,
+the harness's own `.audit/` workspace, and any directory Python marks as a
 virtualenv with `pyvenv.cfg`. On a VCS checkout only tracked files remain.
 That enumeration is persisted as `state/manifest.jsonl`, one row per file:
 
@@ -64,7 +64,8 @@ bin/state mark-examined --agent 1 --file src/parse.c --functions app_parse,app_r
 Receipts append to `state/receipts.jsonl`, pinned to the file's content hash
 from the manifest. The harness verifies each one before recording it: the
 file must be in the manifest, every range must lie inside it, and a function
-name must be one the [call graph](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
+name must be one the
+[call graph](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
 parsed in that file, resolved to the lines from its definition to the next
 one. A receipt that cannot be checked is refused, and a receipt on content
 that has since changed stops counting. Content is what is checked: a file a
@@ -96,32 +97,33 @@ breadth once: with `[sweep] token_budget` set, the audit starts `bin/sweep`
 beside the agent slots. It walks the unreceipted units gap first (files the
 window never offered, then the least-read files), hands each unit to a
 one-shot decision with no tools, and requires a receipt plus zero or more
-leads in return:
+leads in return.
 
 - A **unit** is a parsed function no longer than `unit_lines`, a
   `unit_lines` window of a longer function, or a fixed window where the call
   graph parsed nothing.
-- The **reply** must attest the whole unit, give exactly one valid verdict per
-  parsed function (or the named line window), and may return concrete leads.
-  Incomplete ranges and missing, duplicate, or invalid verdicts refuse the
-  receipt, so the unit stays open. A lead is retained only when it names that
-  function or line window, lies inside the unit, carries a known diagnostic
-  and strategy, and agrees with a non-clean verdict; malformed leads are
-  dropped rather than becoming hypotheses or strategy metrics. The strategy
-  label only routes a lead to a lane, so a missing or unknown one defaults to
-  S3 instead of losing the claim. A reply carries at most three leads.
-- **Receipts** land in `state/receipts.jsonl` with `source: sweep`. **Leads**
-  become `NEEDS_TESTCASE` hypotheses owned by agent `sweep`, which the
-  reproduce lane picks up through the ordinary handoff. The sweep never
+- The **reply** must attest the whole unit, give exactly one valid verdict
+  per parsed function (or the named line window), and may return concrete
+  leads. Incomplete ranges and missing, duplicate, or invalid verdicts refuse
+  the receipt, so the unit stays open. A lead is retained only when it names
+  that function or line window, lies inside the unit, carries a known
+  diagnostic and strategy, and agrees with a non-clean verdict; malformed
+  leads are dropped rather than becoming hypotheses or strategy metrics. The
+  strategy label only routes a lead to a lane, so a missing or unknown one
+  defaults to S3 instead of losing the claim. A reply carries at most three
+  leads.
+- **Receipts** land in `state/receipts.jsonl` with `source: sweep`.
+  **Leads** become `NEEDS_TESTCASE` hypotheses owned by agent `sweep`, which
+  the reproduce lane picks up through the ordinary handoff. The sweep never
   probes, claims a card, or files a finding.
 - **Spend** is the estimated prompt and reply tokens of every call, failed
   ones included, accumulated in `state/sweep.json` across resumes. A call is
   not started when its prompt alone exceeds the remaining budget; its reply
-  can take the final estimate beyond the budget. The sweep stops at
-  that boundary, after three consecutive unusable replies, or when no
-  unreceipted unit remains. A shutdown signal lets the in-flight unit finish
-  its receipt and leads as one commit, so a resume never skips a receipted
-  unit whose lead was lost. Failed or incomplete units remain counted as open.
+  can take the final estimate beyond the budget. The sweep stops at that
+  boundary, after three consecutive unusable replies, or when no unreceipted
+  unit remains. A shutdown signal lets the in-flight unit finish its receipt
+  and leads as one commit, so a resume never skips a receipted unit whose
+  lead was lost. Failed or incomplete units remain counted as open.
 
 The sweep's calls are recorded in the run's usage ledger like every other
 decision, so the benchmark wall counts them.
@@ -132,17 +134,19 @@ File coverage says nothing about interactions. Once every parsed function of
 a file carries a receipt, the ranker mints one **call-edge** card for its set
 of resolved caller files. The card starts with the highest-count caller and
 asks the session to compare caller guarantees against callee assumptions,
-sampling other callers when their contracts differ. This is a bounded sample,
-not an attestation that every caller was examined: `bin/state coverage` reports
-the eligible caller sets, how many were sampled and concluded, how many cards
-the current queue holds, and how many callers beyond the seeds receive no
-individual card. One card represents each caller set, so a file with thousands
-of callers cannot create thousands of agent sessions. Edge cards ride the
-window with their file, add no distinct-file slot, and close like concrete
-cards once probed. A file completing its receipts is part of the queue's
-refresh signature, so the card appears on the next refresh even when no source
-changed. Without receipts, or without a call graph, no edge card exists; the
-pass follows the first one rather than competing with it.
+sampling other callers when their contracts differ.
+
+This is a bounded sample, not an attestation that every caller was examined:
+`bin/state coverage` reports the eligible caller sets, how many were sampled
+and concluded, how many cards the current queue holds, and how many callers
+beyond the seeds receive no individual card. One card represents each caller
+set, so a file with thousands of callers cannot create thousands of agent
+sessions. Edge cards ride the window with their file, add no distinct-file
+slot, and close like concrete cards once probed. A file completing its
+receipts is part of the queue's refresh signature, so the card appears on the
+next refresh even when no source changed. Without receipts, or without a call
+graph, no edge card exists; the pass follows the first one rather than
+competing with it.
 
 ## Observed read requests from transcripts
 
@@ -153,14 +157,14 @@ limit, and the shell idioms the audit shell wraps (`sed -n 'A,Bp'`, `cat`,
 `head`, `tail`, `nl`, `bin/peek FILE:A-B`). A pattern search loads matches,
 not a range, and is not recorded. Only reads inside the target tree count.
 
-The report shows these as **Read requested** beside **Receipted**. The request
-scope is an upper bound: a shell command such as `cat` proves what was asked
-for, while backend or tool truncation can mean less entered the context.
-Receipted is the agent's own statement of what it read. The two disagree in
-useful ways, but neither is a gate: transcript formats and shell idioms vary,
-and a read the parser does not recognise is simply absent. Both ledgers are
-pinned to the current manifest hash, so observations on changed content stop
-counting.
+The report shows these as **Read requested** beside **Receipted**. The
+request scope is an upper bound: a shell command such as `cat` proves what
+was asked for, while backend or tool truncation can mean less entered the
+context. Receipted is the agent's own statement of what it read. The two
+disagree in useful ways, but neither is a gate: transcript formats and shell
+idioms vary, and a read the parser does not recognise is simply absent. Both
+ledgers are pinned to the current manifest hash, so observations on changed
+content stop counting.
 
 The report also joins the two: **attested lines no transcript read
 requested** is the share of receipts the transcript cannot corroborate. An
@@ -186,6 +190,6 @@ classes and target shapes represented by those plants; they do not establish
 recall for unplanted classes. Report manifest reach, attestations, and seeded
 recall separately.
 
-The benchmark telemetry carries the same totals as `coverage.tree`, beside the
-per-lane card shares, so a run report shows how much of the tree its window
-reached.
+The benchmark telemetry carries the same totals as `coverage.tree`, beside
+the per-lane card shares, so a run report shows how much of the tree its
+window reached.
