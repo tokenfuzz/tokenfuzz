@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 610"
      font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
-     role="img" aria-label="TokenFuzz system architecture: source and config pass build and configuration preflight, the queue assigns cards, agents either file source findings or run testcases through probe, and lane-specific validation records publication state">
+     role="img" aria-label="TokenFuzz system architecture: source and config pass build and configuration preflight, the queue assigns cards, agents either file source findings or run testcases through probe, lane-specific validation records publication state, and coverage ledgers report what the run never read">
   <title>TokenFuzz system architecture</title>
   <defs>
     <marker id="sa-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -64,12 +64,14 @@
   <text x="220" y="268" class="sub">Source, patch, peer-fix, and target-wide S4 cards.</text>
 
   <!-- State sidecar -->
-  <g filter="url(#sa-shadow)"><rect x="620" y="222" width="300" height="58" class="state"/></g>
+  <g filter="url(#sa-shadow)"><rect x="620" y="222" width="300" height="74" class="state"/></g>
   <text x="640" y="246" class="title">state/*.jsonl</text>
-  <text x="640" y="268" class="sub">Claims, hypotheses, runs, notes, events.</text>
+  <text x="640" y="266" class="sub">Claims, hypotheses, runs, notes, events;</text>
+  <text x="640" y="282" class="sub">manifest, examined-line receipts, transcript reads.</text>
   <path d="M600,251 L620,251" class="arrow-soft"/>
-  <path d="M710,280 L710,318" class="arrow-soft" marker-end="url(#sa-arrow)"/>
-  <path d="M738,318 L738,280" class="arrow-soft" marker-end="url(#sa-arrow)"/>
+  <path d="M710,296 L710,318" class="arrow-soft" marker-end="url(#sa-arrow)"/>
+  <path d="M738,318 L738,296" class="arrow-soft" marker-end="url(#sa-arrow)"/>
+  <path d="M880,296 L880,418" class="arrow-soft" marker-end="url(#sa-arrow)"/>
 
   <!-- Queue → agents -->
   <path d="M280,280 L200,318" class="arrow" marker-end="url(#sa-arrow)"/>
@@ -105,6 +107,16 @@
   <text x="220" y="440" class="title">bin/probe</text>
   <text x="310" y="438" class="sub">Browser/JS: coverage gate. Native: coverage feedback.</text>
   <text x="310" y="455" class="micro">Then the configured sanitizer or runner records a verdict.</text>
+
+  <!-- Coverage report, fed by the ledgers -->
+  <g filter="url(#sa-shadow)"><rect x="780" y="418" width="140" height="134" class="state"/></g>
+  <text x="794" y="440" class="title">bin/state</text>
+  <text x="794" y="458" class="title">coverage</text>
+  <text x="794" y="480" class="micro">Every auditable file:</text>
+  <text x="794" y="496" class="micro">offered, read, attested,</text>
+  <text x="794" y="512" class="micro">or never reached.</text>
+  <text x="794" y="528" class="micro">The budgeted sweep</text>
+  <text x="794" y="544" class="micro">reads the remainder.</text>
 
   <!-- Probe → triage -->
   <path d="M480,468 L480,486" class="arrow" marker-end="url(#sa-arrow)"/>

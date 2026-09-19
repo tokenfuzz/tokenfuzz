@@ -30,6 +30,28 @@ compaction so the agent can save progress to structured state.
 windows) the agent already covered. The prompt tells the agent not to re-read
 those ranges after compaction.
 
+**Manifest (`state/manifest.jsonl`).** Every auditable file a ranking pass
+enumerated, with its content hash and whether it ever entered the ranked
+window. The base the coverage report measures against.
+
+**Receipt (`bin/state mark-examined`).** An agent's attestation of the line
+ranges or functions it read in one file, pinned to the file's content hash.
+Refused when the manifest cannot verify it; discounted once the content
+changes. Distinct from a validation receipt (`validation.json`).
+
+**Transcript read.** A file request a session's backend transcript shows,
+recorded in `state/reads.jsonl` after the session ends. Evidence beside a
+receipt, never a gate.
+
+**Budgeted sweep.** The optional breadth pass enabled by `[sweep]
+token_budget`: one tool-less decision per unreceipted unit of source, paid
+once, stopping at the budget. Its leads reach the reproduce lane as
+hypotheses owned by agent `sweep`.
+
+**Call-edge card.** The second-pass card minted once every parsed function of
+a file carries a receipt: one S3 card per callee for its resolved caller set,
+seeded at the highest-count caller.
+
 **Steward tick.** In a continuous run, the timer-driven pass (every
 `STEWARD_INTERVAL_SECS`) that scores the generation, rotates starved
 strategies, and re-ranks the queue without stopping any live slot.

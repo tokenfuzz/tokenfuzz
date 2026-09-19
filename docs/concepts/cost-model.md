@@ -17,7 +17,8 @@ cost against reviewed results.
 | New input tokens per turn | Source dumps, raw logs, transcripts | Capped source-reading commands; structured state views. |
 | Output tokens | Long model prose, narration | Strategy quality bar: agents are graded on concrete evidence saved, not words. |
 | Sanitizer runs | Each run takes wall-clock and RAM; browsers cost more | Per-agent launch budget; browser/JS coverage gate; native coverage feedback. |
-| Redundant work | Two agents re-exploring the same surface | Work-card leases, per-agent input memory, rejected indexes. |
+| Redundant work | Two agents re-exploring the same surface | Work-card leases, per-agent input memory, rejected indexes, examined-line receipts that start each pickup from the unread functions. |
+| Breadth on a large tree | The window buys depth on the files the scorer likes; the rest is never opened | The optional budgeted sweep spends a fixed token budget on one tool-less decision per unread unit, and `bin/state coverage` shows what remains. |
 
 Two principles explain most of these choices:
 
@@ -88,6 +89,21 @@ ten rows each; it is row-bounded rather than byte-bounded, so long paths can
 make it larger than 4 KiB. Shell and file-reading wrappers separately cap raw
 output at roughly 50 KiB. Nothing rereads a transcript to work out what
 happened.
+
+## Receipts and the budgeted sweep
+
+An agent's receipt of the lines it read is reused by every later session on
+the same file: the card lists the unexamined functions, so a pickup after
+compaction or by another agent does not pay to re-read the file from the top.
+Receipts also order revisits toward the least-read files.
+
+Breadth is a separate budget. `[sweep] token_budget` in `target.toml` turns
+on a sweep that hands each unreceipted unit of source to one decision with no
+tools and no follow-up turns, on the model `[sweep] model` names. Each unit is
+paid for once, spend is recorded across resumes, and the sweep stops at the
+budget rather than when the tree is covered. It is off by default; the
+coverage report states how far it reached. See
+[Review coverage](coverage.md#the-budgeted-sweep).
 
 ## Session seeds across compaction
 

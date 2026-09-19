@@ -23,6 +23,10 @@ The harness supplies the parts a long audit needs beyond a prompt:
 - **Reviewable triage.** Independent validation, reachability and caller-control
   fields, rejected-result indexes, and severity annotation make model claims
   traceable rather than self-authenticating.
+- **Measured review coverage.** Every auditable file is recorded, agents
+  attest the lines they read, transcripts cross-check those receipts, and a
+  report shows what the run never looked at, so a clean result is not mistaken
+  for a complete one.
 - **Maintainer handoff.** Accepted crashes become self-contained bundles with a
   report, input, sanitizer output, and a one-command reproduction script for a
   clean checkout.

@@ -23,8 +23,11 @@ repo root/
 ```
 
 Audit evidence never goes into the target source tree. Build commands may write
-build artifacts there, and the automatic builder stores reusable recipes under
-`targets/<target>/.audit/`.
+build artifacts there, and the automatic builder stores reusable recipes,
+logs, and its bootstrap virtualenv under `targets/<target>/.audit/`. That
+directory is the harness's workspace, never auditable source: the source walk
+skips it, along with VCS metadata, runtime caches, sanitizer build trees, and
+any directory Python marks as a virtualenv.
 
 ## The audit run
 
@@ -72,6 +75,9 @@ state/runs.jsonl       append-only probe verdicts
 state/notes.jsonl      append-only compact supporting notes
 state/events.jsonl     append-only audit events
 state/manifest.jsonl   every auditable file; rewritten on refresh
+state/receipts.jsonl   append-only examined-line receipts, pinned to content
+state/reads.jsonl      append-only transcript read requests, pinned to content
+state/sweep.json       the budgeted sweep's spend and stop reason
 ```
 
 An agent skips cards that are already claimed, on a surface another agent
@@ -91,6 +97,8 @@ Each agent is a small autonomous worker:
 - a reproduce agent writes one testcase at a time and runs it immediately;
 - an analysis agent primarily traces source and may file a concrete
   source-only finding without first writing a testcase;
+- it records the line ranges or functions it read, so the next session on the
+  same file starts from what is left;
 - it keeps a compact state snippet so a context compaction does not lose the
   thread.
 
@@ -100,6 +108,30 @@ fixes, spec gaps, lifetime and state sequences, property oracles, and so on. If
 the current strategy goes dry, the harness rotates the agent to a different
 one, but only after structured state confirms the method was actually tried
 (see [Strategy model](strategy-model.md#strategy-rotation)).
+
+## Review coverage
+
+The queue is a bounded window, so a clean run cannot by itself say what was
+never looked at. Four ledgers make that visible, and none of them is a gate
+on filing evidence:
+
+- the **manifest** lists every auditable file each ranking pass enumerated,
+  with its content hash and whether it ever entered the window;
+- **receipts** are the agent's own attestation of the lines it read, refused
+  when they name lines or functions the manifest cannot verify, and
+  discounted once the file's content changes;
+- **transcript reads** are the file requests each session's backend
+  transcript shows, recorded after the session ends as the cross-check on
+  receipts;
+- the optional **budgeted sweep** runs beside the agent slots as its own
+  process, buying one tool-less decision per unreceipted unit of source
+  within `[sweep] token_budget`, and hands its leads to the reproduce lane.
+
+Once every parsed function of a file carries a receipt, the ranker mints one
+**call-edge** card for its resolved callers, a bounded second pass over
+cross-file contracts. `bin/state coverage` joins the ledgers into one report.
+[Review coverage](coverage.md) explains each piece and what it does not
+prove.
 
 ## The probe runner
 
@@ -169,7 +201,8 @@ output/<target>/<backend>/results/
   findings/                    filed findings and their review state
   findings-rejected/           rejected findings and their reasons
   corpus/                      saved seeds with metadata
-  state/                       claims, hypotheses, notes, runs, events
+  state/                       claims, hypotheses, notes, runs, events,
+                               manifest, receipts, reads, sweep
   work-cards.jsonl             the ranked queue
   patch-cards.jsonl            prior-fix work cards (strategy S1)
   s6-peer-cards.jsonl          peer-project fix cards (strategy S6)
@@ -236,6 +269,7 @@ then follow its shared code:
 | Work claims and durable state | `bin/state`, `lib/workqueue.py` |
 | Session prompt assembly | `lib/prompt.py`, `lib/prompt_render.py`, `lib/prompts/` |
 | Testcase execution and recorded verdicts | `bin/probe`, `lib/sanitizer_run.py` |
+| Review coverage ledgers and the budgeted sweep | `lib/coverage_ledger.py`, `lib/read_ledger.py`, `lib/sweep.py`, `bin/sweep` |
 | Evidence review and publication receipts | `lib/triage.py`, `lib/validation_receipt.py` |
 | Experiment orchestration and measurement | `lib/benchmark_runner.py`, `lib/benchmark.py` |
 
@@ -254,6 +288,8 @@ The mechanisms that keep the loop honest:
 - a rejected index for low-value crashes so they do not come back;
 - severity scoring and crash clustering as review aids;
 - capped search wrappers and session seeds to keep prompts small;
+- examined-line receipts pinned to content and cross-checked against
+  transcript reads, so coverage is measured rather than assumed;
 - evidence-aware strategy rotation, with a forced fallback for a method that
   never produces qualifying evidence;
 - report fields that triage can parse mechanically.

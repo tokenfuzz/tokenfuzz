@@ -21,6 +21,10 @@ The harness supplies the parts a long audit needs beyond a prompt:
 - **Reviewable triage.** Independent validation, reachability and caller-control
   fields, rejected-result indexes, and severity annotation make model claims
   traceable rather than self-authenticating.
+- **Measured review coverage.** Every auditable file is recorded, agents
+  attest the lines they read, transcripts cross-check those receipts, and a
+  report shows what the run never looked at, so a clean result is not mistaken
+  for a complete one.
 - **Maintainer handoff.** Accepted crashes become self-contained bundles with a
   report, input, sanitizer output, and a one-command reproduction script for a
   clean checkout.
@@ -150,14 +154,17 @@ finding and crash summaries are written directly under `output/<target>/`.
    `output/<target>/target.toml`.
 2. `bin/audit` validates the target, pins a session-local config snapshot,
    ranks work, and launches agents.
-3. Agents claim work, record hypotheses in structured state, and run testcases
-   through `bin/probe`.
+3. Agents claim work, record hypotheses and the lines they read in structured
+   state, and run testcases through `bin/probe`.
 4. Triage validates reports, preserves rejections, clusters matching evidence,
    and exports accepted crashes as maintainer-facing bundles.
+5. `bin/state coverage` reports which files the run offered, read, and
+   attested, and which it never reached.
 
-[Audit lifecycle](concepts/audit-lifecycle.md) walks through that flow, and
+[Audit lifecycle](concepts/audit-lifecycle.md) walks through that flow,
 [System architecture](concepts/system-architecture.md) describes the component
-boundaries.
+boundaries, and [Review coverage](concepts/coverage.md) explains the ledgers
+behind that report.
 
 ## Boundaries and expectations
 

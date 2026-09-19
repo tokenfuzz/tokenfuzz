@@ -9,8 +9,12 @@ makes the untouched share visible.
 ## The manifest
 
 Every ranking pass enumerates the auditable source tree before it scores
-anything. That enumeration is now persisted as `state/manifest.jsonl`, one
-row per file:
+anything. The walk applies the harness's scope rule (documentation, tests,
+examples, benchmarks, and fuzz trees are out) and prunes what holds no target
+source by definition: VCS metadata, runtime caches, sanitizer build trees, the
+harness's own `.audit/` workspace, and any directory Python marks as a
+virtualenv with `pyvenv.cfg`. On a VCS checkout only tracked files remain.
+That enumeration is persisted as `state/manifest.jsonl`, one row per file:
 
 | Field | Meaning |
 | --- | --- |

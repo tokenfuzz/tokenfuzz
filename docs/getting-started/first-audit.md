@@ -113,6 +113,18 @@ inspect in this order:
 4. The two rejected pages, for candidates that reached triage but did not meet
    the bar.
 
+To see what the iteration never looked at, render the coverage report:
+
+```bash
+bin/state --results-dir "$RESULTS" coverage
+```
+
+It lists every auditable file against what was offered, claimed, requested in
+a transcript, and attested read, and names the largest files no session
+reached. A clean run over a mostly unread tree is a budget statement, not a
+security result; [Review coverage](../concepts/coverage.md) explains the
+columns.
+
 Use the trimmed session log named by `index.log` only when the structured
 views do not explain the run. Raw backend transcripts under `$LOGS/.raw/` are
 the last resort.
