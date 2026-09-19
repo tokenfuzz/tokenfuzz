@@ -1,10 +1,10 @@
-{# Rendered into deep_investigation.md.j2 only when cross-run auto-memory is
-   enabled (TOKENFUZZ_MEMORY_ENABLED=1). With memory off, which is the default
-   and always the case under bin/benchmark, no note can be saved or read, so
-   the block would be ~1.8 KB replayed on every turn for nothing. #}
+{# Rendered into each worker prompt when cross-run auto-memory is enabled
+   (TOKENFUZZ_MEMORY_ENABLED=1), or for Antigravity, whose cross-run memory
+   cannot be isolated. With memory unavailable the block would be ~1.8 KB
+   replayed on every turn for nothing. #}
 ## Auto-memory: record what was tried, never "skip future sweeps"
 
-If you save a Claude Code auto-memory note about this card's audit outcome,
+If you save a cross-run learned-memory note about this card's audit outcome,
 the note is a record of **what probes ran**, not a verdict that the file is
 safe. The next agent should be able to read your note, see which input
 shapes / hypotheses you covered, and **probe anyway** if their hypothesis

@@ -230,16 +230,20 @@ def find_first_directive(context: PromptContext) -> str:
     )
 
 
-def auto_memory_section() -> str:
-    """The deep prompt's auto-memory rules, only when a note can exist.
+def auto_memory_section(context: PromptContext) -> str:
+    """A session's auto-memory rules, only when memory can persist.
 
-    Memory is off by default and always off under the benchmark; then no
-    backend can save or read a note, and the block is dead text on every
-    turn.
+    Memory is off by default and always off under the benchmark on backends
+    that can isolate it. Antigravity has no memory or home-isolation switch,
+    so it still needs the guard when the global setting expresses that
+    default-off intent.
     """
     import llm_invoke  # lazy: keeps prompt rendering free of the launcher otherwise
 
-    if not llm_invoke.memory_enabled():
+    antigravity_memory = (
+        context.backend == "gemini" and not llm_invoke.use_gemini_cli()
+    )
+    if not llm_invoke.memory_enabled() and not antigravity_memory:
         return ""
     return render_template("deep_auto_memory.md.j2", {})
 
@@ -601,10 +605,12 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
 
 
 def _agent_state_instructions(context: PromptContext, agent: int) -> str:
-    return (
+    state = (
         f"Use `bin/state resume --agent {agent}` as structured source of truth. "
         f"Write testcases under `{context.scratch_dir(agent)}` and update state after each closure."
     )
+    memory = auto_memory_section(context)
+    return f"{memory}\n\n{state}" if memory else state
 
 
 def _targets(context: PromptContext, mode: str) -> str:
@@ -1069,7 +1075,6 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
             "strategy_roi_directive": "", "find_first_directive": find_first_directive(context),
             "card_discard_min_runs": str(card_min_runs),
             "card_discard_min_hypotheses": str(card_min_hypotheses),
-            "auto_memory_section": auto_memory_section(),
             "agent_state_instructions": _agent_state_instructions(context, agent),
             "common_suffix": session_runtime_suffix(context),
         },
