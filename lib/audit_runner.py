@@ -32,6 +32,7 @@ import cli_help
 import cluster_common
 import fuzz_triage
 import housekeeping
+import llm_decide
 import llm_invoke
 import llm_usage
 import prompt
@@ -4301,7 +4302,9 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         try:
             return _drive_backend(runtime, args, state, drive)
         finally:
-            stop_sweep(runtime, sweeper)
+            stop_sweep(
+                runtime, sweeper, deadline=_productive_wall_deadline(state),
+            )
 
 
 def _drive_backend(runtime: Runtime, args, state: "BackendState", drive) -> int:
@@ -4378,31 +4381,63 @@ def launch_sweep(runtime: Runtime) -> "subprocess.Popen | None":
     return process
 
 
-def stop_sweep(runtime: Runtime, process: "subprocess.Popen | None") -> None:
-    if process is None:
-        return
-    if process.poll() is None:
-        # Tell the sweep not to dispatch another decision before reaping its
-        # in-flight backend CLI. It finishes any returned receipt and leads,
-        # then writes state and exits.
-        process.terminate()
-        process_tree.kill_descendants(process.pid, signal.SIGTERM, 1.0)
+def stop_sweep(
+    runtime: Runtime, process: "subprocess.Popen | None", *,
+    deadline: float | None = None,
+) -> None:
+    stop_sweeps([(runtime, process, deadline)])
+
+
+def _sweep_stop_deadline(runtime: Runtime, deadline: float | None) -> float:
+    stop = time.monotonic() + llm_decide.decision_timeout(
+        sweep.DECISION, backend=runtime.backend,
+    ) + 5
+    return stop if deadline is None else min(stop, deadline)
+
+
+def stop_sweeps(
+    entries: list[tuple[Runtime, "subprocess.Popen | None", float | None]],
+) -> None:
+    """Stop sweep workers without serial waits leaving peers dispatching.
+
+    Every live sweep is signalled first, so none dispatches another decision
+    while a peer is waited on. An in-flight call already paid for may then
+    finish within its decision ceiling and the productive wall, and its
+    receipt and leads are kept. Past that, the sweep and its provider are
+    killed outright: after the wall, even a just-returned reply must not
+    publish into the frozen benchmark artifact set.
+    """
+    plans = []
+    for runtime, process, deadline in entries:
+        if process is None:
+            continue
+        if process.poll() is None:
+            process.terminate()
+        plans.append((runtime, process, _sweep_stop_deadline(runtime, deadline)))
+    # An ensemble's provider pauses move each productive wall independently.
+    # Service the earliest cutoff first so waiting on one backend cannot let
+    # a peer publish after its own frozen boundary.
+    plans.sort(key=lambda plan: plan[2])
+    for runtime, process, stop_deadline in plans:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=max(0.0, stop_deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                # Descendants are captured before the parent disappears.
+                process_tree.kill_descendants(process.pid, signal.SIGKILL, 0)
+                process.kill()
+                process.wait()
         try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-    try:
-        state = sweep.read_state(runtime.results)
-    except sweep.SweepStateError as exc:
-        index_log(runtime, f"WARN: sweep state is unreadable: {exc}")
-        state = {}
-    index_log(
-        runtime,
-        f"sweep: ended rc={process.returncode} receipts={state.get('receipts', 0)} "
-        f"leads={state.get('leads', 0)} spent={state.get('spent_tokens', 0)} "
-        f"stop={state.get('stop', 'interrupted')}",
-    )
+            state = sweep.read_state(runtime.results)
+        except sweep.SweepStateError as exc:
+            index_log(runtime, f"WARN: sweep state is unreadable: {exc}")
+            state = {}
+        index_log(
+            runtime,
+            f"sweep: ended rc={process.returncode} receipts={state.get('receipts', 0)} "
+            f"leads={state.get('leads', 0)} spent={state.get('spent_tokens', 0)} "
+            f"stop={state.get('stop', 'interrupted')}",
+        )
 
 
 def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
@@ -4484,8 +4519,10 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
                     time.sleep(cooldown)
             return 2 if failures == len(states) else 0
         finally:
-            for runtime, sweeper in zip(runtimes, sweepers):
-                stop_sweep(runtime, sweeper)
+            stop_sweeps([
+                (runtime, sweeper, _productive_wall_deadline(state))
+                for runtime, sweeper, state in zip(runtimes, sweepers, states)
+            ])
 
 
 def bound_target_root(root: Path, target: str, target_path: str = "") -> Path:

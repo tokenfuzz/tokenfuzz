@@ -45,9 +45,10 @@ recorded in `state/reads.jsonl` after the session ends. Evidence beside a
 session's receipt, never a gate.
 
 **Budgeted sweep.** The optional breadth pass enabled by `[sweep]
-token_budget`: one tool-less decision per unreceipted unit of source, paid
-once, stopping at the budget. Its leads reach the reproduce lane as
-hypotheses owned by agent `sweep`.
+token_budget`: tool-less decisions over unreceipted source units, stopping at
+the budget. Completed receipts are reused; failed, timed-out, or incomplete
+attempts remain open, and every attempt is charged. Its leads reach the
+reproduce lane as hypotheses owned by agent `sweep`.
 
 **Call-edge card.** The second-pass card minted once every parsed function
 of a file carries a receipt: one S3 card per callee for its resolved caller

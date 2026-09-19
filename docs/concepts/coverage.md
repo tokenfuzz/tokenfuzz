@@ -97,7 +97,7 @@ Receipts change three things:
 
 The ranked window buys depth on the files the scorer likes, and a session
 pays for every file it opens again on every later turn. The sweep buys
-breadth once: with `[sweep] token_budget` set, the audit starts `bin/sweep`
+bounded breadth: with `[sweep] token_budget` set, the audit starts `bin/sweep`
 beside the agent slots. It walks the unreceipted units gap first (files the
 window never offered, then the least-read files), hands each unit to a
 one-shot decision with no tools, and requires a receipt plus zero or more
@@ -125,9 +125,11 @@ leads in return.
   not started when its prompt alone exceeds the remaining budget; its reply
   can take the final estimate beyond the budget. The sweep stops at that
   boundary, after three consecutive unusable replies, or when no unreceipted
-  unit remains. A shutdown signal lets the in-flight unit finish its receipt
-  and leads as one commit, so a resume never skips a receipted unit whose
-  lead was lost. Failed or incomplete units remain counted as open.
+  unit remains. A shutdown signal stops new dispatches and gives the in-flight
+  call its normal decision timeout, bounded by any remaining audit wall, to
+  return; a valid reply finishes its receipt and leads as one logical commit.
+  Failed, timed-out, or incomplete units remain counted as open and may be
+  retried within the remaining token budget.
 
 The sweep's calls are recorded in the run's usage ledger like every other
 decision, so the benchmark wall counts them.

@@ -425,7 +425,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(environment["RESULTS_DIR"], str(self.results))
         self.assertEqual(environment["LLM_DECIDE_LOG"], str(runtime.logs / "llm-decisions.log"))
 
-    def test_stop_signals_the_sweep_before_reaping_its_provider(self) -> None:
+    def test_stop_lets_the_inflight_provider_finish(self) -> None:
         events: list[str] = []
 
         class RunningSweep:
@@ -439,19 +439,140 @@ class RunTests(unittest.TestCase):
                 events.append("sweep")
 
             def wait(self, timeout=None):
+                events.append(f"wait:{timeout}")
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                events.append("kill")
+
+        runtime = SimpleNamespace(results=self.results, backend="claude")
+        with mock.patch.object(
+            audit_runner.process_tree, "kill_descendants",
+            side_effect=lambda *args: events.append("provider"),
+        ) as reap, mock.patch.object(
+            audit_runner.llm_decide, "decision_timeout", return_value=45,
+        ) as ceiling, mock.patch.object(
+            audit_runner.time, "monotonic", return_value=100,
+        ), mock.patch.object(audit_runner, "index_log"):
+            audit_runner.stop_sweep(runtime, RunningSweep())
+        reap.assert_not_called()
+        ceiling.assert_called_once_with("sweep_unit", backend="claude")
+        self.assertEqual(events, ["sweep", "wait:50"])
+
+    def test_stop_reaps_a_provider_that_outlives_its_decision_timeout(self) -> None:
+        events: list[str] = []
+
+        class StuckSweep:
+            pid = 123
+            returncode = None
+            waits = 0
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                events.append("sweep")
+
+            def wait(self, timeout=None):
+                self.waits += 1
+                events.append(f"wait:{timeout}")
+                if self.waits == 1:
+                    raise subprocess.TimeoutExpired("sweep", timeout)
+                self.returncode = -9
+                return self.returncode
+
+            def kill(self):
+                events.append("kill")
+
+        runtime = SimpleNamespace(results=self.results, backend="claude")
+        with mock.patch.object(
+            audit_runner.process_tree, "kill_descendants",
+            side_effect=lambda *args: events.append("provider"),
+        ), mock.patch.object(
+            audit_runner.llm_decide, "decision_timeout", return_value=45,
+        ), mock.patch.object(
+            audit_runner.time, "monotonic", return_value=100,
+        ), mock.patch.object(audit_runner, "index_log"):
+            audit_runner.stop_sweep(runtime, StuckSweep())
+        self.assertEqual(events, ["sweep", "wait:50", "provider", "kill", "wait:None"])
+
+    def test_stop_reaps_immediately_when_the_audit_wall_is_frozen(self) -> None:
+        events: list[str] = []
+
+        class RunningSweep:
+            pid = 123
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                events.append("sweep")
+
+            def wait(self, timeout=None):
+                events.append(f"wait:{timeout}")
+                if timeout is not None:
+                    # Still in flight: no grace remains past the wall.
+                    raise subprocess.TimeoutExpired("sweep", timeout)
+                self.returncode = -9
+                return self.returncode
+
+            def kill(self):
+                events.append("kill")
+
+        runtime = SimpleNamespace(results=self.results, backend="claude")
+        with mock.patch.object(
+            audit_runner.process_tree, "kill_descendants",
+            side_effect=lambda *args: events.append("provider"),
+        ), mock.patch.object(
+            audit_runner.llm_decide, "decision_timeout", return_value=45,
+        ), mock.patch.object(
+            audit_runner.time, "monotonic", return_value=100,
+        ), mock.patch.object(audit_runner, "index_log"):
+            audit_runner.stop_sweep(runtime, RunningSweep(), deadline=99)
+        self.assertEqual(events, ["sweep", "wait:0.0", "provider", "kill", "wait:None"])
+
+    def test_stop_all_signals_then_waits_by_each_sweeps_deadline(self) -> None:
+        events: list[str] = []
+
+        class RunningSweep:
+            def __init__(self, name: str, pid: int):
+                self.name = name
+                self.pid = pid
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                events.append(f"signal:{self.name}")
+
+            def wait(self, timeout=None):
+                if events[:2] != ["signal:first", "signal:second"]:
+                    raise AssertionError(f"wait began before both signals: {events}")
+                events.append(f"wait:{self.name}:{timeout}")
                 self.returncode = 0
                 return 0
 
             def kill(self):
                 self.returncode = -9
 
-        runtime = SimpleNamespace(results=self.results)
+        first = SimpleNamespace(results=self.results, backend="claude")
+        second = SimpleNamespace(results=self.results, backend="codex")
         with mock.patch.object(
-            audit_runner.process_tree, "kill_descendants",
-            side_effect=lambda *args: events.append("provider"),
+            audit_runner.llm_decide, "decision_timeout", return_value=45,
+        ), mock.patch.object(
+            audit_runner.time, "monotonic", return_value=90,
         ), mock.patch.object(audit_runner, "index_log"):
-            audit_runner.stop_sweep(runtime, RunningSweep())
-        self.assertEqual(events, ["sweep", "provider"])
+            audit_runner.stop_sweeps([
+                (first, RunningSweep("first", 101), 200),
+                (second, RunningSweep("second", 102), 100),
+            ])
+        self.assertEqual(
+            events,
+            ["signal:first", "signal:second", "wait:second:10", "wait:first:50"],
+        )
 
     def test_cli_dry_run_lists_units_and_refuses_to_spend_without_a_budget(self) -> None:
         base = [str(ROOT / "bin" / "sweep"), "--target-path", str(self.target),

@@ -1054,9 +1054,13 @@ def _load_mock(mock_val: str) -> Optional[str]:
     return mock_val
 
 
-def decision_timeout(decision: str) -> int:
-    """Return the configured decision ceiling, or the default for `decision`."""
-    backend = os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
+def decision_timeout(decision: str, backend: str = "") -> int:
+    """Return the configured decision ceiling, or the default for `decision`.
+
+    `backend` names the tier when the caller's environment is not the one
+    the decision runs in (an ensemble runner stopping one backend's sweep).
+    """
+    backend = backend or os.environ.get("ACTIVE_BACKEND") or os.environ.get("BACKEND") or ""
     tier = (
         DECISION_TIMEOUT_OSS if backend == "oss"
         else DECISION_TIMEOUT_HOSTED

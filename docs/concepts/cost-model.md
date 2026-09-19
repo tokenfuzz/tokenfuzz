@@ -104,9 +104,10 @@ Receipts also order revisits toward the least-read files.
 Breadth is a separate budget. `[sweep] token_budget` in `target.toml` turns
 on a sweep that hands each unreceipted unit of source to one decision with no
 tools and no follow-up turns, on the model `[sweep] model` names. Each unit
-is paid for once, spend is recorded across resumes, and the sweep stops at
-the budget rather than when the tree is covered. It is off by default; the
-coverage report states how far it reached. See
+with a completed receipt is reused; a failed, timed-out, or incomplete unit
+remains open and can be retried. All spend is recorded across resumes, and
+the sweep stops at the budget rather than when the tree is covered. It is off
+by default; the coverage report states how far it reached. See
 [Review coverage](coverage.md#the-budgeted-sweep).
 
 ## Session seeds across compaction
