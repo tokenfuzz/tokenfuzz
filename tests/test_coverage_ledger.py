@@ -458,6 +458,38 @@ class CallEdgeCardTests(unittest.TestCase):
         self.assertEqual(len(reopened), 1)
         self.assertNotEqual(reopened[0]["id"], first[0]["id"])
 
+    def test_fully_receipted_diversity_floor_file_gets_an_edge_card(self) -> None:
+        rel = "a/b/c/d/e/f/plain.c"
+        source = self.target / rel
+        source.parent.mkdir(parents=True)
+        source.write_text("int plain(void) { return 0; }\n", encoding="utf-8")
+        graph_path = self.results / "state" / callgraph.ARTIFACT_NAME
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["files"][rel] = {
+            "functions": 1, "reachable": 0, "paths": [],
+            "callers": [["src/main.c", 1]], "caller_overflow": [],
+            "callees": [], "definitions": [["plain", 1]],
+        }
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        first = workqueue.rank_target(self.ctx, 10)
+        floor = next(card for card in first if card["file"] == rel)
+        self.assertTrue(floor["reason"].startswith("diversity floor:"))
+        coverage_ledger.record_receipt(self.ctx, "1", rel, functions="plain")
+        self.assertIn(rel, coverage_ledger.caller_sets(self.results, self.target))
+        reranked = workqueue.rank_target(self.ctx, 3)
+        edges = [card for card in self.edges(reranked) if card["file"] == rel]
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(
+            {card["kind"] for card in reranked if card["file"] == rel},
+            {"ranked-source", "call-edge"},
+            "the edge rides with its floor file without consuming another file slot",
+        )
+        self.assertEqual(
+            len({card["file"] for card in reranked if card["kind"] == "ranked-source"}),
+            3,
+            "the floor edge must not displace a distinct main-window file",
+        )
+
     def test_coverage_distinguishes_eligible_sets_from_current_cards(self) -> None:
         graph_path = self.results / "state" / callgraph.ARTIFACT_NAME
         graph = json.loads(graph_path.read_text(encoding="utf-8"))

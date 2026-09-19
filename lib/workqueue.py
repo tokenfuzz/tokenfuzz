@@ -2127,7 +2127,19 @@ def rank_target(
                 existing["score"] = int(existing.get("score", 0)) + min(feature_score, 20)
                 break
     if delta_files is None:
-        cards.extend(call_edge_cards(ctx, cards))
+        # Quiet/deep sources live in the diversity-floor pool, but they are
+        # still eligible for the same second pass once fully receipted. Keep
+        # their edge beside the floor card so the window continues to count
+        # distinct files rather than spending both a main and floor slot on
+        # one callee.
+        floor_files = {
+            normalized_relpath(card.get("file", "")) for card in floor_cards
+        }
+        for edge in call_edge_cards(ctx, [*cards, *floor_cards]):
+            if normalized_relpath(edge.get("file", "")) in floor_files:
+                floor_cards.append(edge)
+            else:
+                cards.append(edge)
     # A fixed lane cannot claim its companion strategies. Select the lane
     # before buildability annotation and the bounded window so `limit` buys
     # that lane's best distinct files rather than a fraction of a mixed queue.
@@ -2153,7 +2165,8 @@ def rank_target(
     else:
         reserve = min(diversity_floor, max(1, limit // 5), len(floor_cards))
         selected_floor = select_diversity_floor(floor_cards, reserve, seen_ids)
-        main_limit = max(0, limit - len(selected_floor))
+        selected_files = {normalized_relpath(card.get("file", "")) for card in selected_floor}
+        main_limit = max(0, limit - len(selected_files))
         selected = dedupe_work_cards(
             select_strategy_window(cards, main_limit) + selected_floor
         )
@@ -2438,26 +2451,33 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
 
 
 def select_diversity_floor(cards: list[dict], limit: int, excluded_ids: set[str]) -> list[dict]:
-    """Pick low-scoring cards across subsystems so regexes don't define scope."""
+    """Pick low-scoring files across subsystems so regexes don't define scope.
+
+    The limit counts distinct files, like the main window: a fully receipted
+    floor file also carries a call-edge card, and every card of a selected
+    file rides with it in selection order.
+    """
     if limit <= 0:
         return []
-    by_subsystem: dict[str, list[dict]] = {}
-    for card in cards:
-        cid = card.get("id", "")
-        if not cid or cid in excluded_ids:
-            continue
-        by_subsystem.setdefault(card.get("subsystem", "unknown"), []).append(card)
-    for rows in by_subsystem.values():
-        rows.sort(key=lambda c: (c.get("id", ""), c.get("file", "")))
+    available = sorted(
+        (card for card in cards if card.get("id", "") and card.get("id", "") not in excluded_ids),
+        key=lambda c: (c.get("id", ""), c.get("file", "")),
+    )
+    by_subsystem: dict[str, dict[str, list[dict]]] = {}
+    for card in available:
+        rel = normalized_relpath(card.get("file", ""))
+        by_subsystem.setdefault(card.get("subsystem", "unknown"), {}).setdefault(rel, []).append(card)
     out: list[dict] = []
-    while len(out) < limit and by_subsystem:
+    selected = 0
+    while selected < limit and by_subsystem:
         for subsystem in sorted(list(by_subsystem)):
-            rows = by_subsystem.get(subsystem) or []
-            if not rows:
+            files = by_subsystem[subsystem]
+            if not files:
                 by_subsystem.pop(subsystem, None)
                 continue
-            out.append(rows.pop(0))
-            if len(out) >= limit:
+            out.extend(files.pop(next(iter(files))))
+            selected += 1
+            if selected >= limit:
                 break
     return out
 
