@@ -19,7 +19,7 @@ row per file:
 | `subsystem` | The same partition the queue uses for diversity. |
 | `card_id` | The id the ranker mints for the file's primary card, so claims resolve to files even after the queue is rewritten. |
 | `offered` | Whether the file has ever entered the ranked window. Sticky across rewrites: a file that left the window was still handed to the run. |
-| `scope` | `tree` for a whole-tree audit, `delta` for `bin/audit --since <rev>`. A delta pass rewrites only the delta's rows and keeps every other row's history, so a later whole-tree audit in the same results tree does not start from nothing. |
+| `scope` | `tree` for a whole-tree audit, `delta` for `bin/audit --since <rev>`. The runner pins one scope to a results tree, and the manifest contains exactly that scope. |
 
 The manifest is written from the same walk that produces the cards, so the
 two cannot disagree about what is in scope. It is a materialized view,
@@ -65,7 +65,9 @@ parsed in that file, resolved to the lines from its definition to the next
 one. A receipt that cannot be checked is refused, and a receipt on content
 that has since changed stops counting. Content is what is checked: a file a
 checkout or build step touched without changing keeps taking receipts, since
-a rerank happens only when tracked content changes.
+a rerank happens only when tracked content changes. When a file has multiple
+parsed definitions with the same name, use `--lines`; the name alone is
+ambiguous and is refused.
 
 The unit is a line range because every language has lines. Functions are a
 view over it: where the call graph parsed the file, the card and
@@ -101,7 +103,9 @@ leads in return:
   receipt, so the unit stays open. A lead is retained only when it names that
   function or line window, lies inside the unit, carries a known diagnostic
   and strategy, and agrees with a non-clean verdict; malformed leads are
-  dropped rather than becoming hypotheses or strategy metrics.
+  dropped rather than becoming hypotheses or strategy metrics. The strategy
+  label only routes a lead to a lane, so a missing or unknown one defaults to
+  S3 instead of losing the claim. A reply carries at most three leads.
 - **Receipts** land in `state/receipts.jsonl` with `source: sweep`. **Leads**
   become `NEEDS_TESTCASE` hypotheses owned by agent `sweep`, which the
   reproduce lane picks up through the ordinary handoff. The sweep never
@@ -111,8 +115,9 @@ leads in return:
   not started when its prompt alone exceeds the remaining budget; its reply
   can take the final estimate beyond the budget. The sweep stops at
   that boundary, after three consecutive unusable replies, or when no
-  unreceipted unit remains. Failed or incomplete units remain counted as
-  open.
+  unreceipted unit remains. A shutdown signal lets the in-flight unit finish
+  its receipt and leads as one commit, so a resume never skips a receipted
+  unit whose lead was lost. Failed or incomplete units remain counted as open.
 
 The sweep's calls are recorded in the run's usage ledger like every other
 decision, so the benchmark wall counts them.
@@ -120,14 +125,20 @@ decision, so the benchmark wall counts them.
 ## The second pass
 
 File coverage says nothing about interactions. Once every parsed function of
-a file carries a receipt, the ranker mints one **call-edge** card per file
-with a certain call into it, from the call graph's resolved edges. The card
-names the caller, and its next action is to compare what each call site
-guarantees against what the callee assumes. Edge cards ride the window with
-their file, so they add no distinct-file slot and no source scan, and they
-close like concrete cards once probed. Without receipts, or without a call
-graph, no edge card exists; the pass follows the first one rather than
-competing with it.
+a file carries a receipt, the ranker mints one **call-edge** card for its set
+of resolved caller files. The card starts with the highest-count caller and
+asks the session to compare caller guarantees against callee assumptions,
+sampling other callers when their contracts differ. This is a bounded sample,
+not an attestation that every caller was examined: `bin/state coverage` reports
+the eligible caller sets, how many were sampled and concluded, how many cards
+the current queue holds, and how many callers beyond the seeds receive no
+individual card. One card represents each caller set, so a file with thousands
+of callers cannot create thousands of agent sessions. Edge cards ride the
+window with their file, add no distinct-file slot, and close like concrete
+cards once probed. A file completing its receipts is part of the queue's
+refresh signature, so the card appears on the next refresh even when no source
+changed. Without receipts, or without a call graph, no edge card exists; the
+pass follows the first one rather than competing with it.
 
 ## Observed read requests from transcripts
 
@@ -146,6 +157,12 @@ useful ways, but neither is a gate: transcript formats and shell idioms vary,
 and a read the parser does not recognise is simply absent. Both ledgers are
 pinned to the current manifest hash, so observations on changed content stop
 counting.
+
+The report also joins the two: **attested lines no transcript read
+requested** is the share of receipts the transcript cannot corroborate. An
+over-broad `mark-examined` on a file the session never opened shows up
+there. Because the parser misses idioms it does not know, the number is a
+place to look, not proof of a false receipt.
 
 ## What it does and does not say
 

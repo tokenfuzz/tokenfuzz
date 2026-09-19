@@ -71,7 +71,7 @@ def _claim_strategy(ctx, requested: str) -> str:
 
 
 def _format_mutator_ok(cmd: str, row: dict) -> str:
-    """Compact OK line for state mutators (add-hyp/update-hyp/update-card/add-note/add-run).
+    """Compact OK line for state mutators.
 
     The agent's own input is already in scope from the preceding function_call
     arguments, so re-echoing the full row wastes tokens. The line below keeps
@@ -115,8 +115,10 @@ def _format_mutator_ok(cmd: str, row: dict) -> str:
         kv("reason", row.get("reason"))
         kv("hyp", row.get("hypothesis_id"))
         kv("card", row.get("card_id"))
+    elif cmd == "mark-examined":
+        pass
     else:
-        # Defensive: should not happen; callers pass one of the five known cmds.
+        # Defensive: should not happen; callers pass a known mutator command.
         kv("row", json.dumps(row, sort_keys=True))
     return " ".join(parts)
 

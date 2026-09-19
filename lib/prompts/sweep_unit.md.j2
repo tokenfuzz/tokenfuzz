@@ -13,6 +13,7 @@ Rules:
 - Read the whole unit. `examined` must cover every line from {{ start }} through {{ end }}; otherwise the unit remains open.
 - Return exactly one verdict per parsed function. When none are listed, use `lines {{ start }}-{{ end }}` as the verdict function. `needs-context` means the answer depends on a caller or callee not shown.
 - A lead is a concrete, falsifiable claim at one function and line, not a style remark or a hypothetical about code not shown. A `clean` verdict has no leads. Zero leads is the normal answer for clean code.
+- Return at most three leads, keeping the strongest concrete claims when several exist.
 - Do not invent function names; use the parsed list or a line range.
 
 Source (line-numbered):

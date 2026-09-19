@@ -56,7 +56,6 @@ class Unit:
     reason: str = ""
     total_lines: int = 0
     sha1: str = ""
-    manifest_entry: dict = field(default_factory=dict, repr=False)
 
     @property
     def key(self) -> str:
@@ -183,30 +182,15 @@ def plan_units(
         for start, end, names in candidates:
             if any(rs <= start and end <= re for rs, re in done):
                 continue
-            units.append(Unit(
-                rel, start, end, names, reason, total,
-                str(row.get("sha1") or ""), dict(row),
-            ))
+            units.append(Unit(rel, start, end, names, reason, total, str(row.get("sha1") or "")))
     return units
 
 
-def _numbered_source(
-    ctx: workqueue.Context, unit: Unit,
-    expected_sha1: str,
-    source_cache: dict[str, tuple[str, list[str]]] | None = None,
-) -> str:
-    path = ctx.target_root / unit.file
-    cache = source_cache if source_cache is not None else {}
-    if unit.file not in cache:
-        with path.open("rb") as stream:
-            body = stream.read()
-        cache[unit.file] = (
-            hashlib.sha1(body).hexdigest(),
-            body.decode("utf-8", "replace").splitlines(),
-        )
-    sha1, lines = cache[unit.file]
-    if not expected_sha1 or sha1 != expected_sha1:
+def _numbered_source(ctx: workqueue.Context, unit: Unit, expected_sha1: str) -> str:
+    body = (ctx.target_root / unit.file).read_bytes()
+    if not expected_sha1 or hashlib.sha1(body).hexdigest() != expected_sha1:
         raise OSError(f"{unit.file} changed after the sweep plan")
+    lines = body.decode("utf-8", "replace").splitlines()
     width = len(str(unit.end))
     return "\n".join(
         f"{number:>{width}}  {lines[number - 1] if number - 1 < len(lines) else ''}"
@@ -216,8 +200,6 @@ def _numbered_source(
 
 def build_prompt(
     ctx: workqueue.Context, unit: Unit, attacker_controls: str,
-    source_cache: dict[str, tuple[str, list[str]]] | None = None,
-    neighbourhood_cache: dict[str, list[str]] | None = None,
     graph: dict | None = None,
 ) -> str:
     row = (
@@ -225,12 +207,7 @@ def build_prompt(
         if unit.total_lines and unit.sha1
         else (coverage_ledger.manifest_row(ctx.results_dir, unit.file) or {})
     )
-    blocks = neighbourhood_cache if neighbourhood_cache is not None else {}
-    if unit.file not in blocks:
-        blocks[unit.file] = callgraph.block_for(
-            ctx.results_dir, unit.file, ctx.target_root, graph,
-        )
-    block = blocks[unit.file]
+    block = callgraph.block_for(ctx.results_dir, unit.file, ctx.target_root, graph)
     return prompt_render.render_template("sweep_unit.md.j2", {
         "attacker_controls": attacker_controls or "bytes",
         "file": unit.file,
@@ -239,16 +216,12 @@ def build_prompt(
         "total_lines": str(row.get("lines") or unit.end),
         "functions": ", ".join(unit.functions) or "(none parsed; treat the window as one unit)",
         "neighbourhood": "\n".join(block).strip(),
-        "source": _numbered_source(ctx, unit, str(row.get("sha1") or ""), source_cache),
+        "source": _numbered_source(ctx, unit, str(row.get("sha1") or "")),
     })
 
 
 class ReplyError(ValueError):
     """A reply the sweep cannot turn into a verified receipt."""
-
-
-class _Stopped(Exception):
-    """SIGTERM from the audit's shutdown; the loop ends and state is written."""
 
 
 def _covered(unit: Unit, receipted: dict[str, list[tuple[int, int]]]) -> bool:
@@ -395,28 +368,17 @@ def _run_locked(
     stop = "exhausted" if not units else "interrupted"
     consecutive = 0
     attempted = 0
-    source_cache: dict[str, tuple[str, list[str]]] = {}
-    neighbourhood_cache: dict[str, list[str]] = {}
-    cached_file = ""
     open_units = {unit.key for unit in units}
-    receipt_signature: tuple[int, int, int] | None = None
 
-    def refresh_open_units(force: bool = False) -> None:
-        nonlocal receipt_signature
-        try:
-            info = coverage_ledger.receipts_path(ctx.results_dir).stat()
-            signature = (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-        except OSError:
-            signature = (0, 0, 0)
-        if not force and signature == receipt_signature:
-            return
+    def refresh_open_units() -> None:
+        # Sessions receipt files while the sweep runs; one ledger read per
+        # paid call is cheap next to the call.
         receipted = coverage_ledger.examined_ranges_by_file(ctx.results_dir)
         open_units.intersection_update(
             unit.key for unit in units if not _covered(unit, receipted)
         )
-        receipt_signature = signature
 
-    refresh_open_units(force=True)
+    refresh_open_units()
 
     def persist(reason: str) -> dict:
         # After every unit, not only at the end: the audit ends the sweep
@@ -430,8 +392,14 @@ def _run_locked(
         _write_state(ctx.results_dir, current)
         return current
 
+    stop_requested = False
+
     def _on_term(signum, frame):
-        raise _Stopped()
+        # Finish the current receipt and its leads as one logical commit.
+        # Raising here can strand a receipted unit without its valid lead,
+        # after which a resume skips the unit permanently.
+        nonlocal stop_requested
+        stop_requested = True
 
     previous_model = os.environ.get("MODEL")
     previous_handler = signal.getsignal(signal.SIGTERM)
@@ -441,6 +409,9 @@ def _run_locked(
     usage_index = llm_usage.find_usage_index(ctx.results_dir)
     try:
         for unit in units:
+            if stop_requested:
+                stop = "interrupted"
+                break
             if token_budget and spent >= token_budget:
                 stop = "budget"
                 break
@@ -448,29 +419,19 @@ def _run_locked(
                 stop = "unit-cap"
                 break
             # A session may have receipted this unit since the plan was made.
-            # Stat the ledger on each turn and reparse it only after a write.
             refresh_open_units()
             if unit.key not in open_units:
                 continue
-            if cached_file != unit.file:
-                source_cache.clear()
-                neighbourhood_cache.clear()
-                cached_file = unit.file
             try:
-                text = build_prompt(
-                    ctx, unit, attacker_controls,
-                    source_cache=source_cache,
-                    neighbourhood_cache=neighbourhood_cache,
-                    graph=graph,
-                )
+                text = build_prompt(ctx, unit, attacker_controls, graph=graph)
             except OSError as exc:
                 # The file changed or vanished under the plan; skip it, do
                 # not spend on it, and let the next plan see the tree.
                 say(f"sweep: cannot read {unit.key}: {exc}")
                 continue
-            refresh_open_units()
-            if unit.key not in open_units:
-                continue
+            if stop_requested:
+                stop = "interrupted"
+                break
             prompt_tokens = llm_usage.estimate_tokens(text)
             if token_budget and spent + prompt_tokens > token_budget:
                 stop = "budget"
@@ -482,6 +443,13 @@ def _run_locked(
             counts["units"] += 1
             attempted += 1
             persist("interrupted")
+            if stop_requested:
+                # No provider call was made, so undo the provisional charge.
+                spent -= prompt_tokens
+                counts["units"] -= 1
+                attempted -= 1
+                stop = "interrupted"
+                break
             reply = llm_decide.llm_decide(
                 DECISION, REQUIRED_KEYS, text,
                 timeout=llm_decide.decision_timeout(DECISION), usage_index=usage_index,
@@ -505,22 +473,19 @@ def _run_locked(
                                 ctx, AGENT, unit.file,
                                 lines=",".join(f"{s}-{e}" for s, e in ranges),
                                 source="sweep", note=summary[:240],
-                                expected_sha1=source_cache[unit.file][0],
-                                manifest_entry=unit.manifest_entry or None,
+                                expected_sha1=unit.sha1,
                             )
                             counts["receipts"] += 1
                             open_units.discard(unit.key)
-                            try:
-                                info = coverage_ledger.receipts_path(ctx.results_dir).stat()
-                                receipt_signature = (info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-                            except OSError:
-                                receipt_signature = None
                 except (ReplyError, coverage_ledger.ReceiptError) as exc:
                     # A receipt the manifest cannot verify (the file was
                     # re-ranked or changed between plan and reply) is not
                     # coverage; the unit stays open for the next plan.
                     failure = f"rejected: {exc}"
             if failure:
+                if stop_requested:
+                    stop = "interrupted"
+                    break
                 counts["failures"] += 1
                 consecutive += 1
                 say(f"sweep: {unit.key} {failure}")
@@ -538,11 +503,12 @@ def _run_locked(
                 f"sweep: {unit.key} examined={len(ranges)} leads={len(leads)} "
                 f"spent={spent}{'/' + str(token_budget) if token_budget else ''}"
             )
+            if stop_requested:
+                stop = "interrupted"
+                break
         else:
-            refresh_open_units(force=True)
+            refresh_open_units()
             stop = "exhausted" if not open_units else "incomplete"
-    except _Stopped:
-        stop = "interrupted"
     finally:
         signal.signal(signal.SIGTERM, previous_handler)
         if model:
@@ -553,7 +519,7 @@ def _run_locked(
         # Persist even when an unexpected ledger or handoff error escapes.
         # The process may fail, but its completed calls must never disappear
         # from the spend ledger and become buyable again on resume.
-        refresh_open_units(force=True)
+        refresh_open_units()
         final_state = persist(stop)
     return final_state
 

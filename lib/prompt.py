@@ -516,7 +516,12 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
     if assigned_strategy != primary_strategy:
         lines.append(f"- **Card primary strategy:** {primary_strategy}")
     if card.get("edge_from"):
-        lines.append(f"- **Edge from:** `{card['edge_from']}` (cross-file contract card)")
+        count = int(card.get("edge_count") or 1)
+        lines.append(
+            f"- **Caller-set sample:** {count} resolved file(s), starting with "
+            f"`{card['edge_from']}`; {int(card.get('edge_omitted') or 0)} "
+            "caller(s) have no individual card"
+        )
     if card.get("seed"):
         lines.append(f"- **Seed:** `{card['seed']}`")
     if card.get("buildability") == "not-built":

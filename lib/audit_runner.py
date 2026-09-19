@@ -46,6 +46,7 @@ import target_profile
 import triage
 import verdict
 import vocab_rules
+import coverage_ledger
 import read_ledger
 import sweep
 import workqueue
@@ -963,10 +964,17 @@ def _work_card_signature(
         },
         sort_keys=True, separators=(",", ":"),
     )
+    # The second pass mints its card only once a file is fully receipted,
+    # which is a ledger event, not a source change. Key on the eligible set
+    # rather than the receipts file so a rerank follows each file that
+    # completes, not every receipt written.
+    second_pass = ",".join(sorted(
+        coverage_ledger.caller_sets(runtime.results, runtime.target_root)
+    ))
     return housekeeping.signature(
         "work-cards-refresh", inputs,
         f"{source_signature or runtime.target_rev}\nrank_config={rank_config}"
-        f"\ncallgraph={callgraph_signature}",
+        f"\ncallgraph={callgraph_signature}\nsecond_pass={second_pass}",
     )
 
 
@@ -1960,6 +1968,9 @@ def progress(runtime: Runtime) -> ProgressSnapshot:
         counts = structured_state.agent_counts(str(agent), runtime.results) or {}
         active += counts.get("active", 0)
         env_blocked += counts.get("env_blocked", 0)
+    sweep_counts = structured_state.agent_counts("sweep", runtime.results) or {}
+    active += sweep_counts.get("active", 0)
+    env_blocked += sweep_counts.get("env_blocked", 0)
     return ProgressSnapshot(
         findings, crashes, len(finding_root_ids), len(crash_root_ids),
         active, env_blocked, artifact_roots,
@@ -4371,10 +4382,11 @@ def stop_sweep(runtime: Runtime, process: "subprocess.Popen | None") -> None:
     if process is None:
         return
     if process.poll() is None:
-        # The sweep writes its state on SIGTERM; its in-flight backend CLI
-        # child would otherwise finish one more paid decision unrecorded.
-        process_tree.kill_descendants(process.pid, signal.SIGTERM, 1.0)
+        # Tell the sweep not to dispatch another decision before reaping its
+        # in-flight backend CLI. It finishes any returned receipt and leads,
+        # then writes state and exits.
         process.terminate()
+        process_tree.kill_descendants(process.pid, signal.SIGTERM, 1.0)
         try:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:

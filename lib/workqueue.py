@@ -1124,7 +1124,14 @@ def mode_for_file(path: str) -> str:
 
 
 def normalized_relpath(path: str | Path) -> str:
-    return str(path).replace("\\", "/").lstrip("./")
+    # Strip `./` prefixes and leading slashes only. A character-set strip
+    # would also eat the dot of a root-level dot directory, so `.github/x`
+    # became `github/x` on cards while the manifest and receipts kept the
+    # real path, and the two never matched.
+    text = str(path).replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    return text.lstrip("/")
 
 
 def is_excluded_work_path(path: str | Path) -> bool:
@@ -1211,9 +1218,9 @@ def work_surface(card: dict) -> str:
     function = (card.get("function") or "").strip()
     strategy = (card.get("strategy") or "").strip().upper()
     if file and card.get("kind") == "call-edge":
-        # One card per resolved caller file: the edge is the surface, so an
-        # S3 companion on the same file is a different card.
-        return f"{file.lower()}:edge:{normalized_relpath(card.get('edge_from', '')).lower()}"
+        # The resolved caller set is one bounded second-pass surface, separate
+        # from the file's ordinary S3 review.
+        return f"{file.lower()}:edge-callers:{str(card.get('edge_set') or '').lower()}"
     if file:
         if function:
             return f"{file.lower()}:{function.lower()}"
@@ -1381,10 +1388,15 @@ def iter_source_files(
     # filter the same way they do in the model-direct prompt.
     # Sanitizer build trees (build-asan*, build-ubsan*, ...) are
     # filtered by is_excluded_path_part below.
+    # `.audit` is the harness's own workspace under a target checkout
+    # (build recipes, logs, the bootstrap virtualenv); it holds no target
+    # source by definition. It matters when the tree is not a checkout, since
+    # the tracked-set filter below is what otherwise keeps it out.
     skip_dirs = {
         ".git",
         ".hg",
         ".svn",
+        ".audit",
         "node_modules",
         "__pycache__",
     }
@@ -1414,6 +1426,10 @@ def iter_source_files(
             if d not in skip_dirs
             and not is_excluded_path_part(normalized_relpath(d).lower())
             and not d.startswith(".cache")
+            # A Python virtualenv is an installed runtime, not the target's
+            # source, whatever it is named; `pyvenv.cfg` is how Python itself
+            # recognises one.
+            and not (Path(dirpath) / d / "pyvenv.cfg").is_file()
         ]
         for name in filenames:
             path = Path(dirpath) / name
@@ -2153,64 +2169,101 @@ def rank_target(
     return selected
 
 
+def edge_card_id(
+    ctx: Context, rel: str, callers: list[str], manifest_by_file: dict[str, dict],
+) -> tuple[str, str]:
+    """(card id, caller-set key) of the second-pass card for one callee.
+
+    A concluded sample is evidence about exact caller and callee content, so
+    the key hashes every side's content: a change on either side mints a
+    fresh card even when the set of paths stays the same.
+    """
+    import coverage_ledger  # lazy: it imports this module
+    identity = [f"callee:{(manifest_by_file.get(rel) or {}).get('sha1', '')}"]
+    for path in sorted(callers):
+        row = manifest_by_file.get(path) or {}
+        if coverage_ledger.content_matches_manifest(ctx.target_root, path, row):
+            sha1 = str(row.get("sha1") or "")
+        else:
+            try:
+                sha1 = coverage_ledger.file_identity(ctx.target_root / path)[1]
+            except OSError:
+                sha1 = ""
+        identity.append(f"{path}:{sha1}")
+    caller_set = hashlib.sha1("\n".join(identity).encode()).hexdigest()[:12]
+    return ranked_card_id(ctx.target_slug, rel, f"edge:callers:{caller_set}"), caller_set
+
+
 def call_edge_cards(ctx: Context, cards: list[dict]) -> list[dict]:
-    """Second-pass cards over cross-file call edges into fully receipted files.
+    """One caller-set second pass per fully receipted file.
 
     File cards cover functions; nothing covers the contract between a caller
     in one file and a callee in another, which is where a size, lifetime, or
     encoding assumption crosses hands. Minted only once every parsed function
     of the callee's file carries a receipt, so the pass follows the first one
     instead of competing with it, and only from the call graph's certain
-    edges. They ride the window with their file like companions, so they cost
-    no distinct-file slot and no extra source scan.
+    edges. One card represents the resolved caller set and starts at its
+    highest-count caller. This bounds the second pass to one session per
+    callee file even when the graph has thousands of callers. It is an S3
+    card in the window: it rides with its file like a companion, and in the
+    rotation it can buy the file's slot itself when the lane holds no other
+    card for that file.
     """
     import callgraph  # lazy: it imports this module
     import coverage_ledger  # lazy: it imports this module
-    receipted = coverage_ledger.examined_ranges_by_file(ctx.results_dir)
-    if not receipted:
+    graph = callgraph.load(ctx.results_dir)
+    sets = coverage_ledger.caller_sets(ctx.results_dir, ctx.target_root, graph)
+    if not sets:
         return []
     manifest_by_file = {
         str(row.get("file") or ""): row
         for row in coverage_ledger.read_manifest(ctx.results_dir)
     }
-    graph = callgraph.load(ctx.results_dir) or {}
     out: list[dict] = []
+    latest = latest_claims_by_card(ctx)
+    ttl = work_card_claim_ttl()
+    now = datetime.now(timezone.utc)
+    conclusion_counts = card_conclusion_counts(ctx)
+    distinct_counts = card_distinct_hypothesis_counts(ctx)
     for card in cards:
         if card.get("kind") != "ranked-source" or card.get("reason", "").startswith("companion strategy "):
             continue
         rel = normalized_relpath(card.get("file", ""))
-        manifest = manifest_by_file.get(rel) or {}
-        # rank_target rewrites the manifest after it selects the new window.
-        # Refuse an old receipt immediately if source changed since the prior
-        # manifest, so that one transition pass cannot mint a stale edge card.
-        if not coverage_ledger.source_matches_manifest(ctx, rel, manifest):
+        callers = sets.get(rel)
+        if not callers:
             continue
-        definitions = coverage_ledger.function_ranges(
-            ctx.results_dir, rel, int(manifest.get("lines") or 0), graph,
-        )
-        if not definitions or any(
-            not any(rs <= start and end <= re for rs, re in receipted.get(rel, []))
-            for _name, start, end in definitions
+        caller = callers[0]
+        card_id, caller_set = edge_card_id(ctx, rel, callers, manifest_by_file)
+        status = visible_card_status(latest.get(card_id), ttl, now)
+        edge = {
+            "id": card_id,
+            "kind": "call-edge",
+            "target_slug": ctx.target_slug,
+            "subsystem": card.get("subsystem", ""),
+            "file": rel,
+            "function": "",
+            "edge_from": caller,
+            "edge_count": len(callers),
+            "edge_set": caller_set,
+            "edge_omitted": max(0, len(callers) - 1),
+            "mode": card.get("mode", "auto"),
+            "strategy": "S3",
+            "score": max(1, int(card.get("score", 1)) - 1),
+            "seed": card.get("seed", ""),
+            "patch_cards": [],
+            "reason": (
+                f"second-pass sample: every parsed function receipted; "
+                f"{len(callers)} resolved caller file(s), seeded by {caller}; "
+                f"{max(0, len(callers) - 1)} not individually carded"
+            ),
+            "status": status,
+            "created_at": now_iso(),
+        }
+        if not card_closed_for_run(
+            ctx, edge, status,
+            conclusion_counts=conclusion_counts, distinct_counts=distinct_counts,
         ):
-            continue
-        for caller in callgraph.caller_files(ctx.results_dir, rel, graph):
-            out.append({
-                "id": ranked_card_id(ctx.target_slug, rel, f"edge:{caller}"),
-                "kind": "call-edge",
-                "target_slug": ctx.target_slug,
-                "subsystem": card.get("subsystem", ""),
-                "file": rel,
-                "function": "",
-                "edge_from": caller,
-                "mode": card.get("mode", "auto"),
-                "strategy": "S3",
-                "score": max(1, int(card.get("score", 1)) - 1),
-                "seed": card.get("seed", ""),
-                "patch_cards": [],
-                "reason": f"second pass: every parsed function receipted; contract with caller {caller}",
-                "status": "unclaimed",
-                "created_at": now_iso(),
-            })
+            out.append(edge)
     return out
 
 
@@ -2309,7 +2362,10 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
         pools: dict[str, list[dict]] = {}
         for card in tier:
             if card.get("kind") == "call-edge":
-                # Rides with its file, like a companion strategy card.
+                # S3 work that can buy its callee's slot even when the lane
+                # holds no other card for that file; otherwise it rides with
+                # the file like a companion (restored below).
+                pools.setdefault("S3", []).append(card)
                 continue
             if card.get("kind") != "ranked-source":
                 # Patch and peer cards keep their own lane and their own cap.
@@ -2368,7 +2424,7 @@ def select_strategy_window(cards: list[dict], limit: int) -> list[dict]:
         rel
         for card in cards
         if card.get("id", "") in chosen_ids
-        and card.get("kind") == "ranked-source"
+        and card.get("kind") in ("ranked-source", "call-edge")
         and (rel := normalized_relpath(card.get("file", "")))
     }
     return [
@@ -5899,12 +5955,16 @@ def card_next_action(
         if has_prior_hypotheses else ""
     )
     if str(card.get("kind", "")) == "call-edge":
+        count = int(card.get("edge_count") or 1)
+        omitted = int(card.get("edge_omitted") or 0)
         return (
             distinct_angle
             + f"Every parsed function in this file already carries a receipt; "
-            f"this card is the contract with its caller `{card.get('edge_from', '')}`. "
-            "Read each resolved call site there and compare what the caller "
-            "guarantees (length, ownership, lifetime, encoding, error state) "
+            f"this bounded second-pass card samples a set of {count} resolved caller "
+            f"file(s), starting with the highest-count caller `{card.get('edge_from', '')}`; "
+            f"{omitted} caller(s) have no individual card. Read the seed's resolved "
+            "call sites and sample other callers when their contracts differ, "
+            "and compare what they guarantee (length, ownership, lifetime, encoding, error state) "
             "against what the callee assumes at the point of use. Create one "
             "hypothesis on a concrete mismatch with an attacker-reachable "
             "input; otherwise `bin/state update-card --card-id <id> --status "
@@ -6533,7 +6593,11 @@ def state_resume(
             if assigned_strategy != card_strategy:
                 lines.append(f"- Card primary strategy: `{card_strategy}`")
             if card.get("edge_from"):
-                lines.append(f"- Edge from: `{card.get('edge_from', '')}`")
+                lines.append(
+                    f"- Caller set: {int(card.get('edge_count') or 1)} resolved file(s), "
+                    f"starting with `{card.get('edge_from', '')}`; "
+                    f"{int(card.get('edge_omitted') or 0)} caller(s) have no individual card"
+                )
             lines.extend([
                 f"- Reason: {card.get('reason','')}",
                 f"- Fix commits: {fix_hash_text}",

@@ -594,10 +594,12 @@ def caller_files(
         return []
     entry = (data.get("files") or {}).get(rel) or {}
     out: list[str] = []
+    seen: set[str] = set()
     for row in [*(entry.get("callers") or []), *(entry.get("caller_overflow") or [])]:
         if isinstance(row, list) and row and isinstance(row[0], str):
             origin = workqueue.normalized_relpath(row[0])
-            if origin and origin != rel and origin not in out:
+            if origin and origin != rel and origin not in seen:
+                seen.add(origin)
                 out.append(origin)
     return out
 

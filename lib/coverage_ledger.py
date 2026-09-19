@@ -119,10 +119,6 @@ def function_ranges(
     return out
 
 
-def source_matches_manifest(ctx: workqueue.Context, rel: str, row: dict) -> bool:
-    return content_matches_manifest(ctx.target_root, rel, row)
-
-
 def content_matches_manifest(target_root: Path, rel: str, row: dict) -> bool:
     """Whether the source on disk is the content the manifest row describes.
 
@@ -141,8 +137,9 @@ def content_matches_manifest(target_root: Path, rel: str, row: dict) -> bool:
             ("mtime_ns", info.st_mtime_ns),
             ("ctime_ns", info.st_ctime_ns),
         )
-        present = [(key, current) for key, current in fields if row.get(key) is not None]
-        if present and all(int(row[key]) == current for key, current in present):
+        if all(row.get(key) is not None for key, _ in fields) and all(
+            int(row[key]) == current for key, current in fields
+        ):
             return True
         return file_identity(path)[1] == str(row.get("sha1") or "")
     except (OSError, TypeError, ValueError):
@@ -160,26 +157,27 @@ def record_receipt(
     source: str = "agent",
     note: str = "",
     expected_sha1: str = "",
-    manifest_entry: dict | None = None,
 ) -> dict:
     """Append a verified receipt: the file is in the manifest, every range is
     inside it, and every function named was parsed there. A receipt that
-    cannot be checked is refused rather than recorded as coverage."""
+    cannot be checked is refused rather than recorded as coverage.
+    `expected_sha1` is the content the reader actually saw; a manifest
+    rewritten to newer content in between refuses the receipt."""
     rel = workqueue.normalized_relpath(file)
-    row = manifest_entry if manifest_entry is not None else manifest_row(ctx.results_dir, rel)
-    if row is not None and workqueue.normalized_relpath(row.get("file", "")) != rel:
-        raise ReceiptError(f"manifest entry for {row.get('file', '')!r} does not describe {rel!r}")
+    row = manifest_row(ctx.results_dir, rel)
     if row is None:
         raise ReceiptError(f"{rel or file!r} is not in the manifest; run bin/rank-work or check the path")
     if expected_sha1 and row.get("sha1") != expected_sha1:
         raise ReceiptError(f"{rel} changed after the reviewed content was loaded")
-    if not source_matches_manifest(ctx, rel, row):
+    if not content_matches_manifest(ctx.target_root, rel, row):
         raise ReceiptError(f"{rel} changed since the coverage manifest was written")
     total = int(row.get("lines") or 0)
     ranges = parse_ranges(lines)
     names = [name.strip() for name in str(functions or "").split(",") if name.strip()]
     if names:
-        known = {name: (start, end) for name, start, end in function_ranges(ctx.results_dir, rel, total)}
+        known: dict[str, list[tuple[int, int]]] = {}
+        for name, start, end in function_ranges(ctx.results_dir, rel, total):
+            known.setdefault(name, []).append((start, end))
         missing = [name for name in names if name not in known]
         if missing:
             hint = (
@@ -187,7 +185,12 @@ def record_receipt(
                 if not known else f"parsed functions are: {', '.join(sorted(known))}"
             )
             raise ReceiptError(f"unknown function(s) {', '.join(missing)} in {rel}; {hint}")
-        ranges = merge_ranges(ranges + [known[name] for name in names])
+        ambiguous = [name for name in names if len(known[name]) > 1]
+        if ambiguous:
+            raise ReceiptError(
+                f"ambiguous function(s) {', '.join(ambiguous)} in {rel}; use --lines"
+            )
+        ranges = merge_ranges(ranges + [known[name][0] for name in names])
     if not ranges:
         raise ReceiptError("a receipt needs --lines or --functions")
     if ranges[-1][1] > total:
@@ -226,6 +229,19 @@ def examined_lines(ranges: list[tuple[int, int]]) -> int:
     return sum(end - start + 1 for start, end in ranges)
 
 
+def intersect_ranges(
+    left: list[tuple[int, int]], right: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Lines present in both merged range lists."""
+    out: list[tuple[int, int]] = []
+    for a_start, a_end in left:
+        for b_start, b_end in right:
+            start, end = max(a_start, b_start), min(a_end, b_end)
+            if start <= end:
+                out.append((start, end))
+    return merge_ranges(out)
+
+
 def examined_fraction_by_file(results_dir: Path) -> dict[str, float]:
     """Share of each manifest file's lines under a current receipt; files
     with no receipt are absent, which reads as zero."""
@@ -261,6 +277,78 @@ def file_examined(results_dir: Path, file: str) -> dict:
         "fraction": (covered / total) if total else 0.0,
         "ranges": ranges,
         "unexamined_functions": unexamined,
+    }
+
+
+def caller_sets(
+    results_dir: Path, target_root: Path, graph: dict | None = None,
+) -> dict[str, list[str]]:
+    """Second-pass eligibility: files whose every parsed function carries a
+    current receipt, mapped to their resolved caller files (most calls
+    first). Empty without a call graph."""
+    data = graph if graph is not None else callgraph.load(results_dir)
+    if data is None or data.get("skipped"):
+        return {}
+    receipted = examined_ranges_by_file(results_dir)
+    out: dict[str, list[str]] = {}
+    for row in read_manifest(results_dir):
+        rel = str(row.get("file") or "")
+        ranges = receipted.get(rel)
+        if not ranges or not content_matches_manifest(target_root, rel, row):
+            continue
+        definitions = function_ranges(results_dir, rel, int(row.get("lines") or 0), data)
+        if not definitions or any(
+            not any(rs <= start and end <= re for rs, re in ranges)
+            for _name, start, end in definitions
+        ):
+            continue
+        callers = callgraph.caller_files(results_dir, rel, data)
+        if callers:
+            out[rel] = callers
+    return out
+
+
+def call_edge_scope(ctx: workqueue.Context) -> dict:
+    """What the bounded second pass has reached.
+
+    One card per eligible caller set, keyed to content, so a set that was
+    sampled and concluded leaves no card in the queue. Counting only the
+    queue would report a reviewed contract as never carded; the claim ledger
+    is what says a set was sampled. Callers beyond each set's seed never get
+    their own card, and that count is the sampling boundary.
+    """
+    graph = callgraph.load(ctx.results_dir)
+    empty = {
+        "available": False, "eligible_caller_sets": 0, "resolved_callers": 0,
+        "sampled_sets": 0, "concluded_sets": 0, "current_sample_cards": 0,
+        "callers_without_individual_card": 0,
+    }
+    if graph is None or graph.get("skipped"):
+        return empty
+    sets = caller_sets(ctx.results_dir, ctx.target_root, graph)
+    manifest_by_file = {str(row.get("file") or ""): row for row in read_manifest(ctx.results_dir)}
+    latest = workqueue.latest_claims_by_card(ctx)
+    sampled = concluded = 0
+    for rel, callers in sets.items():
+        card_id, _ = workqueue.edge_card_id(ctx, rel, callers, manifest_by_file)
+        claim = latest.get(card_id)
+        if claim:
+            sampled += 1
+            concluded += str(claim.get("status") or "") in workqueue.TERMINAL_CARD_STATUSES
+    current_cards = len({
+        str(card.get("id") or "")
+        for card in workqueue.read_jsonl(workqueue.work_cards_path(ctx))
+        if card.get("kind") == "call-edge" and card.get("id")
+    })
+    return {
+        **empty,
+        "available": True,
+        "eligible_caller_sets": len(sets),
+        "resolved_callers": sum(len(callers) for callers in sets.values()),
+        "sampled_sets": sampled,
+        "concluded_sets": concluded,
+        "current_sample_cards": current_cards,
+        "callers_without_individual_card": sum(len(callers) - 1 for callers in sets.values()),
     }
 
 
@@ -341,11 +429,6 @@ def write_manifest(
     with workqueue.jsonl_lock(path):
         previous = {row.get("file", ""): row for row in read_manifest(ctx.results_dir)}
         rows = _manifest_rows(ctx, source_paths, offered_files, scope, previous)
-        if scope == "delta":
-            # The delta is a scope, not the tree: rows the delta does not
-            # touch keep their history rather than being dropped and reset.
-            listed = {row["file"] for row in rows}
-            rows.extend(row for rel, row in previous.items() if rel not in listed)
         rows.sort(key=lambda row: row["file"])
         workqueue._write_jsonl_unlocked(path, rows)
     return rows
@@ -435,6 +518,13 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
     be claimed without being offered only through a non-ranked card (a patch
     card), and a read can be requested without either through discovery, so
     the buckets are counted independently rather than nested.
+
+    `lines_attested_unrequested` is the cross-check between the two ledgers:
+    attested lines no transcript read reached. A receipt is the session's own
+    claim; this is the share of it the transcript cannot corroborate, which
+    is where an over-broad `mark-examined` would show. The read parser misses
+    idioms it does not know, so the number is evidence to inspect, not proof
+    of a false receipt.
     """
     import read_ledger  # lazy: it imports this module
 
@@ -445,6 +535,7 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
     empty = {
         "files": 0, "offered": 0, "claimed": 0, "read_requested": 0, "receipted": 0,
         "lines": 0, "lines_requested": 0, "lines_examined": 0,
+        "lines_attested_unrequested": 0,
     }
     buckets: dict[str, dict] = {}
     totals = dict(empty)
@@ -459,11 +550,15 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
         is_claimed = rel in claimed
         examined = min(lines, examined_lines(receipted.get(rel, [])))
         seen = min(lines, examined_lines(requested.get(rel, [])))
+        corroborated = examined_lines(
+            intersect_ranges(receipted.get(rel, []), requested.get(rel, []))
+        )
         for target in (bucket, totals):
             target["files"] += 1
             target["lines"] += lines
             target["lines_requested"] += seen
             target["lines_examined"] += examined
+            target["lines_attested_unrequested"] += max(0, examined - corroborated)
             target["offered"] += int(offered)
             target["claimed"] += int(is_claimed)
             target["read_requested"] += int(seen > 0)
@@ -476,6 +571,7 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
     return {
         "scope": "delta" if manifest and all(row.get("scope") == "delta" for row in manifest) else ("tree" if manifest else ""),
         "sweep": sweep.summary_lines(ctx.results_dir),
+        "call_edges": call_edge_scope(ctx),
         "depth": depth,
         "totals": totals,
         "never_offered": len(never),
@@ -502,6 +598,7 @@ def render_coverage(report: dict, fmt: str = "md") -> str:
     if fmt == "json":
         return json.dumps(report, sort_keys=True) + "\n"
     totals = report["totals"]
+    edges = report.get("call_edges") or {}
     lines = [
         "# Review coverage",
         "",
@@ -514,11 +611,27 @@ def render_coverage(report: dict, fmt: str = "md") -> str:
         f"- With an agent-attested examined receipt: {totals['receipted']} files, "
         f"{totals['lines_examined']} lines ({_pct(totals['lines_examined'], totals['lines'])})",
         f"- Never offered, claimed, nor receipted: {report['never_offered']}",
+        *(
+            [
+                f"- Attested lines no transcript read requested: "
+                f"{totals['lines_attested_unrequested']} "
+                f"({_pct(totals['lines_attested_unrequested'], totals['lines_examined'])} of attested)"
+            ]
+            if totals["lines_examined"] else []
+        ),
         *report.get("sweep", []),
         "",
         "| Directory | Files | Offered | Claimed | Read requested | Receipted | Lines | Requested % | Attested % |",
         "|---|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
+    if edges.get("available") and edges.get("eligible_caller_sets"):
+        lines.insert(len(lines) - 3, (
+            f"- Cross-file second pass: {edges['eligible_caller_sets']} eligible caller set(s) "
+            f"across {edges['resolved_callers']} resolved caller file(s); "
+            f"{edges['sampled_sets']} sampled ({edges['concluded_sets']} concluded), "
+            f"{edges['current_sample_cards']} card(s) in the current queue; "
+            f"{edges['callers_without_individual_card']} caller(s) beyond the seeds have no individual card"
+        ))
     for row in report["directories"]:
         lines.append(
             f"| `{row['directory']}` | {row['files']} | {row['offered']} | "

@@ -186,8 +186,9 @@ verdict from a timeout. See
 Give each page one job: orient, guide actions, explain design, or define a
 reference. Link to canonical explanations instead of repeating them. Lead with
 the user's task and the shortest safe command; make examples runnable from the
-repository root; update CLI references with behavior changes. Read affected pages in full and trace their claims to implementation
-and tests. Preserve page paths and linked anchors where possible. Distinguish
+repository root; update CLI references with behavior changes. Read affected
+pages in full and trace their claims to implementation and tests. Preserve
+page paths and linked anchors where possible. Distinguish
 filed candidates from validated results.
 
 ```bash

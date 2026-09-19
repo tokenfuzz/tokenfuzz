@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -117,7 +118,7 @@ class ManifestTests(unittest.TestCase):
         empty = self.write_source("src/empty.c", "")
         self.assertEqual(coverage_ledger.file_identity(empty)[0], 0)
 
-    def test_delta_scope_is_recorded_and_keeps_the_rest_of_the_history(self) -> None:
+    def test_delta_manifest_contains_exactly_its_recorded_scope(self) -> None:
         self.write_source("src/changed.c", PARSER)
         self.write_source("src/other.c", PARSER)
         workqueue.rank_target(
@@ -127,14 +128,13 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual([row["file"] for row in manifest], ["src/changed.c"])
         self.assertEqual(manifest[0]["scope"], "delta")
         self.assertEqual(coverage_ledger.coverage_report(self.ctx)["scope"], "delta")
-        # A whole-tree rank, then a delta: the delta is a scope, not the
-        # tree, so the other file's offered history survives the delta pass.
+        # Even a direct rank invocation that switches scope materializes the
+        # requested scope. The audit runner itself refuses this switch.
         workqueue.rank_target(self.ctx, 10)
         workqueue.rank_target(self.ctx, 10, delta_files={"src/changed.c": "changed again"})
         rows = {row["file"]: row for row in coverage_ledger.read_manifest(self.results)}
-        self.assertEqual(set(rows), {"src/changed.c", "src/other.c"})
-        self.assertTrue(rows["src/other.c"]["offered"])
-        self.assertEqual(coverage_ledger.coverage_report(self.ctx)["scope"], "tree")
+        self.assertEqual(set(rows), {"src/changed.c"})
+        self.assertEqual(coverage_ledger.coverage_report(self.ctx)["scope"], "delta")
 
     def test_a_preview_rank_does_not_mark_files_offered(self) -> None:
         self.write_source("src/hot.c", PARSER * 4)
@@ -186,17 +186,6 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual((info["examined_lines"], info["fraction"]), (22, 0.22))
         self.assertEqual(coverage_ledger.examined_fraction_by_file(self.results), {"src/app_parse.c": 0.22})
 
-    def test_a_planned_manifest_entry_avoids_reparsing_the_manifest(self) -> None:
-        entry = coverage_ledger.manifest_row(self.results, "src/app_parse.c")
-        with mock.patch.object(
-            coverage_ledger, "manifest_row", side_effect=AssertionError("unexpected manifest scan"),
-        ):
-            row = coverage_ledger.record_receipt(
-                self.ctx, "sweep", "src/app_parse.c", lines="1-10",
-                expected_sha1=entry["sha1"], manifest_entry=entry,
-            )
-        self.assertEqual(row["ranges"], [[1, 10]])
-
     def test_receipts_outside_the_file_or_manifest_are_refused(self) -> None:
         with self.assertRaisesRegex(coverage_ledger.ReceiptError, "has 100 lines"):
             coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="90-140")
@@ -229,6 +218,16 @@ class ReceiptTests(unittest.TestCase):
             )
         self.assertEqual(workqueue.read_jsonl(coverage_ledger.receipts_path(self.results)), [])
 
+    def test_incomplete_stat_identity_cannot_bypass_the_content_hash(self) -> None:
+        entry = dict(coverage_ledger.manifest_row(self.results, "src/app_parse.c"))
+        incomplete = {"file": entry["file"], "bytes": entry["bytes"], "sha1": entry["sha1"]}
+        original = self.source.read_text(encoding="utf-8")
+        self.source.write_text(original.replace("line 1\n", "xxxx 1\n", 1), encoding="utf-8")
+        self.assertEqual(self.source.stat().st_size, entry["bytes"])
+        self.assertFalse(
+            coverage_ledger.content_matches_manifest(self.target, "src/app_parse.c", incomplete)
+        )
+
     def test_function_receipts_resolve_through_the_call_graph(self) -> None:
         self.write_callgraph([["app_open", 10], ["app_parse", 40], ["app_reset", 80]])
         self.assertEqual(
@@ -248,6 +247,12 @@ class ReceiptTests(unittest.TestCase):
     def test_function_receipts_need_a_parsed_file(self) -> None:
         with self.assertRaisesRegex(coverage_ledger.ReceiptError, "parsed no definitions.*use --lines"):
             coverage_ledger.record_receipt(self.ctx, "2", "src/app_parse.c", functions="app_parse")
+
+    def test_duplicate_function_names_require_explicit_lines(self) -> None:
+        self.write_callgraph([["parse", 10], ["parse", 40], ["reset", 80]])
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "ambiguous function.*parse.*use --lines"):
+            coverage_ledger.record_receipt(self.ctx, "2", "src/app_parse.c", functions="parse")
+        self.assertEqual(workqueue.read_jsonl(coverage_ledger.receipts_path(self.results)), [])
 
     def test_a_receipt_on_changed_content_stops_counting(self) -> None:
         coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-100")
@@ -294,7 +299,7 @@ class ReceiptTests(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertTrue(proc.stdout.startswith("OK: mark-examined"), proc.stdout)
+        self.assertEqual(proc.stdout, "OK: mark-examined\n")
         refused = subprocess.run(
             [*base, "mark-examined", "--agent", "1", "--file", "src/app_parse.c", "--lines", "1-400"],
             capture_output=True, text=True, check=False,
@@ -347,15 +352,15 @@ class CallEdgeCardTests(unittest.TestCase):
         cards = workqueue.rank_target(self.ctx, 10)
         edges = self.edges(cards)
         self.assertEqual(
-            [(card["file"], card["edge_from"], card["strategy"]) for card in edges],
-            [("src/app_parse.c", "src/main.c", "S3"), ("src/app_parse.c", "src/io.c", "S3")],
+            [(card["file"], card["edge_from"], card["edge_count"], card["strategy"]) for card in edges],
+            [("src/app_parse.c", "src/main.c", 2, "S3")],
         )
         primary = next(c for c in cards if c["file"] == "src/app_parse.c" and c["kind"] == "ranked-source" and not c["reason"].startswith("companion"))
         self.assertEqual(edges[0]["score"], primary["score"] - 1)
         # Distinct surfaces from the file's own S3 companion, so dedupe keeps both.
         surfaces = {workqueue.work_surface(card) for card in cards}
         self.assertEqual(len(surfaces), len(cards))
-        self.assertIn("contract with its caller `src/main.c`", workqueue.card_next_action(edges[0]))
+        self.assertIn("samples a set of 2 resolved caller file(s)", workqueue.card_next_action(edges[0]))
         self.assertTrue(workqueue.card_closed_for_run(self.ctx, edges[0], "discarded"),
                         "an edge card is concrete and closes like a patch card")
 
@@ -370,7 +375,7 @@ class CallEdgeCardTests(unittest.TestCase):
         coverage_ledger.record_receipt(
             self.ctx, "1", "src/app_parse.c", functions="parse_input,parse_tail",
         )
-        self.assertEqual(len(self.edges(workqueue.rank_target(self.ctx, 10))), 2,
+        self.assertEqual(len(self.edges(workqueue.rank_target(self.ctx, 10))), 1,
                          "a preamble is not an unexamined function")
 
         source.write_text("\n".join(["line"] * 1999 + ["short function"]) + "\n", encoding="utf-8")
@@ -400,12 +405,121 @@ class CallEdgeCardTests(unittest.TestCase):
         for edge in self.edges(cards):
             self.assertIn(edge["file"], files, "an edge never buys a slot its file did not")
         self.assertIn("src/app_parse.c", files)
-        self.assertEqual(len(self.edges(cards)), 2)
+        self.assertEqual(len(self.edges(cards)), 1)
+
+    def test_high_fan_in_is_one_bounded_caller_set(self) -> None:
+        graph_path = self.results / "state" / callgraph.ARTIFACT_NAME
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["files"]["src/app_parse.c"]["caller_overflow"] = [
+            [f"src/caller-{index}.c", 1000 - index] for index in range(1000)
+        ]
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
+        first = self.edges(workqueue.rank_target(self.ctx, 1))
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["edge_count"], 1001)
+        workqueue.write_cards(workqueue.work_cards_path(self.ctx), first)
+        report = coverage_ledger.coverage_report(self.ctx)
+        self.assertEqual(
+            report["call_edges"],
+            {"available": True, "eligible_caller_sets": 1, "resolved_callers": 1001,
+             "sampled_sets": 0, "concluded_sets": 0, "current_sample_cards": 1,
+             "callers_without_individual_card": 1000},
+        )
+        self.assertIn("1000 caller(s) beyond the seeds have no individual card", coverage_ledger.render_coverage(report))
+        workqueue.append_jsonl(workqueue.state_dir(self.results) / "claims.jsonl", {
+            "card_id": first[0]["id"], "agent": "1", "status": "discarded",
+            "updated_at": workqueue.now_iso(),
+        })
+        cards = workqueue.rank_target(self.ctx, 1)
+        self.assertEqual(
+            self.edges(cards), [],
+            "closing the aggregate does not page 1,000 more agent sessions",
+        )
+        # The concluded sample leaves no card in the queue, and the report
+        # must still say the set was sampled rather than never carded.
+        workqueue.write_cards(workqueue.work_cards_path(self.ctx), cards)
+        after = coverage_ledger.coverage_report(self.ctx)["call_edges"]
+        self.assertEqual(
+            (after["sampled_sets"], after["concluded_sets"], after["current_sample_cards"]),
+            (1, 1, 0),
+        )
+
+    def test_caller_or_callee_content_change_reopens_the_sample(self) -> None:
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
+        first = self.edges(workqueue.rank_target(self.ctx, 10))
+        self.assertEqual(len(first), 1)
+        workqueue.append_jsonl(workqueue.state_dir(self.results) / "claims.jsonl", {
+            "card_id": first[0]["id"], "agent": "1", "status": "discarded",
+            "updated_at": workqueue.now_iso(),
+        })
+        (self.target / "src" / "main.c").write_text(PARSER + "/* changed caller contract */\n", encoding="utf-8")
+        reopened = self.edges(workqueue.rank_target(self.ctx, 10))
+        self.assertEqual(len(reopened), 1)
+        self.assertNotEqual(reopened[0]["id"], first[0]["id"])
+
+    def test_coverage_distinguishes_eligible_sets_from_current_cards(self) -> None:
+        graph_path = self.results / "state" / callgraph.ARTIFACT_NAME
+        graph = json.loads(graph_path.read_text(encoding="utf-8"))
+        graph["files"]["src/io.c"] = {
+            "functions": 2, "reachable": 0, "paths": [],
+            "callers": [["src/main.c", 1]], "caller_overflow": [], "callees": [],
+            "definitions": [["parse_input", 1], ["parse_tail", 3]],
+        }
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+        workqueue.rank_target(self.ctx, 10)
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
+        coverage_ledger.record_receipt(self.ctx, "1", "src/io.c", lines="1-4")
+        cards = workqueue.rank_target(self.ctx, 1)
+        workqueue.write_cards(workqueue.work_cards_path(self.ctx), cards)
+        report = coverage_ledger.coverage_report(self.ctx)["call_edges"]
+        self.assertEqual((report["eligible_caller_sets"], report["current_sample_cards"]), (2, 1))
+        self.assertEqual(report["callers_without_individual_card"], 1)
+
+    def test_a_file_completing_its_receipts_reranks_the_queue(self) -> None:
+        # Reranks follow source and probe-coverage changes; the second pass
+        # needs one when a file becomes fully receipted on a static tree.
+        import audit_runner
+        runtime = SimpleNamespace(
+            results=self.results, target_root=self.target, target_rev="rev-1",
+            config=SimpleNamespace(s6_domain="", s6_peers=[]),
+        )
+        with mock.patch.object(audit_runner.target_config, "vcs_source_signature", return_value="src"):
+            before = audit_runner._work_card_signature(runtime)
+            coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", functions="parse_input")
+            partial = audit_runner._work_card_signature(runtime)
+            coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", functions="parse_tail")
+            complete = audit_runner._work_card_signature(runtime)
+        self.assertEqual(before, partial, "a partial receipt does not force a source rescan")
+        self.assertNotEqual(partial, complete)
 
     def test_delta_runs_mint_no_edge_cards(self) -> None:
         coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
         cards = workqueue.rank_target(self.ctx, 10, delta_files={"src/app_parse.c": "changed"})
         self.assertEqual(self.edges(cards), [])
+
+    def test_edge_cards_respect_a_fixed_strategy(self) -> None:
+        (self.target / "src" / "z_s3.c").write_text("int query(void) { return 0; }\n", encoding="utf-8")
+
+        def scores(paths):
+            return iter(
+                (100, ["query/template construction"])
+                if rel == "src/z_s3.c"
+                else (1, ["input-consumption entrypoint"])
+                for _path, rel in paths
+            )
+
+        with mock.patch.object(workqueue, "source_feature_scores", side_effect=scores):
+            workqueue.rank_target(self.ctx, 10)
+        coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-20")
+        with mock.patch.object(workqueue, "source_feature_scores", side_effect=scores):
+            self.assertEqual(self.edges(workqueue.rank_target(self.ctx, 10, strategy="S7")), [])
+            cards = workqueue.rank_target(self.ctx, 10, strategy="S3")
+        edges = self.edges(cards)
+        self.assertEqual([(card["file"], card["strategy"]) for card in edges], [("src/app_parse.c", "S3")])
+        # The edge competes on score like any S3 card; it takes no priority
+        # over first-pass work in the lane.
+        self.assertEqual(cards[0]["file"], "src/z_s3.c")
 
     def test_resume_and_directive_name_the_caller(self) -> None:
         import prompt
@@ -413,14 +527,17 @@ class CallEdgeCardTests(unittest.TestCase):
         cards = workqueue.rank_target(self.ctx, 10)
         workqueue.write_cards(workqueue.work_cards_path(self.ctx), self.edges(cards))
         brief = workqueue.state_resume(self.ctx, "3", claim=False)
-        self.assertIn("- Edge from: `src/main.c`", brief)
+        self.assertIn("- Caller set: 2 resolved file(s), starting with `src/main.c`", brief)
         references = self.root / "references"
         (references / "strategies").mkdir(parents=True)
         (references / "session-rules.digest.md").write_text("digest\n", encoding="utf-8")
         context = prompt.PromptContext(self.results, self.target, "sampleproj", references, 1)
         # Edge cards are S3 work; a lane pinned elsewhere is rightly not offered one.
         (self.results / "state" / "strategy-1").write_text("S3\n", encoding="utf-8")
-        self.assertIn("**Edge from:** `src/main.c`", prompt.work_card_directive(context, 1, force=True))
+        self.assertIn(
+            "**Caller-set sample:** 2 resolved file(s), starting with `src/main.c`",
+            prompt.work_card_directive(context, 1, force=True),
+        )
 
 
 class ReportTests(unittest.TestCase):
@@ -487,14 +604,15 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(
             report["totals"],
             {"files": 5, "offered": 2, "claimed": 2, "read_requested": 1, "receipted": 1,
-             "lines": 1440, "lines_requested": 900, "lines_examined": 30},
+             "lines": 1440, "lines_requested": 900, "lines_examined": 30,
+             "lines_attested_unrequested": 30},
         )
         by_dir = {row["directory"]: row for row in report["directories"]}
         self.assertEqual(
             by_dir["src/parse"],
             {"directory": "src/parse", "files": 2, "offered": 2, "claimed": 1,
              "read_requested": 0, "receipted": 1, "lines": 420, "lines_requested": 0,
-             "lines_examined": 30},
+             "lines_examined": 30, "lines_attested_unrequested": 30},
         )
         self.assertEqual(by_dir["src/io"]["offered"], 0)
         self.assertEqual(by_dir["tools"]["claimed"], 1)
@@ -505,6 +623,7 @@ class ReportTests(unittest.TestCase):
 
         text = coverage_ledger.render_coverage(report)
         self.assertIn("Never offered, claimed, nor receipted: 2", text)
+        self.assertIn("Attested lines no transcript read requested: 30 (100% of attested)", text)
         self.assertIn("| `src/io` | 2 | 0 | 0 | 1 | 0 | 980 | 92% | 0% |", text)
         self.assertIn("`src/io/writer.c` (900 lines)", text)
         self.assertEqual(

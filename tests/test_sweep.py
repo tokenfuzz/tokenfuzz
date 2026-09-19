@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -266,11 +267,63 @@ class RunTests(unittest.TestCase):
         self.assertEqual(second["spent_tokens"], first["spent_tokens"])
 
     def test_an_interrupted_provider_call_keeps_its_prompt_spend(self) -> None:
-        with mock.patch.object(llm_decide, "llm_decide", side_effect=sweep._Stopped()):
+        def interrupted(*args, **kwargs):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return None
+
+        with mock.patch.object(llm_decide, "llm_decide", side_effect=interrupted):
             state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
         self.assertEqual((state["units"], state["receipts"], state["stop"]), (1, 0, "interrupted"))
+        self.assertEqual(state["failures"], 0, "shutdown is not a backend failure")
         self.assertGreater(state["spent_tokens"], 0)
         self.assertEqual(sweep.read_state(self.results), state)
+
+    def test_sigterm_before_dispatch_does_not_buy_or_start_a_call(self) -> None:
+        real_write = sweep._write_state
+        requested = False
+
+        def request_stop(results_dir, state):
+            nonlocal requested
+            real_write(results_dir, state)
+            if not requested and state["units"] == 1:
+                requested = True
+                signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+
+        with mock.patch.object(sweep, "_write_state", side_effect=request_stop), \
+                mock.patch.object(llm_decide, "llm_decide") as decide:
+            state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
+        decide.assert_not_called()
+        self.assertEqual(
+            (state["units"], state["spent_tokens"], state["units_remaining"], state["stop"]),
+            (0, 0, 2, "interrupted"),
+        )
+
+    def test_sigterm_after_a_valid_reply_commits_its_receipt_and_lead(self) -> None:
+        reply = {
+            "examined": [[1, 50]],
+            "verdicts": [{"function": "lines 1-50", "verdict": "suspicious"}],
+            "leads": [{"function": "lines 1-50", "line": 3, "hypothesis": "h",
+                       "input_shape": "i", "guard_gap": "g", "diagnostic": "bounds",
+                       "strategy": "S7"}],
+        }
+
+        def interrupted(*args, **kwargs):
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+            return reply
+
+        with mock.patch.object(llm_decide, "llm_decide", side_effect=interrupted):
+            state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
+        self.assertEqual(
+            (state["units"], state["receipts"], state["leads"], state["failures"], state["stop"]),
+            (1, 1, 1, 0, "interrupted"),
+        )
+        rows = workqueue.read_jsonl(workqueue.state_dir(self.results) / "hypotheses.jsonl")
+        self.assertEqual([(row["strategy"], row["status"]) for row in rows], [("S7", "NEEDS_TESTCASE")])
+        self.assertEqual(state["units_remaining"], 1)
+        self.assertEqual(
+            audit_runner.progress(SimpleNamespace(results=self.results, num_agents=1)).active, 1,
+            "iteration progress counts the sweep's open lead as live work",
+        )
 
     def test_unusable_replies_count_against_the_budget_and_stop_after_a_streak(self) -> None:
         for name in ("c", "d", "e"):
@@ -303,19 +356,6 @@ class RunTests(unittest.TestCase):
             state = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
         self.assertEqual((state["units"], state["failures"], state["receipts"], state["stop"]), (2, 1, 1, "incomplete"))
         self.assertEqual(state["units_remaining"], 1)
-        # A stop mid-loop leaves the last persisted state, not nothing.
-        with mock.patch.dict(os.environ, self.mock(reply), clear=False), \
-                mock.patch.object(sweep, "_record_lead", side_effect=sweep._Stopped()):
-            (self.target / "src" / "c.c").write_text(_body(50), encoding="utf-8")
-            workqueue.rank_target(self.ctx, 10)
-            reply["verdicts"] = [{"function": "lines 1-50", "verdict": "suspicious"}]
-            reply["leads"] = [{"function": "lines 1-50", "line": 3, "hypothesis": "h", "input_shape": "i",
-                               "guard_gap": "g", "diagnostic": "bounds", "strategy": "S7"}]
-            os.environ["LLM_DECIDE_MOCK_SWEEP_UNIT"] = json.dumps(reply)
-            stopped = sweep.run(self.ctx, token_budget=10**6, unit_lines=100)
-        self.assertEqual(stopped["stop"], "interrupted")
-        self.assertEqual(stopped["receipts"], 2, "the receipt before the stop was kept")
-        self.assertGreater(stopped["spent_tokens"], state["spent_tokens"])
 
     def test_units_receipted_by_a_session_since_the_plan_are_not_bought(self) -> None:
         reply = {"examined": [[1, 50]],
@@ -323,17 +363,11 @@ class RunTests(unittest.TestCase):
         calls: list[str] = []
         real_prompt = sweep.build_prompt
 
-        def spy(
-            ctx, unit, controls, source_cache=None,
-            neighbourhood_cache=None, graph=None,
-        ):
+        def spy(ctx, unit, controls, graph=None):
             calls.append(unit.key)
             if len(calls) == 1:
                 coverage_ledger.record_receipt(ctx, "1", "src/b.c", lines="1-50")
-            return real_prompt(
-                ctx, unit, controls, source_cache=source_cache,
-                neighbourhood_cache=neighbourhood_cache, graph=graph,
-            )
+            return real_prompt(ctx, unit, controls, graph=graph)
 
         with mock.patch.dict(os.environ, self.mock(reply), clear=False), \
                 mock.patch.object(sweep, "build_prompt", spy):
@@ -390,6 +424,34 @@ class RunTests(unittest.TestCase):
                          ("codex", "codex", "gpt-test"))
         self.assertEqual(environment["RESULTS_DIR"], str(self.results))
         self.assertEqual(environment["LLM_DECIDE_LOG"], str(runtime.logs / "llm-decisions.log"))
+
+    def test_stop_signals_the_sweep_before_reaping_its_provider(self) -> None:
+        events: list[str] = []
+
+        class RunningSweep:
+            pid = 123
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                events.append("sweep")
+
+            def wait(self, timeout=None):
+                self.returncode = 0
+                return 0
+
+            def kill(self):
+                self.returncode = -9
+
+        runtime = SimpleNamespace(results=self.results)
+        with mock.patch.object(
+            audit_runner.process_tree, "kill_descendants",
+            side_effect=lambda *args: events.append("provider"),
+        ), mock.patch.object(audit_runner, "index_log"):
+            audit_runner.stop_sweep(runtime, RunningSweep())
+        self.assertEqual(events, ["sweep", "provider"])
 
     def test_cli_dry_run_lists_units_and_refuses_to_spend_without_a_budget(self) -> None:
         base = [str(ROOT / "bin" / "sweep"), "--target-path", str(self.target),

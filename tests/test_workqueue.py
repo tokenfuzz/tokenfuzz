@@ -512,6 +512,11 @@ class WorkQueueTests(unittest.TestCase):
     def test_path_classification_slug_and_subsystem_are_portable(self) -> None:
         self.assertEqual(workqueue.sanitize_slug("My Target++"), "my-target")
         self.assertEqual(workqueue.normalized_relpath("./src\\parser.c:func:9"), "src/parser.c:func:9")
+        # A root-level dot directory keeps its dot: cards, claims, receipts,
+        # and the manifest must all spell the same path.
+        self.assertEqual(workqueue.normalized_relpath("./.audit/x.py"), ".audit/x.py")
+        self.assertEqual(workqueue.normalized_relpath(".github/workflows/ci.py"), ".github/workflows/ci.py")
+        self.assertEqual(workqueue.normalized_relpath("/abs/src/a.c"), "abs/src/a.c")
         self.assertEqual(workqueue.subsystem_for("src/parser/token.c"), "src/parser")
         for path in ("src/parser.c", "lib/module.py", "Sources/App.swift", "crate/src/lib.rs"):
             with self.subTest(path=path):
@@ -913,9 +918,17 @@ class WorkQueueTests(unittest.TestCase):
         excluded = self.target / "tests" / "hidden.c"
         excluded.parent.mkdir()
         excluded.write_text("int hidden;\n")
+        # The harness workspace and any virtualenv are runtime, not source;
+        # a tree that is not a checkout has no tracked-set filter to stop them.
+        for rel in (".audit/venv/lib/site-packages/pip/cache.py", "env/lib/site-packages/dep.py"):
+            path = self.target / rel
+            path.parent.mkdir(parents=True)
+            path.write_text("x = 1\n")
+        (self.target / "env" / "pyvenv.cfg").write_text("home = /usr/bin\n")
         files = [path.relative_to(self.target).as_posix() for path in workqueue.iter_source_files(self.target)]
         self.assertEqual(len(files), 140)
         self.assertNotIn("tests/hidden.c", files)
+        self.assertFalse([f for f in files if f.startswith((".audit/", "env/"))])
         self.assertEqual(len(list(workqueue.iter_source_files(self.target, max_files=7))), 7)
 
     def test_source_subdir_keeps_only_checkout_tracked_sources(self) -> None:
