@@ -105,38 +105,6 @@ different public boundary. To close the whole broad card, use `update-card
 that the card is mode-incompatible, stale, or unreachable from the public
 target boundary. A MISSED verdict alone is not proof of unreachability.
 
-## Auto-memory: record what was tried, never "skip future sweeps"
-
-If you save a Claude Code auto-memory note about this card's audit outcome,
-the note is a record of **what probes ran**, not a verdict that the file is
-safe. The next agent should be able to read your note, see which input
-shapes / hypotheses you covered, and **probe anyway** if their hypothesis
-exercises a path you did not try.
-
-DO write (when saving a memory note about an audit pass):
-- The work-card / patch-card id you closed and on what target SHA.
-- The concrete hypotheses you ran (H-ids), one line each: input shape,
-  guard or path that held, `bin/probe` verdict.
-- One or two input shapes you *did not* try, with a one-line reason.
-- A "Re-investigate if:" line listing conditions that would invalidate the
-  prior CLEAN (new commit touches this file, new assert lands, hypothesis
-  exercises a path not in the list above).
-
-DO NOT write:
-- "skip future sweeps", "skip on future S2/S7 sweeps", "auto-discard on
-  future spawns", "saturated → skip", or any phrasing that tells a future
-  agent to bypass probing without re-evaluating the hypothesis.
-- A blanket file-level CLEAN verdict. CLEAN is a property of the
-  (hypothesis, variant set, target SHA) tuple, never of the file.
-
-When READING a prior auto-memory note about a card you've been assigned:
-- Treat the note as evidence of which hypotheses have already been
-  exercised, not as permission to discard the card.
-- If your hypothesis exercises a path the note does not enumerate, probe
-  it. Reference the prior note in your `--note` ("prior memory covered
-  X,Y; this hypothesis covers Z, untried").
-- A DISCARD justified purely as "prior memory says saturated" is refused.
-  The discard `--note` must still satisfy the trigger-condition evidence
-  bar above for the hypothesis you're closing now.
+{{ auto_memory_section }}
 {{ agent_state_instructions }}
 {{ common_suffix }}

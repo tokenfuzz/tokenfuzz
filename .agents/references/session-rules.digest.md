@@ -121,7 +121,7 @@ resume        --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1
 next-card     --agent N [--mode MODE] [--role reproduce|analysis] [--strategy S1|S2|S3|S4|S5|S6|S7|S8] [--peek]
 show-card     CARD_ID [--mode MODE]                     # compact JSON
 list-cards    [--mode MODE] [--status eligible] [--strategy S] [--subsystem TEXT] [--contains TEXT] [--limit N] [--verbose]
-show-crash    CRASH-ID ;  list-crashes [--status OK|NEW] [--limit N]
+show-crash    CRASH-ID ;  list-crashes [--status OK|PENDING] [--limit N]
 show-finding  FIND-ID ;  list-findings [--status OK|PENDING REVIEW|NOT REPORTABLE|REJECTED] [--limit N]
 add-hyp       --agent N --card-id ID --hypothesis 'desc' --file path:func:line \
               --input-shape 'shape' --guard-gap 'gap' \
@@ -257,9 +257,9 @@ with independent rationales.
 Prose shape for every report — headings, order, word budgets — is the
 "Report narrative" block of this prompt.
 
-Point at the fix (best-effort, never blocks filing): always end `report.md`
-with a `## Fix Direction` heading (on its own line).
-When the fix is a surgical diff, save it
+Point at the fix with exactly one pointer (best-effort, never blocks filing):
+end `report.md` with a `## Fix Direction` heading (on its own line), or,
+when the fix is a surgical diff, save it
 as `patch.diff` in the FIND/CRASH dir instead — `bin/enrich-report` inlines
 it as `## Patch`, so don't write that section yourself. Capture/validation
 mechanics: `.agents/references/session-rules.md`.

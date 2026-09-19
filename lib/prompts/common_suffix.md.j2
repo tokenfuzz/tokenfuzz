@@ -52,7 +52,8 @@ Self-pace:
   symbol lookup rather than re-reading the whole file.
 - A productive session emits at least one hypothesis (PENDING or
   NEEDS_TESTCASE row) every ~30 tool calls. If 30 calls go by with no row
-  written, change strategy or rotate subsystem — don't keep peeking.
+  written, switch strategy on the same card — don't keep peeking, and do
+  not pivot subsystems before a confirmed crash or finding.
 - **Don't read the harness's own tool source to learn how a tool works.**
   `bin/*` and `lib/*` are the auditing harness, not the code under audit;
   every `peek`/`sed`/`rg` into them dumps irrelevant bytes that each later

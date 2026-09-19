@@ -188,6 +188,10 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
                     self.assertIn("`killall`", rendered)
                     self.assertRegex(rendered, r"including absolute\s+paths")
                     self.assertIn("matched PIDs", rendered)
+                    # The guide's Rule 7 forbids a subsystem pivot before a
+                    # confirmation; the pacing hint must not re-invite one.
+                    self.assertNotIn("rotate subsystem", rendered)
+                    self.assertNotIn("strategy or subsystem", rendered)
                     # Report narrative contract — every variant that can file a
                     # report must carry it, including the compact one, which has
                     # no session-rules digest to fall back on.
@@ -303,6 +307,22 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
             short = prompt.session_runtime_suffix(context("claude"))
             self.assertIn("## SESSION EFFICIENCY", short)
             self.assertIn("delegate it to a read-only subagent", short)
+
+    def test_auto_memory_rules_render_only_when_memory_is_enabled(self) -> None:
+        # With memory off (the default, and always under bin/benchmark) no
+        # backend can save or read a note, so the block is dead text replayed
+        # on every turn. It must still render whole when an operator turns
+        # memory on, because a "skip future sweeps" note is a real hazard.
+        context = self.context()
+        with mock.patch.dict(os.environ, {"TOKENFUZZ_MEMORY_ENABLED": ""}):
+            rendered = prompt.deep_investigation_prompt(context, 1)
+            self.assertNotIn("Auto-memory", rendered)
+            self.assertNotIn("skip future sweeps", rendered)
+        with mock.patch.dict(os.environ, {"TOKENFUZZ_MEMORY_ENABLED": "1"}):
+            rendered = prompt.deep_investigation_prompt(context, 1)
+            self.assertIn("## Auto-memory: record what was tried", rendered)
+            self.assertIn("skip future sweeps", rendered)
+            self.assertIn("A DISCARD justified purely as", rendered)
 
     def test_mapping_delegates_are_offered_only_where_their_spend_is_counted(self) -> None:
         # A delegate moves mapping reads out of the replayed transcript, but a

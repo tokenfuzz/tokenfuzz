@@ -53,11 +53,13 @@ Use concrete engineering language:
 - "overwrite" or "stomp" (not "corrupt")
 <!-- /NOVOCAB -->
 
-Testcase file headers MUST be minimal: exactly `TARGET:`, `HYPOTHESIS-ID:`, and a
-one-line `CATEGORY:` drawn from the six neutral categories. Opaque byte inputs
-that cannot carry native comments stay byte-exact and use
-`bin/probe --hypothesis-id H-... <testcase>` instead. Do NOT inline mechanism
-descriptions in the testcase — keep mechanism reasoning in structured state notes.
+Testcase file headers MUST be minimal: only the metadata lines `bin/probe`
+reads — `TARGET:`, `HYPOTHESIS-ID:`, a one-line `CATEGORY:` drawn from the six
+neutral categories, plus `CARD-ID:`, `HARNESS:`, or `PROPERTY:` when
+applicable. Opaque byte inputs that cannot carry native comments stay
+byte-exact and use `bin/probe --hypothesis-id H-... <testcase>` instead. Do NOT
+inline mechanism descriptions in the testcase — keep mechanism reasoning in
+structured state notes.
 
 ## CRASH PROMOTION GATE — LEGITIMATE CRASHES ONLY
 
@@ -95,7 +97,7 @@ type, and breaking on one of them is the bug. All three must hold:
    operation legitimately invalidates a separately owned object.
 
 The question is: did the caller break a contract the docs state (caller
-misuse: `findings/` at most, often nothing), or did the
+misuse: a `bin/state add-note`, never `crashes/`), or did the
 implementation fail to validate an in-domain typed value the docs are silent
 about (an API-hardening bug: `crashes/`)? API-hardening bugs
 are a large class in mature C/C++ libraries; never gate them out. If unsure
@@ -154,29 +156,16 @@ Defaulting to `obeyed` inflates verdicts.
 `fs-state`, or `both` (= `bytes,call-sequence`). When a component lies outside
 this target's `attacker_controls` (`output/<slug>/target.toml`), a source
 reviewer reads the code and decides in triage whether the crash is a security
-report or a retained defect that crosses no security boundary, with no CVSS
-and no credit; the crash **stays in
-`crashes/`**. Never route a reproducing crash to `findings/`,
-mark it DISCARDED, or pre-demote a `call-sequence`/`env`/`race` crash at
-discovery because the target is bytes-only: file it and let triage do that math
-once. If the crash needs a non-default mode, module, codec, filter, or option
-that the application or operator selects rather than the input bytes, write
-`Parameter control: application-supplied` and name the invocation; the crash
-still belongs in `crashes/` and stays remotely reachable, and left unsaid an
-operator-enabled path rates as if the input alone reached it. `Strategy` is
-the strategy actually in use when the testcase was filed (`S1`..`S8`, or `REF`
-when only the pattern library was used); findings carry the same field.
+report or a retained defect that crosses no security boundary; the crash stays
+in `crashes/`, so never pre-demote it to `findings/` or DISCARDED. If the crash
+needs a non-default mode, module, codec, filter, or option that the application
+or operator selects rather than the input bytes, write
+`Parameter control: application-supplied` and name the invocation. `Strategy`
+is the strategy actually in use when the testcase was filed (`S1`..`S8`, or
+`REF` when only the pattern library was used); findings carry the same field.
 
-Filing what you found is cheap; hunting a trigger the attacker cannot supply
-is not. Before committing a session to one, check `crashes/crash-clusters.md`:
-a `NOT-REPORTABLE` row is a mechanism that earned nothing, and another route
-to it earns nothing either; judge a
-neighbouring path on its own trigger, not the neighbour's verdict.
 Source-only defects have no crash evidence to preserve: when the trigger is
 proven outside `attacker_controls` and the defect adds no independent
 boundary violation, record it with `bin/state add-note` instead of filing a
 `FIND-*`; when reachability or impact is uncertain, file the finding for
-review. Neither changes the crash rule above.
-
-The agent guide's **CRASH QUALITY** section carries the full trigger-source
-verdict rule; do not duplicate it here.
+review.

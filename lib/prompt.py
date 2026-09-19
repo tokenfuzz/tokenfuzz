@@ -230,6 +230,20 @@ def find_first_directive(context: PromptContext) -> str:
     )
 
 
+def auto_memory_section() -> str:
+    """The deep prompt's auto-memory rules, only when a note can exist.
+
+    Memory is off by default and always off under the benchmark; then no
+    backend can save or read a note, and the block is dead text on every
+    turn.
+    """
+    import llm_invoke  # lazy: keeps prompt rendering free of the launcher otherwise
+
+    if not llm_invoke.memory_enabled():
+        return ""
+    return render_template("deep_auto_memory.md.j2", {})
+
+
 def turn_budget_section(context: PromptContext) -> str:
     template = (
         "turn_budget.md.j2"
@@ -1043,7 +1057,7 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
             "safety_framing": safety_framing(context),
             "guide_section": guide_section(context, False),
             "state_strategy_arg": _state_strategy_arg(context, agent),
-            "asan_loop_cmd": f"bin/probe scratch-{agent}/testcase",
+            "asan_loop_cmd": f"bin/probe {context.scratch_dir(agent)}/testcase",
             "mode_lock_or_targets_block": target_block,
             "directive_block": "", "enforcement_block": enforcement_results_directive(context, agent),
             "session_continuation_section": seed,
@@ -1055,6 +1069,7 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
             "strategy_roi_directive": "", "find_first_directive": find_first_directive(context),
             "card_discard_min_runs": str(card_min_runs),
             "card_discard_min_hypotheses": str(card_min_hypotheses),
+            "auto_memory_section": auto_memory_section(),
             "agent_state_instructions": _agent_state_instructions(context, agent),
             "common_suffix": session_runtime_suffix(context),
         },
