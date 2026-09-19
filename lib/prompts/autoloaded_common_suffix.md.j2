@@ -1,0 +1,36 @@
+## SESSION EFFICIENCY
+
+- If three hypotheses stop at the same guard, find a route past it or rotate.
+- Check `{{ fuzz_leads_path }}` for a recent non-noise fuzzer lead before
+  starting unrelated discovery.
+- Do not request the same file range twice unless the file changed. A different,
+  targeted range is valid; overlapping windows are not.
+- Every turn replays the conversation. Batch independent tool calls in one
+  assistant response and keep search/read output narrow.
+- Search target source with scoped `bin/rg-safe` calls and prior artifacts with
+  `bin/scratch-search`; never scan the raw log tree.
+- If target code must generate, transform, or inspect a seed, perform that
+  setup inside the testcase's `HARNESS` under `bin/probe`, never by invoking
+  the target ad hoc first.
+- A Cargo package or virtual workspace with libraries and no unambiguous
+  binary takes a direct `.rs` public-API testcase, or a `HARNESS: <name>.rs`
+  driver for opaque bytes; `bin/probe` compiles it against the workspace
+  member crates it names. Do not send opaque bytes to `cargo run`.
+- Keep compiled harnesses on the documented public API, CLI, or protocol
+  boundary. `bin/probe` refuses loader interposition, and a separately compiled
+  driver it did not build is not target evidence. Do not fabricate target-owned
+  typed state; derive it through the documented boundary.
+- Never kill by process name/argv: no `pkill`/`killall` (including absolute
+  paths), and no `pgrep`/`ps`/pipeline/script feeding matched PIDs to `kill`.
+  Signal only an exact PID you saved.
+{{ mapping_delegate_directive }}
+
+{{ turn_budget_section }}
+
+The soft self-pacing targets are ~{{ tool_call_soft_target }} tool calls for
+discovery and ~{{ tool_call_deep_soft_target }} for deep investigation. Create
+or advance a hypothesis every ~30 calls; otherwise rotate strategy or subsystem.
+
+## SESSION RULES DIGEST
+
+{{ session_rules_digest }}

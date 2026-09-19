@@ -169,29 +169,32 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         # workflow, and it is the most common variant. It needs exact CLI
         # syntax and rollover guidance, but replaying the full 22 KB suffix
         # would erase much of the reason this variant is compact.
+        for backend in ("", "codex", "grok"):
+            context = self.context()
+            context.backend = backend
+            for name, rendered in (
+                ("cold", prompt.cold_start_prompt(context, 1)),
+                ("compact", prompt.compact_fresh_prompt(context, 1)),
+                ("deep", prompt.deep_investigation_prompt(context, 1)),
+            ):
+                with self.subTest(backend=backend or "unset", variant=name):
+                    self.assertIn("bin/state resume --agent", rendered)
+                    self.assertIn("TURN BUDGET", rendered)
+                    self.assertIn("Batch independent tool calls", rendered)
+                    self.assertIn("bin/probe", rendered)
+                    self.assertIn("target code must generate, transform, or inspect a seed", rendered)
+                    self.assertIn("kill by process name/argv", rendered)
+                    self.assertIn("`pkill`", rendered)
+                    self.assertIn("`killall`", rendered)
+                    self.assertRegex(rendered, r"including absolute\s+paths")
+                    self.assertIn("matched PIDs", rendered)
+                    # Report narrative contract — every variant that can file a
+                    # report must carry it, including the compact one, which has
+                    # no session-rules digest to fall back on.
+                    self.assertIn("## Report narrative", rendered)
+                    self.assertIn("**Impact**", rendered)
+                    self.assertEqual(rendered.count("## Report narrative"), 1)
         context = self.context()
-        for name, rendered in (
-            ("cold", prompt.cold_start_prompt(context, 1)),
-            ("compact", prompt.compact_fresh_prompt(context, 1)),
-            ("deep", prompt.deep_investigation_prompt(context, 1)),
-        ):
-            with self.subTest(variant=name):
-                self.assertIn("bin/state resume --agent", rendered)
-                self.assertIn("TURN BUDGET", rendered)
-                self.assertIn("Batch independent tool calls", rendered)
-                self.assertIn("bin/probe", rendered)
-                self.assertIn("target code must generate, transform, or inspect a seed", rendered)
-                self.assertIn("kill by process name/argv", rendered)
-                self.assertIn("`pkill`", rendered)
-                self.assertIn("`killall`", rendered)
-                self.assertRegex(rendered, r"including absolute\s+paths")
-                self.assertIn("matched PIDs", rendered)
-                # Report narrative contract — every variant that can file a
-                # report must carry it, including the compact one, which has
-                # no session-rules digest to fall back on.
-                self.assertIn("## Report narrative", rendered)
-                self.assertIn("**Impact**", rendered)
-                self.assertEqual(rendered.count("## Report narrative"), 1)
         compact = prompt.compact_fresh_prompt(context, 1)
         self.assertIn("## COMPACT RUNTIME CONTRACT", compact)
         self.assertIn("bin/state update-hyp --id", compact)
@@ -200,6 +203,13 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         compact_contract = prompt.compact_suffix(context, 1)
         self.assertIn("--strategy STRATEGY", compact_contract)
         self.assertNotIn("--strategy S1", compact_contract)
+        self.assertIn("bin/state recent-notes --kind guard", compact_contract)
+        self.assertIn("mutate around that near-miss", compact_contract)
+        self.assertIn("$RESULTS_DIR/findings/finding-clusters.md", compact_contract)
+        self.assertIn(
+            "$RESULTS_DIR/crashes-rejected/rejected-crashes.md", compact_contract,
+        )
+        self.assertIn("NEEDS CONTENT", compact_contract)
 
     def test_cold_guide_is_embedded_once_per_backend(self) -> None:
         # Codex loads the repo-root AGENTS.md itself as its project document
@@ -240,6 +250,59 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
                 self.assertNotIn("Follow `AGENTS.md`", deep)
             with self.subTest(variant="compact", backend=backend or "unset"):
                 self.assertIn(marker, prompt.compact_fresh_prompt(context(backend), 1))
+
+    def test_autoloaded_guide_uses_a_shorter_common_wrapper_with_the_digest(self) -> None:
+        marker = "GUIDE BODY MARKER app_parse child_free"
+        (self.references / "session-rules.digest.md").write_text(
+            "SESSION DIGEST\nbin/state mark-examined\nbin/probe-history\n"
+            "bin/state explain-queue\n",
+            encoding="utf-8",
+        )
+
+        def context(backend: str) -> prompt.PromptContext:
+            return prompt.PromptContext(
+                results_dir=self.results, target_root=self.target,
+                target_slug="sampleproj", reference_dir=self.references,
+                num_agents=1, agent_roles=("reproduce",),
+                guide_text=f"# Guide\n\n{marker}\n", backend=backend,
+            )
+
+        for backend in ("codex", "grok"):
+            with self.subTest(backend=backend):
+                ctx = context(backend)
+                self.assertLess(
+                    len(prompt.autoloaded_common_suffix(ctx)),
+                    len(prompt._render_common_suffix(ctx)),
+                )
+                for variant, rendered in (
+                    ("cold", prompt.cold_start_prompt(ctx, 1)),
+                    ("deep", prompt.deep_investigation_prompt(ctx, 1)),
+                ):
+                    with self.subTest(backend=backend, variant=variant):
+                        self.assertIn("## SESSION EFFICIENCY", rendered)
+                        self.assertIn("## SESSION RULES DIGEST", rendered)
+                        self.assertIn("SESSION DIGEST", rendered)
+                        self.assertNotIn("## CONTEXT ECONOMICS", rendered)
+                        self.assertIn("bin/state mark-examined", rendered)
+                        self.assertIn("bin/probe-history", rendered)
+                        self.assertIn("bin/state explain-queue", rendered)
+                        self.assertIn("three hypotheses stop at the same guard", rendered)
+                        self.assertIn("fuzz-leads.md", rendered)
+                        self.assertIn("bin/scratch-search", rendered)
+                        self.assertIn("refuses loader interposition", rendered)
+                        self.assertIn("Do not fabricate target-owned", rendered)
+                        self.assertIn("Do not send opaque bytes to `cargo run`", rendered)
+                        self.assertIn("TURN BUDGET", rendered)
+        rendered = prompt.deep_investigation_prompt(context("claude"), 1)
+        self.assertIn("## SESSION RULES DIGEST", rendered)
+        self.assertIn("## CONTEXT ECONOMICS", rendered)
+        # The short wrapper still renders the delegate slot, so a backend
+        # that both auto-loads the guide and has a measured delegate keeps
+        # its directive instead of losing it to the shorter suffix.
+        with mock.patch.object(prompt, "_GUIDE_AUTOLOADING_BACKENDS", frozenset({"claude"})):
+            short = prompt.session_runtime_suffix(context("claude"))
+            self.assertIn("## SESSION EFFICIENCY", short)
+            self.assertIn("delegate it to a read-only subagent", short)
 
     def test_mapping_delegates_are_offered_only_where_their_spend_is_counted(self) -> None:
         # A delegate moves mapping reads out of the replayed transcript, but a

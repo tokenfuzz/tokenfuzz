@@ -52,8 +52,11 @@ The execution boundary and available controls differ by backend; see the
 
 Two implementation choices reduce duplicated context and cache-write cost:
 
-- Codex loads the repo-root `AGENTS.md`, so its cold-start prompt refers to
-  that copy instead of embedding it again.
+- Codex and Grok load the repo-root `AGENTS.md` themselves, so their
+  session prompts refer to that copy instead of embedding it again, and
+  they append a shorter rules suffix that omits the tool orientation the
+  guide already gives. The session-rules digest stays complete for every
+  backend.
 - TokenFuzz defaults Claude launches to a five-minute prompt-cache tier,
   including agent sessions and one-shot decisions in both benchmark
   conditions. An explicit operator cache setting takes precedence; see

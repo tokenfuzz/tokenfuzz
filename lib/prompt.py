@@ -311,12 +311,48 @@ def compact_suffix(context: PromptContext, agent: int) -> str:
         {
             "scratch_dir": str(context.scratch_dir(agent)),
             "scratch_name": f"scratch-{agent}",
+            "fuzz_leads_path": str(context.results_dir / "fuzz-leads.md"),
             "tool_call_soft_target": str(context.soft_target(False)),
             "tool_call_deep_soft_target": str(context.soft_target(True)),
             "turn_budget_section": turn_budget_section(context),
             "mapping_delegate_directive": mapping_delegate_directive(context),
         },
     )
+
+
+def autoloaded_common_suffix(context: PromptContext) -> str:
+    """Common contract for a backend that loads the guide itself.
+
+    The full suffix restates the guide's workflow and tool discipline, which
+    an auto-loading backend already replays from ``AGENTS.md`` on every turn.
+    This variant keeps only what neither the guide nor the session-rules
+    digest carries: the session efficiency reminders, the turn and tool-call
+    budgets, and the delegate directive (empty unless the backend has one).
+    The digest itself stays whole; it holds the run-specific memory, search,
+    and filing gates.
+    """
+    return render_template(
+        "autoloaded_common_suffix.md.j2",
+        {
+            "fuzz_leads_path": str(context.results_dir / "fuzz-leads.md"),
+            "tool_call_soft_target": str(context.soft_target(False)),
+            "tool_call_deep_soft_target": str(context.soft_target(True)),
+            "turn_budget_section": turn_budget_section(context),
+            "session_rules_digest": session_rules_digest(context.reference_dir),
+            "mapping_delegate_directive": mapping_delegate_directive(context),
+        },
+    )
+
+
+def session_runtime_suffix(context: PromptContext) -> str:
+    """The common suffix a cold or deep worker prompt appends.
+
+    Backends that auto-load ``AGENTS.md`` get the shorter wrapper; every
+    other backend needs the full suffix because nothing else orients it.
+    """
+    if guide_autoloaded(context):
+        return autoloaded_common_suffix(context)
+    return common_suffix(context)
 
 
 def write_static_prompt_file(context: PromptContext) -> Path:
@@ -953,7 +989,7 @@ def cold_start_prompt(context: PromptContext, agent: int) -> str:
             "find_first_directive": find_first_directive(context),
             "mode_lock_line": f"**NO OVERLAP.** Mode lock: {mode}." if context.is_browser else "**NO OVERLAP.** Pick a different subsystem from every other agent.",
             "agent_state_instructions": _agent_state_instructions(context, agent),
-            "common_suffix": common_suffix(context),
+            "common_suffix": session_runtime_suffix(context),
         },
     )
 
@@ -1020,6 +1056,6 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
             "card_discard_min_runs": str(card_min_runs),
             "card_discard_min_hypotheses": str(card_min_hypotheses),
             "agent_state_instructions": _agent_state_instructions(context, agent),
-            "common_suffix": common_suffix(context),
+            "common_suffix": session_runtime_suffix(context),
         },
     )

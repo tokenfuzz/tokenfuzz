@@ -7,7 +7,9 @@ Use these exact forms instead of reading harness source or spending a turn on
 bin/state add-hyp --agent N --card-id ID --hypothesis 'desc' --file path:func:line --input-shape 'shape' --guard-gap 'gap' --diagnostic bounds|lifetime|type|size|uninit|state --strategy STRATEGY
 bin/state update-hyp --id H-... --status STATUS [--note NOTE]
 bin/state add-note --agent N --hypothesis-id H-... --kind data-flow|guard|variants|decision|context --text '...'
+bin/state mark-examined --agent N --file path --lines 10-80[,120-140] | --functions a,b [--card-id ID]
 bin/state show-recent --agent N --hyps 10 --runs 10 --claims 10 --notes 10
+bin/state recent-notes --kind guard --limit 40
 bin/state recent-tried --agent N --limit 40
 bin/state explain-queue --mode MODE [--strategy STRATEGY]
 ```
@@ -16,6 +18,11 @@ Use the strategy assigned by `bin/state resume` (`S1`…`S8` or `REF`); do not
 substitute the fallback default when the queue assigned something else.
 
 - Before a parser/decoder testcase, run `bin/find-seed <file>[:<Function>]`.
+- Before a new hypothesis, read recent guard notes. If `recent-tried` marks a
+  run `closest`, mutate around that near-miss before restarting broadly.
+- If three hypotheses stop at the same guard, find a route past it or rotate.
+- Check `{{ fuzz_leads_path }}` for a recent non-noise fuzzer lead before
+  starting unrelated discovery.
 - Testcases live under `{{ scratch_dir }}/` and carry native-comment headers
   `TARGET:`, `HYPOTHESIS-ID:`, and
   `CATEGORY: bounds|lifetime|type|size|uninit|state`; C/C++ API cases may add
@@ -33,6 +40,8 @@ substitute the fallback default when the queue assigned something else.
   with `$RESULTS_DIR/`. For opaque bytes, preserve
   them exactly and pass `--hypothesis-id H-...`; under S8 add
   `--property <kind>`.
+- Run `bin/probe-history <testcase>` before repeating a probe. Reuse a
+  confirmed verdict unless the binary, harness, or testcase changed.
 - If target code must generate, transform, or inspect a seed, perform that
   setup inside the testcase's `HARNESS` under `bin/probe`, never by invoking
   the target ad hoc from the shell first.
@@ -44,6 +53,11 @@ substitute the fallback default when the queue assigned something else.
   A target name also appears in concurrent cells. Signal only a PID you saved.
 - Never read raw state JSONL or harness `bin/`/`lib/` source to rediscover this
   contract. Use the compact `bin/state` views above.
+- Do not run `bin/rank-work` to browse cards; use `bin/state explain-queue` or
+  `bin/state list-cards --limit N`.
+- Before closing or leaving a card, use `bin/state mark-examined` for the
+  lines or functions you actually read. Receipts let the next session start
+  at unexamined code and keep the coverage report tied to real source reads.
 
 Every turn replays the conversation. Batch independent tool calls in one
 assistant response, keep search/read output narrow, and checkpoint each
@@ -62,3 +76,8 @@ not a finding. Promote a sanitizer-class diagnostic to `crashes/` only through
 `bin/probe --confirm`. Reports use the bare labels `Boundary:`,
 `Caller controls:`, `Trusted caller actions:`, `Caller contract:`,
 `Trigger source:`, and `Strategy:`.
+
+Before filing, scan `$RESULTS_DIR/findings/finding-clusters.md` for the same
+location and `$RESULTS_DIR/crashes-rejected/rejected-crashes.md` for the same
+crash site. `NEEDS CONTENT` means the FIND already exists; enrich it instead
+of opening a duplicate.
