@@ -210,12 +210,22 @@ def record_receipt(
     return receipt
 
 
-def examined_ranges_by_file(results_dir: Path) -> dict[str, list[tuple[int, int]]]:
-    """Merged receipted ranges per file, counting only receipts on the
-    manifest's current content hash."""
+def _receipt_ranges_by_file(
+    results_dir: Path, *, agent_attested_only: bool = False,
+) -> dict[str, list[tuple[int, int]]]:
+    """Merged current receipt ranges, optionally limited to agent claims.
+
+    Sweep source reaches the model through the harness-built decision prompt,
+    so it is verified examined coverage but has no transcript read event. The
+    source filter keeps that coverage while letting the report cross-check only
+    the receipts an agent claims for its own source reads. Missing ``source``
+    is the legacy form of an agent receipt.
+    """
     current = {row.get("file"): row.get("sha1") for row in read_manifest(results_dir)}
     collected: dict[str, list[tuple[int, int]]] = {}
     for receipt in workqueue.read_jsonl(receipts_path(results_dir)):
+        if agent_attested_only and str(receipt.get("source") or "agent") != "agent":
+            continue
         rel = str(receipt.get("file") or "")
         if not rel or receipt.get("sha1") != current.get(rel):
             continue
@@ -223,6 +233,17 @@ def examined_ranges_by_file(results_dir: Path) -> dict[str, list[tuple[int, int]
             if isinstance(pair, list) and len(pair) == 2:
                 collected.setdefault(rel, []).append((int(pair[0]), int(pair[1])))
     return {rel: merge_ranges(ranges) for rel, ranges in collected.items()}
+
+
+def examined_ranges_by_file(results_dir: Path) -> dict[str, list[tuple[int, int]]]:
+    """Merged receipted ranges per file, counting only receipts on the
+    manifest's current content hash."""
+    return _receipt_ranges_by_file(results_dir)
+
+
+def agent_attested_ranges_by_file(results_dir: Path) -> dict[str, list[tuple[int, int]]]:
+    """Current ranges that an agent attested reading itself."""
+    return _receipt_ranges_by_file(results_dir, agent_attested_only=True)
 
 
 def examined_lines(ranges: list[tuple[int, int]]) -> int:
@@ -514,27 +535,30 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
     `files` is what the ranker enumerated, `offered` what ever entered the
     window, `claimed` what a session picked up, `read_requested` what a
     transcript shows a session requesting (`lines_requested`), and
-    `receipted` what a session attested reading (`lines_examined`). A file can
-    be claimed without being offered only through a non-ranked card (a patch
-    card), and a read can be requested without either through discovery, so
-    the buckets are counted independently rather than nested.
+    `receipted` what an agent or the budgeted sweep verifiably examined
+    (`lines_examined`). A file can be claimed without being offered only
+    through a non-ranked card (a patch card), and a read can be requested
+    without either through discovery, so the buckets are counted independently
+    rather than nested.
 
-    `lines_attested_unrequested` is the cross-check between the two ledgers:
-    attested lines no transcript read reached. A receipt is the session's own
-    claim; this is the share of it the transcript cannot corroborate, which
-    is where an over-broad `mark-examined` would show. The read parser misses
-    idioms it does not know, so the number is evidence to inspect, not proof
-    of a false receipt.
+    `lines_attested_unrequested` is the cross-check between the two agent
+    ledgers: agent-attested lines no transcript read reached. Sweep receipts
+    remain examined coverage, but are excluded because the harness placed
+    that source directly in a tool-less decision prompt. The read parser
+    misses idioms it does not know, so the number is evidence to inspect, not
+    proof of a false receipt.
     """
     import read_ledger  # lazy: it imports this module
 
     manifest = read_manifest(ctx.results_dir)
     claimed = claimed_files(ctx, manifest)
     receipted = examined_ranges_by_file(ctx.results_dir)
+    agent_attested = agent_attested_ranges_by_file(ctx.results_dir)
     requested = read_ledger.requested_ranges_by_file(ctx.results_dir)
     empty = {
         "files": 0, "offered": 0, "claimed": 0, "read_requested": 0, "receipted": 0,
         "lines": 0, "lines_requested": 0, "lines_examined": 0,
+        "lines_agent_attested": 0,
         "lines_attested_unrequested": 0,
     }
     buckets: dict[str, dict] = {}
@@ -549,16 +573,18 @@ def coverage_report(ctx: workqueue.Context, depth: int = 2, untouched: int = 10)
         offered = bool(row.get("offered"))
         is_claimed = rel in claimed
         examined = min(lines, examined_lines(receipted.get(rel, [])))
+        agent_examined = min(lines, examined_lines(agent_attested.get(rel, [])))
         seen = min(lines, examined_lines(requested.get(rel, [])))
         corroborated = examined_lines(
-            intersect_ranges(receipted.get(rel, []), requested.get(rel, []))
+            intersect_ranges(agent_attested.get(rel, []), requested.get(rel, []))
         )
         for target in (bucket, totals):
             target["files"] += 1
             target["lines"] += lines
             target["lines_requested"] += seen
             target["lines_examined"] += examined
-            target["lines_attested_unrequested"] += max(0, examined - corroborated)
+            target["lines_agent_attested"] += agent_examined
+            target["lines_attested_unrequested"] += max(0, agent_examined - corroborated)
             target["offered"] += int(offered)
             target["claimed"] += int(is_claimed)
             target["read_requested"] += int(seen > 0)
@@ -608,20 +634,21 @@ def render_coverage(report: dict, fmt: str = "md") -> str:
         f"- Ever claimed by a session: {totals['claimed']} ({_pct(totals['claimed'], totals['files'])})",
         f"- Read scope requested per transcripts: {totals['read_requested']} files, "
         f"{totals['lines_requested']} lines ({_pct(totals['lines_requested'], totals['lines'])})",
-        f"- With an agent-attested examined receipt: {totals['receipted']} files, "
+        f"- With a verified examined receipt: {totals['receipted']} files, "
         f"{totals['lines_examined']} lines ({_pct(totals['lines_examined'], totals['lines'])})",
         f"- Never offered, claimed, nor receipted: {report['never_offered']}",
         *(
             [
-                f"- Attested lines no transcript read requested: "
+                f"- Agent-attested lines no transcript read requested: "
                 f"{totals['lines_attested_unrequested']} "
-                f"({_pct(totals['lines_attested_unrequested'], totals['lines_examined'])} of attested)"
+                f"({_pct(totals['lines_attested_unrequested'], totals['lines_agent_attested'])} "
+                f"of agent-attested)"
             ]
-            if totals["lines_examined"] else []
+            if totals["lines_agent_attested"] else []
         ),
         *report.get("sweep", []),
         "",
-        "| Directory | Files | Offered | Claimed | Read requested | Receipted | Lines | Requested % | Attested % |",
+        "| Directory | Files | Offered | Claimed | Read requested | Receipted | Lines | Requested % | Examined % |",
         "|---|--:|--:|--:|--:|--:|--:|--:|--:|",
     ]
     if edges.get("available") and edges.get("eligible_caller_sets"):

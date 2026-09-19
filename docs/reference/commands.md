@@ -359,12 +359,12 @@ cards, runs, and diagnostics per rank bucket, and the share of the queue that
 was ever touched, so a ranking change is judged by conversion rather than
 taste. `strategy-yield` reports per-strategy runs, seconds, and diagnostics.
 
-`coverage` joins the auditable-file manifest to the claims and to the
-`mark-examined` receipts, so the files the ranked window never offered, and
-the share of lines no session attested reading, are listed rather than
-inferred. Its transcript column is the scope of observed read requests,
-which can exceed what entered context when a tool truncated its output; see
-[Review coverage](../concepts/coverage.md).
+`coverage` joins the auditable-file manifest to the claims and to verified
+agent-or-sweep receipts, so the files the ranked window never offered, and
+the examined share of the tree, are listed rather than inferred. Its separate
+uncorroborated metric covers only agent-attested lines. The transcript column
+is the scope of observed read requests, which can exceed what entered context
+when a tool truncated its output; see [Review coverage](../concepts/coverage.md).
 
 `bin/sweep` runs the budgeted breadth pass by hand: `--dry-run` lists the
 unreceipted units in the order they would be swept, `--token-budget N`

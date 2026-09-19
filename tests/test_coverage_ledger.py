@@ -591,6 +591,13 @@ class ReportTests(unittest.TestCase):
         workqueue.append_jsonl(coverage_ledger.receipts_path(self.results), {
             "file": "src/parse/app_parse.c", "ranges": [[1, 30]], "sha1": "h-app_parse",
         })
+        # Sweep source is placed directly in a tool-less decision prompt. It
+        # remains examined coverage, but there can be no transcript read to
+        # corroborate it, so it must not inflate the agent-receipt cross-check.
+        workqueue.append_jsonl(coverage_ledger.receipts_path(self.results), {
+            "file": "tools/gen.c", "ranges": [[1, 10]], "sha1": "h-gen",
+            "source": "sweep",
+        })
         workqueue.append_jsonl(coverage_ledger.receipts_path(self.results), {
             "file": "src/io/reader.c", "ranges": [[1, 80]], "sha1": "stale",
         })
@@ -603,8 +610,9 @@ class ReportTests(unittest.TestCase):
         report = coverage_ledger.coverage_report(self.ctx, depth=2, untouched=1)
         self.assertEqual(
             report["totals"],
-            {"files": 5, "offered": 2, "claimed": 2, "read_requested": 1, "receipted": 1,
-             "lines": 1440, "lines_requested": 900, "lines_examined": 30,
+            {"files": 5, "offered": 2, "claimed": 2, "read_requested": 1, "receipted": 2,
+             "lines": 1440, "lines_requested": 900, "lines_examined": 40,
+             "lines_agent_attested": 30,
              "lines_attested_unrequested": 30},
         )
         by_dir = {row["directory"]: row for row in report["directories"]}
@@ -612,7 +620,8 @@ class ReportTests(unittest.TestCase):
             by_dir["src/parse"],
             {"directory": "src/parse", "files": 2, "offered": 2, "claimed": 1,
              "read_requested": 0, "receipted": 1, "lines": 420, "lines_requested": 0,
-             "lines_examined": 30, "lines_attested_unrequested": 30},
+             "lines_examined": 30, "lines_agent_attested": 30,
+             "lines_attested_unrequested": 30},
         )
         self.assertEqual(by_dir["src/io"]["offered"], 0)
         self.assertEqual(by_dir["tools"]["claimed"], 1)
@@ -623,7 +632,12 @@ class ReportTests(unittest.TestCase):
 
         text = coverage_ledger.render_coverage(report)
         self.assertIn("Never offered, claimed, nor receipted: 2", text)
-        self.assertIn("Attested lines no transcript read requested: 30 (100% of attested)", text)
+        self.assertIn(
+            "Agent-attested lines no transcript read requested: 30 (100% of agent-attested)",
+            text,
+        )
+        self.assertIn("| Requested % | Examined % |", text)
+        self.assertNotIn("| Requested % | Attested % |", text)
         self.assertIn("| `src/io` | 2 | 0 | 0 | 1 | 0 | 980 | 92% | 0% |", text)
         self.assertIn("`src/io/writer.c` (900 lines)", text)
         self.assertEqual(

@@ -117,12 +117,12 @@ on filing evidence:
 
 - the **manifest** lists every auditable file each ranking pass enumerated,
   with its content hash and whether it ever entered the window;
-- **receipts** are the agent's own attestation of the lines it read, refused
-  when they name lines or functions the manifest cannot verify, and
-  discounted once the file's content changes;
+- **receipts** are verified line attestations from an agent or the budgeted
+  sweep, refused when they name lines or functions the manifest cannot
+  verify, and discounted once the file's content changes;
 - **transcript reads** are the file requests each session's backend
   transcript shows, recorded after the session ends as the cross-check on
-  receipts;
+  agent receipts;
 - the optional **budgeted sweep** runs beside the agent slots as its own
   process, buying one tool-less decision per unreceipted unit of source
   within `[sweep] token_budget`, and hands its leads to the reproduce lane.

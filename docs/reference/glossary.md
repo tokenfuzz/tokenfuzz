@@ -34,14 +34,15 @@ re-read those ranges after compaction.
 enumerated, with its content hash and whether it ever entered the ranked
 window. The base the coverage report measures against.
 
-**Receipt (`bin/state mark-examined`).** An agent's attestation of the line
-ranges or functions it read in one file, pinned to the file's content hash.
+**Receipt (`state/receipts.jsonl`; `bin/state mark-examined`).** A verified
+record of line ranges or functions examined by an agent, or source placed
+directly in a budgeted-sweep prompt, pinned to the file's content hash.
 Refused when the manifest cannot verify it; discounted once the content
 changes. Distinct from a validation receipt (`validation.json`).
 
 **Transcript read.** A file request a session's backend transcript shows,
 recorded in `state/reads.jsonl` after the session ends. Evidence beside a
-receipt, never a gate.
+session's receipt, never a gate.
 
 **Budgeted sweep.** The optional breadth pass enabled by `[sweep]
 token_budget`: one tool-less decision per unreceipted unit of source, paid

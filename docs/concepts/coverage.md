@@ -48,20 +48,23 @@ directory:
   `offered` rather than a subset of it.
 
 Directories are listed least-covered first, and the largest files that were
-never offered nor claimed are named, because those are what an operator acts
-on: widen `RANK_WORK_LIMIT`, pin a lane, or run a delta over that directory.
+never offered, claimed, nor receipted are named, because those are what an
+operator acts on: widen `RANK_WORK_LIMIT`, pin a lane, or run a delta over
+that directory.
 
 ## Receipts
 
-A claim says a card was handed out. A receipt is an agent's attestation of
-which lines it read:
+A claim says a card was handed out. An agent records which lines it read with
+a receipt:
 
 ```bash
 bin/state mark-examined --agent 1 --file src/parse.c --lines 1-120,200-260
 bin/state mark-examined --agent 1 --file src/parse.c --functions app_parse,app_reset
 ```
 
-Receipts append to `state/receipts.jsonl`, pinned to the file's content hash
+The budgeted sweep records the same verified receipt shape with `source:
+sweep` for source placed directly in its tool-less decision prompt. Receipts
+append to `state/receipts.jsonl`, pinned to the file's content hash
 from the manifest. The harness verifies each one before recording it: the
 file must be in the manifest, every range must lie inside it, and a function
 name must be one the
@@ -86,8 +89,9 @@ Receipts change three things:
   card, starts from what is left instead of the top of the file.
 - **Reoffer order.** Among broad cards with the same number of prior
   conclusions, the claimer offers the least-read file first.
-- **The report.** `bin/state coverage` adds receipted files and the attested
-  examined-line share per directory, and telemetry carries the same totals.
+- **The report.** `bin/state coverage` adds files and lines verifiably examined
+  by agents or the budgeted sweep per directory, and telemetry carries the
+  same totals.
 
 ## The budgeted sweep
 
@@ -157,20 +161,23 @@ limit, and the shell idioms the audit shell wraps (`sed -n 'A,Bp'`, `cat`,
 `head`, `tail`, `nl`, `bin/peek FILE:A-B`). A pattern search loads matches,
 not a range, and is not recorded. Only reads inside the target tree count.
 
-The report shows these as **Read requested** beside **Receipted**. The
-request scope is an upper bound: a shell command such as `cat` proves what
+The report shows these as **Read requested** beside **Receipted**. Receipted
+includes both agent and sweep coverage. The request scope is an upper bound:
+a shell command such as `cat` proves what
 was asked for, while backend or tool truncation can mean less entered the
-context. Receipted is the agent's own statement of what it read. The two
-disagree in useful ways, but neither is a gate: transcript formats and shell
-idioms vary, and a read the parser does not recognise is simply absent. Both
-ledgers are pinned to the current manifest hash, so observations on changed
-content stop counting.
+context. For agent receipts, the receipt is the agent's own statement of what
+it read. The two disagree in useful ways, but neither is a gate: transcript
+formats and shell idioms vary, and a read the parser does not recognise is
+simply absent. Both ledgers are pinned to the current manifest hash, so
+observations on changed content stop counting.
 
-The report also joins the two: **attested lines no transcript read
-requested** is the share of receipts the transcript cannot corroborate. An
-over-broad `mark-examined` on a file the session never opened shows up
-there. Because the parser misses idioms it does not know, the number is a
-place to look, not proof of a false receipt.
+The report also joins the two: **agent-attested lines no transcript read
+requested** is the share of agent receipts the transcript cannot corroborate.
+Sweep receipts are excluded from this cross-check because their source is in
+the harness-built prompt and cannot produce a transcript read request. An
+over-broad `mark-examined` on a file the session never opened shows up there.
+Because the parser misses idioms it does not know, the number is a place to
+look, not proof of a false receipt.
 
 ## What it does and does not say
 
