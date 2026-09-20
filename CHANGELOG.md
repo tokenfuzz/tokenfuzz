@@ -1,5 +1,159 @@
 # Changelog
 
+## 1.6.1 - 2026-09-19
+
+A run can now say what it looked at and what it never reached. Every
+ranking pass writes a manifest of the auditable tree, sessions leave
+receipts for the lines they read, the backend transcript is read as a
+second witness, and `bin/state coverage` joins the three per directory,
+least covered first. Two things spend that knowledge: a budgeted sweep
+that buys breadth over the files the window never offered, and a second
+pass that asks about the contract across each cross-file call once a file
+is fully read. Around them, triage stops crediting crashes in drivers that
+compile the target's own source, the canary benchmark reports recall per
+bug class, and the prompts lose the rules that contradicted the guide.
+
+### Measured review coverage
+
+- **The tree is enumerated, and a file that left the window leaves a
+  trace.** The ranked window (`RANK_WORK_LIMIT`, 120 by default) grew only
+  once every card in it was worked, and the card file was rewritten on every
+  refresh, so on a large tree most files never received a card and a clean
+  run could not name them. `rank_target` now writes `state/manifest.jsonl`
+  from the same enumeration that produces the cards: every auditable file
+  with its line count, content hash, subsystem, deterministic card id, and a
+  sticky "offered" flag. A preview ranked into another file no longer marks
+  its window offered, a delta pass keeps the rows it does not touch, and the
+  read-modify-write runs under the manifest's lock. The walk prunes the
+  harness's own `.audit/` workspace and any directory Python marks as a
+  virtualenv: pip's vendored code under a bootstrap venv had become 406
+  work cards that agents spent sessions blocking.
+
+- **Sessions record which lines they read.** `bin/state mark-examined
+  --agent N --file F --lines A-B | --functions a,b` appends a verified
+  receipt to `state/receipts.jsonl`: the file must be in the manifest, ranges
+  must fit inside it, function names must be ones the call graph parsed
+  there, and a name defined more than once is refused in favour of
+  `--lines`. Receipts are pinned to the manifest's content identity, checked
+  by stat triple first and by hash on a mismatch, so a receipt on changed
+  content stops counting without refusing every receipt after a touch. Every
+  card directive and resume brief carries an "Examined so far" block with
+  the receipted ranges and the parsed functions no receipt reaches, which is
+  what a post-compaction session or a second agent on the same broad card
+  starts from; the claimer breaks ties among equally-mined broad cards
+  toward the smallest receipted share. The call-graph artifact now keeps
+  each file's function definitions (schema 6) so the unit exists without
+  re-running the parser.
+
+- **The transcript is the second witness.** Receipts are self-attested.
+  After a session ends the runner scans its transcript for each backend's
+  native read tool and the shell idioms the audit shell wraps (`sed -n`,
+  `cat`, `head`, `tail`, `nl`, `bin/peek`), resolves each path into the
+  target tree, and appends merged ranges to `state/reads.jsonl`. `tail -n
+  +K` is no longer read as a count; byte windows and multi-script `sed`
+  calls are skipped rather than recorded as a range they did not read.
+  Coverage shows these as "read requested" beside "receipted", and joins
+  receipts to reads so that attested lines no read requested is where an
+  over-broad `mark-examined` shows. Sweep receipts stay out of that
+  cross-check, since their source reaches the model through the decision
+  prompt and no transcript read could corroborate them. Loaded is evidence,
+  never a gate: a read the parser does not recognise is simply absent.
+
+### The budgeted sweep
+
+- **`bin/sweep` buys breadth the window cannot.** Every file a session
+  opens is replayed on each later turn, so breadth was the expensive thing
+  to buy and the coverage report could only name the gap. The sweep walks
+  the unreceipted units, files the window never offered first, then the
+  least-read, and hands each unit (a parsed function, a `unit_lines`
+  window of a longer one, or a fixed window where nothing parsed) to a
+  one-shot decision with no tools. A reply must attest the whole unit with
+  exactly one verdict per parsed function; a partial or malformed reply
+  leaves the unit open, and a lead must sit inside the unit at a non-clean
+  function. Receipts land with `source: sweep`; leads become
+  `NEEDS_TESTCASE` hypotheses owned by agent `sweep` and reach the
+  reproduce lane through the ordinary handoff once the sweep has recorded
+  state. It never probes, claims a card, or files a finding.
+
+- **Spend is bounded, persisted, and survives interruption.** `[sweep]
+  token_budget` in `target.toml` turns it on; the estimate counts prompt and
+  reply tokens of every call, failed ones included, and is charged before
+  each call and written to `state/sweep.json` after every unit. A call whose
+  prompt alone exceeds the remainder is not started, corrupt state is an
+  error rather than a zero, and one sweep owns a results tree at a time. The
+  audit starts it as a background process beside the slots, its calls land
+  in the usage ledger so the benchmark wall counts them, and delta and
+  fixed-lane runs never start one; ensemble runs do. SIGTERM
+  now finishes the current receipt and leads as one commit and undoes a
+  charge for a call never dispatched, and the runner waits up to the sweep's
+  decision ceiling, inside the productive wall, before killing the tree, so
+  a paid in-flight decision is not lost and bought again on resume.
+
+### The second pass
+
+- **Cross-file call-edge cards ask what file cards cannot.** File cards
+  cover functions; nothing covered the contract between a caller in one
+  file and a callee in another, which is where a length, ownership,
+  lifetime, or encoding assumption changes hands. Once every parsed
+  function in a file carries a receipt, `rank_target` mints one `call-edge`
+  card (strategy S3) per caller set from the call graph's certain edges,
+  keyed to the callee's and every caller's content hash and seeded at the
+  highest-count caller, so a callee with a thousand callers is one card
+  rather than a thousand sessions. Edge cards ride the ranked window with
+  their file like companion cards, buying no distinct-file slot, and also
+  ride the diversity-floor pool so a quiet file the floor placed gets its
+  second pass. Delta runs mint none. The coverage report states the
+  sampling boundary, derives eligibility from the ledgers rather than the
+  live queue (a concluded card had read as "no card"), and the queue
+  refresh now reranks when a file completes its receipts even on a target
+  without probe coverage.
+
+### Triage and benchmark
+
+- **A driver that compiles target source is not the pinned build.** A
+  benchmark replicate credited every direct-condition crash to drivers that
+  `#include`d a target module the pinned build had switched off, while the
+  harness condition blocked the same cards with proof. Triage now asks the
+  compiler (`clang -MM -MG`, `lib/build_scope.py`) which target units a
+  driver compiles into itself and demotes such a crash to a finding, on
+  either side. A scan that cannot run keeps the crash, a crash already
+  published keeps its verdict, and the answer is cached beside the driver by
+  digest. An accepted finding or crash also closes the hypotheses its
+  headers name, so a row filed at the wall no longer reads `PENDING` to the
+  next resume.
+
+- **The canary plants a bug per strategy family and reports recall by
+  class.** Three planted bugs, all overflow-shaped or a plain
+  use-after-free, let a run score 100% while never finding a
+  size-computation, off-by-one guard, or error-path lifetime bug. Four more
+  are planted (an exact-length copy read one past its end, an allocation
+  size computed in an 8-bit type, a double free on an error path, an index
+  guard that admits the capacity), every entry names its strategy, and the
+  scorer reports recall per sanitizer primitive and per strategy shape.
+  `tests/test_canary_planted.py` builds the canary and checks every planted
+  input reproduces at its symbol before a benchmark could mis-score.
+
+### Prompts and documentation
+
+- **Prompts stop contradicting the guide.** Both pacing hints told a dry
+  agent to rotate subsystem, which Rule 7 forbids; they now say to switch
+  strategy on the same card. The safety framing demanded exactly three
+  header lines although `bin/probe` reads more, routed caller misuse to
+  `findings/` against the FIND gate, and carried a third copy of the
+  trigger-source rule; the digest listed a crash status that never exists.
+  Codex and Grok, which auto-load `AGENTS.md`, now get a shorter common
+  suffix (cold prompts shrink by roughly a sixth), compact sessions gain the
+  digest's pre-file rules, and the auto-memory guard renders in every worker
+  prompt that can persist a note, including Antigravity regardless of the
+  memory setting.
+
+- **The handbook is rewritten and checked against the code.** Every page
+  under `docs/` is in plainer prose with each flag traced to `bin/`, `lib/`,
+  `config/`, and `.agents/`; paths and anchors are unchanged. The README,
+  index, architecture, cost-model, glossary, and first-audit pages now
+  describe measured coverage, the sweep, and the second pass, and the
+  development page keeps only what this repository does differently.
+
 ## 1.6.0 - 2026-09-16
 
 The benchmark result is a new page. What was a Markdown crosstab that could
