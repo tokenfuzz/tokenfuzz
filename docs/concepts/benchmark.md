@@ -417,7 +417,7 @@ unavailable.
 | --- | --- |
 | **What each model surfaced** | Results by target revision and condition, split into signatures unique to that condition and signatures shared with other runs. Harness rows include a comparison with their own control. |
 | **Models side by side** | Discovery timelines, which conditions reported each signature, attention by subsystem, strategy use, and available cost and timing measures. |
-| **Run by run** | Each run's outcomes and hypothesis history, with probe events, notes, and links to evidence. Replay controls show how the recorded state changed over time. |
+| **Run by run** | Each run's outcomes and hypothesis history, with probe events, notes, and links to evidence. Replay controls show how the recorded state changed over time. A run against a target with an answer key adds a ground-truth panel with its recall and precision. |
 | **Ledger** | Sortable reference rows for every target, backend, condition, and run. Count links open the indexes that produced them. |
 | **Token usage** | Agent and orchestration cost, including preflight and review. Estimated usage and incomplete delegated spend are marked. |
 | **Bugs by severity** | Crash clusters ordered by severity, with links to the bundles. |

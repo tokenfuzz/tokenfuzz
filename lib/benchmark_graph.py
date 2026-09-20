@@ -120,6 +120,33 @@ def _artifact_time(directory: Path) -> float | None:
     return crash_artifacts.filing_time(directory)
 
 
+def _provenance_time(directory: Path, origin: float | None, limit: float | None) -> float | None:
+    """When the agent's own write-up under ``.audit`` was written, if that is
+    a clock inside the cell's wall.
+
+    A control's crash is promoted by the review after the wall, which stamps
+    the bundle and its created event with the promotion, not the discovery.
+    The agent's original report is moved under ``.audit`` by rename, so its
+    mtime is still the moment the agent claimed the problem. Only the report
+    qualifies: inputs and attachments are copied bytes that can carry a
+    preserved mtime from before the run, and a clock outside the wall is not
+    a discovery, so it is left out rather than clamped to hour zero.
+    """
+    audit = directory / ".audit"
+    if origin is None or not audit.is_dir():
+        return None
+    report = report_identity.exact_child_file(audit, report_identity.REPORT_NAMES)
+    if report is None:
+        return None
+    try:
+        when = report.stat().st_mtime
+    except OSError:
+        return None
+    if when < origin or (limit is not None and when > limit):
+        return None
+    return when
+
+
 def _discovery_index(cells: list[Path]) -> dict[tuple, dict[tuple, float]]:
     """{kind: {signature: earliest hours-into-run it was seen}}."""
     index: dict[str, dict[tuple, float]] = {"find": {}, "crash": {}}
@@ -133,6 +160,8 @@ def _discovery_index(cells: list[Path]) -> dict[tuple, dict[tuple, float]]:
             continue
         stamps = _event_stamps(results)
         origin = _cell_start(cell)
+        wall = meta.get("wall_seconds")
+        limit = origin + float(wall) if origin is not None and isinstance(wall, (int, float)) and wall > 0 else None
         roots = {
             "find": ("findings", "findings-rejected"),
             "crash": ("crashes", "crashes-rejected"),
@@ -151,6 +180,11 @@ def _discovery_index(cells: list[Path]) -> dict[tuple, dict[tuple, float]]:
                         when = _artifact_time(directory)
                     if when is None:
                         continue
+                    # the agent's own write-up, when the recorded clock is
+                    # the review's promotion rather than the discovery
+                    provenance = _provenance_time(directory, origin, limit)
+                    if provenance is not None and provenance < when:
+                        when = provenance
                     # key it once: _signature re-reads the report off disk
                     key = _signature(directory, kind)
                     if key is None:
@@ -174,7 +208,7 @@ def _discovery_index(cells: list[Path]) -> dict[tuple, dict[tuple, float]]:
 
 
 def _event_stamps(results: Path) -> dict[str, float]:
-    """finding_created stamps, when the run recorded them (new runs only)."""
+    """finding_created / crash_created stamps, when the run recorded them."""
     events = results / "state" / "events.jsonl"
     if not events.is_file():
         return {}
@@ -185,7 +219,7 @@ def _event_stamps(results: Path) -> dict[str, float]:
                 row = json.loads(line)
             except ValueError:
                 continue
-            if row.get("type") != "finding_created":
+            if row.get("type") not in ("finding_created", "crash_created"):
                 continue
             stamp = row.get("mtime") or row.get("first_seen")
             try:
@@ -235,10 +269,16 @@ def _cluster_site(cluster: dict, kind: str) -> str:
 
 def _cluster_times(
     run_dir: Path, cond: str, kind: str, rejected: bool,
-    index: dict, members: dict, fallback: float,
+    index: dict, members: dict, fallback: float, covered=None,
 ) -> tuple[list[tuple[float, str, str]], bool]:
     """Earliest discovery time and source site per REAL cluster, from the
     clusterer's own JSON.
+
+    *covered* is the ledger's own predicate for a finding that writes up one
+    of this condition's crashes: such a cluster earns the condition no count,
+    so it gets no step either. Without it the curve would take the earliest
+    clusters and truncate to the count, and the steps would name sites the
+    table never credited.
 
     The clusterers merge more than a raw signature key does, so a locally
     deduplicated list cannot be mapped onto their counts by truncation: given
@@ -258,7 +298,7 @@ def _cluster_times(
     approximate = False
     for cluster in _load_clusters(run_dir / f"clusters-{sub}.json"):
         mine = [m for m in (cluster.get("members") or []) if owner.get(m) == cond]
-        if not mine:
+        if not mine or (covered is not None and covered(cluster, cond)):
             continue
         best = None
         for member in mine:
@@ -296,7 +336,10 @@ def _is_batch_quantized(times: list[float]) -> bool:
     for value in times:
         key = round(value / 0.01)
         buckets[key] = buckets.get(key, 0) + 1
-    return max(buckets.values()) / len(times) > 0.3
+    # a batch is several results on one instant; two of five within a few
+    # seconds is what parallel agents do, not what a gate write looks like
+    top = max(buckets.values())
+    return top >= 3 and top / len(times) > 0.3
 
 
 def _reconcile(
@@ -331,10 +374,9 @@ def build(bench_root: Path) -> dict:
             run = json.loads(run_json.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        try:
-            members = json.loads((run_dir / "pool-members.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            members = {}
+        # the ledger's own reading of membership, so a crash demoted after
+        # pooling is out of the crash set on both the table and the curve
+        members = benchmark._reconcile_demoted_pool_crashes(run_dir)
         report_path = run_dir / "report.json"
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -349,6 +391,12 @@ def build(bench_root: Path) -> dict:
             name = cell.name
             cond = "harness" if name.startswith("harness") else "model-direct"
             cells_by_cond.setdefault(cond, []).append(cell)
+        # the same crash-cover predicate the ledger counts with, so the
+        # finding curve steps exactly where the table credits
+        covered = benchmark._finding_covered_by_crash(benchmark.attribute_clusters(
+            {"clusters": _load_clusters(run_dir / "clusters-crashes.json")},
+            benchmark.credited_pool_members(members, "crashes"),
+        ))
         for condition in report.get("conditions", []):
             cond = condition.get("condition")
             cells = cells_by_cond.get(cond, [])
@@ -381,7 +429,8 @@ def build(bench_root: Path) -> dict:
                 n_rejected = condition.get(rej_key) or 0
                 declared_upper_bound = bool(condition.get(upper_key))
                 acc_times, acc_approx = _cluster_times(
-                    run_dir, cond, kind, False, index, members, wall)
+                    run_dir, cond, kind, False, index, members, wall,
+                    covered=covered if kind == "find" else None)
                 rej_times, rej_approx = _cluster_times(
                     run_dir, cond, kind, True, index, members, wall)
                 # Reports written before the explicit bit can still reveal the

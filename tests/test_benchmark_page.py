@@ -201,7 +201,9 @@ class Fixture:
             {"id": "H-3", "agent": "1", "strategy": "S3", "file": "src/app_alloc.c:app_grow:40",
              "hypothesis": "growth is unbounded", "status": "PENDING",
              "created_at": "2026-01-01T04:00:00Z"},
-            {"id": "H-5", "agent": "1", "strategy": "S2", "file": "src/app_alloc.c:app_grow:40",
+            {"id": "H-5", "agent": "1", "strategy": "S2",
+             # the checkout prefix an agent sometimes writes; one file, one row
+             "file": "targets/sampleproj/src/app_alloc.c:app_grow:40",
              "hypothesis": "still being probed at the wall", "status": "PROBED",
              "created_at": "2026-01-01T02:45:00Z"},
             {"id": "H-4", "agent": "2", "strategy": "S5", "file": "src/app_io.c:app_close:80",
@@ -377,7 +379,7 @@ class BuildTests(unittest.TestCase):
         # resolved by teardown after the wall: still open at the wall, so the
         # bar runs to the wall rather than collapsing to its opening instant
         self.assertEqual((dropped["t0"], dropped["t1"]), (2.5, 3.0))
-        self.assertEqual(dropped["outcome"], "dropped")
+        self.assertEqual(dropped["outcome"], "discarded")
         # the agent's note names the checkout; the page must not
         self.assertNotIn(str(ROOT), dropped["note"])
         self.assertIn("build-asan is pinned", dropped["note"])
@@ -397,7 +399,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(refuted["probes"][0]["verdict"], "PROPERTY")
         self.assertEqual(trace["summary"]["hit"], 1)
         self.assertEqual(trace["summary"]["refuted"], 1)
-        self.assertEqual(trace["summary"]["dropped"], 1)
+        self.assertEqual(trace["summary"]["discarded"], 1)
         self.assertEqual(trace["summary"]["open"], 1)
         # 20, 20, 30 minutes resolved: the middle value
         self.assertEqual(trace["median_minutes"], 20.0)
@@ -506,7 +508,7 @@ class BuildTests(unittest.TestCase):
         self.assertIsNone(benchmark_page._looked("src/none.c", self._cond("harness")["traces"]))
         looked = benchmark_page._looked("src/app_io.c", self._cond("harness")["traces"])
         self.assertEqual(looked["n"], 2)
-        self.assertEqual([h["outcome"] for h in looked["hyps"]], ["refuted", "dropped"])
+        self.assertEqual([h["outcome"] for h in looked["hyps"]], ["refuted", "discarded"])
         self.assertEqual(looked["filed_nearby"], 0)
         parse = benchmark_page._looked("src/app_parse.c", self._cond("harness")["traces"])
         self.assertEqual((parse["n"], parse["filed_nearby"]), (1, 1))
@@ -770,6 +772,94 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn('<img src=x', html)
         self.assertIn("&lt;img src=x", html)
         self.assertNotIn("innerHTML", html)
+
+    def test_a_hypothesis_site_with_the_checkout_prefix_is_target_relative(self) -> None:
+        trace = self._harness_trace()
+        sites = {h["id"]: h["file"] for h in trace["hyps"]}
+        self.assertEqual(sites["H-5"], "src/app_alloc.c:app_grow:40")
+        self.assertEqual(next(h["subsystem"] for h in trace["hyps"] if h["id"] == "H-5"), "src")
+
+    def _harness_trace(self) -> dict:
+        data = benchmark_page.build(self.fixture.root)
+        harness = next(c for c in data["runs"][0]["conditions"] if c["token"] == "harness")
+        return harness["traces"][0]
+
+    def test_checkpoints_fit_the_budget(self) -> None:
+        # a thirty-minute run gets quarter-hour columns, not a lone 1h column
+        def cond(times: list[float], budget_h: float, wall_h: float) -> dict:
+            return {"key": "k", "name": "n", "backend": "codex", "token": "harness",
+                    "provisional": False, "budget_h": budget_h, "wall_h": wall_h,
+                    "find": {"times": times, "approx": False},
+                    "crash": {"times": [], "approx": False}}
+        short = benchmark_page._checkpoints([cond([0.1, 0.3], 0.5, 0.503)])
+        self.assertEqual(short["hours"], [0.25, 0.5, 0.75])
+        self.assertEqual(short["rows"][0]["counts"], [1, 2, 2])
+        medium = benchmark_page._checkpoints([cond([1.2], 2.0, 2.0)])
+        self.assertEqual(medium["hours"], [0.5, 1.0, 1.5, 2.0])
+        long = benchmark_page._checkpoints([cond([2.5], 3.0, 3.0)])
+        self.assertEqual(long["hours"], [1, 2, 3])
+
+    def test_raw_cell_counts_are_every_candidate(self) -> None:
+        # the gate's candidate count includes a crash still pending, which the
+        # confirmed + rejected sum leaves out
+        metrics = {"confirmed_crashes": 18, "crashes_rejected": 0,
+                   "findings": 4, "findings_rejected": 1,
+                   "validation_waterfall": {"crashes": _lanes(18, pending=1),
+                                            "findings": _lanes(4, rejected=1)}}
+        self.assertEqual(benchmark_page._raw_count(metrics, "crashes"), 19)
+        self.assertEqual(benchmark_page._raw_count(metrics, "findings"), 5)
+        older = {"confirmed_crashes": 2, "crashes_rejected": 1, "findings": 3, "findings_rejected": 0}
+        self.assertEqual(benchmark_page._raw_count(older, "crashes"), 3)
+        self.assertEqual(benchmark_page._raw_count(older, "findings"), 3)
+
+    def test_the_funnel_names_a_completed_review_not_a_pass(self) -> None:
+        html = benchmark_page.render(benchmark_page.build(self.fixture.root))
+        self.assertIn(">review completed<", html)
+        self.assertNotIn('<span class="fl">validated</span>', html)
+        self.assertIn("discarded by the agent", html)
+        self.assertNotIn("dropped untested", html)
+        self.assertIn("Finding classes", html)
+
+    def test_ground_truth_scores_render_only_when_the_run_has_an_answer_key(self) -> None:
+        html = benchmark_page.render(benchmark_page.build(self.fixture.root))
+        self.assertNotIn('<div class="pt">Ground truth</div>', html)
+        report = json.loads((self.fixture.run / "report.json").read_text(encoding="utf-8"))
+        scored = {"real_total": 5, "detected": ["a", "b", "c", "d", "e"], "missed": [],
+                  "recall": 1.0, "precision": 1.0, "confirmed_crashes": 23,
+                  "false_positive_crashes": 0, "false_positive_traps_fired": [],
+                  "by_primitive": {"heap-buffer-overflow": {"real": 2, "detected": 2, "recall": 1.0}}}
+        partial = dict(scored, detected=["a", "b", "c", "d"], missed=["e"], recall=0.8)
+        report["ground_truth_scoring"] = {
+            "overall": scored,
+            "by_condition": {"harness": scored, "model-direct": partial},
+            "findings": {
+                "overall": {"real_total": 1, "detected": ["f"], "missed": [], "recall": 1.0,
+                            "precision": 1.0, "confirmed_findings": 8,
+                            "false_positive_traps_fired": [], "open_world_findings": ["x"]},
+                "by_condition": {"harness": {"real_total": 1, "detected": ["f"], "missed": [],
+                                             "recall": 1.0, "precision": 1.0,
+                                             "confirmed_findings": 4,
+                                             "false_positive_traps_fired": [],
+                                             "open_world_findings": ["x"]}},
+            },
+        }
+        (self.fixture.run / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        html = benchmark_page.render(benchmark_page.build(self.fixture.root))
+        panel = html[html.index('<div class="pt">Ground truth</div>'):]
+        panel = panel[:panel.index("</section>")]
+        self.assertIn("<td>gpt-5.6-sol-direct</td>", panel)
+        self.assertIn('<td class="num">80%</td>', panel)
+        self.assertIn('<td class="num">4/5</td>', panel)
+        self.assertIn("<td>e</td>", panel)
+        self.assertIn("heap-buffer-overflow", panel)
+        self.assertIn("open-world", panel)
+        self.assertIn('<td class="num">1</td>', panel)
+        report["ground_truth_error"] = ["entry 3: missing primitive"]
+        (self.fixture.run / "report.json").write_text(json.dumps(report), encoding="utf-8")
+        html = benchmark_page.render(benchmark_page.build(self.fixture.root))
+        self.assertIn("manifest is invalid", html)
+        self.assertIn("entry 3: missing primitive", html)
+        self.assertNotIn('<td class="num">4/5</td>', html)
 
     def test_no_runs_renders_an_empty_notice(self) -> None:
         html = benchmark_page.render({"generated_at": "now", "scorer": "s", "runs": []})

@@ -4092,8 +4092,8 @@ def _finding_covered_by_crash(crash_attr: dict):
 
     A finding is "a security issue reported without a sanitizer crash behind
     it". When the same condition also holds a reportable crash at the same
-    file and function (or line), the finding is that crash's write-up, and
-    counting both credits one defect twice. Crash and finding name the site
+    file and line, the finding is that crash's write-up, and counting both
+    credits one defect twice. Crash and finding name the site
     differently — a stack frame's `ns::fn file.c:12` against a report's
     `src/file.c` and `fn` — so both reduce to (file basename, symbol leaf)
     and (file basename, line) before comparing.
@@ -4155,6 +4155,12 @@ def _finding_covered_by_crash(crash_attr: dict):
             return False
         base = os.path.basename(str(cluster.get("file") or key[1]))
         own = sites.get(cond, ())
+        # The composed key ends in the line when the report pins one and in
+        # the function only when it does not, so a located write-up matches
+        # on its exact line and nothing looser. Do not widen this to the
+        # function: one function can hold many distinct bugs, and a finding
+        # one line off its condition's crash frame is a double count worth
+        # a reviewer's look, not a defect silently folded into another.
         return (
             (base, _symbol_leaf(str(key[2]))) in own
             or (base, str(cluster.get("line") or "")) in own

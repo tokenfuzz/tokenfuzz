@@ -37,6 +37,7 @@ from pathlib import Path
 
 import benchmark
 import benchmark_graph
+import finding_signature
 import report_identity
 import severity_receipt
 import stack_frames
@@ -189,7 +190,7 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
     is shared. The site and title come from the cluster's canonical report so
     a reader can open exactly the evidence behind a dot.
     """
-    members = _read_json(run_dir / "pool-members.json", {}) or {}
+    members = benchmark._reconcile_demoted_pool_crashes(run_dir)
     out: dict[str, list[dict]] = {"find": [], "crash": []}
     # Crashes first: a finding that is one of its own condition's crashes
     # written up is that crash, and the metrics drop it. The page counts the
@@ -496,15 +497,16 @@ def _condition_activity(bench_dir: Path | None, condition: str, wall_h: float) -
 # ── the mind trace: every hypothesis an agent opened, and what became of it ──
 
 # Terminal statuses the audit writes on a hypothesis, folded to what a reader
-# needs to know: did the idea pay off, fail on evidence, get dropped untested,
-# or stall on the environment. Anything else is still open.
+# needs to know: did the idea pay off, fail on evidence, get discarded by the
+# agent (usually after probes that ran clean — the record says how many), or
+# stall on the environment. Anything else is still open.
 _OUTCOME = {
     "CONFIRMED": "confirmed",
     "REFUTED": "refuted", "DISPROVED": "refuted", "CONFIRMED-NO-CRASH": "refuted",
-    "DISCARDED": "dropped", "CLOSED": "dropped",
+    "DISCARDED": "discarded", "CLOSED": "discarded",
     "ENV-BLOCKED": "blocked", "BLOCKED": "blocked",
 }
-OUTCOMES = ("hit", "confirmed", "refuted", "dropped", "blocked", "open")
+OUTCOMES = ("hit", "confirmed", "refuted", "discarded", "blocked", "open")
 _TEXT_CAP = {"hypothesis": 480, "guard_gap": 280, "input_shape": 200, "note": 320}
 
 
@@ -563,7 +565,13 @@ def _clip(text: object, cap: int) -> str:
     return value if len(value) <= cap else value[:cap - 1].rstrip() + "…"
 
 
-def _trace(cell_dir: Path, meta: dict) -> dict | None:
+def _target_root(run: dict) -> str:
+    """The checkout prefix agents sometimes write into a site, to strip."""
+    target = str(run.get("target") or "")
+    return f"targets/{target}" if target else ""
+
+
+def _trace(cell_dir: Path, meta: dict, target_root: str = "") -> dict | None:
     """One cell's hypotheses on its own clock, each with the probes it drove.
 
     This is the run's reasoning as the audit recorded it: what each agent
@@ -637,12 +645,16 @@ def _trace(cell_dir: Path, meta: dict) -> dict | None:
         if outcome == "open" and wall_h is not None:
             # never resolved: it was still open when the wall ended
             t1 = round(wall_h, 4)
+        # Agents write a site as `src/a.c:fn:3` or as
+        # `targets/<slug>/src/a.c:fn:3`; the reports already carry the
+        # target-relative form, and one file must not split into two rows.
+        site = finding_signature.normalize_path(str(row.get("file") or ""), target_root)
         hyps.append({
             "id": hid,
             "agent": str(row.get("agent") or "?"),
             "lane": strategies.normalize(str(row.get("strategy") or "")) or "other",
-            "file": str(row.get("file") or ""),
-            "subsystem": _subsystem(row.get("file")),
+            "file": site,
+            "subsystem": _subsystem(site),
             "diagnostic": str(row.get("diagnostic") or ""),
             "t0": t0,
             "t1": t1,
@@ -679,7 +691,7 @@ def _trace(cell_dir: Path, meta: dict) -> dict | None:
     }
 
 
-def _traces(bench_dir: Path | None, condition: str) -> list[dict]:
+def _traces(bench_dir: Path | None, condition: str, target_root: str = "") -> list[dict]:
     if bench_dir is None:
         return []
     traces = []
@@ -687,7 +699,7 @@ def _traces(bench_dir: Path | None, condition: str) -> list[dict]:
         meta = _read_json(cell_dir / "cell.json", None)
         if not isinstance(meta, dict) or meta.get("condition") != condition:
             continue
-        trace = _trace(cell_dir, meta)
+        trace = _trace(cell_dir, meta, target_root)
         if trace:
             traces.append(trace)
     return traces
@@ -789,7 +801,7 @@ def _looked(problem_path: str, traces: list[dict]) -> dict | None:
                 hits.append(hyp)
     if not hits:
         return None
-    order = {"hit": 0, "confirmed": 1, "open": 2, "refuted": 3, "blocked": 4, "dropped": 5}
+    order = {"hit": 0, "confirmed": 1, "open": 2, "refuted": 3, "blocked": 4, "discarded": 5}
     hits.sort(key=lambda h: (order.get(h["outcome"], 9), h["t0"]))
     return {
         "n": len(hits),
@@ -846,7 +858,7 @@ def _fingerprint(cond: dict) -> dict:
 FINGERPRINT_ROWS = (
     ("unique", "Distinct problems", "more", "int"),
     ("mplus_share", "Medium+ share", "more", "pct"),
-    ("classes", "Bug classes", "more", "int"),
+    ("classes", "Finding classes", "more", "int"),
     ("held", "Claims that held up", "more", "pct"),
     ("first_admitted_min", "First admitted", "less", "min"),
     ("hypotheses", "Hypotheses opened", "info", "int"),
@@ -1000,11 +1012,22 @@ def _yield_split(conditions: list[dict], problems: list[dict]) -> None:
             and not partner["yield"]["floor"] else None)
 
 
-def _checkpoints(conditions: list[dict]) -> dict:
-    """Distinct problems each condition had by each whole hour of its budget.
+def _checkpoint_step(latest: float) -> float:
+    """Column width in hours: whole hours on a long run, quarter hours on a
+    short one, so a thirty-minute budget gets checkpoints inside it rather
+    than a single column at 1h."""
+    if latest >= 3:
+        return 1.0
+    if latest >= 1.5:
+        return 0.5
+    return 0.25
 
-    The hours span the latest discovery as well as the grant: a cell's wall is
-    measured around the whole harness call and runs a few seconds past its
+
+def _checkpoints(conditions: list[dict]) -> dict:
+    """Distinct problems each condition had by each checkpoint of its budget.
+
+    The columns span the latest discovery as well as the grant: a cell's wall
+    is measured around the whole harness call and runs a few seconds past its
     budget, and a result parked at that wall must still land in a column, or
     the table would read below the leaderboard beside it.
     """
@@ -1012,7 +1035,9 @@ def _checkpoints(conditions: list[dict]) -> dict:
                  + [c["wall_h"] or 0 for c in conditions]
                  + [t for c in conditions for t in c["find"]["times"] + c["crash"]["times"]]
                  + [0])
-    hours = list(range(1, int(math.ceil(latest - 1e-9)) + 1)) if latest > 0 else []
+    step = _checkpoint_step(latest)
+    hours = [round(step * i, 4) for i in range(1, int(math.ceil(latest / step - 1e-9)) + 1)] \
+        if latest > 0 else []
     rows = []
     for cond in conditions:
         if cond["provisional"]:
@@ -1275,6 +1300,20 @@ def _lanes(condition: dict) -> dict:
     return out
 
 
+def _raw_count(metrics: dict, kind: str) -> int:
+    """Every candidate the cell filed of one kind, pending ones included.
+
+    The gate's own candidate count is the whole set; an older cell without a
+    waterfall sums what it did record, which omits anything still pending.
+    """
+    stage = (metrics.get("validation_waterfall") or {}).get(kind)
+    if isinstance(stage, dict) and stage.get("candidates") is not None:
+        return _int(stage.get("candidates"))
+    if kind == "findings":
+        return _int(metrics.get("findings")) + _int(metrics.get("findings_rejected"))
+    return _int(metrics.get("confirmed_crashes")) + _int(metrics.get("crashes_rejected"))
+
+
 def _cells(condition: dict, bench_dir: Path | None, provisional_reason: str) -> list[dict]:
     rows = []
     for cell in condition.get("cells") or []:
@@ -1289,14 +1328,8 @@ def _cells(condition: dict, bench_dir: Path | None, provisional_reason: str) -> 
             "wall_h": _hours(cell.get("wall_effective_seconds")),
             "paused_h": _hours(cell.get("paused_seconds")),
             "agents": _int(cell.get("actual_agents")),
-            "findings_raw": (
-                _int(metrics.get("findings")) + _int(metrics.get("findings_rejected"))
-                if has_metrics else None
-            ),
-            "crashes_raw": (
-                _int(metrics.get("confirmed_crashes")) + _int(metrics.get("crashes_rejected"))
-                if has_metrics else None
-            ),
+            "findings_raw": _raw_count(metrics, "findings") if has_metrics else None,
+            "crashes_raw": _raw_count(metrics, "crashes") if has_metrics else None,
             "href": _href(bench_dir / "cells" / name) if bench_dir else "",
         })
     return rows
@@ -1331,7 +1364,7 @@ def _condition(condition: dict, run: dict, bench_dir: Path | None,
         "efficiency": _efficiency(condition),
         "lanes": _lanes(condition),
         "activity": _condition_activity(bench_dir, cond, wall_h or budget_h or 0.0),
-        "traces": _traces(bench_dir, cond) if cond == "harness" else [],
+        "traces": _traces(bench_dir, cond, _target_root(run)) if cond == "harness" else [],
         "cells": _cells(condition, bench_dir, provisional_reason),
         "unjudged_published": [
             {"name": str(a.get("name") or "?"), "why": str(a.get("why") or "?")}
@@ -1393,6 +1426,9 @@ def build(bench_root: Path) -> dict:
                 "conditions": conditions,
                 "clusters": clusters,
                 "rejected": rejected,
+                # a sample target ships an answer key; a live target has none
+                "ground_truth": report.get("ground_truth_scoring") or None,
+                "ground_truth_error": list(report.get("ground_truth_error") or []),
             })
             runs[-1]["directories"] = _directories(runs[-1])
             for cond in conditions:
@@ -1597,7 +1633,11 @@ def _cluster_map(run: dict) -> str:
 
 
 def _funnel(run: dict) -> str:
-    """Candidates → evidence complete → validated → reportable, per side."""
+    """Candidates → evidence complete → review completed → reportable, per side.
+
+    The third stage counts every claim that reached a verdict, rejections
+    included; only the last is a pass.
+    """
     parts = []
     for cond in run["conditions"]:
         for kind, noun in (("find", "findings"), ("crash", "crashes")):
@@ -1607,7 +1647,7 @@ def _funnel(run: dict) -> str:
             top = max(stage["candidates"], 1)
             bars = []
             for key, label in (("candidates", "claimed"), ("evidence", "evidence complete"),
-                               ("validated", "validated"), ("reportable", "reportable")):
+                               ("validated", "review completed"), ("reportable", "reportable")):
                 width = 100.0 * stage[key] / top
                 bars.append(
                     f'<div class="fr"><span class="fl">{label}</span>'
@@ -1786,7 +1826,7 @@ def _checkpoint_table(group: dict) -> str:
     cp = group["checkpoints"]
     if not cp["hours"] or not cp["rows"]:
         return ""
-    head = "".join(f'<th class="num">{h}h</th>' for h in cp["hours"])
+    head = "".join(f'<th class="num">{h:g}h</th>' for h in cp["hours"])
     body = []
     for row in cp["rows"]:
         cells = "".join(f'<td class="num">{n}</td>' for n in row["counts"])
@@ -1796,7 +1836,7 @@ def _checkpoint_table(group: dict) -> str:
             + ('<span class="dim"> ≈</span>' if row["approx"] else "")
             + f'</td>{cells}</tr>')
     return (
-        '<div class="tablewrap"><table class="cp"><thead><tr><th>Distinct problems by hour</th>'
+        '<div class="tablewrap"><table class="cp"><thead><tr><th>Distinct problems by checkpoint</th>'
         + head + "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
         + ('<p class="fn">≈ marks a condition with one or more discovery times parked at its wall.</p>'
            if any(r["approx"] for r in cp["rows"]) else ""))
@@ -1887,7 +1927,7 @@ def _trace_panel(run: dict) -> str:
              '<span class="k"><b class="o-hit"></b>became an artifact</span>'
              '<span class="k"><b class="o-confirmed"></b>confirmed, not filed</span>'
              '<span class="k"><b class="o-refuted"></b>refuted by evidence</span>'
-             '<span class="k"><b class="o-dropped"></b>dropped untested</span>'
+             '<span class="k"><b class="o-discarded"></b>discarded by the agent</span>'
              '<span class="k"><b class="o-blocked"></b>blocked by the environment</span>'
              '<span class="k"><b class="o-open"></b>still open</span></div>']
     for trace in harness["traces"]:
@@ -2091,6 +2131,102 @@ def _target_section(group: dict) -> str:
         + _fingerprint_table(group) + "</div></section>")
 
 
+def _fmt_ratio(value: object) -> str:
+    return "—" if value is None else f"{round(float(value) * 100):d}%"
+
+
+def _ground_truth_panel(run: dict) -> str:
+    """Recall and precision against the target's own answer key.
+
+    Only a sample target carries a manifest; the panel is absent, not zero,
+    on a live target. It mirrors the ledger's block so the two agree, and a
+    malformed manifest reads as an error rather than as a score.
+    """
+    error = run.get("ground_truth_error") or []
+    scoring = run.get("ground_truth") or {}
+    if error:
+        items = "".join(f"<li>{_e(e)}</li>" for e in error)
+        return ('<div class="panel"><div class="pt">Ground truth</div>'
+                '<p class="banner">The ground-truth manifest is invalid, so this run is not '
+                f'scored against it. Fix the answer key, then rerun the ledger step.</p><ul>{items}</ul></div>')
+    if not scoring:
+        return ""
+    labels = {c["token"]: c["label"] for c in run["conditions"]}
+    NUM, TOTAL = ' class="num"', ' class="total"'
+
+    def table(block: dict, columns: list[tuple[str, str]], by_condition: dict) -> str:
+        head = "".join(
+            f'<th{"" if key in ("missed", "traps") else NUM}>{_e(label)}</th>'
+            for key, label in columns)
+        rows = []
+        for token in sorted(by_condition):
+            rows.append(row(labels.get(token, token), by_condition[token], columns))
+        rows.append(row("overall", block.get("overall") or {}, columns, total=True))
+        return ('<div class="tablewrap"><table class="cp"><thead><tr><th>Condition</th>' + head
+                + "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>")
+
+    def row(label: str, s: dict, columns: list[tuple[str, str]], total: bool = False) -> str:
+        cells = []
+        for key, _label in columns:
+            if key == "recall" or key == "precision":
+                cells.append(f'<td class="num">{_fmt_ratio(s.get(key))}</td>')
+            elif key == "detected":
+                cells.append(f'<td class="num">{len(s.get("detected") or [])}/{_int(s.get("real_total"))}</td>')
+            elif key == "missed":
+                cells.append(f'<td>{_e(", ".join(s.get("missed") or []) or "—")}</td>')
+            elif key == "traps":
+                cells.append(f'<td>{_e(", ".join(s.get("false_positive_traps_fired") or []) or "—")}</td>')
+            elif key == "open_world":
+                cells.append(f'<td class="num">{len(s.get("open_world_findings") or [])}</td>')
+            else:
+                cells.append(f'<td class="num">{_int(s.get(key))}</td>')
+        name = f"<b>{_e(label)}</b>" if total else _e(label)
+        return f'<tr{TOTAL if total else ""}><td>{name}</td>' + "".join(cells) + "</tr>"
+
+    parts = ['<div class="panel"><div class="pt">Ground truth</div>']
+    if scoring.get("not_scored") == "findings-only":
+        parts.append('<p class="pd">Findings-only target: it ships no sanitizer, so its planted bugs '
+                     'surface under findings and the crash oracle does not grade them.</p>')
+    elif scoring.get("by_condition"):
+        parts.append(
+            '<p class="pd">Scored against the target\'s own answer key. <b>Recall</b> is the share of '
+            'planted bugs confirmed at their crash site by a runtime sanitizer artifact; '
+            '<b>precision</b> is the share of confirmed crashes that are planted bugs, where a fired '
+            'false-positive trap, an unexpected crash, or a crash with no artifact to attribute all '
+            'count against it.</p>')
+        parts.append(table(scoring, [
+            ("recall", "Recall"), ("detected", "Detected"), ("missed", "Missed"),
+            ("precision", "Precision"), ("confirmed_crashes", "Confirmed"),
+            ("false_positive_crashes", "False positives"), ("traps", "Traps fired"),
+        ], scoring["by_condition"]))
+        classes = list((scoring.get("overall") or {}).get("by_primitive", {}).items()) + [
+            (f"strategy-shaped plant {name}", stats)
+            for name, stats in ((scoring.get("overall") or {}).get("by_strategy_shape") or {}).items()]
+        if classes:
+            rows = "".join(
+                f'<tr><td class="mono">{_e(name)}</td><td class="num">{_int(stats.get("detected"))}/'
+                f'{_int(stats.get("real"))}</td><td class="num">{_fmt_ratio(stats.get("recall"))}</td></tr>'
+                for name, stats in classes)
+            parts.append('<div class="tablewrap"><table class="cp"><thead><tr><th>Class</th>'
+                         '<th class="num">Detected</th><th class="num">Recall</th></tr></thead>'
+                         f'<tbody>{rows}</tbody></table></div>')
+    findings = scoring.get("findings") or {}
+    if findings.get("by_condition"):
+        parts.append(
+            '<p class="pd">Planted findings-only bugs are credited when a confirmed finding names '
+            'the planted function; a confirmed finding at a clean-outcome trap counts against '
+            'precision when its class is one the trap refutes. Every other confirmed finding is '
+            '<b>open-world</b>: real code has bugs the answer key never planted, and those are '
+            'listed without counting for or against.</p>')
+        parts.append(table(findings, [
+            ("recall", "Recall"), ("detected", "Detected"), ("missed", "Missed"),
+            ("precision", "Precision"), ("confirmed_findings", "Confirmed"),
+            ("traps", "Traps fired"), ("open_world", "Open-world"),
+        ], findings["by_condition"]))
+    parts.append("</div>")
+    return "".join(parts)
+
+
 def _run_section(run: dict) -> str:
     anchor = _slug(run["key"])
     identity = " · ".join(filter(None, [
@@ -2138,6 +2274,7 @@ def _run_section(run: dict) -> str:
             'reproducer, <span class="dot dot-find sev-high demo"></span> a source-backed '
             'finding. Hover for the site; click to open the report.</p>'
             + _cluster_map(run) + "</div>")
+        parts.append(_ground_truth_panel(run))
     parts.append(_trace_panel(run))
     if any(cond["activity"] for cond in run["conditions"]):
         parts.append(
@@ -2163,8 +2300,9 @@ def _run_section(run: dict) -> str:
     if funnel:
         more.append(
             '<div class="panel"><div class="pt">What survived review</div>'
-            '<p class="pd">Every claim, then how far it got: evidence on disk, a validation '
-            'verdict, and finally reportable under the declared attacker controls. The gap '
+            '<p class="pd">Every claim, then how far it got: evidence on disk, a review that '
+            'reached a verdict either way, and finally reportable under the declared attacker '
+            'controls. The gap '
             'between the first bar and the last is what the raw count would have overstated.</p>'
             + funnel + "</div>")
     lanes = _lane_table(run)
@@ -2182,8 +2320,9 @@ def _run_section(run: dict) -> str:
     if cells:
         more.append(
             '<div class="panel"><div class="pt">Cells</div>'
-            '<p class="pd">One row per repeat. Raw counts include candidates later rejected '
-            'and count each report once; the reviewed numbers are in the ledger.</p>'
+            '<p class="pd">One row per repeat. Raw counts are every candidate the cell filed, '
+            'including ones later rejected or still pending, each report once; the reviewed '
+            'numbers are in the ledger.</p>'
             + cells + "</div>")
     if more:
         parts.append(
@@ -2198,9 +2337,9 @@ _GUIDE = """
 <details class="guide" id="guide"><summary>How to read this page</summary>
 <div class="gbody">
 <h3>The comparison</h3>
-<p>The page is built for studying how language models discover security problems: across models, and within each model the harness against a plain prompt. Each run audits one target at one commit with one model and one wall-clock budget, twice: <b>tokenfuzz</b> is the full harness — a ranked work queue, several agents, sanitizer probes, review, duplicate merging, exported reproducers — and <b>&lt;model&gt;-direct</b> is the control: the same model and budget given one plain request to find vulnerabilities and none of that machinery. Both sides are then held to the same evidence bar, so the two counts mean the same thing. Every target is audited on live, unfixed code; there is no planted bug to re-find.</p>
+<p>The page is built for studying how language models discover security problems: across models, and within each model the harness against a plain prompt. Each run audits one target at one commit with one model and one wall-clock budget, twice: <b>tokenfuzz</b> is the full harness — a ranked work queue, several agents, sanitizer probes, review, duplicate merging, exported reproducers — and <b>&lt;model&gt;-direct</b> is the control: the same model and budget given one plain request to find vulnerabilities and none of that machinery. Both sides are then held to the same evidence bar, so the two counts mean the same thing. A target is usually live, unfixed code with no planted bug to re-find; a sample target ships an answer key, and its run section adds a <b>Ground truth</b> panel that scores each condition's recall and precision against it.</p>
 <h3>Findings and crashes</h3>
-<p>A <b>crash</b> counts only when sanitizer output and reproducer material are on disk; what an agent claimed is not evidence. A <b>finding</b> is a security issue reported without a crash behind it — real and possibly serious, but the evidence is an argument, so read one as a lead until its report names a concrete boundary and shows how a caller crosses it. Both are merged so one problem reported several times counts once, but findings and crashes are merged separately, as the ledger counts them: a crash whose site was also written up as a finding is one problem in each lane, not one problem. Labels read <code>N (M M+, C classes)</code>: N distinct problems, M scored Medium or higher, spread across C bug classes. One mechanism at thirty sites is thirty findings and one class; that is not the same result as thirty classes.</p>
+<p>A <b>crash</b> counts only when sanitizer output and reproducer material are on disk; what an agent claimed is not evidence. A <b>finding</b> is a security issue reported without a crash behind it — real and possibly serious, but the evidence is an argument, so read one as a lead until its report names a concrete boundary and shows how a caller crosses it. Both are merged so one problem reported several times counts once. Findings and crashes are merged in separate lanes, with one rule across them, as the ledger counts: a finding that writes up one of the same condition's own crashes at the same file and line is that crash and earns no second count, while a finding at a site only the other side crashed still counts for the side with no crash there. Labels read <code>N (M M+, C classes)</code>: N distinct problems, M scored Medium or higher, spread across C bug classes. One mechanism at thirty sites is thirty findings and one class; that is not the same result as thirty classes.</p>
 <p>A <code>K unjudged</code> term means K reports never reached a verdict before the run was published; they earn no credit, so read the cell as a floor. A leading <code>≥</code> means the unjudged remainder outnumbers the verdicts and the count is a lower bound, not a result to compare. <code>K retained</code> appears only on runs finalized before the current rule and counts reproduced crashes a reviewer placed outside the declared attacker controls and kept in the cell uncredited; a current run rejects those with a <code>threat-model:</code> reason instead, so they count as rejected crashes. <code>up to N</code> on a rejected count is an upper bound where duplicates could not be merged. <code>bin/benchmark --regenerate</code> finishes an unfinished gate.</p>
 <p>The rejected and accepted columns are merged separately, so one problem can be reportable in one write-up and rejected in another. Do not divide them into a pass rate.</p>
 <h3>Severity</h3>
@@ -2208,13 +2347,13 @@ _GUIDE = """
 <h3>Effort</h3>
 <p><b>Wall</b> is <code>spent/granted</code> hours, the median across finished repeats; time parked on a provider reset counts as neither. The harness usually spends the whole grant; the control stops when the model decides it is done, so a short numerator beside a count means that count came from a shorter experiment. <b>Replicates</b> is <code>done/total</code>; <code>(Np)</code> repeats never came back and are excluded, <code>(Nt)</code> repeats stopped early on a terminal backend exit but are counted. The wall contains every second the harness spent deciding what to look at next — housekeeping between iterations is steering, not overhead — and only provider-withheld capacity is subtracted.</p>
 <h3>Tokens and cost</h3>
-<p>Token columns are normalised so backends can be compared: <b>Input</b> is tokens charged at the full input rate (Claude's fresh input plus cache writes; running totals from Codex and Gemini have cache reads subtracted back out). <b>Output</b> includes tool-call payloads where reported. <b>Cost</b> prices each backend's own billing buckets at its published list rates and rounds to whole dollars; a <code>~</code> prefix marks a figure estimated from character counts because the backend reported no usage. Each backend's own ledger keeps the cents.</p>
+<p>Token columns are normalised so backends can be compared: <b>Input</b> is tokens charged at the full input rate (Claude's fresh input plus cache writes; running totals from Codex and Gemini have cache reads subtracted back out). <b>Output</b> includes tool-call payloads where reported. <b>Cost</b> prices each backend's own billing buckets at its published list rates and rounds to whole dollars; a <code>~</code> prefix marks an estimated price, for either of two reasons: the backend reported no usage and tokens were estimated from character counts, or the rate card is tiered by request size and the tier was reconstructed from the CLI's per-invocation totals rather than read from an invoice. Each backend's own ledger keeps the cents.</p>
 <h3>Unique, shared, and coverage</h3>
 <p>A problem is <b>unique</b> to a condition when no other condition on the same target revision reached it — the model's own control included, because a problem the plain prompt also found is not the harness's contribution. <b>Coverage</b> is a condition's share of every distinct problem any run has reported on the revision: the union of all runs is the closest thing to an answer key a live target has, and it grows as more models run, so coverage is comparable within a revision and only there.</p>
 <h3>What makes this comparable</h3>
-<p>There is no answer key. Planted-bug suites score a model on re-finding a known defect at a known site; every target here is live, unfixed code, so a result is a problem nobody had filed, held to the same evidence bar on both sides — a reproducing sanitizer crash, or a source-backed report that names a boundary and a caller that crosses it — and merged so the same problem counts once however many times it was written up. The control is the same model with the same budget and a plain prompt, so the difference between the two rows is the harness and nothing else. The trace panels show the process that produced the numbers, from the audit's own state streams, so a reader can see not only what was found but what was tried, refuted, and dropped along the way.</p>
+<p>On a live target there is no answer key. Planted-bug suites score a model on re-finding a known defect at a known site; a live, unfixed target makes every result a problem nobody had filed, held to the same evidence bar on both sides — a reproducing sanitizer crash, or a source-backed report that names a boundary and a caller that crosses it — and merged so the same problem counts once however many times it was written up. The control is the same model with the same budget and a plain prompt, so the difference between the two rows is the harness and nothing else. The trace panels show the process that produced the numbers, from the audit's own state streams, so a reader can see not only what was found but what was tried, refuted, and discarded along the way. A sample target with a planted-bug manifest is scored against it as well, in its run section's Ground truth panel; the counts above still cover whatever the manifest never planted.</p>
 <h3 id="guide-limits">What this does not settle</h3>
-<p>A run is one sample: models vary between runs, budgets and revisions change what is reachable, and a difference between two rows on one run is a lead to test with another run, not a ranking. The pool of known problems is only what these runs have surfaced, so unique and coverage move as more models and repeats are added. Findings without a crash remain arguments until a maintainer confirms them, unjudged and retained remainders are shown rather than resolved, and no figure here is <i>precision</i> — that needs a ground-truth key this kind of target cannot have. The page is a fair, evidence-backed record to reason from, alongside conventional fuzzing, code review, and the judgement of the people who know the code.</p>
+<p>A run is one sample: models vary between runs, budgets and revisions change what is reachable, and a difference between two rows on one run is a lead to test with another run, not a ranking. The pool of known problems is only what these runs have surfaced, so unique and coverage move as more models and repeats are added. Findings without a crash remain arguments until a maintainer confirms them, unjudged and retained remainders are shown rather than resolved, and no figure outside a Ground truth panel is <i>precision</i> — that needs an answer key a live target cannot have. The page is a fair, evidence-backed record to reason from, alongside conventional fuzzing, code review, and the judgement of the people who know the code.</p>
 <h3>Timing and activity</h3>
 <p>Discovery times come from the audit's own event stream, joined to the merged clusters, and placed on the cell's start clock; a result that cannot be placed lands at the end of the run and the panel says <i>timing approximate</i>. The activity strip reads the hypothesis, probe, event, and usage streams each cell wrote while it ran; events after the wall are review, not activity, and are not drawn. Multiple repeats are summed.</p>
 </div></details>
@@ -2233,7 +2372,7 @@ def render(data: dict) -> str:
     head = (
         '<header class="hero"><p class="kick">TokenFuzz benchmark</p>'
         '<h1>How do language models discover security bugs — and what does each one contribute?</h1>'
-        '<p class="lede">Every model audits the same live, unfixed target for the same time budget, '
+        '<p class="lede">Every model audits the same target at the same revision for the same time budget, '
         'twice: inside the tokenfuzz harness, and as a plain prompt that is its own control. '
         'Below: what each surfaced, what no other did, when, and how it reasoned — every count a '
         'reviewed, duplicate-merged problem linked to its evidence. One run is one sample, and a '
@@ -2511,7 +2650,7 @@ details.more>summary{cursor:pointer;font-weight:700;color:var(--ink2)}details.mo
 .dot.future{opacity:.12}
 .tsum{font-size:.84em;color:var(--ink2);margin:10px 0 2px}
 .legend .k b.o-hit{background:var(--codex)}.legend .k b.o-confirmed{background:var(--good)}.legend .k b.o-refuted{background:var(--muted)}
-.legend .k b.o-dropped{background:var(--none)}.legend .k b.o-blocked{background:var(--med)}.legend .k b.o-open{background:var(--surf);border:1.5px solid var(--ink2)}
+.legend .k b.o-discarded{background:var(--none)}.legend .k b.o-blocked{background:var(--med)}.legend .k b.o-open{background:var(--surf);border:1.5px solid var(--ink2)}
 .run[data-backend=claude] .legend .k b.o-hit{background:var(--claude)}.run[data-backend=gemini] .legend .k b.o-hit{background:var(--gemini)}
 .run[data-backend=grok] .legend .k b.o-hit{background:var(--grok)}.run[data-backend=oss] .legend .k b.o-hit{background:var(--oss)}
 .run[data-backend=opencode] .legend .k b.o-hit{background:var(--opencode)}
@@ -2746,7 +2885,7 @@ function traceOf(run,cell){var h=run.conditions.filter(function(c){return c.toke
  return ((h&&h.traces)||[]).filter(function(t){return t.cell===cell})[0]||null}
 function drawTrace(host){var run=runOf(host.dataset.run),T=run&&traceOf(run,host.dataset.cell);if(!T)return;host.replaceChildren();
  var cut=cutOf(host),wall=T.wall_h||Math.max.apply(null,T.hyps.map(function(x){return x.t1}).concat([1]));
- var col=hue(run.backend),OUT={hit:{fill:col},confirmed:{fill:v("--good")},refuted:{fill:v("--muted")},dropped:{fill:v("--none")},blocked:{fill:v("--med")},open:{fill:v("--surf"),stroke:v("--ink2")}};
+ var col=hue(run.backend),OUT={hit:{fill:col},confirmed:{fill:v("--good")},refuted:{fill:v("--muted")},discarded:{fill:v("--none")},blocked:{fill:v("--med")},open:{fill:v("--surf"),stroke:v("--ink2")}};
  // pack each agent's hypotheses into sub-rows so overlapping ideas stay legible
  var subs={};T.agents.forEach(function(a){subs[a]=[]});
  T.hyps.forEach(function(hp){var rows=subs[hp.agent]||(subs[hp.agent]=[]),i=0;for(;i<rows.length;i++)if(rows[i]<=hp.t0)break;

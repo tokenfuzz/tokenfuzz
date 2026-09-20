@@ -1861,6 +1861,31 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertTrue(covered(finding, "harness"))
         self.assertFalse(covered(finding, "model-direct"))
 
+    def test_a_write_up_one_line_off_its_crash_is_not_folded_into_it(self) -> None:
+        # The frame is the write; the report cites the check one line above
+        # it. Only the exact line covers: one function can hold many distinct
+        # bugs, so a near miss stays a second count for a reviewer to settle.
+        crashes = benchmark.attribute_clusters(
+            {"clusters": [{
+                "id": "CL-str", "primitive": "stack-buffer-overflow",
+                "signature": "app_label src/app.c:86 -> dispatch src/app.c:208",
+                "members": ["CRASH-h"],
+            }]},
+            {"CRASH-h": "harness"},
+        )
+        covered = benchmark._finding_covered_by_crash(crashes)
+        one_line_off = {
+            "key_kind": "loc", "key": ["memory-safety", "src/app.c", "87"],
+            "file": "src/app.c", "line": "87", "crash_state": [],
+        }
+        exact = {
+            "key_kind": "loc", "key": ["memory-safety", "src/app.c", "86"],
+            "file": "src/app.c", "line": "86", "crash_state": [],
+        }
+        self.assertFalse(covered(one_line_off, "harness"))
+        self.assertTrue(covered(exact, "harness"))
+        self.assertFalse(covered(exact, "model-direct"))
+
     def test_withheld_member_cannot_supply_cluster_severity(self) -> None:
         for survivor_scores in ({"FIND-kept": {"level": "Low", "rank": 1, "score": 2.5}}, {}):
             with self.subTest(scored=bool(survivor_scores)):

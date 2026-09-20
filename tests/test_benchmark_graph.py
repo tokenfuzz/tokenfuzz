@@ -159,6 +159,11 @@ class BatchQuantizedTests(unittest.TestCase):
     def test_genuinely_spread_timing_is_not_flagged(self) -> None:
         self.assertFalse(benchmark_graph._is_batch_quantized([0.0, 0.43, 0.47, 0.88]))
 
+    def test_two_coincident_results_among_a_few_are_not_a_batch(self) -> None:
+        # two agents filing four seconds apart is real timing on a small run
+        self.assertFalse(benchmark_graph._is_batch_quantized(
+            [0.0364, 0.051, 0.1098, 0.133, 0.1342]))
+
     def test_too_few_points_to_judge(self) -> None:
         self.assertFalse(benchmark_graph._is_batch_quantized([1.0, 1.0]))
 
@@ -206,6 +211,68 @@ class CellOriginTests(unittest.TestCase):
             benchmark_graph._artifact_time(crash),
             datetime.fromisoformat(filed).timestamp(),
         )
+
+    def _cell_with(self, *, event_at: str, audit_report_at: float | None,
+                   attachment_at: float | None = None, kind: str = "crashes") -> Path:
+        import os
+        results = self.cell / "results"
+        (results / "state").mkdir(parents=True)
+        (self.cell / "cell.json").write_text(json.dumps({
+            "condition": "model-direct", "started_at": "2026-07-18T10:00:00+00:00",
+            "wall_seconds": 1800, "results_dir": str(results),
+        }), encoding="utf-8")
+        (results / "state" / "events.jsonl").write_text(json.dumps({
+            "type": "crash_created" if kind == "crashes" else "finding_created",
+            "id": "X-1", "mtime": event_at}) + "\n", encoding="utf-8")
+        artifact = results / kind / "X-1"
+        (artifact / ".audit").mkdir(parents=True)
+        (artifact / "report.md").write_text(
+            "# x\n\nLocation: src/a.c:a_fn:1\nLine: 1\n\n"
+            "ERROR: AddressSanitizer: heap-use-after-free\n    #0 0x1 in a_fn src/a.c:1\n",
+            encoding="utf-8")
+        if audit_report_at is not None:
+            (artifact / ".audit" / "report.md").write_text("# draft\n", encoding="utf-8")
+            os.utime(artifact / ".audit" / "report.md", (audit_report_at, audit_report_at))
+        if attachment_at is not None:
+            (artifact / ".audit" / "input").write_bytes(b"x")
+            os.utime(artifact / ".audit" / "input", (attachment_at, attachment_at))
+        return artifact
+
+    def test_the_agents_own_write_up_predates_a_promotion_stamped_event(self) -> None:
+        # a control's crash is promoted after the wall, which is when the
+        # event stream first saw it; the draft under .audit says when the
+        # agent actually claimed it
+        origin = datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc).timestamp()
+        self._cell_with(event_at="2026-07-18T10:31:00+00:00", audit_report_at=origin + 240)
+        index = benchmark_graph._discovery_index([self.cell])
+        self.assertAlmostEqual(list(index["crash"].values())[0], 240 / 3600)
+
+    def test_an_attachment_dated_before_the_run_does_not_move_a_result(self) -> None:
+        # an input is copied bytes and can carry a preserved mtime from
+        # yesterday; that is not a discovery clock, and the recorded event
+        # stands
+        origin = datetime(2026, 7, 18, 10, 0, tzinfo=timezone.utc).timestamp()
+        self._cell_with(event_at="2026-07-18T10:10:00+00:00",
+                        audit_report_at=origin - 86400, attachment_at=origin - 86400,
+                        kind="findings")
+        index = benchmark_graph._discovery_index([self.cell])
+        self.assertEqual(list(index["find"].values()), [600 / 3600])
+
+    def test_event_stream_stamps_crashes_as_well_as_findings(self) -> None:
+        results = self.cell / "results"
+        (results / "state").mkdir(parents=True)
+        (results / "state" / "events.jsonl").write_text(
+            json.dumps({"type": "finding_created", "id": "FIND-1",
+                        "mtime": "2026-07-18T10:00:00+00:00"}) + "\n"
+            + json.dumps({"type": "crash_created", "id": "CRASH-1",
+                          "mtime": "2026-07-18T11:00:00+00:00"}) + "\n"
+            + json.dumps({"type": "artifact_admitted", "id": "CRASH-1",
+                          "first_seen": "2026-07-18T12:00:00+00:00"}) + "\n",
+            encoding="utf-8")
+        stamps = benchmark_graph._event_stamps(results)
+        self.assertEqual(set(stamps), {"FIND-1", "CRASH-1"})
+        self.assertEqual(stamps["CRASH-1"],
+                         datetime(2026, 7, 18, 11, tzinfo=timezone.utc).timestamp())
 
     def test_exported_crash_filing_clock_is_read_from_audit_provenance(self) -> None:
         crash = self.cell / "CRASH-EXPORTED" / ".audit"
@@ -287,6 +354,34 @@ class ClusterMembershipTimingTests(unittest.TestCase):
             self.run, "harness", "crash", False, index, members, 3.0)
         # each step carries its cluster's own crash site and id alongside its time
         self.assertEqual(times, [(0.1, "a.c:1", "CL-a"), (0.9, "c.c:3", "CL-b")])
+        self.assertFalse(approx)
+
+    def test_a_finding_behind_the_conditions_own_crash_has_no_step(self) -> None:
+        # The table does not count it, so the curve must not step on it:
+        # otherwise the earliest clusters would be taken and truncated to the
+        # count, and the steps would name sites the table never credited.
+        for name, text in (("FIND-0001", "Location: src/a.c:a_fn:1\nLine: 1\n"),
+                           ("FIND-0002", "Location: src/b.c:b_fn:2\nLine: 2\n")):
+            d = self.run / "pool" / "findings" / name
+            d.mkdir(parents=True)
+            (d / "report.md").write_text(f"# x\n\n{text}", encoding="utf-8")
+        (self.run / "clusters-findings.json").write_text(json.dumps({"clusters": [
+            {"id": "FCL-a", "members": ["FIND-0001"], "key_kind": "loc",
+             "key": ["memory-safety", "src/a.c", "1"], "file": "src/a.c",
+             "line": "1", "crash_state": []},
+            {"id": "FCL-b", "members": ["FIND-0002"], "key_kind": "loc",
+             "key": ["memory-safety", "src/b.c", "2"], "file": "src/b.c",
+             "line": "2", "crash_state": []},
+        ]}), encoding="utf-8")
+        members = {"findings": {"FIND-0001": "harness", "FIND-0002": "harness"}}
+        index = {"find": {
+            benchmark_graph._signature(self.run / "pool" / "findings" / "FIND-0001", "find"): 0.1,
+            benchmark_graph._signature(self.run / "pool" / "findings" / "FIND-0002", "find"): 0.9,
+        }}
+        covered = lambda cluster, cond: cluster["id"] == "FCL-a" and cond == "harness"  # noqa: E731
+        times, approx = benchmark_graph._cluster_times(
+            self.run, "harness", "find", False, index, members, 3.0, covered=covered)
+        self.assertEqual(times, [(0.9, "src/b.c:2", "FCL-b")])
         self.assertFalse(approx)
 
     def test_unplaceable_cluster_is_marked_approximate(self) -> None:
