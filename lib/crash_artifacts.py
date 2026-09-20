@@ -145,6 +145,9 @@ _ASAN_FAULT_RE = re.compile(
     r"(?:ERROR|SUMMARY):\s+(?:AddressSanitizer|HWAddressSanitizer):\s+"
     r"([A-Za-z0-9_-]+)"
 )
+_SANITIZER_ACCESS_RE = re.compile(
+    r"^\s*(READ|WRITE) of size\b", re.IGNORECASE | re.MULTILINE,
+)
 _MSAN_FAULT_RE = re.compile(
     r"(?:ERROR|SUMMARY|WARNING):\s+MemorySanitizer:\s+([A-Za-z0-9_-]+)"
 )
@@ -367,6 +370,19 @@ def sanitizer_fault_key(text: str) -> tuple[str, str] | None:
     ):
         return sanitizer, "data-race"
     return None
+
+
+def sanitizer_access(text: str) -> str:
+    """The READ/WRITE direction in the first sanitizer diagnostic, or ``""``.
+
+    Direction is part of crash clustering for ASan bounds faults. Keep its
+    extraction beside :func:`sanitizer_fault_key` so filing-time dedup,
+    clustering, and benchmark attribution cannot silently disagree about
+    which repeated report supplied it.
+    """
+    diagnostic = stack_frames.first_sanitizer_diagnostic(text) or text
+    match = _SANITIZER_ACCESS_RE.search(diagnostic)
+    return match.group(1).upper() if match else ""
 
 
 def looks_like_shell_wrapper(path: Path) -> bool:

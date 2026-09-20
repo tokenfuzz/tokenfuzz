@@ -411,6 +411,31 @@ def leading_inline_group(text: str) -> list[StackFrame]:
     return group
 
 
+_FREED_BY_RE = re.compile(r"^.*\bfreed by thread .*here:\s*$", re.MULTILINE)
+_LIFETIME_SECTION_END_RE = re.compile(
+    r"^\s*(?:previously allocated by|SUMMARY:|==\d+==)", re.MULTILINE,
+)
+
+
+def lifetime_root_stack(diagnostic: str) -> str:
+    """The `freed by` stack of a lifetime diagnostic, or "" when it has none.
+
+    A use-after-free or double-free trips wherever the dangling owner is next
+    touched, but its defect lives where the object was freed without clearing
+    that owner: one such free surfaces as a read in one handler, a second
+    free in another, and a third at teardown. Keying those on the free stack
+    makes them one cluster, as they are one fix. Shared by bin/cluster-crashes
+    and the filing-time crash state so both agree on what one crash is.
+    """
+    match = _FREED_BY_RE.search(diagnostic)
+    if match is None:
+        return ""
+    tail = diagnostic[match.end():]
+    end = _LIFETIME_SECTION_END_RE.search(tail)
+    section = tail[:end.start()] if end else tail
+    return section if interesting_frames(section, want=1) else ""
+
+
 def crash_signature(text: str, want: int = MAX_CRASH_STATE_FRAMES) -> list[str]:
     """Address-stable fingerprint for a crash.
 

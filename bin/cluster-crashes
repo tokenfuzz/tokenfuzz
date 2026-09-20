@@ -59,6 +59,7 @@ SCRIPT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SCRIPT_ROOT / "lib"))
 import strategies  # noqa: E402
 
+import crash_artifacts  # noqa: E402
 import stack_frames  # noqa: E402
 import symbol_names  # noqa: E402
 import clusterfuzz_stacktrace as cf_stack  # noqa: E402
@@ -108,7 +109,6 @@ PRIMITIVE_RE = re.compile(
     + r"|BUS|SEGV"
     r")"
 )
-RW_RE = re.compile(r"\b(READ|WRITE) of size", re.IGNORECASE)
 SUMMARY_RE = re.compile(
     r"^SUMMARY:\s+(?:AddressSanitizer|UndefinedBehaviorSanitizer|"
     r"MemorySanitizer|ThreadSanitizer):\s+(?P<primitive>\S+)"
@@ -464,9 +464,9 @@ def _extract_primitive(asan_text: str) -> str:
     m = PRIMITIVE_RE.search(asan_text)
     if m:
         prim = m.group(1)
-        rw = RW_RE.search(asan_text)
-        if rw:
-            return f"{prim}-{rw.group(1).upper()}"
+        access = crash_artifacts.sanitizer_access(asan_text)
+        if access:
+            return f"{prim}-{access}"
         return prim
 
     # 2. UBSan SUMMARY-line primitive carries the specific sub-kind.
@@ -535,30 +535,6 @@ def _extract_strategy(report_text: str) -> str:
     return ""
 
 
-_FREED_BY_RE = re.compile(r"^.*\bfreed by thread .*here:\s*$", re.MULTILINE)
-_LIFETIME_SECTION_END_RE = re.compile(
-    r"^\s*(?:previously allocated by|SUMMARY:|==\d+==)", re.MULTILINE,
-)
-
-
-def _lifetime_root_stack(diagnostic: str) -> str:
-    """The `freed by` stack of a lifetime diagnostic, or "" when it has none.
-
-    A use-after-free or double-free trips wherever the dangling owner is next
-    touched, but its defect lives where the object was freed without clearing
-    that owner: one such free surfaces as a read in one handler, a second
-    free in another, and a third at teardown. Keying those on the free stack
-    makes them one cluster, as they are one fix.
-    """
-    match = _FREED_BY_RE.search(diagnostic)
-    if match is None:
-        return ""
-    tail = diagnostic[match.end():]
-    end = _LIFETIME_SECTION_END_RE.search(tail)
-    section = tail[:end.start()] if end else tail
-    return section if stack_frames.interesting_frames(section, want=1) else ""
-
-
 def _signature(crash_dir: Path) -> dict:
     asan = _find_sanitizer(crash_dir)
     asan_text = symbol_names.demangle_text(_read_text(asan)) if asan else ""
@@ -575,7 +551,7 @@ def _signature(crash_dir: Path) -> dict:
         diagnostic = asan_text
 
     use_frames = _extract_top_frames(diagnostic)
-    root_text = _lifetime_root_stack(diagnostic)
+    root_text = stack_frames.lifetime_root_stack(diagnostic)
     # Lifetime bug: the free stack is the defect and keys the state; the use
     # site stays in the display. The headline (primitive) is read as printed.
     state_text = root_text or diagnostic

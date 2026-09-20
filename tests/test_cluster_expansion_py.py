@@ -25,7 +25,12 @@ def check(condition: bool, message: str) -> None:
     print(f"  \033[0;32m✓\033[0m {message}")
 
 
-def crash_with_frame(results: Path, target: Path, crash_id: str) -> Path:
+def crash_with_frame(
+    results: Path, target: Path, crash_id: str, line: int = 20,
+) -> Path:
+    # Each fixture crash names its own line so every bundle is its own seed;
+    # this test drives the per-seed driver logic, not the same-state skip
+    # (tests/test_crash_state_dedup_py.py covers that).
     crash = results / "crashes" / crash_id
     crash.mkdir(parents=True)
     source = target / "src" / "parser.c"
@@ -33,7 +38,7 @@ def crash_with_frame(results: Path, target: Path, crash_id: str) -> Path:
     source.write_text("\n".join(f"int line_{line};" for line in range(1, 40)) + "\n")
     (crash / "sanitizer.txt").write_text(
         "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
-        f"    #0 0x1 in app_parse {source}:20\n"
+        f"    #0 0x1 in app_parse {source}:{line}\n"
         "SUMMARY: AddressSanitizer: heap-buffer-overflow\n",
         encoding="utf-8",
     )
@@ -74,7 +79,7 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
         "cluster decisions charge the results-tree usage ledger",
     )
 
-    partial = crash_with_frame(results, target, "CRASH-011-2")
+    partial = crash_with_frame(results, target, "CRASH-011-2", line=21)
     with mock.patch.object(
         triage.llm_decide, "llm_decide", side_effect=decide,
     ) as one_batch:
@@ -134,9 +139,9 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     audit_runner._migrate_cluster_backlog(runtime)
     check((crash / ".cluster_expanded").is_file(), "one-time migration skips already-indexed backlog crashes")
 
-    fresh = crash_with_frame(results, target, "CRASH-030-1")
-    empty = crash_with_frame(results, target, "CRASH-031-1")
-    retry = crash_with_frame(results, target, "CRASH-032-1")
+    fresh = crash_with_frame(results, target, "CRASH-030-1", line=30)
+    empty = crash_with_frame(results, target, "CRASH-031-1", line=31)
+    retry = crash_with_frame(results, target, "CRASH-032-1", line=32)
 
     def expansion(directories, _target, **_kwargs):
         return {
@@ -165,7 +170,7 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     # neighbours, and a neighbour reachable from bytes can sit beside a crash
     # that is not. Skipping the seed would lose that lead for good. The seed's
     # scope constrains the leads instead, through attacker_controls.
-    uncredited = crash_with_frame(results, target, "CRASH-040-1")
+    uncredited = crash_with_frame(results, target, "CRASH-040-1", line=33)
     (uncredited / "validation.json").write_text(
         json.dumps({"kind": "crash", "state": "not-reportable"}), encoding="utf-8",
     )

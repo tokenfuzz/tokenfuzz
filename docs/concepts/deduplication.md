@@ -35,6 +35,20 @@ bucket. Pending or poorly symbolized artifacts stay deterministic through a
 narrow source/object fallback instead of all collapsing into an empty
 signature.
 
+`bin/probe --confirm` also avoids creating a second bundle when triage has
+already promoted the same exact crash state through the same probe route. Its
+filing key includes the sanitizer, primitive and access direction, line-exact
+use stack, and the free stack for lifetime diagnostics. The route includes the
+execution mode, API harness, target arguments, and alternate build recipe;
+testcase bytes are deliberately excluded. A different route or build is filed
+because it can establish a different boundary or severity even when it reaches
+the same internal fault. Pending, retained, rejected, edited, and stale bundles
+never absorb a new reproducer.
+
+This filing check is stricter than the similarity cluster below. It removes a
+repeated input only after one equivalent bundle has current reportable review
+evidence; it does not replace cluster-time review of distinct evidence.
+
 ### How it works
 
 1. **Parse and normalize** the first usable sanitizer diagnostic. Runtime,

@@ -30,6 +30,7 @@ import build_session_seed
 import callgraph
 import cli_help
 import cluster_common
+import crash_bundle
 import fuzz_triage
 import housekeeping
 import llm_decide
@@ -2270,14 +2271,49 @@ def expand_new_crash_clusters(
     into the decision so the siblings it names are ones the model can reach.
     """
     _migrate_cluster_backlog(runtime)
-    candidates = [
-        crash for crash in sorted((runtime.results / "crashes").glob("CRASH-*"))
-        if crash.is_dir()
-        and not (crash / ".cluster_expanded").is_file()
-    ]
+    expanded_states: set[tuple] = set()
+    candidates = []
+    for crash in sorted((runtime.results / "crashes").glob("CRASH-*")):
+        if not crash.is_dir():
+            continue
+        if (crash / ".cluster_expanded").is_file():
+            state = crash_bundle.bundle_crash_state(crash)
+            if state is not None:
+                expanded_states.add(state)
+            continue
+        candidates.append(crash)
     if only is not None:
         chosen = {Path(path) for path in only}
         candidates = [crash for crash in candidates if crash in chosen]
+    # A second bundle with the same crash state is another member of a
+    # cluster, not a new seed: its neighbours would be named from the same
+    # frames and source, so another decision session would spend the wall
+    # re-minting them. A state expanded in an earlier pass is skipped and
+    # marked now; siblings within this pass ride on their representative and
+    # are marked only once its decision completes, so an unavailable decision
+    # leaves them retryable rather than silently unexpanded.
+    fresh: list[Path] = []
+    siblings: dict[Path, list[Path]] = {}
+    representative: dict[tuple, Path] = {}
+    for crash in candidates:
+        state = crash_bundle.bundle_crash_state(crash)
+        if state is None:
+            fresh.append(crash)
+            continue
+        if state in expanded_states:
+            _write_cluster_marker(crash / ".cluster_expanded")
+            index_log(
+                runtime,
+                f"CLUSTER-EXPAND: {crash.name} skipped; crash state already expanded",
+            )
+            continue
+        leader = representative.get(state)
+        if leader is None:
+            representative[state] = crash
+            fresh.append(crash)
+        else:
+            siblings.setdefault(leader, []).append(crash)
+    candidates = fresh
     attempted = getattr(runtime, "cluster_expansion_attempted", None)
     if attempted is None:
         attempted = set()
@@ -2323,6 +2359,12 @@ def expand_new_crash_clusters(
             f"CLUSTER-EXPAND: {crash.name} agent={result['agent']} "
             f"added={result['added']} skipped={result['skipped']}",
         )
+        for sibling in siblings.get(crash, ()):
+            _write_cluster_marker(sibling / ".cluster_expanded")
+            index_log(
+                runtime,
+                f"CLUSTER-EXPAND: {sibling.name} skipped; same crash state as {crash.name}",
+            )
     return counts
 
 

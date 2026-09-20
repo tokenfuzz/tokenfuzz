@@ -6562,6 +6562,112 @@ def show_finding(ctx: Context, finding_id: str) -> dict | None:
     return matches[0] if len(matches) == 1 else None
 
 
+#: Distinct crash states the resume brief lists before truncating. One line
+#: per state keeps the section under ~1.5 KB on the busiest tree seen so far
+#: (24 bundles, 5 states); the count line still says how many more exist.
+_RESUME_CRASH_STATE_LINES = 12
+
+
+def filed_crash_states_markdown(
+    results_dir: Path, filed: list | None = None,
+) -> list[str]:
+    """Resume section naming every distinct promoted crash state on disk.
+
+    Agents re-derived the same promoted crash in more than half of all
+    benchmark bundles (78 of 141) because nothing told them which states
+    were taken: each agent sees only its own hypotheses, and a promoted
+    crash shows up nowhere in its brief. A pending state is deliberately
+    omitted: its evidence may still fail review, so it cannot safely close a
+    peer hypothesis.
+    """
+    import crash_bundle  # lazy: it imports validation_receipt, which imports triage helpers
+
+    states = filed if filed is not None else crash_bundle.filed_crash_states(results_dir)
+    promoted = [item for item in states if item.promoted]
+    if not promoted:
+        return []
+    first_by_state: dict[tuple, crash_bundle.FiledCrashState] = {}
+    for item in promoted:
+        if item.state not in first_by_state:
+            first_by_state[item.state] = item
+    ordered = sorted(
+        first_by_state.values(),
+        key=lambda item: item.crash_id,
+    )
+    lines = ["", "## Crash States Already Filed"]
+    for item in ordered[:_RESUME_CRASH_STATE_LINES]:
+        lines.append(f"- `{item.crash_id}` (promoted): {item.summary}")
+    remaining = len(ordered) - _RESUME_CRASH_STATE_LINES
+    if remaining > 0:
+        lines.append(f"- ... {remaining} more distinct state(s) under `crashes/`")
+    lines.extend([
+        "",
+        "A reproducer of a promoted state through the same probe route is not "
+        "filed (`bin/probe` reports it as a duplicate). Close that hypothesis "
+        "with the listed CRASH id. Continue when the hypothesis predicts another "
+        "function, primitive, frame chain, or a materially different route or "
+        "build configuration.",
+    ])
+    return lines
+
+
+def filed_state_overlap_markdown(
+    results_dir: Path, hypothesis_file: str, filed: list | None = None,
+) -> list[str]:
+    """Flag an active hypothesis whose site already heads a filed crash state.
+
+    Cluster expansion and peers mint hypotheses at a site that another agent
+    then crashes first; the holder found that out only after resuming, reading
+    the seed, and searching the crash tree. The site (file basename and
+    function) is a nudge, not a closure: a different primitive or frame chain
+    at the same function is a new crash, so the agent decides from the states
+    listed here whether its prediction still differs.
+    """
+    import crash_bundle  # lazy: see filed_crash_states_markdown
+
+    # `path:function:line`; a C++ function may itself carry `::`, and the
+    # path never carries a colon, so the function is everything between.
+    parts = str(hypothesis_file or "").split(":")
+    if len(parts) < 2 or not parts[0]:
+        return []
+    hypothesis_parts = tuple(
+        part for part in Path(parts[0]).parts if part not in {"/", "."}
+    )
+    # A bare basename cannot distinguish common sibling paths such as
+    # src/parser.c and vendor/parser.c, so it is too weak to advise closure.
+    if len(hypothesis_parts) < 2:
+        return []
+    function = ":".join(parts[1:-1] if len(parts) >= 3 else parts[1:]).strip()
+    if not function:
+        return []
+    states = filed if filed is not None else crash_bundle.filed_crash_states(results_dir)
+    overlapping = []
+    for item in states:
+        if not item.promoted:
+            continue
+        top = item.state[2][0]
+        frame_function, _, location = top.rpartition(" ")
+        frame_path = re.sub(r":\d+(?::\d+)?$", "", location)
+        frame_parts = tuple(
+            part for part in Path(frame_path).parts if part not in {"/", "."}
+        )
+        shorter, longer = sorted((hypothesis_parts, frame_parts), key=len)
+        same_path = len(shorter) >= 2 and longer[-len(shorter):] == shorter
+        if frame_function != function or not same_path:
+            continue
+        overlapping.append(item)
+    if not overlapping:
+        return []
+    lines = []
+    for item in sorted(overlapping, key=lambda item: (not item.promoted, item.crash_id)):
+        lines.append(f"- Already filed at this site: `{item.crash_id}` (promoted): {item.summary}")
+    lines.append(
+        "- Continue if this hypothesis predicts a different crash state or a "
+        "materially different probe route; otherwise close it with that CRASH id."
+    )
+    return lines
+
+
 def state_resume(
     ctx: Context,
     agent: str,
@@ -6584,6 +6690,8 @@ def state_resume(
     ]
     active.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "", reverse=True)
     pending_crashes = _pending_crashes_for_agent(ctx, agent)
+    import crash_bundle  # lazy: it imports validation_receipt and triage helpers
+    filed_states = crash_bundle.filed_crash_states(ctx.results_dir)
     # A card this agent already holds was rendered with its evidence when it
     # was picked up (the session prompt, or an earlier resume); only a fresh
     # pickup needs the unbounded peer diff again.
@@ -6614,6 +6722,7 @@ def state_resume(
         ])
     else:
         lines.append("- none")
+    lines.extend(filed_crash_states_markdown(ctx.results_dir, filed_states))
     lines.extend([
         "",
         "## Active Hypothesis",
@@ -6631,6 +6740,13 @@ def state_resume(
                 f"- Input Shape: {h.get('input_shape','')}",
                 f"- Guard Gap: {h.get('guard_gap','')}",
                 f"- Diagnostic: `{h.get('diagnostic','')}`",
+            ]
+        )
+        lines.extend(filed_state_overlap_markdown(
+            ctx.results_dir, str(h.get("file", "")), filed_states,
+        ))
+        lines.extend(
+            [
                 "",
                 ("Next action after crash completion: continue this hypothesis."
                  if pending_crashes else

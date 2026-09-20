@@ -3353,8 +3353,11 @@ def _attribution_evidence(
             primitive = m.group(1)
         else:
             primitive = "data-race" if _DATA_RACE_RE.search(diagnostic) else ""
-    access_match = _ACCESS_RE.search(diagnostic)
-    access = access_match.group(1) if access_match else ""
+    if _ca is not None:
+        access = _ca.sanitizer_access(diagnostic)
+    else:
+        access_match = _ACCESS_RE.search(diagnostic)
+        access = access_match.group(1) if access_match else ""
     return primitive, _crash_site_functions(diagnostic, rust), access
 
 

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+import crash_artifacts
 import stack_frames
 
 
@@ -557,6 +558,186 @@ def _restore_primary_differential(sources: Sequence[Path], destination: Path) ->
         (destination / _PRIMARY_DIFFERENTIAL_SANITIZER).unlink(missing_ok=True)
 
 
+class FiledCrashState:
+    """One crash bundle's crash state, as filing-time dedup and the resume brief read it."""
+
+    __slots__ = ("crash_id", "state", "promoted")
+
+    def __init__(self, crash_id: str, state: CrashState, *, promoted: bool) -> None:
+        self.crash_id = crash_id
+        self.state = state
+        self.promoted = promoted
+
+    @property
+    def summary(self) -> str:
+        sanitizer, kind, frames, freed = self.state
+        text = f"{sanitizer} {kind} at {frames[0]}"
+        return f"{text} (freed at {freed[0]})" if freed else text
+
+
+#: (sanitizer, fault kind including access direction where the cluster key
+#: uses it, use-stack signature frames, free-stack signature frames). The free
+#: frames are empty for anything but a lifetime diagnostic.
+CrashState = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+
+#: A probe route independent of testcase bytes. Results trees pin the target
+#: binary and revision; the remaining fields distinguish browser/shell routes,
+#: API harnesses, argv contracts, sanitizers, and alternate build recipes.
+CrashRoute = tuple[str, str, str, tuple[str, ...], str, str]
+
+
+def crash_state(text: str) -> CrashState | None:
+    """The address-stable identity of one sanitizer report.
+
+    Pairs the fault primitive with the line-exact signature frames of the use
+    stack and, for a lifetime diagnostic, of the `freed by` stack. That is at
+    least as fine as what `bin/cluster-crashes` merges on (its state drops
+    line numbers and keys a lifetime crash on the free stack alone), so two
+    reports with one triple here are one cluster row and one unit of yield,
+    while two frees of the same object at different sites stay distinct.
+    None when the report carries no parseable frames, so such a report is
+    never treated as a duplicate.
+    """
+    key = crash_artifacts.sanitizer_fault_key(text)
+    if key is None:
+        return None
+    diagnostic = stack_frames.first_sanitizer_diagnostic(text) or ""
+    if not stack_frames.interesting_frames(diagnostic, want=1):
+        diagnostic = text
+    frames = stack_frames.crash_signature(diagnostic)
+    if not frames:
+        return None
+    freed = stack_frames.crash_signature(stack_frames.lifetime_root_stack(diagnostic))
+    kind = key[1]
+    access = crash_artifacts.sanitizer_access(diagnostic)
+    if key[0] == "asan" and access:
+        kind = f"{kind}-{access}"
+    return key[0], kind, tuple(frames), tuple(freed)
+
+
+def crash_route(
+    sanitizer: str,
+    mode: str,
+    harness: Path | None,
+    args: Sequence[str],
+    build_config_id: str,
+    build_recipe_digest: str,
+) -> CrashRoute:
+    """The probe contract that can safely share one promoted crash bundle."""
+    harness_digest = _sha256(harness) if harness is not None else ""
+    return (
+        sanitizer, mode, harness_digest, tuple(args),
+        build_config_id, build_recipe_digest,
+    )
+
+
+def bundle_crash_route(directory: Path) -> CrashRoute | None:
+    """Read the route bound into a probe bundle's current validation receipt."""
+    path = _probe_context_path(Path(directory))
+    if path is None:
+        return None
+    try:
+        context = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(context, dict) or context.get("version") != 4:
+        return None
+    harness = context.get("harness")
+    if harness is False:
+        harness_digest = ""
+    elif isinstance(harness, dict) and isinstance(harness.get("sha256"), str):
+        harness_digest = harness["sha256"]
+    else:
+        return None
+    args = context.get("args")
+    if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+        return None
+    fields = (
+        context.get("sanitizer"), context.get("mode"),
+        context.get("build_config_id"), context.get("build_recipe_sha256"),
+    )
+    if not all(isinstance(value, str) for value in fields):
+        return None
+    return (
+        fields[0], fields[1], harness_digest, tuple(args), fields[2], fields[3],
+    )
+
+
+def bundle_crash_state(directory: Path) -> CrashState | None:
+    sanitizer = directory / "sanitizer.txt"
+    if not sanitizer.is_file():
+        found = crash_artifacts.find_primary_sanitizer((directory, directory / ".audit"))
+        if found is None or not found.is_file():
+            return None
+        sanitizer = found
+    try:
+        return crash_state(sanitizer.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+
+
+def filed_crash_states(
+    results_dir: str | os.PathLike[str],
+    *,
+    state_filter: CrashState | None = None,
+) -> list[FiledCrashState]:
+    """Every `crashes/CRASH-*` bundle with a parseable crash state, in name order.
+
+    `promoted` reads the receipt through `read_current`, so a bundle whose
+    report or artifacts changed after its review counts as unreviewed again
+    and cannot absorb a new reproducer until triage re-credits it.
+    """
+    import validation_receipt  # lazy: it imports triage helpers
+
+    crashes = Path(results_dir) / "crashes"
+    if not crashes.is_dir():
+        return []
+    filed: list[FiledCrashState] = []
+    for directory in sorted(crashes.glob("CRASH-*")):
+        if not directory.is_dir():
+            continue
+        state = bundle_crash_state(directory)
+        if state is None:
+            continue
+        if state_filter is not None and state != state_filter:
+            continue
+        receipt = validation_receipt.read_current(directory)
+        filed.append(FiledCrashState(
+            directory.name, state,
+            promoted=bool(
+                isinstance(receipt, dict)
+                and receipt.get("state") in validation_receipt.SECURITY_STATES
+            ),
+        ))
+    return filed
+
+
+def promoted_duplicate(
+    results_dir: str | os.PathLike[str],
+    sanitizer_output: Path,
+    route: CrashRoute,
+) -> str | None:
+    """The promoted bundle whose crash state and probe route this repeats.
+
+    Only a bundle triage has already credited (`reportable`) counts: a second
+    input through the same route can add nothing to the cluster it belongs to.
+    A different route is filed because it can establish a different boundary,
+    build dependency, or severity even when the internal fault is identical.
+    Pending, retained, and rejected bundles likewise never absorb evidence.
+    """
+    try:
+        state = crash_state(sanitizer_output.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    if state is None:
+        return None
+    for filed in filed_crash_states(results_dir, state_filter=state):
+        directory = Path(results_dir) / "crashes" / filed.crash_id
+        if filed.promoted and bundle_crash_route(directory) == route:
+            return filed.crash_id
+    return None
+
+
 def _identity(
     testcase: Path, sanitizer: str, mode: str, harness: Path | None,
     args: Sequence[str], build_config_id: str = "", build_recipe_digest: str = "",
@@ -672,6 +853,10 @@ def materialize(
         hashlib.sha256(build_recipe_path.read_bytes()).hexdigest()
         if build_config_id and build_recipe_path is not None else ""
     )
+    route = crash_route(
+        sanitizer, mode, harness_path, args,
+        build_config_id, build_recipe_digest,
+    )
     crashes = Path(results_dir) / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
     identity = _identity(
@@ -701,6 +886,9 @@ def materialize(
                         return "DUP", path.name
                 except OSError:
                     pass
+    duplicate_of = promoted_duplicate(results_dir, sanitizer_path, route)
+    if duplicate_of:
+        return "DUP-STATE", duplicate_of
     crash_id = f"CRASH-{maximum + 1:03d}-{agent}"
     destination = crashes / crash_id
     destination.mkdir()
