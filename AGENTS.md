@@ -130,7 +130,9 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
    harness type when the target uses a language runner). If another runnable
    testcase in the scratch dir needs different harness logic, give each
    harness a unique sibling name and record that exact name in its HARNESS
-   header; never overwrite a shared harness. For an opaque byte
+   header; never overwrite a shared harness. A harness links the pinned
+   sanitizer build only: one that `#include`s a target source file tests a
+   build of its own, and triage demotes its crash to a finding. For an opaque byte
    input, keep the file exact and pass its existing hypothesis with
    `bin/probe --hypothesis-id H-...`; under S8 also pass `--property <kind>`.
    Do not create repo-root `scratch-N/` dirs.

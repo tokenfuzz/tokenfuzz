@@ -269,6 +269,17 @@ attacker-controlled input, skips the trigger review it would otherwise get:
 the evidence already answers the question that review asks. Everything
 weaker takes the normal review.
 
+On either side, a reproducer tests the pinned build and nothing else. A
+driver that `#include`s a target source file compiles a build of its own:
+the unit may be one the pinned configuration never built, such as an optional
+module the upstream default switches off, and a maintainer replaying against
+the pinned artifacts cannot see the crash. Triage asks the compiler which
+target units the driver compiled (`lib/build_scope.py`) and demotes such a
+crash to a finding with that reason, where source review adjudicates it. The
+harness condition never had that route, because `bin/probe` links only the
+pinned build; the rule makes the direct condition's crashes comparable
+rather than removing bugs from either side.
+
 ## Where results land
 
 All benchmark state lives under one root:

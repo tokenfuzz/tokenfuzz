@@ -411,7 +411,7 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         ), mock.patch.object(
             triage, "_run_tool", side_effect=score,
         ), mock.patch.object(
-            triage, "_record_accepted_finding_card",
+            triage, "_record_accepted_artifact",
         ) as record_productive:
             self.assertEqual(
                 triage._finalize_accepted_finding(
@@ -419,7 +419,7 @@ class IncrementalFindingValidationTests(unittest.TestCase):
                 ),
                 "accepted",
             )
-        record_productive.assert_called_once_with(self.finding, self.root)
+        record_productive.assert_called_once_with(self.finding, self.root, "find")
         finalized = json.loads(cache.read_text())
         self.assertEqual(
             finalized["content_sha1"],
@@ -446,7 +446,7 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         ), mock.patch.object(
             triage, "_score_final_report", side_effect=lambda _d, _r, _k, s, **_kw: s,
         ), mock.patch.object(
-            triage, "_record_accepted_finding_card",
+            triage, "_record_accepted_artifact",
         ) as record_productive:
             self.assertEqual(
                 triage._finalize_accepted_finding(
@@ -3692,7 +3692,7 @@ Generated score text.
         with mock.patch.object(
             triage, "_run_tool", return_value=0,
         ) as scorer, mock.patch.object(
-            triage, "_record_accepted_finding_card",
+            triage, "_record_accepted_artifact",
         ) as record_productive:
             self.assertEqual(
                 triage._finalize_accepted_finding(

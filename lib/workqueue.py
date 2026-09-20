@@ -28,6 +28,7 @@ from typing import Iterable
 import cluster_common
 from host_resources import usable_cpu_count
 import languages
+import quality
 import verdict
 import report_identity
 from audit_scope import is_excluded_path_part
@@ -4944,6 +4945,62 @@ def card_run_count(ctx: Context, card_id: str, verdict: str = "") -> int:
             continue
         n += 1
     return n
+
+
+def reconcile_artifact_hypotheses(results_dir: Path, artifact_dir: Path) -> list[str]:
+    """Close the hypotheses an accepted artifact's evidence headers name.
+
+    Agents are told to close a hypothesis with the artifact id, but a session
+    that files a report at the wall never comes back to do it, and the row
+    then reads PENDING to `bin/state resume` and to the card join. The
+    testcase or harness header is the same provenance bin/probe reads, so an
+    artifact that carries one closes exactly the rows it was probed under.
+    Only active rows change; a row already terminal keeps its own verdict.
+    Returns the ids that changed.
+    """
+    artifact = Path(artifact_dir)
+    named: list[str] = []
+    for scan in (artifact, artifact / ".audit"):
+        try:
+            entries = sorted(p for p in scan.iterdir() if p.is_file())
+        except OSError:
+            continue
+        for entry in entries:
+            # Reports and receipts discuss hypotheses; only a testcase or
+            # harness header states which one the evidence was probed under.
+            if entry.suffix.lower() in {".md", ".json", ".log"}:
+                continue
+            hid = quality.hypothesis_id_in_header(entry)
+            if hid and hid not in named:
+                named.append(hid)
+    if not named:
+        return []
+    path = state_dir(results_dir) / "hypotheses.jsonl"
+
+    def open_rows(rows: list[dict]) -> list[dict]:
+        return [
+            row for row in rows
+            if str(row.get("id", "")).strip() in named
+            and is_active_hypothesis_status(str(row.get("status", "")))
+        ]
+
+    if not path.is_file() or not open_rows(read_jsonl(path)):
+        return []
+
+    def mutate(rows: list[dict]) -> list[str]:
+        changed: list[str] = []
+        for row in open_rows(rows):
+            row["status"] = artifact.name
+            row["updated_at"] = now_iso()
+            closure = f"closed by triage: {artifact.name} accepted with this hypothesis in its evidence header"
+            note = str(row.get("note", "") or "")
+            row["note"] = f"{note}; {closure}" if note else closure
+            if row["id"] not in changed:
+                changed.append(row["id"])
+        return changed
+
+    _rows, changed = update_jsonl(path, mutate)
+    return changed
 
 
 def record_accepted_artifact_card(

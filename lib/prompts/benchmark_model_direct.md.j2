@@ -320,7 +320,10 @@ For every CRASH:
      the compiled driver beside it as
      `{{ output_dir }}/crashes/CRASH-<n>/harness`. The gate reruns that
      compiled driver; a directory holding only source is demoted to a
-     finding, however well the driver reproduces.
+     finding, however well the driver reproduces. The driver links the
+     sanitizer build listed above and nothing else: one that `#include`s
+     a target source file compiles a build of its own, and the gate
+     demotes it to a finding for the same reason.
   6. Write `{{ output_dir }}/crashes/CRASH-<n>/report.md`. Use the same
      `## Fields` table and the same "Report narrative" sections required for
      findings.

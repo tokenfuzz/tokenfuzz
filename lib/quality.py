@@ -132,6 +132,12 @@ _C_FAMILY_HARNESS_EXTS = frozenset((".c", ".cc", ".cpp", ".cxx"))
 _RUNNABLE_SOURCE_EXTS = languages.all_harness_exts() - _C_FAMILY_HARNESS_EXTS
 
 
+def hypothesis_id_in_header(path: "str | os.PathLike[str]") -> str:
+    """The `HYPOTHESIS-ID:` a testcase or harness header names, or ""."""
+    match = _HID_RE.search(_read_header(str(path)))
+    return match.group(1) if match else ""
+
+
 def _is_testcase_blacklisted(stem: str, lower: str) -> bool:
     if lower in _BLACK_EXACT_LOWER:
         return True

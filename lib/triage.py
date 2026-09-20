@@ -18,6 +18,7 @@ from pathlib import Path
 
 import benchmark
 import bug_classes
+import build_scope
 import cluster_common
 import crash_artifacts
 import crash_bundle
@@ -27,6 +28,7 @@ import llm_decide
 import llm_usage
 import report_identity
 import stack_frames
+import target_config
 import triage_validate
 import validation_receipt
 import workqueue
@@ -2712,6 +2714,26 @@ def _crash_review_is_reusable(crash_dir: Path) -> bool:
     return report is not None and _cached_trigger_resolution(crash_dir, report)
 
 
+def _configured_include_dirs(results_dir: Path, target_root: Path) -> tuple[Path, ...]:
+    """The include directories the pinned configuration compiles harnesses with.
+
+    The session snapshot beside the results is the configuration the run
+    executed; the live `output/<slug>/target.toml` serves a results tree
+    without one (a benchmark cell, an older run).
+    """
+    snapshot = Path(results_dir) / ".target.toml"
+    path = snapshot if snapshot.is_file() else benchmark._find_output_target_toml(Path(results_dir))
+    if path is None:
+        return ()
+    config = target_config.Config(target_root=str(target_root))
+    try:
+        target_config.load_toml_into(config, path)
+    except (OSError, ValueError) as exc:
+        print(f"WARN: {path}: not readable for the build-scope scan: {exc}", file=sys.stderr)
+        return ()
+    return tuple(Path(config.resolve_path(entry)) for entry in config.includes if entry)
+
+
 def triage_one_crash(
     crash_dir: Path,
     results_dir: Path,
@@ -2786,6 +2808,28 @@ def triage_one_crash(
             crash_dir, rejected_root, report, "missing", missing,
             age_pending=age_pending,
         )
+    if harness is not None and not _is_final_crash_receipt(
+        validation_receipt.read_current(crash_dir),
+    ):
+        # A driver that compiles target source into itself reports on a build
+        # of its own, not the pinned one; see lib/build_scope.py. A scan that
+        # could not run returns None and keeps the crash: the demotion is
+        # permanent and never rests on the scanner's own failure. A crash
+        # already published under an earlier decision keeps its verdict; the
+        # rule binds what is filed from now on, not settled campaigns.
+        units = build_scope.compiled_target_units(
+            harness, target_root,
+            include_dirs=_configured_include_dirs(results_dir, target_root),
+        )
+        if units:
+            demote_to_finding(
+                crash_dir, results_dir,
+                "reproducer compiles target source into the driver ("
+                + ", ".join(str(unit) for unit in units)
+                + ") instead of linking the pinned build, so the diagnostic "
+                "is not evidence about the pinned build",
+            )
+            return "demoted"
     if runtime_only:
         demote_to_finding(
             crash_dir,
@@ -2932,7 +2976,10 @@ def triage_one_crash(
             crash_dir, report, "crash", state,
             attacker_controls=attacker_controls, env=environment,
         )
-    return "pending" if state == "pending" else "promoted"
+    if state == "pending":
+        return "pending"
+    _record_accepted_artifact(crash_dir, results_dir, "crash")
+    return "promoted"
 
 
 def triage_crash_dirs(
@@ -3836,15 +3883,22 @@ def _score_final_report(
     return "pending"
 
 
-def _record_accepted_finding_card(finding_dir: Path, results_dir: Path) -> None:
-    """Feed an accepted finding back to queue ranking without gating triage."""
+def _record_accepted_artifact(directory: Path, results_dir: Path, kind: str) -> None:
+    """Feed an accepted artifact back to structured state without gating triage.
+
+    Closing the hypothesis comes first: the card join below reads the
+    hypothesis row's terminal status, so a row the agent left PENDING would
+    otherwise keep its card live and let a resumed audit re-open a bug that
+    is already filed.
+    """
     try:
+        workqueue.reconcile_artifact_hypotheses(results_dir, directory)
         workqueue.record_accepted_artifact_card(
-            results_dir, finding_dir.name, "find",
+            results_dir, directory.name, kind,
         )
     except OSError as exc:
         print(
-            f"WARN: could not record productive card for {finding_dir.name}: {exc}",
+            f"WARN: could not record accepted {directory.name} in state: {exc}",
             file=sys.stderr,
         )
 
@@ -3944,7 +3998,7 @@ def _finalize_accepted_finding(
     if state == "pending":
         return "pending"
     if state in validation_receipt.SECURITY_STATES:
-        _record_accepted_finding_card(finding_dir, results_dir)
+        _record_accepted_artifact(finding_dir, results_dir, "find")
     return "accepted"
 
 
