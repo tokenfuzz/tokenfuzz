@@ -147,9 +147,11 @@ does not prove that target code ran; inspect the verdict and failure reason.
 
 `state/callgraph.json` is present only with the optional
 [call-neighbourhood analysis](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
-installed. It holds the per-file call maps work-card prompts quote, and
-deleting it costs prompt context and nothing else. The rest is internal
-bookkeeping.
+installed. It holds the per-file call maps work-card prompts quote and each
+file's parsed function definitions with their line ranges. Deleting it costs
+prompt context, function-name receipts (`mark-examined --functions` needs
+the definitions; `--lines` still works), and per-function sweep units, until
+the next `bin/rank-work` rebuilds it. The rest is internal bookkeeping.
 
 For S4, private `fuzz/bin/*.manifest.json` files use schema 2 for new
 builds. They bind an optional source-grounding `receipt` to one harness

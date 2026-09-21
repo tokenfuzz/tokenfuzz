@@ -70,6 +70,7 @@ class CargoLibraryProduct:
     crate: str
     manifest_dir: str
     default_member: bool = False
+    source_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class CargoExecutableProduct:
     manifest_dir: str
     default: bool = False
     default_member: bool = False
+    source_path: str = ""
 
 
 @dataclass(frozen=True)
@@ -137,14 +139,24 @@ def _cargo_workspace_info(raw: object, target_root: str | os.PathLike) -> CargoW
             if not target_name or not isinstance(kinds, list):
                 continue
             kind_set = {str(value) for value in kinds}
+            source_path = ""
+            raw_source = str(target.get("src_path") or "")
+            if raw_source:
+                try:
+                    source_path = os.path.relpath(Path(raw_source).resolve(), root)
+                    if source_path == ".." or source_path.startswith(f"..{os.sep}"):
+                        source_path = ""
+                except OSError:
+                    source_path = ""
             if kind_set & {"lib", "rlib", "dylib", "staticlib", "cdylib"}:
                 libraries.append(CargoLibraryProduct(
                     name, target_name, relative, package_id in default_members,
+                    source_path,
                 ))
             if "bin" in kind_set:
                 executables.append(CargoExecutableProduct(
                     name, target_name, relative, target_name == default_run,
-                    package_id in default_members,
+                    package_id in default_members, source_path,
                 ))
     return CargoWorkspaceInfo(
         tuple(sorted(set(libraries), key=lambda row: (row.manifest_dir, row.package, row.crate))),

@@ -18,6 +18,8 @@ interpreter the harness never chose.
 
 from __future__ import annotations
 
+import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -40,6 +42,7 @@ def _identity(artifact: Path, kind: str) -> "tuple | None":
 # target's own public API may use; the rest are emitted by the sanitizer
 # runtime, the assembler, and the linker's outliner.
 _GENERATED_PREFIXES = ("__", "asan.", "ltmp", "GCC_except", "OUTLINED")
+_GENERATED_NAMES = {"_mh_execute_header", "rust_eh_personality"}
 
 # Symbol types `nm` reports for code: text, and weak text. Everything these
 # sets are compared against is a function, so admitting data and bss entries
@@ -62,7 +65,8 @@ def normalise(names: "set[str]") -> "set[str]":
         names = {name[1:] if name.startswith("_") else name for name in names}
     return {
         name for name in names
-        if name and not name.startswith(_GENERATED_PREFIXES)
+        if name and name not in _GENERATED_NAMES
+        and not name.startswith(_GENERATED_PREFIXES)
     }
 
 
@@ -136,3 +140,124 @@ def undefined_symbols(artifact: Path) -> "set[str]":
                 _CACHE[key] = result
             return result
     return set()
+
+
+# Itanium (`_Z`) and Rust (legacy `_ZN…E`, v0 `_R`) mangling. Everything else
+# `nm` prints is already the identifier the source spelled.
+_MANGLED_PREFIXES = ("_Z", "_R")
+_RUST_LEGACY_HASH = re.compile(r"^h[0-9a-f]{16}$")
+_IDENTIFIER = re.compile(r"^[A-Za-z_]\w*$")
+
+
+def demangle_text(text: str, tool: "str | None" = None) -> str:
+    """Demangle one symbol per line; unchanged when no demangler is present.
+
+    `llvm-cxxfilt` handles Rust v0 as well as Itanium; GNU `c++filt` handles
+    v0 only from binutils 2.36. A caller that knows a pinned LLVM passes its
+    tool; otherwise PATH decides.
+    """
+    tool = tool or shutil.which("llvm-cxxfilt") or shutil.which("c++filt")
+    if not text or tool is None:
+        return text
+    try:
+        result = subprocess.run(
+            [tool], input=text, capture_output=True, text=True, timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return text
+    return result.stdout if result.returncode == 0 else text
+
+
+def _split_scoped(text: str) -> "list[str]":
+    """Split on `::` outside brackets, so a template argument's own `::`
+    never becomes a scope of the symbol."""
+    out, depth, start = [], 0, 0
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in "<({[":
+            depth += 1
+        elif char in ">)}]":
+            depth = max(0, depth - 1)
+        elif depth == 0 and text.startswith("::", index):
+            out.append(text[start:index])
+            index += 2
+            start = index
+            continue
+        index += 1
+    out.append(text[start:])
+    return out
+
+
+def source_identifier(demangled: str) -> "tuple[str, str]":
+    """(identifier, enclosing scope) a demangled symbol names, or ("", "").
+
+    The identifier is what a source parser records as the function name; the
+    scope is the namespace, module, class, or crate module directly around
+    it, so a caller can ask whether that scope is one it parsed. Empty for
+    what no parser could define from this tree's source: a template or
+    generic instantiation or closure (many symbols to one definition,
+    `vector<int>::push_back`, `Option<&str>::map::<…>`, `{closure#0}`), and
+    names in the toolchain-reserved `__` space.
+    """
+    text = demangled.strip()
+    if not text:
+        return "", ""
+    # The parameter list, and any cv/ref qualifiers after it, say nothing
+    # about the name. Match the last `)` back to its `(` so a type inside
+    # the list cannot cut the path short.
+    close = text.rfind(")")
+    if close != -1:
+        depth = 0
+        for index in range(close, -1, -1):
+            if text[index] == ")":
+                depth += 1
+            elif text[index] == "(":
+                depth -= 1
+                if depth == 0:
+                    text = text[:index]
+                    break
+    text = text.replace("(anonymous namespace)", "")
+    if "<" in text or "{" in text or "(" in text:
+        return "", ""
+    segments = [part.strip() for part in _split_scoped(text) if part.strip()]
+    if segments and _RUST_LEGACY_HASH.match(segments[-1]):
+        segments.pop()
+    if not segments:
+        return "", ""
+    identifier = segments[-1].split()[-1]
+    if not _IDENTIFIER.match(identifier):
+        return "", ""
+    scope = segments[-2].split()[-1] if len(segments) > 1 else ""
+    if identifier.startswith("__") or (segments[0].split()[-1]).startswith("__"):
+        return "", ""
+    return identifier, scope
+
+
+def source_identifiers(names: "set[str]", tool: "str | None" = None) -> "set[tuple[str, str]]":
+    """(identifier, scope) for every name, demangling the mangled ones.
+
+    Plain C names have no scope, but still have to be source identifiers:
+    compiler clones such as `parse.cold.1` are not definitions a parser can
+    record. A mangled name the demangler leaves alone (no demangler installed,
+    or an unknown scheme) is dropped rather than compared as its mangled
+    spelling, which no source parser produces.
+    """
+    mangled = sorted(name for name in names if name.startswith(_MANGLED_PREFIXES))
+    out = {
+        parsed for name in names if not name.startswith(_MANGLED_PREFIXES)
+        for parsed in (source_identifier(name),) if parsed[0]
+    }
+    if not mangled:
+        return out
+    rendered = demangle_text("\n".join(mangled) + "\n", tool).splitlines()
+    if len(rendered) != len(mangled):
+        return out
+    for raw, display in zip(mangled, rendered):
+        if display == raw:
+            continue
+        identifier, scope = source_identifier(display)
+        if identifier:
+            out.add((identifier, scope))
+    return out

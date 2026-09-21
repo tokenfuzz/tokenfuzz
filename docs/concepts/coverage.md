@@ -69,8 +69,10 @@ from the manifest. The harness verifies each one before recording it: the
 file must be in the manifest, every range must lie inside it, and a function
 name must be one the
 [call graph](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
-parsed in that file, resolved to the lines from its definition to the next
-one. A receipt that cannot be checked is refused, and a receipt on content
+parsed in that file, resolved to the parser's own start and end lines for
+that definition, so a nested function lies inside its parent's receipt and
+the lines between two functions belong to neither. A receipt that cannot be
+checked is refused, and a receipt on content
 that has since changed stops counting. Content is what is checked: a file a
 checkout or build step touched without changing keeps taking receipts, since
 a rerank happens only when tracked content changes. When a file has multiple

@@ -169,14 +169,20 @@ def plan_units(
         )
         candidates: list[tuple[int, int, list[str]]] = []
         if definitions:
-            first_start = definitions[0][1]
-            if first_start > 1:
-                candidates.extend((s, e, []) for s, e in _windows(1, first_start - 1, size))
+            # Lines no definition covers — the preamble, and what sits
+            # between functions: macros, tables, globals — are windows of
+            # their own; a nested definition adds no gap inside its parent.
+            cursor = 1
             for name, start, end in definitions:
+                if start > cursor:
+                    candidates.extend((s, e, []) for s, e in _windows(cursor, start - 1, size))
                 if end - start + 1 > size:
                     candidates.extend((s, e, [name]) for s, e in _windows(start, end, size))
                 else:
                     candidates.append((start, end, [name]))
+                cursor = max(cursor, end + 1)
+            if cursor <= total:
+                candidates.extend((s, e, []) for s, e in _windows(cursor, total, size))
         else:
             candidates.extend((s, e, []) for s, e in _windows(1, total, size))
         for start, end, names in candidates:

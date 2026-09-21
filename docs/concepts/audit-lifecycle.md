@@ -96,7 +96,7 @@ recovery.
 
 `bin/audit --since <rev>` runs a **delta audit**: the work cards cover only
 the files changed in `<rev>..HEAD`, the files that call them (one hop over
-the call-neighbourhood graph's certain edges; with no graph, the run says so
+the call-neighbourhood graph's resolved edges; with no graph, the run says so
 and covers the changed files alone), and one S1 card per commit in the range.
 The window is the delta: no diversity floor, no expansion. The tree records
 the base revision and changed-file set in `state/run-config.json`, and a

@@ -229,7 +229,7 @@ class ReceiptTests(unittest.TestCase):
         )
 
     def test_function_receipts_resolve_through_the_call_graph(self) -> None:
-        self.write_callgraph([["app_open", 10], ["app_parse", 40], ["app_reset", 80]])
+        self.write_callgraph([["app_open", 10, 39], ["app_parse", 40, 79], ["app_reset", 80, 100]])
         self.assertEqual(
             coverage_ledger.function_ranges(self.results, "src/app_parse.c", 100),
             [("app_open", 10, 39), ("app_parse", 40, 79), ("app_reset", 80, 100)],
@@ -248,8 +248,20 @@ class ReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(coverage_ledger.ReceiptError, "parsed no definitions.*use --lines"):
             coverage_ledger.record_receipt(self.ctx, "2", "src/app_parse.c", functions="app_parse")
 
+    def test_function_ranges_are_the_parsers_not_run_to_the_next_definition(self) -> None:
+        self.write_callgraph([["outer", 10, 40], ["inner", 20, 25], ["late", 90, 300]])
+        self.assertEqual(
+            coverage_ledger.function_ranges(self.results, "src/app_parse.c", 100),
+            [("outer", 10, 40), ("inner", 20, 25), ("late", 90, 100)],
+        )
+        row = coverage_ledger.record_receipt(self.ctx, "2", "src/app_parse.c", functions="outer")
+        self.assertEqual(row["ranges"], [[10, 40]])
+        info = coverage_ledger.file_examined(self.results, "src/app_parse.c")
+        self.assertEqual(info["unexamined_functions"], [("late", 90, 100)],
+                         "a nested function inside a receipted parent is examined")
+
     def test_duplicate_function_names_require_explicit_lines(self) -> None:
-        self.write_callgraph([["parse", 10], ["parse", 40], ["reset", 80]])
+        self.write_callgraph([["parse", 10, 39], ["parse", 40, 79], ["reset", 80, 100]])
         with self.assertRaisesRegex(coverage_ledger.ReceiptError, "ambiguous function.*parse.*use --lines"):
             coverage_ledger.record_receipt(self.ctx, "2", "src/app_parse.c", functions="parse")
         self.assertEqual(workqueue.read_jsonl(coverage_ledger.receipts_path(self.results)), [])
@@ -268,7 +280,7 @@ class ReceiptTests(unittest.TestCase):
         fresh = coverage_ledger.examined_markdown(self.results, "src/app_parse.c")
         self.assertIn("0% of 100 lines (no receipt yet)", fresh[0])
         self.assertIn("mark-examined --agent N --file src/app_parse.c", fresh[-1])
-        self.write_callgraph([[f"fn{n:02d}", n * 5 + 1] for n in range(12)])
+        self.write_callgraph([[f"fn{n:02d}", n * 5 + 1, n * 5 + 5] for n in range(12)])
         coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-10")
         lines = coverage_ledger.examined_markdown(self.results, "src/app_parse.c")
         self.assertIn("10% of 100 lines (lines 1-10)", lines[0])
@@ -333,7 +345,7 @@ class CallEdgeCardTests(unittest.TestCase):
             "files": {"src/app_parse.c": {
                 "functions": 2, "reachable": 0, "paths": [],
                 "callers": [["src/main.c", 3]], "caller_overflow": [["src/io.c", 1]],
-                "callees": [], "definitions": [["parse_input", 1], ["parse_tail", 9]],
+                "callees": [], "definitions": [["parse_input", 1, 8], ["parse_tail", 9, 20]],
             }},
         }), encoding="utf-8")
         workqueue.rank_target(self.ctx, 10)
@@ -369,7 +381,7 @@ class CallEdgeCardTests(unittest.TestCase):
         source.write_text("/* preamble */\n" * 20 + PARSER * 2, encoding="utf-8")
         graph_path = self.results / "state" / callgraph.ARTIFACT_NAME
         graph = json.loads(graph_path.read_text(encoding="utf-8"))
-        graph["files"]["src/app_parse.c"]["definitions"] = [["parse_input", 21], ["parse_tail", 25]]
+        graph["files"]["src/app_parse.c"]["definitions"] = [["parse_input", 21, 24], ["parse_tail", 25, 28]]
         graph_path.write_text(json.dumps(graph), encoding="utf-8")
         workqueue.rank_target(self.ctx, 10)
         coverage_ledger.record_receipt(
@@ -379,7 +391,7 @@ class CallEdgeCardTests(unittest.TestCase):
                          "a preamble is not an unexamined function")
 
         source.write_text("\n".join(["line"] * 1999 + ["short function"]) + "\n", encoding="utf-8")
-        graph["files"]["src/app_parse.c"]["definitions"] = [["large", 1], ["short", 2000]]
+        graph["files"]["src/app_parse.c"]["definitions"] = [["large", 1, 1999], ["short", 2000, 2000]]
         graph_path.write_text(json.dumps(graph), encoding="utf-8")
         workqueue.rank_target(self.ctx, 10)
         coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="1-1998")
@@ -468,7 +480,7 @@ class CallEdgeCardTests(unittest.TestCase):
         graph["files"][rel] = {
             "functions": 1, "reachable": 0, "paths": [],
             "callers": [["src/main.c", 1]], "caller_overflow": [],
-            "callees": [], "definitions": [["plain", 1]],
+            "callees": [], "definitions": [["plain", 1, 1]],
         }
         graph_path.write_text(json.dumps(graph), encoding="utf-8")
         first = workqueue.rank_target(self.ctx, 10)
@@ -496,7 +508,7 @@ class CallEdgeCardTests(unittest.TestCase):
         graph["files"]["src/io.c"] = {
             "functions": 2, "reachable": 0, "paths": [],
             "callers": [["src/main.c", 1]], "caller_overflow": [], "callees": [],
-            "definitions": [["parse_input", 1], ["parse_tail", 3]],
+            "definitions": [["parse_input", 1, 2], ["parse_tail", 3, 4]],
         }
         graph_path.write_text(json.dumps(graph), encoding="utf-8")
         workqueue.rank_target(self.ctx, 10)

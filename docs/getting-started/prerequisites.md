@@ -255,9 +255,53 @@ bin/callgraph --probe              # report whether the analysis can run
 The generated `<results>/state/callgraph.json` is context for an agent, never
 reachability proof or a filter. Indirect calls, callback tables,
 macro-generated names, and some exported declarations are invisible to the
-parser. If exported symbol coverage is below 75%, TokenFuzz withholds the
-inferred entry boundary rather than presenting a partial graph as complete.
-Trees above 5,000 auditable files are skipped.
+parser. Perl and R have no trailmark grammar, so those targets get no graph.
+
+What the graph holds, per audited file: the files with a resolved call into
+it and the files it calls into; the shortest resolved route from the build's
+entry boundary to its most-called functions; a bounded excerpt pack of the
+key caller and callee definitions; and every function definition with the
+parser's own start and end lines, which is what
+[coverage receipts](../concepts/coverage.md) resolve function names against.
+A resolved call is one trailmark matched to a definition, or a qualified
+call whose qualifier names exactly one parsed module, class, struct, trait,
+enum, interface, or namespace holding that function (`reportkit.parse_config(...)`,
+`SliceRead::new(...)`, `Base64Variants.valueOf(...)`), including `self` /
+`this` for the calling function's own class, `super` for its base, and a
+parameter with a declared type (a Go qualifier matches the file's declared
+package name). An untyped parameter shadows a same-named container and
+resolves nothing. A receiver that matches no unique callee — a local of
+unknown type, `obj.method()` — stays unresolved rather than guessed, and
+the block says so. This is structural context, not name resolution: an
+import alias or a local variable spelled like a container of the tree can
+still bind to it.
+
+The entry boundary and the coverage figure come from the sanitizer build's
+symbol table, demangled to source identifiers for C++ and Rust and counted
+only where the parser saw a same-named definition inside the demangled
+namespace, class, or module — or, for a crate-root function, in the Cargo
+target's root source — so a statically linked standard library does not
+dilute the figure and `two::parse` is never credited for `one::parse`.
+Without a built artifact (a findings-only target), the boundary is what
+trailmark detects plus definitions whose own declaration and every enclosing
+type are public — bare `pub` (not `pub(crate)`), Java `public`, Kotlin's
+default visibility, `export`, a capitalised Go name. A Rust `pub` inside a
+private module still counts; whether that module is re-exported is not
+answered here. Definitions nested inside a function are never roots. C/C++
+visibility is a link-time question and Ruby's is declared by a later
+`private`, so those languages get only detected roots without a build. If that
+coverage is below 75%, TokenFuzz withholds the inferred entry boundary rather
+than presenting a partial graph as complete. Trees above 5,000 auditable
+files are skipped. `bin/callgraph` also wraps two of trailmark 0.5.0's
+parsers: C++ so nested namespaces keep their containment and functions
+inside an anonymous namespace are parsed (the release flattens the former
+and skips the latter), and Swift so methods declared in `extension` blocks
+exist (the release drops them).
+
+Each card's block is bounded: at most six caller and six callee files, three
+routed functions, a 600-token excerpt pack, and a fixed caveat — under
+1,000 tokens on every measured tree. The artifact itself never enters a
+prompt.
 
 `bin/rank-work` caches both successful graphs and failures against their
 source, build, and parser fingerprint. The run log says whether

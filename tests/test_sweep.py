@@ -56,7 +56,7 @@ class PlanningTests(unittest.TestCase):
     def test_units_follow_definitions_where_parsed_and_windows_elsewhere(self) -> None:
         (self.target / "src" / "parsed.c").write_text(_body(300), encoding="utf-8")
         (self.target / "src" / "plain.c").write_text(_body(250), encoding="utf-8")
-        self.write_callgraph({"src/parsed.c": [["open", 10], ["parse", 40], ["huge", 60]]})
+        self.write_callgraph({"src/parsed.c": [["open", 10, 39], ["parse", 40, 59], ["huge", 60, 300]]})
         workqueue.rank_target(self.ctx, 10)
         units = {u.key: u for u in sweep.plan_units(self.ctx, unit_lines=100)}
         self.assertEqual(units["src/parsed.c:1-9"].functions, [])
@@ -71,9 +71,22 @@ class PlanningTests(unittest.TestCase):
             ["src/plain.c:1-100", "src/plain.c:101-200", "src/plain.c:201-250"],
         )
 
+    def test_lines_between_functions_get_their_own_windows(self) -> None:
+        # Macros, tables and globals live between functions; with the parser's
+        # own end lines those are nobody's unit, and a nested definition adds
+        # no gap inside its parent.
+        (self.target / "src" / "gaps.c").write_text(_body(120), encoding="utf-8")
+        self.write_callgraph({"src/gaps.c": [["open", 10, 30], ["inner", 15, 20], ["parse", 60, 80]]})
+        workqueue.rank_target(self.ctx, 10)
+        self.assertEqual(
+            [(u.key, u.functions) for u in sweep.plan_units(self.ctx, unit_lines=100) if u.file == "src/gaps.c"],
+            [("src/gaps.c:1-9", []), ("src/gaps.c:10-30", ["open"]), ("src/gaps.c:15-20", ["inner"]),
+             ("src/gaps.c:31-59", []), ("src/gaps.c:60-80", ["parse"]), ("src/gaps.c:81-120", [])],
+        )
+
     def test_a_long_function_is_split_and_receipted_units_are_skipped(self) -> None:
         (self.target / "src" / "parsed.c").write_text(_body(600), encoding="utf-8")
-        self.write_callgraph({"src/parsed.c": [["huge", 1]]})
+        self.write_callgraph({"src/parsed.c": [["huge", 1, 600]]})
         workqueue.rank_target(self.ctx, 10)
         self.assertEqual(
             [u.key for u in sweep.plan_units(self.ctx, unit_lines=100)],

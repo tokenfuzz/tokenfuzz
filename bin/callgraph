@@ -3,7 +3,9 @@
 
 The parsing and graph queries are trailmark's, by Trail of Bits
 (https://github.com/trailofbits/trailmark, Apache-2.0). It is an optional
-runtime dependency an operator installs; nothing here vendors or modifies it.
+runtime dependency an operator installs; nothing here vendors it, and the two
+runtime wrappers (`_patch_cpp_namespaces`, `_patch_swift_extensions`) recover
+declarations the release drops.
 
 Runs *outside* the harness interpreter. trailmark needs Python >= 3.12 and
 pulls in tree-sitter and rustworkx; the harness must keep working under an
@@ -31,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections import Counter, defaultdict, deque
 from pathlib import Path
@@ -41,7 +44,8 @@ from pathlib import Path
 # imports under whichever interpreter bin/rank-work picked.
 sys.path.append(str(Path(__file__).resolve().parent.parent / "lib"))
 import cli_help  # noqa: E402
-from native_symbols import defined_symbols  # noqa: E402
+from languages import for_source_ext  # noqa: E402
+from native_symbols import defined_symbols, source_identifiers  # noqa: E402
 
 # tree-sitter 0.26.0 segfaults in trailmark's C parser from the second file of
 # any directory parse onward. Released trailmark pins `tree-sitter~=0.25.0`, so
@@ -51,7 +55,19 @@ from native_symbols import defined_symbols  # noqa: E402
 BROKEN_TREE_SITTER = ("0.26",)
 
 # Mirrors lib/callgraph.SCHEMA_VERSION; the reader refuses any other value.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
+
+# Node kinds whose name is a scope a symbol's qualified path can name. A
+# built symbol counts toward coverage only when the scope directly around it
+# is one of these (or it has none, as in C): that is what keeps a statically
+# linked standard library, and the crates Rust links into every binary,
+# out of the denominator without a list of library names.
+_SCOPE_KINDS = ("MODULE", "NAMESPACE", "CLASS", "STRUCT", "INTERFACE", "TRAIT", "ENUM", "CONTRACT")
+
+# Receivers that name the calling function's own container, and the ones
+# that name its base container, in the languages trailmark parses.
+_SELF_WORDS = ("self", "this", "$this", "cls", "Self", "static")
+_SUPER_WORDS = ("super", "parent")
 
 # A rendered route longer than this is not a recipe an agent can act on, and
 # the block is a summary, not a trace.
@@ -88,7 +104,105 @@ def _require_trailmark():
         tm_version = version("trailmark")
     except Exception:
         tm_version = "unknown"
+    _patch_cpp_namespaces()
+    _patch_swift_extensions()
     return QueryEngine, supported_languages, f"trailmark={tm_version} tree-sitter={ts_version}"
+
+
+def _patch_cpp_namespaces() -> None:
+    """Preserve C++ namespace containment, including anonymous namespaces.
+
+    trailmark 0.5.0 attaches every named namespace and its children directly
+    to the file module, so like-named nested functions overwrite one another
+    (`one::detail::parse` and `two::detail::parse` become one node); it
+    returns immediately for an anonymous namespace and drops its contents —
+    measured on a sample decoder, 2 of 22 functions parsed. The parser
+    already accepts a container id for every child extractor, so this gives
+    it the namespace id it should have received and keeps the rest upstream.
+    It is a complete replacement, not gated on the version: a release that
+    fixes either defect still gets a correct graph, and one that renames the
+    helpers fails the build visibly instead of silently losing the fix.
+    """
+    try:
+        from trailmark.parsers.cpp import parser as cpp_parser
+    except ImportError:
+        return
+    original = getattr(cpp_parser, "_extract_namespace", None)
+    if original is None or getattr(original, "_tokenfuzz_namespaces", False):
+        return
+
+    def extract_namespace(node, file_path, module_id, graph):
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            point = node.start_point
+            name = ""
+            suffix = f"<anonymous@{point.row + 1}:{point.column}>"
+        else:
+            raw = cpp_parser.node_text(name_node)
+            name = raw.rsplit("::", 1)[-1]
+            suffix = raw.replace("::", ":")
+        namespace_id = f"{module_id}:{suffix}"
+        graph.nodes[namespace_id] = cpp_parser.CodeUnit(
+            id=namespace_id, name=name, kind=cpp_parser.NodeKind.NAMESPACE,
+            location=cpp_parser.make_location(node, file_path),
+        )
+        cpp_parser.add_contains_edge(graph, module_id, namespace_id)
+        body = node.child_by_field_name("body")
+        for child in (body.children if body is not None else ()):
+            cpp_parser._visit_top_level_node(
+                child, file_path, namespace_id, None, graph,
+            )
+
+    extract_namespace._tokenfuzz_namespaces = True
+    cpp_parser._extract_namespace = extract_namespace
+
+
+def _patch_swift_extensions() -> None:
+    """Parse the methods Swift declares inside `extension Type { ... }`.
+
+    trailmark 0.5.0 names a class-like declaration by its direct
+    `type_identifier` child; an extension carries its name inside a
+    `user_type` node, so the extractor returns before reading the body and
+    every extension method is absent. Measured on a logging library: 124
+    of 358 functions, in 46 extension blocks. When the extended type is
+    declared in the same file its methods join that node, so `self.m()`
+    inside the extension resolves; otherwise the extension is its own
+    container of the type's name.
+    """
+    try:
+        from trailmark.parsers.swift import parser as swift_parser
+    except ImportError:
+        return
+    original = getattr(swift_parser, "_extract_class_like", None)
+    if original is None or getattr(original, "_tokenfuzz_extensions", False):
+        return
+
+    def extract_class_like(node, file_path, module_id, graph):
+        if swift_parser.first_child_by_type(node, "type_identifier") is not None:
+            return original(node, file_path, module_id, graph)
+        user_type = swift_parser.first_child_by_type(node, "user_type")
+        name_node = (
+            swift_parser.first_child_by_type(user_type, "type_identifier")
+            if user_type is not None else None
+        )
+        if name_node is None:
+            return original(node, file_path, module_id, graph)
+        name = swift_parser.node_text(name_node)
+        class_id = f"{module_id}:{name}"
+        if class_id not in graph.nodes:
+            graph.nodes[class_id] = swift_parser.CodeUnit(
+                id=class_id, name=name,
+                kind=swift_parser._class_kind(node) or swift_parser.NodeKind.CLASS,
+                location=swift_parser.make_location(node, file_path),
+            )
+            swift_parser.add_contains_edge(graph, module_id, class_id)
+        body = swift_parser.first_child_by_type(node, "class_body")
+        for member in (body.children if body is not None else ()):
+            if member.type == "function_declaration":
+                swift_parser._extract_function(member, file_path, module_id, class_id, graph)
+
+    extract_class_like._tokenfuzz_extensions = True
+    swift_parser._extract_class_like = extract_class_like
 
 
 # ── graph shaping ───────────────────────────────────────────────────
@@ -110,7 +224,8 @@ def _relative(path: str, root: Path) -> str:
         return path
 
 
-def _entry_roots(store, name_of, entry_symbols, exported):
+def _entry_roots(store, name_of, entry_nodes, exported_nodes, callees,
+                 public=frozenset(), *, has_artifact: bool = True):
     """Pick the entry nodes belonging to the configured build artifacts.
 
     Every CLI and example in a tree defines `main`, so a name match cannot
@@ -121,31 +236,245 @@ def _entry_roots(store, name_of, entry_symbols, exported):
     candidate tied, and picking from a tie is guessing. Anything ambiguous
     falls through to the library's exported surface, which is a boundary the
     analysis can stand behind without choosing.
+
+    Returns (roots, secondary roots, basis). Without a built artifact the
+    boundary is what trailmark detected plus the source's own public
+    definitions: a library's public surface is where its callers enter, and
+    on a measured Go, Rust, and Swift library nothing else routed anywhere.
+    Public definitions rank second so a function `main` already reaches
+    keeps that route instead of reading as its own boundary.
     """
     tagged = {node for node, _ in store.all_entrypoints()}
-    if not entry_symbols and not exported:
+    if not has_artifact:
         # No built artifact to choose with. Narrowing to `main` here would
         # throw away the framework routes trailmark detected — the very
         # boundary a managed target has — in favour of a CLI shim.
-        return sorted(tagged), "detected-entrypoints"
-    candidates = sorted(n for n in tagged if name_of.get(n) in ("main", "_main"))
-    if candidates and entry_symbols:
+        secondary = sorted(set(public) - tagged)
+        return sorted(tagged), secondary, ("public-api" if secondary else "detected-entrypoints")
+    candidates = sorted(
+        n for n in tagged
+        if n in entry_nodes and name_of.get(n) in ("main", "_main")
+    )
+    if candidates and entry_nodes:
         def by_closure(node: str) -> int:
-            reached = {name_of.get(n, "") for n in store.reachable_from(node)}
-            return len(reached & entry_symbols)
+            # Over the resolved edges, not trailmark's own reachability: a
+            # Rust or Python `main` reaches its modules only through the
+            # qualified calls resolved here, which the store still holds as
+            # unresolved proxies.
+            return len(set(_shortest_paths([node], callees)) & entry_nodes)
 
         ranked = sorted(((by_closure(node), node) for node in candidates), reverse=True)
         best = ranked[0]
         if best[0] > 0 and (len(ranked) == 1 or ranked[1][0] < best[0]):
-            return [best[1]], "cli-main"
+            return [best[1]], [], "cli-main"
     # No executable entry to anchor on: the library's exported surface is the
     # boundary. `main` is excluded — a tree's example and test drivers export
     # one each, and none of them is this target's public API.
     roots = sorted(
-        node for node, name in name_of.items()
-        if name in exported and name not in ("main", "_main")
+        node for node in exported_nodes
+        if name_of.get(node) not in ("main", "_main")
     )
-    return (roots, "exported-api") if roots else (sorted(tagged), "detected-entrypoints")
+    return (roots, [], "exported-api") if roots else (sorted(tagged), [], "detected-entrypoints")
+
+
+def _public_functions(root: Path, graph, file_of, functions, kind_of) -> set[str]:
+    """Parsed functions whose own declaration and containers are public.
+
+    Visibility is read only from the parser's exact source span. Reading a
+    fixed number of whole lines lets an adjacent declaration, annotation
+    argument, or function body lend its `public`/`private` token to this one;
+    compact Rust and Java commonly put several declarations on one line.
+    Languages whose visibility is not local to a declaration (Ruby and
+    C/C++) deliberately contribute no roots here.
+    """
+    parents: dict[str, str] = {}
+    for edge in graph.edges:
+        if str(edge.kind).rsplit(".", 1)[-1] == "CONTAINS":
+            parents[edge.target_id] = edge.source_id
+
+    lines_of: dict[str, list[bytes]] = {}
+    prefixes: dict[str, str] = {}
+
+    def declaration_prefix(node: str) -> str:
+        if node in prefixes:
+            return prefixes[node]
+        unit = graph.nodes.get(node)
+        source = file_of.get(node, "")
+        location = getattr(unit, "location", None)
+        if not source or location is None or location.start_line < 1:
+            prefixes[node] = ""
+            return ""
+        if source not in lines_of:
+            try:
+                lines_of[source] = (root / source).read_bytes().splitlines()
+            except OSError:
+                lines_of[source] = []
+        lines = lines_of[source]
+        if location.end_line > len(lines):
+            prefixes[node] = ""
+            return ""
+        selected = lines[location.start_line - 1:location.end_line]
+        if not selected:
+            prefixes[node] = ""
+            return ""
+        selected[0] = selected[0][location.start_col:]
+        selected[-1] = selected[-1][:location.end_col]
+        text = b"\n".join(selected).decode("utf-8", "replace")
+
+        language = for_source_ext(Path(source).suffix.lower())
+        language_name = language.name if language else ""
+        if language_name in ("javascript", "typescript"):
+            before = lines[location.start_line - 1][:location.start_col].decode("utf-8", "replace")
+            wrapper = re.search(r"(?:^|[;{}])\s*(export(?:\s+default)?\s*)$", before)
+            if wrapper:
+                text = wrapper.group(1) + text
+
+        name = re.escape(getattr(unit, "name", "") or "")
+        kind = kind_of(node)
+        if not name:
+            prefix = ""
+        elif kind in ("FUNCTION", "METHOD"):
+            patterns = {
+                "rust": rf"\bfn\s+{name}\b",
+                "kotlin": rf"\bfun\b[\s\S]*?\b{name}\s*\(",
+                "swift": rf"\bfunc\s+{name}\b",
+                "javascript": rf"(?:\bfunction\s+)?\b{name}\s*\(",
+                "typescript": rf"(?:\bfunction\s+)?\b{name}\s*\(",
+            }
+            pattern = patterns.get(language_name, rf"\b{name}\s*\(")
+            match = re.search(pattern, text)
+            prefix = text[:match.end()] if match else ""
+        else:
+            match = re.search(
+                rf"\b(?:class|struct|interface|trait|enum|protocol|object|extension)\s+{name}\b",
+                text,
+            )
+            prefix = text[:match.end()] if match else ""
+        prefixes[node] = prefix
+        return prefix
+
+    def locally_public(node: str, language_name: str, parent_kind: str) -> bool:
+        unit = graph.nodes.get(node)
+        name = getattr(unit, "name", "") or ""
+        prefix = declaration_prefix(node)
+        kind = kind_of(node)
+        if parent_kind in ("FUNCTION", "METHOD"):
+            return False
+        if language_name not in ("go", "python") and not prefix:
+            return False
+        if language_name == "rust":
+            # Bare `pub`: `pub(crate)` and `pub(super)` are not API. Whether
+            # the containing module is itself exported is a re-export
+            # question this structural pass does not answer, so a `pub` in a
+            # private module can be a root; the block is context, and an
+            # unexported root costs a route, not a wrong edge.
+            if parent_kind == "TRAIT" and kind in ("FUNCTION", "METHOD"):
+                return re.search(r"\b(private|pub\s*\()", prefix) is None
+            return re.search(r"\bpub\b(?!\s*\()", prefix) is not None
+        if language_name == "go":
+            return name[:1].isupper()
+        if language_name in ("java", "c_sharp"):
+            if parent_kind == "INTERFACE" and kind in ("FUNCTION", "METHOD"):
+                return re.search(r"\bprivate\b", prefix) is None
+            return re.search(r"\bpublic\b", prefix) is not None
+        if language_name == "swift":
+            if parent_kind in ("INTERFACE", "PROTOCOL") and kind in ("FUNCTION", "METHOD"):
+                return re.search(r"\bprivate\b", prefix) is None
+            if kind not in ("FUNCTION", "METHOD") and re.search(r"\bextension\b", prefix):
+                # An extension is as visible as the type it extends, which
+                # may be declared elsewhere; its members carry their own
+                # `public`. Only an explicitly narrowed extension hides them.
+                return re.search(r"\b(private|fileprivate|internal)\b", prefix) is None
+            return re.search(r"\b(public|open)\b", prefix) is not None
+        if language_name == "kotlin":
+            return re.search(r"\b(private|internal|protected)\b", prefix) is None
+        if language_name == "python":
+            return not name.startswith("_")
+        if language_name == "php":
+            return kind not in ("FUNCTION", "METHOD") \
+                or re.search(r"\b(private|protected)\b", prefix) is None
+        if language_name in ("javascript", "typescript"):
+            if parent_kind == "MODULE":
+                return re.search(r"\bexport\b", prefix) is not None
+            return not name.startswith("#") \
+                and re.search(r"\b(private|protected)\b", prefix) is None
+        return False
+
+    visible: dict[str, bool] = {}
+
+    def is_visible(node: str) -> bool:
+        if node in visible:
+            return visible[node]
+        source = file_of.get(node, "")
+        language = for_source_ext(Path(source).suffix.lower())
+        language_name = language.name if language else ""
+        parent = parents.get(node, "")
+        parent_kind = kind_of(parent)
+        if not locally_public(node, language_name, parent_kind):
+            visible[node] = False
+            return False
+        if not parent or parent_kind == "MODULE":
+            visible[node] = True
+            return True
+        visible[node] = is_visible(parent)
+        return visible[node]
+
+    return {node for node in functions if is_visible(node)}
+
+
+def _function_scopes(graph, kind_of, functions) -> dict[str, set[str]]:
+    """Scope names that contain each parsed function, by CONTAINS edges.
+
+    A demangled `ns::Type::method` names its enclosing scope; matching on
+    the name alone credited `two::parse` when only `one::parse` was parsed.
+    A Rust module's symbol scope is its file stem, not the dotted id.
+    """
+    parents: dict[str, str] = {}
+    for edge in graph.edges:
+        if str(edge.kind).rsplit(".", 1)[-1] == "CONTAINS":
+            parents[edge.target_id] = edge.source_id
+    scopes: dict[str, set[str]] = defaultdict(set)
+    for node in functions:
+        parent = parents.get(node, "")
+        seen: set[str] = set()
+        while parent and parent not in seen:
+            seen.add(parent)
+            unit = graph.nodes.get(parent)
+            if unit is not None and kind_of(parent) in _SCOPE_KINDS and unit.name:
+                scopes[node].add(unit.name)
+                location = getattr(unit, "location", None)
+                if kind_of(parent) == "MODULE" and location is not None \
+                        and Path(getattr(location, "file_path", "")).suffix.lower() == ".rs":
+                    scopes[node].add(unit.name.rsplit(".", 1)[-1])
+            parent = parents.get(parent, "")
+    return scopes
+
+
+def _matching_symbols(identifiers, functions, name_of, scopes_of, file_of,
+                      extra_scopes=None):
+    """Demangled (identifier, scope) pairs mapped to parsed nodes."""
+    extra_scopes = extra_scopes or {}
+    by_name: dict[str, set[str]] = defaultdict(set)
+    for node in functions:
+        if name_of.get(node):
+            by_name[name_of[node]].add(node)
+    matched: dict[tuple[str, str], set[str]] = {}
+    for name, scope in identifiers:
+        candidates = by_name.get(name, set())
+        if not scope:
+            nodes = set(candidates)
+        else:
+            nodes = {
+                node for node in candidates
+                if scope in scopes_of.get(node, ())
+                or file_of.get(node) in extra_scopes.get(scope, ())
+            }
+        # A scoped symbol cannot choose between two same-named definitions in
+        # like-named namespaces/classes. Keep unscoped C/main names broad so
+        # entry-closure scoring can distinguish the tree's several drivers.
+        if nodes and (not scope or len(nodes) == 1):
+            matched[(name, scope)] = nodes
+    return matched
 
 
 def _qualified(node, name_of, file_of, ambiguous) -> str:
@@ -184,31 +513,179 @@ def _key_units(node: str, callers: dict[str, set[str]], callees: dict[str, set[s
     return caller, callee
 
 
-def _definitions(nodes, name_of: dict[str, str], line_of: dict[str, int]) -> list[list]:
-    """`[name, start line]` for every parsed function in a file, by line.
+def _definitions(nodes, name_of: dict[str, str], line_of: dict[str, int],
+                 end_of: dict[str, int]) -> list[list]:
+    """`[name, start line, end line]` for every parsed function in a file.
 
     This is the file's unit list for the coverage ledger: a receipt names
-    functions, and the ledger resolves them to line ranges here. A unit
-    without a start line cannot bound a range and is left out.
+    functions, and the ledger resolves them to these lines. The end is the
+    parser's, so a nested definition sits inside its parent's range and the
+    lines between two functions belong to neither. A unit without a start
+    line cannot bound a range and is left out; one without an end is a
+    single line.
     """
-    rows = {
-        (name_of.get(node, ""), int(line_of.get(node, 0) or 0))
-        for node in nodes
-    }
-    return [[name, line] for name, line in sorted(rows, key=lambda r: (r[1], r[0]))
-            if name and line > 0]
+    rows = set()
+    for node in nodes:
+        start = int(line_of.get(node, 0) or 0)
+        end = max(start, int(end_of.get(node, 0) or 0))
+        rows.add((name_of.get(node, ""), start, end))
+    return [[name, start, end] for name, start, end in sorted(rows, key=lambda r: (r[1], r[2], r[0]))
+            if name and start > 0]
 
 
-def _shortest_paths(roots: list[str], callees: dict[str, set[str]]) -> dict[str, list[str]]:
-    """One BFS over the whole graph, not one per function of interest."""
+def _resolved_proxy_calls(graph, kind_of) -> list[tuple[str, str]]:
+    """(caller, callee) for qualified calls trailmark left unresolved but
+    that name a function of exactly one parsed container: a module
+    (`reportkit.parse_config(...)`, `reportkit::parse_config(...)`) or a
+    class, struct, trait, enum, interface, or namespace (`Base64Variants.valueOf(...)`,
+    `SliceRead::new(...)`, `LoggingSystem.bootstrap(...)`). trailmark marks
+    every qualified call `inferred` and resolves none of them, which left a
+    Java tree of 379 files with no cross-file edge at all and every
+    managed-language sample with none.
+
+    The qualifier's last segment names a container by name, or a module by
+    its id, its file stem when the parser prefixed the directory
+    (`src.reportkit` for `import reportkit`), or a Go source file's declared
+    package name (`reportkit.Parse` across `reportkit/a.go` and
+    `reportkit/b.go`).
+    `self` / `this` / `$this` name the calling function's own container,
+    `super` / `parent` its base containers (by the INHERITS edges' names),
+    and a parameter with a declared type names that type (`Base64Variant b`
+    then `b.encode(...)`); an untyped parameter shadows same-named containers
+    and resolves nothing. The callee must be a function the graph's CONTAINS
+    edges place in exactly one of those containers: that uniqueness is what
+    makes the edge exact rather than a same-name guess, and two classes
+    sharing a name resolve nothing. The one way it can be wrong is a local
+    variable named after a container of the tree carrying an attribute named
+    after one of its functions.
+    """
+    children: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    parent_of: dict[str, str] = {}
+    bases: dict[str, set[str]] = defaultdict(set)
+    for edge in graph.edges:
+        kind = str(edge.kind).rsplit(".", 1)[-1]
+        if kind == "INHERITS":
+            bases[edge.source_id].add(edge.target_id.rsplit(":", 1)[-1].rsplit(".", 1)[-1])
+        if kind != "CONTAINS":
+            continue
+        parent_of[edge.target_id] = edge.source_id
+        if kind_of(edge.target_id) in ("FUNCTION", "METHOD"):
+            unit = graph.nodes[edge.target_id]
+            children[edge.source_id][unit.name or ""].add(edge.target_id)
+    by_name: dict[str, set[str]] = defaultdict(set)
+    go_packages: dict[str, str] = {}
+    for node_id, unit in graph.nodes.items():
+        kind = kind_of(node_id)
+        if kind not in _SCOPE_KINDS or not unit.name:
+            continue
+        if kind == "MODULE":
+            parts = node_id.split(".")
+            by_name[node_id].add(node_id)
+            by_name[parts[-1]].add(node_id)
+            location = getattr(unit, "location", None)
+            path = getattr(location, "file_path", "") if location is not None else ""
+            if Path(path).suffix.lower() == ".go":
+                if path not in go_packages:
+                    try:
+                        source = Path(path).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        source = ""
+                    match = re.search(r"(?m)^\s*package\s+([A-Za-z_]\w*)\b", source)
+                    go_packages[path] = match.group(1) if match else ""
+                if go_packages[path]:
+                    by_name[go_packages[path]].add(node_id)
+        else:
+            by_name[node_id].add(node_id)
+            by_name[unit.name].add(node_id)
+        lineage = []
+        parent = node_id
+        seen = set()
+        while parent and parent not in seen and kind_of(parent) != "MODULE":
+            seen.add(parent)
+            ancestor = graph.nodes.get(parent)
+            if ancestor is not None and ancestor.name:
+                lineage.append(ancestor.name)
+            parent = parent_of.get(parent, "")
+        if len(lineage) > 1:
+            by_name["::".join(reversed(lineage))].add(node_id)
+            by_name[".".join(reversed(lineage))].add(node_id)
+
+    out: list[tuple[str, str]] = []
+    for edge in graph.edges:
+        if str(edge.kind).rsplit(".", 1)[-1] != "CALLS":
+            continue
+        raw = dict(edge.attributes or ()).get("raw_target") or edge.target_id
+        if not isinstance(raw, str):
+            continue
+        raw = raw.split("proxy.unresolved:", 1)[-1]
+        for separator in ("::", "->", "."):
+            qualifier, found, name = raw.rpartition(separator)
+            if not found or not name:
+                continue
+            last = qualifier.rsplit(separator, 1)[-1].lstrip("\\")
+            own = parent_of.get(edge.source_id, "")
+            caller = graph.nodes.get(edge.source_id)
+            if qualifier in _SELF_WORDS:
+                containers = {own} if own else set()
+            elif qualifier in _SUPER_WORDS:
+                containers = {c for base in bases.get(own, ()) for c in by_name.get(base, ())}
+            else:
+                parameters = [
+                    parameter for parameter in (getattr(caller, "parameters", None) or ())
+                    if parameter.name == qualifier
+                ]
+                if parameters:
+                    # A parameter shadows a same-named module or class. Only
+                    # its declared type can make the receiver resolvable.
+                    containers = set()
+                    for parameter in parameters:
+                        type_ref = getattr(parameter, "type_ref", None)
+                        type_name = type_ref.name.rsplit(".", 1)[-1] \
+                            if type_ref is not None and type_ref.name else ""
+                        if type_name:
+                            containers |= by_name.get(type_name, set())
+                else:
+                    # An exact qualified id wins over a same-named stem
+                    # elsewhere. Several containers may share the name — a
+                    # Java class and its file, a Go package across files, a
+                    # reopened C++ namespace — and that is fine: the callee
+                    # must still be unique across all of them.
+                    containers = set(by_name.get(qualifier, ()))
+                    if not containers:
+                        containers = set(by_name.get(last, ()))
+            targets = {
+                target for container in containers
+                for target in children[container].get(name, ())
+            }
+            if len(targets) == 1:
+                out.append((edge.source_id, next(iter(targets))))
+            break
+    return out
+
+
+def _shortest_paths(roots: list[str], callees: dict[str, set[str]],
+                    secondary: list[str] = ()) -> dict[str, list[str]]:
+    """One BFS over the whole graph, not one per function of interest.
+
+    Secondary roots start a second search only where the first did not
+    reach, so a route from a primary root is never shortened to "is itself
+    a root".
+    """
     previous: dict[str, str | None] = {root: None for root in roots}
-    queue = deque(roots)
-    while queue:
-        node = queue.popleft()
-        for target in sorted(callees.get(node, ())):
-            if target not in previous:
-                previous[target] = node
-                queue.append(target)
+    def traverse(wave) -> None:
+        for node in wave:
+            previous.setdefault(node, None)
+        while wave:
+            node = wave.popleft()
+            for target in sorted(callees.get(node, ())):
+                if target not in previous:
+                    previous[target] = node
+                    wave.append(target)
+
+    traverse(deque(roots))
+    # Construct this after the first traversal. Building both queues up front
+    # revisits every public root the primary entry already reached.
+    traverse(deque(node for node in secondary if node not in previous))
     paths: dict[str, list[str]] = {}
     for node in previous:
         chain, cursor = [], node
@@ -246,7 +723,9 @@ def build(args) -> dict:
     file_of: dict[str, str] = {}
     name_of: dict[str, str] = {}
     line_of: dict[str, int] = {}
+    end_of: dict[str, int] = {}
     file_functions: dict[str, list[str]] = defaultdict(list)
+    scope_names: set[str] = set()
     for node_id, unit in graph.nodes.items():
         location = getattr(unit, "location", None)
         if not location or not getattr(location, "file_path", ""):
@@ -255,45 +734,106 @@ def build(args) -> dict:
         file_of[node_id] = source
         name_of[node_id] = unit.name or ""
         line_of[node_id] = int(getattr(location, "start_line", 0) or 0)
+        end_of[node_id] = int(getattr(location, "end_line", 0) or 0)
+        kind = str(getattr(unit, "kind", "")).rsplit(".", 1)[-1]
+        if kind in _SCOPE_KINDS and unit.name:
+            scope_names.add(unit.name)
+            if kind == "MODULE" and Path(source).suffix.lower() == ".rs":
+                scope_names.add(unit.name.rsplit(".", 1)[-1])
         if _function_kinds(unit):
             file_functions[source].append(node_id)
 
-    # Resolved call edges only. trailmark tags a call whose receiver type it
-    # could not resolve as `inferred`, and those land on whichever same-named
-    # definition it found — which is most calls in a method-dispatch language
-    # (measured: 76% and 75% inferred on a Java and a Go tree) and produced
-    # neighbour lists pointing at architecturally impossible files. A
-    # syntactically direct call is 99% of a C tree's edges, so the targets this
-    # analysis serves well are unaffected, and the ones it cannot resolve now
-    # say nothing instead of something wrong.
+    # Resolved call edges only: trailmark's `certain` ones (a bare call it
+    # matched to a definition) plus qualified calls that name a parsed
+    # module's own function. A call trailmark tags `inferred` and leaves on
+    # an unresolved proxy is a receiver it could not type — most calls in a
+    # method-dispatch language (measured: 76% and 75% inferred on a Java and
+    # a Go tree) — and guessing a same-named definition for it produced
+    # neighbour lists pointing at architecturally impossible files. Those
+    # still say nothing instead of something wrong.
     callers: dict[str, set[str]] = defaultdict(set)
     callees: dict[str, set[str]] = defaultdict(set)
-    for edge in graph.edges:
-        if str(edge.kind).rsplit(".", 1)[-1] != "CALLS":
-            continue
-        if str(edge.confidence).rsplit(".", 1)[-1] != "CERTAIN":
-            continue
-        callers[edge.target_id].add(edge.source_id)
-        callees[edge.source_id].add(edge.target_id)
+    def kind_of(node_id: str) -> str:
+        unit = graph.nodes.get(node_id)
+        return str(getattr(unit, "kind", "")).rsplit(".", 1)[-1] if unit is not None else ""
 
-    api_symbols = defined_symbols(Path(args.api_artifact)) if args.api_artifact else set()
-    api_exported = (
-        defined_symbols(Path(args.api_artifact), exported_only=True)
-        if args.api_artifact else set()
+    resolved = [
+        (edge.source_id, edge.target_id) for edge in graph.edges
+        if str(edge.kind).rsplit(".", 1)[-1] == "CALLS"
+        and str(edge.confidence).rsplit(".", 1)[-1] == "CERTAIN"
+        and kind_of(edge.target_id) != "PROXY"
+    ] + _resolved_proxy_calls(graph, kind_of)
+    for source_id, target_id in resolved:
+        callers[target_id].add(source_id)
+        callees[source_id].add(target_id)
+
+    functions_all = [node for nodes in file_functions.values() for node in nodes]
+    function_scopes = _function_scopes(graph, kind_of, functions_all)
+    extra_scopes: dict[str, set[str]] = defaultdict(set)
+    for spec in args.scope or ():
+        scope, separator, source = spec.partition("=")
+        if separator and scope and source:
+            extra_scopes[scope].add(Path(source).as_posix())
+    scope_names.update(extra_scopes)
+    symbol_cache: dict[tuple[str, bool], set[tuple[str, str]]] = {}
+
+    def symbol_identifiers(artifact: str, exported_only: bool = False) -> set[tuple[str, str]]:
+        # Demangled to the identifier the source spelled — `nm` on a C++ or
+        # Rust build prints `_ZN7rbundle6decodeE…`, which no parser names,
+        # and comparing that verbatim scored every such target at ~0% and
+        # withheld its boundary for good. See _SCOPE_KINDS for the filter.
+        if not artifact:
+            return set()
+        key = (artifact, exported_only)
+        if key not in symbol_cache:
+            symbol_cache[key] = {
+                (identifier, scope) for identifier, scope in
+                source_identifiers(defined_symbols(Path(artifact), exported_only=exported_only))
+                if not scope or scope in scope_names
+            }
+        return symbol_cache[key]
+
+    api_symbols = symbol_identifiers(args.api_artifact)
+    api_exported = symbol_identifiers(args.api_artifact, exported_only=True)
+    entry_symbols = symbol_identifiers(args.entry_artifact)
+    api_matches = _matching_symbols(
+        api_symbols, functions_all, name_of, function_scopes, file_of, extra_scopes,
     )
-    entry_symbols = defined_symbols(Path(args.entry_artifact)) if args.entry_artifact else set()
-    graph_names = {name for node, name in name_of.items() if _function_kinds(graph.nodes[node])}
     coverage = {
         "artifact": args.api_artifact or "",
+        # Scope is part of the identity. `one::parse` being present must not
+        # credit an unparsed `two::parse`; an ABI shim is a second symbol and
+        # matches independently, so retaining both does not distort the ratio.
         "symbols": len(api_symbols),
-        "covered": len(api_symbols & graph_names),
-        "ratio": round(len(api_symbols & graph_names) / len(api_symbols), 4) if api_symbols else None,
+        "covered": len(api_matches),
     }
-
-    roots, basis = _entry_roots(
-        store, name_of, entry_symbols or api_symbols, api_exported or api_symbols,
+    coverage["ratio"] = (
+        round(coverage["covered"] / coverage["symbols"], 4)
+        if coverage["symbols"] else None
     )
-    paths = _shortest_paths(roots, callees) if roots else {}
+
+    # A configured but unreadable/stripped artifact supplies no boundary.
+    # Falling back from its empty global-symbol set to every local symbol
+    # would present private implementation functions as exported API roots.
+    entry_identifiers = entry_symbols if args.entry_artifact else api_symbols
+    exported_identifiers = api_exported
+    entry_matches = _matching_symbols(
+        entry_identifiers, functions_all, name_of, function_scopes, file_of, extra_scopes,
+    )
+    exported_matches = _matching_symbols(
+        exported_identifiers, functions_all, name_of, function_scopes, file_of, extra_scopes,
+    )
+    entry_nodes = set().union(*entry_matches.values()) if entry_matches else set()
+    exported_nodes = set().union(*exported_matches.values()) if exported_matches else set()
+    has_artifact = bool(args.entry_artifact or args.api_artifact)
+    roots, secondary, basis = _entry_roots(
+        store, name_of, entry_nodes, exported_nodes, callees,
+        _public_functions(root, graph, file_of, functions_all, kind_of)
+        if not has_artifact else frozenset(),
+        has_artifact=has_artifact,
+    )
+    paths = _shortest_paths(roots, callees, secondary) if roots or secondary else {}
+    boundary = roots + secondary
 
     defining_files: dict[str, set[str]] = defaultdict(set)
     for node, name in name_of.items():
@@ -366,7 +906,7 @@ def build(args) -> dict:
             "caller_overflow": ranked_callers[args.neighbour_files:],
             "paths": entries,
             "excerpts": excerpts,
-            "definitions": _definitions(functions, name_of, line_of),
+            "definitions": _definitions(functions, name_of, line_of, end_of),
         }
 
     return {
@@ -387,8 +927,8 @@ def build(args) -> dict:
             ).name if (args.entry_artifact or args.api_artifact) else "",
             # Node ids, not bare names — `lintmain:main` tells an agent which
             # translation unit the boundary lives in; `main` tells it nothing.
-            "roots": roots[:4],
-            "root_count": len(roots),
+            "roots": boundary[:4],
+            "root_count": len(boundary),
         },
         "coverage": coverage,
         "files": files,
@@ -411,6 +951,8 @@ def main(argv: list[str]) -> int:
                         help="built library or binary whose symbols bound the audited code and yield the coverage figure (default: none)")
     parser.add_argument("--entry-artifact", default="",
                         help="built binary whose main() is the entry boundary (default: none)")
+    parser.add_argument("--scope", action="append", default=[],
+                        help="extra symbol scope and exact root source as NAME=PATH, such as a Rust crate target (repeatable)")
     parser.add_argument("--signature", default="",
                         help="source-content signature stamped into the artifact (default: empty)")
     parser.add_argument("--neighbour-files", type=int, default=6,

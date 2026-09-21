@@ -55,6 +55,27 @@ When a sanitizer is available, enable the slug and configure its execution
 route. Swift selects its sanitizer through runner tokens, and Go `race` uses
 the runner; neither follows the ordinary native `<name>_bin` rule.
 
+## What the call-neighbourhood context sees per language
+
+With the optional
+[call-neighbourhood analysis](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
+installed, every language above except Perl and R gets a parsed graph; those
+two have no trailmark grammar. What the graph resolves differs by how calls
+are written:
+
+| Language | Cross-file relationships | Entry boundary |
+| --- | --- | --- |
+| C | Direct calls (most of the tree) | The sanitizer binary's `main`, or the library's exported symbols; detected roots only without a build |
+| C++, Rust | Direct calls plus `Type::method` / `module::function` naming one parsed container; symbols and their scopes are demangled for coverage | As C; Rust without a build also uses bare-`pub` definitions whose containing type is public; template instantiations do not count toward coverage |
+| Python, Go, Java, Kotlin, Swift, JS/TS | `module.function`, `Class.method`, `self`/`this`/`super`, and typed parameters naming one parsed container; Swift `extension` methods included | Entry points trailmark detects (`main`, route handlers) plus definitions whose declaration and containing types are public |
+| PHP | Same rule; `$obj->m()` on an untyped local stays unresolved when no unique container matches | As above |
+| Ruby | Same rule; `obj.m()` on an untyped local stays unresolved, so few edges | Detected entry points only: visibility is declared by a later `private`, not on the definition |
+
+A receiver that matches no unique callee is left unresolved, never
+guessed, and the card's block says so. This is structural context: an
+import alias or local variable spelled like a container of the tree can
+still bind to it. An unobserved edge is not evidence of unreachability.
+
 ## What `target.toml` looks like for each ecosystem
 
 `bin/setup-target` seeds these automatically for ecosystems in its registry.

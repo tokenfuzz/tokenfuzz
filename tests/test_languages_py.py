@@ -685,17 +685,23 @@ with tempfile.TemporaryDirectory() as td:
             "id": "core-id", "name": "sample-core",
             "manifest_path": str(member / "Cargo.toml"),
             "targets": [
-                {"name": "sample_core", "kind": ["lib"]},
-                {"name": "helper", "kind": ["bin"]},
+                {"name": "sample_core", "kind": ["lib"],
+                 "src_path": str(member / "source" / "lib.rs")},
+                {"name": "helper", "kind": ["bin"],
+                 "src_path": str(member / "source" / "main.rs")},
             ],
         }],
     }
     info = languages._cargo_workspace_info(raw, root)
-    assert_eq((languages.CargoLibraryProduct("sample-core", "sample_core", "core"),),
+    assert_eq((languages.CargoLibraryProduct(
+        "sample-core", "sample_core", "core", source_path="core/source/lib.rs",
+    ),),
               info.libraries,
               "Cargo metadata: workspace member library is retained")
     assert_eq("core", info.executables[0].manifest_dir,
               "Cargo metadata: executable retains its member manifest")
+    assert_eq("core/source/main.rs", info.executables[0].source_path,
+              "Cargo metadata: executable retains its exact root source")
 
 with tempfile.TemporaryDirectory() as td:
     root = Path(td)

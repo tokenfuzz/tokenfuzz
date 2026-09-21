@@ -16,6 +16,7 @@ import re
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -54,7 +55,7 @@ ARTIFACT = {
                 {"function": "app_reset", "path": []},
                 {"function": "app_open", "path": ["app_open"]},
             ],
-            "definitions": [["app_open", 12], ["app_parse", 40], ["app_reset", 88]],
+            "definitions": [["app_open", 12, 30], ["app_parse", 40, 80], ["app_reset", 88, 95]],
         },
         "src/lonely.c": {
             "functions": 3, "reachable": 0, "callers": [], "callees": [], "paths": [],
@@ -83,7 +84,7 @@ class BlockRenderingTests(unittest.TestCase):
         self.assertIn("`src/main.c`(4 fn)", block)
         self.assertIn("`src/buf.c`(9 fn)", block)
         self.assertIn("main -> run -> app_parse", block)
-        self.assertIn("95% of the built target's symbols", block)
+        self.assertIn("95% of the built target's own symbols", block)
         self.assertIn("`driver:main` in `app`", block)
 
     def test_missing_path_is_stated_not_implied(self) -> None:
@@ -382,8 +383,8 @@ class RefreshTests(unittest.TestCase):
 
     def _pin_signature(self, value: str) -> None:
         original = callgraph.cache_signature
-        callgraph.cache_signature = lambda root, results, artifacts=None: value
-        self.addCleanup(setattr, callgraph, "_source_signature", original)
+        callgraph.cache_signature = lambda root, results, artifacts=None, source_signature=None: value
+        self.addCleanup(setattr, callgraph, "cache_signature", original)
 
     def _write_artifact(self, signature: str) -> None:
         artifact = json.loads(json.dumps(ARTIFACT))
@@ -413,6 +414,41 @@ class RefreshTests(unittest.TestCase):
         self._write_artifact("")
         (self.ctx.target_root / "a.c").write_text("int f(void){return 0;}\n", encoding="utf-8")
         self.assertTrue(callgraph.refresh(self.ctx).startswith("unavailable"))
+
+    def test_rust_crate_names_reach_the_sidecar_as_scopes(self) -> None:
+        self._pin_interpreter(str(self.root / "no-such-python"))
+        self._pin_signature("sig-c")
+        (self.ctx.target_root / "src").mkdir()
+        (self.ctx.target_root / "src" / "lib.rs").write_text("pub fn api() {}\n", encoding="utf-8")
+        seen: list[list[str]] = []
+
+        def fake_run(command, *args, **kwargs):
+            seen.append(list(command))
+            return SimpleNamespace(returncode=3, stdout="", stderr="unavailable: no")
+
+        info = SimpleNamespace(
+            libraries=[SimpleNamespace(crate="my_core", source_path="core/src/lib.rs")],
+            executables=[
+                SimpleNamespace(name="my-tool", source_path="core/src/main.rs"),
+                SimpleNamespace(name="helper", source_path="tools/helper.rs"),
+            ],
+        )
+        with mock.patch.object(callgraph.timeout, "run_timeout", fake_run), \
+                mock.patch.object(callgraph.languages, "cargo_workspace_info", lambda root: info):
+            callgraph.refresh(self.ctx)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(
+            [seen[0][i + 1] for i, word in enumerate(seen[0]) if word == "--scope"],
+            ["helper=tools/helper.rs", "my_core=core/src/lib.rs", "my_tool=core/src/main.rs"],
+        )
+        # A failed build is cached against its signature; give the second
+        # attempt a new one so it spawns.
+        self._pin_signature("sig-d")
+        with mock.patch.object(callgraph.timeout, "run_timeout", fake_run), \
+                mock.patch.object(callgraph.languages, "cargo_workspace_info",
+                                  mock.Mock(side_effect=ValueError("no cargo"))):
+            callgraph.refresh(self.ctx)
+        self.assertNotIn("--scope", seen[1], "a tree Cargo cannot describe keeps the gap, not the run")
 
     def test_empty_tree_is_skipped_before_spawning(self) -> None:
         self._pin_interpreter(str(self.root / "no-such-python"))
@@ -617,7 +653,9 @@ class RealTrailmarkTests(unittest.TestCase):
         routes = {row["function"]: row["path"] for row in data["files"]["app.c"]["paths"]}
         # main() calls helper() and nothing else. The links.toml entry claims
         # main -> sink at confidence "certain"; honouring it would put a
-        # fabricated route in front of an agent.
+        # fabricated route in front of an agent. Native visibility is not
+        # recoverable from a definition alone, so a tree with no build does
+        # not manufacture a public boundary for sink either.
         self.assertEqual(routes.get("sink"), [])
         self.assertEqual(routes.get("helper"), ["main", "helper"])
 
@@ -648,6 +686,245 @@ class RealTrailmarkTests(unittest.TestCase):
         ))
         self.assertIn("`main` (`app.c:2`) calls `core_work`:", block)
         self.assertIn("2 | int main(void) { core_work(\"x\"); return 0; }", block)
+
+    def test_definitions_carry_the_parsers_end_lines(self) -> None:
+        (self.root / "target" / "app.c").write_text(
+            "int main(void) {\n"
+            "  return 0;\n"
+            "}\n"
+            "\n"
+            "/* a table between two functions */\n"
+            "static const int table[] = {1, 2, 3};\n"
+            "\n"
+            "void tail(void) { }\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        self.assertEqual(
+            callgraph.definitions_for(self.ctx.results_dir, "app.c"),
+            [("main", 1, 3), ("tail", 8, 8)],
+        )
+
+    def test_functions_in_an_anonymous_namespace_are_parsed(self) -> None:
+        """trailmark 0.5.0 skips a nameless namespace; bin/callgraph wraps
+        the parser so the file-local helpers C++ keeps there exist."""
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "app.cpp").write_text(
+            "namespace lib {\n"
+            "namespace {\n"
+            "void helper(int x) { (void)x; }\n"
+            "}\n"
+            "int decode(int x) { helper(x); return x; }\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "cli.cpp").write_text(
+            "namespace lib { int decode(int); }\n"
+            "int main(void) { return lib::decode(1); }\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(
+            [name for name, _s, _e in callgraph.definitions_for(self.ctx.results_dir, "app.cpp", data)],
+            ["helper", "decode"],
+        )
+        routes = {row["function"]: row["path"] for row in data["files"]["app.cpp"]["paths"]}
+        self.assertEqual(routes["helper"], ["main", "decode", "helper"])
+
+    def test_nested_namespaces_keep_same_named_functions_distinct(self) -> None:
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "app.cpp").write_text(
+            "namespace one { namespace detail { int parse() { return 1; } } }\n"
+            "namespace two { namespace detail { int parse() { return 2; } } }\n"
+            "int main() { return one::detail::parse(); }\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(
+            [row[0] for row in callgraph.definitions_for(
+                self.ctx.results_dir, "app.cpp", data,
+            )],
+            ["parse", "parse", "main"],
+        )
+        self.assertEqual(data["files"]["app.cpp"]["functions"], 3)
+
+    def test_a_qualified_call_into_a_parsed_module_is_an_edge(self) -> None:
+        """`import mod; mod.func()` is an exact reference, not a guess:
+        both the module and the function exist as parsed nodes."""
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "cli.py").write_text(
+            "import parser\n"
+            "import json\n"
+            "def main():\n"
+            "    parser.parse_config('x')\n"
+            "    json.loads('{}')\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "parser.py").write_text(
+            "def parse_config(text):\n"
+            "    return text\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(data["files"]["parser.py"]["callers"], [["cli.py", 1]])
+        self.assertEqual(data["files"]["cli.py"]["callees"], [["parser.py", 1]])
+        self.assertEqual(callgraph.caller_files(self.ctx.results_dir, "parser.py", data), ["cli.py"])
+
+    def test_a_python_package_is_not_every_module_below_its_directory(self) -> None:
+        """`pkg.work()` looks in pkg/__init__.py, not any pkg/*.py file."""
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "cli.py").write_text(
+            "import pkg\n"
+            "def main():\n"
+            "    return pkg.work()\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "pkg").mkdir()
+        (self.root / "target" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+        (self.root / "target" / "pkg" / "worker.py").write_text(
+            "def work():\n"
+            "    return 1\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(data["files"]["pkg/worker.py"]["callers"], [])
+
+    def test_a_class_qualified_call_resolves_through_the_containing_class(self) -> None:
+        """`Loader.load(...)` names a method of exactly one parsed class; a
+        name two classes share resolves nothing rather than guessing."""
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "cli.py").write_text(
+            "class Loader:\n"
+            "    @staticmethod\n"
+            "    def load(text):\n"
+            "        return text\n"
+            "class Twin:\n"
+            "    @staticmethod\n"
+            "    def make():\n"
+            "        return 1\n"
+            "def main():\n"
+            "    Loader.load('x')\n"
+            "    Twin.make()\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "other.py").write_text(
+            "class Twin:\n"
+            "    @staticmethod\n"
+            "    def other():\n"
+            "        return 2\n"
+            "def entry():\n"
+            "    return Loader.load('y')\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "shadow.py").write_text(
+            "def entry(Loader):\n"
+            "    return Loader.load('z')\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(data["files"]["cli.py"]["callers"], [["other.py", 1]])
+        self.assertEqual(data["files"]["other.py"]["callees"], [["cli.py", 1]])
+        self.assertEqual(data["files"]["other.py"]["callers"], [], "Twin is ambiguous even when only one has make")
+        self.assertNotIn(["shadow.py", 1], data["files"]["cli.py"]["callers"],
+                         "an untyped parameter shadows the same-named class")
+
+    def test_swift_extension_methods_are_parsed_and_join_their_type(self) -> None:
+        """trailmark 0.5.0 drops every `extension Type { ... }` body."""
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "logger.swift").write_text(
+            "public struct Logger {\n"
+            "    func direct() {}\n"
+            "}\n"
+            "extension Logger {\n"
+            "    public func log() { self.direct() }\n"
+            "    func hidden() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "extra.swift").write_text(
+            "private extension Logger {\n"
+            "    public func secret() {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(
+            [name for name, _s, _e in callgraph.definitions_for(self.ctx.results_dir, "logger.swift", data)],
+            ["direct", "log", "hidden"],
+        )
+        routes = {row["function"]: row["path"] for row in data["files"]["logger.swift"]["paths"]}
+        self.assertEqual(routes["direct"], ["log", "direct"], "self.direct() from the extension")
+        self.assertEqual(data["entry"]["roots"], ["logger:Logger.log"],
+                         "a private extension hides its members; a plain one does not")
+
+    def test_a_class_sharing_its_files_name_still_resolves(self) -> None:
+        """Java's one-class-per-file convention makes the class and its
+        module share a name; the callee's uniqueness decides, not the
+        container count. This regressed to zero edges on a 379-file tree."""
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "Codec.java").write_text(
+            "public class Codec { public static int decode(int x) { return x; } }\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "Main.java").write_text(
+            "public class Main { public static void main(String[] a) { Codec.decode(1); } }\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(data["files"]["Codec.java"]["callers"], [["Main.java", 1]])
+
+    def test_self_and_typed_parameter_receivers_resolve_through_their_container(self) -> None:
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "lib.rs").write_text(
+            "pub struct Reader;\n"
+            "impl Reader {\n"
+            "    pub fn open(&self) -> u8 { self.fill() }\n"
+            "    pub(crate) fn crate_only(&self) -> u8 { 2 }\n"
+            "    fn fill(&self) -> u8 { 1 }\n"
+            "}\n"
+            "struct Hidden;\n"
+            "impl Hidden { pub fn exposed_name(&self) -> u8 { 3 } }\n"
+            "fn hidden() {}\n",
+            encoding="utf-8",
+        )
+        (self.root / "target" / "cli.rs").write_text(
+            "use crate::Reader;\n"
+            "pub fn drive(r: Reader) -> u8 { r.open() }\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(data["files"]["lib.rs"]["callers"], [["cli.rs", 1]], "r.open() through r: Reader")
+        routes = {row["function"]: row["path"] for row in data["files"]["lib.rs"]["paths"]}
+        self.assertEqual(routes["fill"], ["open", "fill"], "self.fill() inside impl Reader")
+        # No artifact: the boundary is what the source spells `pub`. `fill`
+        # is private, `pub(crate)` is not API, and a `pub` method on a
+        # private type is not reachable from outside.
+        self.assertEqual(data["entry"]["basis"], "public-api")
+        self.assertEqual(data["entry"]["roots"], ["cli:drive", "lib:Reader.open"])
+        self.assertEqual(data["entry"]["root_count"], 2)
+        self.assertEqual(routes.get("hidden", []), [])
+
+    def test_a_nested_python_function_is_not_a_public_api_root(self) -> None:
+        (self.root / "target" / "app.c").unlink()
+        (self.root / "target" / "api.py").write_text(
+            "def outer():\n"
+            "    def inner():\n"
+            "        return 1\n"
+            "    return inner()\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(callgraph.refresh(self.ctx), "built")
+        data = callgraph.load(self.ctx.results_dir)
+        self.assertEqual(data["entry"]["roots"], ["api:outer"])
+        self.assertEqual(data["entry"]["root_count"], 1)
 
 
 class StatusLineTests(unittest.TestCase):
@@ -767,6 +1044,24 @@ class FingerprintTests(unittest.TestCase):
                 )
         self.assertNotEqual(first, second)
 
+    def test_the_sidecar_is_part_of_the_cache_signature(self) -> None:
+        first_sidecar = self.root / "sidecar-a"
+        second_sidecar = self.root / "sidecar-b"
+        first_sidecar.write_bytes(b"first")
+        second_sidecar.write_bytes(b"second")
+        with mock.patch.object(
+            target_config, "vcs_source_signature", return_value="source-1",
+        ), mock.patch.object(callgraph, "_toolchain", return_value="tools-1"):
+            with mock.patch.object(callgraph, "_sidecar", return_value=first_sidecar):
+                first = callgraph.cache_signature(
+                    self.ctx.target_root, self.ctx.results_dir, ("", ""),
+                )
+            with mock.patch.object(callgraph, "_sidecar", return_value=second_sidecar):
+                second = callgraph.cache_signature(
+                    self.ctx.target_root, self.ctx.results_dir, ("", ""),
+                )
+        self.assertNotEqual(first, second)
+
     def test_the_outer_gate_queries_the_source_once(self) -> None:
         import audit_runner
 
@@ -834,7 +1129,10 @@ class SymbolTableTests(unittest.TestCase):
         self.assertEqual(self.sidecar.SCHEMA_VERSION, callgraph.SCHEMA_VERSION)
 
     def test_macho_underscore_is_stripped_once_for_the_whole_artifact(self) -> None:
-        names = native_symbols.normalise({"_app_parse", "_app_open", "_asan.module_ctor"})
+        names = native_symbols.normalise({
+            "_app_parse", "_app_open", "_asan.module_ctor",
+            "__mh_execute_header", "_rust_eh_personality",
+        })
         self.assertEqual(names, {"app_parse", "app_open"})
 
     def test_elf_names_are_left_alone(self) -> None:
@@ -861,9 +1159,72 @@ class SymbolTableTests(unittest.TestCase):
         # Named rather than checked against sys.stdlib_module_names, which is
         # 3.10+: the harness still supports the 3.9 a stock macOS ships, and a
         # test that cannot run there does not guard anything there.
-        allowed = {"__future__", "subprocess", "pathlib", "os", "sys", "re"}
+        allowed = {"__future__", "subprocess", "pathlib", "os", "sys", "re", "shutil"}
         self.assertTrue(imported <= allowed,
                         f"non-stdlib or unvetted imports: {imported - allowed}")
+
+
+class SourceIdentifierTests(unittest.TestCase):
+    """A built C++ or Rust symbol has to be compared as the name the source
+    spelled, in the scope the parser would record it under."""
+
+    def test_itanium_and_rust_names_reduce_to_identifier_and_scope(self) -> None:
+        cases = {
+            "rbundle::(anonymous namespace)::handle_opt(rbundle::(anonymous namespace)::Context&, unsigned char const*)":
+                ("handle_opt", "rbundle"),
+            "rbundle::decode(unsigned char const*, unsigned long)": ("decode", "rbundle"),
+            "Foo::Bar::method(int) const": ("method", "Bar"),
+            "sample_rust::reportkit::parse_config::h0123456789abcdef": ("parse_config", "reportkit"),
+            "sample_rust::run": ("run", "sample_rust"),
+            "checksum": ("checksum", ""),
+        }
+        for demangled, expected in cases.items():
+            with self.subTest(demangled=demangled):
+                self.assertEqual(native_symbols.source_identifier(demangled), expected)
+
+    def test_instantiations_closures_and_reserved_names_are_not_definitions(self) -> None:
+        for demangled in (
+            "void std::vector<unsigned char, std::allocator<unsigned char>>::push_back(unsigned char const&)",
+            "<core::option::Option<&str>>::map::<usize, &mut sample_rust::run::{closure#1}>",
+            "std::__1::__libcpp_allocate[abi:nqe210106](unsigned long)",
+            "__rustc::__rust_alloc",
+            "ns::Type::operator()(int)",
+            "",
+        ):
+            with self.subTest(demangled=demangled):
+                self.assertEqual(native_symbols.source_identifier(demangled), ("", ""))
+
+    def test_mangled_names_are_demangled_in_one_batch_and_plain_ones_pass_through(self) -> None:
+        seen = []
+
+        def fake_demangler(text, tool=None):
+            seen.append(text)
+            table = {
+                "_ZN7rbundle6decodeEPKhm": "rbundle::decode(unsigned char const*, unsigned long)",
+                "_ZN11sample_rust3run17h0123456789abcdefE": "sample_rust::run::h0123456789abcdef",
+                "_ZUnknown": "_ZUnknown",
+            }
+            return "".join(table[line] + "\n" for line in text.splitlines())
+
+        with mock.patch.object(native_symbols, "demangle_text", fake_demangler):
+            out = native_symbols.source_identifiers(
+                {"checksum", "_ZN7rbundle6decodeEPKhm", "_ZN11sample_rust3run17h0123456789abcdefE", "_ZUnknown"},
+            )
+        self.assertEqual(out, {("checksum", ""), ("decode", "rbundle"), ("run", "sample_rust")})
+        self.assertEqual(len(seen), 1, "one subprocess for the whole artifact")
+
+    def test_compiler_clones_are_not_source_definitions(self) -> None:
+        self.assertEqual(
+            native_symbols.source_identifiers({"parse", "parse.cold.1", "parse.isra.0"}),
+            {("parse", "")},
+        )
+
+    def test_without_a_demangler_mangled_names_are_dropped_not_compared_raw(self) -> None:
+        with mock.patch.object(native_symbols, "demangle_text", lambda text, tool=None: text):
+            self.assertEqual(
+                native_symbols.source_identifiers({"plain", "_ZN7rbundle6decodeEPKhm"}),
+                {("plain", "")},
+            )
 
 
 class DefinitionTests(unittest.TestCase):
@@ -886,7 +1247,7 @@ class DefinitionTests(unittest.TestCase):
         self.write(ARTIFACT)
         self.assertEqual(
             callgraph.definitions_for(self.results, "./src/parse.c"),
-            [("app_open", 12), ("app_parse", 40), ("app_reset", 88)],
+            [("app_open", 12, 30), ("app_parse", 40, 80), ("app_reset", 88, 95)],
         )
 
     def test_missing_field_file_or_artifact_reads_as_no_definitions(self) -> None:
@@ -895,17 +1256,21 @@ class DefinitionTests(unittest.TestCase):
         self.assertEqual(callgraph.definitions_for(self.results, "src/lonely.c"), [])
         self.assertEqual(callgraph.definitions_for(self.results, "src/none.c"), [])
         malformed = json.loads(json.dumps(ARTIFACT))
-        malformed["files"]["src/parse.c"]["definitions"] = [["x", "y"], ["", 3], [7]]
+        malformed["files"]["src/parse.c"]["definitions"] = [["x", "y", 2], ["", 3, 4], [7], ["old", 5], ["back", 9, 4]]
         self.write(malformed)
         self.assertEqual(callgraph.definitions_for(self.results, "src/parse.c"), [])
 
     def test_builder_lists_every_located_function_once_by_line(self) -> None:
         sidecar = _sidecar()
-        name_of = {"p:parse": "parse", "p:reset": "reset", "p:dup": "parse", "p:nowhere": "lost"}
-        line_of = {"p:parse": 40, "p:reset": 12, "p:dup": 40, "p:nowhere": 0}
+        name_of = {"p:parse": "parse", "p:reset": "reset", "p:dup": "parse", "p:nowhere": "lost",
+                   "p:inner": "inner"}
+        line_of = {"p:parse": 40, "p:reset": 12, "p:dup": 40, "p:nowhere": 0, "p:inner": 45}
+        end_of = {"p:parse": 80, "p:reset": 12, "p:dup": 80, "p:inner": 50}
         self.assertEqual(
-            sidecar._definitions(name_of, name_of, line_of),
-            [["reset", 12], ["parse", 40]],
+            sidecar._definitions(name_of, name_of, line_of, end_of),
+            # A nested definition keeps its own lines inside its parent's;
+            # a unit without an end line is a single line, never zero.
+            [["reset", 12, 12], ["parse", 40, 80], ["inner", 45, 50]],
         )
 
 
@@ -913,43 +1278,124 @@ class EntryBoundaryTests(unittest.TestCase):
     """Which `main` belongs to the configured binary."""
 
     class FakeStore:
-        def __init__(self, entrypoints, reachable):
+        def __init__(self, entrypoints):
             self._entrypoints = entrypoints
-            self._reachable = reachable
 
         def all_entrypoints(self):
             return [(node, None) for node in self._entrypoints]
-
-        def reachable_from(self, node):
-            return self._reachable.get(node, [])
 
     def setUp(self) -> None:
         self.sidecar = _sidecar()
 
     def test_closure_picks_the_main_that_reaches_the_binary(self) -> None:
         name_of = {"app:main": "main", "driver:main": "main", "core:work": "work"}
-        store = self.FakeStore(
-            ["app:main", "driver:main"],
-            {"app:main": ["core:work"], "driver:main": []},
+        store = self.FakeStore(["app:main", "driver:main"])
+        # The closure runs over the resolved edges, which include qualified
+        # calls trailmark itself never resolved.
+        callees = {"app:main": {"core:work"}}
+        roots, secondary, basis = self.sidecar._entry_roots(
+            store, name_of, {"app:main", "driver:main", "core:work"}, {"core:work"}, callees,
         )
-        roots, basis = self.sidecar._entry_roots(store, name_of, {"work"}, {"work"})
-        self.assertEqual((roots, basis), (["app:main"], "cli-main"))
+        self.assertEqual((roots, secondary, basis), (["app:main"], [], "cli-main"))
 
     def test_a_tie_falls_through_to_the_exported_surface(self) -> None:
         # Every driver exports only `main`, so nothing discriminates. Guessing
         # a winner would anchor every path on an arbitrary test binary.
         name_of = {"a:main": "main", "b:main": "main", "lib:api": "api"}
-        store = self.FakeStore(["a:main", "b:main"], {})
-        roots, basis = self.sidecar._entry_roots(
-            store, name_of, {"main"}, {"api", "main"},
+        store = self.FakeStore(["a:main", "b:main"])
+        roots, _secondary, basis = self.sidecar._entry_roots(
+            store, name_of, {"a:main", "b:main"}, {"lib:api", "a:main", "b:main"}, {},
         )
         self.assertEqual((roots, basis), (["lib:api"], "exported-api"))
 
     def test_exported_roots_never_include_a_driver_main(self) -> None:
         name_of = {"a:main": "main", "lib:api": "api"}
-        store = self.FakeStore([], {})
-        roots, _ = self.sidecar._entry_roots(store, name_of, set(), {"api", "main"})
+        store = self.FakeStore([])
+        roots, _secondary, _basis = self.sidecar._entry_roots(
+            store, name_of, set(), {"lib:api", "a:main"}, {},
+        )
         self.assertEqual(roots, ["lib:api"])
+
+    def test_an_unreadable_artifact_does_not_enable_source_visibility_fallback(self) -> None:
+        store = self.FakeStore(["app:main"])
+        roots, secondary, basis = self.sidecar._entry_roots(
+            store, {"app:main": "main", "lib:api": "api"}, set(), set(), {},
+            {"lib:api"}, has_artifact=True,
+        )
+        self.assertEqual((roots, secondary, basis), (["app:main"], [], "detected-entrypoints"))
+
+    def test_a_demangled_scope_selects_only_the_definition_in_that_scope(self) -> None:
+        matched = self.sidecar._matching_symbols(
+            {("parse", "one")}, ["a:parse", "b:parse"],
+            {"a:parse": "parse", "b:parse": "parse"},
+            {"a:parse": {"one"}, "b:parse": {"two"}},
+            {"a:parse": "a.cc", "b:parse": "b.cc"},
+        )
+        self.assertEqual(matched, {("parse", "one"): {"a:parse"}})
+
+    def test_a_scope_shared_by_two_definitions_is_not_a_symbol_match(self) -> None:
+        matched = self.sidecar._matching_symbols(
+            {("parse", "detail")}, ["a:parse", "b:parse"],
+            {"a:parse": "parse", "b:parse": "parse"},
+            {"a:parse": {"detail"}, "b:parse": {"detail"}},
+            {"a:parse": "a.cc", "b:parse": "b.cc"},
+        )
+        self.assertEqual(matched, {})
+
+    def test_a_crate_scope_matches_only_its_cargo_target_root(self) -> None:
+        matched = self.sidecar._matching_symbols(
+            {("run", "first")}, ["a:run", "b:run"],
+            {"a:run": "run", "b:run": "run"}, {"a:run": set(), "b:run": set()},
+            {"a:run": "first/src/lib.rs", "b:run": "second/src/lib.rs"},
+            {"first": {"first/src/lib.rs"}},
+        )
+        self.assertEqual(matched, {("run", "first"): {"a:run"}})
+
+
+class PublicRuleTests(unittest.TestCase):
+    """Public roots come from one exact declaration and its containers."""
+
+    def test_adjacent_modifiers_and_a_nonpublic_container_do_not_leak(self) -> None:
+        sidecar = _sidecar()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "a.java").write_text(
+                "public class Public { public void open() {} private void hidden() {} }\n"
+                "class PackageOnly { public void open() {} }\n",
+                encoding="utf-8",
+            )
+            lines = (root / "a.java").read_text(encoding="utf-8").splitlines()
+            def unit(node, name, kind, line, text):
+                start = lines[line - 1].index(text)
+                return SimpleNamespace(
+                    name=name, kind=kind,
+                    location=SimpleNamespace(
+                        start_line=line, end_line=line,
+                        start_col=start, end_col=start + len(text),
+                    ),
+                )
+            nodes = {
+                "a:Public": unit("a:Public", "Public", "CLASS", 1, lines[0]),
+                "a:Public.open": unit("a:Public.open", "open", "METHOD", 1, "public void open() {}"),
+                "a:Public.hidden": unit("a:Public.hidden", "hidden", "METHOD", 1, "private void hidden() {}"),
+                "a:PackageOnly": unit("a:PackageOnly", "PackageOnly", "CLASS", 2, lines[1]),
+                "a:PackageOnly.open": unit("a:PackageOnly.open", "open", "METHOD", 2, "public void open() {}"),
+            }
+            edges = [
+                SimpleNamespace(kind="CONTAINS", source_id="a:Public", target_id="a:Public.open"),
+                SimpleNamespace(kind="CONTAINS", source_id="a:Public", target_id="a:Public.hidden"),
+                SimpleNamespace(kind="CONTAINS", source_id="a:PackageOnly", target_id="a:PackageOnly.open"),
+            ]
+            graph = SimpleNamespace(nodes=nodes, edges=edges)
+            file_of = {node: "a.java" for node in nodes}
+            kind_of = lambda node: getattr(nodes.get(node), "kind", "")
+            self.assertEqual(
+                sidecar._public_functions(
+                    root, graph, file_of,
+                    ["a:Public.open", "a:Public.hidden", "a:PackageOnly.open"], kind_of,
+                ),
+                {"a:Public.open"},
+            )
 
 
 class KeyUnitTests(unittest.TestCase):
@@ -1003,6 +1449,21 @@ class ShortestPathTests(unittest.TestCase):
         callees = {"main": {"a"}, "a": {"b"}, "b": {"a", "c"}}
         paths = self.sidecar._shortest_paths(["main"], callees)
         self.assertEqual(paths["c"], ["main", "a", "b", "c"])
+
+    def test_a_secondary_root_reached_by_the_primary_is_not_walked_twice(self) -> None:
+        class CountingDict(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.reads = Counter()
+
+            def get(self, key, default=None):
+                self.reads[key] += 1
+                return super().get(key, default)
+
+        callees = CountingDict({"main": {"api"}, "api": {"leaf"}})
+        paths = self.sidecar._shortest_paths(["main"], callees, ["api"])
+        self.assertEqual(paths["leaf"], ["main", "api", "leaf"])
+        self.assertEqual(callees.reads["api"], 1)
 
 
 if __name__ == "__main__":

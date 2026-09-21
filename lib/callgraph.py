@@ -33,7 +33,7 @@ ARTIFACT_NAME = "callgraph.json"
 
 # Bump when the artifact's shape or the policy that fills it changes, so a
 # stale artifact is rebuilt rather than read under new rules.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 
 # The unit pack is bounded in tokens, not units: it carries the definitions
 # an agent would otherwise spend its first tool calls opening, and at 600
@@ -216,7 +216,8 @@ def cache_signature(
         return ""
     policy = hashlib.sha1()
     for path in (
-        Path(__file__), Path(workqueue.__file__), Path(languages.__file__),
+        Path(__file__), _sidecar(), Path(__file__).with_name("native_symbols.py"),
+        Path(workqueue.__file__), Path(languages.__file__),
         Path(__file__).with_name("audit_scope.py"),
     ):
         try:
@@ -383,6 +384,8 @@ def refresh(ctx: workqueue.Context) -> str:
             command += ["--api-artifact", api_artifact]
         if entry_artifact:
             command += ["--entry-artifact", entry_artifact]
+        for crate in _crate_scopes(ctx.target_root, names):
+            command += ["--scope", crate]
         completed = timeout.run_timeout(
             command, BUILD_TIMEOUT_SECONDS, kill=True, rss_mb=BUILD_RSS_MB,
             capture_output=True, text=True,
@@ -401,6 +404,33 @@ def refresh(ctx: workqueue.Context) -> str:
     return "built"
 
 
+def _crate_scopes(target_root: Path, names: list[str]) -> list[str]:
+    """Workspace crate targets as `name=root-source`, for the sidecar.
+
+    A crate-root function's symbol is `crate::name`, and the crate is not a
+    module the parser records, so without this the coverage figure left
+    every function in a crate target's root file uncounted. Cargo metadata
+    supplies both the name symbols use and the root source it applies to. A
+    tree Cargo cannot describe simply keeps that gap, which refresh already
+    tolerates.
+    """
+    if "rust" not in names:
+        return []
+    try:
+        info = languages.cargo_workspace_info(target_root)
+    except ValueError:
+        return []
+    scopes = {
+        f"{row.crate.replace('-', '_')}={row.source_path}"
+        for row in info.libraries if row.crate and row.source_path
+    }
+    scopes.update(
+        f"{row.name.replace('-', '_')}={row.source_path}"
+        for row in info.executables if row.name and row.source_path
+    )
+    return sorted(scopes)
+
+
 def _coverage_note(data: dict) -> tuple[bool, str]:
     coverage = data.get("coverage") or {}
     ratio = coverage.get("ratio")
@@ -408,7 +438,7 @@ def _coverage_note(data: dict) -> tuple[bool, str]:
         return True, "symbol coverage unmeasured (no built artifact to compare against)"
     if ratio < MIN_COVERAGE:
         return False, ""
-    return True, f"{ratio:.0%} of the built target's symbols were parsed"
+    return True, f"{ratio:.0%} of the built target's own symbols were parsed"
 
 
 def _definition_window(path: Path, line: int) -> list[tuple[int, str]]:
@@ -560,27 +590,28 @@ def block_for(
 
 def definitions_for(
     results_dir: Path, file: str, graph: dict | None = None,
-) -> list[tuple[str, int]]:
-    """Parsed function definitions of one file as (name, start line), by line.
+) -> list[tuple[str, int, int]]:
+    """Parsed function definitions of one file as (name, start, end), by line.
 
-    Empty when there is no graph, the file was never parsed, or the artifact
-    predates the field; callers fall back to line windows, never to a guess.
+    The lines are the parser's own, so a nested definition lies inside its
+    parent's. Empty when there is no graph or the file was never parsed;
+    callers fall back to line windows, never to a guess.
     """
     rel = workqueue.normalized_relpath(file)
     data = (graph if graph is not None else load(results_dir)) if rel else None
     if data is None or data.get("skipped"):
         return []
     entry = (data.get("files") or {}).get(rel) or {}
-    out: list[tuple[str, int]] = []
+    out: list[tuple[str, int, int]] = []
     for row in entry.get("definitions") or []:
-        if isinstance(row, list) and len(row) == 2 and isinstance(row[0], str):
+        if isinstance(row, list) and len(row) == 3 and isinstance(row[0], str):
             try:
-                line = int(row[1])
+                start, end = int(row[1]), int(row[2])
             except (TypeError, ValueError):
                 continue
-            if row[0] and line > 0:
-                out.append((row[0], line))
-    return sorted(out, key=lambda item: (item[1], item[0]))
+            if row[0] and start > 0 and end >= start:
+                out.append((row[0], start, end))
+    return sorted(out, key=lambda item: (item[1], item[2], item[0]))
 
 
 def caller_files(

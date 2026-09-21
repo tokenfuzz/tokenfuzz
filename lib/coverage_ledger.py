@@ -102,19 +102,17 @@ def function_ranges(
     lines: int,
     graph: dict | None = None,
 ) -> list[tuple[str, int, int]]:
-    """(name, start, end) per parsed definition; a definition runs to the next.
+    """(name, start, end) per parsed definition, clipped to the file.
 
-    The parser records where a function starts, not where it ends, and
-    languages disagree about what ends one. Running each to the line before
-    the next definition (the last to end of file) over-counts only comments
-    between functions, and never splits a body across two units.
+    The lines are the parser's, so a nested function lies inside its parent
+    and the lines between two functions — macros, tables, globals — belong
+    to no unit. A definition starting past the file's end is a stale graph
+    and is left out rather than clipped into the wrong lines.
     """
-    definitions = callgraph.definitions_for(results_dir, file, graph)
     out: list[tuple[str, int, int]] = []
-    for index, (name, start) in enumerate(definitions):
+    for name, start, end in callgraph.definitions_for(results_dir, file, graph):
         if start > lines:
             break
-        end = definitions[index + 1][1] - 1 if index + 1 < len(definitions) else lines
         out.append((name, start, max(start, min(end, lines))))
     return out
 
