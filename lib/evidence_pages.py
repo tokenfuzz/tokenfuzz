@@ -101,7 +101,6 @@ _CVSS_GROUPS = (
     ("Confidence", ("E",)),
 )
 
-_TITLE_RE = re.compile(r"^#\s*(?:/?[\w/.-]*?[A-Z]+-[\w.-]+\s*[:—–-]\s*)?(.+?)\s*$")
 _TLDR_RE = re.compile(r"^-\s*\*\*(Bug|Trigger|Fix)\*\*\s*[—–-]\s*(.+?)\s*$")
 _TABLE_FIELD_RE = re.compile(r"^\|\s*([A-Za-z][A-Za-z0-9 /_-]{0,48}?)\s*\|\s*(.*?)\s*\|\s*$")
 _BARE_FIELD_RE = re.compile(r"^([A-Za-z][A-Za-z0-9 /_-]{1,48}):\s+(\S.*)$")
@@ -303,24 +302,8 @@ def report_fields(text: str) -> dict[str, str]:
     return merged
 
 
-_ID_ONLY_RE = re.compile(r"^/?[\w/.-]*?(?:CRASH|FIND)-[\w.-]+$")
-
-
 def _report_title(text: str, fallback: str) -> str:
-    """The report's own heading, or its one-line bug summary when the heading
-    is only the artifact id."""
-    for line in _outside_fences(text):
-        if line.startswith("# "):
-            match = _TITLE_RE.match(line)
-            title = (match.group(1) if match else line[2:]).strip()
-            if title and not _ID_ONLY_RE.match(title):
-                return title
-            break
-    tldr = _tldr(text)
-    line = tldr.get("bug") or _first_paragraph(_sections(text).get("summary", ""), 140)
-    if line:
-        return line if len(line) <= 140 else line[:137].rstrip() + "…"
-    return fallback
+    return report_identity.report_title(text) or fallback
 
 
 def _tldr(text: str) -> dict[str, str]:

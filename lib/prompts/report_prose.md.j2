@@ -16,7 +16,9 @@
    Keep it terse: it is cache-replayed on every tool call. #}
 ## Report narrative
 
-Before the headings, include exactly one bare
+Start the report with one `# <title>` line: the defect in at most ten plain
+words, no symbol names, no artifact id. Every index and result page names the
+report by it. Before the section headings, include exactly one bare
 `Location: path/to/file.ext:function:line` naming the root-cause operation,
 not a caller or downstream effect. Use the equivalent endpoint, config key, or
 protocol step when there is no source file. Do not give a list or line range:

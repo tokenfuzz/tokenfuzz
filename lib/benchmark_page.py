@@ -53,8 +53,6 @@ LANE_NAMES = {k: v for k, v in strategies.NAMES.items() if k in strategies.ACTIV
 PROBE_VERDICTS = ("CRASH", "CLEAN", "TIMEOUT", "EXEC_FAIL", "other")
 
 _SEVERITY_RANK = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1}
-_TITLE = re.compile(r"^#\s*(?:[A-Z]+-[\w.-]+\s*[:—–-]\s*)?(.+?)\s*$")
-_BUG_LINE = re.compile(r"^-\s*\*\*Bug\*\*\s*[—–-]\s*(.+?)\s*$")
 
 
 def _read_json(path: Path, default):
@@ -119,31 +117,19 @@ def _artifact_href(directory: Path) -> str:
 
 
 def _artifact_title(directory: Path) -> str:
-    """The report's own heading, without its artifact id prefix.
+    """The report's own title: its heading, else its Summary's first sentence.
 
-    A direct-condition report often carries no H1 at all — the enrichment
-    TL;DR is the first thing in the file — so the reviewer's one-line "Bug"
-    summary stands in, trimmed to a title's length. Neither is invented: both
-    are the report's own words.
+    One reading for every report on the page, harness or direct, so a row's
+    label never depends on which side wrote it.
     """
     candidate = report_identity.find_report(directory)
-    if candidate is not None:
-        fallback = ""
-        try:
-            with candidate.open(encoding="utf-8", errors="replace") as stream:
-                for line in stream:
-                    if line.startswith("# "):
-                        match = _TITLE.match(line)
-                        return match.group(1) if match else line[2:].strip()
-                    if not fallback:
-                        match = _BUG_LINE.match(line)
-                        if match:
-                            fallback = match.group(1).strip()
-        except OSError:
-            return ""
-        if fallback:
-            return fallback if len(fallback) <= 140 else fallback[:137].rstrip() + "…"
-    return ""
+    if candidate is None:
+        return ""
+    try:
+        text = candidate.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return report_identity.report_title(text)
 
 
 def _severity_of(cluster: dict, members: set[str] | None = None) -> tuple[str, int]:

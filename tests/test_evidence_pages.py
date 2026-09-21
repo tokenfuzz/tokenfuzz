@@ -250,7 +250,7 @@ class EvidencePagesTests(unittest.TestCase):
         self.assertEqual(facts["primitive"], "heap-buffer-overflow")
         self.assertEqual(facts["severity"]["level"], "Medium")
         self.assertEqual(facts["lanes"], ["S5"])
-        self.assertEqual(facts["title"], "The parser reads one byte past the record.")
+        self.assertEqual(facts["title"], "The parser reads one byte past the record")
         card = evidence_pages.action_card(facts)
         self.assertIn("./reproduce.sh", card)
         self.assertIn("input.bin", card)

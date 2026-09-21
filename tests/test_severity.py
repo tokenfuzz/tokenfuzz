@@ -1863,6 +1863,36 @@ class SeverityTests(unittest.TestCase):
                 separator,
             )
 
+    def test_synthesized_fields_table_never_splits_a_section_from_its_body(self) -> None:
+        # A report without an H1 opens with bare labels and `## Summary`.
+        # Placing the table after "the first heading" put it between that
+        # heading and its paragraph, so the Summary read as empty to the
+        # TL;DR builder and every page title fell back to the site.
+        sev = {"level": "Medium", "score": 5.5, "cvss": {"nomenclature": "CVSS-BT"}}
+        used = {"trigger_source": "bytes"}
+        untitled = (
+            "Location: src/app_parse.c:app_parse:91\n"
+            "Trigger source: bytes\n\n"
+            "## Summary\n\nThe parser trusts a length field. Two bytes reach it.\n\n"
+            "## Root Cause\n\nNo bound.\n"
+        )
+        text = severity._synthesize_fields_table(untitled, sev, used)
+        lines = text.splitlines()
+        self.assertEqual(lines[1], "## Fields")
+        summary_at = lines.index("## Summary")
+        self.assertEqual(lines[summary_at + 2], "The parser trusts a length field. Two bytes reach it.")
+        titled = "# App parser trusts a length field\n\n" + untitled
+        text = severity._synthesize_fields_table(titled, sev, used)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "# App parser trusts a length field")
+        self.assertEqual(lines[2], "## Fields")
+        self.assertEqual(lines[lines.index("## Summary") + 2],
+                         "The parser trusts a length field. Two bytes reach it.")
+        # A `# comment` inside a repro fence is not a heading.
+        fenced = "```sh\n# build first\n```\n\n" + untitled
+        text = severity._synthesize_fields_table(fenced, sev, used)
+        self.assertEqual(text.splitlines()[1], "## Fields")
+
     def test_prose_caller_controls_stays_prose(self) -> None:
         report = self.make_report(
             "parser reads past the record while decoding attacker bytes",

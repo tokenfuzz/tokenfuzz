@@ -411,6 +411,74 @@ def exact_child_file(parent: Path, names: Iterable[str]) -> Path | None:
     return next(iter(exact_child_files(parent, names)), None)
 
 
+# An H1 may lead with the artifact id (`# FIND-006: ...`, `# CRASH-001-1 — ...`);
+# the title is what follows. A heading that is only the id names nothing.
+_H1_TITLE_RE = re.compile(r"^#\s*(?:/?[\w/.-]*?[A-Z]+-[\w.-]+\s*[:—–-]\s*)?(.+?)\s*$")
+_ID_ONLY_RE = re.compile(r"^/?[\w/.-]*?(?:CRASH|FIND)-[\w.-]+$")
+_H1_LINE_RE = re.compile(r"^ {0,3}# ")
+_SUMMARY_HEADING_RE = re.compile(r"^(?:##\s+Summary\s*|Summary:\s*)$", re.IGNORECASE)
+_SENTENCE_END_RE = re.compile(r"^(.+?[.!?])(?:\s|$)")
+
+
+def report_title(report_text: str, limit: int = 140) -> str:
+    """The report's own title, or "" when it has none.
+
+    Every page that names a report uses this one reading, so a harness report
+    and a model-direct report of the same shape get the same kind of title.
+    The H1 wins, without its artifact-id prefix; a report without one falls
+    back to the first sentence of `## Summary`, which the report contract
+    defines as the defect in plain words. Nothing is invented: both are the
+    author's text. Enrichment output is skipped, so the derived TL;DR never
+    stands in for the prose it was built from.
+    """
+    lines = report_text.splitlines()
+    fenced = code_fence_mask(lines)
+    in_summary = False
+    in_enrich = False
+    paragraph: list[str] = []
+    for line, is_fenced in zip(lines, fenced):
+        if is_fenced:
+            continue
+        stripped = line.strip()
+        if _ENRICH_OPEN_RE.fullmatch(stripped):
+            in_enrich = True
+            continue
+        if _ENRICH_CLOSE_RE.fullmatch(stripped):
+            in_enrich = False
+            continue
+        if in_enrich:
+            continue
+        # Markdown allows up to three spaces before a heading; four make an
+        # indented code block, whose `# comment` is not a title.
+        if _H1_LINE_RE.match(line):
+            match = _H1_TITLE_RE.match(stripped)
+            title = (match.group(1) if match else stripped[2:]).strip()
+            if title and not _ID_ONLY_RE.match(title):
+                return _clip(title, limit)
+            continue
+        if _SUMMARY_HEADING_RE.match(stripped):
+            in_summary = True
+            continue
+        if not in_summary:
+            continue
+        if stripped and not stripped.startswith(SECTION_BOUNDARY_PREFIXES):
+            paragraph.append(stripped)
+            continue
+        if paragraph or stripped.startswith(SECTION_BOUNDARY_PREFIXES):
+            break
+    if not paragraph:
+        return ""
+    prose = " ".join(" ".join(paragraph).split())
+    match = _SENTENCE_END_RE.match(prose)
+    sentence = match.group(1) if match else prose
+    # A sentence reads as a heading without its full stop.
+    return _clip(sentence.rstrip("."), limit)
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
 def find_report(directory: Path) -> Path | None:
     """Return the artifact's report, spelled the way the directory spells it."""
     return exact_child_file(directory, REPORT_NAMES)

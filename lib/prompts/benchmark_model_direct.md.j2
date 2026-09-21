@@ -245,7 +245,8 @@ and its absence never holds a finding back.
 For every FINDING:
 
   1. Create `{{ output_dir }}/findings/FIND-<n>/`  (n = 1, 2, 3, ...).
-  2. Write `{{ output_dir }}/findings/FIND-<n>/report.md`. Begin it with a
+  2. Write `{{ output_dir }}/findings/FIND-<n>/report.md`. After the title
+     line required under "Report narrative" at the end of this prompt, put a
      `## Fields` table — a Markdown table whose first column is the field
      name and second is the value — carrying these rows verbatim so the
      downstream tooling can render and score every report on one yardstick:

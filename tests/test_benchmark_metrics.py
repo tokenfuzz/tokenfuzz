@@ -2556,6 +2556,28 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
         self.assertEqual(rows[0]["reason"], final_reason)
 
+    def test_rejected_finding_site_is_read_from_a_bare_location_line(self) -> None:
+        # Harness reports carry the site as a bare `Location:` label; direct
+        # reports carry a Fields table. The index reads both, so one side's
+        # rows are never a column of dashes beside the other's sites.
+        rejected_root = self.root / "site-shapes"
+        bare = rejected_root / "FIND-REJECTED-0001"
+        bare.mkdir(parents=True)
+        (bare / "report.md").write_text(
+            "Location: src/app_parse.c:app_parse:91\nClass: dos\n\n## Summary\n\nA loop.\n",
+            encoding="utf-8")
+        table = rejected_root / "FIND-REJECTED-0002"
+        table.mkdir()
+        (table / "report.md").write_text(
+            "## Fields\n\n| Field | Value |\n|:--|:--|\n| File | `src/app_io.c` |\n"
+            "| Function | `app_read` |\n| Line | 12 |\n",
+            encoding="utf-8")
+
+        rows = {row["id"]: row["site"] for row in benchmark._rejected_finding_rows(rejected_root)}
+
+        self.assertEqual(rows["FIND-REJECTED-0001"], "src/app_parse.c:app_parse:91")
+        self.assertEqual(rows["FIND-REJECTED-0002"], "src/app_io.c:app_read:12")
+
     def test_rejected_crash_index_renders_the_rejection_reason(self) -> None:
         # Triage writes rejection.md on the reject path before moving the
         # directory, so it is the one reason a pooled rejected crash carries.

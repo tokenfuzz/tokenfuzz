@@ -2889,11 +2889,14 @@ def _synthesize_fields_table(text: str, severity: dict, used: dict) -> str:
     lines = text.splitlines()
     table = ["## Fields", "", "| Field | Value |", "| :---- | :---- |"]
     table += [f"| {f} | {v} |" for f, v in rows]
-    # Lead with the Fields section: place it after the first heading, or at the
-    # top when the report has no heading.
+    # Lead with the Fields section: place it after the H1, or at the top when
+    # the report has none. Only an H1 counts. Matching any heading put the
+    # table between `## Summary` and its body in reports without a title,
+    # which emptied the Summary section the TL;DR and page titles read.
     idx = 0
+    fenced = report_identity.code_fence_mask(lines)
     for i, line in enumerate(lines):
-        if line.startswith("#"):
+        if line.startswith("# ") and not fenced[i]:
             idx = i + 1
             break
     lines[idx:idx] = ["", *table, ""]

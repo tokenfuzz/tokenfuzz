@@ -373,6 +373,8 @@ ok("exactly one bare" in prose
    and "Location: path/to/file.ext:function:line" in prose
    and "finding clustering consumes this field" in prose,
    "report contract requires one root-cause location for deterministic dedup")
+ok("Start the report with one" in prose and "the defect in at most ten plain words" in prose,
+   "report contract requires a title line every index and page names the report by")
 
 rc, reach = render_named("triage_reachability_fields.md.j2", {"body": "sample report"})
 ok(rc == 0, "reach-field prompt renders for disclosure classification")

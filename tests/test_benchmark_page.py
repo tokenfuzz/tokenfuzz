@@ -168,8 +168,11 @@ class Fixture:
              "file": "src/app_loop.c", "line": "3", "severity_label": "Low"},
         ]}), encoding="utf-8")
         self._report("pool/findings/FIND-0001", "# FIND-001 — Parser trusts a length field\n")
+        # A report without a heading is labelled by its Summary's first
+        # sentence, never by the enrichment TL;DR derived from it.
         self._report("pool/findings/FIND-0002",
-                     "<!-- enrich:tldr -->\n- **Bug** — I/O path frees a buffer twice\n")
+                     "<!-- enrich:tldr -->\n- **Bug** — stale TL;DR\n<!-- /enrich:tldr -->\n"
+                     "## Summary\n\nI/O path frees a buffer twice. A second read reuses it.\n")
         self._report("pool/findings/FIND-0003", "# FIND-003: Allocation grows without bound\n")
         self._report("pool/findings/FIND-0005", "## Fields\n")
         self._report("pool/crashes/CRASH-0001", "# CRASH-001-1: SEGV in child_free\n", "report.md")

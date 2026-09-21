@@ -3840,38 +3840,23 @@ def _crash_site(crash_dir: Path) -> str:
 
 
 def _finding_site(finding_dir: Path) -> str:
-    """file:func:line for a rejected finding, read from its Fields table."""
+    """file:func:line for a rejected finding, read as the clusterer reads it.
+
+    The Location line, the Fields table, and inline prose all count, so a
+    harness report (bare labels) and a direct report (a table) both get a
+    site.
+    """
     for path in report_identity.exact_child_files(finding_dir, report_identity.REPORT_NAMES):
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        fields: dict[str, str] = {}
-        for line in text.splitlines():
-            m = re.match(r"^\|\s*(File|Function|Line)\s*\|\s*(.+?)\s*\|", line, re.I)
-            if not m:
-                continue
-            key = m.group(1).lower()
-            val = m.group(2).strip().strip("`").strip()
-            if val and key not in fields:
-                fields[key] = val
-        parts = [fields[k] for k in ("file", "function", "line") if fields.get(k)]
+        source, func = finding_signature.extract_location(text)
+        line = finding_signature.extract_line(text)
+        parts = [part for part in (source, func, line) if part]
         if parts:
             return ":".join(parts)
     return ""
-
-
-def _finding_title(finding_dir: Path) -> str:
-    for path in report_identity.exact_child_files(finding_dir, report_identity.REPORT_NAMES):
-        try:
-            for line in path.read_text(
-                    encoding="utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if line.startswith("#"):
-                    return line.lstrip("#").strip() or finding_dir.name
-        except OSError:
-            pass
-    return finding_dir.name
 
 
 def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
@@ -3898,7 +3883,6 @@ def _rejected_finding_rows(rejected_dir: Path) -> list[dict]:
         )
         rows.append({
             "id": finding_dir.name,
-            "title": _finding_title(finding_dir),
             "site": _finding_site(finding_dir),
             "reason": reason,
             "report": _report_link_name(finding_dir),
