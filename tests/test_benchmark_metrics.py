@@ -889,6 +889,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("gemini", "gemini-2.0-flash", "0.10", "0.025", "0.40"),
             ("gemini", "gemini-2.0-flash-lite", "0.075", "0", "0.30"),
             ("grok", "grok-build-0.1", "1", "0.20", "2"),
+            ("grok", "grok-4.7", "2", "0.50", "6"),
             ("grok", "grok-4.6", "2", "0.50", "6"),
             ("grok", "grok-4.5", "2", "0.30", "6"),
             ("grok", "grok-4.3", "1.25", "0.20", "2.50"),
@@ -1040,6 +1041,22 @@ class BenchmarkMetricsTests(unittest.TestCase):
             output_tokens=1_000_000, prompt_tokens_for_tier=200_000,
         )
         self.assertEqual(benchmark._decimal_text(grok_long), "16.600000")
+
+        # OpenAI publishes its standard tier as "<272K context length", so the
+        # boundary itself is long-context, like xAI's and unlike Google's.
+        codex_standard, _ = benchmark._cost_decimal(
+            "codex", "gpt-5.4",
+            input_tokens=1_000_000, cached_input_tokens=1_000_000,
+            output_tokens=1_000_000, prompt_tokens_for_tier=271_999,
+        )
+        self.assertEqual(benchmark._decimal_text(codex_standard), "17.750000")
+
+        codex_long, _ = benchmark._cost_decimal(
+            "codex", "gpt-5.4",
+            input_tokens=1_000_000, cached_input_tokens=1_000_000,
+            output_tokens=1_000_000, prompt_tokens_for_tier=272_000,
+        )
+        self.assertEqual(benchmark._decimal_text(codex_long), "28.000000")
 
         # Vendor thresholds are per request. Harness rows retain the rendered
         # prompt size, so cumulative session input must not force the high tier.

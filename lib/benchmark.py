@@ -1531,6 +1531,11 @@ def _pricing_rates(
         # GPT-5.6 renamed the former flagship/mini/nano tiers to
         # Sol/Terra/Luna. The unsuffixed alias routes to Sol.
         #
+        # OpenAI's standard tier is published as "<272K context length", so a
+        # request at exactly 272k is already long-context and the boundary bills
+        # high — the same exclusive-low shape xAI uses, and the opposite of
+        # Google's "<= 200k" below.
+        #
         # A rate keys on the pricing day only where the vendor publishes the
         # date, as Gemini Flash does below. Guessing one is worse than not
         # dating at all: a made-up boundary silently restates a completed run's
@@ -1542,6 +1547,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
+                "threshold_inclusive": True,
                 "input_low": _money("0.20"),
                 "input_high": _money("0.40"),
                 "cache_write_low": _money("0.25"),
@@ -1556,6 +1562,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
+                "threshold_inclusive": True,
                 "input_low": _money("2"),
                 "input_high": _money("4"),
                 "cache_write_low": _money("2.50"),
@@ -1588,6 +1595,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
+                "threshold_inclusive": True,
                 "input_low": _money("4"),
                 "input_high": _money("8"),
                 "cache_write_low": _money("5"),
@@ -1602,6 +1610,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
+                "threshold_inclusive": True,
                 "input_low": _money("30"),
                 "input_high": _money("60"),
                 "cache_read_low": _money("0"),
@@ -1614,6 +1623,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
+                "threshold_inclusive": True,
                 "input_low": _money("5"),
                 "input_high": _money("10"),
                 "cache_read_low": _money("0.50"),
@@ -1640,6 +1650,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
+                "threshold_inclusive": True,
                 "input_low": _money("30"),
                 "input_high": _money("60"),
                 "cache_read_low": _money("0"),
@@ -1652,6 +1663,7 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
+                "threshold_inclusive": True,
                 "input_low": _money("2.50"),
                 "input_high": _money("5"),
                 "cache_read_low": _money("0.25"),
@@ -1833,7 +1845,7 @@ def _pricing_rates(
                 "output_high": _money("4"),
                 "source": "xai-code-api-grok-build-0.1",
             }
-        if _model_id_is(m, "grok-4.6"):
+        if _model_id_is(m, "grok-4.7", "grok-4.6"):
             return {
                 "tiered": True,
                 "threshold": 200_000,
@@ -1844,7 +1856,7 @@ def _pricing_rates(
                 "cache_read_high": _money("1"),
                 "output_low": _money("6"),
                 "output_high": _money("12"),
-                "source": "xai-chat-api-grok-4.6",
+                "source": "xai-chat-api-grok-4.7/4.6",
             }
         if _model_id_is(m, "grok-4.5"):
             return {
