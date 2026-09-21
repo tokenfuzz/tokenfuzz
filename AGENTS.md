@@ -148,10 +148,12 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
    one-run probe does NOT auto-file — confirm first.) Do NOT hunt the crashes/
    tree for it and do NOT open a second dir — re-confirming the same testcase
    reuses the existing bundle. If it prints `[probe] CRASH DUPLICATE`, the same
-   crash state (primitive + signature frames) is already a promoted bundle:
-   nothing is filed, so close the hypothesis with that CRASH id and aim the
-   next testcase at a different crash state — `bin/state resume` lists the
-   states already taken. Go to the printed path and ENRICH `report.md`
+   crash state (primitive + signature frames) through the same probe route is
+   already a promoted bundle: nothing is filed, so close the hypothesis with
+   that CRASH id and aim the next testcase at a different crash state —
+   `bin/state resume` lists the promoted states already taken. A materially
+   different route or build configuration is still filed. Go to the printed
+   path and ENRICH `report.md`
    — write the narrative sections named in the "Report narrative" block of your session prompt (Summary, Root Cause, Data Flow, Impact, Fix Direction), keeping Data Flow bullets in the `step: func (path/to/file.c:NN) — desc` shape so the post-render pass can inline source snippets. Point at the fix with exactly one pointer (best-effort, never blocks filing): for a surgical 1–3 line fix, save a sibling `patch.diff` whenever it passes the non-mutating `git -C "$TARGET_ROOT" apply --check` (never modify the target source to validate — for hg targets just save the `hg diff`); do NOT write a `## Patch` section in `report.md` — `bin/enrich-report` is the single writer of that section. Otherwise — the fix is non-surgical, or you couldn't capture a clean diff — add a `## Fix Direction` heading on its own line instead. The report must also carry the standard bare-label fields `Boundary:` / `Caller controls:` / `Trusted caller actions:` / `Caller contract:` / `Trigger source:` / `Strategy:` (see `.agents/references/session-rules.md`). `Strategy: S<N>` records which of S1, S2, S3, S4, S5, S6, S7, S8, or REF produced this report — the cluster tables and ROI surface use it to attribute bugs to the strategy that found them.
 ```
 
@@ -183,6 +185,10 @@ the auto-quarantine classes below are kept out of `crashes/`.) Filing one is
 cheap; re-reaching it is not — a `NOT-REPORTABLE` row in
 `crashes/crash-clusters.md` is a mechanism already reviewed and credited
 nothing, so another route to the same mechanism earns nothing either. A
+bundle whose crash state and recorded probe route match a promoted bundle is
+folded into it by triage (its files move to `crashes/.duplicates/`, the
+hypothesis closes with the promoted CRASH id), so equivalent evidence buys no
+credit and no review. A bundle without route metadata is reviewed normally. A
 neighbouring code path is a separate question: reachability is per-trigger,
 and one can be externally-reachable beside a crash that is not.
 

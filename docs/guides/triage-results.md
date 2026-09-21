@@ -128,12 +128,13 @@ before a final receipt is written.
 
 ### Crash candidates
 
-Three non-reportable outcomes require different operator action:
+Four non-reportable outcomes require different operator action:
 
 | Disposition | Typical reason | What happens |
 | --- | --- | --- |
 | Hard rejection | Near-null dereference, OOM only, assertion or panic only, plain stack overflow, a fault rooted in the audit harness, or two source-anchored reviews disproving the route | The directory moves to `crashes-rejected/` with the reason. A scratch-source fault counts as harness-rooted only when the leaf has an absolute path under this run's own `scratch-N/` and no target-source frame appears anywhere in the diagnostic; missing path ownership or any target allocation/free/context frame fails open and preserves the crash. |
 | Promotion pending | The testcase, saved diagnostic, report, required fields, or exported invocation is incomplete; source review may also remain unsettled | The directory stays under `crashes/` with a pending receipt. Work that stays incomplete for ten triage passes ages into rejection. |
+| Duplicate crash state | The bundle's sanitizer primitive, line-exact signature frames, and recorded probe route match a bundle that already holds a `reportable` receipt | The directory moves to `crashes/.duplicates/` with a `duplicate-of.txt` naming the promoted bundle; no review runs, the filing hypothesis closes with the promoted CRASH id, and neither results nor rejections count it. Same-state, same-route bundles that are all still pending are reviewed one at a time: the earliest filed goes first and the rest wait for its verdict in the same pass. Missing route metadata fails open and receives normal review. |
 | Threat-model rejection | The report admits a caller-contract violation or harness-only parameter, source review places the required trigger outside `attacker_controls`, or the reviews cannot settle scope after the focused resolution | The directory moves to `crashes-rejected/` with a `threat-model:` or `unsettled-scope:` reason; the evidence stays intact and unscored. |
 
 An out-of-model trigger is a real defect worth reporting to the maintainers

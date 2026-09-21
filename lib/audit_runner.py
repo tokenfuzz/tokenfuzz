@@ -2227,6 +2227,7 @@ def post_iteration(
             runtime,
             f"Housekeeping: crashes promoted={crash_counts['promoted']} rejected={crash_counts['rejected']} "
             f"pending={crash_counts['pending']} demoted={crash_counts['demoted']} "
+            f"duplicate={crash_counts.get('duplicate', 0)} "
             f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
             f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']} "
             f"orphans_enforced={enforced} corpus_promoted={promoted}",
@@ -3504,7 +3505,9 @@ class SealedGateWorker:
         # pool: review cost per artifact keeps counting them, the blocked
         # share does not.
         records: list[dict] = []
-        crash_counts = {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0}
+        crash_counts = {
+            "promoted": 0, "rejected": 0, "pending": 0, "demoted": 0, "duplicate": 0,
+        }
         with _phase_span([], "crash_triage", records=records):
             if crashes:
                 crash_counts.update(triage.triage_crash_dirs(
@@ -3538,6 +3541,7 @@ class SealedGateWorker:
         )
         acted = (
             crash_counts["rejected"] or crash_counts["demoted"]
+            or crash_counts.get("duplicate", 0)
             or finding_counts["rejected"] or cluster_counts["added"]
         )
         if elapsed >= 1.0 or acted:
@@ -3547,6 +3551,7 @@ class SealedGateWorker:
                 f"crashes={len(crashes)}/{total_crashes}: "
                 f"crashes promoted={crash_counts['promoted']} rejected={crash_counts['rejected']} "
                 f"pending={crash_counts['pending']} demoted={crash_counts['demoted']} "
+                f"duplicate={crash_counts.get('duplicate', 0)} "
                 f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
                 f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']} "
                 f"in {elapsed:.1f}s",

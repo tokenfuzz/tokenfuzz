@@ -74,8 +74,12 @@ class CrashStateDedupTests(unittest.TestCase):
         )
 
     def promote(self, crash_id: str) -> None:
+        directory = self.results / "crashes" / crash_id
+        # Triage settles the class before any receipt; a receipt written over
+        # a classless skeleton would lapse the moment the gate stamps it.
+        triage._materialize_crash_class(directory)
         receipt = validation_receipt.write(
-            self.results / "crashes" / crash_id, kind="crash", state="reportable",
+            directory, kind="crash", state="reportable",
             target_revision="rev", target_config_sha256="cfg", attacker_controls=["bytes"],
         )
         self.assertIsNotNone(receipt)
@@ -255,6 +259,203 @@ class CrashStateDedupTests(unittest.TestCase):
         self.assertEqual(counts["expanded"], 1)
         self.assertTrue((crashes / first / ".cluster_expanded").is_file())
         self.assertTrue((crashes / repeat / ".cluster_expanded").is_file())
+
+    def context(self) -> workqueue.Context:
+        target = self.root / "target"
+        (target / ".git").mkdir(parents=True, exist_ok=True)
+        ctx = workqueue.Context(ROOT, target, "sample", self.results, "git")
+        workqueue.init_state(ctx)
+        return ctx
+
+    def add(self, ctx: workqueue.Context, agent: str, hid: str, site: str, status: str = "PENDING") -> None:
+        workqueue.add_hypothesis(ctx, argparse.Namespace(
+            agent=agent, id=hid, card_id="", hypothesis="size math", file=site,
+            input_shape="bytes", guard_gap="none", diagnostic="bounds",
+            strategy="S7", status=status,
+        ))
+
+    def gate(self, adjudicate=None) -> tuple[dict, list[list[str]]]:
+        with mock.patch.object(
+            triage, "_adjudicate_crash_dirs",
+            side_effect=adjudicate or (lambda directories, **_kw: None),
+        ) as reviewed:
+            counts = triage.triage_crash_dirs(
+                self.results, self.root / "target", "sample", ["bytes"], workers=1,
+            )
+        groups = [
+            sorted(d.name for d in call.args[0])
+            for call in reviewed.call_args_list if call.args[0]
+        ]
+        return counts, groups
+
+    def duplicates(self) -> list[str]:
+        root = self.results / "crashes" / triage.DUPLICATE_CRASHES_DIR
+        return sorted(p.name for p in root.glob("CRASH-*")) if root.is_dir() else []
+
+    def test_triage_folds_a_pending_duplicate_of_a_promoted_state(self) -> None:
+        ctx = self.context()
+        _, first = self.file("1", "a", trace())
+        _, duplicate = self.file("2", "b", trace())
+        self.add(ctx, "2", "H-dup", "src/parser.c:app_parse:20", status=duplicate)
+        self.promote(first)
+        counts, groups = self.gate()
+        self.assertEqual(counts["duplicate"], 1)
+        self.assertEqual(self.duplicates(), [duplicate])
+        self.assertFalse((self.results / "crashes" / duplicate).exists())
+        self.assertNotIn(duplicate, [name for group in groups for name in group])
+        note = (
+            self.results / "crashes" / triage.DUPLICATE_CRASHES_DIR / duplicate / "duplicate-of.txt"
+        ).read_text().splitlines()
+        self.assertEqual(note[0], first)
+        rows = {r["id"]: r for r in workqueue.read_jsonl(self.results / "state" / "hypotheses.jsonl")}
+        self.assertEqual(rows["H-dup"]["status"], first)
+        self.assertIn(f"Triage folded {duplicate} into {first}", rows["H-dup"]["note"])
+
+    def test_same_pass_siblings_wait_for_the_representative_s_verdict(self) -> None:
+        _, first = self.file("1", "a", trace())
+        _, second = self.file("2", "b", trace())
+        _, other = self.file("2", "c", trace(line=25))
+
+        def promote_first(directories, **_kw):
+            for directory in directories:
+                if directory.name == first:
+                    self.promote(first)
+
+        counts, groups = self.gate(promote_first)
+        # One review settles the state; the sibling folds without a second.
+        self.assertEqual(groups, [sorted([first, other])])
+        self.assertEqual(counts["duplicate"], 1)
+        self.assertEqual(self.duplicates(), [second])
+
+    def test_an_unpromoted_representative_leaves_its_sibling_judged(self) -> None:
+        _, first = self.file("1", "a", trace())
+        _, second = self.file("2", "b", trace())
+        counts, groups = self.gate()
+        self.assertEqual(groups, [[first], [second]])
+        self.assertEqual(counts["duplicate"], 0)
+        self.assertEqual(self.duplicates(), [])
+
+    def test_a_different_route_is_reviewed_on_its_own(self) -> None:
+        _, first = self.file("1", "a", trace())
+        _, browser = self.file("2", "b", trace(), mode="browser")
+        self.promote(first)
+        counts, groups = self.gate()
+        self.assertEqual(counts["duplicate"], 0)
+        self.assertEqual(groups, [sorted([first, browser])])
+
+    def test_two_promoted_bundles_are_never_folded_into_each_other(self) -> None:
+        _, first = self.file("1", "a", trace())
+        _, second = self.file("2", "b", trace())
+        self.promote(first)
+        self.promote(second)
+        counts, groups = self.gate()
+        self.assertEqual(counts["duplicate"], 0)
+        self.assertEqual(self.duplicates(), [])
+        self.assertEqual(groups, [sorted([first, second])])
+
+    def test_a_hand_filed_duplicate_without_a_probe_receipt_is_reviewed(self) -> None:
+        _, first = self.file("1", "a", trace())
+        self.promote(first)
+        manual = self.results / "crashes" / "CRASH-001-manual"
+        manual.mkdir()
+        (manual / "sanitizer.txt").write_text(trace(), encoding="utf-8")
+        (manual / "input.bin").write_bytes(b"manual")
+        (manual / "report.md").write_text(
+            "# Manual\n\nLocation: src/parser.c:app_parse:20\n\nTrigger source: bytes\n"
+            "Caller contract: obeyed\n", encoding="utf-8",
+        )
+        counts, groups = self.gate()
+        self.assertEqual(counts["duplicate"], 0)
+        self.assertEqual(self.duplicates(), [])
+        self.assertEqual(groups, [sorted([first, "CRASH-001-manual"])])
+
+    def test_a_failed_state_update_rolls_the_bundle_back(self) -> None:
+        ctx = self.context()
+        _, duplicate = self.file("2", "b", trace())
+        self.add(ctx, "2", "H-dup", "src/parser.c:app_parse:20", status=duplicate)
+        directory = self.results / "crashes" / duplicate
+        with mock.patch.object(
+            workqueue, "record_artifact_duplicate", side_effect=OSError("state unavailable"),
+        ):
+            with self.assertRaisesRegex(OSError, "state unavailable"):
+                triage._fold_duplicate_crash(directory, self.results, "CRASH-001-1")
+        self.assertTrue(directory.is_dir())
+        self.assertEqual(self.duplicates(), [])
+
+    def test_a_fold_closes_the_open_hypothesis_named_in_the_evidence_header(self) -> None:
+        ctx = self.context()
+        _, first = self.file("1", "a", trace())
+        self.add(ctx, "2", "H-open", "src/parser.c:app_parse:20", status="INVESTIGATING")
+        testcase = self.root / "b.bin"
+        # Opaque inputs carry the hypothesis in structured probe provenance,
+        # not by prepending a text header to the testcase bytes.
+        testcase.write_bytes(b"opaque")
+        sanitizer = self.root / "b.txt"
+        sanitizer.write_text(trace(), encoding="utf-8")
+        status, duplicate = crash_bundle.materialize(
+            self.results, "2", testcase, sanitizer, "asan", "generic", hypothesis="H-open",
+        )
+        self.assertEqual(status, "FILED")
+        self.promote(first)
+        counts, _groups = self.gate()
+        self.assertEqual(counts["duplicate"], 1)
+        rows = {r["id"]: r for r in workqueue.read_jsonl(self.results / "state" / "hypotheses.jsonl")}
+        self.assertEqual(rows["H-open"]["status"], first)
+        self.assertIn(f"Triage folded {duplicate} into {first}", rows["H-open"]["note"])
+
+    def test_expansion_prompt_names_filed_lines_without_filtering(self) -> None:
+        ctx = self.context()
+        _, first = self.file("1", "a", trace())
+        self.add(ctx, "2", "H-find", "src/other.c:app_other:7", status="FIND-001")
+        prompts: list[str] = []
+
+        def decide(_kind, _key, prompt, _timeout, **_kw):
+            prompts.append(prompt)
+            return {"items": [{"id": first, "rows": []}]}
+
+        with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
+            triage.cluster_expansion_decisions(
+                [self.results / "crashes" / first], self.root / "target",
+            )
+        self.assertEqual(len(prompts), 1)
+        self.assertNotIn("Promoted crash signature frames", prompts[0])
+        self.assertNotIn("src/other.c:app_other:7", prompts[0])
+        self.promote(first)
+        prompts.clear()
+        with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
+            triage.cluster_expansion_decisions(
+                [self.results / "crashes" / first], self.root / "target",
+            )
+        self.assertIn(f"- app_parse /src/parser.c:20 - {first}", prompts[0])
+        self.assertNotIn("src/other.c:app_other:7", prompts[0])
+        self.assertIn("A different primitive, object, or materially different route", prompts[0])
+
+    def test_expansion_keeps_distinct_leads_at_a_filed_line(self) -> None:
+        ctx = self.context()
+        _, first = self.file("1", "a", trace())
+        self.add(ctx, "2", "H-find", "src/other.c:app_other:7", status="FIND-001")
+        rows = [
+            {"file": "src/parser.c", "function": "app_parse", "line": 20,
+             "hypothesis": "a different primitive at the crash line", "category": "type"},
+            {"file": "src/other.c", "function": "ns::app_other", "line": 7,
+             "hypothesis": "a distinct route to the finding line", "category": "state"},
+            {"file": "src/parser.c", "function": "app_parse", "line": 31,
+             "hypothesis": "a different line of the same function", "category": "bounds"},
+        ]
+        result = workqueue.add_cluster_hypotheses(ctx, first, rows, num_agents=2)
+        self.assertEqual((result["added"], result["skipped"]), (3, 0))
+        added = [
+            r for r in workqueue.read_jsonl(self.results / "state" / "hypotheses.jsonl")
+            if r.get("card_id") == "" and r["status"] == "PENDING"
+        ]
+        self.assertEqual(
+            [r["file"] for r in added],
+            [
+                "src/parser.c:app_parse:20",
+                "src/other.c:ns::app_other:7",
+                "src/parser.c:app_parse:31",
+            ],
+        )
 
 
 if __name__ == "__main__":

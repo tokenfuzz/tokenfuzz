@@ -11,7 +11,7 @@ import shlex
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Collection, Sequence
 
 import crash_artifacts
 import stack_frames
@@ -731,10 +731,34 @@ def promoted_duplicate(
         return None
     if state is None:
         return None
-    for filed in filed_crash_states(results_dir, state_filter=state):
-        directory = Path(results_dir) / "crashes" / filed.crash_id
-        if filed.promoted and bundle_crash_route(directory) == route:
-            return filed.crash_id
+    return promoted_state_owner(results_dir, state, route)
+
+
+def promoted_state_owner(
+    results_dir: str | os.PathLike[str],
+    state: CrashState,
+    route: CrashRoute | None,
+    *,
+    filed: list[FiledCrashState] | None = None,
+    exclude: Collection[str] = (),
+) -> str | None:
+    """The promoted bundle that already carries `state` through `route`.
+
+    A missing route fails open: a hand-written or legacy bundle may carry
+    evidence for a materially different boundary, so state equality alone
+    cannot absorb it. `filed` lets a pass over many bundles read the receipts
+    once.
+    """
+    if route is None:
+        return None
+    if filed is None:
+        filed = filed_crash_states(results_dir, state_filter=state)
+    for item in filed:
+        if item.state != state or not item.promoted or item.crash_id in exclude:
+            continue
+        directory = Path(results_dir) / "crashes" / item.crash_id
+        if bundle_crash_route(directory) == route:
+            return item.crash_id
     return None
 
 
@@ -765,6 +789,7 @@ def _write_probe_context(
     sanitizer_output: Path,
     args: Sequence[str],
     binary: str | os.PathLike[str] | None,
+    hypothesis_id: str = "",
     build_config_id: str = "",
     build_recipe_digest: str = "",
 ) -> None:
@@ -782,6 +807,7 @@ def _write_probe_context(
         "sanitizer_sha256": _sha256(sanitizer_output),
         "sanitizer_size": sanitizer_output.stat().st_size,
         "mode": mode,
+        "hypothesis_id": hypothesis_id,
         "harness": (
             {
                 "name": harness.name,
@@ -912,6 +938,7 @@ def materialize(
             harness=(destination / harness_path.name) if harness_path else None,
             args=args, sanitizer_output=destination / "sanitizer.txt",
             binary=binary, build_config_id=build_config_id,
+            hypothesis_id=hypothesis,
             build_recipe_digest=build_recipe_digest,
         )
         if build_config_id and build_recipe_path is not None:

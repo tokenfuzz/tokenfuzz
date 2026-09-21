@@ -3706,6 +3706,54 @@ def record_artifact_rejection(
     return changed
 
 
+def record_artifact_duplicate(
+    results_dir: Path, artifact_name: str, owner: str, reason: str,
+    artifact_dir: Path | None = None,
+) -> list[dict]:
+    """Close the hypotheses that filed a folded bundle with the promoted crash id.
+
+    The agent did crash the state, so the row keeps a CRASH status and its
+    subsystem credit; the id it carries is the bundle maintainers will see.
+    A row the agent never closed (bin/probe files without changing status)
+    is found the way promotion finds it, through the hypothesis named in the
+    bundle's evidence header, so the fold never leaves a live row pointing at
+    a bundle that left `crashes/`.
+    """
+    path = state_dir(results_dir) / "hypotheses.jsonl"
+    if not path.is_file():
+        return []
+    artifact_id = _artifact_status_id(artifact_name)
+    if not artifact_id:
+        return []
+    named = hypotheses_named_in_evidence(artifact_dir) if artifact_dir else []
+
+    def mutate(rows: list[dict]) -> list[dict]:
+        latest_indexes: dict[tuple[str, str], int] = {}
+        for index, row in enumerate(rows):
+            hypothesis_id = str(row.get("id", "")).strip()
+            if hypothesis_id:
+                latest_indexes[(str(row.get("agent", "")), hypothesis_id)] = index
+        changed: list[dict] = []
+        for index in latest_indexes.values():
+            row = rows[index]
+            previous = str(row.get("status", "")).strip()
+            filed_it = _artifact_status_id(previous) == artifact_id
+            still_open = (
+                str(row.get("id", "")).strip() in named
+                and is_active_hypothesis_status(previous)
+            )
+            if not (filed_it or still_open):
+                continue
+            row["status"] = owner
+            row["updated_at"] = now_iso()
+            row["note"] = f"Triage folded {artifact_name} into {owner}: {reason}"
+            changed.append(dict(row))
+        return changed
+
+    _rows, changed = update_jsonl(path, mutate)
+    return changed
+
+
 def record_artifact_reconsideration(
     results_dir: Path, artifact_name: str, reason: str,
 ) -> list[dict]:
@@ -4947,20 +4995,25 @@ def card_run_count(ctx: Context, card_id: str, verdict: str = "") -> int:
     return n
 
 
-def reconcile_artifact_hypotheses(results_dir: Path, artifact_dir: Path) -> list[str]:
-    """Close the hypotheses an accepted artifact's evidence headers name.
-
-    Agents are told to close a hypothesis with the artifact id, but a session
-    that files a report at the wall never comes back to do it, and the row
-    then reads PENDING to `bin/state resume` and to the card join. The
-    testcase or harness header is the same provenance bin/probe reads, so an
-    artifact that carries one closes exactly the rows it was probed under.
-    Only active rows change; a row already terminal keeps its own verdict.
-    Returns the ids that changed.
-    """
-    artifact = Path(artifact_dir)
+def hypotheses_named_in_evidence(artifact_dir: Path) -> list[str]:
+    """Hypothesis ids the bundle's testcase or harness headers were probed under."""
     named: list[str] = []
-    for scan in (artifact, artifact / ".audit"):
+    for context in (
+        artifact_dir / ".probe-context.json",
+        artifact_dir / ".audit" / ".probe-context.json",
+    ):
+        try:
+            payload = json.loads(context.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict) or payload.get("version") != 4:
+            continue
+        hid = str(payload.get("hypothesis_id") or "").strip()
+        if hid and hid not in named:
+            named.append(hid)
+    if named:
+        return named
+    for scan in (artifact_dir, artifact_dir / ".audit"):
         try:
             entries = sorted(p for p in scan.iterdir() if p.is_file())
         except OSError:
@@ -4973,6 +5026,22 @@ def reconcile_artifact_hypotheses(results_dir: Path, artifact_dir: Path) -> list
             hid = quality.hypothesis_id_in_header(entry)
             if hid and hid not in named:
                 named.append(hid)
+    return named
+
+
+def reconcile_artifact_hypotheses(results_dir: Path, artifact_dir: Path) -> list[str]:
+    """Close the hypotheses an accepted artifact's evidence headers name.
+
+    Agents are told to close a hypothesis with the artifact id, but a session
+    that files a report at the wall never comes back to do it, and the row
+    then reads PENDING to `bin/state resume` and to the card join. The
+    testcase or harness header is the same provenance bin/probe reads, so an
+    artifact that carries one closes exactly the rows it was probed under.
+    Only active rows change; a row already terminal keeps its own verdict.
+    Returns the ids that changed.
+    """
+    artifact = Path(artifact_dir)
+    named = hypotheses_named_in_evidence(artifact)
     if not named:
         return []
     path = state_dir(results_dir) / "hypotheses.jsonl"

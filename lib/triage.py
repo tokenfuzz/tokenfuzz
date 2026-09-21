@@ -1427,6 +1427,43 @@ def _cluster_expansion_item(
     }
 
 
+_FILED_LINES_PROMPT_LIMIT = 40
+
+
+def _filed_lines_block(results: Path) -> str:
+    """Promoted crash frames that can steer expansion away from repeats.
+
+    Without it the model named a line another bundle or a closed hypothesis
+    already covered in 84 of 135 benchmark siblings, and each cost the agent
+    it was routed to a session to close as the artifact that existed. The
+    list only informs: every row still lands in the queue, so a genuinely
+    different mechanism or route at a filed line is the model's call, not a
+    filter's. Pending and rejected evidence is omitted because it has not
+    earned the authority to steer discovery away from a site.
+    """
+    lines: dict[str, str] = {}
+    for item in crash_bundle.filed_crash_states(results):
+        if not item.promoted:
+            continue
+        for frame in item.state[2][:1] + item.state[3][:1]:
+            lines.setdefault(frame, item.crash_id)
+    if not lines:
+        return ""
+    body = [f"- {site} - {artifact}" for site, artifact in sorted(lines.items())]
+    omitted = len(body) - _FILED_LINES_PROMPT_LIMIT
+    body = body[:_FILED_LINES_PROMPT_LIMIT]
+    if omitted > 0:
+        body.append(f"- ... and {omitted} more filed lines")
+    return (
+        "\nPromoted crash signature frames already filed in this audit:\n"
+        + "\n".join(body) + "\n"
+        "Avoid a row that predicts the same primitive, object, frame chain, "
+        "and probe route. A different primitive, object, or materially "
+        "different route can still add evidence at the same line; say what "
+        "differs in the hypothesis.\n"
+    )
+
+
 def cluster_expansion_decisions(
     crash_dirs: list[Path], target_root: Path, *,
     attacker_controls: list[str] | None = None,
@@ -1473,6 +1510,7 @@ def cluster_expansion_decisions(
                 for item in items
             ),
             "scope_block": scope_block,
+            "filed_block": _filed_lines_block(crash_dirs[0].parents[1]),
         },
     )
     configured = llm_decide.decision_timeout("cluster_expand")
@@ -3040,7 +3078,7 @@ def triage_crash_dirs(
             and not autodiscard_reason(sanitizer_text)
         ):
             _materialize_crash_class(directory)
-    counts = {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0}
+    counts = {"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0, "duplicate": 0}
     if not directories:
         return counts
     # A current final receipt needs no repeated triage. Cached trigger reviews
@@ -3096,8 +3134,151 @@ def triage_crash_dirs(
     directories = [
         directory for directory in directories if directory not in handled
     ]
+    directories, deferred, folded = _fold_duplicate_crash_states(directories, results)
+    counts["duplicate"] += folded
+    _adjudicate_crash_dirs(
+        directories, results=results, target_root=target_root,
+        target_slug=target_slug, controls=controls, findings_only=findings_only,
+        deadline=deadline, target_root_is_product=target_root_is_product,
+        bypasses=bypasses, age_pending=age_pending, workers=workers,
+        usage_index=usage_index, counts=counts,
+    )
+    if deferred:
+        # The representatives hold their verdicts now: a sibling of one that
+        # was promoted folds into it, and the rest are adjudicated on their own
+        # merits in this same pass, so a barrier leaves nothing unjudged.
+        deferred, _, folded = _fold_duplicate_crash_states(
+            deferred, results, defer_siblings=False,
+        )
+        counts["duplicate"] += folded
+        _adjudicate_crash_dirs(
+            deferred, results=results, target_root=target_root,
+            target_slug=target_slug, controls=controls, findings_only=findings_only,
+            deadline=deadline, target_root_is_product=target_root_is_product,
+            bypasses=bypasses, age_pending=age_pending, workers=workers,
+            usage_index=usage_index, counts=counts,
+        )
+    return counts
+
+
+#: Bundles triage folded into a promoted bundle with the same crash state.
+#: Hidden so routine scans (`glob("CRASH-*")`, the rejected index, pooling)
+#: never count them: they are neither results nor rejections, only evidence
+#: a maintainer can still open.
+DUPLICATE_CRASHES_DIR = ".duplicates"
+
+
+def _fold_duplicate_crash_states(
+    directories: list[Path], results: Path, *, defer_siblings: bool = True,
+) -> tuple[list[Path], list[Path], int]:
+    """Fold bundles whose crash state a promoted bundle already carries.
+
+    Returns (bundles to adjudicate, siblings deferred behind a representative,
+    bundles folded). Every duplicate reproducer used to buy an enrichment pass,
+    a trigger review, reachability, severity, and export for a cluster that
+    was already credited; across 36 benchmark cells that was 78 of 141
+    bundles. Only a `reportable` receipt absorbs: a pending, retained, or
+    rejected bundle may still need the second reproducer, and a different
+    probe route is adjudicated on its own because it can establish a different
+    boundary. Same-state, same-route bundles with no promoted owner yet elect
+    the earliest filed one as representative; with `defer_siblings` the rest
+    wait for its verdict so one review settles the state, otherwise they all
+    proceed. Missing route metadata and already promoted candidates fail open
+    to ordinary adjudication.
+    """
+    filed = crash_bundle.filed_crash_states(results)
+    adjudicate: list[Path] = []
+    deferred: list[Path] = []
+    folded = 0
+    states: dict[Path, tuple] = {}
+    routes: dict[Path, tuple | None] = {}
+    promoted_ids = {item.crash_id for item in filed if item.promoted}
+    for directory in directories:
+        state = crash_bundle.bundle_crash_state(directory)
+        if state is None:
+            adjudicate.append(directory)
+            continue
+        # A final receipt can re-enter this list when its source-review policy
+        # is stale. Keep that accepted artifact canonical while it refreshes;
+        # folding one accepted id into another would churn metrics and links.
+        if directory.name in promoted_ids:
+            adjudicate.append(directory)
+            continue
+        route = crash_bundle.bundle_crash_route(directory)
+        owner = crash_bundle.promoted_state_owner(
+            results, state, route, filed=filed, exclude={directory.name},
+        )
+        if owner is not None:
+            _fold_duplicate_crash(directory, results, owner)
+            folded += 1
+            continue
+        states[directory] = state
+        routes[directory] = route
+    leaders: dict[tuple, list[Path]] = {}
+    for directory in sorted(
+        states, key=lambda d: (crash_artifacts.filing_time(d) or float("inf"), d.name),
+    ):
+        peers = leaders.setdefault(states[directory], [])
+        route = routes[directory]
+        if route is not None and defer_siblings and any(
+            routes[peer] == route for peer in peers
+        ):
+            deferred.append(directory)
+            continue
+        peers.append(directory)
+    adjudicate.extend(d for d in directories if d in states and d not in deferred)
+    return adjudicate, deferred, folded
+
+
+def _fold_duplicate_crash(directory: Path, results: Path, owner: str) -> Path:
+    """Move a duplicate bundle beside the crash tree and close its hypothesis."""
+    root = results / "crashes" / DUPLICATE_CRASHES_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    destination = _unique_destination(root, directory.name)
+    shutil.move(str(directory), destination)
+    reason = f"identical crash state already promoted as {owner}"
+    try:
+        (destination / "duplicate-of.txt").write_text(
+            f"{owner}\n{reason}\n", encoding="utf-8",
+        )
+        workqueue.record_artifact_duplicate(
+            results, directory.name, owner, reason, artifact_dir=destination,
+        )
+    except OSError as exc:
+        # Keep the visible crash tree and structured state consistent. A
+        # hidden bundle whose hypothesis still names its old CRASH id is worse
+        # than retrying the fold on the next pass.
+        try:
+            (destination / "duplicate-of.txt").unlink(missing_ok=True)
+            shutil.move(str(destination), directory)
+        except OSError as rollback_exc:
+            raise OSError(
+                f"could not record duplicate status for {directory.name} "
+                f"({exc}); rollback also failed: {rollback_exc}"
+            ) from rollback_exc
+        raise
+    return destination
+
+
+def _adjudicate_crash_dirs(
+    directories: list[Path],
+    *,
+    results: Path,
+    target_root: str | os.PathLike[str],
+    target_slug: str,
+    controls: list[str],
+    findings_only: bool,
+    deadline: float | None,
+    target_root_is_product: bool,
+    bypasses: set[Path],
+    age_pending: bool,
+    workers: int,
+    usage_index,
+    counts: dict[str, int],
+) -> None:
+    """Export, review, and finalize one group of crash bundles into `counts`."""
     if not directories:
-        return counts
+        return
     reach_directories = []
     for directory in directories:
         sanitizer = _sanitizer_file(directory)
@@ -3220,7 +3401,6 @@ def triage_crash_dirs(
         )
     for status in statuses:
         counts[status] = counts.get(status, 0) + 1
-    return counts
 
 
 def _finding_cache(path: Path) -> dict:

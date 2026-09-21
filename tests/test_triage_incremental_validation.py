@@ -2097,7 +2097,7 @@ Generated score text.
                 triage.triage_crash_dirs(
                     self.root, self.root, "sampleproj", workers=1,
                 ),
-                {"promoted": 1, "rejected": 0, "pending": 1, "demoted": 0},
+                {"promoted": 1, "rejected": 0, "pending": 1, "demoted": 0, "duplicate": 0},
             )
 
     def test_crash_final_receipt_does_not_hide_a_stale_trigger_review(self) -> None:
@@ -2167,7 +2167,7 @@ Generated score text.
         self.assertEqual(attempted, [crash])
         self.assertEqual(
             counts,
-            {"promoted": 1, "rejected": 0, "pending": 0, "demoted": 0},
+            {"promoted": 1, "rejected": 0, "pending": 0, "demoted": 0, "duplicate": 0},
         )
 
     def test_expired_deadline_keeps_a_final_receipt_it_cannot_refresh(self) -> None:
@@ -2277,7 +2277,7 @@ Generated score text.
         self.assertEqual(attempted, [True, True])
         self.assertEqual(
             counts,
-            {"promoted": 0, "rejected": 2, "pending": 0, "demoted": 0},
+            {"promoted": 0, "rejected": 2, "pending": 0, "demoted": 0, "duplicate": 0},
         )
 
     def test_crash_gate_converges_fields_on_canonical_report_after_export(self) -> None:
@@ -2342,7 +2342,7 @@ Generated score text.
         self.assertEqual(events, ["export", "converge"])
         self.assertEqual(
             counts,
-            {"promoted": 1, "rejected": 0, "pending": 0, "demoted": 0},
+            {"promoted": 1, "rejected": 0, "pending": 0, "demoted": 0, "duplicate": 0},
         )
 
     def test_index_maintenance_rebinds_receipts_after_generated_report_edits(self) -> None:
