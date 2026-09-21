@@ -3274,12 +3274,13 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     )
     gate_passes = [0]
     def _limited_gate(_results, **_kwargs):
-        # First pass records an unknown provider reset; the second recovers.
+        # First pass records an unknown provider reset and leaves one id
+        # pending; the second recovers.
         marker = Path(os.environ["LLM_DECIDE_LIMIT_FILE"])
         gate_passes[0] += 1
         if gate_passes[0] == 1:
             marker.write_text("unknown\n", encoding="utf-8")
-        return {"accepted": gate_passes[0], "rejected": 0, "pending": 0}
+        return {"accepted": gate_passes[0], "rejected": 0, "pending": 2 - gate_passes[0]}
     with mock.patch.dict(os.environ, {
         "FIND_GATE_MAX_PAUSES": "1", "FIND_GATE_PAUSE_MAX_TOTAL": "1",
         "FIND_GATE_PAUSE_CHUNK": "1",
@@ -3549,6 +3550,25 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         timeout_result is None and timeout_backend_error is False
         and timeout_row["usage_complete"] is False,
         "timed-out decisions retain partial usage without crashing finalization",
+    )
+    # A schema-free call accepts any object, so a well-formed provider error
+    # event passed as the verdict and spent a reach-field attempt on an outage.
+    event_marker = root / "schema-free-limit"
+    with mock.patch.dict(os.environ, {
+        "ACTIVE_BACKEND": "claude", "MODEL": "fixture-model",
+        "LLM_DECIDE_LIMIT_FILE": str(event_marker),
+    }, clear=False), mock.patch.object(
+        llm_decide, "_invoke_backend",
+        return_value='{"type":"result","is_error":true,"api_error_status":401}',
+    ):
+        event_result, event_error = llm_decide._run_decision(
+            "reachability-fields", "", "classify", 5, "",
+        )
+    check(
+        event_result is None and event_error is False
+        and event_marker.is_file() and event_marker.read_text().strip(),
+        "a provider error event is never accepted as a schema-free verdict",
+        repr(event_result),
     )
 
     check(

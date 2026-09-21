@@ -876,7 +876,9 @@ _ALL_REACH_FIELD_LABELS = {
 # but left cached answers keyed to the old policy, which severity reads.
 # v7 added `availability_loss`; a resource report whose attempts an earlier
 # schema exhausted must be asked once for the grade the scorer now reads.
-_REACH_FIELD_DECISION_VERSION = "reach-fields-v7-availability-loss"
+# v9: only a verdict keyed to the report spends an attempt. Earlier sidecars
+# charged provider outages and dropped ids to the ceiling and froze reports.
+_REACH_FIELD_DECISION_VERSION = "reach-fields-v9-keyed-attempts"
 _REACH_FIELD_ENUMS = {
     "caller_contract": {"obeyed", "violated", "unspecified"},
     "caller_controls": {"bytes", "length", "number", "flags", "call-sequence", "timing", "none"},
@@ -991,17 +993,61 @@ def _pending_optional_reach_fields(text: str) -> dict[str, str]:
 _CONDITIONAL_REACH_FIELD_KEYS = frozenset({"class", "advisory", "parameter_control"})
 
 
-def _answered_reach_attempts(cache: dict) -> int:
+def _reach_attempts(cache: dict) -> int:
+    """Verdicts a model returned for this report, whatever they contained.
+
+    A batch that dropped the id, unusable JSON, a capped or timed-out call:
+    none is a verdict on the report, so none counts. The ceiling bounds what
+    the model actually said; the drain loop bounds everything else per pass,
+    and a report nothing was ever said about stays owed its ask.
+    """
     try:
-        return int(cache.get("_answered_attempts", 0))
+        return int(cache.get("_fill_attempts", 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _reach_attempt_ceiling() -> int:
+    return _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
+
+
+def _reach_attempts_exhausted(cache: dict, *, single: bool = False) -> bool:
+    """Whether the report has spent its batched asks, or with `single` also
+    the one single-report ask that follows them.
+
+    A model that answers a batch and leaves an id out twice is not a settled
+    "cannot classify": the same report asked on its own usually is answered.
+    So the last ask is single-report, and only after it does the report stop
+    being owed one.
+    """
+    return _reach_attempts(cache) >= _reach_attempt_ceiling() + (1 if single else 0)
+
+
+# Why a report's scorer fields were never settled, as the rejection records
+# it. The batched asks and the single-report ask after them each returned a
+# verdict for this report, and none named the caller contract or trigger
+# source: the report does not say where its boundary is, and a reviewer
+# cannot find out from it.
+REACH_FIELDS_UNSETTLED_REASON = (
+    "review could not determine the report's caller contract or trigger "
+    "source after every ask was answered"
+)
+
+
+def _reach_fields_unsettled(directory: Path) -> bool:
+    """Whether every verdict the model gave for this report left its boundary
+    unplaced: the batched asks and the single-report ask after them."""
+    report = _report(directory)
+    if report is None:
+        return False
+    cache = _reach_field_cache(directory / ".llm_fields.json")
+    return _reach_attempts_exhausted(cache, single=True)
 
 
 def _reach_fields_owed(text: str, cache: dict) -> bool:
     """Whether this report still earns a provider ask for its scorer fields."""
     missing = _missing_reach_fields(text)
-    if _answered_reach_attempts(cache):
+    if _reach_attempts(cache):
         missing = {
             key: label for key, label in missing.items()
             if key not in _CONDITIONAL_REACH_FIELD_KEYS
@@ -1166,25 +1212,24 @@ def fill_reach_fields(
         missing = _missing_reach_fields(full_text)
         if not _reach_fields_owed(full_text, cache):
             return True
-    try:
-        attempts = int(cache.get("_fill_attempts", 0))
-        max_attempts = _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
-    except (TypeError, ValueError):
-        attempts, max_attempts = 0, 2
-    if attempts >= max_attempts:
+    single = decision_override is _NO_REACH_DECISION
+    if _reach_attempts_exhausted(cache, single=single):
         return changed
     decision = decision_override
-    if decision is _NO_REACH_DECISION:
+    if single:
         prompt = render_template("triage_reachability_fields.md.j2", {"narrative": text})
         timeout = llm_decide.decision_timeout("reachability-fields")
         decision = llm_decide.llm_decide(
             "reachability-fields", "", prompt, timeout, usage_index=usage_index,
         )
-    cache["_fill_attempts"] = attempts + 1
     if not isinstance(decision, dict):
+        # No verdict for this report: the ceiling is permanent and per
+        # report, and charging a provider cap or a dropped id to it froze
+        # reports pending beyond the reach of the drain's pause-and-retry and
+        # of --regenerate. Persist only the migrated version.
         _write_atomic_json(sidecar, cache)
         return changed
-    cache["_answered_attempts"] = _answered_reach_attempts(cache) + 1
+    cache["_fill_attempts"] = _reach_attempts(cache) + 1
     accepted = _accepted_reach_fields(decision, missing)
     cache.update(accepted)
     _write_atomic_json(sidecar, cache)
@@ -1228,12 +1273,7 @@ def _batch_reach_field_decisions(
             narrative = report_text[:6000]
             if not _reach_fields_owed(report_text, cache):
                 continue
-        try:
-            attempts = int(cache.get("_fill_attempts", 0))
-            max_attempts = _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
-        except (TypeError, ValueError):
-            attempts, max_attempts = 0, 2
-        if attempts >= max_attempts:
+        if _reach_attempts_exhausted(cache):
             continue
         attempted.add(directory)
         items.append({"id": directory.name, "report": narrative})
@@ -1277,11 +1317,7 @@ def reach_fields_open(directory: Path) -> bool:
     cache = _reach_field_cache(directory / ".llm_fields.json")
     if not _reach_fields_owed(text, cache):
         return False
-    try:
-        attempts = int(cache.get("_fill_attempts", 0))
-    except (TypeError, ValueError):
-        return True
-    return attempts < _positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2)
+    return not _reach_attempts_exhausted(cache, single=True)
 
 
 def converge_reach_fields(
@@ -1310,24 +1346,33 @@ def converge_reach_fields(
     report change", is what keeps an answerless pass retrying.
     """
     remaining = [Path(directory) for directory in directories]
-    for _ in range(_positive_int_env("LLM_FIELD_FILL_MAX_ATTEMPTS", 2) + 1):
+    asked: set[Path] = set()
+    for _ in range(_reach_attempt_ceiling() + 1):
         if _deadline_expired(deadline):
             return
         attempted, decisions, _ = _batch_reach_field_decisions(
             remaining, usage_index, deadline, workers,
         )
         if not attempted:
-            return
+            break
+        asked |= attempted
         for directory in remaining:
             if directory not in attempted:
                 continue
-            # An omitted id yields None, which spends this artifact's attempt
-            # without a second single-report call; the next pass re-batches it.
+            # An omitted id yields None and spends nothing; this loop's pass
+            # count is what bounds it, and the next pass re-batches it.
             fill_reach_fields(
                 directory, usage_index,
                 decision_override=decisions.get(directory),
             )
         remaining = sorted(attempted)
+    # Whatever the batches left open — dropped from every reply, or answered
+    # without the fields — gets one ask on its own, at the same width.
+    singles = [directory for directory in sorted(asked) if reach_fields_open(directory)]
+    if not singles or _deadline_expired(deadline):
+        return
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        list(pool.map(lambda directory: fill_reach_fields(directory, usage_index), singles))
 
 
 def fill_reach_fields_tree(root: Path) -> int:
@@ -3020,6 +3065,27 @@ def triage_one_crash(
     return "promoted"
 
 
+#: The pending receipt a bundle carries when its replay produced no
+#: measurement. A repeat triage pass replays exactly these: a bundle whose
+#: replay did measure but whose model review is still pending must not be
+#: re-run, since a replay that fails today would demote it.
+UNMEASURED_REPLAY_DETAIL = "configured-target replay could not be measured"
+
+
+def replay_unmeasured(directory: Path) -> bool:
+    try:
+        payload = json.loads(
+            (Path(directory) / "validation.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("state") == "pending"
+        and payload.get("detail") == UNMEASURED_REPLAY_DETAIL
+    )
+
+
 def triage_crash_dirs(
     results_dir: str | os.PathLike[str],
     target_root: str | os.PathLike[str],
@@ -3061,7 +3127,7 @@ def triage_crash_dirs(
             # publication credit for a crash this pass could not measure.
             validation_receipt.write(
                 directory, kind="crash", state="pending",
-                detail="configured-target replay could not be measured",
+                detail=UNMEASURED_REPLAY_DETAIL,
             )
     directories = [
         path for path in sorted(crashes.glob("CRASH-*"))
@@ -4130,6 +4196,15 @@ def _finalize_accepted_finding(
         return "rejected"
     reach_verdict, reach_detail = evaluate_crash_verdict(_read(report), controls)
     if reach_verdict == "incomplete":
+        if _reach_fields_unsettled(finding_dir):
+            # The model answered for this report and never placed the
+            # boundary. Held pending, this would sit unadjudicated forever;
+            # the rejection keeps the report and says exactly why.
+            _reject(
+                finding_dir, results_dir / "findings-rejected",
+                UNSETTLED_REJECTION_PREFIX + REACH_FIELDS_UNSETTLED_REASON,
+            )
+            return "rejected"
         validation_receipt.write(
             finding_dir, kind="finding", state="pending",
             detail="required boundary or trigger fields are incomplete",

@@ -148,10 +148,15 @@ class ConvergeReachFields(unittest.TestCase):
             root = Path(tmp)
             directory = _artifact(root, "findings", "FIND-0001")
             batch = _batches(None)
-            with mock.patch.object(triage, "_batch_decisions", batch):
+            with mock.patch.object(triage, "_batch_decisions", batch), \
+                    mock.patch.object(triage.llm_decide, "llm_decide", return_value=None) as single:
                 triage.converge_reach_fields([directory])
-            self.assertEqual(len(batch.seen), 2)
-            self.assertEqual(_attempts(directory), 2)
+            # Bounded here by the pass count, then one ask on its own; an
+            # omitted id is no verdict, so the report stays owed one.
+            self.assertEqual(len(batch.seen), triage._reach_attempt_ceiling() + 1)
+            self.assertEqual(single.call_count, 1)
+            self.assertEqual(_attempts(directory), 0)
+            self.assertTrue(triage.reach_fields_open(directory))
 
     def test_retries_the_whole_group_in_one_batched_pass(self) -> None:
         # Convergence must not trade the batched pass for one call per
@@ -162,14 +167,16 @@ class ConvergeReachFields(unittest.TestCase):
                 _artifact(root, "findings", f"FIND-{n:04d}") for n in range(1, 7)
             ]
             batch = _batches(None)
-            with mock.patch.object(triage, "_batch_decisions", batch):
+            with mock.patch.object(triage, "_batch_decisions", batch), \
+                    mock.patch.object(triage.llm_decide, "llm_decide", return_value=None) as single:
                 triage.converge_reach_fields(group, workers=4)
-            # Two passes, each handed all six artifacts at once — not twelve
-            # single-report decisions.
-            self.assertEqual(len(batch.seen), 2)
+            # Each pass is handed all six artifacts at once; the single asks
+            # come only after the batches, one per artifact.
+            self.assertEqual(len(batch.seen), triage._reach_attempt_ceiling() + 1)
             self.assertTrue(all(len(seen) == 6 for seen in batch.seen))
+            self.assertEqual(single.call_count, 6)
             for directory in group:
-                self.assertEqual(_attempts(directory), 2)
+                self.assertEqual(_attempts(directory), 0)
 
     def test_deadline_stops_the_loop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

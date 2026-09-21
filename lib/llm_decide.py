@@ -1168,10 +1168,7 @@ def record_provider_limit(*chunks: str) -> None:
     if not raw:
         return
     try:
-        from audit_helpers import (
-            _latest_rejected_reset_at,
-            _provider_issue_from_lines,
-        )
+        from audit_helpers import _latest_rejected_reset_at
     except Exception:
         return
     try:
@@ -1181,8 +1178,8 @@ def record_provider_limit(*chunks: str) -> None:
         # refusal stops the fan-out for the opposite reason: it will not clear,
         # and every further call returns an unparseable error the gate then
         # carries as an unjudged artifact.
-        issue = _provider_issue_from_lines(lines)
-        if issue not in ("capacity_limited", "backend_rejected"):
+        issue = provider_issue(raw)
+        if issue not in _PROVIDER_STOP_ISSUES:
             return
         # The two are recorded apart because the reader does different things
         # with them: a cap is waited out, a refusal is not. Writing a refusal as
@@ -1196,6 +1193,25 @@ def record_provider_limit(*chunks: str) -> None:
             f.write(f"{marker}\n")
     except Exception:
         return
+
+
+#: Provider outcomes that are not a model answer: a cap to wait out, or a
+#: refusal that will not clear.
+_PROVIDER_STOP_ISSUES = ("capacity_limited", "backend_rejected")
+
+
+def provider_issue(raw: str) -> str:
+    """Classify raw backend output with the audit loop's event-scoped detector.
+
+    Returns none/transient/capacity_limited/backend_rejected. Best-effort: an
+    unavailable classifier reads as no issue, the same as the decision path
+    behaved before it had one.
+    """
+    try:
+        from audit_helpers import _provider_issue_from_lines
+        return _provider_issue_from_lines(raw.splitlines())
+    except Exception:
+        return "none"
 
 
 def provider_limit_open() -> bool:
@@ -1327,8 +1343,20 @@ def _run_decision(
         record_provider_limit(raw)
         return None, False
     parsed = _try_load(json_text)
+    if not required_keys and provider_issue(raw) in _PROVIDER_STOP_ISSUES:
+        # A schema-free call accepts any object, so a well-formed provider
+        # error event would pass as the verdict; the reach-field fill would
+        # count it as an answer that settled nothing and spend an attempt on
+        # an outage. Classify before accepting.
+        _llm_log(f"{decision} FAIL provider-event bytes={prompt_bytes} elapsed={elapsed}s")
+        record_provider_limit(raw)
+        return None, False
     if not _validate_required_keys(parsed, required_keys):
         _llm_log(f"{decision} FAIL missing-keys={required_keys} bytes={prompt_bytes} elapsed={elapsed}s")
+        # A usage limit can also arrive as a well-formed error event with
+        # exit 0: valid JSON, none of the requested keys. The drain pauses on
+        # the marker, so classify this shape too, not only unparsable output.
+        record_provider_limit(raw)
         return None, False
     if not _validate_decision_shape(decision, parsed):
         _llm_log(f"{decision} FAIL invalid-shape bytes={prompt_bytes} elapsed={elapsed}s")

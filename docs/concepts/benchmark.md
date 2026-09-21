@@ -181,10 +181,27 @@ review attempts; it does not invent a verdict when the response omits or
 mangles an id. Crash triage passes the deadline through to its reviews, so a
 review that does not settle in time can remain pending.
 
-The finding drain repeats while its unjudged remainder keeps falling, because
-a review batch that returns no keyed output leaves its ids unadjudicated even
-on an unlimited budget. Cached receipts make each repeat pay only for what is
-still missing.
+Crash triage and the finding drain each repeat until nothing is pending. A
+pass that settles something, or that ran into a provider cap, is followed by
+another — after the cap is waited out — because everything that can leave an
+artifact pending inside a pass (a batch that omitted its id, a vote no model
+served, a replay that could not run) is retried by the next pass from cached
+receipts. A pass that settles nothing and records no cap stops the drain,
+since repeating it would repeat its answers; so does a refusal. The log
+names the stop. A remainder after the drain therefore means the finalize
+wall expired, the provider refused, it stayed capped past the pause budget,
+or a pass stalled — which is also how an outage that records no cap looks
+(timeouts, a missing backend, a spent decision budget). `--regenerate`
+continues from the cached receipts.
+
+Inside a pass, the bounded per-report budget for the scorer fields a finding
+needs before it can be judged is spent only by verdicts the model returned
+for that report. A capped or timed-out call, a batch reply that dropped the
+id, or unusable JSON says nothing about the report, spends nothing, and is
+bounded by the pass instead. After the batched asks the report is asked on
+its own once; a report whose every verdict left its caller contract and
+trigger source unplaced does not say where its boundary is, and is rejected
+with that reason rather than held.
 
 A run records the three gate prompt versions in effect when it started (the
 trigger gate, its resolver, and the find-quality gate) and adjudicates every
@@ -673,9 +690,9 @@ empty or incomplete directory is not evidence and does not create a marker.
 
 A run pins one build generation:
 
-1. A fresh run snapshots `target.toml`, converges its selected native build
-   once, then records the selected runner, executable, library, and
-   build-stamp bytes.
+1. A fresh run converges its selected native build once, snapshots the
+   `target.toml` that build filled in, then records the selected runner,
+   executable, library, and build-stamp bytes.
 2. It holds shared leases on those native build trees and any target-owned
    generic runner for the whole run, including replay, pooled triage, and
    metrics.

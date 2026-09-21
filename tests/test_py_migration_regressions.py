@@ -2176,7 +2176,8 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     )
     (cached_reach_dir / ".llm_fields.json").write_text(
         json.dumps({
-            "_fill_attempts": 2,
+            # Batched asks and the single-report ask after them all spent.
+            "_fill_attempts": triage._reach_attempt_ceiling() + 1,
             "_decision_version": triage._REACH_FIELD_DECISION_VERSION,
             "trusted_caller_actions": "normal public call",
         }),
@@ -2314,7 +2315,8 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         triage, "_prepare_accepted_finding",
         side_effect=lambda _directory, report, *_args: report,
     ), mock.patch.object(
-        triage, "_batch_reach_field_decisions", return_value=(set(), {}, set()),
+        triage, "_batch_reach_field_decisions",
+        return_value=(set(), {}, set()),
     ):
         batch_quality_counts = triage.validate_find_gate(batch_quality_root)
     check(

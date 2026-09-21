@@ -127,6 +127,12 @@ def _write_batch_votes(command: list[str], only: set[str] | None = None) -> None
         )
 
 
+def _no_verdict(decision: str, *_args, **_kwargs):
+    """A reply with no verdict for the report: a batch that dropped the id,
+    or a single ask whose output was unusable."""
+    return {"items": []} if decision.endswith("_batch") else None
+
+
 class IncrementalFindingValidationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="triage-incremental-")
@@ -148,7 +154,8 @@ class IncrementalFindingValidationTests(unittest.TestCase):
         ), mock.patch.object(
             triage, "_prepare_accepted_finding", return_value=self.report,
         ), mock.patch.object(
-            triage, "_batch_reach_field_decisions", return_value=(set(), {}, set()),
+            triage, "_batch_reach_field_decisions",
+            return_value=(set(), {}, set()),
         ):
             return triage.validate_find_gate(self.root, workers=2)
 
@@ -1060,7 +1067,8 @@ Generated score text.
         ), mock.patch.object(
             triage, "validate_one_finding", return_value="quality-accepted",
         ), mock.patch.object(
-            triage, "_batch_reach_field_decisions", return_value=(set(), {}, None),
+            triage, "_batch_reach_field_decisions",
+            return_value=(set(), {}, None),
         ), mock.patch.object(
             triage, "_prepare_accepted_finding", return_value=None,
         ), mock.patch.object(
@@ -1102,7 +1110,8 @@ Generated score text.
         ), mock.patch.object(
             triage, "validate_one_finding", return_value="quality-accepted",
         ), mock.patch.object(
-            triage, "_batch_reach_field_decisions", return_value=(set(), {}, None),
+            triage, "_batch_reach_field_decisions",
+            return_value=(set(), {}, None),
         ), mock.patch.object(
             triage, "_prepare_accepted_finding", return_value=None,
         ), mock.patch.object(
@@ -1156,7 +1165,8 @@ Generated score text.
         with mock.patch.object(
             triage, "_batch_decisions", side_effect=decisions,
         ), mock.patch.object(
-            triage, "_batch_reach_field_decisions", return_value=(set(), {}, None),
+            triage, "_batch_reach_field_decisions",
+            return_value=(set(), {}, None),
         ), mock.patch.object(
             triage, "_prepare_accepted_finding", return_value=None,
         ), mock.patch.object(
@@ -3828,9 +3838,7 @@ Generated score text.
         self.assertEqual(len(calls), 1)
         self.assertFalse(triage.reach_fields_open(self.finding))
         cache = json.loads((self.finding / ".llm_fields.json").read_text())
-        self.assertEqual(
-            (cache["_fill_attempts"], cache["_answered_attempts"]), (1, 1),
-        )
+        self.assertEqual(cache["_fill_attempts"], 1)
         # A second convergence pass, as the barrier and the pool rebuild run,
         # asks nothing more.
         with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=decide):
@@ -3841,12 +3849,14 @@ Generated score text.
         # No answer at all spends an attempt but settles nothing: the retry
         # budget still applies to the same open fields.
         self._reach_report(drop=("class", "advisory"))
+        # The batched asks, then the single-report ask; none returned a
+        # verdict for this report, so it is still owed one.
         with mock.patch.object(
-            triage.llm_decide, "llm_decide", return_value={"items": []},
+            triage.llm_decide, "llm_decide", side_effect=_no_verdict,
         ) as silent:
             triage.converge_reach_fields([self.finding], None, workers=1)
-        self.assertEqual(silent.call_count, 2)
-        self.assertFalse(triage.reach_fields_open(self.finding))
+        self.assertEqual(silent.call_count, triage._reach_attempt_ceiling() + 2)
+        self.assertTrue(triage.reach_fields_open(self.finding))
         # A required field left missing by an answered attempt is asked again;
         # only the conditional ones stop reopening the ask.
         self._reach_report(drop=("surface", "class", "advisory"))
@@ -3864,6 +3874,84 @@ Generated score text.
         self.assertIn("Class: authorization", text)
         self.assertIn("Surface: library-api", text)
         self.assertFalse(triage.reach_fields_open(self.finding))
+
+    def test_a_capped_provider_does_not_spend_the_reach_retry_budget(self) -> None:
+        """A drain under a provider cap must leave the asks for the next pass.
+
+        The observed failure: a capacity-limited find-gate drain opened the
+        limit marker, every queued decision was then skipped locally, and each
+        skip was charged to the report as a spent attempt. 29 of 38 findings
+        came out of that cell holding two unanswered attempts, no scorer
+        fields, and a `pending` receipt no later pass could reopen.
+        """
+        limit = self.root / "decision-provider-limit"
+        limit.write_text("unknown\n", encoding="utf-8")
+        self._reach_report(drop=("surface", "boundary"))
+        with mock.patch.dict(
+            os.environ, {"LLM_DECIDE_LIMIT_FILE": str(limit)}, clear=False,
+        ), mock.patch.object(
+            triage.llm_decide, "_resolve_mock_value", return_value="",
+        ), mock.patch.object(
+            triage.llm_decide, "_run_decision",
+        ) as dispatched:
+            triage.converge_reach_fields([self.finding], None, workers=1)
+            self.assertFalse(dispatched.called)
+        self.assertTrue(triage.reach_fields_open(self.finding))
+
+        # And the same when the cap opens mid-pass, so the calls are made and
+        # skipped locally: they cost wall time, never an ask.
+        with mock.patch.object(
+            triage.llm_decide, "llm_decide", return_value=None,
+        ) as skipped:
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        self.assertTrue(skipped.called)
+        sidecar = self.finding / ".llm_fields.json"
+        cache = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+        self.assertEqual(cache.get("_fill_attempts", 0), 0)
+        self.assertTrue(triage.reach_fields_open(self.finding))
+
+        # The cap clears and the very next pass fills the fields it owes.
+        answer = {"items": [{
+            "id": self.finding.name, "surface": "library-api",
+            "boundary": "public request handler",
+        }]}
+        with mock.patch.object(
+            triage.llm_decide, "llm_decide", return_value=answer,
+        ):
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        text = self.report.read_text(encoding="utf-8")
+        self.assertIn("Surface: library-api", text)
+        self.assertIn("Boundary: public request handler", text)
+
+    def test_only_a_verdict_for_the_report_spends_its_ask(self) -> None:
+        """Dropped ids are bounded per pass and leave the report retryable;
+        a verdict that answers without the field is what the ceiling counts."""
+        self._reach_report(drop=("surface",))
+        answers: list[str] = []
+
+        def omit(decision, *_args, **_kwargs):
+            answers.append(decision)
+            return _no_verdict(decision)
+
+        with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=omit):
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        self.assertEqual(
+            answers,
+            ["reachability_fields_batch"] * (triage._reach_attempt_ceiling() + 1)
+            + ["reachability-fields"],
+        )
+        self.assertTrue(triage.reach_fields_open(self.finding))
+        self.assertFalse(triage._reach_fields_unsettled(self.finding))
+
+        def verdict(_decision, *_args, **_kwargs):
+            return {"items": [{"id": self.finding.name, "primitive": "authz_bypass"}]}
+
+        with mock.patch.object(triage.llm_decide, "llm_decide", side_effect=verdict) as asked:
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        # Two batched verdicts and the single one, none placing the field.
+        self.assertEqual(asked.call_count, triage._reach_attempt_ceiling() + 1)
+        self.assertFalse(triage.reach_fields_open(self.finding))
+        self.assertTrue(triage._reach_fields_unsettled(self.finding))
 
     def test_a_batched_answer_still_lands_after_cached_fields_complete_the_report(self) -> None:
         # Cached required fields complete the report, but a resource report

@@ -294,20 +294,26 @@ def _finalize_deadline(finalize_wall: int) -> float | None:
     return time.monotonic() + finalize_wall if finalize_wall else None
 
 
-# Repeat passes over a gate that still holds pending ids. Three is enough for
-# the observed failure — a batch that answered for some ids and not others —
-# without turning a genuinely stuck reviewer into an unbounded retry loop; the
-# strictly-falling remainder below is what actually ends it.
-_FIND_GATE_COMPLETION_PASSES = 3
-
-
-def drain_find_gate(
-    results: Path, backend: str, model: str, target: Path, target_slug: str,
-    *, deadline: float | None = None, workers: int = 4,
+def _drain_gate(
+    results: Path, run_pass, *, deadline: float | None = None,
+    label: str = "Find-gate",
 ) -> dict[str, int]:
-    """Adjudicate a finished cell, pausing only for a confirmed provider cap."""
-    import triage
+    """Repeat a gate pass until nothing is pending, pausing for provider caps.
 
+    Each pass either settles something, or reports a provider cap it ran into,
+    or neither. The first two are reasons to go again — after waiting the cap
+    out — and the third stops: a pass that settled nothing and recorded no cap
+    would be repeated verbatim. Everything that can leave an artifact pending
+    inside a pass (a batch that omitted its id, an unserved vote, a replay that
+    could not run) is retried by the next pass from cached receipts, so this
+    loop is what turns "pending" into a verdict. A refusal stops it too: that
+    provider is not coming back. The first pass always runs so an expired
+    deadline still enumerates what it leaves unjudged.
+
+    The stop is logged with its reason. A stall cannot be told from an outage
+    that writes no marker — timeouts, a missing backend, a spent decision
+    budget — so the log says so, and `--regenerate` resumes from receipts.
+    """
     limit_file = results / ".find-gate-limit"
     try:
         max_pauses = max(0, int(os.environ.get("FIND_GATE_MAX_PAUSES", "12")))
@@ -315,9 +321,70 @@ def drain_find_gate(
         pause_chunk = max(1, int(os.environ.get("FIND_GATE_PAUSE_CHUNK", "1800")))
     except ValueError:
         max_pauses, max_pause_total, pause_chunk = 12, 21600, 1800
-    paused = 0
-    refused = False
-    counts = {"accepted": 0, "rejected": 0, "pending": 0}
+    paused = pauses = 0
+    counts: dict[str, int] = {}
+    previous_limit = os.environ.get("LLM_DECIDE_LIMIT_FILE")
+    os.environ["LLM_DECIDE_LIMIT_FILE"] = str(limit_file)
+    try:
+        pending_before: int | None = None
+        while True:
+            if pending_before is not None and deadline is not None and time.monotonic() >= deadline:
+                log(f"{label} stopped: finalize wall expired with {pending_before} unjudged")
+                break
+            limit_file.write_text("", encoding="utf-8")
+            counts = run_pass()
+            pending = int(counts.get("pending", 0))
+            if not pending:
+                break
+            if pending_before is not None and deadline is not None and time.monotonic() >= deadline:
+                log(f"{label} stopped: finalize wall expired with {pending} unjudged")
+                break
+            reset = _find_gate_reset(limit_file)
+            capped = reset is not None and not (reset == 0 and limit_file.stat().st_size == 0)
+            if capped:
+                if _find_gate_refused(limit_file):
+                    log(f"{label} stopped: provider refused the request")
+                    break
+                if pauses >= max_pauses or paused >= max_pause_total:
+                    log(f"{label} stopped: provider still limited after {paused}s of pauses")
+                    break
+                now = int(time.time())
+                wait = reset - now + 30 if reset and reset > now else pause_chunk
+                wait = max(1, min(wait, max_pause_total - paused))
+                if deadline is not None:
+                    wait = min(wait, max(0, int(deadline - time.monotonic())))
+                    if wait <= 0:
+                        log(f"{label} stopped: finalize wall expired with {pending} unjudged")
+                        break
+                log(f"{label} provider limit: pausing {wait}s before retry")
+                time.sleep(wait)
+                paused += wait
+                pauses += 1
+            elif pending_before is not None and pending >= pending_before:
+                log(
+                    f"{label} stopped: a pass settled nothing for {pending} "
+                    "artifact(s) and recorded no provider cap; an outage that "
+                    "leaves no marker (timeouts, missing backend, spent "
+                    "decision budget) reads the same, and --regenerate resumes"
+                )
+                break
+            pending_before = pending
+    finally:
+        if previous_limit is None:
+            os.environ.pop("LLM_DECIDE_LIMIT_FILE", None)
+        else:
+            os.environ["LLM_DECIDE_LIMIT_FILE"] = previous_limit
+        limit_file.unlink(missing_ok=True)
+    if paused:
+        counts["paused_seconds"] = paused
+    return counts
+
+
+def drain_find_gate(
+    results: Path, backend: str, model: str, target: Path, target_slug: str,
+    *, deadline: float | None = None, workers: int = 4,
+) -> dict[str, int]:
+    """Adjudicate a finished cell's findings to completion."""
     config = benchmark_target_config(results, target, target_slug)
     revision, config_digest = _evidence_scope(results, target, target_slug)
     with _decision_environment(
@@ -326,80 +393,48 @@ def drain_find_gate(
         target_revision=revision,
         target_config_sha256=config_digest,
     ):
-        previous_limit = os.environ.get("LLM_DECIDE_LIMIT_FILE")
-        os.environ["LLM_DECIDE_LIMIT_FILE"] = str(limit_file)
+        return _drain_gate(
+            results,
+            lambda: triage.validate_find_gate(
+                results, deadline=deadline, target_root_is_product=True,
+                reject_missing_reports=True, finish_started_group=True,
+                workers=workers,
+            ),
+            deadline=deadline,
+        )
 
-        def drain_once() -> dict[str, int]:
-            nonlocal paused, refused
-            result = {"accepted": 0, "rejected": 0, "pending": 0}
-            for attempt in range(max_pauses + 1):
-                # The first pass must still enumerate expired findings so the
-                # cell is marked incomplete; validate_find_gate's own deadline
-                # check makes that bookkeeping pass spend no provider quota.
-                if attempt and deadline is not None and time.monotonic() >= deadline:
-                    break
-                limit_file.write_text("", encoding="utf-8")
-                result = triage.validate_find_gate(
-                    results, deadline=deadline, target_root_is_product=True,
-                    reject_missing_reports=True, finish_started_group=True,
-                    workers=workers,
-                )
-                reset = _find_gate_reset(limit_file)
-                if reset is None:
-                    break
-                if reset == 0 and limit_file.stat().st_size == 0:
-                    break
-                if _find_gate_refused(limit_file):
-                    # Nothing to wait for, and nothing to come back to: the
-                    # outer completion loop reads this too, because clearing the
-                    # marker and calling again is how a refusal turns into a
-                    # second refused call instead of an unadjudicated remainder.
-                    refused = True
-                    log("Find-gate stopped: provider refused the request")
-                    break
-                if attempt >= max_pauses or paused >= max_pause_total:
-                    break
-                now = int(time.time())
-                wait = reset - now + 30 if reset and reset > now else pause_chunk
-                wait = max(1, min(wait, max_pause_total - paused))
-                if deadline is not None:
-                    wait = min(wait, max(0, int(deadline - time.monotonic())))
-                    if wait <= 0:
-                        break
-                log(f"Find-gate provider limit: pausing {wait}s before retry")
-                time.sleep(wait)
-                paused += wait
-            return result
 
-        try:
-            counts = drain_once()
-            # A review batch that returns no keyed output leaves its ids
-            # pending, and the pass ends with them unadjudicated even on an
-            # unlimited wall — so an unbounded budget alone does not finish the
-            # gate. Cached receipts make a repeat pass pay only for what is
-            # still missing, so retry while the remainder actually falls. A
-            # pass that converges, stalls, or runs past the ceiling ends the
-            # drain instead of looping on a stuck id.
-            for _ in range(_FIND_GATE_COMPLETION_PASSES):
-                if refused:
-                    break
-                if not counts.get("pending"):
-                    break
-                if deadline is not None and time.monotonic() >= deadline:
-                    break
-                before = counts["pending"]
-                counts = drain_once()
-                if counts.get("pending", 0) >= before:
-                    break
-        finally:
-            if previous_limit is None:
-                os.environ.pop("LLM_DECIDE_LIMIT_FILE", None)
-            else:
-                os.environ["LLM_DECIDE_LIMIT_FILE"] = previous_limit
-            limit_file.unlink(missing_ok=True)
-    if paused:
-        counts["paused_seconds"] = paused
-    return counts
+def drain_crash_triage(
+    results: Path, target: Path, target_slug: str, *, workers: int = 4,
+    deadline: float | None = None, require_replay: bool = False,
+    age_pending: bool = True,
+) -> dict[str, int]:
+    """Crash triage to completion, under the same pause-and-repeat as findings.
+
+    The promotion-pending TTL ages on the first pass only. It counts
+    finalizations a bundle has sat incomplete through, and the repeat passes
+    here are one finalization: aging them all would let a provider cap, or
+    nine sibling crashes settling one per pass, retire a bundle no model ever
+    reviewed.
+    """
+    passes = 0
+
+    def run_pass() -> dict[str, int]:
+        nonlocal passes
+        passes += 1
+        counts = triage_cell_crashes(
+            results, target, target_slug, workers=workers, deadline=deadline,
+            require_replay=require_replay,
+            age_pending=age_pending and passes == 1,
+            replay_settled=passes == 1,
+        )
+        # A bundle whose replay could not be measured carries a pending
+        # receipt but is not in the gate's own pending count; the loop must
+        # see it, or one unmeasured replay is never retried.
+        counts["pending"] = counts.get("pending", 0) + counts.get("unreplayed", 0)
+        return counts
+
+    return _drain_gate(results, run_pass, deadline=deadline, label="Crash triage")
 
 
 def _benchmark_target_config_path(
@@ -538,8 +573,15 @@ def triage_cell_crashes(
     deadline: float | None = None,
     require_replay: bool = False,
     age_pending: bool = True,
+    replay_settled: bool = True,
 ) -> dict[str, int]:
-    """Apply the audit crash gate to a finished benchmark cell."""
+    """Apply the audit crash gate to a finished benchmark cell.
+
+    `replay_settled=False` replays only bundles the previous pass could not
+    measure: a repeat pass exists to retry those, not to re-measure a
+    reproducer that already ran and is only waiting on model review — a
+    re-run that fails under host load would demote it.
+    """
     nested_crashes = results / "session" / "results" / "crashes"
     if nested_crashes.is_dir():
         sources = [path for path in nested_crashes.iterdir() if path.is_dir()]
@@ -560,7 +602,10 @@ def triage_cell_crashes(
         triage.route_finding_diagnostics(
             results, reconsider_unverifiable_replay=True,
         )
-        candidates = sorted((results / "crashes").glob("CRASH-*"))
+        candidates = [
+            crash_dir for crash_dir in sorted((results / "crashes").glob("CRASH-*"))
+            if replay_settled or triage.replay_unmeasured(crash_dir)
+        ]
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=min(2, len(candidates) or 1)
         ) as executor:
@@ -1418,24 +1463,21 @@ def _provider_issue(cell_dir: Path, model: str = "") -> str:
 
 
 def _unadjudicated_warning(name: str, unjudged: int) -> str:
-    """The un-adjudicated warning, without promising a remedy that may not apply.
+    """The un-adjudicated warning, naming the only causes that remain.
 
-    Two different states reach this count. A review with no usable recorded
-    answer is retried on the next pass. An inconclusive first review or split is
-    retried once with its prior evidence; only a focused resolution that still
-    cannot settle is cached until the evidence changes.
-
-    Says "retries" rather than "finishes" because a retry is not a promise — a
-    batch can return nothing usable again — and hedges the receipt for the same
-    reason: an id no review has answered may have no current receipt at all.
+    The drain repeats until every finding is judged, so a remainder means the
+    drain itself stopped, and the log line before this one says why: the
+    finalize wall expired, the provider refused, it stayed capped past the
+    pause budget, or a pass settled nothing — which is also how an outage that
+    records no cap looks. `--regenerate` continues from the cached receipts.
     """
     return (
         f"WARN: {name} has {unjudged} finding(s) un-adjudicated after drain; "
-        "they count as unconfirmed. `bin/benchmark --regenerate` retries the "
-        "ones whose review left no usable answer or needs focused resolution; "
-        "an unresolved final review stays unjudged until new evidence settles "
-        "it. Each "
-        "finding's validation.json says which, where one exists"
+        "they count as unconfirmed. The drain stopped early — the finalize "
+        "wall expired, the provider refused, it stayed capped past the pause "
+        "budget, or a pass settled nothing (the 'stopped:' line above says "
+        "which). `bin/benchmark --regenerate` continues from the cached "
+        "receipts"
     )
 
 
@@ -3974,7 +4016,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                                 with _finalization_phase(
                                     results, finalization_pass, "crash_triage",
                                 ):
-                                    crash_counts = triage_cell_crashes(
+                                    crash_counts = drain_crash_triage(
                                         results, target_root, args.target,
                                         workers=finalize_workers,
                                         deadline=_finalize_deadline(finalize_wall),
@@ -4178,7 +4220,7 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                             with _finalization_phase(
                                 results, finalization_pass, "crash_triage",
                             ):
-                                triage_cell_crashes(
+                                drain_crash_triage(
                                     results, target_root, args.target,
                                     workers=finalize_workers,
                                     deadline=_finalize_deadline(finalize_wall),

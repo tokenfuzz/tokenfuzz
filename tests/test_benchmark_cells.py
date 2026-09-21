@@ -1360,24 +1360,132 @@ class FinalizationDrainTests(unittest.TestCase):
         self.assertEqual(counts.get("pending"), 3)
         self.assertNotIn("paused_seconds", counts)
 
-    def test_the_unadjudicated_warning_names_only_remedies_that_apply(self) -> None:
-        """It must not promise that re-running the gate finishes the count.
+    def test_the_drain_repeats_while_the_remainder_falls_and_stops_on_a_stall(self) -> None:
+        """No fixed pass count: only a served pass that settles nothing ends it.
 
-        Operators followed the old wording, ran `--regenerate`, and watched the
-        number not move. The warning must distinguish retryable first-pass
-        uncertainty from a focused resolution that already remained uncertain.
+        The old drain allowed three completion passes, so a remainder that
+        needed a fourth was published unjudged with nothing wrong upstream.
+        """
+        results = self.work / "cell" / "results"
+        results.mkdir(parents=True)
+        remainders = iter([5, 4, 3, 2, 1, 0])
+        passes = benchmark_runner._drain_gate(
+            results, lambda: {"pending": next(remainders)},
+        )
+        self.assertEqual(passes, {"pending": 0})
+        self.assertEqual(next(remainders, "spent"), "spent")
+
+        served = [4, 4]
+        stalled = benchmark_runner._drain_gate(
+            results, lambda: {"pending": served.pop(0)},
+        )
+        self.assertEqual(stalled, {"pending": 4})
+        self.assertEqual(served, [], "a served pass with no progress is tried once more, not forever")
+
+    def test_crash_triage_waits_out_a_provider_cap_like_the_finding_drain(self) -> None:
+        results = self.work / "cell" / "results"
+        results.mkdir(parents=True)
+        calls: list[int] = []
+
+        def triage_pass(*_args, **_kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                Path(os.environ["LLM_DECIDE_LIMIT_FILE"]).write_text("unknown\n")
+                return {"promoted": 0, "pending": 2}
+            return {"promoted": 2, "pending": 0}
+
+        with mock.patch.dict(os.environ, {"FIND_GATE_PAUSE_CHUNK": "7"}, clear=False), \
+                mock.patch.object(benchmark_runner, "triage_cell_crashes", triage_pass), \
+                mock.patch.object(benchmark_runner.time, "sleep") as slept:
+            counts = benchmark_runner.drain_crash_triage(
+                results, self.work / "target", "demo",
+            )
+        slept.assert_called_once_with(7)
+        self.assertEqual(counts, {"promoted": 2, "pending": 0, "paused_seconds": 7})
+
+    def test_crash_drain_ages_the_pending_ttl_once_per_finalization(self) -> None:
+        results = self.work / "cell" / "results"
+        results.mkdir(parents=True)
+        aged: list[bool] = []
+        remainders = iter([2, 1, 0])
+
+        def triage_pass(*_args, age_pending, **_kwargs):
+            aged.append(age_pending)
+            return {"pending": next(remainders)}
+
+        with mock.patch.object(benchmark_runner, "triage_cell_crashes", triage_pass):
+            benchmark_runner.drain_crash_triage(results, self.work / "target", "demo")
+        self.assertEqual(aged, [True, False, False])
+
+    def test_an_expired_finalize_wall_is_logged_as_the_stop(self) -> None:
+        results = self.work / "cell" / "results"
+        results.mkdir(parents=True)
+        lines: list[str] = []
+        with mock.patch.object(benchmark_runner, "log", lines.append), \
+                mock.patch.object(benchmark_runner.time, "monotonic", return_value=100.0):
+            counts = benchmark_runner._drain_gate(
+                results, lambda: {"pending": 1}, deadline=100.0,
+            )
+        self.assertEqual(counts, {"pending": 1})
+        self.assertTrue(any("finalize wall expired" in line for line in lines), lines)
+
+    def test_repeat_crash_passes_replay_only_what_the_last_could_not_measure(self) -> None:
+        """A 5/5 replay waiting on model review is not re-run: a re-run that
+        fails under host load would demote it, so a provider cap during
+        review must not be able to change crash credit."""
+        results = self.work / "cell" / "results"
+        crashes = results / "crashes"
+        for name, state, detail in (
+            ("CRASH-001-1", "pending", benchmark_runner.triage.UNMEASURED_REPLAY_DETAIL),
+            ("CRASH-002-1", "pending", "incomplete fields: missing Caller contract"),
+            ("CRASH-003-1", "reportable", ""),
+        ):
+            (crashes / name).mkdir(parents=True)
+            (crashes / name / "report.md").write_text("# Crash\n", encoding="utf-8")
+            benchmark_runner.validation_receipt.write(crashes / name, kind="crash", state=state, detail=detail)
+        replayed: list[str] = []
+
+        def verify(crash_dir, *_args, **_kwargs):
+            replayed.append(crash_dir.name)
+            return "reproduced"
+
+        with mock.patch.object(benchmark_runner, "_verify_model_direct_crash", verify), \
+                mock.patch.object(benchmark_runner.triage, "triage_crash_dirs", return_value={"pending": 0}), \
+                mock.patch.object(benchmark_runner.triage, "route_finding_diagnostics"), \
+                mock.patch.object(
+                    benchmark_runner, "benchmark_target_config",
+                    return_value=SimpleNamespace(
+                        attacker_controls=["bytes"],
+                        attacker_controls_csv=lambda: "bytes",
+                        sanitizers_explicitly_disabled=False,
+                    ),
+                ):
+            benchmark_runner.triage_cell_crashes(
+                results, self.work / "target", "demo", require_replay=True,
+                replay_settled=False,
+            )
+            self.assertEqual(replayed, ["CRASH-001-1"])
+            replayed.clear()
+            benchmark_runner.triage_cell_crashes(
+                results, self.work / "target", "demo", require_replay=True,
+            )
+        # The replay pool runs two at a time, so only membership is ordered.
+        self.assertEqual(sorted(replayed), ["CRASH-001-1", "CRASH-002-1", "CRASH-003-1"])
+
+    def test_the_unadjudicated_warning_names_only_causes_that_remain(self) -> None:
+        """The drain runs to completion, so a remainder names why it stopped.
+
+        Operators once followed a wording that promised `--regenerate` would
+        finish the count, ran it, and watched the number not move. Now the only
+        things that leave a finding unjudged are the drain being stopped, and
+        the warning says which stop to look for.
         """
         warning = benchmark_runner._unadjudicated_warning("harness-r1", 3)
         self.assertIn("harness-r1", warning)
         self.assertIn("3 finding(s)", warning)
         self.assertIn("--regenerate", warning)
-        self.assertIn("retries", warning)
-        self.assertIn("focused resolution", warning)
-        self.assertIn("unresolved final review", warning)
-        self.assertNotIn("to finish the gate", warning)
-        # A pending id may have no receipt at all, so the receipt is offered as
-        # a place to look rather than asserted to exist.
-        self.assertIn("where one exists", warning)
+        for cause in ("finalize wall", "refused", "capped"):
+            self.assertIn(cause, warning)
 
     def test_a_run_adjudicates_under_the_gate_versions_it_started_with(self) -> None:
         # A prompt bump landing mid-run split one cell's votes across two
