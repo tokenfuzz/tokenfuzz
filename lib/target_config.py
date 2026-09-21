@@ -4823,6 +4823,8 @@ def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:
     cfg.sweep_token_budget = 0
     cfg.sweep_model = ""
     cfg.sweep_unit_lines = 120
+    cfg.asan_bin = ""
+    cfg.asan_lib = ""
     cfg.ubsan_bin = ""
     cfg.msan_bin = ""
     cfg.tsan_bin = ""

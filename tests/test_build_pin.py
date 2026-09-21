@@ -817,6 +817,45 @@ class PrimaryOnlyBuildTests(unittest.TestCase):
         self.assertNotIn("--no-alternates", self._setup_target_argv(True))
 
 
+class ConvergedConfigTests(unittest.TestCase):
+    """setup-target fills artifact paths into the live config as it builds."""
+
+    def test_refresh_reads_the_config_setup_target_wrote(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="converged-") as directory:
+            root = Path(directory)
+            target = root / "targets" / "sampleproj"
+            _native_target(target)
+            config = target_config.Config(target_root=str(target))
+            config.sanitizers_enabled = ["asan"]
+            written = root / "output" / "sampleproj" / "target.toml"
+
+            def build(command, **_kwargs):
+                written.parent.mkdir(parents=True)
+                written.write_text(
+                    'target = "sampleproj"\nasan_bin = "build-asan/app"\n\n'
+                    '[sanitizer]\nenabled = ["asan"]\n', encoding="utf-8",
+                )
+                return SimpleNamespace(returncode=0)
+
+            states = iter(["missing", "fresh"])
+            with mock.patch.object(
+                build_preflight, "_build_freshness",
+                side_effect=lambda *_args: next(states, "fresh"),
+            ), mock.patch.object(
+                build_preflight.subprocess, "run", side_effect=build,
+            ), mock.patch.object(
+                build_preflight, "_refresh_coverage",
+            ) as coverage, mock.patch.object(
+                build_preflight, "hold_builds", return_value=[],
+            ):
+                build_preflight.refresh(
+                    root, target, "sampleproj", config, root, "codex", "",
+                    lambda message: None, include_alternates=False,
+                )
+            self.assertEqual("build-asan/app", config.asan_bin)
+            self.assertEqual("build-asan/app", coverage.call_args.args[2].asan_bin)
+
+
 class GenericRunnerLeaseTests(unittest.TestCase):
     def test_a_target_owned_runner_is_leased(self) -> None:
         with tempfile.TemporaryDirectory(prefix="runner-lease-") as directory:

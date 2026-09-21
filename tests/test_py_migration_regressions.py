@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -151,11 +153,26 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
     budget_clock = iter([0])
     def _budget_time():
         return next(budget_clock, 5)
+
+    def _budget_preflight(*_args, **_kwargs):
+        # Convergence fills the artifact paths into the live config, after the
+        # run took its first snapshot.
+        built = fake_script_root / "targets" / "sampleproj" / "build-asan" / "converged-app"
+        built.parent.mkdir(parents=True, exist_ok=True)
+        built.write_bytes(b"converged\n")
+        built.chmod(0o755)
+        live = fake_script_root / "output" / "sampleproj" / "target.toml"
+        live.parent.mkdir(parents=True, exist_ok=True)
+        live.write_text(
+            'target = "sampleproj"\nasan_bin = "build-asan/converged-app"\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n', encoding="utf-8",
+        )
+        return []
     with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
          mock.patch.object(benchmark_runner.llm_invoke, "apply_memory_policy"), \
          mock.patch.object(benchmark_runner.target_config, "detect_rev", return_value="rev"), \
          mock.patch.object(benchmark_runner, "_git_rev", return_value="rev"), \
-         mock.patch.object(benchmark_runner, "preflight_build", return_value=[]), \
+         mock.patch.object(benchmark_runner, "preflight_build", side_effect=_budget_preflight), \
          mock.patch.object(benchmark_runner, "run_harness", side_effect=_budget_harness), \
          mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=_budget_crash_triage), \
          mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
@@ -180,6 +197,50 @@ with tempfile.TemporaryDirectory(prefix="py-migration-regressions-") as temporar
         (cells_dir / "harness-r2" / "metrics.json").read_text(encoding="utf-8")
     )
     check(budget_rc == 0, "trigger residue does not discard an otherwise completed benchmark cell")
+    check(
+        'asan_bin = "build-asan/converged-app"' in (bench_dir / "target.toml").read_text(encoding="utf-8"),
+        "the run pins the config its build preflight converged, not the seed it started from",
+    )
+
+    def _raced_preflight(*_args, **_kwargs):
+        # A peer rewrote the shared live config after this run's preflight
+        # verified it: the copy the run pins names a binary that is not there.
+        live = fake_script_root / "output" / "sampleproj" / "target.toml"
+        live.write_text(
+            'target = "sampleproj"\nasan_bin = "build-asan/peer-app"\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n', encoding="utf-8",
+        )
+        return []
+    raced_dir = backend_root / "raced-pin"
+    raced_cells = raced_dir / "cells"
+    raced_cells.mkdir(parents=True)
+    raced_launched = []
+
+    def _raced_harness(cell_dir, *_args, **_kwargs):
+        raced_launched.append(cell_dir)
+        return 0, cell_dir / "results"
+    with mock.patch.object(benchmark_runner, "SCRIPT_ROOT", fake_script_root), \
+         mock.patch.object(benchmark_runner.llm_invoke, "apply_memory_policy"), \
+         mock.patch.object(benchmark_runner.target_config, "detect_rev", return_value="rev"), \
+         mock.patch.object(benchmark_runner, "_git_rev", return_value="rev"), \
+         mock.patch.object(benchmark_runner, "preflight_build", side_effect=_raced_preflight), \
+         mock.patch.object(benchmark_runner, "run_harness", side_effect=_raced_harness), \
+         mock.patch.object(benchmark_runner, "triage_cell_crashes", side_effect=_budget_crash_triage), \
+         mock.patch.object(benchmark_runner, "drain_find_gate", side_effect=_budget_drain), \
+         mock.patch.object(benchmark_runner, "update_result", return_value=empty_report), \
+         mock.patch.object(benchmark_runner.metrics, "render_section", return_value=""), \
+         mock.patch.object(benchmark_runner.metrics, "append_to_ledger"), \
+         redirect_stderr(io.StringIO()) as raced_err:
+        raced_rc = benchmark_runner._run_locked(
+            budget_args, bench_root, backend_root, raced_dir, raced_cells,
+            backend_root / "benchmark-results.md", "raced-pin", ["harness"],
+        )
+    check(
+        raced_rc == 1 and not raced_launched
+        and "asan_bin is missing (build-asan/peer-app)" in raced_err.getvalue(),
+        "a pinned snapshot that no longer verifies refuses the run before any cell",
+        (raced_rc, raced_err.getvalue()[-300:]),
+    )
     check(
         drained_deadlines == [12, 12],
         "final benchmark triage receives its independent deadline",

@@ -136,6 +136,13 @@ nested_toml = write(
 nested_cfg = tc.Config(target_root=str(nested_checkout))
 tc.load_toml_into(nested_cfg, nested_toml)
 tc.load_toml_into(nested_cfg, nested_toml)
+write("routed.toml", 'target = "x"\nasan_bin = "build-asan/app"\nasan_lib = "build-asan/libapp.a"\n')
+write("unrouted.toml", 'target = "x"\n')
+scrubbed_cfg = tc.Config(target_root=str(TEST_TMPDIR))
+tc.load_toml_into(scrubbed_cfg, TEST_TMPDIR / "routed.toml")
+tc.load_toml_into(scrubbed_cfg, TEST_TMPDIR / "unrouted.toml")
+assert_eq(("", ""), (scrubbed_cfg.asan_bin, scrubbed_cfg.asan_lib),
+          "load_toml_into: reloading a file that dropped asan_bin/asan_lib clears them")
 assert_eq(
     (nested_checkout / "project").resolve(), Path(nested_cfg.target_root),
     "load_toml_into: reloading a nested config keeps its checkout root",

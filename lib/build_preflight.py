@@ -666,6 +666,15 @@ def _converge(
         logger(f"WARN: sanitizer build preflight could not run; continuing: {exc}")
         return
 
+    # setup-target fills the artifact paths (asan_bin, asan_lib, runner) into
+    # output/<slug>/target.toml as it builds. The object in hand predates that
+    # write, and the post-build probe, the coverage siblings and the caller's
+    # verification and build identity all read it: left stale, a first build
+    # ran with no coverage sibling and no build identity at all.
+    written = root / "output" / target_slug / "target.toml"
+    if written.is_file():
+        target_config.load_toml_into(config, written)
+
     try:
         after = {
             name: _build_freshness(target_root, config, name)

@@ -3755,6 +3755,23 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
     blocking = preflight_build(
         args, bench_dir, model, pinned_identity, run_config,
     )
+    if not blocking and not args.dry_run and pinned_identity is None \
+            and not args.regenerate:
+        # The preflight may have run setup-target --build, which fills the
+        # artifact paths into the live config. The snapshot above predates that
+        # write, and a run pinned to it measured every cell on a contract that
+        # named no binary: no build identity, no symbol coverage, no entry
+        # boundary. Pin the converged contract, then verify and lease that
+        # exact copy: the live file is shared, and a peer may have changed it
+        # between the preflight's check and this read.
+        config_snapshot = _snapshot_benchmark_config(
+            bench_dir, target_root, args.target, replace=True,
+        )
+        run_config = _benchmark_config(target_root, args.target, config_snapshot)
+        blocking = [
+            f"{name} could not be leased"
+            for name in build_preflight.hold_builds(target_root, run_config, log)
+        ] + build_preflight.build_problems(target_root, run_config)
     if blocking and not args.regenerate:
         if pinned_identity is not None:
             for reason in blocking:
