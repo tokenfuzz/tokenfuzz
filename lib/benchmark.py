@@ -40,7 +40,7 @@ import shutil
 import sys
 import tempfile
 import urllib.parse
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1992,8 +1992,8 @@ def harvest_finalization_tokens(
     Post-cell adjudication writes to the same index the audit does, so a cell
     that re-reviews a large corpus reports a token and cost total dominated by
     work that found nothing -- one re-review moved a direct cell from 13.9M to
-    24.9M input. The published columns stay combined on purpose: this is the
-    breakdown, recorded beside them, not a second number in the table.
+    24.9M input. The cell's own `tokens` stay combined; `_tokens_for_cell`
+    subtracts this subset so the published columns measure the wall alone.
 
     Split by the `.finalization_started` stamp rather than by decision role,
     because in-run housekeeping decisions steer the audit and belong to it.
@@ -4645,11 +4645,35 @@ def _tokens_for_cell(cell: dict) -> dict:
     tokens = metrics.get("tokens") or {}
     if not isinstance(tokens, dict):
         tokens = {}
-    input_tokens = _as_nonnegative_int(tokens.get("input_tokens"))
-    cached_input = _as_nonnegative_int(tokens.get("cached_input_tokens"))
-    cache_creation = _as_nonnegative_int(tokens.get("cache_creation_tokens"))
-    output_tokens = _as_nonnegative_int(tokens.get("output_tokens"))
+    # The published columns measure the audit wall. Post-wall adjudication of
+    # the frozen artifact set writes to the same ledger, and its size follows
+    # how many reports a cell filed, not how hard the cell worked: on one run
+    # it was 62% of a direct cell's input, and the row read as if reviewing
+    # the control's own findings were part of its audit spend. It stays
+    # recorded beside the columns as `finalization_*`.
+    finalization = metrics.get("finalization_tokens") or {}
+    if not isinstance(finalization, dict):
+        finalization = {}
+
+    def wall_only(key: str) -> int:
+        return max(
+            0,
+            _as_nonnegative_int(tokens.get(key))
+            - _as_nonnegative_int(finalization.get(key)),
+        )
+
+    input_tokens = wall_only("input_tokens")
+    cached_input = wall_only("cached_input_tokens")
+    cache_creation = wall_only("cache_creation_tokens")
+    output_tokens = wall_only("output_tokens")
     prompt_estimate = _as_nonnegative_int(tokens.get("prompt_estimate_tokens"))
+    cost_usd = str(tokens.get("cost_usd") or "")
+    finalization_cost = str(finalization.get("cost_usd") or "")
+    if cost_usd and finalization_cost:
+        try:
+            cost_usd = str(max(Decimal(0), Decimal(cost_usd) - Decimal(finalization_cost)))
+        except (InvalidOperation, ValueError):
+            pass
     # `estimated` is explicit for model-direct rows. Harness-side gemini
     # rows often only have prompt_estimate_tokens because agy has no usage
     # surface; treat that as estimated too so reports do not imply measured
@@ -4676,10 +4700,13 @@ def _tokens_for_cell(cell: dict) -> dict:
         "cache_creation_tokens": cache_creation,
         "output_tokens": output_tokens,
         "prompt_estimate_tokens": prompt_estimate,
-        "cost_usd": str(tokens.get("cost_usd") or ""),
+        "cost_usd": cost_usd,
         "cost_source": str(tokens.get("cost_source") or ""),
         "cost_estimated": bool(tokens.get("cost_estimated")) or estimated,
-        "usage_records": _as_nonnegative_int(tokens.get("usage_records")),
+        "usage_records": wall_only("usage_records"),
+        "finalization_input_tokens": _as_nonnegative_int(finalization.get("input_tokens")),
+        "finalization_output_tokens": _as_nonnegative_int(finalization.get("output_tokens")),
+        "finalization_cost_usd": finalization_cost,
         # Observed subagent spawns for the cell; a seat-hour figure is a
         # floor when this is non-zero.
         "delegation_events": (
@@ -6555,8 +6582,8 @@ def render_section(report: dict) -> str:
             "This is token cost, not separately metered provider tools, "
             "explicit cache storage, or non-standard service tiers. "
             "Codex rows use OpenAI API-equivalent dollars, including "
-            "GPT-5.5 long-context pricing when a request exceeds 272k "
-            "input tokens; the Codex product also reports credits."
+            "long-context pricing when a request exceeds 272k input "
+            "tokens; the Codex product also reports credits."
         )
         lines.append(
             "> - **Output** — tokens the model emitted (responses + "
@@ -7327,10 +7354,14 @@ def crosstab(bench_root: Path) -> str:
     )
     lines.append("")
     lines.append(
-        "- **Input** — tokens charged at the full input rate. Backends count "
-        "differently, so they are put on one footing: Claude's fresh input and "
-        "cache writes are added here, while Codex and Gemini report a running "
-        "total, so their cache reads are subtracted back out."
+        "- **Input** — tokens charged at the full input rate, spent inside "
+        "the wall. Backends count differently, so they are put on one "
+        "footing: Claude's fresh input and cache writes are added here, while "
+        "Codex and Gemini report a running total, so their cache reads are "
+        "subtracted back out. Review of the frozen artifact set after the "
+        "wall is recorded in each cell's `finalization_tokens` and left out "
+        "of every token and cost column, so a condition that filed more "
+        "reports is not charged for having them judged."
     )
     lines.append(
         "- **Output** — tokens generated, including tool-call payloads where "
@@ -7339,8 +7370,9 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "- **Cost** — what the run would cost at published list prices, with "
         "each bucket at its own rate: fresh input, cache writes, cache reads, "
-        "and output. Two vendor details are handled before totalling: GPT-5.5 "
-        "requests past 272k tokens bill at the higher long-context rate, and "
+        "and output. Two vendor details are handled before totalling: OpenAI "
+        "requests past 272k input tokens bill at the higher long-context "
+        "rate, and "
         "Gemini Pro is priced per request across its 200k-token tier "
         "boundary. Codex may also bill as workspace credits rather than "
         "dollars. This page rounds to whole dollars; each backend's own "

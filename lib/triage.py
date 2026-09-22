@@ -4528,13 +4528,30 @@ def record_artifact_events(results_dir: str | os.PathLike[str]) -> int:
     now = datetime.now(timezone.utc).isoformat()
     rows: list[dict] = []
 
-    def stamp(event: str, directory: Path, **extra: object) -> None:
+    def stamp(
+        event: str, directory: Path, *, at: str | None = None, **extra: object,
+    ) -> None:
         payload = {"type": event, "id": directory.name, **extra}
         key = event_key(payload)
         if key in seen:
             return
         seen.add(key)
-        rows.append({**payload, "first_seen": now})
+        rows.append({**payload, "first_seen": at or now})
+
+    def receipt_clock(directory: Path) -> str | None:
+        # The receipt records when the verdict landed. Stamping the scan's
+        # own clock instead dated every admission to whichever housekeeping
+        # pass first noticed it, which for a wall-cut iteration was the end
+        # of the run, so time-to-first-admitted read as the whole wall.
+        try:
+            payload = json.loads(
+                (directory / "validation.json").read_text(encoding="utf-8")
+            )
+            return datetime.fromtimestamp(
+                float(payload["validated_at"]), timezone.utc,
+            ).isoformat()
+        except (OSError, ValueError, KeyError, TypeError, OverflowError):
+            return None
 
     for root in (results / "crashes", results / "crashes-rejected"):
         if not root.is_dir():
@@ -4565,9 +4582,9 @@ def record_artifact_events(results_dir: str | os.PathLike[str]) -> int:
             if not directory.is_dir():
                 continue
             if validation_receipt.claims_state(directory, validation_receipt.SECURITY_STATES):
-                stamp("artifact_admitted", directory, kind=kind)
+                stamp("artifact_admitted", directory, kind=kind, at=receipt_clock(directory))
             elif validation_receipt.claims_state(directory, frozenset({"rejected"})):
-                stamp("artifact_rejected", directory, kind=kind)
+                stamp("artifact_rejected", directory, kind=kind, at=receipt_clock(directory))
     if not rows:
         return 0
     with workqueue.jsonl_lock(events):
@@ -4634,6 +4651,86 @@ def _finding_review_order(directories: list[Path]) -> list[Path]:
     return ordered
 
 
+_SITE_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+)(?::\d+)?$")
+
+
+def _crash_site(directory: Path) -> tuple[str, int, str] | None:
+    """(file basename, line, function) of a crash's first interesting frame."""
+    sanitizer = _sanitizer_file(directory)
+    if sanitizer is None:
+        return None
+    frame = stack_frames.first_interesting_frame(_read(sanitizer))
+    if frame is None:
+        return None
+    match = _SITE_LINE_RE.match(frame.location.strip())
+    if not match:
+        return None
+    return (
+        Path(match.group("path")).name.lower(),
+        int(match.group("line")),
+        frame.state_function.lower(),
+    )
+
+
+def _finding_site(report: Path) -> tuple[str, int, str] | None:
+    """(file basename, line, function) a finding names as its root cause."""
+    text = read_report_bounded(report)
+    file, func = finding_signature.extract_location(text)
+    line = finding_signature.extract_line(text)
+    if not file or not line.isdigit():
+        return None
+    return (Path(file).name.lower(), int(line), (func or "").lower())
+
+
+def absorb_crash_companions(results: Path, directories: list[Path]) -> list[Path]:
+    """Fold each finding into the crash filed at its exact source line.
+
+    A source finding and a sanitizer crash at the same line describe one
+    defect, most often because the session files the FIND first and its
+    probe then reproduces it. Reviewing both spent two verdicts on one
+    question and could return opposite answers: the crash accepted as
+    in-model while the same write-up was rejected as outside it, counted
+    once as security yield and once as a rejected report. The crash carries
+    the reproducer, so it owns the verdict; the finding moves under it as
+    `.companion/<FIND-id>` where its argument stays on disk and follows the
+    crash whichever way triage rules. Only the exact line qualifies: a shared
+    function is not a shared defect. Pinned findings stay under review.
+    """
+    sites: dict[tuple[str, int], list[tuple[str, Path]]] = {}
+    for lane in ("crashes", "crashes-rejected"):
+        for crash in sorted((results / lane).glob("CRASH-*")):
+            if not crash.is_dir():
+                continue
+            site = _crash_site(crash)
+            if site is not None:
+                sites.setdefault(site[:2], []).append((site[2], crash))
+    if not sites:
+        return list(directories)
+    kept: list[Path] = []
+    for directory in directories:
+        pinned = (directory / ".keep").is_file() or (directory / ".reviewed").is_file()
+        report = _report(directory)
+        site = _finding_site(report) if report is not None and not pinned else None
+        owner = None
+        if site is not None:
+            for function, crash in sites.get(site[:2], []):
+                if not function or not site[2] or function == site[2]:
+                    owner = crash
+                    break
+        if owner is None:
+            kept.append(directory)
+            continue
+        destination = _unique_destination(owner / ".companion", directory.name)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(directory), destination)
+        print(
+            f"INFO: {directory.name} names the site of {owner.name}; "
+            f"kept as its companion write-up under {destination.parent.name}/",
+            file=sys.stderr,
+        )
+    return kept
+
+
 def validate_find_gate(
     results_dir: str | os.PathLike[str],
     *,
@@ -4680,6 +4777,7 @@ def validate_find_gate(
     if only is not None:
         chosen = {Path(path) for path in only}
         directories = [path for path in directories if path in chosen]
+    directories = absorb_crash_companions(results, directories)
     timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
     # Finish conclusive cached work before asking a provider for anything.

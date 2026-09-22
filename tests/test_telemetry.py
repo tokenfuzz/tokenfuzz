@@ -158,8 +158,19 @@ class TelemetryTests(unittest.TestCase):
         ttf = telemetry.time_to_first(self.results)
         self.assertEqual(ttf["run_start"], "2026-08-28T10:00:00+00:00")
         self.assertEqual(ttf["filed_seconds"], 180.0)
-        self.assertEqual(ttf["crash_confirmed_seconds"], 1200.0)
+        # The reproduced crash was never admitted, so it confirms nothing:
+        # the run log's 5/5 rerun used to credit a crash triage later rejected.
+        self.assertIsNone(ttf["crash_confirmed_seconds"])
         self.assertEqual(ttf["admitted_seconds"], 7200.0)
+        _write_jsonl(self.results / "state" / "events.jsonl", [
+            {"type": "crash_created", "id": "CRASH-002-1", "signature": [],
+             "first_seen": "2026-08-28T11:00:00+00:00",
+             "mtime": "2026-08-28T10:30:00+00:00"},
+            {"type": "artifact_admitted", "id": "CRASH-002-1", "kind": "crash",
+             "first_seen": "2026-08-28T10:45:00+00:00"},
+        ])
+        ttf = telemetry.time_to_first(self.results)
+        self.assertEqual(ttf["crash_confirmed_seconds"], 1800.0)
 
     def test_time_to_first_uses_session_start_not_its_completion_row(self) -> None:
         self._index([{

@@ -901,11 +901,21 @@ def materialize(
             if separator and key == identity and (crashes / crash_id).is_dir():
                 return "DUP", crash_id
     maximum = 0
-    pattern = re.compile(rf"^CRASH-([0-9]+)-{re.escape(str(agent))}$")
-    for path in crashes.iterdir():
-        match = pattern.match(path.name) if path.is_dir() else None
-        if match:
+    # A rejected crash keeps its number: triage moves the directory to
+    # crashes-rejected/ under the same name (suffixed only on collision), so
+    # counting crashes/ alone re-issued CRASH-001-1 after the first was
+    # rejected and the second could only land under a timestamped name.
+    pattern = re.compile(rf"^CRASH-([0-9]+)-{re.escape(str(agent))}(?:\..*)?$")
+    for lane in (crashes, crashes.parent / "crashes-rejected"):
+        if not lane.is_dir():
+            continue
+        for path in lane.iterdir():
+            match = pattern.match(path.name) if path.is_dir() else None
+            if not match:
+                continue
             maximum = max(maximum, int(match.group(1)))
+            if lane != crashes:
+                continue
             for identity_path in (path / ".probe-identity", path / ".audit" / ".probe-identity"):
                 try:
                     if identity_path.read_text(encoding="utf-8").strip() == identity:

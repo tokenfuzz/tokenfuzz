@@ -287,31 +287,29 @@ def _min_stamp(values: list[float | None]) -> float | None:
     return min(present) if present else None
 
 
-def _confirmed_crash_run(row: dict) -> bool:
-    try:
-        repetitions = int(row.get("sanitizer_runs") or 1)
-    except (TypeError, ValueError):
-        return False
-    return (
-        str(row.get("verdict") or "").upper() == "CRASH"
-        and str(row.get("sanitizer") or "").lower() != "runner"
-        and repetitions >= 2
-    )
-
-
 def time_to_first(results_dir: Path, origin: str = "") -> dict:
-    """Seconds from run start to the first filed, confirmed, and admitted artifact."""
+    """Seconds from run start to the first filed, confirmed, and admitted artifact.
+
+    `crash_confirmed` is the filing time of the earliest crash that review
+    admitted. Filing already requires the sanitizer to reproduce the crash,
+    and reading confirmation from the run log instead credited the first
+    reproduced crash even when triage later rejected it.
+    """
     results = Path(results_dir)
     start = run_start(results, origin)
     events = _rows(results / "state" / "events.jsonl")
-    runs = _rows(results / "state" / "runs.jsonl")
     filed = _min_stamp([
         _parse_ts(row.get("mtime") or row.get("first_seen"))
         for row in events if row.get("type") in ("finding_created", "crash_created")
     ])
+    admitted_crashes = {
+        row.get("id") for row in events
+        if row.get("type") == "artifact_admitted" and row.get("kind") == "crash"
+    }
     confirmed = _min_stamp([
-        _parse_ts(row.get("created_at"))
-        for row in runs if _confirmed_crash_run(row)
+        _parse_ts(row.get("mtime") or row.get("first_seen"))
+        for row in events
+        if row.get("type") == "crash_created" and row.get("id") in admitted_crashes
     ])
     admitted = _min_stamp([
         _parse_ts(row.get("first_seen"))

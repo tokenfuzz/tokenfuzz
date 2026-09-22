@@ -1699,10 +1699,10 @@ def _effort(run: dict) -> str:
                 '<abbr class="mark" title="From file clocks, not recorded session spans">†</abbr>'
                 if eff["occupancy"] is not None and eff["occupancy_source"] != "recorded" else "")),
             _tile("First filed", _fmt_min(eff["first_filed_min"]), "from the first backend call"),
-            _tile("First crash confirmed", _fmt_min(eff["first_crash_min"])),
+            _tile("First crash confirmed", _fmt_min(eff["first_crash_min"]), "first crash later admitted"),
             _tile("First admitted", _fmt_min(eff["first_admitted_min"]), "first reportable receipt"),
             _tile("Probe EXEC_FAIL share", _fmt_pct(eff["exec_fail"])),
-            _tile("Input tokens", _e(tok["input"]), "fresh input + cache writes"),
+            _tile("Input tokens", _e(tok["input"]), "fresh input + cache writes, inside the wall"),
             _tile("Output tokens", _e(tok["output"])),
             _tile("Cost", _e(tok["cost"]), "list price" + (", estimated" if tok["estimated"] else "")),
             _tile("Confirmed / seat-h", "—" if eff["per_seat_hour"] is None else
@@ -2333,7 +2333,7 @@ _GUIDE = """
 <h3>Effort</h3>
 <p><b>Wall</b> is <code>spent/granted</code> hours, the median across finished repeats; time parked on a provider reset counts as neither. The harness usually spends the whole grant; the control stops when the model decides it is done, so a short numerator beside a count means that count came from a shorter experiment. <b>Replicates</b> is <code>done/total</code>; <code>(Np)</code> repeats never came back and are excluded, <code>(Nt)</code> repeats stopped early on a terminal backend exit but are counted. The wall contains every second the harness spent deciding what to look at next — housekeeping between iterations is steering, not overhead — and only provider-withheld capacity is subtracted.</p>
 <h3>Tokens and cost</h3>
-<p>Token columns are normalised so backends can be compared: <b>Input</b> is tokens charged at the full input rate (Claude's fresh input plus cache writes; running totals from Codex and Gemini have cache reads subtracted back out). <b>Output</b> includes tool-call payloads where reported. <b>Cost</b> prices each backend's own billing buckets at its published list rates and rounds to whole dollars; a <code>~</code> prefix marks an estimated price, for either of two reasons: the backend reported no usage and tokens were estimated from character counts, or the rate card is tiered by request size and the tier was reconstructed from the CLI's per-invocation totals rather than read from an invoice. Each backend's own ledger keeps the cents.</p>
+<p>Token columns are normalised so backends can be compared and cover the audit wall only: <b>Input</b> is tokens charged at the full input rate (Claude's fresh input plus cache writes; running totals from Codex and Gemini have cache reads subtracted back out). <b>Output</b> includes tool-call payloads where reported. Review of the frozen artifact set after the wall is recorded per cell as <code>finalization_tokens</code> and left out of every token and cost figure, so a condition that filed more reports is not charged for having them judged. <b>Cost</b> prices each backend's own billing buckets at its published list rates and rounds to whole dollars; a <code>~</code> prefix marks an estimated price, for either of two reasons: the backend reported no usage and tokens were estimated from character counts, or the rate card is tiered by request size and the tier was reconstructed from the CLI's per-invocation totals rather than read from an invoice. Each backend's own ledger keeps the cents.</p>
 <h3>Unique, shared, and coverage</h3>
 <p>A problem is <b>unique</b> to a condition when no other condition on the same target revision reached it — the model's own control included, because a problem the plain prompt also found is not the harness's contribution. <b>Coverage</b> is a condition's share of every distinct problem any run has reported on the revision: the union of all runs is the closest thing to an answer key a live target has, and it grows as more models run, so coverage is comparable within a revision and only there.</p>
 <h3>What makes this comparable</h3>

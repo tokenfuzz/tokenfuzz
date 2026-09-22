@@ -1137,6 +1137,44 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertIsNone(token_row["delegation_events"],
                           "a cell that predates delegation recording is unrecorded, not zero")
 
+    def test_token_columns_exclude_post_wall_adjudication(self) -> None:
+        """Reviewing a cell's own reports after the wall is not its audit spend.
+
+        On one run the direct control's row carried 998k of 1.6M input and
+        $14 of $24 from validating the 21 findings it had filed, so the more
+        a condition filed the more it appeared to cost. The columns measure
+        the wall; the finalization subset stays recorded beside them.
+        """
+        cell = {
+            "condition": "model-direct", "status": "done", "wall_seconds": 3600,
+            "metrics": {
+                "tokens": {
+                    "input_tokens": 1_610_799, "cached_input_tokens": 35_275_008,
+                    "output_tokens": 184_467, "usage_records": 31,
+                    "cost_usd": "24.242535",
+                },
+                "finalization_tokens": {
+                    "input_tokens": 997_494, "cached_input_tokens": 5_630_720,
+                    "output_tokens": 106_959, "usage_records": 30,
+                    "cost_usd": "14.340441",
+                },
+            },
+        }
+        row = benchmark._tokens_for_cell(cell)
+        self.assertEqual(row["input_tokens"], 613_305)
+        self.assertEqual(row["cached_input_tokens"], 29_644_288)
+        self.assertEqual(row["output_tokens"], 77_508)
+        self.assertEqual(row["usage_records"], 1)
+        self.assertEqual(row["cost_usd"], "9.902094")
+        self.assertEqual(row["finalization_input_tokens"], 997_494)
+        self.assertEqual(row["finalization_cost_usd"], "14.340441")
+        # A run predating the finalization stamp reports its combined ledger.
+        del cell["metrics"]["finalization_tokens"]
+        row = benchmark._tokens_for_cell(cell)
+        self.assertEqual(row["input_tokens"], 1_610_799)
+        self.assertEqual(row["cost_usd"], "24.242535")
+        self.assertEqual(row["finalization_input_tokens"], 0)
+
     def test_configured_default_models_have_pricing(self) -> None:
         # Every backend default in config/models.toml must key a pricing row.
         # Backends without a backend-reported cost (codex/gemini/grok) render a

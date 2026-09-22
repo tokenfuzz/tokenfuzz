@@ -1730,6 +1730,7 @@ def run_model_direct(
     usage_events = []
     for index, (usage, session_rc) in enumerate(usage_rows):
         event = dict(usage)
+        event.setdefault("role", "model-direct")
         event["reentry"] = index
         event["resolved_effort"] = llm_invoke.default_effort(backend)
         event["usage_complete"] = llm_usage.usage_is_complete(event, session_rc)
