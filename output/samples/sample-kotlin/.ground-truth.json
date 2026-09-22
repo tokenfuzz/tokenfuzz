@@ -2,22 +2,9 @@
   "target": "samples/sample-kotlin",
   "language": "kotlin",
   "findings_only": true,
-  "description": "Answer key for the synthetic sample-kotlin target. XXE, shell injection, serialized-array amplification, and concrete effectful plugin construction cross the attacker-supplied job-file boundary. Inert object/class reconstruction and a root selected by the same job remain precision traps.",
+  "description": "Answer key for the synthetic sample-kotlin target. XXE, shell injection, and unfiltered object deserialization cross the attacker-supplied job-file boundary. Inert object/class reconstruction, a root selected by the same job, and the availability-only serialized-array allocation and plugin-timer effects are precision traps: denial of service is not scored.",
   "runner": "reportkit.kts",
   "planted_bugs": [
-    {
-      "id": "serialized-array-size-amplification",
-      "kind": "real",
-      "findings_only": true,
-      "primitive": "denial-of-service",
-      "classes": ["denial-of-service"],
-      "access": "ALLOC",
-      "signature_symbol": "loadState",
-      "input": "repro/case-state-max-array",
-      "cwe": "CWE-400",
-      "modeled_on": "small serialized-array header declaring a near-maximum allocation with no application size ceiling",
-      "summary": "loadState accepts a 27-byte serialized byte-array stream declaring length 2,147,483,647. ObjectInputStream attempts that allocation before any application limit and terminates the Kotlin runner with an uncaught OutOfMemoryError."
-    },
     {
       "id": "xxe-manifest",
       "kind": "real",
@@ -41,19 +28,6 @@
       "cwe": "CWE-78",
       "modeled_on": "OS command injection class — ProcessBuilder(\"sh\", \"-c\", <attacker>) on an attacker string",
       "summary": "runExport runs its hook string through 'sh -c', so any export hook is arbitrary command execution. case-export runs 'true; echo injected' to prove the string is executed as a shell command."
-    },
-    {
-      "id": "effectful-plugin-construction",
-      "kind": "real",
-      "findings_only": true,
-      "primitive": "denial-of-service",
-      "classes": ["denial-of-service"],
-      "access": "EXEC",
-      "signature_symbol": "loadPlugin",
-      "input": "repro/case-plugin-timer",
-      "cwe": "CWE-470",
-      "modeled_on": "externally selected class construction reaching an installed constructor with a concrete process-lifetime effect",
-      "summary": "loadPlugin constructs any caller-named class. Selecting the built-in java.util.Timer starts a non-daemon thread, so the script prints successful dispatch but cannot exit and remains alive until the runner deadline."
     },
     {
       "id": "unfiltered-object-deserialization",
@@ -98,8 +72,17 @@
       "kind": "fp",
       "expected_outcome": "clean",
       "signature_symbol": "loadPlugin",
-      "classes": ["rce", "code-injection"],
-      "refute_reason": "Constructing java.util.Random proves class selection, not a gadget, privilege change, or other security impact. The real bug at this function is the effect of construction itself, so only a code-execution claim fires this trap."
+      "classes": ["rce", "code-injection", "denial-of-service"],
+      "refute_reason": "Constructing java.util.Random proves class selection, not a gadget, privilege change, or other security impact. The real bug at this function is the effect of construction itself, so only a code-execution claim fires this trap. Availability-only impact: constructing the caller-named java.util.Timer starts a non-daemon thread that keeps the process alive until the runner deadline. This harness does not score denial of service, an accepted limitation, so a report claiming only that here is a false positive by policy."
+    },
+    {
+      "id": "serialized-array-size-amplification",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "loadState",
+      "classes": ["denial-of-service"],
+      "input": "repro/case-state-max-array",
+      "refute_reason": "Availability-only impact: a 27-byte serialized array header declaring a near-maximum length makes ObjectInputStream attempt the allocation and end the process with an OutOfMemoryError. This harness does not score denial of service, an accepted limitation, so a report claiming only that here is a false positive by policy."
     }
   ]
 }

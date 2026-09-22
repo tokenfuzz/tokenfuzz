@@ -208,8 +208,8 @@ ok('set parameter_control to "application-supplied"' in rf,
 rc, ff = render_named("find_first_directive.md.j2",
                       {"results_dir": "/r", "report_prose": ""})
 ok(rc == 0, "find_first_directive renders")
-ok("AND show the demand surviving the project's own allocation" in ff,
-   "find-first: unsized resource exhaustion is not a FIND")
+ok("does not score denial of service" in ff,
+   "find-first: availability-only impact is not a FIND")
 
 rc, vp = render_named("validate_trigger_provenance.md.j2", {"target_path": "/t"})
 ok(rc == 0, "validate_trigger_provenance renders")

@@ -268,6 +268,19 @@ penalises the condition that builds reproducers and rewards the one that
 does not. The trigger-provenance reviewer reads the source and answers the
 question itself, and its answer wins when the two disagree.
 
+### Denial of service is not scored
+
+A report whose only consequence is availability loss (CPU or memory
+amplification, algorithmic or regex complexity, leaks, out-of-memory,
+recursion depth, a fault that ends one request or process) is rejected by the
+finding gate on both sides, without a vote when its class is in the `dos`
+family and by the quality reviewer when the class hides it. Crash triage
+already auto-rejects stack exhaustion and out-of-memory diagnostics. This is
+an accepted limitation: the harness scores boundary-crossing primitives, and a
+condition that can restate one quadratic loop at twenty sites must not be
+able to outscore one that found a memory-safety bug. The rejected reports
+stay on disk under `findings-rejected/` as engineering evidence.
+
 ### Both conditions face the same bar
 
 The baseline's crashes are replayed through the target's normal invocation

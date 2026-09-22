@@ -99,9 +99,10 @@ class StrategyValidationTests(unittest.TestCase):
         self.assertIn("S4-directed-fuzzing.md", s7)
         self.assertIn("Existing parser fixture mutation", s7)
         self.assertIn("state/lifetime experiments owned by S5", s7)
-        self.assertIn("quantified memory or CPU amplification", s7)
-        self.assertIn("target's own size ceiling", s7)
-        self.assertIn("configured availability boundary", s7)
+        # Size and count fields stay a route to bounds bugs; the allocation
+        # or CPU cost they cause is an accepted limitation, never a finding.
+        self.assertIn("does not score availability-only impact", s7)
+        self.assertNotIn("configured availability boundary", s7)
         self.assertNotIn("Not OOM (which is noise)", s7)
 
         s3 = self.text("S3-spec-vs-impl.md")

@@ -177,7 +177,17 @@ class SampleBugClassTests(unittest.TestCase):
                 self.assertIn(symbol, source_text, f"{path}: {bug['id']}")
 
         expected = set(bug_classes.DASHBOARD_CLASSES) | set(bug_classes.HARNESS_CLASSES)
-        self.assertEqual(covered, expected)
+        # Denial of service is not scored, so the dos family has no planted
+        # site to recall. Its sample sites stay as false-positive traps, so
+        # the answer keys still exercise the exclusion rather than forget it.
+        dos_family = {name for name in expected if bug_classes.family_of(name) == "dos"}
+        self.assertTrue(dos_family)
+        self.assertEqual(covered, expected - dos_family)
+        trapped: set[str] = set()
+        for path in manifests:
+            for trap in json.loads(path.read_text())["false_positive_traps"]:
+                trapped.update(trap.get("classes", []))
+        self.assertLessEqual(dos_family, trapped)
 
     def test_python_ground_truth_inputs_name_reachable_operations(self) -> None:
         """Embedded example jobs cannot drift away from the sample CLI."""

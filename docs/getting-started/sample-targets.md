@@ -33,9 +33,9 @@ and `.ground-truth.json` answer keys, is a gitignored working area.
 | `samples/sample-swift` | Swift / SwiftPM | ASan (via `[runner]`) | 3 | 4 |
 | `samples/sample-go` | Go / `go build -race` | `race` | 3 | 5 |
 | `samples/sample-python-native` | Python C extension | ASan | 1 | 0 |
-| `samples/sample-python` | Python | findings-only | 27 | 4 |
-| `samples/sample-java` | Java / maven | findings-only | 5 | 4 |
-| `samples/sample-kotlin` | Kotlin | findings-only | 5 | 4 |
+| `samples/sample-python` | Python | findings-only | 24 | 7 |
+| `samples/sample-java` | Java / maven | findings-only | 3 | 5 |
+| `samples/sample-kotlin` | Kotlin | findings-only | 3 | 5 |
 | `samples/sample-javascript` | Node / npm | findings-only | 3 | 4 |
 | `samples/sample-typescript` | TypeScript / npm (`node`, type stripping) | findings-only | 3 | 4 |
 | `samples/sample-ruby` | Ruby / bundler | findings-only | 3 | 4 |
@@ -89,7 +89,12 @@ The sample answer keys cover every class in the 2026-08-26 Anthropic Red
 The sanitizer targets demonstrate memory bounds, arithmetic, lifetime,
 uninitialized state, invalid frees, and races. The findings-only Python target
 adds short, independent examples for authorization, injection, cryptography,
-filesystem and network boundaries, resource exhaustion, and web security.
+filesystem and network boundaries, and web security. Its resource-exhaustion
+examples, and the Java and Kotlin allocation and plugin-timer examples, are
+false-positive traps: denial of service is
+[not scored](../concepts/benchmark.md#denial-of-service-is-not-scored), so a
+report that claims only availability loss at those sites counts against the
+run.
 
 An answer-key bug has one `primitive`, the exact label used to score its
 runtime diagnostic or finding. Its `classes` list records every established

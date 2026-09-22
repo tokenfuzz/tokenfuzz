@@ -52,7 +52,7 @@
         polling `ls findings/`) is satisfied by whichever bug shape is
         cheapest to restate — a 2026-08-02 pass filed one pattern across
         dozens of files and never ran the sanitizer. Quality is held by
-        the evidence bar here and the amplification rule in
+        the evidence bar here and the availability-only exclusion in
         audit_bug_contract.md.j2, never by an identity rule: merging one
         mechanism's sites across files was tried and removed, because
         cluster identity is (class, file, line) and merging suppresses
@@ -195,9 +195,11 @@ surface area of the project: memory-safety bugs (use-after-free, OOB
 read/write, double-free, type confusion, integer wrap), command and SQL
 injection, path traversal, missing or broken authentication / authorization,
 prototype pollution, SSRF, XSS in template / DOM-sink paths, unsafe parsing
-of untrusted data, race conditions, secret or PII leaks, and
-resource-exhaustion bugs. That list is a starting point, not a fence -- file
-anything that looks exploitable or weakens a security boundary.
+of untrusted data, race conditions, and secret or PII leaks. That list is a
+starting point, not a fence -- file anything that looks exploitable or weakens
+a security boundary. Denial of service alone is not on it: availability-only
+reports are not scored here, and the gate rejects them whichever side files
+them.
 
 Aim for depth: chase reach paths several call-frames deep and sketch PoCs in
 comments.

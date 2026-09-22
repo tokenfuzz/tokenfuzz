@@ -7282,7 +7282,9 @@ def crosstab(bench_root: Path) -> str:
         "points just as readily as it overstates an unreproduced claim. A real "
         "defect that crosses no security boundary stays on disk and is not "
         "security yield; one no reviewer settled is carried as an unjudged "
-        "remainder instead."
+        "remainder instead. Denial of service is never yield: a report whose "
+        "only consequence is availability loss is rejected on either side, an "
+        "accepted limitation of a harness that scores boundary-crossing primitives."
     )
     lines.append("")
 

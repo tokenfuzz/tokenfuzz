@@ -71,8 +71,8 @@ If a managed testcase prerequisite is absent, print `NO_EXEC: <proof>` and
 exit 2; do not raise an exception.
 
 A wrong exception type or one request's uncaught exception is robustness, not
-durable denial of service. File it only with proof that it crosses a security
-boundary or terminates or blocks a durable service beyond that request.
+durable denial of service, and denial of service is not scored here in any
+form. File it only with proof that it crosses a security boundary.
 
 | Category | In scope when the consumer is… | Security primitive it becomes |
 |----------|--------------------------------|-------------------------------|

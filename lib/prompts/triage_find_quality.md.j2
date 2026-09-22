@@ -152,14 +152,13 @@ unproven or merely suspicious report does not clear the default reject. REJECT
     corruption, UAF, bounds access, secret disclosure, or durable security
     impact after the failed allocation. An unchecked string-duplication or
     buffer-allocation helper is not by itself security substance.
-  - Unsized resource exhaustion: an allocation or loop driven by an
-    attacker-controlled count or length. Reject unless the report BOTH
-    quantifies the amplification (attacker bytes in → bytes or CPU consumed)
-    AND shows the demand surviving the project's own allocation or size
-    ceiling (or states the project has none). Either one alone fails: an
-    amplification a cap neutralizes is allocation handling, and a large
-    demand that costs the attacker comparably large input is not
-    amplification. Keep the report when both are argued but one is thin.
+  - Availability-only impact: resource exhaustion of any shape (CPU or
+    memory amplification, algorithmic or regex complexity, leaks,
+    out-of-memory, unbounded recursion) or a fault that only ends the request
+    or process, however well quantified. This harness does not score denial
+    of service; that is an accepted limitation, so reject the report whatever
+    class label it carries unless it proves a memory-safety, disclosure,
+    injection, or authorization consequence beyond the availability loss.
   - Unsourced residual-memory disclosure: a report claiming that
     uninitialized, stale, or leftover memory reaches an attacker MUST name
     the allocation that memory comes from -- the call, buffer, or field the

@@ -16,6 +16,42 @@ import triage  # noqa: E402
 import validation_receipt  # noqa: E402
 
 
+class AvailabilityOnlyTests(unittest.TestCase):
+    """Denial of service is not scored: a dos-family FIND is rejected unvoted."""
+
+    def test_dos_family_finding_is_rejected_without_a_vote_and_stays_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dos-scope-") as temporary:
+            results = Path(temporary)
+            findings = results / "findings"
+            findings.mkdir()
+            slow = findings / "FIND-0002-quadratic"
+            slow.mkdir()
+            (slow / "report.md").write_text(
+                "# Translation permits quadratic CPU exhaustion\n\n"
+                "Location: xpath.c:app_translate:7809\n\n"
+                "## Fields\n\n| Field | Value |\n|:--|:--|\n"
+                "| Class | denial-of-service |\n| File | `xpath.c` |\n"
+                "| Function | `app_translate` |\n| Line | 7809 |\n\n"
+                "## Summary\n\nEvery input character rescans the mapping string.\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"LLM_DECIDE_DISABLE": "1"}):
+                counts = triage.validate_find_gate(results, workers=1)
+            self.assertEqual(counts, {"accepted": 0, "rejected": 1, "pending": 0})
+            rejected = results / "findings-rejected" / "FIND-0002-quadratic"
+            self.assertTrue(rejected.is_dir())
+            self.assertIn(
+                triage.AVAILABILITY_ONLY_REJECTION_REASON,
+                (rejected / "rejection.md").read_text(encoding="utf-8"),
+            )
+            self.assertFalse((rejected / ".llm-find-quality.json").exists(), "no vote spent")
+            # A later pass must not requeue a policy rejection as a stale verdict.
+            with mock.patch.dict(os.environ, {"LLM_DECIDE_DISABLE": "1"}):
+                triage.validate_find_gate(results, workers=1)
+            self.assertTrue(rejected.is_dir())
+            self.assertEqual(list(findings.glob("FIND-*")), [])
+
+
 class SiteReviewTests(unittest.TestCase):
     def test_legacy_same_site_verdicts_return_to_independent_review(self) -> None:
         with tempfile.TemporaryDirectory(prefix="legacy-site-review-") as temporary:

@@ -49,9 +49,9 @@ class here when a report carries one.
 | `integer-underflow` | memory-safety | integer overflow (precursor) |
 | `null-deref` | memory-safety | null dereference |
 | `segv` | memory-safety | fault at an unknown address (availability) |
-| `stack-overflow` | dos | stack exhaustion — ASan's `stack-overflow` is recursion, not a stack buffer |
-| `denial-of-service` | dos | DoS amplification, graded by `Availability loss` |
-| `uncaught-exception` | dos | DoS amplification — kept only when the exception ends the process, not the request |
+| `stack-overflow` | dos | stack exhaustion — ASan's `stack-overflow` is recursion, not a stack buffer; not scored |
+| `denial-of-service` | dos | availability loss of any shape; not scored, the finding gate rejects the family as an accepted limitation |
+| `uncaught-exception` | dos | an exception ending a request or process; not scored |
 | `sql-injection` | injection | SQL injection |
 | `command-injection` | injection | command injection |
 | `code-injection` | injection | code execution |

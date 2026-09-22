@@ -206,22 +206,15 @@ Inputs to construct:
 - Magic bytes of format A followed by body of format B
 ```
 
-### Technique 5: Resource exhaustion boundaries
+### Technique 5: Size and count fields as a route, not a result
 
-Do not file ordinary allocation failure or an OOM reached only with a
-comparably large input. A compact input is substantive when an encoded
-size/count produces quantified memory or CPU amplification, the demand
-survives the target's own size ceiling (or none exists), and the resulting
-resource loss crosses the configured availability boundary. Record all three;
-without them it is allocation noise, not a finding.
-
-```
-Inputs to construct:
-- Image with 1x(2^31-1) dimensions (huge allocation from small input)
-- Deeply nested elements (4096+ nesting depth)
-- Millions of small allocations (many small chunks, not one big one)
-- Array/table with count=MAX but tiny actual data (sparse allocation)
-```
+Encoded sizes and counts (`1x(2^31-1)` image dimensions, `count=MAX` over
+tiny data, 4096+ nesting) are worth constructing because the code that trusts
+them is where bounds and integer wraps live. The allocation or CPU cost they
+cause is not a finding: this harness does not score availability-only impact
+(memory or CPU amplification, out-of-memory, recursion depth), an accepted
+limitation because the focus is on boundary-crossing primitives. Record the cost in
+state as evidence and file only the memory-safety consequence that follows.
 
 ### Delivery
 

@@ -1637,8 +1637,22 @@ UNSETTLED_REJECTION_REASON = (
     + "source review could not place the trigger inside the declared threat model"
 )
 THREAT_MODEL_REJECTION_PREFIX = "threat-model: "
+# Availability-only impact is not scored. The harness looks for boundary-crossing
+# primitives; a report whose whole consequence is that a service slows, runs
+# out of memory, or ends a request is recorded as engineering evidence and
+# earns no security credit. This is an accepted limitation, stated in the
+# bug contract every agent and the direct control read, and enforced here so
+# the two conditions cannot diverge on it: one run filed nineteen quadratic-CPU
+# reports on one side while the other side's strategies never opened one.
+OUT_OF_SCOPE_REJECTION_PREFIX = "out-of-scope: "
+AVAILABILITY_ONLY_REJECTION_REASON = (
+    OUT_OF_SCOPE_REJECTION_PREFIX
+    + "availability-only impact (denial of service) is not scored by this "
+    "harness; recorded as engineering evidence"
+)
 _PUBLICATION_REJECTION_PREFIXES = (
     THREAT_MODEL_REJECTION_PREFIX, UNSETTLED_REJECTION_PREFIX,
+    OUT_OF_SCOPE_REJECTION_PREFIX,
 )
 
 
@@ -4731,6 +4745,34 @@ def absorb_crash_companions(results: Path, directories: list[Path]) -> list[Path
     return kept
 
 
+def reject_availability_only(
+    results: Path, directories: list[Path], counts: dict[str, int],
+) -> list[Path]:
+    """Reject `dos`-family findings from their authored class, before any vote.
+
+    Denial of service is not scored, so a report that declares itself one
+    needs no reviewer. The quality prompt carries the same rule for a report
+    that hides the class behind another label; both must agree. Pinned
+    findings stay under review.
+    """
+    kept: list[Path] = []
+    for directory in directories:
+        pinned = (directory / ".keep").is_file() or (directory / ".reviewed").is_file()
+        report = _report(directory)
+        if pinned or report is None or bug_classes.family_of(
+            finding_signature.extract_class(read_report_bounded(report)),
+        ) != "dos":
+            kept.append(directory)
+            continue
+        (directory / ".pending-drop").unlink(missing_ok=True)
+        _reject(
+            directory, results / "findings-rejected",
+            AVAILABILITY_ONLY_REJECTION_REASON,
+        )
+        counts["rejected"] += 1
+    return kept
+
+
 def validate_find_gate(
     results_dir: str | os.PathLike[str],
     *,
@@ -4780,6 +4822,7 @@ def validate_find_gate(
     directories = absorb_crash_companions(results, directories)
     timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
+    directories = reject_availability_only(results, directories, counts)
     # Finish conclusive cached work before asking a provider for anything.
     # Regeneration often has a large legacy backlog alongside already-reviewed
     # artifacts. Letting the backlog consume the shared deadline first made

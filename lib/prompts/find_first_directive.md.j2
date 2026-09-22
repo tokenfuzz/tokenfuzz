@@ -27,13 +27,12 @@ agent rotates, the iteration ends, or the testcase hits a coverage/build wall.
 
 **Skip filing** when the issue is pure correctness, data-integrity,
 robustness, or spec-deviation without a security implication — the harness
-gate quarantines non-security FINDs. Same for an allocation or loop sized by
-an attacker-controlled count or length, unless you BOTH quantify the
-amplification (attacker bytes in → bytes or CPU consumed) AND show the demand
-surviving the project's own allocation or size ceiling, saying so plainly when
-the project has no such ceiling. Either one alone fails: an amplification a
-cap neutralizes is allocation handling, and a large demand that costs the
-attacker comparably large input is not amplification.
+gate quarantines non-security FINDs. Same for availability-only impact:
+resource exhaustion, algorithmic or regex complexity, leaks, out-of-memory,
+recursion depth, or a fault that only ends a request or process. This harness
+does not score denial of service; the gate rejects a `dos`-family FIND without
+a vote. Record the observation in state and file only a memory-safety,
+disclosure, injection, or authorization consequence that follows from it.
 
 **Point at the fix (best-effort, never blocks filing).** End `report.md`
 with exactly one fix pointer: a `## Fix Direction` heading on its own line

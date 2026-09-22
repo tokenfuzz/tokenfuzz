@@ -478,25 +478,25 @@ class SharedPolicyAgreementTests(unittest.TestCase):
     """Rules restated across prompts, asserted as agreeing rather than present.
 
     The renderer has no include, so the emit contract, the harness FIND
-    directive and the find-quality gate each carry the resource-exhaustion bar
-    in their own voice. When one said "skip only when NEITHER fact holds"
-    while another said "in scope only when BOTH hold", a report quantifying an
-    amplification the project's own cap already neutralized passed emit and
-    gate while the contract excluded it.
+    directive and the find-quality gate each carry the availability rule in
+    their own voice. When the contract asked agents to quantify amplification
+    while the strategy references told them a slowdown is never durable denial
+    of service, one condition filed nineteen quadratic-CPU reports the gate
+    accepted and the other never opened one. Denial of service is now excluded
+    everywhere, as an accepted limitation, and every statement must say so.
     """
 
     def read(self, *parts: str) -> str:
         return " ".join((ROOT.joinpath(*parts)).read_text(encoding="utf-8").split())
 
-    def test_every_statement_of_the_rule_requires_both_facts(self) -> None:
+    def test_every_statement_excludes_availability_only_impact(self) -> None:
         for name in ("audit_bug_contract.md.j2", "find_first_directive.md.j2",
-                     "triage_find_quality.md.j2"):
+                     "triage_find_quality.md.j2", "benchmark_model_direct.md.j2"):
             with self.subTest(prompt=name):
                 body = self.read("lib", "prompts", name)
-                self.assertIn("BOTH quantif", body)
-                self.assertIn("AND show", body)
-                # The De Morgan inversion that split them the first time.
-                self.assertNotIn("neither the amplification", body)
+                self.assertIn("not score", body)
+                self.assertNotIn("BOTH quantif", body)
+                self.assertNotIn("resource-exhaustion bugs", body)
 
     def test_application_supplied_reaches_the_scorer_from_author_docs(self) -> None:
         # Scoring must not depend on the bounded triage fill-in pass: the

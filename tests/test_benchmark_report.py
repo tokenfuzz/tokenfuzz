@@ -174,8 +174,8 @@ class BenchmarkReportTests(unittest.TestCase):
             # Execution budget goes to the attacker's boundary, so a crash
             # lane cannot degenerate into sweeping non-default options.
             "the attacker controls the **input**, not your command",
-            # Shared bug contract: resource exhaustion needs amplification.
-            "resource exhaustion you cannot size",
+            # Shared bug contract: availability-only impact is not scored.
+            "availability-only impact",
             # The `Class` field takes the same closed canonical vocabulary the
             # harness prompt and the quality gate use, so class breadth is a
             # measurement, never a prompt artifact. It labels; it does not

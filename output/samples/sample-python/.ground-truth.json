@@ -240,28 +240,6 @@
       "summary": "A fixed repeating keystream encrypts every record without a nonce or authentication tag."
     },
     {
-      "id": "cyclic-alias-stack-exhaustion",
-      "kind": "real",
-      "primitive": "stack-overflow",
-      "classes": ["stack-overflow", "denial-of-service"],
-      "signature_symbol": "expand_alias",
-      "file": "src/security_examples.py",
-      "input_text": "op: alias\na\na=b\nb=a",
-      "cwe": "CWE-674",
-      "summary": "Alias expansion has no cycle detection or depth bound; the RecursionError propagates out of the /alias route and reportkit_service aborts the whole worker process on it."
-    },
-    {
-      "id": "backtracking-filter-dos",
-      "kind": "real",
-      "primitive": "denial-of-service",
-      "classes": ["denial-of-service"],
-      "signature_symbol": "validate_filter",
-      "file": "src/security_examples.py",
-      "input_text": "op: filter\n(a+)+$\naaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
-      "cwe": "CWE-1333",
-      "summary": "An attacker-controlled backtracking regular expression runs over attacker-controlled text without a deadline."
-    },
-    {
       "id": "negative-refund-logic",
       "kind": "real",
       "primitive": "logic-error",
@@ -271,17 +249,6 @@
       "input_text": "op: refund\n-999999",
       "cwe": "CWE-840",
       "summary": "The refund limit has an upper bound but no nonnegative lower bound, so apply_refund (the /refund route) debits the named account and credits the merchant."
-    },
-    {
-      "id": "uncaught-required-field",
-      "kind": "real",
-      "primitive": "uncaught-exception",
-      "classes": ["uncaught-exception", "denial-of-service"],
-      "signature_symbol": "load_required_field",
-      "file": "src/security_examples.py",
-      "input_text": "op: required\nmissing",
-      "cwe": "CWE-248",
-      "summary": "A missing caller-selected key raises an uncaught KeyError that ends the CLI request and, through the /field route, aborts the whole reportkit_service worker."
     },
     {
       "id": "diagnostic-secret-disclosure",
@@ -344,6 +311,36 @@
       "file": "src/reportkit.py",
       "classes": ["path-traversal", "arbitrary-file-write"],
       "refute_reason": "The same job chooses both root and name, so traversal adds no write capability."
+    },
+    {
+      "id": "cyclic-alias-stack-exhaustion",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "expand_alias",
+      "classes": ["stack-overflow", "denial-of-service"],
+      "file": "src/security_examples.py",
+      "input_text": "op: alias\na\na=b\nb=a",
+      "refute_reason": "Availability-only impact: alias expansion has no cycle detection or depth bound, and the RecursionError ends the worker. This harness does not score denial of service, an accepted limitation, so a report claiming only that here is a false positive by policy."
+    },
+    {
+      "id": "backtracking-filter-dos",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "validate_filter",
+      "classes": ["denial-of-service"],
+      "file": "src/security_examples.py",
+      "input_text": "op: filter\n(a+)+$\naaaaaaaaaaaaaaaaaaaaaaaaaaaaa!",
+      "refute_reason": "Availability-only impact: an attacker-controlled backtracking regular expression runs over attacker-controlled text without a deadline. This harness does not score denial of service, an accepted limitation, so a report claiming only that here is a false positive by policy."
+    },
+    {
+      "id": "uncaught-required-field",
+      "kind": "fp",
+      "expected_outcome": "clean",
+      "signature_symbol": "load_required_field",
+      "classes": ["uncaught-exception", "denial-of-service"],
+      "file": "src/security_examples.py",
+      "input_text": "op: required\nmissing",
+      "refute_reason": "Availability-only impact: a missing caller-selected key raises an uncaught KeyError that ends the request and the worker. This harness does not score denial of service, an accepted limitation, so a report claiming only that here is a false positive by policy."
     }
   ]
 }
