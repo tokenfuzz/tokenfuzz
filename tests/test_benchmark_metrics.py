@@ -1019,8 +1019,8 @@ class BenchmarkMetricsTests(unittest.TestCase):
         )
         self.assertEqual(benchmark._decimal_text(gemini_long), "17.750000")
 
-        # Google's low tier is "<= 200k" and xAI's is "< 200k", so the same
-        # 200k threshold bills low here and high for grok just below.
+        # Google's low tier includes 200k; xAI's canonical pricing table marks
+        # long context as >= 200k.
         gemini_at_boundary, _ = benchmark._cost_decimal(
             "gemini", "gemini-2.5-pro",
             input_tokens=1_000_000, cached_input_tokens=1_000_000,
@@ -1042,19 +1042,18 @@ class BenchmarkMetricsTests(unittest.TestCase):
         )
         self.assertEqual(benchmark._decimal_text(grok_long), "16.600000")
 
-        # OpenAI publishes its standard tier as "<272K context length", so the
-        # boundary itself is long-context, like xAI's and unlike Google's.
-        codex_standard, _ = benchmark._cost_decimal(
+        # OpenAI likewise applies long-context pricing only above 272k.
+        codex_at_boundary, _ = benchmark._cost_decimal(
             "codex", "gpt-5.4",
             input_tokens=1_000_000, cached_input_tokens=1_000_000,
-            output_tokens=1_000_000, prompt_tokens_for_tier=271_999,
+            output_tokens=1_000_000, prompt_tokens_for_tier=272_000,
         )
-        self.assertEqual(benchmark._decimal_text(codex_standard), "17.750000")
+        self.assertEqual(benchmark._decimal_text(codex_at_boundary), "17.750000")
 
         codex_long, _ = benchmark._cost_decimal(
             "codex", "gpt-5.4",
             input_tokens=1_000_000, cached_input_tokens=1_000_000,
-            output_tokens=1_000_000, prompt_tokens_for_tier=272_000,
+            output_tokens=1_000_000, prompt_tokens_for_tier=272_001,
         )
         self.assertEqual(benchmark._decimal_text(codex_long), "28.000000")
 
@@ -1151,11 +1150,13 @@ class BenchmarkMetricsTests(unittest.TestCase):
                 "tokens": {
                     "input_tokens": 1_610_799, "cached_input_tokens": 35_275_008,
                     "output_tokens": 184_467, "usage_records": 31,
+                    "prompt_estimate_tokens": 1_900_000,
                     "cost_usd": "24.242535",
                 },
                 "finalization_tokens": {
                     "input_tokens": 997_494, "cached_input_tokens": 5_630_720,
                     "output_tokens": 106_959, "usage_records": 30,
+                    "prompt_estimate_tokens": 1_100_000,
                     "cost_usd": "14.340441",
                 },
             },
@@ -1164,6 +1165,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(row["input_tokens"], 613_305)
         self.assertEqual(row["cached_input_tokens"], 29_644_288)
         self.assertEqual(row["output_tokens"], 77_508)
+        self.assertEqual(row["prompt_estimate_tokens"], 800_000)
         self.assertEqual(row["usage_records"], 1)
         self.assertEqual(row["cost_usd"], "9.902094")
         self.assertEqual(row["finalization_input_tokens"], 997_494)
@@ -1172,6 +1174,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         del cell["metrics"]["finalization_tokens"]
         row = benchmark._tokens_for_cell(cell)
         self.assertEqual(row["input_tokens"], 1_610_799)
+        self.assertEqual(row["prompt_estimate_tokens"], 1_900_000)
         self.assertEqual(row["cost_usd"], "24.242535")
         self.assertEqual(row["finalization_input_tokens"], 0)
 

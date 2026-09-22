@@ -1531,10 +1531,9 @@ def _pricing_rates(
         # GPT-5.6 renamed the former flagship/mini/nano tiers to
         # Sol/Terra/Luna. The unsuffixed alias routes to Sol.
         #
-        # OpenAI's standard tier is published as "<272K context length", so a
-        # request at exactly 272k is already long-context and the boundary bills
-        # high — the same exclusive-low shape xAI uses, and the opposite of
-        # Google's "<= 200k" below.
+        # OpenAI applies long-context rates when a request exceeds 272k input
+        # tokens, so the boundary itself remains on the standard rate, like
+        # Google's <= 200k low tier below.
         #
         # A rate keys on the pricing day only where the vendor publishes the
         # date, as Gemini Flash does below. Guessing one is worse than not
@@ -1547,7 +1546,6 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "threshold_inclusive": True,
                 "input_low": _money("0.20"),
                 "input_high": _money("0.40"),
                 "cache_write_low": _money("0.25"),
@@ -1562,7 +1560,6 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "threshold_inclusive": True,
                 "input_low": _money("2"),
                 "input_high": _money("4"),
                 "cache_write_low": _money("2.50"),
@@ -1595,7 +1592,6 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "threshold_inclusive": True,
                 "input_low": _money("4"),
                 "input_high": _money("8"),
                 "cache_write_low": _money("5"),
@@ -1610,7 +1606,6 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "threshold_inclusive": True,
                 "input_low": _money("30"),
                 "input_high": _money("60"),
                 "cache_read_low": _money("0"),
@@ -1623,7 +1618,6 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "threshold_inclusive": True,
                 "input_low": _money("5"),
                 "input_high": _money("10"),
                 "cache_read_low": _money("0.50"),
@@ -1650,7 +1644,6 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "threshold_inclusive": True,
                 "input_low": _money("30"),
                 "input_high": _money("60"),
                 "cache_read_low": _money("0"),
@@ -1663,7 +1656,6 @@ def _pricing_rates(
             return {
                 "tiered": True,
                 "threshold": 272_000,
-                "threshold_inclusive": True,
                 "input_low": _money("2.50"),
                 "input_high": _money("5"),
                 "cache_read_low": _money("0.25"),
@@ -1827,10 +1819,8 @@ def _pricing_rates(
             }
 
     if b == "grok":
-        # xAI long-context pricing: a prompt at or past the threshold bills
-        # every token in the request at the higher rate. xAI's low tier is
-        # "< 200k", unlike Anthropic's and Google's "<= 200k", so the boundary
-        # itself is billed high here and low there. Cache writes have no
+        # xAI's pricing table defines long context as >= 200k input tokens, so
+        # the boundary itself takes the higher rate. Cache writes have no
         # separate rate and bill as base input.
         if _model_id_is(m, "grok-build-0.1"):
             return {
@@ -4666,7 +4656,7 @@ def _tokens_for_cell(cell: dict) -> dict:
     cached_input = wall_only("cached_input_tokens")
     cache_creation = wall_only("cache_creation_tokens")
     output_tokens = wall_only("output_tokens")
-    prompt_estimate = _as_nonnegative_int(tokens.get("prompt_estimate_tokens"))
+    prompt_estimate = wall_only("prompt_estimate_tokens")
     cost_usd = str(tokens.get("cost_usd") or "")
     finalization_cost = str(finalization.get("cost_usd") or "")
     if cost_usd and finalization_cost:
