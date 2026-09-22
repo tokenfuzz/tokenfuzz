@@ -92,8 +92,8 @@ state** and the report's **exact claimed security consequence**:
 >       language-neutral review mode:
 >       - memory-contract: an enforced guard, initialization, or ownership rule
 >         prevents the claimed corruption or invalid access;
->       - resource: an enforced ceiling, streaming bound, or cleanup path stops
->         the report's quantified amplification or retained demand;
+>       - resource: availability-only impact is rejected by policy; when the
+>         report claims a separate scored consequence, use its matching mode;
 >       - disclosure: the bytes reaching the claimed sink are fixed, zero, or
 >         attacker-derived, so they cannot contain the victim, cross-request,
 >         cross-tenant, credential, or arbitrary-process data the report claims;
@@ -197,8 +197,9 @@ For web / application / protocol / configuration / concurrency findings,
 select the matching generic semantic rubric instead of treating easy trigger
 reachability as proof:
 
-- resource exhaustion: identify the attacker-controlled exhausting quantity
-  and source-prove unbounded retention, work, or amplification;
+- resource exhaustion: availability-only impact is not scored; reject it unless
+  the report proves a separate memory-safety, disclosure, injection, or
+  authorization consequence, then review that consequence under its rubric;
 - disclosure / uninitialized output: trace the sensitive or uninitialized
   source to an attacker-observable output;
 - auth / boundary / injection / crypto: identify the security decision or

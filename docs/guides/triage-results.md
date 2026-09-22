@@ -152,7 +152,7 @@ dangerous-looking API. Common rejected shapes:
 | Path escape where one untrusted value chooses both base and child | A separately trusted root, authorization decision, or different capability reached by the escape. |
 | Loading an outside file the attacker cannot place | A shipped effectful module or attacker-controlled placement inside the threat model. |
 | Deserialization or reflection reaches only a sink | A reachable gadget, hook, authorization effect, or memory consequence in the actual environment. |
-| Resource exhaustion from a caller-controlled count | Quantified amplification that survives the product's own input ceiling. |
+| Resource exhaustion from a caller-controlled count | A separate memory-safety, disclosure, injection, or authorization consequence; availability loss alone is not scored. |
 | Residual-memory disclosure with no source allocation | The buffer, field, allocation, or prior operation the bytes came from. |
 | Caller-owned pointer or lifetime misuse | A public product path through which untrusted input drives the parameter into that state. |
 
@@ -239,12 +239,11 @@ actually decides the fault, not every setup call the driver makes.
 `Parameter control` matters when a compiled harness supplies a value the
 external input does not directly choose.
 
-Two fields are classified by the harness from the report rather than
-authored, and each can only lower a score. `Disclosed content` grades what an
-information-disclosure report shows reaching the attacker. `Availability
-loss` grades whether a source-argued resource-exhaustion report demonstrates
-the service dying (`total`, the only value that keeps the class's VA:H) or
-merely slowing in proportion to the attacker's own input (`degraded`).
+Two fields can appear in generated or older reports. `Disclosed content`
+grades what an information-disclosure report shows reaching the attacker.
+`Availability loss` is retained for compatibility with reports created before
+availability-only findings became unscored; it does not make such a candidate
+reportable.
 
 `Cluster`, `Dedup frames`, severity text, and patch rendering are written by
 the harness. Do not hand-author those generated sections.

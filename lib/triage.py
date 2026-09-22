@@ -858,10 +858,6 @@ _OPTIONAL_REACH_FIELD_LABELS = {
         # the only way this field moves a score and silence never costs a
         # finding.
         "disclosed_content",
-        # Whether a resource-exhaustion report demonstrates total loss or a
-        # slower service. Optional the same way; the scorer reads silence as
-        # degraded, so a source-only DoS claim earns VA:H only once graded.
-        "availability_loss",
     )
 }
 _ALL_REACH_FIELD_LABELS = {
@@ -874,8 +870,6 @@ _ALL_REACH_FIELD_LABELS = {
 # Bumped with the prompt: 12420dd made fixed pre-input shaping application
 # setup (`trigger_source: bytes`, `parameter_control: application-supplied`)
 # but left cached answers keyed to the old policy, which severity reads.
-# v7 added `availability_loss`; a resource report whose attempts an earlier
-# schema exhausted must be asked once for the grade the scorer now reads.
 # v9: only a verdict keyed to the report spends an attempt. Earlier sidecars
 # charged provider outages and dropped ids to the ceiling and froze reports.
 _REACH_FIELD_DECISION_VERSION = "reach-fields-v9-keyed-attempts"
@@ -889,7 +883,6 @@ _REACH_FIELD_ENUMS = {
     "disclosed_content": {
         "cross-principal", "same-context", "attacker-derived", "fixed-or-zero",
     },
-    "availability_loss": {"total", "degraded"},
 }
 _SURFACE_KINDS = {"network", "library-api", "file-format", "cli", "dev-tool", "internal", "unknown"}
 _CARRIER_KINDS = {"network", "library-api", "file-format", "cli", "harness", "runner", "unknown"}
@@ -949,13 +942,11 @@ def _missing_reach_fields(text: str) -> dict[str, str]:
 
 
 # Broad and stable rather than a class list that rots: any report whose own
-# class or primitive says it discloses something, or that it exhausts a
-# resource, is worth one bounded ask for the grade the scorer reads.
+# class or primitive says it discloses something is worth one bounded ask for
+# the grade the scorer reads.
 _OPTIONAL_REACH_FIELD_SHAPES = (
     ("disclosed_content",
      re.compile(r"disclos|info[-_ ]?leak|uninit|residu", re.I)),
-    ("availability_loss",
-     re.compile(r"\bdos\b|amplif|exhaust|memory[-_ ]?leak|regex|resource", re.I)),
 )
 
 
@@ -1328,22 +1319,14 @@ def converge_reach_fields(
 ) -> None:
     """Batch reach-field fill until nothing is pending or the budget is spent.
 
-    One batched pass applies what one answer supplies and stops. When an
-    answer is omitted or unparsable it still spends an attempt and
-    materializes nothing, so a later pass — the pool rebuild runs one —
-    rewrites a report that a validation receipt already covers. That
-    invalidates the receipt, bin/severity declines to score a report its
-    review no longer describes, and the artifact publishes unrated.
+    Complete the bounded retries before a validation receipt binds to the
+    report. A later field-fill pass would otherwise rewrite reviewed content
+    and leave the artifact unrated because its receipt no longer matches.
 
-    Repeating the pass here spends the same per-artifact attempt ceiling
-    before the receipt binds, at the same batch width, so the later pass has
-    nothing left to change. Provider calls keep their count and their shape —
-    only their timing moves.
-
-    Termination rides on the batch pass itself: it already skips a converged
-    report and one that has spent its attempts, so the set it reports as
-    attempted shrinks to empty. Looping on that set, rather than on "did the
-    report change", is what keeps an answerless pass retrying.
+    Only a parseable answer keyed to the report spends its per-artifact
+    attempt budget. Omitted ids, malformed answers, and provider failures stay
+    retryable; this loop's pass ceiling bounds them, then one final individual
+    request gives every still-open report a chance outside a partial batch.
     """
     remaining = [Path(directory) for directory in directories]
     asked: set[Path] = set()
@@ -1368,7 +1351,21 @@ def converge_reach_fields(
         remaining = sorted(attempted)
     # Whatever the batches left open — dropped from every reply, or answered
     # without the fields — gets one ask on its own, at the same width.
-    singles = [directory for directory in sorted(asked) if reach_fields_open(directory)]
+    # Include reports that entered this convergence with their batched verdict
+    # budget already spent. Restricting this to `asked` stranded those reports:
+    # the batch correctly skipped them, but their final single-report ask was
+    # never issued on this or any later pass.
+    singles: list[Path] = []
+    for directory in sorted(set(directories)):
+        cache = _reach_field_cache(directory / ".llm_fields.json")
+        if (
+            reach_fields_open(directory)
+            and (
+                directory in asked
+                or _reach_attempts_exhausted(cache)
+            )
+        ):
+            singles.append(directory)
     if not singles or _deadline_expired(deadline):
         return
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -1654,6 +1651,16 @@ _PUBLICATION_REJECTION_PREFIXES = (
     THREAT_MODEL_REJECTION_PREFIX, UNSETTLED_REJECTION_PREFIX,
     OUT_OF_SCOPE_REJECTION_PREFIX,
 )
+# The scorer's DoS-only primitives (bin/severity CVSS4_CLASS, the rows whose
+# fault is the exhaustion or termination itself rather than a memory access).
+# A dos-family Class with one of these Primitives is availability-only through
+# and through; any other Primitive contradicts the Class and names a
+# consequence the quality reviewer must weigh. tests/test_severity.py pins
+# this set to that table.
+AVAILABILITY_ONLY_PRIMITIVES = frozenset({
+    "bus", "dos_amplification", "memory_leak", "null_deref", "oom",
+    "regex_dos", "segv", "stack_exhaustion",
+})
 
 
 def _publication_rejection(reason: str) -> bool:
@@ -4668,8 +4675,10 @@ def _finding_review_order(directories: list[Path]) -> list[Path]:
 _SITE_LINE_RE = re.compile(r"^(?P<path>.+?):(?P<line>\d+)(?::\d+)?$")
 
 
-def _crash_site(directory: Path) -> tuple[str, int, str] | None:
-    """(file basename, line, function) of a crash's first interesting frame."""
+def _crash_site(
+    directory: Path, target_root: str = "",
+) -> tuple[str, int, str] | None:
+    """(target-relative file, line, function) of the first target frame."""
     sanitizer = _sanitizer_file(directory)
     if sanitizer is None:
         return None
@@ -4680,20 +4689,25 @@ def _crash_site(directory: Path) -> tuple[str, int, str] | None:
     if not match:
         return None
     return (
-        Path(match.group("path")).name.lower(),
+        finding_signature.normalize_path(match.group("path"), target_root),
         int(match.group("line")),
-        frame.state_function.lower(),
+        frame.state_function,
     )
 
 
-def _finding_site(report: Path) -> tuple[str, int, str] | None:
-    """(file basename, line, function) a finding names as its root cause."""
+def _finding_site(
+    report: Path, target_root: str = "",
+) -> tuple[str, int, str, str] | None:
+    """(target-relative file, line, function, class) named by a finding."""
     text = read_report_bounded(report)
-    file, func = finding_signature.extract_location(text)
+    file, func = finding_signature.extract_location(text, target_root)
     line = finding_signature.extract_line(text)
     if not file or not line.isdigit():
         return None
-    return (Path(file).name.lower(), int(line), (func or "").lower())
+    return (
+        file, int(line), func or "",
+        finding_signature.normalize_class(finding_signature.extract_class(text)),
+    )
 
 
 def absorb_crash_companions(results: Path, directories: list[Path]) -> list[Path]:
@@ -4707,15 +4721,19 @@ def absorb_crash_companions(results: Path, directories: list[Path]) -> list[Path
     once as security yield and once as a rejected report. The crash carries
     the reproducer, so it owns the verdict; the finding moves under it as
     `.companion/<FIND-id>` where its argument stays on disk and follows the
-    crash whichever way triage rules. Only the exact line qualifies: a shared
-    function is not a shared defect. Pinned findings stay under review.
+    crash whichever way triage rules. Only a memory-safety finding at the exact
+    target-relative path and line qualifies: a shared basename, function, or
+    source line across different issue classes is not a shared defect. Pinned
+    findings stay under review.
     """
+    target = target_config.find_target_root(results, repository_root=SCRIPT_ROOT)
+    target_root = str(target) if target is not None else ""
     sites: dict[tuple[str, int], list[tuple[str, Path]]] = {}
     for lane in ("crashes", "crashes-rejected"):
         for crash in sorted((results / lane).glob("CRASH-*")):
             if not crash.is_dir():
                 continue
-            site = _crash_site(crash)
+            site = _crash_site(crash, target_root)
             if site is not None:
                 sites.setdefault(site[:2], []).append((site[2], crash))
     if not sites:
@@ -4724,9 +4742,12 @@ def absorb_crash_companions(results: Path, directories: list[Path]) -> list[Path
     for directory in directories:
         pinned = (directory / ".keep").is_file() or (directory / ".reviewed").is_file()
         report = _report(directory)
-        site = _finding_site(report) if report is not None and not pinned else None
+        site = (
+            _finding_site(report, target_root)
+            if report is not None and not pinned else None
+        )
         owner = None
-        if site is not None:
+        if site is not None and site[3] == "memory-safety":
             for function, crash in sites.get(site[:2], []):
                 if not function or not site[2] or function == site[2]:
                     owner = crash
@@ -4751,17 +4772,23 @@ def reject_availability_only(
     """Reject `dos`-family findings from their authored class, before any vote.
 
     Denial of service is not scored, so a report that declares itself one
-    needs no reviewer. The quality prompt carries the same rule for a report
-    that hides the class behind another label; both must agree. Pinned
-    findings stay under review.
+    needs no reviewer. A Primitive outside the availability-only set
+    contradicts that Class and may name a consequence that is scored, so the
+    report goes to quality review instead of being dropped here. The quality
+    prompt carries the same policy for a report that hides the class behind
+    another label. Pinned findings stay under review.
     """
     kept: list[Path] = []
     for directory in directories:
         pinned = (directory / ".keep").is_file() or (directory / ".reviewed").is_file()
         report = _report(directory)
-        if pinned or report is None or bug_classes.family_of(
-            finding_signature.extract_class(read_report_bounded(report)),
-        ) != "dos":
+        text = read_report_bounded(report) if report is not None else ""
+        primitive = _field(text, "Primitive").strip().lower().replace("-", "_")
+        if (
+            pinned or report is None
+            or (primitive and primitive not in AVAILABILITY_ONLY_PRIMITIVES)
+            or bug_classes.family_of(finding_signature.extract_class(text)) != "dos"
+        ):
             kept.append(directory)
             continue
         (directory / ".pending-drop").unlink(missing_ok=True)
@@ -4820,6 +4847,14 @@ def validate_find_gate(
         chosen = {Path(path) for path in only}
         directories = [path for path in directories if path in chosen]
     directories = absorb_crash_companions(results, directories)
+    if only is None:
+        # A companion already turned down on its own keeps contradicting the
+        # crash's verdict from the rejected lane and inflates the rejected
+        # count, so it folds under the crash the same way.
+        absorb_crash_companions(results, [
+            path for path in sorted((results / "findings-rejected").glob("FIND-*"))
+            if path.is_dir()
+        ])
     timeout = _positive_int_env("LLM_DECISION_TIMEOUT", 300)
     counts = {"accepted": 0, "rejected": 0, "pending": 0}
     directories = reject_availability_only(results, directories, counts)

@@ -108,11 +108,10 @@ exception around the one target call, even when the crafted input is expected
 to be valid. Let every other exception escape. A normal rejection is CLEAN
 evidence; an uncaught expected parse error is testcase noise that looks like a
 runtime crash. An unexpected exception type is still only a robustness or API
-contract defect unless you can show it escaping a real request/process
-isolation boundary or causing another concrete security impact; do not confirm
-or file it merely because it reproduces. In particular, an exception such as
-`RecursionError` that ends only the current parse or request is not durable
-denial of service.
+contract defect unless you can show a separate memory-safety, disclosure,
+injection, or authorization consequence; do not confirm or file it merely
+because it reproduces or ends a request or process. Availability-only impact,
+including `RecursionError`, is not scored.
 
 ## Adversarial Parser/Decoder Inputs
 

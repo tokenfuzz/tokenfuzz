@@ -51,6 +51,41 @@ class AvailabilityOnlyTests(unittest.TestCase):
             self.assertTrue(rejected.is_dir())
             self.assertEqual(list(findings.glob("FIND-*")), [])
 
+    def test_a_contradictory_primitive_fails_open_to_quality_review(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dos-primitive-") as temporary:
+            results = Path(temporary)
+            finding = results / "findings" / "FIND-0001"
+            finding.mkdir(parents=True)
+            (finding / "report.md").write_text(
+                "# Conflicting authored fields\n\n"
+                "Class: denial-of-service\nPrimitive: heap_write\n",
+                encoding="utf-8",
+            )
+            counts = {"accepted": 0, "rejected": 0, "pending": 0}
+            kept = triage.reject_availability_only(results, [finding], counts)
+            self.assertEqual(kept, [finding])
+            self.assertEqual(counts, {"accepted": 0, "rejected": 0, "pending": 0})
+
+    def test_dos_primitives_do_not_bypass_policy_rejection(self) -> None:
+        for primitive in sorted(triage.AVAILABILITY_ONLY_PRIMITIVES):
+            with self.subTest(primitive=primitive), tempfile.TemporaryDirectory(
+                prefix="dos-primitive-",
+            ) as temporary:
+                results = Path(temporary)
+                finding = results / "findings" / "FIND-0001"
+                finding.mkdir(parents=True)
+                (finding / "report.md").write_text(
+                    "# Availability-only finding\n\n"
+                    f"Class: denial-of-service\nPrimitive: {primitive}\n",
+                    encoding="utf-8",
+                )
+                counts = {"accepted": 0, "rejected": 0, "pending": 0}
+                kept = triage.reject_availability_only(results, [finding], counts)
+                self.assertEqual(kept, [])
+                self.assertEqual(
+                    counts, {"accepted": 0, "rejected": 1, "pending": 0},
+                )
+
 
 class SiteReviewTests(unittest.TestCase):
     def test_legacy_same_site_verdicts_return_to_independent_review(self) -> None:

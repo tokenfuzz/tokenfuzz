@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import severity_receipt  # noqa: E402
+import triage  # noqa: E402
 
 
 def load_severity():
@@ -36,6 +37,29 @@ def load_severity():
 
 
 severity = load_severity()
+
+
+class AvailabilityOnlyPrimitiveTests(unittest.TestCase):
+    def test_triage_policy_set_matches_the_scorer_dos_rows(self) -> None:
+        """The finding gate's availability-only primitives are the scorer's.
+
+        Both sides name the same rows: every primitive the gate treats as
+        pure denial of service scores no confidentiality or integrity impact,
+        and every DoS-only row of the scorer is one the gate knows. An
+        invalid read shares that impact shape but is a memory access, so it
+        stays out of the gate's set by name.
+        """
+        table = severity.CVSS4_CLASS
+        for primitive in triage.AVAILABILITY_ONLY_PRIMITIVES:
+            self.assertIn(primitive, table)
+            self.assertEqual(table[primitive][:2], ("N", "N"), primitive)
+        self.assertLessEqual(
+            {"dos_amplification", "regex_dos", "memory_leak", "oom",
+             "stack_exhaustion", "null_deref", "segv", "bus"},
+            triage.AVAILABILITY_ONLY_PRIMITIVES,
+        )
+        for primitive in ("uaf_read", "heap_read_small", "wild_read", "integer_overflow"):
+            self.assertNotIn(primitive, triage.AVAILABILITY_ONLY_PRIMITIVES)
 
 
 class SeverityTests(unittest.TestCase):

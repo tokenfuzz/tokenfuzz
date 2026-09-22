@@ -33,13 +33,15 @@ SANITIZER = (
 )
 
 
-def _finding_report(file: str, function: str, line: int) -> str:
+def _finding_report(
+    file: str, function: str, line: int, klass: str = "oob-read",
+) -> str:
     return (
         "# Progressive data reads beyond its length\n\n"
         f"Location: {file}:{function}:{line}\n\n"
         "## Fields\n\n"
         "| Field | Value |\n|:--|:--|\n"
-        "| Class | oob-read |\n"
+        f"| Class | {klass} |\n"
         f"| File | `{file}` |\n"
         f"| Function | `{function}` |\n"
         f"| Line | {line} |\n\n"
@@ -54,18 +56,24 @@ class CompanionAbsorptionTests(unittest.TestCase):
         self.results = Path(self.temporary.name)
         (self.results / "findings").mkdir()
 
-    def _crash(self, name: str, lane: str = "crashes") -> Path:
+    def _crash(
+        self, name: str, lane: str = "crashes", file: str = "parse.c",
+    ) -> Path:
         directory = self.results / lane / name
         directory.mkdir(parents=True)
-        (directory / "sanitizer.txt").write_text(SANITIZER, encoding="utf-8")
+        sanitizer = SANITIZER.replace("parse.c:8190", f"{file}:8190")
+        (directory / "sanitizer.txt").write_text(sanitizer, encoding="utf-8")
         (directory / "report.md").write_text("# crash\n", encoding="utf-8")
         return directory
 
-    def _finding(self, name: str, file="parse.c", function="app_push_cdata", line=8190) -> Path:
+    def _finding(
+        self, name: str, file="parse.c", function="app_push_cdata", line=8190,
+        klass="oob-read",
+    ) -> Path:
         directory = self.results / "findings" / name
         directory.mkdir()
         (directory / "report.md").write_text(
-            _finding_report(file, function, line), encoding="utf-8",
+            _finding_report(file, function, line, klass), encoding="utf-8",
         )
         return directory
 
@@ -102,6 +110,51 @@ class CompanionAbsorptionTests(unittest.TestCase):
         far = self._finding("FIND-008-far", line=42)
         kept = triage.absorb_crash_companions(self.results, [pinned, far])
         self.assertEqual(kept, [pinned, far])
+
+    def test_same_basename_or_different_class_does_not_fold(self) -> None:
+        self._crash("CRASH-001-3", file="src/one/parse.c")
+        other_path = self._finding(
+            "FIND-004-other-path", file="src/two/parse.c",
+        )
+        other_class = self._finding(
+            "FIND-005-other-class", file="src/one/parse.c", klass="auth-bypass",
+        )
+        other_case = self._finding(
+            "FIND-006-other-case", file="src/one/Parse.c",
+        )
+        kept = triage.absorb_crash_companions(
+            self.results, [other_path, other_class, other_case],
+        )
+        self.assertEqual(kept, [other_path, other_class, other_case])
+
+    def test_absolute_crash_path_matches_target_relative_finding(self) -> None:
+        target = self.results / "target"
+        (target / "src").mkdir(parents=True)
+        (self.results / ".session-env").write_text(
+            f"TARGET_ROOT={target}\n", encoding="utf-8",
+        )
+        crash = self._crash(
+            "CRASH-001-3", file=str(target / "src" / "parse.c"),
+        )
+        finding = self._finding("FIND-004-relative", file="src/parse.c")
+        kept = triage.absorb_crash_companions(self.results, [finding])
+        self.assertEqual(kept, [])
+        self.assertTrue((crash / ".companion" / finding.name).is_dir())
+
+    def test_find_gate_folds_an_already_rejected_companion(self) -> None:
+        crash = self._crash("CRASH-001-3")
+        rejected = self.results / "findings-rejected" / "FIND-004-length-read"
+        rejected.mkdir(parents=True)
+        (rejected / "report.md").write_text(
+            _finding_report("parse.c", "app_push_cdata", 8190), encoding="utf-8",
+        )
+        (rejected / "rejection.md").write_text(
+            "# Rejected artifact\n\nReason: threat-model: outside\n", encoding="utf-8",
+        )
+        with mock.patch.dict("os.environ", {"LLM_DECIDE_DISABLE": "1"}):
+            triage.validate_find_gate(self.results, workers=1)
+        self.assertFalse(rejected.exists())
+        self.assertTrue((crash / ".companion" / "FIND-004-length-read" / "rejection.md").is_file())
 
     def test_find_gate_absorbs_before_spending_a_vote(self) -> None:
         crash = self._crash("CRASH-001-3")

@@ -19,8 +19,7 @@ and trace the value from the caller-controlled boundary through a real caller;
 violating a concrete precondition is harness misuse, not a counter-example.
 
 **Managed runtimes.** Catch only documented input-rejection exceptions; a
-wrong exception type or one uncaught request is robustness, not durable denial
-of service.
+wrong exception type or one uncaught request is robustness, not a finding.
 
 **Review gate.** When the card floor is complete, discard the card and end the
 session instead of claiming the next card.
@@ -70,16 +69,16 @@ unexpected failure cannot be normalized into an apparently equal result.
 If a managed testcase prerequisite is absent, print `NO_EXEC: <proof>` and
 exit 2; do not raise an exception.
 
-A wrong exception type or one request's uncaught exception is robustness, not
-durable denial of service, and denial of service is not scored here in any
-form. File it only with proof that it crosses a security boundary.
+A wrong exception type or one request's uncaught exception is robustness, and
+denial of service is not scored here in any form. File it only with proof of a
+separate memory-safety, disclosure, injection, or authorization consequence.
 
 | Category | In scope when the consumer is… | Security primitive it becomes |
 |----------|--------------------------------|-------------------------------|
 | Inverse (round-trip) | a trust/parse check enforced on one form but made on the other | smuggle a value past the check (parser/filter desync) |
 | Idempotence | a sanitiser / canonicaliser feeding a filter, ACL, or SOP/CSP check | single-pass residual bypasses the check |
 | Injectivity | a key/identifier explicitly promised unique within its domain | cache poisoning, identity confusion |
-| Numerical domain | an allocation size, index, length, or resource limit | negative→huge-unsigned / `INT_MIN` → OOB or DoS |
+| Numerical domain | an allocation size, index, length, or security limit | negative→huge-unsigned / `INT_MIN` → out-of-range access or policy bypass |
 | Format compliance | an escaper/emitter whose output crosses into another parser/context | injection across the context boundary |
 | Equivalence | two documented-equivalent forms feed an auth, policy, or validation decision | policy bypass or interpretation differential |
 
@@ -229,7 +228,7 @@ probability (`0 ≤ f(x) ≤ 1`), `sum(f(xs)) ≈ 1.0` for distributions.
 **Why this finds bugs:** numerical code accumulates rounding error, signed-
 unsigned conversions wrap, intermediate computations overflow into signed
 representation, "always positive" comes from a single sign check that misses
-`-0.0`, `NaN`, subnormals, or the `INT_MIN` denial-of-service case.
+`-0.0`, `NaN`, subnormals, or the `INT_MIN` overflow case.
 
 **Highest yield:** statistical / scientific code (random samplers, distribution
 fits, regression fits), media codec quantisers and de-quantisers (must stay in
@@ -260,9 +259,9 @@ bin/rg-safe -l 'positive|non[\s_-]?negative|always >= 0|in \[[0-9]|in \(0,|norma
    - `f(NaN)` returns a value that *looks* finite but propagates NaN downstream
    - `f(subnormal)` flushes to zero on one platform and not another
 4. Any violation is a counter-example; file it when the out-of-domain value
-   feeds an allocation size, index, length, or resource limit (see *Pick the
-   target by its security consumer*) — that is where it becomes an OOB or DoS
-   primitive. Float-comparison tolerance is `f != f` (NaN
+   feeds an allocation size, index, length, or security limit (see *Pick the
+   target by its security consumer*) — that is where it becomes an out-of-range
+   access or policy-bypass primitive. Float-comparison tolerance is `f != f` (NaN
    self-inequality) and ULP-distance, never `==` on floats.
 
 ### Category 5 — Format-compliance regex

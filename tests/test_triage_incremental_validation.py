@@ -2741,59 +2741,16 @@ Generated score text.
         self.assertEqual(
             triage._valid_reach_field("disclosed_content", "invented"), "",
         )
-
-    def test_availability_loss_is_optional_enum_bound_and_asked_for_dos(self) -> None:
-        """A resource report owes one grade; other reports buy no extra call."""
-        self.assertIn("availability_loss", triage._OPTIONAL_REACH_FIELD_LABELS)
-        self.assertNotIn("availability_loss", triage._REACH_FIELD_LABELS)
-        self.assertNotIn(
-            "availability_loss", triage._missing_reach_fields("| Class | x |"),
-        )
-        self.assertEqual(
-            triage._valid_reach_field("availability_loss", "total"), "total",
-        )
-        self.assertEqual(
-            triage._valid_reach_field("availability_loss", "severe"), "",
-        )
         required = "".join(
             f"| {label} | stated |\n"
             for label in triage._REACH_FIELD_LABELS.values()
         )
-        for header in (
-            "| Class | dos:algorithmic |\n",
-            "| Class | resource-exhaustion |\n| Primitive | dos_amplification |\n",
-            "Primitive: memory_leak\n",
-        ):
-            self.assertEqual(
-                triage._pending_optional_reach_fields(header + required),
-                {"availability_loss": "Availability loss"}, header,
-            )
         self.assertEqual(
             triage._pending_optional_reach_fields(
-                "| Class | dos:algorithmic |\n| Availability loss | degraded |\n"
-                + required,
+                "| Class | dos:algorithmic |\n" + required,
             ),
             {},
-        )
-        # A disclosure report is asked for its own grade and not this one.
-        self.assertEqual(
-            triage._pending_optional_reach_fields(
-                "| Class | info-disclosure:uninitialized-memory |\n" + required,
-            ),
-            {"disclosed_content": "Disclosed content"},
-        )
-        self.assertEqual(
-            triage._pending_optional_reach_fields(
-                "| Class | memory-safety:bounds |\n" + required,
-            ),
-            {},
-        )
-        self.report.write_text("| Class | dos:algorithmic |\n" + required, encoding="utf-8")
-        self.assertTrue(triage.fill_reach_fields(
-            self.finding, decision_override={"availability_loss": "degraded"},
-        ))
-        self.assertEqual(
-            triage._field(self.report.read_text(), "Availability loss"), "degraded",
+            "availability-only reports must not buy an extra classification call",
         )
 
     def test_complete_disclosure_report_is_still_asked_once(self) -> None:
@@ -3953,29 +3910,21 @@ Generated score text.
         self.assertFalse(triage.reach_fields_open(self.finding))
         self.assertTrue(triage._reach_fields_unsettled(self.finding))
 
-    def test_a_batched_answer_still_lands_after_cached_fields_complete_the_report(self) -> None:
-        # Cached required fields complete the report, but a resource report
-        # still owes its optional grade. The batch already asked for it; the
-        # answer must be applied rather than dropped on the early return.
-        self._reach_report(drop=("surface", "primitive"))
-        self.report.write_text(
-            self.report.read_text(encoding="utf-8").replace(
-                "Class: authorization", "Class: dos amplification",
-            ),
-            encoding="utf-8",
-        )
+    def test_spent_batch_budget_still_gets_the_final_single_ask(self) -> None:
+        self._reach_report(drop=("surface",))
         (self.finding / ".llm_fields.json").write_text(json.dumps({
             "_decision_version": triage._REACH_FIELD_DECISION_VERSION,
-            "_fill_attempts": 0,
-            "surface": "library-api",
-            "primitive": "dos_amplification",
+            "_fill_attempts": triage._reach_attempt_ceiling(),
         }))
-        self.assertTrue(triage.fill_reach_fields(
-            self.finding, None, decision_override={"availability_loss": "total"},
-        ))
-        text = self.report.read_text(encoding="utf-8")
-        self.assertIn("Surface: library-api", text)
-        self.assertIn("Availability loss: total", text)
+        with mock.patch.object(
+            triage.llm_decide, "llm_decide",
+            return_value={"surface": "library-api"},
+        ) as asked:
+            triage.converge_reach_fields([self.finding], None, workers=1)
+        self.assertEqual(asked.call_count, 1)
+        self.assertIn(
+            "Surface: library-api", self.report.read_text(encoding="utf-8"),
+        )
         self.assertFalse(triage.reach_fields_open(self.finding))
 
     def test_unconditional_quality_rounds_are_cast_together(self) -> None:
