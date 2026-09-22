@@ -4117,12 +4117,18 @@ def _run_locked(args, bench_root, backend_root, bench_dir, cells_dir, ledger, ru
                 log(f"Cell {name} {metrics.metric_gate_summary(summary)}")
                 if status == "done":
                     done += 1
+                    decisions = (summary.get("telemetry") or {}).get("decisions") or {}
                     log(
                         f"Cell {name} done in {format_duration(wall)}: "
                         f"crashes={summary.get('confirmed_crashes', 0)} "
                         f"findings={summary.get('confirmed_findings', 0)} "
-                        f"refusals={summary.get('model_refusals', 0)}"
+                        f"refusals={summary.get('model_refusals', 0)} "
+                        f"review_failures={decisions.get('failed') or 0}"
                     )
+                    for failure in decisions.get("failures") or []:
+                        # A failed review call is wall the gate lost; it never
+                        # changes a verdict, so it is reported, not fatal.
+                        log(f"Cell {name} review call failed: {failure}")
                 else:
                     failed += 1
                     if status == "incomplete":

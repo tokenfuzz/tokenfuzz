@@ -399,15 +399,24 @@ replicates; an em dash means unrecorded, never zero.
 | `Occupancy` | Occupied agent-seconds over seats × effective wall. A `†` marks a cell that predates recorded session spans, where the number comes from the prompt-render and transcript file clocks instead. |
 | `Blocked housekeeping` | Share of the effective wall the worker pool sat empty while crash triage, the result gates, indexes, orphan enforcement, and corpus promotion ran. Still charged to the wall either way. |
 | `Review s/artifact` | In-wall and post-cell crash-triage plus result-gate seconds per artifact those gates judged. Post-cell time is measurement and remains excluded from `Wall (h)`, but it is real review cost. |
-| `First filed` / `First crash confirmed` / `First admitted` | Minutes from the run's first clock (its first backend call) to the first artifact filed, the filing of the first crash that review later admitted, and the first receipt claiming `reportable`. |
+| `First filed` / `First crash confirmed` / `First admitted` | Minutes from the run's first clock (its first backend call) to the first artifact filed, the filing of the first crash that review later admitted, and the first receipt claiming `reportable`. A receipt keeps the clock its verdict first landed with: later passes that repeat the same verdict over the same evidence do not move it. |
 | `EXEC_FAIL share` | Fraction of probes whose command started but produced no valid result. This includes classified loader, usage, input-rejection, abort, unverified-exit, and other exit failures; a sanitizer launch may already have been spent. |
-| `Duplicate roots` | Share of artifact signatures filed by more than one agent: convergence, not yield. |
+| `Duplicate roots` | Share of artifact signatures filed by more than one agent: convergence, not yield. A crash bundle is placed by the slot its name carries, a finding by the hypothesis that closed on it. |
 | `Confirmed / seat-h` | Reportable finding and crash clusters per worker-hour (`Worker-h`), so a condition with more concurrent seats is charged for them. Seats count launches; a `≤` prefix marks a condition in which a launch delegated to subagents, or whose backend cannot show its fan-out (Grok), so the seat capacity is a floor and the rate an upper bound. |
-| `$ / confirmed` | Measured cost per reportable cluster; absent when cost was estimated, a delegating cell's spend is a floor, or nothing was confirmed. |
+| `$ / confirmed` | Cost per reportable cluster, marked `~` when the cost was estimated; absent when nothing was confirmed. |
 
 The same numbers sit in each cell's `metrics.json` under `telemetry`, and a
 `lineage.jsonl` beside it joins card, hypothesis, testcase, artifact, and
-signature, one row per hypothesis. `telemetry.coverage` records, per strategy
+signature, one row per hypothesis. Its `productive` flag says whether the
+hypothesis was the first to close on an artifact that was adjudicated on its
+own; one that closed on a bundle another hypothesis had already filed, or on
+a bundle folded as a duplicate, reproduced a known defect and counts as
+convergence in the lane table and the hypothesis panel, not as yield.
+`telemetry.decisions` counts the harness's own review calls and the ones
+that failed or were skipped by the circuit breaker, with the wall the
+failures consumed; a cell with failed calls says so in the cells table and
+in the benchmark console, since a review call that times out is gate time
+lost, not a verdict. `telemetry.coverage` records, per strategy
 lane, how many ranked work cards a session claimed (`examined`, a claim-based
 proxy: it says the card was handed out, not that its file was read) and how
 many reached a terminal claim status (`concluded`), with the claimed share of

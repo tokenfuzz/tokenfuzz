@@ -564,6 +564,7 @@ def write(
     review_facts: dict[str, str] | None = None,
     _preserved_source_attestations: object | None = None,
     _preserved_source_context: object | None = None,
+    _preserved_validated_at: float | None = None,
 ) -> dict | None:
     if kind not in {"finding", "crash"} or state not in ALL_STATES:
         raise ValueError("invalid validation receipt kind/state")
@@ -585,15 +586,19 @@ def write(
     )
     if record is None:
         return None
+    destination = Path(directory) / "validation.json"
     payload = {
         "schema_version": SCHEMA_VERSION,
         "kind": kind,
         "state": state,
         "detail": detail,
         "evidence": record,
-        "validated_at": time.time(),
+        "validated_at": (
+            _unchanged_verdict_clock(destination, kind, state, record)
+            or _preserved_validated_at
+            or time.time()
+        ),
     }
-    destination = Path(directory) / "validation.json"
     temporary = destination.with_name(
         f".{destination.name}.{os.getpid()}.{time.time_ns()}.tmp",
     )
@@ -603,6 +608,31 @@ def write(
     )
     os.replace(temporary, destination)
     return payload
+
+
+def _unchanged_verdict_clock(
+    destination: Path, kind: str, state: str, record: dict,
+) -> float | None:
+    """The prior receipt's clock when this write repeats its verdict.
+
+    Every pass over an artifact rewrites its receipt, and the barrier and the
+    benchmark's closing pass both re-validate what the background gate already
+    admitted. Stamping the pass clock each time dated every admission to the
+    last pass, so time-to-first-admitted read as the end of the run. The
+    verdict landed when the same kind, state, and evidence were first written;
+    a changed verdict or changed evidence takes the current clock.
+    """
+    try:
+        prior = json.loads(destination.read_text(encoding="utf-8"))
+        if (
+            prior.get("kind") == kind
+            and prior.get("state") == state
+            and prior.get("evidence", {}).get("evidence_id") == record.get("evidence_id")
+        ):
+            return float(prior["validated_at"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
 
 
 def rewrite_after_equivalent_transform(
@@ -646,6 +676,12 @@ def rewrite_after_equivalent_transform(
         _preserved_source_context=(
             saved.get("source_context")
             if "source_context" in saved else None
+        ),
+        # The rewrite changes the evidence digest, never the verdict, so the
+        # verdict keeps the clock it landed with.
+        _preserved_validated_at=(
+            float(prior_receipt["validated_at"])
+            if isinstance(prior_receipt.get("validated_at"), (int, float)) else None
         ),
     )
 

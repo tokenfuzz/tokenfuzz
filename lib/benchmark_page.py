@@ -496,9 +496,16 @@ OUTCOMES = ("hit", "confirmed", "refuted", "discarded", "blocked", "open")
 _TEXT_CAP = {"hypothesis": 480, "guard_gap": 280, "input_shape": 200, "note": 320}
 
 
-def _outcome(status: str, artifact: str) -> str:
+def _outcome(status: str, artifact: str, productive: bool | None = None) -> str:
+    """Where a hypothesis ended up.
+
+    One that closed on an artifact another hypothesis had already filed, or on
+    a bundle folded as a duplicate, reproduced a known defect and filed
+    nothing new: that is "confirmed, not filed", not a hit. Lineage rows
+    written before they carried `productive` keep the old reading.
+    """
     if artifact or status.startswith(("FIND-", "CRASH-")):
-        return "hit"
+        return "confirmed" if productive is False else "hit"
     return _OUTCOME.get(status, "open")
 
 
@@ -594,9 +601,12 @@ def _trace(cell_dir: Path, meta: dict, target_root: str = "") -> dict | None:
         return round(value, 4)
 
     artifacts: dict[str, str] = {}
+    productive: dict[str, bool] = {}
     for row in _iter_jsonl(cell_dir / "lineage.jsonl"):
         if row.get("artifact") and row.get("hypothesis_id"):
             artifacts[str(row["hypothesis_id"])] = str(row["artifact"])
+            if isinstance(row.get("productive"), bool):
+                productive[str(row["hypothesis_id"])] = row["productive"]
     probes: dict[str, list] = {}
     for row in _iter_jsonl(state / "runs.jsonl"):
         when = hours(row.get("created_at"))
@@ -627,7 +637,7 @@ def _trace(cell_dir: Path, meta: dict, target_root: str = "") -> dict | None:
         t1 = max([t0, hours(row.get("updated_at"), clamp=True) or t0] + [p["t"] for p in mine])
         status = str(row.get("status") or "").strip().upper()
         artifact = artifacts.get(hid, "")
-        outcome = _outcome(status, artifact)
+        outcome = _outcome(status, artifact, productive.get(hid))
         if outcome == "open" and wall_h is not None:
             # never resolved: it was still open when the wall ended
             t1 = round(wall_h, 4)
@@ -1238,10 +1248,11 @@ def _efficiency(condition: dict) -> dict:
         "seat_floor": bool(condition.get("spend_lower_bound")) or not condition.get(
             "delegation_observable", True),
         "per_seat_hour": per_seat_hour,
+        # An estimated price is still a price; it is marked, not withheld.
         "cost_per_confirmed": (
-            round(cost / confirmed, 2)
-            if cost and confirmed and not estimated and wall else None
+            round(cost / confirmed, 2) if cost and confirmed and wall else None
         ),
+        "cost_estimated": estimated,
         "delegations": _int(condition.get("delegation_events_total")),
     }
 
@@ -1316,6 +1327,9 @@ def _cells(condition: dict, bench_dir: Path | None, provisional_reason: str) -> 
             "agents": _int(cell.get("actual_agents")),
             "findings_raw": _raw_count(metrics, "findings") if has_metrics else None,
             "crashes_raw": _raw_count(metrics, "crashes") if has_metrics else None,
+            "review_failures": _int(
+                ((metrics.get("telemetry") or {}).get("decisions") or {}).get("failed")
+            ) if has_metrics else None,
             "href": _href(bench_dir / "cells" / name) if bench_dir else "",
         })
     return rows
@@ -1708,7 +1722,8 @@ def _effort(run: dict) -> str:
             _tile("Confirmed / seat-h", "—" if eff["per_seat_hour"] is None else
                   f'{"≤" if eff["seat_floor"] else ""}{eff["per_seat_hour"]:g}'),
             _tile("$ / confirmed", "—" if eff["cost_per_confirmed"] is None else
-                  f'${eff["cost_per_confirmed"]:,.2f}'),
+                  f'{"~" if eff["cost_estimated"] else ""}${eff["cost_per_confirmed"]:,.2f}',
+                  "list price, estimated" if eff["cost_estimated"] else "list price"),
         ]
         blocks.append(
             f'<div class="effort"><div class="ft"><span class="cond cond-{_e(cond["token"])}">'
@@ -1723,7 +1738,8 @@ def _cells_table(run: dict) -> str:
             rows.append(
                 f'<tr><td>{_link(cell["name"], cell["href"], "mono")}</td>'
                 f'<td><span class="cond cond-{_e(cond["token"])}">{_e(cond["label"])}</span></td>'
-                f'<td>{_e(cell["status"])}{(" · " + _e(cell["quality"])) if cell["quality"] and cell["quality"] != "clean" else ""}</td>'
+                f'<td>{_e(cell["status"])}{(" · " + _e(cell["quality"])) if cell["quality"] and cell["quality"] != "clean" else ""}'
+                f'{(" · " + str(cell["review_failures"]) + " review call" + ("s" if cell["review_failures"] != 1 else "") + " failed") if cell.get("review_failures") else ""}</td>'
                 f'<td class="num">{cell["agents"] or "—"}</td>'
                 f'<td class="num">{"—" if cell["findings_raw"] is None else cell["findings_raw"]}</td>'
                 f'<td class="num">{"—" if cell["crashes_raw"] is None else cell["crashes_raw"]}</td>'
@@ -1972,7 +1988,7 @@ def _fmt_dim(value: float | None, unit: str) -> str:
     if unit == "min":
         return _fmt_min(value)
     if unit == "usd":
-        return f"${value:,.0f}"
+        return f"${value:,.2f}"
     if unit == "int":
         return f"{int(value)}"
     return f"{value:g}"

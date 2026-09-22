@@ -3508,11 +3508,11 @@ def score_ground_truth(
                       + len(unexpected) + len(unattributed))
         total = tp_crashes + fp_crashes
 
-        def breakdown(key_of) -> dict:
+        def breakdown(key_of, bugs=None) -> dict:
             # Recall per class: an overall figure hides which families a
             # run finds and which it never reaches.
             groups: dict[str, dict] = {}
-            for b in real:
+            for b in (real if bugs is None else bugs):
                 group = groups.setdefault(key_of(b), {"real": 0, "detected": 0})
                 group["real"] += 1
                 group["detected"] += int(b["id"] in detected)
@@ -3527,7 +3527,13 @@ def score_ground_truth(
             "missed": sorted(b["id"] for b in real if b["id"] not in detected),
             "recall": round(tp_bugs / len(real), 4) if real else None,
             "by_primitive": breakdown(lambda b: str(b.get("primitive", "")) or "unlabelled"),
-            "by_strategy_shape": breakdown(lambda b: str(b.get("strategy", "")) or "unlabelled"),
+            # Only plants the manifest shaped for a lane: a manifest without
+            # the field would otherwise print one "unlabelled" shape row that
+            # repeats the overall recall.
+            "by_strategy_shape": breakdown(
+                lambda b: str(b.get("strategy", "")),
+                [b for b in real if str(b.get("strategy", ""))],
+            ),
             "confirmed_crashes": total,
             "true_positive_crashes": tp_crashes,
             "false_positive_crashes": fp_crashes,

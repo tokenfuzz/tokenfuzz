@@ -382,21 +382,105 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(rows, [
             {"card_id": "WORK-a", "hypothesis_id": "H-1", "agent": "1", "strategy": "S3",
              "status": "FIND-001", "testcases": ["aaa", "bbb"], "artifact": "FIND-001",
-             "signature": ["k", "a.c", "1"]},
+             "productive": True, "signature": ["k", "a.c", "1"]},
             {"card_id": "WORK-b", "hypothesis_id": "H-2", "agent": "2", "strategy": "S7",
-             "status": "DISCARDED", "testcases": [], "artifact": None, "signature": []},
+             "status": "DISCARDED", "testcases": [], "artifact": None, "productive": False,
+             "signature": []},
         ])
         target = self.root / "cell" / "lineage.jsonl"
         self.assertEqual(telemetry.write_lineage(self.results, target), 2)
         self.assertEqual(len(target.read_text(encoding="utf-8").splitlines()), 2)
+
+    def _bundle(self, lane: str, name: str, card: str = "") -> None:
+        directory = self.results / lane / name
+        directory.mkdir(parents=True)
+        (directory / "report.md").write_text(
+            f"# {name}\n\n{('CARD-ID: ' + card) if card else ''}\n", encoding="utf-8",
+        )
+
+    def test_a_hypothesis_is_placed_on_its_slot_suffixed_bundle(self) -> None:
+        # Agents close with the bare id the probe printed; the bundle carries
+        # the slot. Agent 2's CRASH-002 is crashes/CRASH-002-2, never -1.
+        self._bundle("crashes", "CRASH-002-1")
+        self._bundle("crashes", "CRASH-002-2")
+        self._bundle("crashes/.duplicates", "CRASH-001-3")
+        self._bundle("findings", "FIND-001-guard", card="WORK-a")
+        self._bundle("findings", "FIND-001-oob", card="WORK-b")
+        _write_jsonl(self.results / "state" / "hypotheses.jsonl", [
+            {"id": "H-1", "agent": "2", "card_id": "", "status": "CRASH-002",
+             "strategy": "S7", "created_at": "2026-01-01T00:00:01Z"},
+            {"id": "H-2", "agent": "3", "card_id": "", "status": "CRASH-001",
+             "strategy": "S7", "created_at": "2026-01-01T00:00:02Z"},
+            {"id": "H-3", "agent": "1", "card_id": "WORK-a", "status": "FIND-001",
+             "strategy": "S2", "created_at": "2026-01-01T00:00:03Z"},
+            {"id": "H-4", "agent": "2", "card_id": "WORK-b", "status": "find-001",
+             "strategy": "S7", "created_at": "2026-01-01T00:00:04Z"},
+            # Re-probing agent 2's own filed reproducer: the same bundle again.
+            {"id": "H-5", "agent": "2", "card_id": "", "status": "CRASH-002",
+             "strategy": "S7", "created_at": "2026-01-01T00:00:05Z"},
+            # Names a bundle no directory resolves: the claim stands.
+            {"id": "H-6", "agent": "1", "card_id": "", "status": "CRASH-009",
+             "strategy": "S3", "created_at": "2026-01-01T00:00:06Z"},
+        ])
+        placed = telemetry.hypothesis_artifacts(self.results)
+        self.assertEqual(placed["H-1"], {"artifact": "CRASH-002-2", "productive": True})
+        # Folded as a duplicate: placed, but never a result of its own.
+        self.assertEqual(placed["H-2"], {"artifact": "CRASH-001-3", "productive": False})
+        self.assertEqual(placed["H-3"], {"artifact": "FIND-001-guard", "productive": True})
+        self.assertEqual(placed["H-4"], {"artifact": "FIND-001-oob", "productive": True})
+        self.assertEqual(placed["H-5"], {"artifact": "CRASH-002-2", "productive": False})
+        self.assertEqual(placed["H-6"], {"artifact": "CRASH-009", "productive": True})
+        self.assertEqual(telemetry.lane_stats(self.results), {
+            "S2": {"hypotheses": 1, "productive": 1},
+            "S3": {"hypotheses": 1, "productive": 1},
+            "S7": {"hypotheses": 4, "productive": 2},
+        })
+
+    def test_duplicate_roots_join_bare_statuses_and_crash_slots(self) -> None:
+        self._bundle("crashes", "CRASH-001-2")
+        self._bundle("crashes/.duplicates", "CRASH-001-1")
+        self._bundle("crashes/.duplicates", "CRASH-001-3")
+        _write_jsonl(self.results / "state" / "hypotheses.jsonl", [
+            {"id": "H-1", "agent": "1", "status": "CRASH-001", "strategy": "S3"},
+            {"id": "H-2", "agent": "2", "status": "CRASH-001", "strategy": "S7"},
+        ])
+        signature = ["app_parse sample.c:91"]
+        _write_jsonl(self.results / "state" / "events.jsonl", [
+            {"type": "crash_created", "id": "CRASH-001-1", "signature": signature},
+            {"type": "crash_created", "id": "CRASH-001-2", "signature": signature},
+            # Filed by slot 3 with no hypothesis closed on it: the slot places it.
+            {"type": "crash_created", "id": "CRASH-001-3", "signature": signature},
+            {"type": "crash_created", "id": "CRASH-002-2", "signature": ["app_other b.c:2"]},
+        ])
+        self.assertEqual(telemetry.duplicate_roots(self.results), {
+            "signatures": 2, "multi_agent": 1, "rate": 0.5,
+        })
+
+    def test_decisions_count_failed_review_calls_and_their_wall(self) -> None:
+        log = self.results.parent / "logs" / "llm-decisions.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        (log.parent / "index.jsonl").write_text("", encoding="utf-8")
+        log.write_text(
+            "2026-09-22T13:45:30Z work_rerank OK bytes=1569 elapsed=15s\n"
+            "2026-09-22T14:00:12Z cluster_expand FAIL claude-rc=124 bytes=3254 elapsed=330s timeout=329s\n"
+            "2026-09-22T14:00:40Z cluster_expand SKIP circuit-open prompt_threshold=2 type_threshold=8\n"
+            "2026-09-22T14:01:44Z trigger-validator-batch votes=4/4 OK bytes=51004 elapsed=52s\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(telemetry.decisions(self.results), {
+            "calls": 3, "failed": 1, "skipped": 1, "failed_seconds": 330.0,
+            "failures": ["cluster_expand claude-rc=124 bytes=3254 elapsed=330s timeout=329s"],
+        })
 
     def test_summary_has_every_block_even_on_an_empty_tree(self) -> None:
         summary = telemetry.summary(self.results)
         self.assertEqual(
             set(summary),
             {"occupancy", "housekeeping", "finalization", "time_to_first",
-             "lanes", "coverage", "execution", "duplicate_roots", "lineage_rows"},
+             "lanes", "coverage", "execution", "duplicate_roots", "decisions",
+             "lineage_rows"},
         )
+        self.assertEqual(summary["decisions"]["calls"], None)
         self.assertEqual(summary["coverage"], {
             "cards": 0, "examined": 0, "examined_share": None, "lanes": {},
             "tree": {"files": 0, "offered": 0, "offered_share": None,

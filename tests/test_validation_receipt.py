@@ -50,6 +50,45 @@ class ValidationReceiptTests(unittest.TestCase):
         )
         self.assertIsNone(validation_receipt.read_current(self.directory))
 
+    def test_a_repeated_verdict_keeps_the_clock_it_first_landed_with(self) -> None:
+        # Every barrier and closing pass rewrites the receipt; dating each
+        # rewrite made time-to-first-admitted the end of every run.
+        first = validation_receipt.write(
+            self.directory, kind="finding", state="reportable",
+            target_revision="rev", target_config_sha256="cfg", attacker_controls=["bytes"],
+        )
+        with mock.patch("validation_receipt.time.time", return_value=first["validated_at"] + 600):
+            again = validation_receipt.write(
+                self.directory, kind="finding", state="reportable",
+                detail="a later pass, same evidence",
+                target_revision="rev", target_config_sha256="cfg", attacker_controls=["bytes"],
+            )
+            self.assertEqual(again["validated_at"], first["validated_at"])
+            demoted = validation_receipt.write(
+                self.directory, kind="finding", state="pending",
+                target_revision="rev", target_config_sha256="cfg", attacker_controls=["bytes"],
+            )
+            self.assertEqual(demoted["validated_at"], first["validated_at"] + 600)
+            self.report.write_text("# Boundary issue\n\nRevised evidence.\n", encoding="utf-8")
+            revised = validation_receipt.write(
+                self.directory, kind="finding", state="pending",
+                target_revision="rev", target_config_sha256="cfg", attacker_controls=["bytes"],
+            )
+            self.assertEqual(revised["validated_at"], first["validated_at"] + 600)
+
+    def test_an_equivalent_transform_keeps_the_verdict_clock(self) -> None:
+        first = validation_receipt.write(
+            self.directory, kind="finding", state="reportable",
+            target_revision="rev", target_config_sha256="cfg", attacker_controls=["bytes"],
+        )
+        prior = validation_receipt.read_current(self.directory)
+        # A harness-owned rewrite: same words, different bytes on disk.
+        self.report.write_text(self.report.read_text() + "\n", encoding="utf-8")
+        with mock.patch("validation_receipt.time.time", return_value=first["validated_at"] + 600):
+            rebound = validation_receipt.rewrite_after_equivalent_transform(self.directory, prior)
+        self.assertEqual(rebound["validated_at"], first["validated_at"])
+        self.assertIsNotNone(validation_receipt.read_current(self.directory))
+
     def test_small_mutable_evidence_is_never_served_from_the_memo(self) -> None:
         # Gate caches are small and rewritten in place. A same-size rewrite can
         # land inside the filesystem's mtime granularity, so these must be

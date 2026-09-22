@@ -462,6 +462,10 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(benchmark_page._outcome("CONFIRMED-NO-CRASH", ""), "refuted")
         self.assertEqual(benchmark_page._outcome("PROBED", ""), "open")
         self.assertEqual(benchmark_page._outcome("DISCARDED", "CRASH-001"), "hit")
+        # Closed on a bundle another hypothesis filed first: reproduced, not new.
+        self.assertEqual(benchmark_page._outcome("CRASH-001", "CRASH-001-2", False), "confirmed")
+        self.assertEqual(benchmark_page._outcome("CRASH-001", "CRASH-001-2", True), "hit")
+        self.assertEqual(benchmark_page._fmt_dim(0.23, "usd"), "$0.23")
 
     def test_target_group_joins_problems_across_conditions(self) -> None:
         groups = self.data["targets"]

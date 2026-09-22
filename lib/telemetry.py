@@ -334,18 +334,128 @@ def _strategy_key(value: object) -> str:
     return text if _STRATEGY_RE.match(text) else "other"
 
 
-def _productive(status: object) -> bool:
+def _names_artifact(status: object) -> bool:
     return str(status or "").upper().startswith(("CRASH", "FIND"))
+
+
+_ARTIFACT_LANES = ("crashes", "findings", "crashes-rejected", "findings-rejected")
+_CARD_LINE_RE = re.compile(r"^CARD-ID:\s*(\S+)", re.MULTILINE)
+
+
+def _artifact_directories(results: Path) -> dict[str, tuple[Path, bool]]:
+    """Artifact name -> (directory, adjudicated on its own).
+
+    Bundles folded as duplicates sit under ``crashes/.duplicates``; they
+    resolve, so a hypothesis that closed on one is placed, but they were
+    never a result of their own.
+    """
+    found: dict[str, tuple[Path, bool]] = {}
+    for lane in _ARTIFACT_LANES:
+        root = results / lane
+        if root.is_dir():
+            for path in root.iterdir():
+                if path.is_dir() and _names_artifact(path.name):
+                    found.setdefault(path.name, (path, True))
+    duplicates = results / "crashes" / ".duplicates"
+    if duplicates.is_dir():
+        for path in duplicates.iterdir():
+            if path.is_dir() and _names_artifact(path.name):
+                found.setdefault(path.name, (path, False))
+    return found
+
+
+def _finding_card(directory: Path) -> str:
+    """The `CARD-ID:` a finding report carries, or ""."""
+    import report_identity  # lazy: it imports the triage helpers
+
+    report = report_identity.find_report(directory)
+    if report is None:
+        return ""
+    try:
+        match = _CARD_LINE_RE.search(report.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return ""
+    return match.group(1) if match else ""
+
+
+def _resolve_artifact(
+    status: str, agent: str, card_id: str, directories: dict[str, tuple[Path, bool]],
+) -> str:
+    """The directory a hypothesis status names, or the status itself.
+
+    Agents close a hypothesis with the id `bin/probe` printed, which for a
+    crash omits the slot suffix the bundle directory carries (`CRASH-002`
+    from agent 2 is `crashes/CRASH-002-2`) and for a finding omits the slug
+    (`FIND-001` is `findings/FIND-001-<slug>`, one per agent that filed a
+    FIND-001). Joining on the bare id matched nothing, so every metric built
+    on the join read zero.
+    """
+    if status in directories:
+        return status
+    suffixed = f"{status}-{agent}" if agent else ""
+    if suffixed in directories:
+        return suffixed
+    matches = [name for name in directories if name.startswith(status + "-")]
+    if len(matches) > 1 and card_id and status.startswith("FIND"):
+        matches = [
+            name for name in matches
+            if _finding_card(directories[name][0]) == card_id
+        ]
+    return matches[0] if len(matches) == 1 else status
+
+
+def hypothesis_artifacts(results_dir: Path) -> dict[str, dict]:
+    """Per hypothesis id: the artifact it closed on and whether that was yield.
+
+    A hypothesis is productive when it is the first to close on an artifact
+    that was adjudicated on its own. A later hypothesis closing on the same
+    bundle re-derived it, and one closing on a bundle folded as a duplicate
+    filed a copy of a state already on disk: both are convergence, not
+    yield, and counting them made a lane that re-probed filed reproducers
+    read as productive. A status naming an artifact no directory resolves
+    keeps the agent's claim, as before.
+    """
+    results = Path(results_dir)
+    latest = _latest_by_id(_rows(results / "state" / "hypotheses.jsonl"))
+    directories = _artifact_directories(results)
+    resolved: dict[str, str | None] = {}
+    for identity, row in latest.items():
+        status = str(row.get("status") or "").strip()
+        if not _names_artifact(status):
+            resolved[identity] = None
+            continue
+        resolved[identity] = _resolve_artifact(
+            status.upper(), str(row.get("agent") or ""), str(row.get("card_id") or ""),
+            directories,
+        )
+    first_by_artifact: dict[str, str] = {}
+    for identity in sorted(
+        (i for i, name in resolved.items() if name),
+        key=lambda i: (str(latest[i].get("created_at") or ""), i),
+    ):
+        first_by_artifact.setdefault(resolved[identity], identity)
+    out: dict[str, dict] = {}
+    for identity, name in resolved.items():
+        if name is None:
+            out[identity] = {"artifact": None, "productive": False}
+            continue
+        placed = directories.get(name)
+        productive = (
+            placed is None or (placed[1] and first_by_artifact[name] == identity)
+        )
+        out[identity] = {"artifact": name, "productive": productive}
+    return out
 
 
 def lane_stats(results_dir: Path) -> dict[str, dict[str, int]]:
     """Hypotheses and productive hypotheses per strategy, latest row per id."""
     latest = _latest_by_id(_rows(Path(results_dir) / "state" / "hypotheses.jsonl"))
+    artifacts = hypothesis_artifacts(results_dir)
     stats: dict[str, dict[str, int]] = {}
-    for row in latest.values():
+    for identity, row in latest.items():
         lane = stats.setdefault(_strategy_key(row.get("strategy")), {"hypotheses": 0, "productive": 0})
         lane["hypotheses"] += 1
-        if _productive(row.get("status")):
+        if artifacts[identity]["productive"]:
             lane["productive"] += 1
     return dict(sorted(stats.items()))
 
@@ -452,13 +562,18 @@ def execution_verdicts(results_dir: Path) -> dict:
     }
 
 
+_CRASH_SLOT_RE = re.compile(r"^CRASH-\d+-(\d+)(?:\..*)?$")
+
+
 def _agent_by_artifact(results_dir: Path) -> dict[str, set[str]]:
+    """Artifact directory name -> agents whose hypotheses closed on it."""
     agents: dict[str, set[str]] = {}
     latest = _latest_by_id(_rows(Path(results_dir) / "state" / "hypotheses.jsonl"))
-    for row in latest.values():
-        status = str(row.get("status") or "")
-        if _productive(status):
-            agents.setdefault(status, set()).add(str(row.get("agent") or ""))
+    for identity, placed in hypothesis_artifacts(results_dir).items():
+        if placed["artifact"]:
+            agents.setdefault(placed["artifact"], set()).add(
+                str(latest[identity].get("agent") or ""),
+            )
     return agents
 
 
@@ -474,13 +589,63 @@ def duplicate_roots(results_dir: Path) -> dict:
         if not isinstance(signature, list) or not signature:
             continue
         artifact = str(row.get("id") or "")
-        by_signature.setdefault(tuple(signature), set()).update(agents.get(artifact, set()))
+        filers = set(agents.get(artifact, set()))
+        # A crash bundle names its slot, so it places itself even when no
+        # hypothesis was closed on it.
+        slot = _CRASH_SLOT_RE.match(artifact)
+        if slot:
+            filers.add(slot.group(1))
+        by_signature.setdefault(tuple(signature), set()).update(filers)
     multi = sum(1 for members in by_signature.values() if len(members - {""}) > 1)
     total = len(by_signature)
     return {
         "signatures": total,
         "multi_agent": multi,
         "rate": (round(multi / total, 4) if total else None),
+    }
+
+
+# ``<stamp> <decision> [key=value ...] OK|FAIL|SKIP <rest>``; a batch decision
+# puts its vote tally before the outcome.
+_DECISION_LINE_RE = re.compile(
+    r"^\S+ (?P<decision>\S+)(?: \S+=\S+)* (?P<outcome>OK|FAIL|SKIP)\b(?P<rest>.*)$"
+)
+_ELAPSED_RE = re.compile(r"elapsed=(\d+)s")
+
+
+def decisions(results_dir: Path) -> dict:
+    """Harness review calls: how many ran, failed, were skipped, and what they cost.
+
+    A review decision that times out is fail-cached and logged only in
+    ``llm-decisions.log``; one such call held the background gate for 330
+    wall-seconds while the cell reported a clean run. ``failed_seconds`` is
+    the wall those calls consumed. ``None`` when the log was never written.
+    """
+    log = llm_usage.find_usage_index(Path(results_dir)).with_name("llm-decisions.log")
+    try:
+        lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {"calls": None, "failed": None, "skipped": None, "failed_seconds": None, "failures": []}
+    calls = failed = skipped = 0
+    failed_seconds = 0.0
+    failures: list[str] = []
+    for line in lines:
+        match = _DECISION_LINE_RE.match(line.strip())
+        if not match:
+            continue
+        outcome = match.group("outcome")
+        if outcome == "SKIP":
+            skipped += 1
+            continue
+        calls += 1
+        if outcome == "FAIL":
+            failed += 1
+            elapsed = _ELAPSED_RE.search(match.group("rest"))
+            failed_seconds += float(elapsed.group(1)) if elapsed else 0.0
+            failures.append(f"{match.group('decision')}{match.group('rest').rstrip()}")
+    return {
+        "calls": calls, "failed": failed, "skipped": skipped,
+        "failed_seconds": round(failed_seconds, 3), "failures": failures,
     }
 
 
@@ -498,10 +663,11 @@ def lineage(results_dir: Path) -> list[dict]:
     for row in _rows(results / "state" / "events.jsonl"):
         if row.get("type") in ("finding_created", "crash_created"):
             signatures[str(row.get("id") or "")] = list(row.get("signature") or [])
+    artifacts = hypothesis_artifacts(results)
     rows: list[dict] = []
     for identity, row in sorted(latest.items()):
         status = str(row.get("status") or "")
-        artifact = status if _productive(status) else None
+        artifact = artifacts[identity]["artifact"]
         rows.append({
             "card_id": row.get("card_id"),
             "hypothesis_id": identity,
@@ -510,6 +676,7 @@ def lineage(results_dir: Path) -> list[dict]:
             "status": status,
             "testcases": testcases.get(identity, []),
             "artifact": artifact,
+            "productive": artifacts[identity]["productive"],
             "signature": signatures.get(artifact or "", []),
         })
     return rows
@@ -542,5 +709,6 @@ def summary(results_dir: Path, origin: str = "") -> dict:
         "coverage": coverage(results),
         "execution": execution_verdicts(results),
         "duplicate_roots": duplicate_roots(results),
+        "decisions": decisions(results),
         "lineage_rows": len(lineage(results)),
     }
