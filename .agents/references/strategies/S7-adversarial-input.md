@@ -5,8 +5,10 @@
 normal `bin/probe` pipeline: reason backwards from parser or decoder code to
 the one input that reaches a specific error path (truncation at each parse
 phase, size and length fields, encoding boundaries, format confusion, resource
-limits). No fuzzer, harness generation, or corpus under S7; that is an S4 card.
-Create only the final H-prefixed testcase in `scratch-N`.
+limits). No fuzzer, fuzz-harness generation, or corpus under S7; that is an S4
+card. A minimal deterministic public-API driver is only a delivery route for
+the hand-crafted testcase. Create only the final H-prefixed testcase in
+`scratch-N`.
 
 **Route gate.** Before committing a hypothesis, verify from the configured
 runner and build metadata how `bin/probe` delivers the crafted testcase to the

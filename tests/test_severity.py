@@ -1912,6 +1912,11 @@ class SeverityTests(unittest.TestCase):
         self.assertEqual(lines[2], "## Fields")
         self.assertEqual(lines[lines.index("## Summary") + 2],
                          "The parser trusts a length field. Two bytes reach it.")
+        indented = "   # App parser trusts a length field\n\n" + untitled
+        text = severity._synthesize_fields_table(indented, sev, used)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "   # App parser trusts a length field")
+        self.assertEqual(lines[2], "## Fields")
         # A `# comment` inside a repro fence is not a heading.
         fenced = "```sh\n# build first\n```\n\n" + untitled
         text = severity._synthesize_fields_table(fenced, sev, used)

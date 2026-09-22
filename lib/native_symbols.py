@@ -61,7 +61,13 @@ def normalise(names: "set[str]") -> "set[str]":
     prefix test against the raw spelling lets every one of them through.
     """
     prefixed = sum(1 for name in names if name.startswith("_"))
-    if prefixed * 2 > len(names):
+    # Itanium C++ and Rust v0/legacy symbols start with `_Z` / `_R` on ELF
+    # and gain the object-format underscore (`__Z` / `__R`) on Mach-O. A C++
+    # library can contain only mangled definitions, so the old majority rule
+    # mistook ELF for Mach-O and stripped the byte the demangler needs.
+    elf_mangled = any(name.startswith(("_Z", "_R")) for name in names) \
+        and not any(name.startswith(("__Z", "__R")) for name in names)
+    if prefixed * 2 > len(names) and not elf_mangled:
         names = {name[1:] if name.startswith("_") else name for name in names}
     return {
         name for name in names

@@ -2896,7 +2896,10 @@ def _synthesize_fields_table(text: str, severity: dict, used: dict) -> str:
     idx = 0
     fenced = report_identity.code_fence_mask(lines)
     for i, line in enumerate(lines):
-        if line.startswith("# ") and not fenced[i]:
+        # CommonMark permits up to three leading spaces before an ATX heading.
+        # Keep this in sync with report_identity.report_title(), which treats
+        # that form as the report's one title.
+        if re.match(r"^ {0,3}# ", line) and not fenced[i]:
             idx = i + 1
             break
     lines[idx:idx] = ["", *table, ""]

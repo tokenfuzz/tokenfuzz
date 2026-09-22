@@ -3,7 +3,8 @@
 Strategy S4 is the only TokenFuzz strategy that runs a fuzzer. Use it when a
 published API accepts a shape the threat model exposes and no existing
 harness drives that API. Use S7 for hand-written parser or decoder boundary
-inputs; S7 never builds a fuzz harness or runs a campaign.
+inputs; S7 may use a minimal deterministic public-API driver to deliver one,
+but never builds a fuzz harness or runs a campaign.
 
 The agent-facing playbook is
 `.agents/references/strategies/S4-directed-fuzzing.md`. This page is for

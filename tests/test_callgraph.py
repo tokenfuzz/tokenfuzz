@@ -1139,6 +1139,16 @@ class SymbolTableTests(unittest.TestCase):
         names = native_symbols.normalise({"app_parse", "app_open", "_pcre2_internal"})
         self.assertEqual(names, {"app_parse", "app_open", "_pcre2_internal"})
 
+    def test_elf_mangled_library_is_not_mistaken_for_macho(self) -> None:
+        self.assertEqual(
+            native_symbols.normalise({"_ZN2ns5parseEv", "_Rsample"}),
+            {"_ZN2ns5parseEv", "_Rsample"},
+        )
+        self.assertEqual(
+            native_symbols.normalise({"__ZN2ns5parseEv", "__Rsample"}),
+            {"_ZN2ns5parseEv", "_Rsample"},
+        )
+
     def test_missing_artifact_yields_no_symbols(self) -> None:
         self.assertEqual(self.sidecar.defined_symbols(Path("/nonexistent/libapp.so")), set())
 

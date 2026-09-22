@@ -23,7 +23,7 @@ question answerable from disk.
 | **S4** Boundary-directed fuzzing | Build or improve a fuzz target, but only for a published API that untrusted input reaches and no harness drives. Ground setup and teardown in bounded local callers, retain build and first-slice receipts, run short slices, and hand every artifact to `bin/probe`. | An admitted, source-grounded harness, a coverage figure, and a confirmed crash, or a recorded reason the harness stopped paying. |
 | **S5** Lifetime and state | Probe re-entrancy, error-path cleanup, ordering, and timing transitions on the same object. | A multi-step sequence that reaches a lifetime or state transition. |
 | **S6** Cross-project variant mining | Take a recent fix in a peer project that implements the same spec, format, or algorithm, and look for the unfixed analogue here. | An adapted testcase against the local implementation. |
-| **S7** Adversarial input | Build parser or decoder boundary inputs by hand. Fuzzers and harnesses belong to S4. | A targeted testcase or a minimised input. |
+| **S7** Adversarial input | Build parser or decoder boundary inputs by hand. A minimal public-API driver may deliver the bytes when no runner reaches the surface; fuzz harnesses and campaigns belong to S4. | A targeted testcase or a minimised input. |
 | **S8** Property-based oracles | Check inverse, idempotence, injectivity, numerical-domain, or format properties: silent corruption that no sanitizer catches. | A generated input with a minimised property counter-example. |
 | **REF** Pattern search | Shared grep recipes used alongside any strategy. | Candidate sites and guard shapes. |
 

@@ -106,7 +106,7 @@ Prefer the sanitizer wrappers (`bin/run-asan`, `bin/run-ubsan`, `bin/run-msan`,
 | **4th** | **S4: Boundary-directed fuzzing** | The only strategy that runs a fuzzer. `bin/fuzz candidates` admits a published API that untrusted input reaches and no harness drives; `bin/fuzz template` grounds setup in at most two local callers and carries a source receipt; improve or write one faithful harness, then spend ONE bounded campaign. Artifacts replay through `bin/probe`. |
 | **5th** | **S5: Lifetime & state violation** | Re-entrancy, error-path cleanup, thread races, state machine sequences. |
 | **6th** | **S6: Cross-project variant mining** | Mine peer projects' fixes for bug classes in target. |
-| **7th** | **S7: Adversarial input** | Targeted parser/decoder boundary inputs, written by hand. No harnesses, no corpora, no fuzzer — those are S4. |
+| **7th** | **S7: Adversarial input** | Targeted parser/decoder boundary inputs, written by hand. A minimal public-API driver may deliver those bytes when the runner cannot; fuzz harness generation, corpora, and fuzzing are S4. |
 | **8th** | **S8: Property-based oracles** | Sanitizer-free oracles for silent corruption: idempotence, injectivity, numerical domain, format compliance, inverse operations. |
 | Ref | **REF: Pattern search library** | Grep patterns for use alongside any strategy. |
 
