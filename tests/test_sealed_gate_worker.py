@@ -251,6 +251,13 @@ class SealTests(unittest.TestCase):
         self.assertEqual(batches, [[first], [second]])
         log = self.runtime.index.read_text()
         self.assertEqual(log.count("Background cluster expansion: expanded=1"), 2)
+        # An expanded seed is handed over by every later sweep; it is not
+        # queued again (the marker is what expand_new_crash_clusters writes).
+        (first / ".cluster_expanded").write_text("done\n", encoding="utf-8")
+        (second / ".cluster_expanded").write_text("done\n", encoding="utf-8")
+        worker._stop = False
+        self.assertEqual(worker._schedule_expansion([first, second], None), "idle")
+        worker._stop = True
 
     def _sweep_with_gates(self, worker) -> dict[str, dict]:
         calls: dict[str, dict] = {}

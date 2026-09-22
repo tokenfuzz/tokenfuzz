@@ -3610,11 +3610,14 @@ class SealedGateWorker:
         """
         with self._lock:
             # A sealed crash is handed over by every sweep until its receipt
-            # lands; one that is already queued or being expanded is not
-            # queued again.
+            # lands; one already expanded, queued, or being expanded is not
+            # queued again, so an idle run does not submit a no-op batch and
+            # log it every sweep.
             self._expand_backlog.extend(
                 crash for crash in crashes
-                if crash not in self._expand_backlog and crash not in self._expanding
+                if crash not in self._expand_backlog
+                and crash not in self._expanding
+                and not (crash / ".cluster_expanded").is_file()
             )
             if self._stop:
                 return "stopped"
