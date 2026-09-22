@@ -1727,6 +1727,11 @@ def run_model_direct(
             else:
                 os.environ["LOGDIR"] = previous_logdir
             _reap_cell_processes(reap_marker, cell_dir)
+    # Before any replay, triage, or export rewrites them: the model's own
+    # writes are the only filing clock these bundles have.
+    for crash_dir in sorted((cell_dir / "crashes").glob("CRASH-*")):
+        if crash_dir.is_dir():
+            crash_artifacts.pin_filing_time(crash_dir)
     usage_events = []
     for index, (usage, session_rc) in enumerate(usage_rows):
         event = dict(usage)

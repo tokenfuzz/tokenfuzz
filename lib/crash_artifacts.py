@@ -8,7 +8,7 @@ import binascii
 import os
 import re
 import shlex
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -218,6 +218,28 @@ def filing_time(directory: Path) -> float | None:
     except OSError:
         return None
     return min(stamps) if stamps else None
+
+
+def pin_filing_time(directory: Path) -> bool:
+    """Record a bundle's filing clock from its own files, once.
+
+    A bundle `bin/probe` did not create (one a model wrote directly) has no
+    write-once clock, and the first harness pass that canonicalizes it
+    rewrites every file, so the filesystem fallback afterwards reads the
+    review time. Pinning it while the files still carry the writer's mtimes
+    keeps "first crash confirmed" on the same filing clock as a probe bundle.
+    """
+    target = directory / ".crash-created-at"
+    if target.exists() or (directory / ".audit" / ".crash-created-at").exists():
+        return False
+    filed = filing_time(directory)
+    if filed is None:
+        return False
+    target.write_text(
+        datetime.fromtimestamp(filed, timezone.utc).isoformat() + "\n",
+        encoding="utf-8",
+    )
+    return True
 
 
 def _fatal_signal_kind(pattern: "re.Pattern[str]", text: str) -> Optional[str]:

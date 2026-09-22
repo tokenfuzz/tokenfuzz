@@ -427,6 +427,32 @@ with tempfile.TemporaryDirectory() as td:
     assert_eq(None, ca.crash_harness_binary(cd),
               "crash_harness_binary: source-only bundle carries no binary")
 
+# A bundle a model wrote directly has no write-once clock, and export rewrites
+# every file; pinning it first keeps the writer's time, not the review's.
+with tempfile.TemporaryDirectory() as td:
+    import os
+
+    cd = Path(td) / "CRASH-1"
+    cd.mkdir()
+    for name, stamp in (("input.bin", 1_000_100), ("sanitizer.txt", 1_000_050)):
+        (cd / name).write_text("x\n")
+        os.utime(cd / name, (stamp, stamp))
+    os.utime(cd, (1_000_200, 1_000_200))
+    assert_eq(True, ca.pin_filing_time(cd), "pin_filing_time: pins an unstamped bundle")
+    for child in cd.iterdir():
+        os.utime(child, (2_000_000, 2_000_000))
+    os.utime(cd, (2_000_000, 2_000_000))
+    assert_eq(1_000_050.0, ca.filing_time(cd),
+              "pin_filing_time: a later rewrite leaves the writer's clock")
+    assert_eq(False, ca.pin_filing_time(cd), "pin_filing_time: never overwrites a clock")
+
+with tempfile.TemporaryDirectory() as td:
+    cd = Path(td) / "CRASH-1"
+    (cd / ".audit").mkdir(parents=True)
+    (cd / ".audit" / ".crash-created-at").write_text("2026-01-01T00:00:00+00:00\n")
+    assert_eq(False, ca.pin_filing_time(cd),
+              "pin_filing_time: an exported clock under .audit counts")
+
 
 total = _PASSED + _FAILED
 if _FAILED == 0:
