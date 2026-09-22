@@ -862,6 +862,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("claude", "claude-mythos-5-1", "10", "0.25", "50"),
             ("claude", "claude-fable-5", "10", "1", "50"),
             ("claude", "claude-mythos-5", "10", "1", "50"),
+            ("claude", "claude-opus-5-5", "4", "0.20", "20"),
             ("claude", "claude-opus-5", "5", "0.50", "25"),
             ("claude", "claude-opus-4-8", "5", "0.50", "25"),
             ("claude", "claude-opus-4-5", "5", "0.50", "25"),
@@ -970,6 +971,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         claude_cache = (
             ("claude-fable-5-1", "12.50", "20"),
             ("claude-fable-5", "12.50", "20"),
+            ("claude-opus-5-5", "5", "8"),
             ("claude-opus-5", "6.25", "10"),
             ("claude-opus-4-8", "6.25", "10"),
             ("claude-sonnet-5", "2.50", "4"),

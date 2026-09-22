@@ -1454,6 +1454,18 @@ def _pricing_rates(
                 "output": _money("10"),
                 "source": "claude-api-sonnet-5-standard",
             }
+        # Opus 5.5 is priced below Opus 5 across the board and, like Fable
+        # 5.1, reads its cache at a lower multiplier (0.05x, $0.20/MTok), so
+        # it cannot share the Opus 4.5-5 row.
+        if _model_id_is(m, "claude-opus-5-5"):
+            return {
+                "input": _money("4"),
+                "cache_write": _money("5"),
+                "cache_write_1h": _money("8"),
+                "cache_read": _money("0.20"),
+                "output": _money("20"),
+                "source": "claude-api-opus-5.5",
+            }
         if _model_id_is(
             m,
             "claude-opus-5",
