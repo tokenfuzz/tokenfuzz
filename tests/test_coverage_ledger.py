@@ -547,9 +547,9 @@ class CallEdgeCardTests(unittest.TestCase):
 
         def scores(paths):
             return iter(
-                (100, ["query/template construction"])
+                (100, ["query/template construction"], frozenset())
                 if rel == "src/z_s3.c"
-                else (1, ["input-consumption entrypoint"])
+                else (1, ["input-consumption entrypoint"], frozenset())
                 for _path, rel in paths
             )
 

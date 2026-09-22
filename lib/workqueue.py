@@ -671,7 +671,9 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
     (_ASSERT_RE, 8, "asserted invariant"),
     # S8 — round-trip / property surface: code with an inverse operation
     # (encode/decode, compress/inflate) or an idempotent normaliser
-    # (normalise/canonicalise/sanitise/dedupe) carries its own oracle.
+    # (normalise/canonicalise/sanitise/dedupe) carries its own oracle. This
+    # row only finds the words; `code_feature_profile` and `rank_target`
+    # decide whether the inverse actually exists (see _INVERSE_FAMILIES).
     (re.compile(
         r"\b\w*(?:[Ee]ncode|[Dd]ecode|[Ss]erializ|[Cc]ompress|[Dd]eflate"
         r"|[Ii]nflate|[Mm]arshal|[Ee]ncrypt|[Dd]ecrypt|[Nn]ormaliz"
@@ -1818,10 +1820,67 @@ def load_patch_cards(path: Path, limit: int | None = 40, ctx: Context | None = N
     )[:limit]
 
 
-def code_feature_reasons(text: str) -> tuple[int, list[str]]:
+ROUND_TRIP_REASON = "round-trip property surface"
+#: Inverse-operation families for the round-trip oracle: (forward stems,
+#: inverse stems). A one-way codec word carries no oracle on its own: a
+#: decode-only library has nothing to round-trip through, and ranking it as
+#: S8 minted cards whose only possible outcome was a source-proof block.
+_INVERSE_FAMILIES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
+    ("codec", ("encode",), ("decode",)),
+    ("serialize", ("serializ",), ("deserializ",)),
+    ("compress", ("compress", "deflate"), ("decompress", "uncompress", "inflate")),
+    ("marshal", ("marshal",), ("unmarshal",)),
+    ("crypt", ("encrypt",), ("decrypt",)),
+)
+#: Idempotent normalisers carry their own oracle (f(f(x)) == f(x)).
+_IDEMPOTENT_STEMS = ("normaliz", "canonicaliz", "sanitiz", "dedup", "escape")
+
+
+def round_trip_directions(tokens: Iterable[str]) -> frozenset[str]:
+    """`idempotent` and `<family>:forward|inverse` for the words a file uses."""
+    found: set[str] = set()
+    for token in tokens:
+        word = token.lower()
+        if any(stem in word for stem in _IDEMPOTENT_STEMS):
+            found.add("idempotent")
+        for family, forward, inverse in _INVERSE_FAMILIES:
+            if any(stem in word for stem in inverse):
+                found.add(f"{family}:inverse")
+            rest = word
+            for stem in inverse:
+                rest = rest.replace(stem, "")
+            if any(stem in rest for stem in forward):
+                found.add(f"{family}:forward")
+    return frozenset(found)
+
+
+def complete_inverse_families(directions: Iterable[str]) -> frozenset[str]:
+    """Families whose forward and inverse both appear among `directions`."""
+    present = set(directions)
+    return frozenset(
+        family for family, _forward, _inverse in _INVERSE_FAMILIES
+        if f"{family}:forward" in present and f"{family}:inverse" in present
+    )
+
+
+def code_feature_profile(text: str) -> tuple[int, list[str], frozenset[str]]:
+    """Score, reasons, and round-trip directions for one source file.
+
+    The round-trip reason fires here only on an idempotent normaliser or an
+    inverse pair within the file; `rank_target` adds it to a one-way codec
+    file when the inverse exists elsewhere in the target, so a codec whose
+    encoder and decoder live in separate files keeps its S8 cards.
+    """
     score = 0
     reasons: list[str] = []
+    directions: frozenset[str] = frozenset()
     for pattern, pts, reason in CODE_PATTERNS:
+        if reason == ROUND_TRIP_REASON:
+            directions = round_trip_directions(pattern.findall(text))
+            if "idempotent" in directions or complete_inverse_families(directions):
+                score += pts
+                reasons.append(reason)
+            continue
         matches = len(pattern.findall(text))
         if matches:
             # Presence-only reasons (the S8 property surfaces) score once,
@@ -1835,17 +1894,22 @@ def code_feature_reasons(text: str) -> tuple[int, list[str]]:
             else:
                 score += min(pts * matches, pts * 4)
             reasons.append(reason)
+    return score, reasons, directions
+
+
+def code_feature_reasons(text: str) -> tuple[int, list[str]]:
+    score, reasons, _directions = code_feature_profile(text)
     return score, reasons
 
 
-def _source_feature_score(path: Path) -> tuple[int, list[str]]:
+def _source_feature_score(path: Path) -> tuple[int, list[str], frozenset[str]]:
     """Read and score one source file in a process-pool-safe call."""
-    return code_feature_reasons(read_sample(path))
+    return code_feature_profile(read_sample(path))
 
 
 def source_feature_scores(
     source_paths: list[tuple[Path, str]],
-) -> Iterable[tuple[int, list[str]]]:
+) -> Iterable[tuple[int, list[str], frozenset[str]]]:
     """Score sources in order, spreading independent regex work over CPUs."""
     workers = min(usable_cpu_count(), len(source_paths))
     paths = (path for path, _rel in source_paths)
@@ -2027,10 +2091,24 @@ def rank_target(
     seen_ids = {c.get("id") for c in cards}
     seen_surfaces = {work_surface(c) for c in cards}
     diversity_floor = int(os.environ.get("RANK_WORK_DIVERSITY_FLOOR", "12") or "12")
-    feature_rows = source_feature_scores(source_paths)
-    for (path, rel), (feature_score, feature_reasons) in zip(
+    feature_rows = list(source_feature_scores(source_paths))
+    # A one-way codec file carries the round-trip oracle when its inverse is
+    # anywhere in the target: the harness drives both through the public API.
+    target_families = complete_inverse_families(
+        direction for _score, _reasons, directions in feature_rows
+        for direction in directions
+    )
+    round_trip_points = next(
+        pts for _pattern, pts, reason in CODE_PATTERNS if reason == ROUND_TRIP_REASON
+    )
+    for (path, rel), (feature_score, feature_reasons, directions) in zip(
         source_paths, feature_rows,
     ):
+        if ROUND_TRIP_REASON not in feature_reasons and any(
+            direction.split(":", 1)[0] in target_families for direction in directions
+        ):
+            feature_score += round_trip_points
+            feature_reasons = [*feature_reasons, ROUND_TRIP_REASON]
         score = 0
         reasons: list[str] = []
         path_score, path_reasons = structural_path_score(rel)

@@ -324,6 +324,46 @@ class WorkQueueTests(unittest.TestCase):
             "a pinned lane spends the whole window on its own best files",
         )
 
+    def test_round_trip_needs_an_inverse_somewhere_in_the_target(self) -> None:
+        """A decode-only library has nothing to round-trip through.
+
+        The word alone minted S8 cards whose only outcome was a source-proof
+        block. The inverse may live in another file, as in codecs split into
+        encoder and decoder trees, so the check is target-wide.
+        """
+        reason = workqueue.ROUND_TRIP_REASON
+        self.assertNotIn(reason, workqueue.code_feature_reasons("n = app_decode(buf, len);")[1])
+        self.assertNotIn(reason, workqueue.code_feature_reasons("obj = deserialize(buf);")[1])
+        self.assertIn(reason, workqueue.code_feature_reasons(
+            "app_encode(v, out); app_decode(out, v2);")[1])
+        self.assertIn(reason, workqueue.code_feature_reasons(
+            "b = serialize(v); v2 = deserialize(b);")[1])
+        self.assertIn(reason, workqueue.code_feature_reasons("s = canonicalize(path);")[1])
+        self.assertEqual(
+            workqueue.round_trip_directions(["deserialize_all", "Uncompress"]),
+            frozenset({"serialize:inverse", "compress:inverse"}),
+        )
+
+        body = (
+            "int app_decode_record(const char *src, size_t length) {\n"
+            "  char buf[16]; memcpy(buf, src, length); return app_decode(buf);\n}\n"
+        )
+        (self.target / "dec.c").write_text(body, encoding="utf-8")
+
+        def reasons_for(name: str) -> set[str]:
+            return {
+                part for card in workqueue.rank_target(self.ctx, 20)
+                if card["file"] == name
+                for part in str(card.get("reason", "")).split("; ")
+            }
+
+        self.assertNotIn(reason, reasons_for("dec.c"))
+        (self.target / "enc.c").write_text(
+            "int app_encode_record(char *dst) { return app_encode(dst); }\n",
+            encoding="utf-8",
+        )
+        self.assertIn(reason, reasons_for("dec.c"))
+
     def test_selected_files_keep_independently_closable_strategy_cards(self) -> None:
         cards = []
         for index in range(6):
