@@ -162,8 +162,15 @@ class ProbeCppHarnessTests(unittest.TestCase):
             encoding="utf-8",
         )
 
-    def test_s7_rejects_a_harness_when_a_runner_route_exists(self) -> None:
-        """S7 drives the configured runner; rebuilding a driver is S4's job."""
+    def test_s7_keeps_its_harness_beside_a_runner(self) -> None:
+        """A runner does not prove it reaches the card's surface.
+
+        A CLI that only parses leaves its option-gated library surfaces
+        unreachable; refusing an S7 harness beside it made those cards
+        terminal while S3, S5, and S8 drove the same surfaces through
+        public-API harnesses. Route choice is the agent's under the route
+        gate, and the trigger gate scores threat-model fit for every strategy.
+        """
         (self.slug_dir / "target.toml").write_text(
             'target = "testproject"\nasan_lib = "build/libtarget.a"\n'
             'includes = []\ndefines = []\nlink_libs = []\n'
@@ -174,9 +181,9 @@ class ProbeCppHarnessTests(unittest.TestCase):
 
         process = self.run_probe()
 
-        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
-        self.assertIn("S7 drives the configured runner", process.stdout + process.stderr)
-        self.assertFalse((self.scratch / ".harness-cache").exists())
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertNotIn("S7 drives the configured runner", process.stdout + process.stderr)
+        self.assertTrue((self.scratch / ".harness-cache").exists())
 
     def test_s7_keeps_its_harness_beside_a_sanitizer_binary(self) -> None:
         """A sanitizer binary is not proof that bytes reach the target.

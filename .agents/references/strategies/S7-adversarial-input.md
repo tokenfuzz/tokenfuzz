@@ -9,18 +9,21 @@ limits). No fuzzer, harness generation, or corpus under S7; that is an S4 card.
 Create only the final H-prefixed testcase in `scratch-N`.
 
 **Route gate.** Before committing a hypothesis, verify from the configured
-runner and build metadata that `bin/probe` can invoke the card's exact parse or
-decode surface with the crafted testcase. A runner fixed to another subcommand
-does not make a surface reachable because the binary contains it. If no route
-exists, `bin/state update-card --card-id <id> --status blocked --note <proof>`
-and do not create a hypothesis or substitute a wrapper, trusted setup, or
-source-only audit. A one-shot API harness is a valid route only when it calls
-a documented public library boundary and no `[runner] bin` is configured; with
-a runner, probe through the runner or hand the API to S4. Startup or teardown
-code that runs for every testcase is not an input route.
+runner and build metadata how `bin/probe` delivers the crafted testcase to the
+card's exact parse or decode surface. Probe through the configured runner when
+the testcase bytes select that surface through it. A runner fixed to another
+subcommand does not make a surface reachable because the binary contains it;
+when the runner cannot reach the card's surface, a faithful public-API harness
+that feeds the testcase bytes to the documented entry point is the S7 route,
+the same route every other strategy uses. Name that entry point and its fixed
+setup in the report; the trigger gate scores threat-model fit. Only when
+neither route exists, `bin/state update-card --card-id <id> --status blocked
+--note <proof>`; never substitute a wrapper of internal state, trusted setup,
+or source-only audit for a missing route. Startup or teardown code that runs
+for every testcase is not an input route.
 For a library-only Cargo package, a direct `.rs` testcase is the configured
 runner route: `bin/probe` links it to the audited crate. Use that route under
-S7; it is not a substituted `HARNESS:` or an S4 fuzz harness.
+S7; it is not an S4 fuzz harness.
 
 **Direct-input gate.** The trigger must occur during one documented parse or
 decode operation on the crafted input; never add a dump, encode, or round trip
@@ -71,22 +74,26 @@ do not leave unmodified or intermediate seed files there. Housekeeping treats
 every scratch input as a runnable testcase and will otherwise probe it again.
 
 **Route gate:** before committing a hypothesis, verify from the configured
-runner and build metadata that `bin/probe` can invoke the card's exact parse or
-decode surface with the crafted testcase. A runner fixed to another subcommand
-does not make the surface reachable merely because the same binary contains
-it. If no route exists, run `bin/state update-card --card-id <id> --status
-blocked --note <configuration-and-source-proof>`; do
-not create a hypothesis or replace the missing route with an undocumented
-wrapper, trusted setup, or source-only rule audit. A one-shot API harness is a
-valid route only when it faithfully calls a documented public library boundary
-and no `[runner] bin` is configured: with a runner, `bin/probe` refuses an S7
-`HARNESS:` — probe through the runner, or hand an uncovered public API to S4.
+runner and build metadata how `bin/probe` delivers the crafted testcase to the
+card's exact parse or decode surface. Probe through the configured runner when
+the testcase bytes select that surface through it. A runner fixed to another
+subcommand does not make the surface reachable merely because the same binary
+contains it: a CLI that only parses leaves its option-gated library surfaces
+unreached. For such a surface, a faithful public-API harness that feeds the
+testcase bytes to the documented entry point is the S7 route, the same route
+S3, S5, and S8 use, and `bin/probe` compiles an S7 `HARNESS:` exactly as it
+does for them. Record the entry point and its fixed, contract-obeying setup in
+the report as `Trusted caller actions`; the trigger gate, not the route gate,
+scores threat-model fit. Only when neither route exists, run `bin/state
+update-card --card-id <id> --status blocked --note
+<configuration-and-source-proof>`; never replace a missing route with a
+wrapper that forges internal state, trusted setup, or a source-only rule audit.
 Startup or teardown code that executes identically for every testcase is not
 an input route: the testcase bytes must select or shape the named boundary,
 not merely cause the process to initialize it.
 For a library-only Cargo package, a direct `.rs` testcase is the configured
 runner route: `bin/probe` links it to the audited crate. Use that route under
-S7; it is not a substituted `HARNESS:` or an S4 fuzz harness.
+S7; it is not an S4 fuzz harness.
 
 If a managed testcase prerequisite is absent, print `NO_EXEC: <proof>` and
 exit 2; do not raise an exception.

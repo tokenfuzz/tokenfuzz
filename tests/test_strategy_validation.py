@@ -76,11 +76,20 @@ class StrategyValidationTests(unittest.TestCase):
             r"Strategy S7", r"Adversarial", r"Truncation",
             r"Size issue", r"Encoding.*charset", r"Format confusion", r"bin/probe",
             r"one documented parse or\s+decode operation",
-            r"runner fixed to another subcommand",
+            r"runner fixed to another\s+subcommand",
             r"Startup or teardown code",
             r"update-card --card-id <id> --status\s+blocked",
+            r"public-API harness\s+that feeds the\s+testcase bytes",
+            r"the same route (every other strategy uses|S3, S5, and S8 use)",
+            r"trigger gate.*scores threat-model fit",
         ):
             self.assertRegex(s7, pattern)
+        # A runner that only parses used to make S7 refuse a harness and block
+        # option-gated library surfaces for good, with a hand-off to S4 that
+        # no mechanism performed. Route choice now follows the shared rule.
+        for stale in ("hand the API to S4", "hand an uncovered public API",
+                      "no `[runner] bin` is configured", "refuses an S7"):
+            self.assertNotIn(stale, s7)
         # Fuzzing moved to S4 wholesale. If any of it comes back here, two
         # strategies own the same method and the rotation stops meaning
         # anything.
