@@ -6640,23 +6640,23 @@ _RESUME_CRASH_STATE_LINES = 12
 def filed_crash_states_markdown(
     results_dir: Path, filed: list | None = None,
 ) -> list[str]:
-    """Resume section naming every distinct promoted crash state on disk.
+    """Resume section naming every distinct crash state filed under `crashes/`.
 
-    Agents re-derived the same promoted crash in more than half of all
-    benchmark bundles (78 of 141) because nothing told them which states
-    were taken: each agent sees only its own hypotheses, and a promoted
-    crash shows up nowhere in its brief. A pending state is deliberately
-    omitted: its evidence may still fail review, so it cannot safely close a
-    peer hypothesis.
+    Agents re-derived the same crash in more than half of all benchmark
+    bundles (78 of 141) because nothing told them which states were taken:
+    each agent sees only its own hypotheses. Listing only promoted states
+    left the same gap for as long as review lagged filing — a whole wall,
+    when one review call stalled — so a state is listed from the moment it
+    is filed, with how far its review has got. A second reproducer of the
+    same state through the same route is refused at filing regardless.
     """
     import crash_bundle  # lazy: it imports validation_receipt, which imports triage helpers
 
     states = filed if filed is not None else crash_bundle.filed_crash_states(results_dir)
-    promoted = [item for item in states if item.promoted]
-    if not promoted:
+    if not states:
         return []
     first_by_state: dict[tuple, crash_bundle.FiledCrashState] = {}
-    for item in promoted:
+    for item in sorted(states, key=lambda item: (not item.promoted, item.crash_id)):
         if item.state not in first_by_state:
             first_by_state[item.state] = item
     ordered = sorted(
@@ -6665,17 +6665,18 @@ def filed_crash_states_markdown(
     )
     lines = ["", "## Crash States Already Filed"]
     for item in ordered[:_RESUME_CRASH_STATE_LINES]:
-        lines.append(f"- `{item.crash_id}` (promoted): {item.summary}")
+        lines.append(f"- `{item.crash_id}` ({item.label}): {item.summary}")
     remaining = len(ordered) - _RESUME_CRASH_STATE_LINES
     if remaining > 0:
         lines.append(f"- ... {remaining} more distinct state(s) under `crashes/`")
     lines.extend([
         "",
-        "A reproducer of a promoted state through the same probe route is not "
-        "filed (`bin/probe` reports it as a duplicate). Close that hypothesis "
-        "with the listed CRASH id. Continue when the hypothesis predicts another "
-        "function, primitive, frame chain, or a materially different route or "
-        "build configuration.",
+        "A reproducer of a filed state through the same probe route is not "
+        "filed again (`bin/probe` reports it as a duplicate), whether or not "
+        "its review has finished. Close that hypothesis with the listed CRASH "
+        "id. Continue when the hypothesis predicts another function, "
+        "primitive, frame chain, or a materially different route or build "
+        "configuration.",
     ])
     return lines
 
@@ -6712,8 +6713,6 @@ def filed_state_overlap_markdown(
     states = filed if filed is not None else crash_bundle.filed_crash_states(results_dir)
     overlapping = []
     for item in states:
-        if not item.promoted:
-            continue
         top = item.state[2][0]
         frame_function, _, location = top.rpartition(" ")
         frame_path = re.sub(r":\d+(?::\d+)?$", "", location)
@@ -6729,7 +6728,7 @@ def filed_state_overlap_markdown(
         return []
     lines = []
     for item in sorted(overlapping, key=lambda item: (not item.promoted, item.crash_id)):
-        lines.append(f"- Already filed at this site: `{item.crash_id}` (promoted): {item.summary}")
+        lines.append(f"- Already filed at this site: `{item.crash_id}` ({item.label}): {item.summary}")
     lines.append(
         "- Continue if this hypothesis predicts a different crash state or a "
         "materially different probe route; otherwise close it with that CRASH id."

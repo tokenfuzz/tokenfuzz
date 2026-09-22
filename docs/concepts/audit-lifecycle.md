@@ -200,7 +200,13 @@ pass after the workers drain.
       it has ended, or, when no session named it, once every session still
       running started after it was filed.
 
-    A turn-capped session's continuation counts as the same session. A
+    A turn-capped session's continuation counts as the same session. Cluster
+    expansion, which asks the model for neighbours of a newly gated crash,
+    runs on its own lane behind the sweep: its decision can take minutes,
+    and a sweep that waited on it once left every later artifact ungated to
+    the end of the wall. A slot is not relaunched with less wall left than
+    the fastest first probe any session of the run has recorded, since such
+    a session ends before its resume. A
     steward tick every few minutes scores the generation, rotates starved
     strategy lanes, and re-ranks the queue without stopping anyone. The one
     full pass over the whole tree, including orphan-testcase enforcement and

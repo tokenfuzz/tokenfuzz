@@ -188,6 +188,7 @@ class SealTests(unittest.TestCase):
              mock.patch.object(triage, "validate_find_gate", side_effect=find_gate), \
              mock.patch.object(audit_runner, "expand_new_crash_clusters", side_effect=expand):
             worker._sweep()
+            worker._expander.shutdown(wait=True)
         self.assertEqual(calls["crash"]["only"], [sealed_crash])
         self.assertFalse(calls["crash"]["age_pending"])
         self.assertEqual(calls["find"]["only"], [sealed_finding])
@@ -201,8 +202,55 @@ class SealTests(unittest.TestCase):
         ]
         self.assertEqual(
             sorted((row["phase"], row["blocked"], row["iteration"]) for row in rows),
-            [("crash_triage", False, 1), ("result_gates", False, 1)],
+            [("cluster_expand", False, 1), ("crash_triage", False, 1),
+             ("result_gates", False, 1)],
         )
+
+    def test_a_slow_expansion_never_holds_the_sweep(self) -> None:
+        """One hosted expansion call ran 330s; the sweep waited and nothing sealed
+        after it was gated before the wall. Expansion runs on its own lane and
+        later crashes queue behind it."""
+        first = _artifact(self.results, "crashes", "CRASH-001-2")
+        worker = self._worker()
+        release = threading.Event()
+        batches: list[list[Path]] = []
+
+        def expand(_runtime, **kwargs):
+            batches.append(list(kwargs["only"]))
+            if len(batches) == 1:
+                release.wait(5)
+            return {"expanded": len(kwargs["only"]), "added": 0, "skipped": 0, "pending": 0}
+
+        gates = {"promoted": 1, "rejected": 0, "pending": 0, "demoted": 0}
+        try:
+            with mock.patch.object(triage, "triage_crash_dirs", return_value=gates), \
+                 mock.patch.object(triage, "validate_find_gate", return_value={
+                     "accepted": 0, "rejected": 0, "pending": 0}), \
+                 mock.patch.object(audit_runner, "expand_new_crash_clusters", side_effect=expand):
+                started = time.monotonic()
+                worker._sweep()
+                # Returned while the first expansion still blocks.
+                self.assertLess(time.monotonic() - started, 2.0)
+                self.assertEqual(worker.sweeps, 1)
+                self.assertFalse(worker._expansion.done())
+                second = _artifact(self.results, "crashes", "CRASH-002-2")
+                worker.observe()
+                worker._sweep()
+                self.assertEqual(worker.sweeps, 2)
+                # Queued behind the expansion in flight, not run beside it.
+                self.assertEqual(worker._expand_backlog, [second])
+                self.assertEqual(batches, [[first]])
+                release.set()
+                deadline = time.monotonic() + 5
+                while len(batches) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+        finally:
+            release.set()
+            worker._stop = True
+            worker._expander.shutdown(wait=True)
+        self.assertEqual(batches, [[first], [second]])
+        log = self.runtime.index.read_text()
+        self.assertEqual(log.count("Background cluster expansion: expanded=1"), 2)
 
     def _sweep_with_gates(self, worker) -> dict[str, dict]:
         calls: dict[str, dict] = {}

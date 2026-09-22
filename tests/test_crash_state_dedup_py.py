@@ -73,6 +73,11 @@ class CrashStateDedupTests(unittest.TestCase):
             self.results, agent, testcase, sanitizer, "asan", mode, **kwargs,
         )
 
+    def file_unchecked(self, agent: str, name: str, text: str, **kwargs) -> tuple[str, str]:
+        """File past the state check: a bundle that landed before the rule, or a race."""
+        with mock.patch.object(crash_bundle, "filed_duplicate", return_value=None):
+            return self.file(agent, name, text, **kwargs)
+
     def promote(self, crash_id: str) -> None:
         directory = self.results / "crashes" / crash_id
         # Triage settles the class before any receipt; a receipt written over
@@ -84,20 +89,51 @@ class CrashStateDedupTests(unittest.TestCase):
         )
         self.assertIsNotNone(receipt)
 
-    def test_same_state_files_until_the_first_bundle_is_promoted(self) -> None:
+    def test_same_state_through_the_same_route_is_refused_once_filed(self) -> None:
         status, first = self.file("1", "a", trace())
         self.assertEqual(status, "FILED")
-        # Pending review: the second agent's evidence may still be needed.
-        status, second = self.file("2", "b", trace())
-        self.assertEqual(status, "FILED")
-        self.assertNotEqual(first, second)
+        # Still under review: the second agent's reproducer would earn the
+        # same verdict through the same route, so it is refused at once.
+        self.assertEqual(self.file("2", "b", trace()), ("DUP-STATE", first))
+        self.assertEqual(crash_bundle.bundle_review_label(
+            self.results / "crashes" / first), "under review")
         self.promote(first)
-        status, duplicate = self.file("3", "c", trace())
-        self.assertEqual((status, duplicate), ("DUP-STATE", first))
+        self.assertEqual(self.file("3", "c", trace()), ("DUP-STATE", first))
+        self.assertEqual(crash_bundle.bundle_review_label(
+            self.results / "crashes" / first), "promoted")
+        # An edited report suspends the receipt, not the filing refusal.
+        report = self.results / "crashes" / first / "report.md"
+        report.write_text(report.read_text() + "\nRevised after review.\n")
+        self.assertEqual(self.file("3", "d", trace()), ("DUP-STATE", first))
         self.assertEqual(
             sorted(p.name for p in (self.results / "crashes").glob("CRASH-*")),
-            [first, second],
+            [first],
         )
+
+    def test_a_promoted_owner_is_preferred_over_a_pending_one(self) -> None:
+        state = crash_bundle.crash_state(trace())
+        route = ("asan", "generic", "", (), "", "")
+        filed = [
+            crash_bundle.FiledCrashState("CRASH-001-1", state, promoted=False),
+            crash_bundle.FiledCrashState(
+                "CRASH-002-2", state, promoted=True, receipt_state="reportable",
+            ),
+        ]
+        with mock.patch.object(crash_bundle, "bundle_crash_route", return_value=route):
+            self.assertEqual(
+                crash_bundle.state_owner(self.results, state, route, filed=filed),
+                "CRASH-002-2",
+            )
+            self.assertEqual(
+                crash_bundle.state_owner(
+                    self.results, state, route, filed=filed[:1], promoted_only=True,
+                ),
+                None,
+            )
+            self.assertEqual(
+                crash_bundle.state_owner(self.results, state, route, filed=filed[:1]),
+                "CRASH-001-1",
+            )
 
     def test_a_different_primitive_or_frame_is_a_new_state(self) -> None:
         _, first = self.file("1", "a", trace())
@@ -131,20 +167,16 @@ class CrashStateDedupTests(unittest.TestCase):
         self.assertEqual(state[1], "heap-use-after-free-READ")
         self.assertTrue(state[3] and state[3][0].startswith("app_release"))
 
-    def test_an_edited_report_suspends_the_promoted_receipt(self) -> None:
-        _, first = self.file("1", "a", trace())
-        self.promote(first)
-        self.assertEqual(self.file("2", "b", trace())[0], "DUP-STATE")
-        report = self.results / "crashes" / first / "report.md"
-        report.write_text(report.read_text() + "\nRevised after review.\n")
-        self.assertEqual(self.file("2", "c", trace())[0], "FILED")
-
-    def test_rejected_or_retained_bundles_never_absorb_a_new_reproducer(self) -> None:
+    def test_a_retained_bundle_absorbs_and_a_rejected_one_does_not(self) -> None:
         _, first = self.file("1", "a", trace())
         (self.results / "crashes" / first / "validation.json").write_text(
             json.dumps({"kind": "crash", "state": "not-reportable"}), encoding="utf-8",
         )
-        self.assertEqual(self.file("2", "b", trace())[0], "FILED")
+        self.assertEqual(self.file("2", "b", trace()), ("DUP-STATE", first))
+        rejected = self.results / "crashes-rejected"
+        rejected.mkdir()
+        (self.results / "crashes" / first).rename(rejected / first)
+        self.assertEqual(self.file("2", "c", trace())[0], "FILED")
 
     def test_resume_lists_distinct_states_with_the_promoted_member(self) -> None:
         target = self.root / "target"
@@ -152,24 +184,25 @@ class CrashStateDedupTests(unittest.TestCase):
         ctx = workqueue.Context(ROOT, target, "sample", self.results, "git")
         workqueue.init_state(ctx)
         _, first = self.file("1", "a", trace())
-        _, second = self.file("2", "b", trace())
+        _, second = self.file("2", "b", trace(), mode="browser")
         _, other = self.file("2", "c", trace(line=25))
         self.promote(second)
         resume = workqueue.state_resume(ctx, "3", "generic", claim=False)
         self.assertIn("## Crash States Already Filed", resume)
         self.assertIn(f"- `{second}` (promoted): asan heap-buffer-overflow at app_parse", resume)
+        self.assertIn(f"- `{other}` (under review): asan heap-buffer-overflow at app_parse", resume)
         self.assertNotIn(f"`{first}`", resume)
-        self.assertNotIn(f"`{other}`", resume)
+        self.assertIn("whether or not its review has finished", resume)
 
-    def test_resume_does_not_treat_pending_evidence_as_taken(self) -> None:
+    def test_resume_lists_pending_evidence_as_under_review(self) -> None:
         target = self.root / "target"
         (target / ".git").mkdir(parents=True)
         ctx = workqueue.Context(ROOT, target, "sample", self.results, "git")
         workqueue.init_state(ctx)
         _, pending = self.file("1", "a", trace())
         resume = workqueue.state_resume(ctx, "2", "generic", claim=False)
-        self.assertNotIn("## Crash States Already Filed", resume)
-        self.assertNotIn(f"`{pending}`", resume)
+        self.assertIn("## Crash States Already Filed", resume)
+        self.assertIn(f"- `{pending}` (under review):", resume)
 
     def test_resume_flags_an_active_hypothesis_at_a_filed_site(self) -> None:
         target = self.root / "target"
@@ -210,7 +243,7 @@ class CrashStateDedupTests(unittest.TestCase):
 
     def test_expansion_skips_a_seed_whose_state_was_already_expanded(self) -> None:
         _, first = self.file("1", "a", trace())
-        _, repeat = self.file("2", "b", trace())
+        _, repeat = self.file_unchecked("2", "b", trace())
         _, other = self.file("2", "c", trace(line=25))
         (self.results / "crashes" / first / ".cluster_expanded").write_text("expanded\n")
         (self.results / "state" / ".cluster-expand-backlog-done").write_text("done\n")
@@ -231,7 +264,7 @@ class CrashStateDedupTests(unittest.TestCase):
 
     def test_same_tick_duplicates_share_one_seed_and_stay_retryable(self) -> None:
         _, first = self.file("1", "a", trace())
-        _, repeat = self.file("2", "b", trace())
+        _, repeat = self.file_unchecked("2", "b", trace())
         (self.results / "state" / ".cluster-expand-backlog-done").write_text("done\n")
         runtime = SimpleNamespace(
             results=self.results, target_root=self.root / "target", num_agents=2,
@@ -295,7 +328,7 @@ class CrashStateDedupTests(unittest.TestCase):
     def test_triage_folds_a_pending_duplicate_of_a_promoted_state(self) -> None:
         ctx = self.context()
         _, first = self.file("1", "a", trace())
-        _, duplicate = self.file("2", "b", trace())
+        _, duplicate = self.file_unchecked("2", "b", trace())
         self.add(ctx, "2", "H-dup", "src/parser.c:app_parse:20", status=duplicate)
         self.promote(first)
         counts, groups = self.gate()
@@ -313,7 +346,7 @@ class CrashStateDedupTests(unittest.TestCase):
 
     def test_same_pass_siblings_wait_for_the_representative_s_verdict(self) -> None:
         _, first = self.file("1", "a", trace())
-        _, second = self.file("2", "b", trace())
+        _, second = self.file_unchecked("2", "b", trace())
         _, other = self.file("2", "c", trace(line=25))
 
         def promote_first(directories, **_kw):
@@ -329,7 +362,7 @@ class CrashStateDedupTests(unittest.TestCase):
 
     def test_an_unpromoted_representative_leaves_its_sibling_judged(self) -> None:
         _, first = self.file("1", "a", trace())
-        _, second = self.file("2", "b", trace())
+        _, second = self.file_unchecked("2", "b", trace())
         counts, groups = self.gate()
         self.assertEqual(groups, [[first], [second]])
         self.assertEqual(counts["duplicate"], 0)
@@ -345,7 +378,7 @@ class CrashStateDedupTests(unittest.TestCase):
 
     def test_two_promoted_bundles_are_never_folded_into_each_other(self) -> None:
         _, first = self.file("1", "a", trace())
-        _, second = self.file("2", "b", trace())
+        _, second = self.file_unchecked("2", "b", trace())
         self.promote(first)
         self.promote(second)
         counts, groups = self.gate()
@@ -371,7 +404,7 @@ class CrashStateDedupTests(unittest.TestCase):
 
     def test_a_failed_state_update_rolls_the_bundle_back(self) -> None:
         ctx = self.context()
-        _, duplicate = self.file("2", "b", trace())
+        _, duplicate = self.file_unchecked("2", "b", trace())
         self.add(ctx, "2", "H-dup", "src/parser.c:app_parse:20", status=duplicate)
         directory = self.results / "crashes" / duplicate
         with mock.patch.object(
@@ -392,9 +425,10 @@ class CrashStateDedupTests(unittest.TestCase):
         testcase.write_bytes(b"opaque")
         sanitizer = self.root / "b.txt"
         sanitizer.write_text(trace(), encoding="utf-8")
-        status, duplicate = crash_bundle.materialize(
-            self.results, "2", testcase, sanitizer, "asan", "generic", hypothesis="H-open",
-        )
+        with mock.patch.object(crash_bundle, "filed_duplicate", return_value=None):
+            status, duplicate = crash_bundle.materialize(
+                self.results, "2", testcase, sanitizer, "asan", "generic", hypothesis="H-open",
+            )
         self.assertEqual(status, "FILED")
         self.promote(first)
         counts, _groups = self.gate()

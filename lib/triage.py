@@ -3292,8 +3292,9 @@ def _fold_duplicate_crash_states(
             adjudicate.append(directory)
             continue
         route = crash_bundle.bundle_crash_route(directory)
-        owner = crash_bundle.promoted_state_owner(
+        owner = crash_bundle.state_owner(
             results, state, route, filed=filed, exclude={directory.name},
+            promoted_only=True,
         )
         if owner is not None:
             _fold_duplicate_crash(directory, results, owner)

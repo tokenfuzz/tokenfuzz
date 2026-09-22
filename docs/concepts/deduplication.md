@@ -35,19 +35,26 @@ bucket. Pending or poorly symbolized artifacts stay deterministic through a
 narrow source/object fallback instead of all collapsing into an empty
 signature.
 
-`bin/probe --confirm` also avoids creating a second bundle when triage has
-already promoted the same exact crash state through the same probe route. Its
+`bin/probe --confirm` also refuses to create a second bundle when `crashes/`
+already holds the same exact crash state reached through the same probe
+route, whether that bundle is still under review or already promoted. Its
 filing key includes the sanitizer, primitive and access direction, line-exact
 use stack, and the free stack for lifetime diagnostics. The route includes the
 execution mode, API harness, target arguments, and alternate build recipe;
 testcase bytes are deliberately excluded. A different route or build is filed
 because it can establish a different boundary or severity even when it reaches
-the same internal fault. Pending, retained, rejected, edited, and stale bundles
-never absorb a new reproducer.
+the same internal fault. A rejected bundle has left `crashes/` and absorbs
+nothing.
 
-This filing check is stricter than the similarity cluster below. It removes a
-repeated input only after one equivalent bundle has current reportable review
-evidence; it does not replace cluster-time review of distinct evidence.
+The refusal does not wait for review because a second reproducer of an
+identical state through an identical route cannot earn a different verdict:
+the same frames cross the same boundary the same way. Waiting for promotion
+made filing depend on gate latency, and while review lagged the agents every
+agent re-filed every crash. Triage still folds a pending duplicate only into a
+bundle with current reportable review evidence; this filing check is stricter
+than the similarity cluster below and does not replace cluster-time review of
+distinct evidence. The structured resume lists every filed state with how far
+its review has got, so an agent can close a hypothesis on it at once.
 
 ### How it works
 

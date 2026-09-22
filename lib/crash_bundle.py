@@ -561,18 +561,46 @@ def _restore_primary_differential(sources: Sequence[Path], destination: Path) ->
 class FiledCrashState:
     """One crash bundle's crash state, as filing-time dedup and the resume brief read it."""
 
-    __slots__ = ("crash_id", "state", "promoted")
+    __slots__ = ("crash_id", "state", "promoted", "receipt_state")
 
-    def __init__(self, crash_id: str, state: CrashState, *, promoted: bool) -> None:
+    def __init__(
+        self, crash_id: str, state: CrashState, *, promoted: bool,
+        receipt_state: str | None = None,
+    ) -> None:
         self.crash_id = crash_id
         self.state = state
         self.promoted = promoted
+        self.receipt_state = receipt_state
+
+    @property
+    def label(self) -> str:
+        return review_label(self.receipt_state)
 
     @property
     def summary(self) -> str:
         sanitizer, kind, frames, freed = self.state
         text = f"{sanitizer} {kind} at {frames[0]}"
         return f"{text} (freed at {freed[0]})" if freed else text
+
+
+def review_label(receipt_state: str | None) -> str:
+    """How far review has taken a bundle, for an agent deciding to move on."""
+    import validation_receipt  # lazy: it imports triage helpers
+
+    if receipt_state in validation_receipt.SECURITY_STATES:
+        return "promoted"
+    if receipt_state == "not-reportable":
+        return "reviewed, not reportable"
+    return "under review"
+
+
+def bundle_review_label(directory: Path) -> str:
+    import validation_receipt  # lazy: it imports triage helpers
+
+    receipt = validation_receipt.read_current(directory)
+    return review_label(
+        str(receipt.get("state")) if isinstance(receipt, dict) else None,
+    )
 
 
 #: (sanitizer, fault kind including access direction where the cluster key
@@ -623,7 +651,7 @@ def crash_route(
     build_config_id: str,
     build_recipe_digest: str,
 ) -> CrashRoute:
-    """The probe contract that can safely share one promoted crash bundle."""
+    """The probe contract that can safely share one filed crash bundle."""
     harness_digest = _sha256(harness) if harness is not None else ""
     return (
         sanitizer, mode, harness_digest, tuple(args),
@@ -702,28 +730,34 @@ def filed_crash_states(
         if state_filter is not None and state != state_filter:
             continue
         receipt = validation_receipt.read_current(directory)
+        receipt_state = (
+            str(receipt.get("state")) if isinstance(receipt, dict) else None
+        )
         filed.append(FiledCrashState(
             directory.name, state,
-            promoted=bool(
-                isinstance(receipt, dict)
-                and receipt.get("state") in validation_receipt.SECURITY_STATES
-            ),
+            promoted=receipt_state in validation_receipt.SECURITY_STATES,
+            receipt_state=receipt_state,
         ))
     return filed
 
 
-def promoted_duplicate(
+def filed_duplicate(
     results_dir: str | os.PathLike[str],
     sanitizer_output: Path,
     route: CrashRoute,
 ) -> str | None:
-    """The promoted bundle whose crash state and probe route this repeats.
+    """The filed bundle whose crash state and probe route this repeats.
 
-    Only a bundle triage has already credited (`reportable`) counts: a second
-    input through the same route can add nothing to the cluster it belongs to.
-    A different route is filed because it can establish a different boundary,
-    build dependency, or severity even when the internal fault is identical.
-    Pending, retained, and rejected bundles likewise never absorb evidence.
+    Any bundle under `crashes/` absorbs, whatever its review state. A second
+    reproducer of an identical state through an identical route cannot be
+    judged differently from the first: the same frames cross the same
+    boundary the same way, so it adds nothing to the cluster and only buys
+    another enrichment and review pass. Absorbing only promoted bundles made
+    filing depend on gate latency: while review lagged the agents, every
+    agent re-derived every crash (6 of 13 bundles in one cell, 78 of 141
+    across a benchmark). A different route is filed because it can establish
+    a different boundary, build dependency, or severity even when the
+    internal fault is identical.
     """
     try:
         state = crash_state(sanitizer_output.read_text(encoding="utf-8", errors="replace"))
@@ -731,30 +765,35 @@ def promoted_duplicate(
         return None
     if state is None:
         return None
-    return promoted_state_owner(results_dir, state, route)
+    return state_owner(results_dir, state, route)
 
 
-def promoted_state_owner(
+def state_owner(
     results_dir: str | os.PathLike[str],
     state: CrashState,
     route: CrashRoute | None,
     *,
     filed: list[FiledCrashState] | None = None,
     exclude: Collection[str] = (),
+    promoted_only: bool = False,
 ) -> str | None:
-    """The promoted bundle that already carries `state` through `route`.
+    """The bundle that already carries `state` through `route`.
 
     A missing route fails open: a hand-written or legacy bundle may carry
     evidence for a materially different boundary, so state equality alone
     cannot absorb it. `filed` lets a pass over many bundles read the receipts
-    once.
+    once. `promoted_only` is for triage folding, where only a credited
+    bundle may take another's evidence; filing-time refusal and the resume
+    brief consult every filed bundle.
     """
     if route is None:
         return None
     if filed is None:
         filed = filed_crash_states(results_dir, state_filter=state)
-    for item in filed:
-        if item.state != state or not item.promoted or item.crash_id in exclude:
+    for item in sorted(filed, key=lambda item: (not item.promoted, item.crash_id)):
+        if item.state != state or item.crash_id in exclude:
+            continue
+        if promoted_only and not item.promoted:
             continue
         directory = Path(results_dir) / "crashes" / item.crash_id
         if bundle_crash_route(directory) == route:
@@ -922,7 +961,7 @@ def materialize(
                         return "DUP", path.name
                 except OSError:
                     pass
-    duplicate_of = promoted_duplicate(results_dir, sanitizer_path, route)
+    duplicate_of = filed_duplicate(results_dir, sanitizer_path, route)
     if duplicate_of:
         return "DUP-STATE", duplicate_of
     crash_id = f"CRASH-{maximum + 1:03d}-{agent}"

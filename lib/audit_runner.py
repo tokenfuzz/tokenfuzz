@@ -45,6 +45,7 @@ import structured_state
 import process_tree
 import target_config
 import target_profile
+import telemetry
 import triage
 import verdict
 import vocab_rules
@@ -3136,6 +3137,29 @@ def _productive_wall_remaining(state: BackendState) -> int | None:
     return max(0, int(budget - elapsed))
 
 
+def _launch_floor_seconds(runtime: Runtime) -> float | None:
+    """The shortest time any session of this run needed to reach its first probe.
+
+    A slot relaunched with less wall than that cannot finish its structured
+    resume, let alone probe: one session launched with 5s left was killed
+    after paying its prompt. The floor is the run's own measurement, so a
+    target whose sessions probe in 20s keeps launching to the last half
+    minute; with no probing session recorded yet there is no floor.
+    """
+    try:
+        rows = workqueue.read_jsonl(runtime.index_jsonl)
+    except (OSError, AttributeError, TypeError):
+        return None
+    fastest: float | None = None
+    for row in rows:
+        if not isinstance(row, dict) or not telemetry.is_session_role(row.get("role")):
+            continue
+        value = row.get("first_probe_seconds")
+        if isinstance(value, (int, float)) and value > 0:
+            fastest = value if fastest is None else min(fastest, value)
+    return fastest
+
+
 def _productive_wall_deadline(state: BackendState) -> float | None:
     try:
         budget = max(0, int(os.environ.get("AUDIT_WALL_BUDGET_SECS", "0")))
@@ -3277,6 +3301,19 @@ class SealedGateWorker:
         self.sweeps = 0
         self.seconds = 0.0
         self._sweep_started: float | None = None
+        # Cluster expansion is lead generation, not adjudication, and its
+        # decision call can take minutes: one hosted call ran 330s and, while
+        # the sweep waited on it, nine crashes and every finding that sealed
+        # sat ungated to the end of the wall. It runs on its own lane; the
+        # sweep hands it newly promoted crashes and never waits for it.
+        self._expander = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="cluster-expand",
+        )
+        self._expansion: concurrent.futures.Future | None = None
+        self._expansion_started: float | None = None
+        self._expansion_finished: float | None = None
+        self._expanding: set[Path] = set()
+        self._expand_backlog: list[Path] = []
         results = getattr(self.runtime, "results", None)
         self._results = Path(results) if results else None
         if self._results is None:
@@ -3370,8 +3407,22 @@ class SealedGateWorker:
         drained_at = time.monotonic()
         self._wake.set()
         self._thread.join()
-        started = self._sweep_started
-        if started is None or started > drained_at:
+        # An expansion still deciding is the barrier's cluster_expand phase
+        # by another name; it is joined here so the barrier never runs a
+        # second decision over the same seeds, and its tail is billed alike.
+        self._expander.shutdown(wait=True)
+        sweep_in_flight = (
+            self._sweep_started is not None and self._sweep_started <= drained_at
+        )
+        expansion_in_flight = (
+            self._expansion_started is not None
+            and self._expansion_started <= drained_at
+            and (
+                self._expansion_finished is None
+                or self._expansion_finished > drained_at
+            )
+        )
+        if not (sweep_in_flight or expansion_in_flight):
             return
         tail = time.monotonic() - drained_at
         if tail <= 0:
@@ -3518,31 +3569,24 @@ class SealedGateWorker:
                     age_pending=False, only=crashes,
                 ))
         finding_counts = {"accepted": 0, "rejected": 0, "pending": 0}
-        with _phase_span([], "result_gates", records=records), \
-                concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            expansion = pool.submit(
-                expand_new_crash_clusters, runtime, deadline=deadline,
-                only=crashes,
-            )
-            try:
-                if findings:
-                    finding_counts.update(triage.validate_find_gate(
-                        runtime.results, workers=runtime.num_agents,
-                        deadline=deadline, target_root_is_product=True,
-                        only=findings,
-                    ))
-            finally:
-                cluster_counts = expansion.result()
+        with _phase_span([], "result_gates", records=records):
+            if findings:
+                finding_counts.update(triage.validate_find_gate(
+                    runtime.results, workers=runtime.num_agents,
+                    deadline=deadline, target_root_is_product=True,
+                    only=findings,
+                ))
         elapsed = time.monotonic() - started
         self.sweeps += 1
         self.seconds += elapsed
         _record_phase_rows(
             runtime, records, iteration=self.state.iteration, blocked=False,
         )
+        expansion = self._schedule_expansion(crashes, deadline)
         acted = (
             crash_counts["rejected"] or crash_counts["demoted"]
             or crash_counts.get("duplicate", 0)
-            or finding_counts["rejected"] or cluster_counts["added"]
+            or finding_counts["rejected"]
         )
         if elapsed >= 1.0 or acted:
             index_log(
@@ -3553,9 +3597,79 @@ class SealedGateWorker:
                 f"pending={crash_counts['pending']} demoted={crash_counts['demoted']} "
                 f"duplicate={crash_counts.get('duplicate', 0)} "
                 f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
-                f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']} "
+                f"pending={finding_counts['pending']} cluster_expand={expansion} "
                 f"in {elapsed:.1f}s",
             )
+
+    def _schedule_expansion(self, crashes: list[Path], deadline: float | None) -> str:
+        """Queue newly gated crashes for expansion off the sweep's critical path.
+
+        One expansion runs at a time so two decisions never mint the same
+        neighbours; crashes that seal while one is in flight wait in a backlog
+        the completion callback drains. Returns a word for the log line.
+        """
+        with self._lock:
+            # A sealed crash is handed over by every sweep until its receipt
+            # lands; one that is already queued or being expanded is not
+            # queued again.
+            self._expand_backlog.extend(
+                crash for crash in crashes
+                if crash not in self._expand_backlog and crash not in self._expanding
+            )
+            if self._stop:
+                return "stopped"
+            if self._expansion is not None and not self._expansion.done():
+                return "in-flight"
+            if not self._expand_backlog:
+                return "idle"
+            batch = list(self._expand_backlog)
+            self._expand_backlog.clear()
+            self._expanding = set(batch)
+            self._expansion_started = time.monotonic()
+            self._expansion = future = self._expander.submit(
+                expand_new_crash_clusters, self.runtime, deadline=deadline,
+                only=batch,
+            )
+        # Registered outside the lock: a future that has already finished
+        # runs its callback synchronously, and the callback schedules the
+        # next batch under this same lock.
+        future.add_done_callback(
+            lambda done: self._expansion_done(done, deadline),
+        )
+        return "started"
+
+    def _expansion_done(
+        self, future: concurrent.futures.Future, deadline: float | None,
+    ) -> None:
+        started = self._expansion_started or time.monotonic()
+        self._expansion_finished = time.monotonic()
+        seconds = self._expansion_finished - started
+        with self._lock:
+            self._expanding = set()
+        _record_phase_rows(
+            self.runtime, [{"phase": "cluster_expand", "seconds": round(seconds, 3)}],
+            iteration=self.state.iteration, blocked=False,
+        )
+        exc = future.exception()
+        if exc is not None:
+            index_log(
+                self.runtime,
+                "ERROR: background cluster expansion failed: "
+                f"{type(exc).__name__}: {exc}; the barrier will retry it",
+            )
+        else:
+            counts = future.result()
+            index_log(
+                self.runtime,
+                f"Background cluster expansion: expanded={counts['expanded']} "
+                f"added={counts['added']} pending={counts['pending']} in {seconds:.1f}s",
+            )
+        if self._stop:
+            return
+        # A backlog gathered while this ran, or a deadline that has not passed,
+        # starts the next batch without waiting for another sweep.
+        if deadline is None or time.monotonic() < deadline:
+            self._schedule_expansion([], deadline)
 
 
 def run_agent_pool(
@@ -3990,6 +4104,15 @@ def run_continuous(state: BackendState) -> tuple[str, list[AgentResult]]:
             remaining = _productive_wall_remaining(state)
             if remaining is not None and remaining <= 0:
                 return False
+            if remaining is not None and not initial:
+                floor = _launch_floor_seconds(runtime)
+                if floor is not None and remaining < floor:
+                    index_log(
+                        runtime,
+                        f"slot {agent}: idle; {remaining}s left is under the run's "
+                        f"fastest first probe ({floor:.0f}s)",
+                    )
+                    return False
             if not initial and ceiling_reached():
                 return False
             if result is None:

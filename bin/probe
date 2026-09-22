@@ -1704,18 +1704,19 @@ class Probe:
         crash_dir = Path(self.config.results_dir) / "crashes" / crash_id
         if status == "DUP-STATE":
             # The same fault primitive and signature frames through this probe
-            # route are already a promoted bundle, so another input would only
-            # buy a full enrichment and background review pass.
+            # route are already a filed bundle, so another input would only
+            # buy a full enrichment and review pass for the same verdict.
+            label = crash_bundle.bundle_review_label(crash_dir)
             print(
-                f"[probe] CRASH DUPLICATE: identical crash state and probe route are already promoted as "
-                f"{crash_dir} - not filed. Close this hypothesis as {crash_id} and spend "
+                f"[probe] CRASH DUPLICATE: identical crash state and probe route are already filed as "
+                f"{crash_dir} ({label}) - not filed. Close this hypothesis as {crash_id} and spend "
                 "the next testcase on a different crash state (another function, "
                 "primitive, or the cluster-expand neighbours)."
             )
             if self.header["hypothesis"]:
                 self._append_state_note(
                     self.header["hypothesis"],
-                    f"bin/probe: crash state and probe route already promoted as crashes/{crash_id}; "
+                    f"bin/probe: crash state and probe route already filed as crashes/{crash_id} ({label}); "
                     f"not filed. Close this hypothesis as {crash_id} and move to a "
                     "different crash state.",
                 )
