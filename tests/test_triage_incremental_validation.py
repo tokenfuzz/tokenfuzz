@@ -4066,6 +4066,23 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
                     triage._trigger_review_seconds(),
                 )
 
+    def test_trigger_review_uses_its_own_decision_latency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "llm-decisions.log"
+            log.write_text(
+                "t trigger-validator-batch votes=1/1 OK bytes=9 elapsed=58s\n"
+                "t trigger-validator votes=1/1 OK bytes=9 elapsed=8s\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {
+                "ACTIVE_BACKEND": "codex", "LLM_DECIDE_LOG": str(log),
+            }, clear=True):
+                deadline = time.monotonic() + 20
+                self.assertGreater(triage._trigger_review_timeout(deadline), 0)
+                self.assertEqual(
+                    triage._trigger_review_timeout(deadline, batch=True), 0,
+                )
+
     def test_decision_timeout_requires_a_decision_name(self) -> None:
         with self.assertRaises(TypeError):
             llm_decide.decision_timeout()  # type: ignore[call-arg]

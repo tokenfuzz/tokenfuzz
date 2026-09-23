@@ -2492,10 +2492,10 @@ def _launch_timeout(
     return 0 if fastest is not None and timeout < fastest else timeout
 
 
-def _trigger_review_timeout(deadline: float | None) -> int:
-    """`_launch_timeout` for a provenance review, single or batched."""
+def _trigger_review_timeout(deadline: float | None, *, batch: bool = False) -> int:
+    """Use the latency of the same provenance-review call shape."""
     return _launch_timeout(
-        ("trigger-validator", "trigger-validator-batch"),
+        "trigger-validator-batch" if batch else "trigger-validator",
         _trigger_review_seconds(), deadline,
     )
 
@@ -2607,7 +2607,7 @@ def _batch_finding_trigger_votes(
         index_and_batch: tuple[int, list[tuple[Path, Path, Path]]],
     ) -> tuple[int, list[tuple[Path, Path, Path]], int | None]:
         index, batch = index_and_batch
-        timeout = _trigger_review_timeout(deadline)
+        timeout = _trigger_review_timeout(deadline, batch=True)
         if timeout <= 0 or llm_decide.provider_limit_open():
             return index, batch, None
         return index, batch, run_batch(batch, str(index), timeout)
@@ -2645,7 +2645,7 @@ def _batch_finding_trigger_votes(
 
     def retry(tag_and_batch: tuple[str, list[tuple[Path, Path, Path]]]) -> None:
         tag, batch = tag_and_batch
-        timeout = _trigger_review_timeout(deadline)
+        timeout = _trigger_review_timeout(deadline, batch=True)
         if timeout <= 0 or llm_decide.provider_limit_open():
             return
         run_batch(batch, tag, timeout)

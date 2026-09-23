@@ -393,10 +393,9 @@ If no sanitizer-confirmed crash exists, it says so.
 A finding is counted as a write-up of its condition's crash, not a second
 problem, when it embeds that crash's fault stack, or when it sits at the
 exact file and line of one of that condition's crash frames and its class is
-one a sanitizer reports (memory safety, race, or unclassified). A shared
-function is not enough, and neither is a line for an auth, injection or
-disclosure finding, so those still count and are left for a reviewer to
-settle.
+memory safety or race. A shared function is not enough, and neither is a line
+for an auth, injection, disclosure, or unclassified finding, so those still
+count and are left for a reviewer to settle.
 
 **Efficiency** follows the scoreboard whenever a cell recorded any of it, and
 says where each condition's wall went. Every value is a median over completed

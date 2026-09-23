@@ -1737,6 +1737,11 @@ class BenchmarkMetricsTests(unittest.TestCase):
         }]}
         scored = benchmark.score_findings_ground_truth(findings, manifest)
         self.assertEqual(scored["overall"]["detected"], [])
+        # Ground-truth paths have a stricter identity rule than crash frames,
+        # whose absolute build path may correspond to a relative report path.
+        self.assertFalse(benchmark._manifest_file_allows(
+            {"file": "src/a/parse.c"}, "/checkout/src/a/parse.c",
+        ))
 
     def test_a_sibling_class_label_credits_a_bug_that_owns_its_symbol(self) -> None:
         """One family, one planted bug, nothing there to tell apart.
@@ -2010,6 +2015,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
         # A different defect family on the crash's line is a second problem,
         # and a report naming only the crash's function pins no site.
         self.assertFalse(covered({**finding, "class": "info-disclosure"}, "harness"))
+        self.assertFalse(covered({**finding, "class": "other"}, "harness"))
         # A race detector's crash is written up as a race.
         self.assertTrue(covered({**finding, "class": "data-race"}, "harness"))
         self.assertFalse(covered({
@@ -2044,6 +2050,27 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertFalse(covered(one_line_off, "harness"))
         self.assertTrue(covered(exact, "harness"))
         self.assertFalse(covered(exact, "model-direct"))
+
+    def test_same_basename_and_line_in_sibling_files_is_not_one_crash(self) -> None:
+        crashes = benchmark.attribute_clusters(
+            {"clusters": [{
+                "id": "CL-src", "primitive": "heap-buffer-overflow",
+                "signature": "app_parse src/parser.c:86",
+                "members": ["CRASH-h"],
+            }]},
+            {"CRASH-h": "harness"},
+        )
+        covered = benchmark._finding_covered_by_crash(crashes)
+        finding = {
+            "key_kind": "loc", "key": ["memory-safety", "vendor/parser.c", "86"],
+            "file": "vendor/parser.c", "line": "86", "crash_state": [],
+            "class": "heap-buffer-overflow",
+        }
+        self.assertFalse(covered(finding, "harness"))
+        self.assertTrue(covered({**finding, "file": "/checkout/src/parser.c"}, "harness"))
+        self.assertTrue(benchmark._same_crash_source_file(
+            "targets/sampleproj/render/reader.go", "render/reader.go",
+        ))
 
     def test_withheld_member_cannot_supply_cluster_severity(self) -> None:
         for survivor_scores in ({"FIND-kept": {"level": "Low", "rank": 1, "score": 2.5}}, {}):

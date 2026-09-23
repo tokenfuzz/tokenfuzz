@@ -4190,8 +4190,25 @@ def credited_pool_members(members: dict, kind: str) -> dict:
     }
 
 
-# Bug-class families a sanitizer crash can itself report.
-_SANITIZER_FAMILIES = frozenset({"memory-safety", "race", "other"})
+# `other` also means missing or unknown class, so it gives no evidence that
+# a same-line finding is the sanitizer fault rather than a second issue.
+_SANITIZER_FAMILIES = frozenset({"memory-safety", "race"})
+
+
+def _same_crash_source_file(left: str, right: str) -> bool:
+    """Whether a crash frame's path and a finding's path name one file.
+
+    Frames carry a bare name, an absolute build path or a checkout-prefixed
+    one (`targets/<slug>/src/a.go`), reports a target-relative path, so the
+    shorter must be a whole-component suffix of the longer: `src/parser.c`
+    matches `/checkout/src/parser.c` but not `vendor/parser.c`.
+    """
+    left_parts = tuple(part for part in Path(left).parts if part not in {"/", "."})
+    right_parts = tuple(part for part in Path(right).parts if part not in {"/", "."})
+    if not left_parts or not right_parts:
+        return False
+    shorter, longer = sorted((left_parts, right_parts), key=len)
+    return longer[-len(shorter):] == shorter
 
 
 def _finding_covered_by_crash(crash_attr: dict):
@@ -4201,11 +4218,10 @@ def _finding_covered_by_crash(crash_attr: dict):
     it". When the same condition also holds a reportable crash at the same
     file and line, a finding of a family a sanitizer reports is that crash's
     write-up, and counting both credits one defect twice: in saved runs every
-    such finding was a source-only report of its condition's crash. Crash and
-    finding name the file differently — a stack frame's `ns::fn file.c:12`
-    against a report's `src/file.c` — so both reduce to (file basename, line)
-    before comparing. A function is never enough: one can hold many distinct
-    bugs.
+    such finding was a source-only report of its condition's crash. A bare
+    frame filename can match a report's target-relative path, while two paths
+    with directories must identify the same file. A function is never enough:
+    one can hold many distinct bugs.
 
     A lifetime cluster's own signature is rooted at the free site, so a
     write-up of where the stale state was observed names neither. Embedding
@@ -4222,7 +4238,7 @@ def _finding_covered_by_crash(crash_attr: dict):
         if not line.isdigit():
             continue
         for cond in cluster.get("conditions", []):
-            sites.setdefault(cond, set()).add((os.path.basename(path), line))
+            sites.setdefault(cond, set()).add((path, line))
 
     states: dict[str, set[tuple[str, ...]]] = {}
     for cluster in crash_attr.get("clusters", []):
@@ -4266,8 +4282,11 @@ def _finding_covered_by_crash(crash_attr: dict):
         # into another.
         if bug_classes.family_of(cluster.get("class")) not in _SANITIZER_FAMILIES:
             return False
-        base = os.path.basename(str(cluster.get("file") or key[1]))
-        return (base, line) in sites.get(cond, ())
+        file = str(cluster.get("file") or key[1])
+        return any(
+            own_line == line and _same_crash_source_file(file, own_file)
+            for own_file, own_line in sites.get(cond, ())
+        )
 
     return covered
 
