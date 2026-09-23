@@ -1540,9 +1540,6 @@ def _pricing_rates(
             }
 
     if b in {"codex", "oss"}:
-        # GPT-5.6 renamed the former flagship/mini/nano tiers to
-        # Sol/Terra/Luna. The unsuffixed alias routes to Sol.
-        #
         # OpenAI applies long-context rates when a request exceeds 272k input
         # tokens, so the boundary itself remains on the standard rate, like
         # Google's <= 200k low tier below.
@@ -1554,6 +1551,53 @@ def _pricing_rates(
         # that Sol's promotional pricing runs "at least through November 21,
         # 2026" — a floor with no start, and no post-promotion rate published —
         # so there is nothing here to encode but the price in force.
+        #
+        # GPT-6 has three separately named tiers. There is no documented
+        # unsuffixed GPT-6 alias, so each exact API model gets its own row.
+        if _model_id_is(m, "gpt-6-astra"):
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("10"),
+                "input_high": _money("20"),
+                "cache_write_low": _money("12.50"),
+                "cache_write_high": _money("25"),
+                "cache_read_low": _money("1"),
+                "cache_read_high": _money("2"),
+                "output_low": _money("50"),
+                "output_high": _money("75"),
+                "source": "openai-api-gpt-6-astra-standard",
+            }
+        if _model_id_is(m, "gpt-6-sol"):
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("2"),
+                "input_high": _money("4"),
+                "cache_write_low": _money("2.50"),
+                "cache_write_high": _money("5"),
+                "cache_read_low": _money("0.20"),
+                "cache_read_high": _money("0.40"),
+                "output_low": _money("10"),
+                "output_high": _money("15"),
+                "source": "openai-api-gpt-6-sol-standard",
+            }
+        if _model_id_is(m, "gpt-6-luna"):
+            return {
+                "tiered": True,
+                "threshold": 272_000,
+                "input_low": _money("0.10"),
+                "input_high": _money("0.20"),
+                "cache_write_low": _money("0.125"),
+                "cache_write_high": _money("0.25"),
+                "cache_read_low": _money("0.01"),
+                "cache_read_high": _money("0.02"),
+                "output_low": _money("0.50"),
+                "output_high": _money("0.75"),
+                "source": "openai-api-gpt-6-luna-standard",
+            }
+        # GPT-5.6 renamed the former flagship/mini/nano tiers to
+        # Sol/Terra/Luna. The unsuffixed alias routes to Sol.
         if _model_id_is(m, "gpt-5.6-luna"):
             return {
                 "tiered": True,

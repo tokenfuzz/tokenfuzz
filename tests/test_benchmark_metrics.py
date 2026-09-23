@@ -588,6 +588,7 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("grok", "grok-build-0.1", {"input": 3000, "cached_input": 2000, "output": 3000}, "0.007400"),
             ("codex", "gpt-5.5", {"input": 5000000, "cached_input": 4800000, "output": 1000, "prompt_estimate_build": 16000}, "3.430000"),
             ("codex", "gpt-5.6-sol", {"input": 5000000, "cached_input": 4800000, "output": 1000, "prompt_estimate_build": 16000}, "2.740000"),
+            ("codex", "gpt-6-sol", {"input": 5000000, "cached_input": 4800000, "output": 1000, "prompt_estimate_build": 16000}, "1.370000"),
         )
         for backend, model, tokens, expected in cases:
             with self.subTest(backend=backend, model=model):
@@ -825,6 +826,9 @@ class BenchmarkMetricsTests(unittest.TestCase):
 
     def test_current_model_families_use_their_exact_price_tiers(self) -> None:
         cases = (
+            ("codex", "gpt-6-astra", "10", "1", "50"),
+            ("codex", "gpt-6-sol", "2", "0.20", "10"),
+            ("codex", "gpt-6-luna", "0.10", "0.01", "0.50"),
             ("codex", "gpt-5.6", "4", "0.40", "20"),
             ("codex", "gpt-5.6-sol", "4", "0.40", "20"),
             ("codex", "gpt-daybreak-blue-latest", "4", "0.40", "20"),
@@ -909,13 +913,26 @@ class BenchmarkMetricsTests(unittest.TestCase):
                     self.assertEqual(str(rates.get("cache_read", 0)), cache_rate)
                     self.assertEqual(str(rates["output"]), output_rate)
 
-        # The old "mini" suffix is not a GPT-5.6 model tier, and arbitrary
-        # future-looking names must not inherit Sol pricing by substring.
+        # Arbitrary aliases and future-looking names must not inherit a tier
+        # by substring. GPT-6 has no documented unsuffixed alias.
+        self.assertIsNone(benchmark._pricing_rates("codex", "gpt-6"))
+        self.assertIsNone(benchmark._pricing_rates("codex", "gpt-6-mini"))
+        self.assertIsNone(benchmark._pricing_rates("codex", "gpt-60"))
         self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5.6-mini"))
         self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5.60"))
         self.assertIsNone(benchmark._pricing_rates("codex", "gpt-5-6"))
         self.assertIsNone(benchmark._pricing_rates("claude", "claude-haiku-5"))
         self.assertIsNone(benchmark._pricing_rates("claude", "claude-opus-6"))
+        for model, write_rate in (
+            ("gpt-6-astra", "12.50"),
+            ("gpt-6-sol", "2.50"),
+            ("gpt-6-luna", "0.125"),
+        ):
+            with self.subTest(model=model, tier="cache-write"):
+                self.assertEqual(
+                    str(benchmark._pricing_rates("codex", model)["cache_write_low"]),
+                    write_rate,
+                )
         # Sonnet 5 is the standing argument against pricing an announcement:
         # its 2026-09-01 increase to $3/$15 was cancelled and the launch price
         # became standard. No row keys on a date, so nothing in the table can
@@ -951,6 +968,9 @@ class BenchmarkMetricsTests(unittest.TestCase):
             )
 
         long_context = (
+            ("gpt-6-astra", "20", "2", "25", "75"),
+            ("gpt-6-sol", "4", "0.40", "5", "15"),
+            ("gpt-6-luna", "0.20", "0.02", "0.25", "0.75"),
             ("gpt-5.6-sol", "8", "0.80", "10", "30"),
             ("gpt-5.6-terra", "4", "0.40", "5", "18"),
             ("gpt-5.6-luna", "0.40", "0.04", "0.50", "1.80"),
