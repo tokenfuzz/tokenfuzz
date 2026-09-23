@@ -66,6 +66,21 @@ def node_supports_hooks() -> bool:
     return probe.stdout.strip() == "true"
 
 
+def node_hooks_imported_cjs_requires() -> bool:
+    """Whether Node runs module hooks for require() in CJS an ES module imported.
+
+    Before nodejs/node#62920 (24.18 and 26.2), a CommonJS module imported with
+    hook-supplied source got a re-invented require() that skips the hooks.
+    """
+    if not NODE:
+        return False
+    probe = subprocess.run(
+        [NODE, "-p", "process.versions.node"], capture_output=True, text=True, check=False,
+    )
+    version = tuple(int(part) for part in probe.stdout.strip().split(".")[:2])
+    return version >= (26, 2) or (24, 18) <= version < (25, 0)
+
+
 class NodeOptionsTests(unittest.TestCase):
     def test_node_runner_preloads_the_hooks_after_the_targets_options(self) -> None:
         options = sanitizer_run.node_options(
@@ -99,7 +114,7 @@ class TypeScriptHooksTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
 
-    def test_the_targets_typescript_resolves_paths_and_transpiles_to_commonjs(self) -> None:
+    def check_paths_project(self, entry: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
             self.write(project, {
@@ -110,10 +125,11 @@ class TypeScriptHooksTests(unittest.TestCase):
                 }}),
                 "src/entry.ts": 'exports.value = require("@fixture/value").value;\n',
                 "lib/value.ts": 'exports.value = "from-paths";\n',
+                "main.cjs": 'console.log(JSON.stringify(require("./src/entry.js")));\n',
                 "main.mjs": 'import entry from "./src/entry.js";\n'
                             "console.log(JSON.stringify(entry));\n",
             })
-            result = self.run_node(project, "main.mjs")
+            result = self.run_node(project, entry)
             self.assertEqual(result.returncode, 0, result.stderr)
             loaded = json.loads(result.stdout)
             # `.js` named the `.ts` source; the alias resolved through tsconfig.
@@ -122,6 +138,14 @@ class TypeScriptHooksTests(unittest.TestCase):
                 "module": 1, "experimentalDecorators": True,
                 "emitDecoratorMetadata": False,
             })
+
+    def test_the_targets_typescript_resolves_paths_and_transpiles_to_commonjs(self) -> None:
+        self.check_paths_project("main.cjs")
+
+    @unittest.skipUnless(node_hooks_imported_cjs_requires(),
+                         "needs Node 24.18+ or 26.2+ (nodejs/node#62920)")
+    def test_an_es_module_testcase_reaches_the_same_resolution(self) -> None:
+        self.check_paths_project("main.mjs")
 
     def test_without_typescript_node_strips_types_after_extension_resolution(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

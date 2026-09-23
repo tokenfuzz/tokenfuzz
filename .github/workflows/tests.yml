@@ -59,6 +59,8 @@ jobs:
           jq --version
           clang --version | head -1
           rg --version | head -1
+          # The runner image's Node, not the distro's, is first on PATH.
+          node --version
           uname -mr
           id -u
 
@@ -98,6 +100,7 @@ jobs:
           jq --version
           clang --version | head -1
           rg --version | head -1
+          node --version || echo "node: not on PATH"
           # Host policy, not tooling. A runner has SIP off and a developer mac
           # has it on, which decides whether this host discloses a platform
           # binary's environment — a difference the reap tests read for a code

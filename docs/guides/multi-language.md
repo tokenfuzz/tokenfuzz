@@ -190,7 +190,12 @@ unless they use top-level `await` or `import.meta`. From an ES module
 testcase, a CommonJS file's default export is its `.default`. Decorator
 metadata is not emitted. A target without
 `typescript` keeps Node's type stripping, and JavaScript modules are left to
-Node. The hooks need Node 22.15 or later and do nothing on older releases. A
+Node. The hooks need Node 22.15 or later and do nothing on older releases.
+Before Node 24.18 and 26.2 (and on 25), a CommonJS file that an ES module
+imports resolves its own `require()` calls without the hooks
+([nodejs/node#62920](https://github.com/nodejs/node/pull/62920)), so its
+extensionless, `.js`-for-`.ts` and `paths` specifiers resolve only from a
+CommonJS testcase. A
 project that needs a different loader such as `ts-node` sets `bin` to it, and
 preflight runs the loader on an empty program before any audit starts.
 
