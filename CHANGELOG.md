@@ -2,197 +2,280 @@
 
 ## 1.6.2 - 2026-09-22
 
-A crash is now paid for once. Filing refuses a crash state already on
-disk, triage folds the duplicates that were filed before anything was
-promoted, and a finding at the exact line of a filed crash shares that
-crash's verdict instead of earning a second one. Denial of service leaves
-the scoring on both sides of the benchmark, S7 reaches option-gated
-surfaces through a public-API harness, S8 stops minting round-trip cards
-where no inverse exists, and the triage drain finishes every report it was
-given. Underneath, the call graph serves C++, Rust, Java, Kotlin, Go and
-Python trees, the benchmark pins the configuration its preflight converged
-and reports clocks and spend that mean what they say, and the Claude
-default moves to Opus 5.5.
+Duplicate crash work was the largest waste in the last benchmark round: 141
+crash bundles covered 63 distinct crash states, and every repeat paid for
+its own enrichment and review. This release files a crash state once, tells
+agents what is already taken before they rediscover it, and gives a finding
+and a crash at the same line one verdict. Denial of service leaves the
+scoring on both sides of the benchmark, a provider outage no longer leaves
+the triage drain with reports it cannot judge, and the call graph reaches
+beyond plain C. Benchmark cells now run on the configuration their preflight
+built, with clocks and spend that cover what they claim, and the default
+models move to Opus 5.5, GPT-6 Sol and grok 4.7.
 
 ### Duplicate crashes
 
-- **A crash state is filed once.** Across 38 benchmark cells, 141 crash
-  bundles covered 63 distinct crash states, and every duplicate bought a
-  full enrichment pass plus validator, reachability, expansion and
-  severity sessions. `bin/probe` now prints `CRASH DUPLICATE` with the id
-  to close the hypothesis with when the report's crash state (sanitizer,
-  fault kind with the access direction, line-exact use-stack signature,
-  and the free stack for lifetime diagnostics) and the probe route (mode,
-  harness, argv, alternate build recipe) match any bundle under
-  `crashes/`, not only a promoted one: a second reproducer of the same
-  state through the same route cannot earn a different verdict. A
-  materially different route is still filed, since it can establish a
-  different boundary, build dependency or severity. `bin/state resume`
-  lists every filed state with how far its review has got and flags an
-  active hypothesis whose site heads one; cluster expansion sends one seed
-  per crash state, lists the promoted signature frames so a covered line
-  is not re-proposed, and no longer re-queues a seed it has already
-  expanded, which had logged an empty batch every thirty seconds for the
-  rest of the wall.
+- **A crash state is filed once.** `bin/probe --confirm` filed a bundle for
+  every distinct reproducer, so across 38 benchmark cells 141 bundles
+  covered 63 crash states, each buying its own enrichment, validation,
+  reachability, expansion and severity sessions. Filing now refuses a
+  reproducer whose crash state (sanitizer, fault kind and access direction,
+  line-exact use stack, and the free stack for lifetime faults) and probe
+  route (mode, harness, argv, alternate build) match any bundle under
+  `crashes/`, and prints `CRASH DUPLICATE` with the id to close the
+  hypothesis with. A single exploration run prints `CRASH STATE ALREADY
+  FILED` so the five confirm runs are not spent, and records the owner as
+  `duplicate_of` on its run row (`filed_state_repeats` in telemetry).
+  `bin/state resume` lists every filed state with how far its review has
+  got. A materially different route is still filed, since it can establish a
+  different boundary, build dependency or severity.
 
-- **Triage folds the duplicates the filing check cannot see.** Across 36
-  benchmark cells, 44 of 64 duplicate bundles were filed before the first
-  bundle was promoted, a median 64 seconds after it, and 6 more entered
-  `crashes/` through finding routing with no probe receipt at all. The
-  crash gate now folds a pending bundle whose state and route match a
-  bundle holding a current reportable receipt into
-  `crashes/.duplicates/<name>/` with a `duplicate-of.txt`, and closes the
-  filing hypothesis with the promoted `CRASH` id, found through the probe
-  provenance (v4) when the agent left the row open. Same-state pending
-  siblings elect the earliest filed as representative and wait for its
-  verdict in the same pass, so a barrier leaves nothing unjudged; a
-  missing route, or a bundle that already holds a reportable receipt,
-  fails open to ordinary review.
+- **Triage folds duplicates filed before the first was promoted.** The
+  filing check cannot see a sibling filed moments earlier: in 36 cells, 44
+  of 64 duplicate bundles landed before the first was promoted, a median 64
+  seconds after it. The crash gate now moves a pending bundle whose state
+  and route match a promoted one to `crashes/.duplicates/<name>/` with a
+  `duplicate-of.txt`, and closes the filing hypothesis with the promoted
+  `CRASH` id. Same-state pending siblings wait for the earliest one's
+  verdict in the same pass, so nothing is left unjudged, and a bundle
+  without a recorded route goes to ordinary review.
 
-- **Promotion no longer waits on expansion, and a slot is not relaunched
-  into a closing wall.** One cluster-expansion review call ran 330 seconds
-  inside the background sweep, so nothing was promoted after minute 10 and
-  every later artifact waited for the barrier. Expansion now runs on its
-  own thread with a backlog and the sweep never waits on it; its
-  800-second ceiling stays. A slot is not relaunched with less wall than
-  the run's fastest first probe, since one launched with 5 seconds left
-  paid for its prompt and was killed before its resume.
+- **Agents see a taken site before opening it.** `bin/state add-hyp` now
+  names any filed crash and any older hypothesis at the same function in the
+  same file. It is advice, not a refusal, since a different mechanism at one
+  function is a new bug, and only earlier ledger rows count, so two agents
+  opening one site together do not both yield. Cluster expansion, which had
+  re-proposed an already covered line for 84 of 135 benchmark siblings,
+  sends one seed per crash state and lists the promoted crash frames.
 
-- **One verdict per defect.** A source finding and a sanitizer crash at
-  the same line are one defect, yet each got its own trigger review, and
-  one run counted the same defect as security yield and as a rejected
-  report. The find gate folds a finding into the crash filed at its exact
-  target-relative path, line and case-sensitive function under
-  `.companion/`, including a finding already rejected on its own, and only
-  a memory-safety finding folds under a sanitizer crash; a shared function
-  is not a shared defect. Crash numbers now count bundles moved to
-  `crashes-rejected/`, so a number is never issued twice.
+- **A finding and a crash at the same line get one verdict.** Each got its
+  own trigger review, and one run counted a single defect both as security
+  yield and as a rejected report. The find gate now folds a memory-safety
+  finding into the sanitizer crash filed at the same target-relative path,
+  line and function, including a finding already rejected on its own, and
+  the crash's verdict is the only one. A shared function alone is not a
+  shared defect. Crash numbers also count bundles moved to
+  `crashes-rejected/`, so no number is issued twice.
 
-### Defaults and reports
+- **Promotion no longer waits on cluster expansion.** One 330-second
+  expansion call inside the background sweep held back every promotion after
+  minute 10 of a run. Expansion now runs on its own thread with a backlog
+  that the sweep never waits on; its 800-second ceiling stays.
 
-- **Claude defaults to Opus 5.5 and grok to 4.7.** Every claude-backend
-  run now uses `claude-opus-5-5`, priced on its own row (4/5/8/0.20/20 per
-  MTok, cache reads at 0.05x), and every grok run uses `grok-4.7`, which
-  shares 4.6's rates. Every other row was rechecked against the vendors'
-  pages. OpenAI's long-context rate applies above 272k input tokens, so a
-  request of exactly 272k bills standard; xAI's applies at or above 200k,
-  and the boundary tests state both in the vendors' terms.
-
-- **Reports have one title reading.** `bin/severity` placed its
-  synthesized Fields table after the first heading of any level, which
-  split an untitled report's Summary from its paragraph and lost the TL;DR
-  Bug line. Only an H1 outside a fence anchors the table, CommonMark's
-  three-space indented headings are honoured, and `report_title` is the
-  one derivation shared by the page, the evidence pages and the rejected
-  index. The contract asks every report for a short `# <title>` line in
-  both conditions.
+- **A crash state comes from one complete sanitizer report.** A confirmation
+  transcript can open with a run cut off before its stack, and selection
+  paired that run's READ with the next run's WRITE frames, inventing a crash
+  state. The fault kind, access direction and frames now come from the first
+  report that has a stack, and clustering, duplicate filing and replay
+  matching all read them from there.
 
 ### Scope and strategy
 
 - **Denial of service is not scored, on either side.** The bug contract
   asked agents to quantify resource amplification while the strategy
-  references called a slowdown never durable, and on one run that split
-  scored the direct control nineteen quadratic-CPU findings against a
-  harness whose lanes never opened one. Availability-only impact is now a
-  stated limitation: the finding gate rejects a dos-family `FIND` before
-  any vote is spent, the quality prompt rejects the same substance under
-  another label, and every prompt, strategy reference and doc states the
-  rule. A report whose primitive names a consequence outside the DoS-only
-  rows still goes to quality review instead of being dropped unread. The
-  seven planted denial-of-service bugs in the Java, Kotlin and Python
-  samples become false-positive traps at the same sites.
+  references said a slowdown is never durable denial of service, and on one
+  run the direct control scored nineteen quadratic-CPU findings against a
+  harness that never opened one. Availability-only impact is now a stated
+  limitation: the finding gate rejects a dos-family `FIND` before any review
+  vote, the quality review rejects the same substance under another label,
+  and the reach-field pass stops asking for `availability_loss`. A report
+  whose primitive names a scorable consequence is still reviewed. The
+  planted denial-of-service bugs in the Java, Kotlin and Python samples
+  become false-positive traps.
 
-- **S7 routes through a public-API harness when the runner cannot reach
-  the card.** S7 refused a `HARNESS` beside a configured runner, but a
-  runner only proves a byte route to the surface it drives, and on one
-  library benchmark this stranded three option-gated surfaces for an hour
-  while S3 drove them through harnesses. The route gate now follows the
-  rule every other strategy uses: probe through the runner when the
-  testcase bytes select the surface through it, otherwise a minimal
-  deterministic public-API harness fed with the testcase bytes, and block
-  only when neither exists. Fuzz harnesses, corpora and campaigns remain
-  S4's; the strategy table, S7 brief and fuzzing guide say so.
+- **Worker prompts state the threat model the direct control already had.**
+  Harness workers saw `attacker_controls` only as a config fact, and in one
+  hour three of four rejected crashes came from callback and lifecycle
+  triggers outside the modelled input. Cold, compact, deep and browser
+  prompts now render the control's threat-model section, still with the rule
+  never to pre-filter a crash.
 
-- **A round-trip card needs an inverse to round-trip through.** A one-way
-  codec word such as decode, deserialize or inflate minted S8 companion
-  cards on a decode-only library, and an agent spent a session on each
-  proving the oracle absent. The round-trip reason now fires on an
-  idempotent normaliser or an inverse pair, and a one-way file keeps it
-  only when the inverse exists somewhere in the target, so a codec split
-  into encoder and decoder files still gets its S8 cards.
+- **A card that already crashed is concluded, not discarded.** 88 of 188
+  card discards were on cards that had already produced a crash, reached by
+  probing in-range inputs to meet the three-CLEAN floor. AGENTS Rule 5 and
+  the `update-card` refusal now point at `--status crash` or `--status
+  find`, which need no CLEAN runs.
+
+- **S7 reaches surfaces the runner cannot through a public-API harness.** S7
+  refused a `HARNESS` whenever a runner was configured, which on one library
+  stranded three option-gated surfaces for an hour. It now probes through
+  the runner when the testcase bytes select the surface and through a
+  minimal deterministic public-API driver otherwise, blocking only when
+  neither exists. Fuzz harnesses, corpora and campaigns stay with S4.
+
+- **S8 round-trip cards need an inverse in the target.** One-way codec words
+  such as decode or inflate minted round-trip cards on a decode-only
+  library, and agents spent a session on each proving the oracle absent. The
+  card now needs an idempotent normaliser or an inverse pair in the file,
+  or, for a one-way file, the inverse somewhere else in the target, so a
+  codec split into encoder and decoder files keeps its cards.
+
+- **S6 discovery cards need a local peer clone.** Agents have no network
+  access, yet a discovery card asked them to find a fix in a peer's history;
+  one cold start spent 11 minutes and 1.9M tokens on failed fetches.
+  Discovery cards are now issued only over a local clone, which the card
+  names, and a lane that is simply empty offline no longer reports a
+  degraded source, so a pinned S6 run stops re-running the generator.
 
 ### Triage completion
 
-- **The drain adjudicates every finding and crash.** A capacity-limited
-  drain left 29 of 38 findings unadjudicated: once the provider cap
-  opened, every skipped reach-field ask had still been charged to the
-  report's two-attempt ceiling. Only a verdict keyed to the report spends
-  an attempt now; a capped or timed-out call, a batch reply that dropped
-  the id, or unusable JSON is bounded by the pass instead. After the
-  batched asks, one single-report ask reaches every open report that has
-  spent its batch budget, and a report whose every verdict left its
-  boundary unplaced is rejected with that reason rather than held pending.
-  The drain repeats until nothing is pending, pausing on a recorded cap
-  and stopping with the reason logged on a refusal; crash triage runs
-  through the same loop. A usage limit arriving as a well-formed exit-0
-  error event records the cap marker. Reach-field decisions are v9, which
-  releases sidecars frozen by the old accounting.
+- **A provider outage no longer spends a report's review attempts.** A
+  capacity-limited drain left 29 of 38 findings unjudged, because each
+  reach-field ask skipped under the provider cap still spent one of the
+  report's two attempts. Only a verdict for the report spends an attempt
+  now; a capped or timed-out call, a dropped id or unusable JSON does not. A
+  report that has spent its batch budget gets one single-report ask, and one
+  whose boundary no verdict could place is rejected with that reason instead
+  of held pending. The drain repeats until nothing is pending, pausing on a
+  recorded cap (now also when the cap arrives as a clean exit-0 error event)
+  and stopping with the reason logged on a refusal or a pass that settles
+  nothing; crash triage uses the same loop. Reach-field decisions move to
+  v9, which releases sidecars stuck under the old accounting.
+
+- **Review calls are not started into a closing wall.** Trigger, quality and
+  expansion calls launched with 4 to 18 seconds left were killed without an
+  answer and reported as failed reviews. A gate or expansion call now waits
+  for the pass after the wall when less time remains than the fastest
+  completed call of the same decision; before any has completed, nothing is
+  held back.
 
 ### Call graph
 
-- **Built symbols are demangled, qualified calls resolve, and definitions
-  carry ranges.** The call-neighbourhood graph served plain C and little
-  else: `nm` names of a C++ or Rust build were compared undemangled, so
-  coverage scored near zero and the entry boundary was always withheld;
-  functions inside anonymous namespaces were skipped and named namespaces
-  flattened; every qualified call (`module.func`, `Class.method`,
-  `Type::method`, `self.m`) was left unresolved; and a definition carried
-  only a start line. Symbols are demangled in one batch and matched inside
-  their scope, namespaces keep containment, qualified calls resolve through
-  containment edges when the callee is unique across the containers the
-  qualifier can name, definitions record `[name, start, end]` (schema 8),
-  and the coverage ledger and sweep use the parser's ranges. ELF `_Z` and
-  `_R` mangling is recognised before the Mach-O underscore rule, which had
-  stripped the byte the demangler keys on. Measured: sample-cpp coverage
-  0.45% to 95%, sample-rust 0.01% to 100%.
+- **The call graph serves C++, Rust, Swift, Java, Kotlin, Go and Python
+  trees.** It had served plain C and little else: built C++ and Rust symbols
+  were compared still mangled, so symbol coverage read near zero and the
+  entry boundary was always withheld; anonymous namespaces were skipped and
+  named ones flattened; qualified calls (`module.func`, `Class.method`,
+  `Type::method`, `self.m`) went unresolved, leaving most non-C trees
+  without a cross-file edge; Swift methods in `extension` blocks were
+  missed; and a definition carried only its start line. Symbols from ELF and
+  Mach-O builds are now demangled and matched within their own scope,
+  namespaces keep containment, a qualified call resolves when its callee is
+  unique across the containers the qualifier can name, and definitions
+  record `[name, start, end]` (schema 8), so the coverage ledger stops
+  running each function to the next and the sweep gives the lines between
+  functions their own windows. A target without a build gets an entry
+  boundary from definitions that are public along with every enclosing type.
+  Sample symbol coverage rose from 0.45% to 95% on C++ and from 0.01% to
+  100% on Rust.
+
+### Agent time
+
+- **Agent tools resolve the paths the harness prints.** Across 736 benchmark
+  sessions, 151 `bin/peek` misses were target-relative source paths, the
+  form `bin/state` prints, given from the harness root. `bin/peek` now falls
+  back to the target, then the results tree; `mark-examined` records a read
+  window that runs past the end of the file up to EOF; and
+  `bin/probe-history` hashes a `scratch-N/` testcase where `bin/probe` finds
+  it instead of printing `sha1=?`. The pre-file checks name
+  `bin/scratch-search <function>` and `bin/state list-findings --limit 0`,
+  which read the artifacts themselves, instead of indexes that are often not
+  written yet mid-run.
+
+- **A slot whose lane runs dry is reassigned at once.** When the one-card S4
+  lane closed, the refill found nothing there and idled the slot until the
+  steward tick, 1.5 to 3 minutes of a 30-minute wall. The refill now
+  reassigns an empty lane before deciding the slot has no work.
+
+- **A card names the alternate build its file needs.** Probes on a file only
+  an alternate build compiles failed to link against the regular build until
+  agents found `PROBE_BUILD_CONFIG` themselves. The card and the resume now
+  name the ready configuration, and `bin/probe` also accepts the `cfg-<id>`
+  spelling agents copy from the build tree's name.
+
+- **A Claude session finishes its long commands.** Claude Code moves a Bash
+  command still running at its 120-second default timeout to the
+  background, and a headless session then exits without the result: one
+  cell's fuzz lane restarted the same campaign in five sessions and never
+  finished it. Every Claude launch now keeps harness commands in the
+  foreground for up to an hour, bounded by the session wall; an operator's
+  own `BASH_DEFAULT_TIMEOUT_MS` or `BASH_MAX_TIMEOUT_MS` wins.
+
+- **A worked card is not handed back for subsystem diversity.** Diversity
+  kept only cards in subsystems no other agent owned, so when the lone such
+  card had already been discarded, the same agent got it back for twenty
+  minutes while five untouched cards waited. Once every free-subsystem card
+  has been worked, the claim offers the untouched cards instead.
+
+- **A lane whose cards all fail its entry gate rotates.** Rotation off a
+  strategy waited for notes in that strategy's vocabulary, so an S8 agent
+  that blocked every card because no property reached a security consumer
+  never wrote one: in a 30-minute cell it spent all of its 18 one-minute
+  sessions re-blocking S8 cards and never rotated. A card the agent concluded
+  in its lane now counts as that evidence, and an `update-card` row that
+  omits `--agent` records the card's live claimant instead of nobody.
+
+- **A testcase can load a TypeScript project's source.** Node strips only
+  erasable types and resolves only the specifiers it is given, so on a
+  TypeScript framework most cards stopped at the first decorator, `paths`
+  alias or extensionless import and were blocked as unrunnable. Every Node
+  runner execution now preloads hooks that resolve and transpile `.ts`
+  source with the target's own `typescript` and `tsconfig.json`; a target
+  without `typescript` keeps Node's behaviour.
+
+- **A failed import is not a crash.** The runners' uncaught-exception crash
+  patterns recorded every module-resolution failure as `CRASH`: 7 of 10
+  runner crashes across two Node targets in one round were a testcase import
+  path, an unbuilt `dist/` or an unwired workspace package, and a Kotlin
+  target's run lacked a standard-library class. A Node resolution failure
+  and a class missing from the JVM classpath are now `NO_EXEC`, like a
+  Python `ModuleNotFoundError` in the testcase frame. Only the last error in
+  the output decides, so a logged resolution failure cannot hide a later
+  crash, and a program that logs one and then exits 0 records a clean run.
 
 ### Benchmark
 
-- **A run pins the configuration its preflight converged.** A fresh run
-  snapshotted `target.toml` before the preflight's `setup-target --build`
-  filled `asan_bin` and `asan_lib`, so cells ran on a contract naming no
-  binary: no build identity, no coverage sibling and no entry boundary.
-  The snapshot is taken after convergence, verified, and leased as that
-  exact copy; the config reloads inside the converge step and clears the
-  build route fields like every other route field.
+- **A run pins the configuration its preflight built.** A fresh run
+  snapshotted `target.toml` before the preflight's build filled `asan_bin`
+  and `asan_lib`, so cells ran on a contract naming no binary: no build
+  identity, coverage sibling or entry boundary. The snapshot is now taken
+  after the build converges, verified, and leased as that exact copy.
 
-- **Clocks and spend mean what they say.** A receipt rewritten with the
-  same verdict keeps the clock it first landed with, so time-to-first-
-  admitted no longer reads as the end of every run, and admission events
-  carry the receipt's own time rather than the housekeeping pass that
-  noticed them. First crash confirmed now reads the filing of the first
-  crash triage admitted, not the first one reproduced, which could be one
-  triage later rejected. A direct control's crash bundle is clocked from
-  its own file times the moment the session exits, before the replay and
-  export pass rewrites every file in it; the old reading put the control's
-  first confirmed crash minutes after its session had ended, and runs
-  already finalized keep it because the original times are gone.
-  Hypotheses join to bundles by resolved directory, so duplicate roots
-  stop reading zero, and a hypothesis is productive only when it is the
-  first to close on a bundle adjudicated on its own. The token and cost
-  columns cover the wall only; post-wall review of a cell's own reports,
-  which was 62% of one control's input, stays recorded beside them, and
-  the character-count estimate is split the same way. Review calls and
-  their failures are counted with the wall they lost, and cost per
-  confirmed is shown to cents and marked when estimated.
+- **Clocks and spend cover what they claim.** Every barrier rewrote a
+  receipt's clock, so time to first admitted read as the end of every run; a
+  receipt now keeps the clock of its first verdict, and first crash
+  confirmed reads the first crash triage admitted rather than the first
+  reproduced. A direct control's crash is clocked from its own file times
+  when the session exits, before export rewrites them; it had read minutes
+  after the session ended, and runs finalized earlier keep that reading
+  because the original times are gone. Token and cost columns cover the wall
+  only, with post-wall review of a cell's own reports, 62% of one control's
+  input, recorded beside them, and cost per confirmed is shown, marked `~`
+  when estimated, instead of withheld. Hypotheses join to bundles by
+  resolved directory, so duplicate filing no longer reads zero; only the
+  first hypothesis to close on a bundle judged on its own counts as
+  productive, and the rest show as "confirmed, not filed". Failed review
+  calls are counted with the wall they lost.
 
-- **Results land where the evidence puts them.** The discovery curve
-  skips clusters the table never credited, reads a control's crash from
-  the agent's own in-wall draft rather than the post-wall promotion, and
-  keeps copied inputs out of it. The crash-cover rule stays at exact file
-  and line. Sites written with a `targets/<slug>/` prefix no longer split a
-  directory into two subsystem rows, checkpoint columns follow the budget,
-  and a run with an answer key shows its recall and precision on the page.
+- **Results land where the evidence puts them.** The discovery curve could
+  step on sites the table never credited; it now skips them, and reads a
+  control's crash from its in-wall draft rather than the post-wall
+  promotion. A finding counts as its condition's crash written up only when
+  it embeds that crash's stack, or sits at the exact file and line of a
+  crash frame with a class a sanitizer reports; one that shares only the
+  function no longer folds. Sites written with a `targets/<slug>/` prefix no
+  longer split a subsystem row, checkpoint columns follow the budget, and a
+  run with an answer key shows its recall and precision on the page.
+
+### Defaults and reports
+
+- **The default models move to Opus 5.5, GPT-6 Sol and grok 4.7.** The
+  claude, codex and grok backends now default to `claude-opus-5-5`,
+  `gpt-6-sol` and `grok-4.7`. Opus 5.5 gets its own pricing row with cache
+  reads at 0.05x of input; GPT-6 Astra, Sol and Luna each get a Standard row
+  with the 272k long-context boundary, and a bare or look-alike `gpt-6` name
+  stays unpriced rather than inheriting a tier by substring; grok 4.7 shares
+  4.6's rates.
+
+- **Reports have one title.** `bin/severity` placed its synthesized Fields
+  table after the first heading of any level, which split an untitled
+  report's Summary from its paragraph and dropped the TL;DR's Bug line. Only
+  an H1 outside a code fence now anchors the table, CommonMark's indented
+  headings included. `report_title` is the one title reading for the
+  benchmark page and the evidence pages, the report contract asks for a
+  `# <title>` line in both conditions, and the rejected-finding index takes
+  a harness row's site from the clusterer's location parser instead of
+  showing a dash.
 
 ## 1.6.1 - 2026-09-19
 
