@@ -5754,11 +5754,22 @@ def update_card_status(
         runs, hyps = card_discard_evidence(ctx, card_id)
         ok = runs >= min_runs and hyps >= min_hyps
         if not ok:
+            # A card with a probed crash is concluded, and `crash` has its own
+            # gate; without this pointer agents probed in-range inputs purely
+            # to reach the floor (92 of 198 benchmark discards were on cards
+            # that had already crashed).
+            hint = (
+                "This card already has a CRASH verdict: if that crash is filed "
+                "under crashes/, close the card with --status crash (or "
+                "--status find for a filed finding) instead."
+                if card_run_count(ctx, card_id, verdict="CRASH")
+                else "Run bin/probe and add distinct hypotheses first."
+            )
             raise CardStatusUpdateError(
                 f"update-card refuses {status} for {card_id}: "
                 f"clean_runs={runs} (need {min_runs}); "
                 f"probed_distinct_hypotheses={hyps} (need {min_hyps}). "
-                "Run bin/probe and add distinct hypotheses first."
+                + hint
             )
     elif status == "blocked" and not str(note or "").strip():
         raise CardStatusUpdateError(
@@ -5854,6 +5865,12 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
     closest = str(getattr(args, "closest", "") or "").strip()
     if closest:
         row["closest"] = closest
+    # Present (possibly empty) only when bin/probe checked the filed crash
+    # states: "" is a new state, an id is the bundle this one repeats, and a
+    # missing key is unknown, so older ledgers never read as zero repeats.
+    duplicate_of = getattr(args, "duplicate_of", None)
+    if duplicate_of is not None:
+        row["duplicate_of"] = str(duplicate_of)
     append_jsonl(state_dir(ctx.results_dir) / "runs.jsonl", row)
     return row
 
@@ -6759,8 +6776,141 @@ def filed_crash_states_markdown(
     return lines
 
 
+def _path_parts(path: str) -> tuple[str, ...]:
+    return tuple(part for part in Path(path).parts if part not in {"/", "."})
+
+
+#: (path parts, anchored, function). An anchored path is target-relative and
+#: compares exactly; an unanchored one is absolute outside the target root (a
+#: sanitizer frame from another mount) and can only be suffix-matched.
+Site = tuple[tuple[str, ...], bool, str]
+
+
+def _site_path(path: str, target_root: Path | None) -> tuple[tuple[str, ...], bool]:
+    candidate = Path(path)
+    if target_root is not None:
+        root = Path(target_root)
+        if not candidate.is_absolute():
+            parts = _path_parts(path)
+            # A repo-root-relative spelling (`targets/<slug>/src/a.c`) names
+            # the same file as the target-relative one. Strip the prefix only
+            # when the file proves it: a target called `requests` holds a
+            # `requests/` package whose paths must stay as written.
+            if parts and not root.joinpath(*parts).exists():
+                prefix = _path_parts(str(root))
+                for start in range(len(prefix)):
+                    tail = prefix[start:]
+                    rest = parts[len(tail):]
+                    if parts[:len(tail)] == tail and rest and root.joinpath(*rest).exists():
+                        return rest, True
+            return parts, True
+        try:
+            return _path_parts(str(candidate.relative_to(root))), True
+        except ValueError:
+            return _path_parts(path), False
+    return _path_parts(path), not candidate.is_absolute()
+
+
+def hypothesis_site(hypothesis_file: str, target_root: Path | None = None) -> Site | None:
+    """The site a `path:function[:line]` hypothesis location names.
+
+    A C++ function may itself carry `::`, and the path never carries a colon,
+    so the function is everything between the path and a numeric line.
+    """
+    parts = str(hypothesis_file or "").split(":")
+    if len(parts) < 2 or not parts[0]:
+        return None
+    path, anchored = _site_path(parts[0], target_root)
+    # Only a numeric tail is a line: `a.cc:Parser::read` has none, and taking
+    # `read` as its line made every method of Parser one site.
+    has_line = len(parts) >= 3 and re.fullmatch(r"\d+(?:-\d+)?", parts[-1].strip())
+    function = ":".join(parts[1:-1] if has_line else parts[1:]).strip()
+    if not path or not function:
+        return None
+    return path, anchored, function
+
+
+def same_site(site: Site, other: Site | None) -> bool:
+    """One function in one file.
+
+    Two target-relative paths must be equal: `src/parser.c` and
+    `vendor/src/parser.c` are different files. Only an unanchored absolute
+    path may match by suffix, and then on at least two components, because a
+    bare basename cannot tell sibling directories apart.
+    """
+    if other is None or site[2] != other[2]:
+        return False
+    if site[1] and other[1]:
+        return site[0] == other[0]
+    shorter, longer = sorted((site[0], other[0]), key=len)
+    return len(shorter) >= 2 and longer[-len(shorter):] == shorter
+
+
+def site_overlap_advisory(ctx: Context, row: dict) -> list[str]:
+    """What an older hypothesis or a filed crash already holds at a new site.
+
+    Agents re-derive each other's leads: in one three-agent cell four agents
+    opened the same assert-only guard and three the same size-math defect,
+    each paying for a testcase, a probe and a confirm to learn it was taken.
+    Only rows ahead of the new one in the ledger count, so two agents adding
+    the same site at once never both yield: the older row owns it. This is
+    advice, never a refusal: a different mechanism at one function is a new
+    bug, so the agent compares mechanisms and decides.
+    """
+    site = hypothesis_site(str(row.get("file", "")), ctx.target_root)
+    if site is None:
+        return []
+    filed = [
+        line for line in filed_state_overlap_markdown(
+            ctx.results_dir, str(row.get("file", "")), target_root=ctx.target_root,
+        )
+        if line.startswith("- Already filed")
+    ]
+    older: list[dict] = []
+    for other in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl"):
+        if (
+            str(other.get("id", "")) == str(row.get("id", ""))
+            and str(other.get("agent", "")) == str(row.get("agent", ""))
+        ):
+            break
+        older.append(other)
+    peers = [
+        other for other in older
+        if other.get("id")
+        and (
+            is_active_hypothesis_status(str(other.get("status", "")))
+            or str(other.get("status", "")).upper().startswith(("CRASH", "FIND"))
+        )
+        and same_site(site, hypothesis_site(str(other.get("file", "")), ctx.target_root))
+    ]
+    shown = peers[-3:]
+    if not filed and not shown:
+        return []
+    lines = list(filed)
+    for other in shown:
+        text = " ".join(str(other.get("hypothesis", "")).split())
+        lines.append(
+            f"- Hypothesis `{other['id']}` (agent {other.get('agent', '?')}, "
+            f"{other.get('status', '')}) at this site: {text[:120]}"
+        )
+    hid = row.get("id")
+    if filed or any(not is_active_hypothesis_status(str(o.get("status", ""))) for o in shown):
+        advice = f"close it with `bin/state update-hyp --id {hid} --status <that CRASH/FIND id>`."
+    else:
+        advice = (
+            "the older hypothesis owns this site: `bin/state update-hyp --id "
+            f"{hid} --status DISCARDED --note 'duplicate of <that id>'` and pick another site."
+        )
+    lines.append(
+        "- Compare mechanisms first: keep this hypothesis if it names a different "
+        f"guard, primitive, or trigger; if it is the same one, {advice}"
+    )
+    return lines
+
+
 def filed_state_overlap_markdown(
     results_dir: Path, hypothesis_file: str, filed: list | None = None,
+    *, target_root: Path | None = None,
 ) -> list[str]:
     """Flag an active hypothesis whose site already heads a filed crash state.
 
@@ -6773,20 +6923,8 @@ def filed_state_overlap_markdown(
     """
     import crash_bundle  # lazy: see filed_crash_states_markdown
 
-    # `path:function:line`; a C++ function may itself carry `::`, and the
-    # path never carries a colon, so the function is everything between.
-    parts = str(hypothesis_file or "").split(":")
-    if len(parts) < 2 or not parts[0]:
-        return []
-    hypothesis_parts = tuple(
-        part for part in Path(parts[0]).parts if part not in {"/", "."}
-    )
-    # A bare basename cannot distinguish common sibling paths such as
-    # src/parser.c and vendor/parser.c, so it is too weak to advise closure.
-    if len(hypothesis_parts) < 2:
-        return []
-    function = ":".join(parts[1:-1] if len(parts) >= 3 else parts[1:]).strip()
-    if not function:
+    site = hypothesis_site(hypothesis_file, target_root)
+    if site is None:
         return []
     states = filed if filed is not None else crash_bundle.filed_crash_states(results_dir)
     overlapping = []
@@ -6794,12 +6932,7 @@ def filed_state_overlap_markdown(
         top = item.state[2][0]
         frame_function, _, location = top.rpartition(" ")
         frame_path = re.sub(r":\d+(?::\d+)?$", "", location)
-        frame_parts = tuple(
-            part for part in Path(frame_path).parts if part not in {"/", "."}
-        )
-        shorter, longer = sorted((hypothesis_parts, frame_parts), key=len)
-        same_path = len(shorter) >= 2 and longer[-len(shorter):] == shorter
-        if frame_function != function or not same_path:
+        if not same_site(site, (*_site_path(frame_path, target_root), frame_function)):
             continue
         overlapping.append(item)
     if not overlapping:
@@ -6890,6 +7023,7 @@ def state_resume(
         )
         lines.extend(filed_state_overlap_markdown(
             ctx.results_dir, str(h.get("file", "")), filed_states,
+            target_root=ctx.target_root,
         ))
         lines.extend(
             [

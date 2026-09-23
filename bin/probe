@@ -918,6 +918,9 @@ class HarnessBuilder:
 
 
 class Probe:
+    #: Filed bundle this run's crash state repeats; see _filed_state_owner.
+    duplicate_of: str | None = None
+
     def __init__(self, args: argparse.Namespace):
         self.args = args
         # None until `execute` times a run. Recording a state row without one
@@ -1364,6 +1367,7 @@ class Probe:
         probe_verdict = self._reject_foreign_image(probe_verdict)
         self._write_internal_differential_result(probe_verdict)
         print(f"[probe] verdict={probe_verdict}")
+        self.duplicate_of = self._filed_state_owner(probe_verdict)
         self._record_state(probe_verdict)
         self._file_crash(probe_verdict)
         return 0 if probe_verdict == "PROPERTY" else result
@@ -1653,6 +1657,7 @@ class Probe:
             reason=reason,
             coverage=coverage,
             closest=frame[:200] if frame else "",
+            duplicate_of=self.duplicate_of,
         ))
         if probe_verdict == "CRASH" and self.sanitizer != "runner":
             self._append_state_note(
@@ -1677,6 +1682,8 @@ class Probe:
             return
         runs = int(self.environment["SANITIZER_RUNS"])
         if not crash_bundle.should_file(probe_verdict, self.sanitizer, runs):
+            if self.duplicate_of and not self.args.confirm:
+                self._note_filed_state(self.duplicate_of)
             return
         if self.harness_source and self.build_kind == "interpret":
             print(f"[probe] WARNING: crash confirmed but auto-file skipped for interpreted HARNESS. File it under {self.config.results_dir}/crashes/.", file=sys.stderr)
@@ -1732,6 +1739,55 @@ class Probe:
                 )
         else:
             print(f"[probe] CRASH already filed (identical reproducer): {self.config.results_dir}/crashes/{crash_id}")
+
+    def _filed_state_owner(self, probe_verdict: str) -> str | None:
+        """The filed bundle this crash's state and route repeat.
+
+        None when the question does not apply (no sanitizer crash, runner
+        route, internal differential), "" when checked and new. It uses the
+        exact route and predicate filing uses, so a single run can say what a
+        --confirm would be refused for, and the run row records the owner as
+        structured `duplicate_of` instead of only a prose note.
+        """
+        if (
+            probe_verdict != "CRASH" or self.sanitizer == "runner"
+            or os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL") == "1"
+        ):
+            return None
+        try:
+            route = crash_bundle.probe_route(
+                self.sanitizer, self.mode,
+                Path(self.harness_source) if self.harness_source else None,
+                self.repro_args, self.selected_build_config,
+                build_config.recipe_path(self.config.target_root, self.selected_build_config)
+                if self.selected_build_config else None,
+            )
+            return crash_bundle.filed_duplicate(self.config.results_dir, self.output, route) or ""
+        except OSError as exc:
+            print(f"[probe] WARNING: filed-state lookup failed: {exc}", file=sys.stderr)
+            return None
+
+    def _note_filed_state(self, owner: str) -> None:
+        """Name the filed bundle an exploration crash repeats, before --confirm.
+
+        Filing refuses a same-state, same-route reproducer anyway; saying so
+        on the single run saves the five confirm runs and the turns around
+        them that re-derived outcomes already on disk.
+        """
+        crash_dir = Path(self.config.results_dir) / "crashes" / owner
+        label = crash_bundle.bundle_review_label(crash_dir)
+        print(
+            f"[probe] CRASH STATE ALREADY FILED: this crash state and probe route are "
+            f"{crash_dir} ({label}); --confirm would not file it. If this hypothesis "
+            f"predicted that state, close it as {owner}; if it aims past that site, "
+            "reshape the input to avoid the filed crash."
+        )
+        if self.header["hypothesis"]:
+            self._append_state_note(
+                self.header["hypothesis"],
+                f"bin/probe: exploration crash repeats crashes/{owner} ({label}); "
+                f"close as {owner} if predicted, else reshape past it.",
+            )
 
     def _write_internal_differential_result(self, probe_verdict: str) -> None:
         destination = os.environ.get("_TOKENFUZZ_PRIMARY_DIFFERENTIAL_RESULT", "")

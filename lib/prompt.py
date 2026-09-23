@@ -724,6 +724,23 @@ def sanitizer_build_directive(context: PromptContext) -> str:
     return build_section + "\n\n" + "\n".join(facts)
 
 
+def threat_model_directive(context: PromptContext) -> str:
+    """The threat-model section the model-direct baseline also renders.
+
+    Without it workers read `attacker_controls` only as a config fact beside
+    three "file it regardless of trigger source" rules, and in one libxml2
+    hour three of four rejected crashes were callback and lifecycle triggers
+    the review placed outside `bytes`. Browser workers get it too: the
+    baseline renders it for every target with a loaded config.
+    """
+    controls = ", ".join(getattr(context.config, "attacker_controls", None) or [])
+    if not controls:
+        return ""
+    return render_template(
+        "audit_threat_model.md.j2", {"attacker_controls": controls},
+    ).strip()
+
+
 def build_config_assignment_directive(context: PromptContext, agent: int) -> str:
     if context.is_browser or context.config is None:
         return ""
@@ -751,7 +768,11 @@ def build_config_assignment_directive(context: PromptContext, agent: int) -> str
 
 
 def agent_build_directive(context: PromptContext, agent: int) -> str:
-    parts = [sanitizer_build_directive(context), build_config_assignment_directive(context, agent)]
+    parts = [
+        sanitizer_build_directive(context),
+        build_config_assignment_directive(context, agent),
+        threat_model_directive(context),
+    ]
     return "\n\n".join(part for part in parts if part)
 
 
@@ -1049,11 +1070,12 @@ def deep_investigation_prompt(context: PromptContext, agent: int) -> str:
     strategy = context.strategy(agent)
     seed = _continuation(context, agent)
     target_block = _targets(context, mode)
-    if not context.is_browser:
-        target_block += "\n\n" + agent_build_directive(context, agent)
-        failures = harness_build_failures_directive(context)
-        if failures:
-            target_block += "\n\n" + failures
+    directive = agent_build_directive(context, agent)
+    if directive:
+        target_block += "\n\n" + directive
+    failures = harness_build_failures_directive(context)
+    if failures:
+        target_block += "\n\n" + failures
     card_min_runs, card_min_hypotheses = workqueue.card_discard_requirements()
     return render_template(
         "deep_investigation.md.j2",

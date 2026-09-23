@@ -1595,6 +1595,15 @@ class WorkQueueTests(unittest.TestCase):
             "discarded",
         )
 
+    def test_discard_refusal_on_a_crashed_card_points_at_the_crash_close(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/app.c")])
+        self.add_hypothesis()
+        with self.assertRaisesRegex(workqueue.CardStatusUpdateError, "add distinct hypotheses"):
+            workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")
+        self.add_run(verdict="CRASH")
+        with self.assertRaisesRegex(workqueue.CardStatusUpdateError, "--status crash"):
+            workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")
+
     def test_env_blocked_is_the_non_discard_exit_for_unreachable_card(self) -> None:
         self.write_cards([
             self.card("WORK-A", "src/app.c", kind="prior-fix"),

@@ -659,6 +659,26 @@ def crash_route(
     )
 
 
+def probe_route(
+    sanitizer: str,
+    mode: str,
+    harness: Path | None,
+    args: Sequence[str],
+    build_config=None,
+    build_recipe: Path | None = None,
+) -> CrashRoute:
+    """The route `materialize` would bind for one probe invocation."""
+    build_config_id = str(getattr(build_config, "config_id", "") or "")
+    build_recipe_digest = (
+        _sha256(build_recipe)
+        if build_config_id and build_recipe is not None and build_recipe.is_file()
+        else ""
+    )
+    return crash_route(
+        sanitizer, mode, harness, args, build_config_id, build_recipe_digest,
+    )
+
+
 def bundle_crash_route(directory: Path) -> CrashRoute | None:
     """Read the route bound into a probe bundle's current validation receipt."""
     path = _probe_context_path(Path(directory))
@@ -914,14 +934,10 @@ def materialize(
         raise FileNotFoundError("bundle input missing")
     if build_config_id and (build_recipe_path is None or not build_recipe_path.is_file()):
         raise FileNotFoundError("alternate build recipe missing")
-    build_recipe_digest = (
-        hashlib.sha256(build_recipe_path.read_bytes()).hexdigest()
-        if build_config_id and build_recipe_path is not None else ""
+    route = probe_route(
+        sanitizer, mode, harness_path, args, build_config, build_recipe_path,
     )
-    route = crash_route(
-        sanitizer, mode, harness_path, args,
-        build_config_id, build_recipe_digest,
-    )
+    build_recipe_digest = route[5]
     crashes = Path(results_dir) / "crashes"
     crashes.mkdir(parents=True, exist_ok=True)
     identity = _identity(

@@ -180,57 +180,22 @@ MISSED alone is not proof of unreachability.
 
 ## CRASH promotion gate
 
-`crashes/CRASH-*` only for legitimate sanitizer diagnostics:
+The full gate is the CRASH PROMOTION GATE section of your prompt; this adds
+only what it does not say.
 
-1. Trusted caller uses normal public APIs; obeys ownership / lifetime /
-   callback / allocator / threading / cleanup contracts.
-2. Untrusted part is a normal input boundary: file/packet/web bytes,
-   regex pattern, media stream, archive, IPC, CLI input.
-3. Testcase does NOT mutate target-owned internals, include private APIs,
-   free active callback state, switch allocators mid-flight, or free
-   owners before dependents.
-4. If the crash depends on a specific offset/length/index/callback
-   return/lifetime/order, prove that value is reachable through the
-   normal product boundary — input bytes ≠ "library exposes caller
-   control of iterator offset N."
-
-Required fields in every report:
-
-```
-Boundary:
-Caller controls:
-Trusted caller actions:
-Caller contract: obeyed|violated|unspecified
-Trigger source: bytes|call-sequence|timing|race|protocol-state|env|fs-state|both
-Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF
-```
-
-`Strategy` is the investigation strategy actually in use when the
-testcase was filed (an active strategy from the strategy index, or REF for the
-pattern-search library). Same field for findings/FIND-*.
-
-`Entry` (optional, recommended): the public API function an external caller
-invokes to reach the bug, call-shaped, e.g. ``Entry: pcre2_match()``.
-Reachability *reports* caller reach at this entry point (prioritisation only;
-not a CVSS input); otherwise it infers the entry from the deepest product frame
-in the sanitizer stack.
-
-`Parameter control` (when value-dependent): direct / mapped /
-application-supplied / harness-only / none. Use `application-supplied`
-when the bug needs a non-default mode/codec/filter/option the
-application selects. The triage matrix demotes when `Trigger source`
-falls outside the target's `attacker_controls` (target.toml) and a source
-reviewer agrees — a **not-reportable** decision (security→robustness) that
-KEEPS the crash in `crashes/` without numeric CVSS or security credit, not a
-move to `findings/`. File any reproducing sanitizer
-crash that clears conditions 1–3 under `crashes/` regardless of trigger
-source and let triage make that call; do not pre-demote a
-`call-sequence`/`env`/`race` crash to `findings/` on a bytes-only target.
-Caller contract violations always reject. `violated` = the target's own
-docs state a rule the testcase breaks (ordering, ownership, lifetime,
-accepted argument/parent types) — quote it. A validity requirement still
-counts when phrased as "should" or "callers must make sure"; a recommendation
-that does not define accepted input does not. Silence is `unspecified`.
+- If the crash depends on a specific offset/length/index/callback
+  return/lifetime/order, prove that value is reachable through the normal
+  product boundary — input bytes ≠ "library exposes caller control of
+  iterator offset N."
+- Report fields: `Caller contract: obeyed|violated|unspecified`,
+  `Trigger source: bytes|call-sequence|timing|race|protocol-state|env|fs-state|both`,
+  `Strategy: S1|S2|S3|S4|S5|S6|S7|S8|REF`, plus `Boundary:`, `Caller controls:`,
+  `Trusted caller actions:`. Findings carry the same `Strategy` field.
+- `Entry` (optional, recommended): the call-shaped public API an external
+  caller invokes, e.g. ``Entry: pcre2_match()``; reachability reports caller
+  reach at it (prioritisation only, not a CVSS input).
+- `Parameter control` (when value-dependent): direct / mapped /
+  application-supplied / harness-only / none.
 
 ## FIND quality bar
 

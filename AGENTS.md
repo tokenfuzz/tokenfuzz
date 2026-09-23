@@ -63,7 +63,7 @@ Each agent has a role set by the harness:
    are ordinary testcase output and receive no finding credit.
    MISSED = revise input, don't discard, don't spend the execution budget.
 4. **DEPTH FOLLOWS EVIDENCE.** Start with a trigger-aimed `bin/probe` run. One CLEAN may resolve a deterministic hypothesis only when the testcase directly instantiates every named boundary value or call step. Allocator-, scheduler-, race-, GC-, timing-, re-entrancy-, or state-dependent triggers need repetition or distinct shapes; a coverage HIT alone proves only that the location executed. MISSED, NO_EXEC, and EXEC_FAIL never justify discard; a concrete source/configuration proof that the named trigger has no documented input boundary may.
-5. **BREADTH WITH A CARD FLOOR.** Before discarding a card, record at least 3 card-linked CLEAN `bin/probe` runs across at least 2 distinct hypothesis shapes that were actually probed. This is a card floor, not a per-hypothesis variant tax. On a concrete patch/site card that retires the card; on a broad whole-file card it records this dry pass and yields to fresher work, but cannot prove unexamined functions exhausted, so the queue may reoffer it with its history until campaign dry/wall limits. Deepen any angle that clears a guard, reaches closer coverage, changes suspicious output, or exposes crash-adjacent state. If the configured target cannot execute the card, do not manufacture CLEAN evidence: after checking sibling builds/modes, use `ENV-BLOCKED`. That closes a concrete patch/site card, but on a broad ranked-source card it records and demotes only the failed route; use `update-card --status blocked --note <proof>` only for a proven whole-card mode incompatibility, stale surface, or non-public boundary. MISSED alone is not proof.
+5. **BREADTH WITH A CARD FLOOR.** Before discarding a card, record at least 3 card-linked CLEAN `bin/probe` runs across at least 2 distinct hypothesis shapes that were actually probed. This is a card floor, not a per-hypothesis variant tax. A card that already produced a filed crash or finding is concluded, not discarded: close it with `update-card --status crash` or `--status find`, which need no CLEAN runs; never probe in-range inputs just to reach the floor. On a concrete patch/site card that retires the card; on a broad whole-file card it records this dry pass and yields to fresher work, but cannot prove unexamined functions exhausted, so the queue may reoffer it with its history until campaign dry/wall limits. Deepen any angle that clears a guard, reaches closer coverage, changes suspicious output, or exposes crash-adjacent state. If the configured target cannot execute the card, do not manufacture CLEAN evidence: after checking sibling builds/modes, use `ENV-BLOCKED`. That closes a concrete patch/site card, but on a broad ranked-source card it records and demotes only the failed route; use `update-card --status blocked --note <proof>` only for a proven whole-card mode incompatibility, stale surface, or non-public boundary. MISSED alone is not proof.
 6. **Bugs cluster.** After confirming, search SAME FILE and neighbors before moving on.
 7. **Stay on one subsystem while exploring; expand to neighbors after a hit.** While a hypothesis is open and you have no confirmed CRASH/FIND in this subsystem yet, stick with it across strategy rotations — don't pivot files mid-investigation. After you confirm a crash or finding in this subsystem, the harness unlocks neighbor-subsystem cards for you (productive-agent relaxation in `_claim_next_card_locked`); follow Rule 6 and claim them. Pre-confirmation pivots are wasted context cost.
 8. **Iterate on non-diagnostic runs.** Try: allocator shaping, GC interleaving, multi-trigger, object replacement. See `.agents/references/reproducer-templates.md`.
@@ -145,11 +145,13 @@ If the current strategy yields nothing on this subsystem, **switch strategy firs
    runs, `bin/probe` materializes the bundle for you — it copies the reproducer +
    `sanitizer.txt` into the next `crashes/CRASH-NNN-<agent>/` slot, writes a
    `report.md` skeleton, and prints `[probe] CRASH FILED: <path>`. (A single
-   one-run probe does NOT auto-file — confirm first.) Do NOT hunt the crashes/
-   tree for it and do NOT open a second dir — re-confirming the same testcase
+   one-run probe does NOT auto-file — confirm first, unless it printed
+   `[probe] CRASH STATE ALREADY FILED`: a confirm cannot file that either.)
+   Do NOT hunt the crashes/ tree for it and do NOT open a second dir —
+   re-confirming the same testcase
    reuses the existing bundle. If it prints `[probe] CRASH DUPLICATE`, the same
    crash state (primitive + signature frames) through the same probe route is
-   already a promoted bundle: nothing is filed, so close the hypothesis with
+   already a filed bundle: nothing is filed, so close the hypothesis with
    that CRASH id and aim the next testcase at a different crash state —
    `bin/state resume` lists the promoted states already taken. A materially
    different route or build configuration is still filed. Go to the printed

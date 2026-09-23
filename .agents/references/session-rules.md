@@ -266,6 +266,8 @@ that were actually probed. MISSED, NO_EXEC, EXEC_FAIL, and CRASH rows do not cou
 retires a concrete patch/site card; for a broad whole-file card it records a
 dry pass and yields to fresher work, but the card remains reofferable with its
 history because finite probes cannot prove unexamined functions exhausted.
+A card that already produced a crash or finding closes as `--status crash` or
+`--status find` instead, with no CLEAN floor.
 If the configured target cannot execute a surface, do not manufacture CLEAN
 evidence: after checking sibling builds/modes, mark its hypothesis ENV-BLOCKED.
 That closes a concrete site card, but records only the failed route on a broad

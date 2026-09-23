@@ -19,6 +19,7 @@ from workqueue import (
     card_yield,
     add_common_args,
     add_hypothesis,
+    site_overlap_advisory,
     add_note,
     add_run,
     AmbiguousHypothesisUpdateError,
@@ -541,6 +542,9 @@ def main(argv: list[str]) -> int:
             print(f"[state] {exc}", file=sys.stderr)
             return 2
         _emit_mutator("add-hyp", row, args.json)
+        advisory = site_overlap_advisory(ctx, row)
+        if advisory:
+            print("\n".join(advisory), file=sys.stderr if args.json else sys.stdout)
         return 0
     if args.cmd == "update-hyp":
         if not args.id:

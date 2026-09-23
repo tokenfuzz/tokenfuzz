@@ -551,14 +551,22 @@ def execution_verdicts(results_dir: Path) -> dict:
     completing cleanly — rejected input, loader, usage, or runner failure — a
     launch that cost a sanitizer run and taught nothing."""
     counts: dict[str, int] = {}
+    checked = repeats = 0
     for row in _rows(Path(results_dir) / "state" / "runs.jsonl"):
         verdict = str(row.get("verdict") or "").upper() or "UNKNOWN"
         counts[verdict] = counts.get(verdict, 0) + 1
+        if "duplicate_of" in row:
+            checked += 1
+            repeats += bool(row["duplicate_of"])
     total = sum(counts.values())
     return {
         "counts": dict(sorted(counts.items())),
         "total": total,
         "exec_fail_share": (round(counts.get("EXEC_FAIL", 0) / total, 4) if total else None),
+        # Sanitizer crashes that repeated a filed state through the same
+        # route: re-derived work. None when no run recorded the check.
+        "filed_state_repeats": repeats if checked else None,
+        "filed_state_checked": checked,
     }
 
 

@@ -757,6 +757,27 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "generic prompt injects parsed threat-model and harness config",
         directive,
     )
+    generic_deep = prompt.agent_build_directive(generic_context, 1)
+    check(
+        "## Threat model" in generic_deep
+        and "`attacker_controls = bytes, call-sequence`" in generic_deep
+        and "Aim at faults the listed controls reach, but never pre-filter" in generic_deep
+        and generic_cold.count("## Threat model") == 1,
+        "worker prompt carries the threat-model section the model-direct baseline gets, once",
+        generic_deep,
+    )
+    browser_threat_context = prompt.PromptContext(
+        results, generic_target, "demo", references, 2, is_browser=True,
+        browser_agents=1, config=generic_config,
+    )
+    browser_cold = prompt.cold_start_prompt(browser_threat_context, 1)
+    check(
+        browser_cold.count("## Threat model") == 1
+        and "`attacker_controls = bytes, call-sequence`" in browser_cold
+        and "SANITIZER BUILDS" not in browser_cold,
+        "browser workers get the threat-model section without the native build block",
+        browser_cold,
+    )
     cache = results / "scratch-1" / ".harness-cache"
     cache.mkdir(parents=True)
     for index in range(3):

@@ -56,6 +56,21 @@ than the similarity cluster below and does not replace cluster-time review of
 distinct evidence. The structured resume lists every filed state with how far
 its review has got, so an agent can close a hypothesis on it at once.
 
+The same lookup runs earlier, too. A one-run exploration probe whose crash
+repeats a filed state through the same route prints `CRASH STATE ALREADY
+FILED` with the owning bundle, so the agent skips a confirm that could not
+file, and its `state/runs.jsonl` row records the owner as `duplicate_of`
+(empty for a new state). Cell telemetry counts those rows as
+`filed_state_repeats`; a ledger written before the field existed reports it
+as unknown, not zero.
+
+`bin/state add-hyp` names any filed crash state, and any older live or
+crash/finding-closed hypothesis, at the same function in the same
+target-relative file. Only rows ahead of the new one in the ledger count, so
+two agents opening one site at the same moment never both yield. Both notices
+are advice: a testcase aimed past a filed crash reshapes its input, and a
+different mechanism at the same function is a new bug.
+
 ### How it works
 
 1. **Parse and normalize** the first usable sanitizer diagnostic. Runtime,

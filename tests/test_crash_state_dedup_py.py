@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -17,6 +19,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import audit_runner  # noqa: E402
 import crash_bundle  # noqa: E402
+import telemetry  # noqa: E402
 import triage  # noqa: E402
 import validation_receipt  # noqa: E402
 import workqueue  # noqa: E402
@@ -109,6 +112,19 @@ class CrashStateDedupTests(unittest.TestCase):
             sorted(p.name for p in (self.results / "crashes").glob("CRASH-*")),
             [first],
         )
+
+    def test_an_exploration_probe_finds_the_owner_filing_would_refuse_for(self) -> None:
+        harness = self.root / "harness.c"
+        harness.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        status, first = self.file("1", "a", trace(), harness=harness, args=("-x",))
+        self.assertEqual(status, "FILED")
+        repeat = self.root / "repeat.txt"
+        repeat.write_text(trace(), encoding="utf-8")
+        same = crash_bundle.probe_route("asan", "generic", harness, ("-x",))
+        self.assertEqual(crash_bundle.filed_duplicate(self.results, repeat, same), first)
+        # A single run through another argv contract is not that bundle's.
+        other = crash_bundle.probe_route("asan", "generic", harness, ())
+        self.assertIsNone(crash_bundle.filed_duplicate(self.results, repeat, other))
 
     def test_a_promoted_owner_is_preferred_over_a_pending_one(self) -> None:
         state = crash_bundle.crash_state(trace())
@@ -233,6 +249,70 @@ class CrashStateDedupTests(unittest.TestCase):
         self.assertIn("- ID: `H-same`", resume)
         self.assertIn(f"- Already filed at this site: `{filed}` (promoted): asan heap-buffer-overflow at app_parse", resume)
         self.assertIn("Continue if this hypothesis predicts a different crash state", resume)
+
+    def test_add_hyp_names_what_already_holds_its_site(self) -> None:
+        target = self.root / "target"
+        (target / ".git").mkdir(parents=True)
+        ctx = workqueue.Context(ROOT, target, "sample", self.results, "git")
+        workqueue.init_state(ctx)
+
+        def add(agent: str, hid: str, site: str) -> dict:
+            return workqueue.add_hypothesis(ctx, argparse.Namespace(
+                agent=agent, id=hid, card_id="", hypothesis=f"size math {hid}", file=site,
+                input_shape="bytes", guard_gap="none", diagnostic="bounds",
+                strategy="S7", status="PENDING",
+            ))
+
+        def advise(row: dict) -> list[str]:
+            return workqueue.site_overlap_advisory(ctx, row)
+
+        add("1", "H-found", "src/parser.c:app_check:198")
+        workqueue.update_hypothesis(ctx, "H-found", "FIND-001", agent="1")
+        add("1", "H-dropped", "src/parser.c:app_check:190")
+        workqueue.update_hypothesis(ctx, "H-dropped", "DISCARDED", agent="1")
+        self.assertEqual(advise(add("2", "H-elsewhere", "src/parser.c:app_other:5")), [])
+        # Distinct files that share a suffix are distinct sites.
+        self.assertEqual(advise(add("2", "H-vendor", "vendor/src/parser.c:app_check:198")), [])
+        self.assertEqual(advise(add("2", "H-sibling", "vendor/parser.c:app_check:198")), [])
+        # The same file spelled absolute or repo-prefixed is the same site.
+        (target / "src").mkdir()
+        (target / "src" / "parser.c").write_text("int app_check;\n")
+        for hid, spelling in (
+            ("H-absolute", f"{target}/src/parser.c:app_check:197"),
+            ("H-prefixed", "target/src/parser.c:app_check:199"),
+        ):
+            advisory = advise(add("2", hid, spelling))
+            self.assertTrue(any("`H-found` (agent 1, FIND-001)" in line for line in advisory), (hid, advisory))
+            self.assertFalse(any("H-dropped" in line for line in advisory), advisory)
+            self.assertIn(f"--id {hid} --status <that CRASH/FIND id>", advisory[-1])
+            self.assertIn("Compare mechanisms first", advisory[-1])
+
+        # Two agents opening one site at once: only the newer row yields.
+        first = add("3", "H-live", "src/parser.c:app_live:4")
+        second = add("2", "H-late", "src/parser.c:app_live:6")
+        self.assertEqual(advise(first), [])
+        advisory = advise(second)
+        self.assertTrue(any("`H-live` (agent 3, PENDING)" in line for line in advisory), advisory)
+        self.assertIn("--id H-late --status DISCARDED", advisory[-1])
+
+        # A package named like its target keeps its own directory.
+        (target / "target").mkdir()
+        (target / "target" / "api.py").write_text("x = 1\n")
+        add("1", "H-pkg", "target/api.py:get:3")
+        self.assertEqual(advise(add("2", "H-toplevel", "api.py:get:3")), [])
+        self.assertTrue(advise(add("2", "H-pkg2", f"{target}/target/api.py:get:9")))
+
+        # A lineless C++ method is its own site, not `Parser:` shared by all.
+        add("3", "H-read", "src/codec.cc:Parser::read")
+        self.assertEqual(advise(add("2", "H-write", "src/codec.cc:Parser::write")), [])
+        self.assertTrue(advise(add("2", "H-read2", "src/codec.cc:Parser::read:40")))
+        # A file at the target root is unambiguous once paths are anchored.
+        add("1", "H-root", "valid.c:check_one:10")
+        self.assertTrue(advise(add("2", "H-root2", "valid.c:check_one:12")))
+
+        _, filed = self.file("1", "a", trace())
+        advisory = advise(add("3", "H-crash", "src/parser.c:app_parse:20"))
+        self.assertTrue(any(f"Already filed at this site: `{filed}`" in line for line in advisory), advisory)
 
     def test_resume_omits_the_section_without_crashes(self) -> None:
         target = self.root / "target"
@@ -490,6 +570,82 @@ class CrashStateDedupTests(unittest.TestCase):
                 "src/parser.c:app_parse:31",
             ],
         )
+
+
+class ExplorationProbeTests(unittest.TestCase):
+    def test_a_single_run_names_the_bundle_a_confirm_would_repeat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target"
+            results = root / "output/sample/codex/results"
+            scratch = results / "scratch-1"
+            logs = root / "logs"
+            source = target / "src/app.c"
+            scratch.mkdir(parents=True)
+            logs.mkdir()
+            source.parent.mkdir(parents=True)
+            source.write_text("int app_parse(void) { return 0; }\n")
+            tool = target / "build-asan/tool"
+            tool.parent.mkdir()
+            tool.write_text(
+                "#!/bin/sh\n"
+                "echo TESTCASE_EXECUTED\n"
+                "echo 'ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1' >&2\n"
+                f"echo '    #0 0x1 in app_parse {source}:1' >&2\n"
+                f"echo 'SUMMARY: AddressSanitizer: heap-buffer-overflow {source}:1 in app_parse' >&2\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            tool.chmod(0o755)
+            (root / "output/sample/target.toml").write_text(
+                'target="sample"\nbuild_system="cmake"\nbuild_widening=false\n'
+                'asan_bin="build-asan/tool"\n',
+                encoding="utf-8",
+            )
+            (results / ".session-env").write_text(
+                f"RESULTS_DIR={results}\nTARGET_ROOT={target}\nTARGET_SLUG=sample\n"
+                f"TARGET_REV=test\nLOGDIR={logs}\n"
+            )
+            environment = os.environ.copy()
+            environment.update(PROBE_AUTO_ROUTE="0", LLM_DECIDE_DISABLE="1")
+            environment.pop("AUDIT_BUILD_SUFFIX", None)
+
+            def probe(name: str, *flags: str) -> str:
+                testcase = scratch / f"{name}.txt"
+                testcase.write_text(
+                    f"// TARGET: src/app.c:app_parse:1\n// HYPOTHESIS-ID: H-{name}\n"
+                    f"// CATEGORY: bounds\n// MODE: generic\n{name}\n"
+                )
+                completed = subprocess.run(
+                    [str(ROOT / "bin/probe"), *flags, str(testcase)],
+                    env=environment, capture_output=True, text=True, check=False,
+                )
+                return completed.stdout + completed.stderr
+
+            first = probe("first", "--confirm")
+            crashes = sorted((results / "crashes").glob("CRASH-*"))
+            self.assertEqual(len(crashes), 1, first)
+            output = probe("second")
+            self.assertIn("verdict=CRASH", output)
+            self.assertIn(f"CRASH STATE ALREADY FILED: this crash state and probe route are {crashes[0]}", output)
+            self.assertEqual(len(list((results / "crashes").glob("CRASH-*"))), 1)
+            # The owner is structured run state, not only a prose note.
+            rows = [
+                json.loads(line)
+                for line in (results / "state" / "runs.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(
+                [(row["hypothesis_id"], row.get("duplicate_of")) for row in rows],
+                [("H-first", ""), ("H-second", crashes[0].name)],
+            )
+            execution = telemetry.execution_verdicts(results)
+            self.assertEqual(
+                (execution["filed_state_repeats"], execution["filed_state_checked"]), (1, 2),
+            )
+            (results / "state" / "runs.jsonl").write_text(
+                json.dumps({"verdict": "CRASH"}) + "\n", encoding="utf-8",
+            )
+            self.assertIsNone(telemetry.execution_verdicts(results)["filed_state_repeats"])
 
 
 if __name__ == "__main__":
