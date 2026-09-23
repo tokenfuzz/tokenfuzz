@@ -1648,6 +1648,7 @@ def run_model_direct(
     # Marker goes into the child's environment only, never this process's, so
     # the reap can never turn on the orchestrator itself.
     reap_marker = process_tree.new_marker()
+    wall_started = time.time()
     started = time.monotonic()
     reentries = 0
     paused = 0
@@ -1731,7 +1732,7 @@ def run_model_direct(
     # writes are the only filing clock these bundles have.
     for crash_dir in sorted((cell_dir / "crashes").glob("CRASH-*")):
         if crash_dir.is_dir():
-            crash_artifacts.pin_filing_time(crash_dir)
+            crash_artifacts.pin_filing_time(crash_dir, not_before=wall_started)
     usage_events = []
     for index, (usage, session_rc) in enumerate(usage_rows):
         event = dict(usage)

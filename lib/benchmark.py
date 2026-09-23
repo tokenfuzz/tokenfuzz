@@ -2034,6 +2034,52 @@ def harvest_finalization_tokens(
     return totals
 
 
+def harvest_wall_tokens(
+    index_jsonl: Path,
+    default_backend: str = "",
+    default_model: str = "",
+    prompt_estimate_fallback: int = 0,
+) -> dict:
+    """The audit-side token ledger, including its own source and cost flags.
+
+    Counts can be subtracted from the combined ledger, but an unknown or
+    estimated finalization call cannot be subtracted from a categorical flag.
+    Read the pre-marker rows directly so both kinds of field describe the
+    same work. Runs predating the marker retain their combined ledger.
+    """
+    marker = Path(index_jsonl).parent / ".finalization_started"
+    try:
+        started = marker.read_text(encoding="utf-8").strip()
+        lines = Path(index_jsonl).read_text(
+            encoding="utf-8", errors="replace",
+        ).splitlines()
+    except OSError:
+        return {}
+    if not started:
+        return {}
+    before = []
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            stamp = str(row.get("timestamp") or "")
+            # An old row without a clock could not be classified as
+            # finalization by the companion reader, so keep the partition
+            # exhaustive and charge it to the audit rather than lose usage.
+            if not stamp or stamp < started:
+                before.append(line)
+    totals = harvest_tokens(
+        Path(index_jsonl), default_backend=default_backend,
+        default_model=default_model,
+        prompt_estimate_fallback=prompt_estimate_fallback,
+        lines=before,
+    )
+    totals["started_at"] = started
+    return totals
+
+
 def harvest_tokens(
     index_jsonl: Path,
     default_backend: str = "",
@@ -3683,6 +3729,12 @@ def harvest(
         default_backend=default_backend,
         default_model=default_model,
     )
+    metrics["wall_tokens"] = harvest_wall_tokens(
+        _find_index_jsonl(results_dir),
+        default_backend=default_backend,
+        default_model=default_model,
+        prompt_estimate_fallback=_model_direct_prompt_estimate(results_dir),
+    )
     metrics["execution"] = harvest_execution(
         results_dir,
         raw_log=results_dir / "backend.raw.log",
@@ -4094,16 +4146,22 @@ def credited_pool_members(members: dict, kind: str) -> dict:
     }
 
 
+# Bug-class families a sanitizer crash can itself report.
+_SANITIZER_FAMILIES = frozenset({"memory-safety", "race", "other"})
+
+
 def _finding_covered_by_crash(crash_attr: dict):
     """Predicate: is this finding cluster one of *cond*'s crashes written up?
 
     A finding is "a security issue reported without a sanitizer crash behind
     it". When the same condition also holds a reportable crash at the same
-    file and line, the finding is that crash's write-up, and counting both
-    credits one defect twice. Crash and finding name the site
-    differently — a stack frame's `ns::fn file.c:12` against a report's
-    `src/file.c` and `fn` — so both reduce to (file basename, symbol leaf)
-    and (file basename, line) before comparing.
+    file and line, a finding of a family a sanitizer reports is that crash's
+    write-up, and counting both credits one defect twice: in saved runs every
+    such finding was a source-only report of its condition's crash. Crash and
+    finding name the file differently — a stack frame's `ns::fn file.c:12`
+    against a report's `src/file.c` — so both reduce to (file basename, line)
+    before comparing. A function is never enough: one can hold many distinct
+    bugs.
 
     A lifetime cluster's own signature is rooted at the free site, so a
     write-up of where the stale state was observed names neither. Embedding
@@ -4112,19 +4170,15 @@ def _finding_covered_by_crash(crash_attr: dict):
     sites: dict[str, set[tuple[str, str]]] = {}
     for cluster in crash_attr.get("clusters", []):
         first = str(cluster.get("signature") or "").split(" -> ")[0]
-        func, location = (
+        _func, location = (
             _sf.parse_frame_body(first) if _sf is not None else ("", "")
         )
-        if not location:
-            continue
         path, _, line = location.partition(":")
-        base = os.path.basename(path)
-        tokens = {(base, _symbol_leaf(func))} if func else set()
         line = line.split(":", 1)[0]
-        if line.isdigit():
-            tokens.add((base, line))
+        if not line.isdigit():
+            continue
         for cond in cluster.get("conditions", []):
-            sites.setdefault(cond, set()).update(tokens)
+            sites.setdefault(cond, set()).add((os.path.basename(path), line))
 
     states: dict[str, set[tuple[str, ...]]] = {}
     for cluster in crash_attr.get("clusters", []):
@@ -4158,20 +4212,18 @@ def _finding_covered_by_crash(crash_attr: dict):
         if state and state in states.get(cond, ()):
             return True
         key = cluster.get("key") or []
-        if str(cluster.get("key_kind")) != "loc" or len(key) < 3:
+        line = str(cluster.get("line") or "")
+        if str(cluster.get("key_kind")) != "loc" or len(key) < 3 or not line:
+            return False
+        # A sanitizer reports memory-safety, race and unclassified runtime
+        # faults; an auth or disclosure finding on the same line is a
+        # different defect. A write-up one line off its crash frame is a
+        # double count worth a reviewer's look, not a defect silently folded
+        # into another.
+        if bug_classes.family_of(cluster.get("class")) not in _SANITIZER_FAMILIES:
             return False
         base = os.path.basename(str(cluster.get("file") or key[1]))
-        own = sites.get(cond, ())
-        # The composed key ends in the line when the report pins one and in
-        # the function only when it does not, so a located write-up matches
-        # on its exact line and nothing looser. Do not widen this to the
-        # function: one function can hold many distinct bugs, and a finding
-        # one line off its condition's crash frame is a double count worth
-        # a reviewer's look, not a defect silently folded into another.
-        return (
-            (base, _symbol_leaf(str(key[2]))) in own
-            or (base, str(cluster.get("line") or "")) in own
-        )
+        return (base, line) in sites.get(cond, ())
 
     return covered
 
@@ -4662,8 +4714,14 @@ def _tokens_for_cell(cell: dict) -> dict:
     finalization = metrics.get("finalization_tokens") or {}
     if not isinstance(finalization, dict):
         finalization = {}
+    wall = metrics.get("wall_tokens")
+    if not isinstance(wall, dict) or not wall.get("started_at"):
+        wall = None
+    audit = wall if wall is not None else tokens
 
     def wall_only(key: str) -> int:
+        if wall is not None:
+            return _as_nonnegative_int(wall.get(key))
         return max(
             0,
             _as_nonnegative_int(tokens.get(key))
@@ -4675,9 +4733,9 @@ def _tokens_for_cell(cell: dict) -> dict:
     cache_creation = wall_only("cache_creation_tokens")
     output_tokens = wall_only("output_tokens")
     prompt_estimate = wall_only("prompt_estimate_tokens")
-    cost_usd = str(tokens.get("cost_usd") or "")
+    cost_usd = str(audit.get("cost_usd") or "")
     finalization_cost = str(finalization.get("cost_usd") or "")
-    if cost_usd and finalization_cost:
+    if wall is None and cost_usd and finalization_cost:
         try:
             cost_usd = str(max(Decimal(0), Decimal(cost_usd) - Decimal(finalization_cost)))
         except (InvalidOperation, ValueError):
@@ -4686,7 +4744,7 @@ def _tokens_for_cell(cell: dict) -> dict:
     # rows often only have prompt_estimate_tokens because agy has no usage
     # surface; treat that as estimated too so reports do not imply measured
     # provider telemetry.
-    estimated = bool(tokens.get("estimated")) or (
+    estimated = bool(audit.get("estimated")) or (
         prompt_estimate > 0
         and input_tokens == 0
         and cached_input == 0
@@ -4709,8 +4767,8 @@ def _tokens_for_cell(cell: dict) -> dict:
         "output_tokens": output_tokens,
         "prompt_estimate_tokens": prompt_estimate,
         "cost_usd": cost_usd,
-        "cost_source": str(tokens.get("cost_source") or ""),
-        "cost_estimated": bool(tokens.get("cost_estimated")) or estimated,
+        "cost_source": str(audit.get("cost_source") or ""),
+        "cost_estimated": bool(audit.get("cost_estimated")) or estimated,
         "usage_records": wall_only("usage_records"),
         "finalization_input_tokens": _as_nonnegative_int(finalization.get("input_tokens")),
         "finalization_output_tokens": _as_nonnegative_int(finalization.get("output_tokens")),
@@ -4718,13 +4776,13 @@ def _tokens_for_cell(cell: dict) -> dict:
         # Observed subagent spawns for the cell; a seat-hour figure is a
         # floor when this is non-zero.
         "delegation_events": (
-            None if tokens.get("delegation_events") is None
-            else _as_nonnegative_int(tokens.get("delegation_events"))
+            None if audit.get("delegation_events") is None
+            else _as_nonnegative_int(audit.get("delegation_events"))
         ),
-        "spend_lower_bound": bool(tokens.get("spend_lower_bound")),
-        "delegation_observable": tokens.get("delegation_observable") is not False,
+        "spend_lower_bound": bool(audit.get("spend_lower_bound")),
+        "delegation_observable": audit.get("delegation_observable") is not False,
         "estimated": estimated,
-        "token_source": str(tokens.get("token_source") or ""),
+        "token_source": str(audit.get("token_source") or ""),
     }
 
 

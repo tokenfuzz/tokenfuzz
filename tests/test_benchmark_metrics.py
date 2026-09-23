@@ -1180,6 +1180,72 @@ class BenchmarkMetricsTests(unittest.TestCase):
         self.assertEqual(row["cost_usd"], "24.242535")
         self.assertEqual(row["finalization_input_tokens"], 0)
 
+    def test_wall_token_labels_exclude_failed_finalization_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            index = Path(td) / "index.jsonl"
+            index.write_text("\n".join(json.dumps(row) for row in (
+                {"timestamp": "2026-09-22T00:00:00+00:00", "backend": "claude",
+                 "model": "claude-opus-5-5", "tokens": {"input": 100, "output": 10}},
+                {"timestamp": "2026-09-22T00:02:00+00:00", "backend": "claude",
+                 "model": "claude-opus-5-5", "role": "decision:find-quality", "tokens": {}},
+            )) + "\n")
+            (Path(td) / ".finalization_started").write_text(
+                "2026-09-22T00:01:00+00:00"
+            )
+            cell = {"condition": "harness", "metrics": {
+                "tokens": benchmark.harvest_tokens(index),
+                "finalization_tokens": benchmark.harvest_finalization_tokens(index),
+                "wall_tokens": benchmark.harvest_wall_tokens(index),
+            }}
+            row = benchmark._tokens_for_cell(cell)
+            self.assertEqual(row["input_tokens"], 100)
+            self.assertEqual(row["usage_records"], 1)
+            self.assertEqual(row["token_source"], "measured")
+            self.assertFalse(row["cost_estimated"])
+
+    def test_finalization_only_usage_does_not_become_audit_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            index = Path(td) / "index.jsonl"
+            index.write_text(json.dumps({
+                "timestamp": "2026-09-22T00:02:00+00:00",
+                "backend": "claude", "model": "claude-opus-5-5",
+                "role": "decision:find-quality",
+                "tokens": {"input": 100, "output": 10},
+            }) + "\n")
+            (Path(td) / ".finalization_started").write_text(
+                "2026-09-22T00:01:00+00:00"
+            )
+            cell = {"condition": "harness", "metrics": {
+                "tokens": benchmark.harvest_tokens(index),
+                "finalization_tokens": benchmark.harvest_finalization_tokens(index),
+                "wall_tokens": benchmark.harvest_wall_tokens(index),
+            }}
+            row = benchmark._tokens_for_cell(cell)
+            self.assertEqual(row["input_tokens"], 0)
+            self.assertEqual(row["usage_records"], 0)
+            self.assertEqual(row["cost_usd"], "")
+            self.assertEqual(row["token_source"], "unknown")
+            self.assertEqual(row["finalization_input_tokens"], 100)
+
+    def test_unstamped_rows_stay_audit_usage_and_a_missing_index_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            index = Path(td) / "index.jsonl"
+            (Path(td) / ".finalization_started").write_text(
+                "2026-09-22T00:01:00+00:00"
+            )
+            # The marker alone, with no ledger, describes no audit usage.
+            self.assertEqual(benchmark.harvest_wall_tokens(index), {})
+            index.write_text(json.dumps({
+                "backend": "claude", "model": "claude-opus-5-5",
+                "tokens": {"input": 40, "output": 4},
+            }) + "\n")
+            wall = benchmark.harvest_wall_tokens(index)
+            finalization = benchmark.harvest_finalization_tokens(index)
+            # A row with no clock cannot be finalization, so the audit keeps
+            # it and the partition stays exhaustive.
+            self.assertEqual(wall["input_tokens"], 40)
+            self.assertEqual(int(finalization.get("input_tokens") or 0), 0)
+
     def test_configured_default_models_have_pricing(self) -> None:
         # Every backend default in config/models.toml must key a pricing row.
         # Backends without a backend-reported cost (codex/gemini/grok) render a
@@ -1917,9 +1983,20 @@ class BenchmarkMetricsTests(unittest.TestCase):
         finding = {
             "key_kind": "loc", "key": ["memory-safety", "src/chtio.c", "85"],
             "file": "src/chtio.c", "line": "85", "crash_state": [],
+            "class": "double-free",
         }
         self.assertTrue(covered(finding, "harness"))
         self.assertFalse(covered(finding, "model-direct"))
+        # A different defect family on the crash's line is a second problem,
+        # and a report naming only the crash's function pins no site.
+        self.assertFalse(covered({**finding, "class": "info-disclosure"}, "harness"))
+        # A race detector's crash is written up as a race.
+        self.assertTrue(covered({**finding, "class": "data-race"}, "harness"))
+        self.assertFalse(covered({
+            "key_kind": "loc", "key": ["memory-safety", "src/chtio.c", "handle_push"],
+            "file": "src/chtio.c", "line": "", "crash_state": [],
+            "class": "double-free",
+        }, "harness"))
 
     def test_a_write_up_one_line_off_its_crash_is_not_folded_into_it(self) -> None:
         # The frame is the write; the report cites the check one line above
@@ -1937,10 +2014,12 @@ class BenchmarkMetricsTests(unittest.TestCase):
         one_line_off = {
             "key_kind": "loc", "key": ["memory-safety", "src/app.c", "87"],
             "file": "src/app.c", "line": "87", "crash_state": [],
+            "class": "stack-buffer-overflow",
         }
         exact = {
             "key_kind": "loc", "key": ["memory-safety", "src/app.c", "86"],
             "file": "src/app.c", "line": "86", "crash_state": [],
+            "class": "stack-buffer-overflow",
         }
         self.assertFalse(covered(one_line_off, "harness"))
         self.assertTrue(covered(exact, "harness"))

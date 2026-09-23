@@ -52,7 +52,9 @@ def crash_state(report_text: str, want: int = 3) -> tuple[str, ...]:
     if _sf is None:
         return ()
     try:
-        return tuple(_sf.crash_signature(report_text or "", want=want))
+        text = report_text or ""
+        diagnostic = _sf.first_stacked_sanitizer_diagnostic(text)
+        return tuple(_sf.crash_signature(diagnostic or text, want=want))
     except Exception:
         return ()
 

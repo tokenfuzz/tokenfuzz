@@ -220,7 +220,7 @@ def filing_time(directory: Path) -> float | None:
     return min(stamps) if stamps else None
 
 
-def pin_filing_time(directory: Path) -> bool:
+def pin_filing_time(directory: Path, *, not_before: float | None = None) -> bool:
     """Record a bundle's filing clock from its own files, once.
 
     A bundle `bin/probe` did not create (one a model wrote directly) has no
@@ -233,6 +233,31 @@ def pin_filing_time(directory: Path) -> bool:
     if target.exists() or (directory / ".audit" / ".crash-created-at").exists():
         return False
     filed = filing_time(directory)
+    if not_before is not None:
+        # A control may copy its input from a corpus with a preserved mtime.
+        # Only its own diagnostic or write-up can date a crash inside this
+        # cell; if neither carries such a clock, use the fresh directory.
+        now = datetime.now(timezone.utc).timestamp()
+        report = report_identity.find_report(directory)
+        authored = [directory / "sanitizer.txt"]
+        if report is not None:
+            authored.append(report)
+        stamps = []
+        for path in authored:
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:
+                continue
+            if not_before <= stamp <= now:
+                stamps.append(stamp)
+        if stamps:
+            filed = min(stamps)
+        else:
+            try:
+                directory_stamp = directory.stat().st_mtime
+            except OSError:
+                directory_stamp = now
+            filed = directory_stamp if not_before <= directory_stamp <= now else now
     if filed is None:
         return False
     target.write_text(

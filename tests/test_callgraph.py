@@ -1343,6 +1343,33 @@ class EntryBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(matched, {("parse", "one"): {"a:parse"}})
 
+    def test_nested_scope_does_not_hide_its_parents_symbol(self) -> None:
+        nodes = {
+            "module": SimpleNamespace(name="unit", kind="MODULE"),
+            "outer": SimpleNamespace(name="Outer", kind="CLASS"),
+            "inner": SimpleNamespace(name="Inner", kind="CLASS"),
+            "outer:parse": SimpleNamespace(name="parse", kind="METHOD"),
+            "inner:parse": SimpleNamespace(name="parse", kind="METHOD"),
+        }
+        edges = [
+            SimpleNamespace(kind="CONTAINS", source_id=source, target_id=target)
+            for source, target in (
+                ("module", "outer"), ("outer", "inner"),
+                ("outer", "outer:parse"), ("inner", "inner:parse"),
+            )
+        ]
+        graph = SimpleNamespace(nodes=nodes, edges=edges)
+        functions = ["outer:parse", "inner:parse"]
+        scopes = self.sidecar._function_scopes(
+            graph, lambda node: nodes[node].kind, functions,
+        )
+        matched = self.sidecar._matching_symbols(
+            {("parse", "Outer")}, functions,
+            {node: "parse" for node in functions}, scopes,
+            {node: "src/parse.cc" for node in functions},
+        )
+        self.assertEqual(matched, {("parse", "Outer"): {"outer:parse"}})
+
     def test_a_scope_shared_by_two_definitions_is_not_a_symbol_match(self) -> None:
         matched = self.sidecar._matching_symbols(
             {("parse", "detail")}, ["a:parse", "b:parse"],
@@ -1354,9 +1381,11 @@ class EntryBoundaryTests(unittest.TestCase):
 
     def test_a_crate_scope_matches_only_its_cargo_target_root(self) -> None:
         matched = self.sidecar._matching_symbols(
-            {("run", "first")}, ["a:run", "b:run"],
-            {"a:run": "run", "b:run": "run"}, {"a:run": set(), "b:run": set()},
-            {"a:run": "first/src/lib.rs", "b:run": "second/src/lib.rs"},
+            {("run", "first")}, ["a:run", "a:Boxed.run", "b:run"],
+            {"a:run": "run", "a:Boxed.run": "run", "b:run": "run"},
+            {"a:run": {"lib"}, "a:Boxed.run": {"Boxed"}, "b:run": {"lib"}},
+            {"a:run": "first/src/lib.rs", "a:Boxed.run": "first/src/lib.rs",
+             "b:run": "second/src/lib.rs"},
             {"first": {"first/src/lib.rs"}},
         )
         self.assertEqual(matched, {("run", "first"): {"a:run"}})

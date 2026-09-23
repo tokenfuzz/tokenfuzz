@@ -164,37 +164,53 @@ _DIAGNOSTIC_OPEN_RE = re.compile(
 )
 
 
-def first_sanitizer_diagnostic(text: str) -> str | None:
-    """Return the first complete runtime diagnostic in *text*.
-
-    Reports may contain prose plus several confirmation runs.  Primitive
-    classification must not splice a class from one run together with an
-    access size or direction from another, and report prose must not outrank
-    the runtime.  This bounded slice keeps the first diagnostic's headline,
-    access line, SCARINESS metadata, and closing summary together.
-    """
-    if not text:
-        return None
-    match = SANITIZER_SIGNATURE_RE.search(text)
-    if match is None:
-        return None
+def _sanitizer_diagnostic_blocks(text: str):
+    """Yield bounded runtime blocks in one pass over a confirmation transcript."""
     lines = text.splitlines(keepends=True)
-    offset = 0
-    start = 0
+    start = None
     for index, line in enumerate(lines):
-        if offset + len(line) > match.start():
-            start = index
-            break
-        offset += len(line)
-    block = [lines[start]]
-    for line in lines[start + 1:]:
+        if start is None:
+            if SANITIZER_SIGNATURE_RE.search(line):
+                start = index
+            continue
         if _DIAGNOSTIC_CLOSE_RE.match(line):
-            block.append(line)
-            break
-        if _DIAGNOSTIC_OPEN_RE.match(line):
-            break
-        block.append(line)
-    return "".join(block)
+            yield "".join(lines[start:index + 1])
+            start = None
+        elif _DIAGNOSTIC_OPEN_RE.match(line):
+            yield "".join(lines[start:index])
+            start = index if SANITIZER_SIGNATURE_RE.search(line) else None
+    if start is not None:
+        yield "".join(lines[start:])
+
+
+def first_sanitizer_diagnostic(text: str) -> str | None:
+    """First runtime block with a fault stack, or the first block if none has one.
+
+    Confirmation transcripts can begin with a truncated report. Prefer the
+    first block with frames so primitive, access direction, and fault site
+    all come from one run. Frame-free diagnostics still retain their first
+    block for callers that can classify a fault without a source stack.
+    """
+    first = None
+    for block in _sanitizer_diagnostic_blocks(text):
+        if first is None:
+            first = block
+        if interesting_frames(block, want=1):
+            return block
+    return first
+
+
+def first_stacked_sanitizer_diagnostic(text: str) -> str | None:
+    """First diagnostic carrying a fault stack, skipping truncated reports.
+
+    A confirmation transcript may start with an interrupted run. Selecting
+    its headline and the next run's frames would identify a fault that never
+    occurred; clusterers need both fields from the same complete block.
+    """
+    for block in _sanitizer_diagnostic_blocks(text):
+        if interesting_frames(block, want=1):
+            return block
+    return None
 
 
 @dataclasses.dataclass(frozen=True)

@@ -113,6 +113,21 @@ class CrashStateDedupTests(unittest.TestCase):
             [first],
         )
 
+    def test_truncated_first_report_uses_the_later_complete_fault(self) -> None:
+        partial = (
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "READ of size 1 at 0x1 thread T0\n"
+        )
+        complete = (
+            "==2==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "WRITE of size 1 at 0x2 thread T0\n"
+            "#0 0x1 in app_store src/app.c:102\n"
+            "#1 0x2 in dispatch src/main.c:12\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+        )
+        self.assertEqual(crash_bundle.crash_state(partial + complete),
+                         crash_bundle.crash_state(complete))
+
     def test_an_exploration_probe_finds_the_owner_filing_would_refuse_for(self) -> None:
         harness = self.root / "harness.c"
         harness.write_text("int main(void) { return 0; }\n", encoding="utf-8")

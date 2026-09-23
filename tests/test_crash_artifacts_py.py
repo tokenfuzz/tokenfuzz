@@ -446,6 +446,24 @@ with tempfile.TemporaryDirectory() as td:
               "pin_filing_time: a later rewrite leaves the writer's clock")
     assert_eq(False, ca.pin_filing_time(cd), "pin_filing_time: never overwrites a clock")
 
+# A control may copy a corpus input with its old mtime into a fresh bundle.
+# That input predates the cell and cannot date the control's crash.
+with tempfile.TemporaryDirectory() as td:
+    import os
+
+    cd = Path(td) / "CRASH-1"
+    cd.mkdir()
+    start = 1_000_000.0
+    (cd / "input.bin").write_bytes(b"input")
+    os.utime(cd / "input.bin", (start - 86_400, start - 86_400))
+    (cd / "sanitizer.txt").write_text("diagnostic\n")
+    os.utime(cd / "sanitizer.txt", (start + 30, start + 30))
+    os.utime(cd, (start + 40, start + 40))
+    assert_eq(True, ca.pin_filing_time(cd, not_before=start),
+              "pin_filing_time: pins an in-wall control output")
+    assert_eq(start + 30, ca.filing_time(cd),
+              "pin_filing_time: copied input cannot predate the crash")
+
 with tempfile.TemporaryDirectory() as td:
     cd = Path(td) / "CRASH-1"
     (cd / ".audit").mkdir(parents=True)

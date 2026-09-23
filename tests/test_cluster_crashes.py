@@ -265,6 +265,27 @@ The parser writes past `{object_name}`.
         self.assertIn("app_drop src/app.c:30", index)
         self.assertIn("(use: app_flush src/app.c:10)", index)
 
+    def test_incomplete_first_diagnostic_does_not_mix_faults(self) -> None:
+        sanitizer = (
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "READ of size 1 at 0x1 thread T0\n"
+            "==2==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "WRITE of size 1 at 0x2 thread T0\n"
+            "#0 0x1 in app_store src/app.c:102\n"
+            "#1 0x2 in dispatch src/main.c:12\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+        )
+        self.make_simple_crash(
+            self.results, "CRASH-partial", sanitizer,
+            "# Bounds\nSurface: library-api\nTarget: src/app.c:app_store:102",
+        )
+        process = self.run_cluster(None, "--json")
+        self.assertEqual(process.returncode, 0, process.stderr)
+        cluster = json.loads(process.stdout)["clusters"][0]
+        self.assertEqual(cluster["primitive"], "heap-buffer-overflow-WRITE")
+        self.assertEqual(cluster["member_crash_signatures"]["CRASH-partial"],
+                         "app_store src/app.c:102 -> dispatch src/main.c:12")
+
     def test_highest_severity_member_is_canonical(self) -> None:
         parent = self.root / "severity" / "crashes"
         low = self.make_crash(

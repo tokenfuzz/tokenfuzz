@@ -183,8 +183,13 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
     # same problems the ledger does, so it needs the same predicate.
     covered = None
     if members:
+        crash_index = _cluster_index(run_dir, "crash")
+        crash_clusters = [
+            {**crash_index.get(str(cluster.get("id") or ""), {}), **cluster}
+            for cluster in (report.get("crash_clusters") or [])
+        ]
         covered = benchmark._finding_covered_by_crash(benchmark.attribute_clusters(
-            {"clusters": report.get("crash_clusters") or []},
+            {"clusters": crash_clusters},
             benchmark.credited_pool_members(members, "crashes"),
         ))
     for kind, key, sub in (
@@ -199,6 +204,10 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
             # attribution so a report-only rebuild also removes their credit.
             # Without the pool-members receipt there is nothing to attribute
             # against, and the report's own clusters stand.
+            clusters = [
+                {**index.get(str(cluster.get("id") or ""), {}), **cluster}
+                for cluster in clusters
+            ]
             clusters = benchmark.attribute_clusters(
                 {"clusters": clusters}, owner,
                 covered=covered if kind == "find" else None,
@@ -214,7 +223,9 @@ def _clusters(run_dir: Path, report: dict, bench_dir: Path | None) -> dict[str, 
                 # disagree about how many problems a condition found. The site
                 # the predicate needs survives only on the clusterer's own
                 # record; report.json keeps the identity, not the location.
-                conditions = [c for c in conditions if not covered(detail, c)]
+                conditions = [
+                    c for c in conditions if not covered({**detail, **cluster}, c)
+                ]
                 if not conditions:
                     continue
             canonical = str(detail.get("canonical") or "")

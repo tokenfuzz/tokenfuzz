@@ -423,11 +423,12 @@ def _public_functions(root: Path, graph, file_of, functions, kind_of) -> set[str
 
 
 def _function_scopes(graph, kind_of, functions) -> dict[str, set[str]]:
-    """Scope names that contain each parsed function, by CONTAINS edges.
+    """Direct named scope of each parsed function, by CONTAINS edges.
 
     A demangled `ns::Type::method` names its enclosing scope; matching on
     the name alone credited `two::parse` when only `one::parse` was parsed.
-    A Rust module's symbol scope is its file stem, not the dotted id.
+    An outer scope cannot also match a method of a nested type. A Rust
+    module's symbol scope is its file stem, not the dotted id.
     """
     parents: dict[str, str] = {}
     for edge in graph.edges:
@@ -446,6 +447,7 @@ def _function_scopes(graph, kind_of, functions) -> dict[str, set[str]]:
                 if kind_of(parent) == "MODULE" and location is not None \
                         and Path(getattr(location, "file_path", "")).suffix.lower() == ".rs":
                     scopes[node].add(unit.name.rsplit(".", 1)[-1])
+                break
             parent = parents.get(parent, "")
     return scopes
 
@@ -467,7 +469,12 @@ def _matching_symbols(identifiers, functions, name_of, scopes_of, file_of,
             nodes = {
                 node for node in candidates
                 if scope in scopes_of.get(node, ())
-                or file_of.get(node) in extra_scopes.get(scope, ())
+                or (
+                    file_of.get(node) in extra_scopes.get(scope, ())
+                    # A crate-name alias applies to the root module's
+                    # functions, not methods nested in a type in that file.
+                    and Path(file_of[node]).stem in scopes_of.get(node, ())
+                )
             }
         # A scoped symbol cannot choose between two same-named definitions in
         # like-named namespaces/classes. Keep unscoped C/main names broad so

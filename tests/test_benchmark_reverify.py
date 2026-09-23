@@ -1101,6 +1101,25 @@ class BenchmarkReverifyTests(unittest.TestCase):
             original, multi_run_transcript(runs),
         )
 
+    def test_truncated_first_report_cannot_validate_an_unrelated_replay(self) -> None:
+        original = (
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "READ of size 1 at 0x1 thread T0\n"
+            "==2==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "WRITE of size 1 at 0x2 thread T0\n"
+            "#0 0x1 in app_store src/app.c:102\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+        )
+        unrelated = (
+            "==3==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "READ of size 1 at 0x3 thread T0\n"
+            "#0 0x3 in other_parse src/other.c:17\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+        )
+        matching = original.split("==2==", 1)[1]
+        matching = "==2==" + matching
+        self.assertEqual(self.reproducing(original, [unrelated, matching]), 1)
+
     def test_the_measured_rate_counts_only_the_original_fault(self) -> None:
         ubsan_bounds = (
             "src/parse.c:91:17: runtime error: index 12 out of bounds "
