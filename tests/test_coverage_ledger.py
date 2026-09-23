@@ -186,9 +186,15 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual((info["examined_lines"], info["fraction"]), (22, 0.22))
         self.assertEqual(coverage_ledger.examined_fraction_by_file(self.results), {"src/app_parse.c": 0.22})
 
+    def test_a_read_window_past_eof_records_up_to_eof(self) -> None:
+        row = coverage_ledger.record_receipt(
+            self.ctx, "1", "src/app_parse.c", lines="1-10,90-140",
+        )
+        self.assertEqual(row["ranges"], [[1, 10], [90, 100]])
+
     def test_receipts_outside_the_file_or_manifest_are_refused(self) -> None:
-        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "has 100 lines"):
-            coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="90-140")
+        with self.assertRaisesRegex(coverage_ledger.ReceiptError, "has 100 lines; range starts at 120"):
+            coverage_ledger.record_receipt(self.ctx, "1", "src/app_parse.c", lines="10-20,120-140")
         with self.assertRaisesRegex(coverage_ledger.ReceiptError, "not in the manifest"):
             coverage_ledger.record_receipt(self.ctx, "1", "src/missing.c", lines="1-2")
         with self.assertRaisesRegex(coverage_ledger.ReceiptError, "needs --lines or --functions"):
@@ -313,7 +319,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout, "OK: mark-examined\n")
         refused = subprocess.run(
-            [*base, "mark-examined", "--agent", "1", "--file", "src/app_parse.c", "--lines", "1-400"],
+            [*base, "mark-examined", "--agent", "1", "--file", "src/app_parse.c", "--lines", "200-400"],
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(refused.returncode, 2)

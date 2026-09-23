@@ -3862,6 +3862,7 @@ def _refill_finished_slots(
         # its crash as "found nothing" would strand the slot. Only a
         # clean session has to justify its replacement.
         if outcome == "clean":
+            initialize_agent_strategies(runtime)
             if should_skip_launch(
                 runtime, context, result.agent, primary_always_launches=False,
             ):
@@ -4132,6 +4133,10 @@ def run_continuous(state: BackendState) -> tuple[str, list[AgentResult]]:
                 return True
             if outcome == "continue":
                 return True
+            # A slot whose lane just ran dry (one fuzz card, discarded) idled
+            # until the steward tick reassigned it: 1.5 to 3 minutes of a
+            # 30-minute wall on libxml2 and cjson. Reassign before asking.
+            initialize_agent_strategies(runtime)
             if should_skip_launch(runtime, context, agent, primary_always_launches=False):
                 index_log(runtime, f"slot {agent}: idle; no active hypothesis, handoff, claimable card, or fuzz lead")
                 return False

@@ -235,7 +235,10 @@ on an alternate is automatically re-confirmed against the regular build, and
 the report records both results: a bug in a supported optional feature is
 still a bug, it just carries the build it needs. Use
 `PROBE_BUILD_CONFIG=<name>` (or `primary`) for a deliberate one-off
-comparison.
+comparison; the config id and the `cfg-<id>` spelling from the build tree's
+name select it too. A work card whose file only an alternate build compiles
+names that configuration, since a probe against the regular build cannot
+link it.
 
 Every testcase begins with native-comment headers (`//`, `#`, `<!-- … -->`,
 whatever the file's own language uses):

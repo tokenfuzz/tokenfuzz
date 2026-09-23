@@ -584,6 +584,7 @@ def work_card_directive(context: PromptContext, agent: int, *, force: bool = Fal
             "sanitizer builds; source review remains valid, but do not invent "
             "CLEAN probe evidence if the public surface cannot execute"
         )
+    lines += workqueue.build_config_markdown(card)
     fixes = card.get("fix_hashes") or []
     lines.append(f"- **Fix commits:** {', '.join(fixes) if fixes else 'none listed'}")
     lines += workqueue.peer_fix_markdown(card)
@@ -753,7 +754,8 @@ def build_config_assignment_directive(context: PromptContext, agent: int) -> str
         return (
             "## BUILD CONFIGURATION - PRIMARY\n\n"
             "This agent is the regular-configuration control. `bin/probe` uses the canonical build; "
-            "do not set `PROBE_BUILD_CONFIG` unless making one explicit differential comparison."
+            "do not set `PROBE_BUILD_CONFIG` unless making one explicit differential comparison "
+            "or your card names the only build that compiles its file."
         )
     item = build_config.find(context.config.build_configs if context.config else [], selector)
     if item is None:

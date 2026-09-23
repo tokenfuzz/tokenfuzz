@@ -57,6 +57,10 @@ class BuildConfigTests(unittest.TestCase):
         self.assertNotEqual(first.config_id, reordered.config_id)
         self.assertEqual(build_config.suffix(first, "-image"), f"-image+cfg-{first.config_id}")
         self.assertEqual(build_config.build_dir("/tmp/src", first).name, f"build-asan+cfg-{first.config_id}")
+        # The spelling in that tree name selects the config as its id does.
+        for selector in (first.name, first.config_id, f"cfg-{first.config_id}"):
+            self.assertIs(build_config.find([first, reordered], selector), first)
+        self.assertIsNone(build_config.find([first], "cfg-unknown"))
         self.assertEqual(Path("/tmp/src/build-asan").name, "build-asan")
         recipe = Path("/tmp/widened.sh")
         self.assertNotEqual(

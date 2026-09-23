@@ -33,7 +33,7 @@ class RulesDigestTests(unittest.TestCase):
         topics = (
             "bin/probe", "TARGET:", "find-seed", "recent-notes", "tried-inputs",
             "rg-safe", "bin/peek", "show-patch", "NEUTRAL",
-            "bin/state resume --agent", "crashes-rejected", "finding-clusters",
+            "bin/state resume --agent", "crashes-rejected", "list-findings",
             "Caller contract", "Trigger source", "Parameter control", "FIND",
             "patch.diff", "write that section",
         )

@@ -397,8 +397,14 @@ def main(argv: list[str]) -> int:
             target_paths.append(str((Path.cwd() / args.testcase).resolve()))
         else:
             target_paths.append(str(tc_input.resolve()))
+        # bin/probe resolves `scratch-N/...` against RESULTS_DIR, so hash the
+        # file where it exists rather than the last spelling tried: from the
+        # repository root a cwd-relative guess hid the content sha1.
+        resolved = next(
+            (Path(p) for p in target_paths[1:] if Path(p).is_file()),
+            Path(target_paths[-1]),
+        )
         # Strip RESULTS_DIR-relative form too so stored relative paths match.
-        resolved = Path(target_paths[-1])
         try:
             rel = resolved.relative_to(results_dir)
             target_paths.append(str(rel))

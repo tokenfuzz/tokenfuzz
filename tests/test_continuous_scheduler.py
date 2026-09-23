@@ -216,6 +216,31 @@ class ContinuousSchedulerTests(unittest.TestCase):
         self.assertEqual(len(h.calls), 1)
         self.assertIn("under the run's fastest first probe (63s)", h.runtime.index.read_text())
 
+    def test_a_slot_whose_lane_ran_dry_is_reassigned_before_it_idles(self) -> None:
+        # The slot's only card (one fuzz card) closed during its session.
+        # The steward tick is five minutes out; the refill must reassign the
+        # lane itself instead of parking the slot until then.
+        h = _Harness(self.root, num_agents=1)
+        lane = {"ended": False, "reassigned": False}
+
+        def agent(number, cold):
+            lane["ended"] = True
+            return h.result(number)
+
+        def reassign(_runtime):
+            if lane["ended"]:
+                lane["reassigned"] = True
+
+        def skip(*_a, **_k):
+            if not h.calls:
+                return False
+            return not lane["reassigned"] or len(h.calls) >= 2
+
+        with h.patched(agent, skip_launch=skip), \
+             mock.patch.object(audit_runner, "initialize_agent_strategies", side_effect=reassign):
+            audit_runner.run_continuous(h.state)
+        self.assertEqual(len(h.calls), 2, repr(h.calls))
+
     def test_a_deadline_outcome_idles_the_slot(self) -> None:
         h = _Harness(self.root, num_agents=1)
         with h.patched(lambda number, cold: h.result(number, rc=124)):

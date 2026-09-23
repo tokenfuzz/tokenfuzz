@@ -81,6 +81,18 @@ class PeerFixCardTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def clone_peers(self, *peers: str) -> None:
+        """A local clone under targets/: the only history an agent can read."""
+        for peer in peers:
+            clone = self.sandbox / "targets" / peer
+            clone.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "-q", str(clone)], check=True)
+            subprocess.run(
+                ["git", "-C", str(clone), "-c", "user.email=t@example.test",
+                 "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"],
+                check=True,
+            )
+
     def write_config(self, peers: list[str] | None = None) -> None:
         text = 'target = "myxml"\n'
         if peers:
@@ -111,6 +123,7 @@ class PeerFixCardTests(unittest.TestCase):
         """Patch excerpts are network reads; a stalled endpoint must not hold
         the lane. Cards still arrive, as leads behind a discovery route."""
         self.write_config(peers=["expat"])
+        self.clone_peers("expat")
         proc = self.run_shim(extra_env={"S6_TEST_SLOW_EXCERPTS": "1"}, fixes=3)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         rows = [
@@ -213,6 +226,7 @@ class PeerFixCardTests(unittest.TestCase):
 
     def test_a_source_silent_peer_gets_one_bounded_discovery_card(self) -> None:
         self.write_config(peers=["expat", "libxml"])
+        self.clone_peers("expat", "libxml")
         env = self.environment()
         env["S6_TEST_EMPTY_PEER"] = "libxml"
 
@@ -234,9 +248,50 @@ class PeerFixCardTests(unittest.TestCase):
             discovery["peer_fix_summary"].lower(),
         )
         self.assertNotIn("source unavailable", discovery["reason"])
+        self.assertEqual(
+            Path(discovery["peer_clone"]).resolve(),
+            (self.sandbox / "targets" / "libxml").resolve(),
+        )
+
+    def test_no_discovery_card_without_a_local_clone_to_search(self) -> None:
+        # Agents have no network; a discovery card over history they cannot
+        # read spent a whole session on failed fetches.
+        self.write_config(peers=["expat", "libxml"])
+        env = self.environment()
+        env["S6_TEST_EMPTY_PEER"] = "libxml"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        self.assertEqual(
+            [(card["peer_project"], card["peer_fix_source"]) for card in cards],
+            [("expat", "osv")],
+        )
+
+    def test_an_empty_lane_fails_only_when_a_source_failed(self) -> None:
+        # No clone and no exact fix is an honestly empty lane offline; the
+        # same emptiness behind a failed feed is a degraded source.
+        self.write_config(peers=["expat"])
+        for variable, expected in (
+            ("S6_TEST_EMPTY_PEER", 0), ("S6_TEST_UNAVAILABLE_PEER", 1),
+        ):
+            with self.subTest(variable=variable):
+                env = self.environment()
+                env[variable] = "expat"
+                proc = subprocess.run(
+                    [sys.executable, str(self.shim)], env=env,
+                    capture_output=True, text=True,
+                )
+                self.assertEqual(proc.returncode, expected, proc.stderr)
+                self.assertEqual(self.card_file.read_text(), "")
 
     def test_a_source_failure_falls_open_to_peer_discovery(self) -> None:
         self.write_config(peers=["expat"])
+        self.clone_peers("expat")
         env = self.environment()
         env["S6_TEST_FAIL_PEER"] = "expat"
 
@@ -256,6 +311,7 @@ class PeerFixCardTests(unittest.TestCase):
 
     def test_an_osv_outage_is_not_reported_as_an_empty_feed(self) -> None:
         self.write_config(peers=["expat"])
+        self.clone_peers("expat")
         env = self.environment()
         env["S6_TEST_UNAVAILABLE_PEER"] = "expat"
 
@@ -272,6 +328,7 @@ class PeerFixCardTests(unittest.TestCase):
 
     def test_endpoint_only_peer_keeps_one_exact_fix_discovery_route(self) -> None:
         self.write_config(peers=["expat"])
+        self.clone_peers("expat")
         env = self.environment(fixes=8)
         env["S6_TEST_ENDPOINT_PEER"] = "expat"
 
@@ -345,6 +402,7 @@ class PeerFixCardTests(unittest.TestCase):
 
     def test_fixed_range_and_peer_discovery_precede_endpoint_only_leads(self) -> None:
         self.write_config(peers=["expat", "libxml", "otherxml"])
+        self.clone_peers("expat", "libxml", "otherxml")
         env = self.environment(fixes=1)
         env["S6_TEST_ENDPOINT_PEER"] = "expat"
         env["S6_TEST_EMPTY_PEER"] = "otherxml"

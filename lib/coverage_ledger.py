@@ -191,8 +191,11 @@ def record_receipt(
         ranges = merge_ranges(ranges + [known[name][0] for name in names])
     if not ranges:
         raise ReceiptError("a receipt needs --lines or --functions")
-    if ranges[-1][1] > total:
-        raise ReceiptError(f"{rel} has {total} lines; range ends at {ranges[-1][1]}")
+    if ranges[-1][0] > total:
+        raise ReceiptError(f"{rel} has {total} lines; range starts at {ranges[-1][0]}")
+    # A read window past EOF (`sed -n 90,140p` on a 100-line file) examined
+    # up to EOF; refusing it only cost the agent a retry turn.
+    ranges[-1] = (ranges[-1][0], min(ranges[-1][1], total))
     receipt = {
         "file": rel,
         "ranges": [[start, end] for start, end in ranges],

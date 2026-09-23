@@ -162,6 +162,20 @@ class ProbeHistoryTests(unittest.TestCase):
         self.assertIn("no --confirm run recorded yet", output)
         self.assertNotIn("← confirmed", output)
 
+    def test_scratch_relative_path_hashes_the_file_under_results(self) -> None:
+        # The run is launched outside RESULTS_DIR, as agents run it from the
+        # repository root; a fresh name with probed bytes matches by content.
+        copy = self.results / "scratch-2" / "fresh-name.bin"
+        copy.write_bytes(self.first.read_bytes())
+        proc = subprocess.run(
+            [sys.executable, str(COMMAND), "scratch-2/fresh-name.bin"],
+            capture_output=True, text=True, cwd=self.temporary.name,
+            env={**os.environ, "RESULTS_DIR": str(self.results)},
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("sha1=" + self.first_sha1[:12], proc.stdout)
+        self.assertIn("4 runs across 2 agents", proc.stdout)
+
     def test_missing_testcase_falls_back_to_recorded_path(self) -> None:
         self.first.unlink()
         proc = self.run_history(self.first)

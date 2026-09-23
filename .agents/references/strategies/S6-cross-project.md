@@ -142,6 +142,11 @@ When you see one in a peer, search for the analogue in the target.
 
 ## Commands by source type
 
+These network lookups are for the operator preparing peers:
+`bin/peer-fix-cards` runs them before the audit. An audit session has no
+network egress, so work from the card's excerpt and local peer clones under
+`targets/`; a card neither can resolve is blocked, not searched for.
+
 ### Source coverage at a glance
 
 No single source covers every peer. Pick by target shape:

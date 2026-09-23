@@ -52,13 +52,31 @@ def emit_file(path: Path, label: str, no_cap: bool) -> int:
     return 0
 
 
+def resolve_file(filename: str) -> Path | None:
+    """`filename` from the cwd, else under the session's target or results.
+
+    Structured state names source target-relative (`src/parse.c`) while
+    sessions run from the harness root; 151 of 250 relative misses in earlier
+    benchmark logs were that spelling, each a wasted turn.
+    """
+    path = Path(filename)
+    if path.is_file():
+        return path
+    if path.is_absolute():
+        return None
+    for root in (os.environ.get("TARGET_ROOT"), os.environ.get("RESULTS_DIR")):
+        if root and (Path(root) / path).is_file():
+            return Path(root) / path
+    return None
+
+
 def range_mode(raw: str, no_cap: bool) -> int:
     if ":" in raw:
         filename, spec = raw.split(":", 1)
     else:
         filename, spec = raw, ""
-    path = Path(filename)
-    if not path.is_file():
+    path = resolve_file(filename)
+    if path is None:
         return fail(f"file not found: {filename}")
 
     if not spec:
@@ -211,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     first = args[0]
     is_range = len(args) == 1 and (
         explicit_operand
-        or (not first.startswith("-") and (":" in first or Path(first).exists()))
+        or (not first.startswith("-") and (":" in first or resolve_file(first) is not None))
     )
     if len(args) == 1 and not is_range and (
         "/" in first or ("." in Path(first).name and not first.startswith("-"))

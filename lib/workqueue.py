@@ -859,7 +859,7 @@ class Context:
     target_slug: str
     results_dir: Path
     repo_type: str
-    _sanitizer_object_cache: tuple[set[str], int] | None = field(
+    _sanitizer_object_cache: tuple[dict[str, set[str]], int] | None = field(
         default=None, init=False, repr=False,
     )
 
@@ -1488,11 +1488,11 @@ def _object_identities(key: str) -> Iterable[str]:
                 cut = base.rfind("-", 0, cut)
 
 
-def _sanitizer_object_index(ctx: Context) -> tuple[set[str], int]:
-    """Return source identities compiled by the available sanitizer builds."""
+def _sanitizer_object_index(ctx: Context) -> tuple[dict[str, set[str]], int]:
+    """Map each compiled source identity to the sanitizer build trees holding it."""
     if ctx._sanitizer_object_cache is not None:
         return ctx._sanitizer_object_cache
-    keys: set[str] = set()
+    keys: dict[str, set[str]] = {}
     builds = 0
     try:
         target_root = ctx.target_root.resolve()
@@ -1547,8 +1547,8 @@ def _sanitizer_object_index(ctx: Context) -> tuple[set[str], int]:
                     if suffix not in _NATIVE_COMPILATION_UNIT_EXTS:
                         continue
                     found = True
-                    keys.add(relative)
-                    keys.add(relative[: -len(suffix)])
+                    for key in (relative, relative[: -len(suffix)]):
+                        keys.setdefault(key, set()).add(root.name)
                 builds += int(found)
                 # A valid compilation database is the build system's direct
                 # answer. Do not walk its object layout merely because none of
@@ -1566,20 +1566,47 @@ def _sanitizer_object_index(ctx: Context) -> tuple[set[str], int]:
                     (Path(dirpath) / name).relative_to(root).as_posix().lower()
                 )
                 key = relative[: -len(suffix)]
-                keys.update(_object_identities(key))
-                keys.update(_object_identities(key.replace("/.libs/", "/")))
+                for identity in (
+                    *_object_identities(key),
+                    *_object_identities(key.replace("/.libs/", "/")),
+                ):
+                    keys.setdefault(identity, set()).add(root.name)
         builds += int(found)
     result = (keys, builds)
     ctx._sanitizer_object_cache = result
     return result
 
 
+def _probeable_alternate_builds(ctx: Context) -> dict[str, str]:
+    """Tree name -> config name for alternates `bin/probe` would run now.
+
+    Only the pinned configuration's ready trees under this container's build
+    suffix: a stale digest or another image's tree is refused by the probe.
+    """
+    import build_config  # lazy: see import note at top of file
+    import target_config  # lazy: see import note at top of file
+
+    try:
+        config = target_config.load(ctx.results_dir)
+    except (OSError, ValueError):
+        return {}
+    base = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+    ready: dict[str, str] = {}
+    for item in config.build_configs:
+        tree = build_config.build_dir(ctx.target_root, item, base_suffix=base)
+        if build_config.is_ready(tree, build_config.recipe_path(ctx.target_root, item)):
+            ready[tree.name] = item.name
+    return ready
+
+
 def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
     """Attach advisory compilation evidence without removing source-review work."""
     object_index, build_count = _sanitizer_object_index(ctx)
+    alternates: dict[str, str] | None = None
     out: list[dict] = []
     for original in cards:
         card = dict(original)
+        card.pop("build_config", None)
         relative = normalized_relpath(card.get("file", "")).lower()
         suffix = Path(relative).suffix.lower()
         if not object_index or suffix not in _NATIVE_COMPILATION_UNIT_EXTS:
@@ -1591,12 +1618,21 @@ def annotate_card_buildability(ctx: Context, cards: list[dict]) -> list[dict]:
             # Set lookups keep this flat in the number of objects, which a
             # per-card scan was not.
             stem = relative[: -len(suffix)]
-            matched = relative in object_index or stem in object_index
-            card["buildability"] = "built" if matched else "not-built"
-            if not matched:
+            trees = object_index.get(relative, set()) | object_index.get(stem, set())
+            card["buildability"] = "built" if trees else "not-built"
+            if not trees:
                 card["buildability_reason"] = (
                     f"no matching object in {build_count} sanitizer build(s)"
                 )
+            # A file only an alternate configuration compiles cannot link
+            # against the primary build: cJSON_Utils.c cost cjson agents
+            # failed probes before they found PROBE_BUILD_CONFIG.
+            if trees and all("+cfg-" in tree for tree in trees):
+                if alternates is None:
+                    alternates = _probeable_alternate_builds(ctx)
+                names = sorted(alternates[tree] for tree in trees if tree in alternates)
+                if names:
+                    card["build_config"] = names[0]
         out.append(card)
     return out
 
@@ -6100,6 +6136,17 @@ def peer_revision_kind(source: str) -> str:
     return "OSV range endpoint" if str(source) == "osv" else "Peer fix commit"
 
 
+def build_config_markdown(card: dict) -> list[str]:
+    """Name the alternate build a card's file is only compiled in."""
+    config = str(card.get("build_config") or "")
+    if not config:
+        return []
+    return [
+        f"- Execution availability: only build config `{config}` compiles this "
+        f"file; probe it with `PROBE_BUILD_CONFIG={config} bin/probe ...`",
+    ]
+
+
 def peer_fix_markdown(card: dict, *, include_diff: bool = True) -> list[str]:
     """Render the bounded evidence carried by an S6 peer-fix card.
 
@@ -6130,15 +6177,17 @@ def peer_fix_markdown(card: dict, *, include_diff: bool = True) -> list[str]:
         f"- {label}: {_clip_model_field(value, 300)}"
         for label, value in fields if str(value or "").strip()
     )
+    if card.get("peer_clone"):
+        lines.append(f"- Local peer clone: `{card['peer_clone']}`")
     source = str(card.get("peer_fix_source", ""))
     card_diff = str(card.get("peer_fix_diff_excerpt", ""))[:6000].rstrip()
     diff = card_diff if include_diff else ""
     if source == "osv":
         if card.get("peer_fix_evidence_url") and not card_diff:
             lines.append(
-                "- Open the peer evidence URL directly before broad web search; "
-                "audit shell egress may be unavailable. Treat the URL according "
-                "to its evidence kind, not as automatic proof of the repair."
+                "- The harness could not fetch this revision's patch and audit "
+                "sessions have no network: block the card with that note unless "
+                "the summary alone names the repaired guard."
             )
         if card.get("peer_fix_evidence_kind") == "fixed-range":
             lines.append(
@@ -6156,7 +6205,7 @@ def peer_fix_markdown(card: dict, *, include_diff: bool = True) -> list[str]:
     elif source == "discovery":
         lines.append(
             "- Discovery card: resolve one exact security-relevant fix from the "
-            "peer's official history before searching the target. If none exists, "
+            "local peer clone listed above before searching the target. If none exists, "
             "block this card with that source proof instead of guessing."
         )
     if diff:
@@ -7079,6 +7128,7 @@ def state_resume(
                 lines.append(f"- Invalid fix commits: {invalid_fix_text}")
             if patch_card_text:
                 lines.append(f"- Related patch cards: {patch_card_text}")
+            lines.extend(build_config_markdown(card))
             lines.extend(peer_fix_markdown(card, include_diff=fresh_pickup))
             import coverage_ledger  # lazy: it imports this module
             lines.extend(coverage_ledger.examined_markdown(ctx.results_dir, card.get("file", "")))

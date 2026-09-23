@@ -231,9 +231,10 @@ mechanics: `.agents/references/session-rules.md`.
 
 ## Pre-file checks
 
-- Before `crashes/CRASH-*/`: check `crashes-rejected/rejected-crashes.md`.
-- Before `findings/FIND-*/`: confirm security (above), scan
-  `findings/finding-clusters.md` for existing FINDs on same location
+- Before `crashes/CRASH-*/`: `bin/scratch-search <function>` covers
+  `crashes/` and `crashes-rejected/`.
+- Before `findings/FIND-*/`: confirm security (above), and check
+  `bin/state list-findings --limit 0` for an existing FIND on the same location
   (Status `NEEDS CONTENT` means fix in place, don't open a duplicate).
 
 ## Drill-down

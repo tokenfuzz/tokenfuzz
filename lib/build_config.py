@@ -107,8 +107,10 @@ def from_parsed(entries: object, *, include_widened: bool = False) -> list[Build
 
 
 def find(configs: Iterable[BuildConfig], selector: str) -> BuildConfig | None:
+    # `cfg-<id>` is how the id appears in the build tree's name (`suffix`),
+    # and agents copy it from there.
     for config in configs:
-        if selector in (config.name, config.config_id):
+        if selector in (config.name, config.config_id, f"cfg-{config.config_id}"):
             return config
     return None
 

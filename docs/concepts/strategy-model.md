@@ -98,7 +98,11 @@ scope.
   sites get a boost.
 - **Peer-fix cards** (always S6): appended when `target.toml` declares peer
   projects, so a fix landing in one project becomes a probe against the
-  unfixed analogue here.
+  unfixed analogue here. Audit sessions have no network, so evidence is
+  fetched beforehand: a fix diff or advisory excerpt rides on the card, and
+  the discovery card that asks the agent to find an exact fix itself is
+  issued only when a local peer clone under `targets/` holds the history to
+  search.
 - **The S4 campaign card**: one target-wide boundary-fuzzing campaign,
   rather than one feature-derived card per file. When more than one agent is
   available, the scheduler reserves one reproduce seat for this campaign

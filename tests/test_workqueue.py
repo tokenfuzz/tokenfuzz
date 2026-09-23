@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -1285,6 +1286,60 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(reproduced["id"], "WORK-BUILT")
         self.assertEqual(analyzed["id"], "WORK-OPTIONAL")
 
+    def test_a_unit_only_an_alternate_build_compiles_names_that_config(self) -> None:
+        (self.target / "src").mkdir()
+        for name in ("core.c", "extra.c"):
+            (self.target / "src" / name).write_text("int f(void);\n")
+        for tree, name in (
+            ("build-asan", "core"), ("build-asan+cfg-widened-abc123", "core"),
+            ("build-asan+cfg-widened-abc123", "extra"),
+            ("build-asan+cfg-stale-0000", "extra"),
+        ):
+            obj = self.target / tree / "src" / f"{name}.o"
+            obj.parent.mkdir(parents=True, exist_ok=True)
+            obj.touch()
+        ready = {"build-asan+cfg-widened-abc123": "widened"}
+        with mock.patch.object(workqueue, "_probeable_alternate_builds", return_value=ready):
+            core, extra = workqueue.annotate_card_buildability(self.ctx, [
+                self.card("WORK-CORE", "src/core.c", build_config="stale"),
+                self.card("WORK-EXTRA", "src/extra.c"),
+            ])
+        self.assertEqual((core["buildability"], extra["buildability"]), ("built", "built"))
+        # The primary compiles core.c; a hint from an older annotation goes.
+        self.assertNotIn("build_config", core)
+        # Only the ready configured tree names a config, never the stale one.
+        self.assertEqual(extra["build_config"], "widened")
+        self.assertIn(
+            "PROBE_BUILD_CONFIG=widened bin/probe",
+            "\n".join(workqueue.build_config_markdown(extra)),
+        )
+
+    def test_only_ready_configured_alternates_under_this_suffix_are_probeable(self) -> None:
+        import build_config
+
+        widened = build_config.BuildConfig("widened", "widened", ("-DX=1",))
+        compact = build_config.BuildConfig("compact", "compact", ("-Os",))
+        for item in (widened, compact):
+            recipe = build_config.recipe_path(self.target, item)
+            recipe.parent.mkdir(parents=True, exist_ok=True)
+            recipe.write_text("echo build\n")
+            tree = build_config.build_dir(self.target, item, base_suffix="-img")
+            tree.mkdir(parents=True)
+            build_config.write_recipe_stamp(tree, recipe)
+        build_config.mark_ready(
+            build_config.build_dir(self.target, widened, base_suffix="-img"),
+            build_config.recipe_path(self.target, widened),
+        )
+        config = SimpleNamespace(build_configs=[widened, compact])
+        with mock.patch("target_config.load", return_value=config), \
+             mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": "-img"}):
+            ready = workqueue._probeable_alternate_builds(self.ctx)
+        with mock.patch("target_config.load", return_value=config), \
+             mock.patch.dict(os.environ, {"AUDIT_BUILD_SUFFIX": ""}):
+            other_image = workqueue._probeable_alternate_builds(self.ctx)
+        self.assertEqual(ready, {f"build-asan-img+cfg-{widened.config_id}": "widened"})
+        self.assertEqual(other_image, {})
+
     def test_buildability_uses_compile_database_without_feedback_duplicates(self) -> None:
         """Structured build metadata answers once for mirrored siblings."""
         source = self.target / "src/built.c"
@@ -1951,7 +2006,7 @@ class WorkQueueTests(unittest.TestCase):
         )
 
         self.assertIn(
-            "resolve one exact security-relevant fix from the peer's official history",
+            "resolve one exact security-relevant fix from the local peer clone listed above",
             rendered,
         )
         self.assertIn("block this card with that source proof instead of guessing", rendered)

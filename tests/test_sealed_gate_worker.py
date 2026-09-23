@@ -554,6 +554,7 @@ class PoolIntegrationTests(unittest.TestCase):
         no_expand = {"expanded": 0, "added": 0, "skipped": 0, "pending": 0}
         with mock.patch.object(audit_runner, "run_agent_guarded", side_effect=agent), \
              mock.patch.object(audit_runner, "should_skip_launch", return_value=False), \
+             mock.patch.object(audit_runner, "initialize_agent_strategies"), \
              mock.patch.object(triage, "validate_find_gate", side_effect=find_gate), \
              mock.patch.object(
                  triage, "triage_crash_dirs",

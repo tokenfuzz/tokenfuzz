@@ -209,10 +209,11 @@ class DeepInvestigationPolicyTests(unittest.TestCase):
         self.assertNotIn("--strategy S1", compact_contract)
         self.assertIn("bin/state recent-notes --kind guard", compact_contract)
         self.assertIn("mutate around that near-miss", compact_contract)
-        self.assertIn("$RESULTS_DIR/findings/finding-clusters.md", compact_contract)
-        self.assertIn(
-            "$RESULTS_DIR/crashes-rejected/rejected-crashes.md", compact_contract,
-        )
+        # The pre-file checks name live commands, not index files that
+        # housekeeping may not have written yet.
+        self.assertIn("bin/state list-findings --limit 0", compact_contract)
+        self.assertIn("bin/scratch-search <function>", compact_contract)
+        self.assertNotIn("rejected-crashes.md", compact_contract)
         self.assertIn("NEEDS CONTENT", compact_contract)
 
     def test_cold_guide_is_embedded_once_per_backend(self) -> None:

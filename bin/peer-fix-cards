@@ -106,7 +106,7 @@ def build_s6_card(
 
 
 def build_s6_discovery_card(
-    target_slug: str, peer: str, source_error: str = "",
+    target_slug: str, peer: str, clone: Path, source_error: str = "",
 ) -> dict:
     """Keep one configured peer visible when feeds found no exact fix.
 
@@ -114,6 +114,11 @@ def build_s6_discovery_card(
     degraded source is not an empty one. The card says which: the audit runs
     this generator with stderr discarded, so the card is the only place that
     difference survives to an operator or the agent working the lane.
+
+    Only a peer with a local clone gets one. Agents never have network
+    egress, so "search the peer's official history" without a clone spent a
+    whole cjson cold start (11 minutes, 1.9M tokens, no probe) on failed
+    fetches before the agent blocked the card.
     """
     silence = (
         f"source unavailable ({source_error})" if source_error
@@ -121,16 +126,20 @@ def build_s6_discovery_card(
     )
     summary = (
         f"No exact VCS or fixed-range repair was available ({silence}). "
-        "Resolve one exact security-relevant fix from official history before "
-        "searching the target; close the card if none exists."
+        "Resolve one exact security-relevant fix from the local peer clone "
+        "(agents have no network) before searching the target; close the "
+        "card if none exists."
     )
     card = build_s6_card(
         target_slug, peer, {"source": "discovery", "summary": summary},
     )
     card["score"] = 20
+    # Its own field: the rendered summary is clipped, and a clipped path
+    # names no clone.
+    card["peer_clone"] = str(clone)
     card["reason"] = (
         f"S6 peer discovery: {peer} {silence}; resolve one exact "
-        "security-relevant fix from official history before mapping the target"
+        "security-relevant fix from its local clone before mapping the target"
     )
     return card
 
@@ -216,6 +225,7 @@ def main(argv: list[str]) -> int:
     peer_cards: list[list[dict]] = []
     seen_ids: set[str] = set()
     excerpt_deadline = time.monotonic() + EXCERPT_FETCH_BUDGET_SECONDS
+    degraded_peers: list[str] = []
     for peer in cfg.s6_peers[:args.limit]:
         source_error = ""
         source_errors: list[str] = []
@@ -251,6 +261,8 @@ def main(argv: list[str]) -> int:
             for fix in row if fix
         ]
 
+        if source_error:
+            degraded_peers.append(peer)
         group: list[dict] = []
         clone = peer_sources.find_peer_clone(peer, clone_roots)
         for fix in fixes:
@@ -285,8 +297,8 @@ def main(argv: list[str]) -> int:
             seen_ids.add(card["id"])
             group.append(card)
         # An advisory range endpoint is a lead, not the repair. Keep one
-        # bounded discovery route whenever the feeds supplied no exact VCS or
-        # fixed-range diff; otherwise a noisy OSV feed can suppress the only
+        # bounded discovery route, over a local clone, whenever the feeds
+        # supplied no exact VCS or fixed-range diff; otherwise a noisy OSV feed can suppress the only
         # route to a reviewable fix and consume the whole S6 wall on history
         # searches. Retain endpoint leads behind it and stay within the
         # per-peer cap.
@@ -298,9 +310,9 @@ def main(argv: list[str]) -> int:
             )
             for card in group
         )
-        if not has_exact_fix:
+        if not has_exact_fix and clone is not None:
             group = [
-                build_s6_discovery_card(ctx.target_slug, peer, source_error),
+                build_s6_discovery_card(ctx.target_slug, peer, clone, source_error),
                 *group,
             ]
         peer_cards.append(group[:args.max_per_peer])
@@ -336,14 +348,19 @@ def main(argv: list[str]) -> int:
         for card in cards:
             print(json.dumps(card, sort_keys=True))
     if not cards:
-        # Configured peers that yield nothing are a degraded source, not an
-        # empty one: OSV returns [] for a network failure exactly as it does
-        # for "no advisories". Reporting success here let an unreachable
-        # provider read downstream as a legitimate zero-yield campaign.
+        # Configured peers that yield nothing because a source failed are a
+        # degraded source, not an empty one: reporting success let an
+        # unreachable provider read downstream as a legitimate zero-yield
+        # campaign. Sources record their failures, so a peer whose feeds
+        # answered, with no exact fix and no local clone to search, is an
+        # honestly empty lane for this environment.
+        if degraded_peers:
+            print(f"[peer-fix-cards] no cards; sources unreachable for "
+                  f"{', '.join(degraded_peers)}", file=sys.stderr)
+            return 1
         print(f"[peer-fix-cards] no cards from configured peers "
-              f"{', '.join(cfg.s6_peers)}; sources unreachable or empty",
+              f"{', '.join(cfg.s6_peers)}: no exact fix and no local clone",
               file=sys.stderr)
-        return 1
     return 0
 
 

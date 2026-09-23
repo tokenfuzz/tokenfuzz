@@ -2835,8 +2835,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     ):
         equal(2, audit_runner.release_stale_card_claims(queue_runtime), "audit loop wires stale-claim release through structured state")
 
+    # A fixed strategy keeps the refill's lane reassignment out of these
+    # scheduling checks; test_continuous_scheduler covers that step.
     pool_runtime = SimpleNamespace(
         num_agents=2, index=root / "pool-index.log", raw=root / "pool-raw",
+        fixed_strategy="S1",
     )
     pool_runtime.raw.mkdir()
     pool_context = mock.Mock()

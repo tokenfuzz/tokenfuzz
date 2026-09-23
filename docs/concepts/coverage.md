@@ -66,7 +66,8 @@ The budgeted sweep records the same verified receipt shape with `source:
 sweep` for source placed directly in its tool-less decision prompt. Receipts
 append to `state/receipts.jsonl`, pinned to the file's content hash
 from the manifest. The harness verifies each one before recording it: the
-file must be in the manifest, every range must lie inside it, and a function
+file must be in the manifest, every range must start inside it (an end
+past the last line records up to it), and a function
 name must be one the
 [call graph](../getting-started/prerequisites.md#experimental-call-neighbourhood-context)
 parsed in that file, resolved to the parser's own start and end lines for

@@ -80,7 +80,7 @@ not a finding. Promote a sanitizer-class diagnostic to `crashes/` only through
 `Caller controls:`, `Trusted caller actions:`, `Caller contract:`,
 `Trigger source:`, and `Strategy:`.
 
-Before filing, scan `$RESULTS_DIR/findings/finding-clusters.md` for the same
-location and `$RESULTS_DIR/crashes-rejected/rejected-crashes.md` for the same
-crash site. `NEEDS CONTENT` means the FIND already exists; enrich it instead
-of opening a duplicate.
+Before filing, check `bin/state list-findings --limit 0` for the same location and
+`bin/scratch-search <function>` (it covers `crashes/` and `crashes-rejected/`)
+for the same crash site. `NEEDS CONTENT` means the FIND already exists;
+enrich it instead of opening a duplicate.
