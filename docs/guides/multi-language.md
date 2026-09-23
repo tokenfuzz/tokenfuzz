@@ -174,9 +174,25 @@ generated files are usable before the runner canary and audit begin.
 TypeScript projects are detected as `npm` and receive the Node runner. Node
 22.18 and later run `.ts` sources directly by stripping their types, so a
 TypeScript entry point needs no loader when its imports name the `.ts`
-extension; the committed `samples/sample-typescript` runs that way. A project
-that needs a loader such as `ts-node` sets `bin` to it, and preflight runs the
-loader on an empty program before any audit starts.
+extension; the committed `samples/sample-typescript` runs that way.
+
+Every Node runner execution also preloads `lib/typescript_hooks.cjs` through
+`NODE_OPTIONS`, after any `NODE_OPTIONS` the target sets. When Node cannot
+resolve an import from TypeScript source, the hooks resolve it with the
+target's own `typescript` package and nearest `tsconfig.json`, so `paths`
+aliases, extensionless imports and `.js` specifiers for `.ts` files work.
+They also transpile each `.ts` file with that compiler, so decorators,
+parameter properties and enums load, and stack traces name the `.ts` line.
+A single-file transpile cannot tell a re-exported type from a value, so a
+project that declares `isolatedModules` or `verbatimModuleSyntax` gets the
+module format Node would give it, and any other project's files are CommonJS
+unless they use top-level `await` or `import.meta`. From an ES module
+testcase, a CommonJS file's default export is its `.default`. Decorator
+metadata is not emitted. A target without
+`typescript` keeps Node's type stripping, and JavaScript modules are left to
+Node. The hooks need Node 22.15 or later and do nothing on older releases. A
+project that needs a different loader such as `ts-node` sets `bin` to it, and
+preflight runs the loader on an empty program before any audit starts.
 
 ### PHP
 

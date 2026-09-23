@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -29,6 +30,26 @@ def runner_exit_succeeded(
     if environment.get("PROBE_HARNESS_SOURCE"):
         return False
     return returncode in (config.runner_success_codes if config else [0])
+
+
+TYPESCRIPT_HOOKS = Path(__file__).resolve().parent / "typescript_hooks.cjs"
+
+
+def node_options(binary: str, environment: Mapping[str, str]) -> dict[str, str]:
+    """NODE_OPTIONS that preload the TypeScript hooks into a Node runner.
+
+    Node strips only erasable types and resolves only the specifiers it is
+    given, so a testcase importing a real TypeScript project's source stopped
+    at its first decorator, `paths` alias or extensionless import. Set on the
+    execution rather than in target.toml, so every existing Node target gets
+    it; a target's own NODE_OPTIONS is kept.
+    """
+    if Path(binary).name not in {"node", "nodejs"}:
+        return {}
+    # NODE_OPTIONS honours quoting and backslashes but not JSON's \u escapes.
+    preload = f"--require {json.dumps(str(TYPESCRIPT_HOOKS), ensure_ascii=False)}"
+    existing = environment.get("NODE_OPTIONS", "").strip()
+    return {"NODE_OPTIONS": f"{existing} {preload}".strip()}
 
 
 def end_child_output_line() -> None:
@@ -240,6 +261,7 @@ class SanitizerRunner:
         command.extend(args[1:])
         completed = self._run_symbolized(
             command, options, timeout,
+            extra_env=node_options(binary, self.runtime_env(options)),
             rss_mb=sanitizer.generic_rss_limit_mb(self.env),
             cwd=configured_runner_cwd(self.config, binary, self.name),
         )
