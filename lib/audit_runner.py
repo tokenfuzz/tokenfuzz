@@ -3137,29 +3137,6 @@ def _productive_wall_remaining(state: BackendState) -> int | None:
     return max(0, int(budget - elapsed))
 
 
-def _launch_floor_seconds(runtime: Runtime) -> float | None:
-    """The shortest time any session of this run needed to reach its first probe.
-
-    A slot relaunched with less wall than that cannot finish its structured
-    resume, let alone probe: one session launched with 5s left was killed
-    after paying its prompt. The floor is the run's own measurement, so a
-    target whose sessions probe in 20s keeps launching to the last half
-    minute; with no probing session recorded yet there is no floor.
-    """
-    try:
-        rows = workqueue.read_jsonl(runtime.index_jsonl)
-    except (OSError, AttributeError, TypeError):
-        return None
-    fastest: float | None = None
-    for row in rows:
-        if not isinstance(row, dict) or not telemetry.is_session_role(row.get("role")):
-            continue
-        value = row.get("first_probe_seconds")
-        if isinstance(value, (int, float)) and value > 0:
-            fastest = value if fastest is None else min(fastest, value)
-    return fastest
-
-
 def _productive_wall_deadline(state: BackendState) -> float | None:
     try:
         budget = max(0, int(os.environ.get("AUDIT_WALL_BUDGET_SECS", "0")))
@@ -3621,14 +3598,22 @@ class SealedGateWorker:
             )
             if self._stop:
                 return "stopped"
-            if self._expansion is not None and not self._expansion.done():
+            # A Future becomes done before its callback has retired the
+            # batch. The callback owns this slot until it clears it below.
+            if self._expansion is not None:
                 return "in-flight"
             if not self._expand_backlog:
                 return "idle"
-            batch = list(self._expand_backlog)
+            batch = [
+                crash for crash in self._expand_backlog
+                if not (crash / ".cluster_expanded").is_file()
+            ]
             self._expand_backlog.clear()
+            if not batch:
+                return "idle"
             self._expanding = set(batch)
             self._expansion_started = time.monotonic()
+            self._expansion_finished = None
             self._expansion = future = self._expander.submit(
                 expand_new_crash_clusters, self.runtime, deadline=deadline,
                 only=batch,
@@ -3644,11 +3629,14 @@ class SealedGateWorker:
     def _expansion_done(
         self, future: concurrent.futures.Future, deadline: float | None,
     ) -> None:
-        started = self._expansion_started or time.monotonic()
-        self._expansion_finished = time.monotonic()
-        seconds = self._expansion_finished - started
         with self._lock:
+            if self._expansion is not future:
+                return
+            finished = time.monotonic()
+            seconds = finished - (self._expansion_started or finished)
+            self._expansion_finished = finished
             self._expanding = set()
+            self._expansion = None
         _record_phase_rows(
             self.runtime, [{"phase": "cluster_expand", "seconds": round(seconds, 3)}],
             iteration=self.state.iteration, blocked=False,
@@ -4108,15 +4096,6 @@ def run_continuous(state: BackendState) -> tuple[str, list[AgentResult]]:
             remaining = _productive_wall_remaining(state)
             if remaining is not None and remaining <= 0:
                 return False
-            if remaining is not None and not initial:
-                floor = _launch_floor_seconds(runtime)
-                if floor is not None and remaining < floor:
-                    index_log(
-                        runtime,
-                        f"slot {agent}: idle; {remaining}s left is under the run's "
-                        f"fastest first probe ({floor:.0f}s)",
-                    )
-                    return False
             if not initial and ceiling_reached():
                 return False
             if result is None:

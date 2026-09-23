@@ -198,9 +198,10 @@ class ContinuousSchedulerTests(unittest.TestCase):
         self.assertGreaterEqual(h.steers, 1)
         self.assertEqual(h.barriers, 1)
 
-    def test_a_slot_is_not_relaunched_under_the_runs_fastest_first_probe(self) -> None:
-        # One session launched with 5s of wall left paid its prompt and was
-        # killed before its resume. The floor is the run's own measurement.
+    def test_a_prior_slow_probe_does_not_idle_a_slot_with_wall_left(self) -> None:
+        # A probe row is stamped on completion. A slow first probe in an
+        # earlier session does not prove the next session cannot file a
+        # finding or finish a short probe before the wall.
         h = _Harness(self.root, num_agents=1)
         h.runtime.index_jsonl = self.root / "index.jsonl"
         h.runtime.index_jsonl.write_text(
@@ -208,13 +209,11 @@ class ContinuousSchedulerTests(unittest.TestCase):
             + json.dumps({"role": "decision:work_rerank"}) + "\n",
             encoding="utf-8",
         )
-        self.assertEqual(audit_runner._launch_floor_seconds(h.runtime), 63.1)
         h.state.started_at = time.monotonic() - 40
         with h.patched(lambda number, cold: h.result(number)), \
              mock.patch.dict(os.environ, {"AUDIT_WALL_BUDGET_SECS": "60"}):
             audit_runner.run_continuous(h.state)
-        self.assertEqual(len(h.calls), 1)
-        self.assertIn("under the run's fastest first probe (63s)", h.runtime.index.read_text())
+        self.assertGreater(len(h.calls), 1)
 
     def test_a_slot_whose_lane_ran_dry_is_reassigned_before_it_idles(self) -> None:
         # The slot's only card (one fuzz card) closed during its session.

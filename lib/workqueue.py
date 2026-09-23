@@ -5997,10 +5997,10 @@ def probe_span_stats(
 ) -> dict:
     """What one agent session spent on probes, from its runs.jsonl rows.
 
-    Decomposes a session's wall the only way state can: time to the first
-    probe (reading and reasoning before any execution), seconds inside probe
-    executions, and how many produced a diagnostic. Deterministic and
-    backend-agnostic, so the same numbers compare across backends.
+    Decomposes a session's wall the only way state can: time until the first
+    probe *completed* (its ledger row is written at the end), seconds inside
+    probe executions, and how many produced a diagnostic. This completion
+    time must not be used as a lower bound on the next session's launch.
     """
     rows = read_jsonl(state_dir(results_dir) / "runs.jsonl")
     count = 0

@@ -390,10 +390,10 @@ matching `session_*.log` for the session named in the timeline. Use
 
 Each session row carries `probes`, `probe_seconds`, `probe_diagnostics`, and
 `first_probe_seconds`: how many `bin/probe` runs the session made, the wall
-they took, how many produced a diagnostic, and how long the session took to
-run its first. Usage rows also record `delegation_events` (subagent spawns
-the transcript shows, one per call id), `spend_lower_bound` (the delegated
-work ran where the row's usage cannot see it, so the row is a floor),
+they took, how many produced a diagnostic, and how long until the first probe
+completed and wrote its run row. Usage rows also record `delegation_events`
+(subagent spawns the transcript shows, one per call id), `spend_lower_bound`
+(the delegated work ran where the row's usage cannot see it, so the row is a floor),
 `delegation_observable` (`false` where the backend cannot show its fan-out
 at all), and `served_model` when the provider billed the session to a model
 other than the one requested. The [benchmark page](../concepts/benchmark.md)

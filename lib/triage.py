@@ -1555,8 +1555,9 @@ def cluster_expansion_decisions(
             "filed_block": _filed_lines_block(crash_dirs[0].parents[1]),
         },
     )
-    configured = llm_decide.decision_timeout("cluster_expand")
-    timeout = _decision_timeout(configured, deadline)
+    timeout = _launch_timeout(
+        "cluster_expand", llm_decide.decision_timeout("cluster_expand"), deadline,
+    )
     if timeout <= 0:
         return decisions
     decision = llm_decide.llm_decide(
@@ -2468,6 +2469,37 @@ def _trigger_review_seconds() -> int:
     return llm_decide.decision_timeout("trigger_validator")
 
 
+def _launch_timeout(
+    decisions: str | tuple[str, ...], configured: int, deadline: float | None,
+) -> int:
+    """The wall for one model call, or 0 when it cannot finish before `deadline`.
+
+    A call started with less wall than this run's fastest completed call of
+    the same decision is killed without an answer and counted as a failed
+    review call: a trigger review launched with 4s left on sample-c, a cluster
+    expansion with 18s on cjson, a quality batch with 15s on libxml2. Gate
+    calls run again in the pass after the wall, and an expansion after it
+    adds nothing, so the launch only spent a session and misreported
+    reviewer health. This is the model-call twin of
+    the scheduler's fastest-first-probe launch floor; with no completed call
+    yet, nothing is refused.
+    """
+    timeout = _decision_timeout(configured, deadline)
+    if deadline is None or timeout <= 0:
+        return timeout
+    names = (decisions,) if isinstance(decisions, str) else decisions
+    fastest = llm_decide.fastest_completed_seconds(*names)
+    return 0 if fastest is not None and timeout < fastest else timeout
+
+
+def _trigger_review_timeout(deadline: float | None) -> int:
+    """`_launch_timeout` for a provenance review, single or batched."""
+    return _launch_timeout(
+        ("trigger-validator", "trigger-validator-batch"),
+        _trigger_review_seconds(), deadline,
+    )
+
+
 def _batch_finding_trigger_votes(
     directories: list[Path], results_dir: Path, deadline: float | None,
     usage_index: str | os.PathLike[str] | None,
@@ -2575,7 +2607,7 @@ def _batch_finding_trigger_votes(
         index_and_batch: tuple[int, list[tuple[Path, Path, Path]]],
     ) -> tuple[int, list[tuple[Path, Path, Path]], int | None]:
         index, batch = index_and_batch
-        timeout = _decision_timeout(_trigger_review_seconds(), deadline)
+        timeout = _trigger_review_timeout(deadline)
         if timeout <= 0 or llm_decide.provider_limit_open():
             return index, batch, None
         return index, batch, run_batch(batch, str(index), timeout)
@@ -2613,7 +2645,7 @@ def _batch_finding_trigger_votes(
 
     def retry(tag_and_batch: tuple[str, list[tuple[Path, Path, Path]]]) -> None:
         tag, batch = tag_and_batch
-        timeout = _decision_timeout(_trigger_review_seconds(), deadline)
+        timeout = _trigger_review_timeout(deadline)
         if timeout <= 0 or llm_decide.provider_limit_open():
             return
         run_batch(batch, tag, timeout)
@@ -2648,7 +2680,7 @@ def _trigger_vote(
         return 2
     if not (report.is_file() and report.stat().st_size) or not target_root.is_dir() or not backend:
         return 2
-    timeout = _decision_timeout(_trigger_review_seconds(), deadline)
+    timeout = _trigger_review_timeout(deadline)
     if timeout <= 0:
         return 2
     command = [
@@ -3634,7 +3666,7 @@ def _batch_decisions(
     ]
 
     def decide(batch: list[dict]) -> dict[str, dict]:
-        call_timeout = _decision_timeout(timeout, deadline)
+        call_timeout = _launch_timeout(decision, timeout, deadline)
         if call_timeout <= 0:
             return {}
         allowed = {str(item["id"]) for item in batch}
@@ -4391,7 +4423,7 @@ def validate_one_finding(
         not _quality_terminal(payload, quorum, accept_quorum)
         and len(queued_votes) < vote_limit
     ):
-        vote_timeout = _decision_timeout(timeout, deadline)
+        vote_timeout = _launch_timeout("find_quality", timeout, deadline)
         if vote_timeout <= 0:
             break
         if initial_votes is not None:

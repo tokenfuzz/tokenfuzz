@@ -159,13 +159,42 @@ def _utc_iso() -> str:
 
 def _llm_log(line: str) -> None:
     """Append to the LLM decision audit trail. Best-effort, never raises."""
-    target = os.environ.get("LLM_DECIDE_LOG") or f"{os.environ.get('LOGDIR') or '/tmp'}/llm-decisions.log"
+    target = _decision_log_path()
     try:
-        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "a", encoding="utf-8") as f:
             f.write(f"{_utc_iso()} {line}\n")
     except OSError:
         pass
+
+
+def _decision_log_path() -> Path:
+    return Path(
+        os.environ.get("LLM_DECIDE_LOG")
+        or f"{os.environ.get('LOGDIR') or '/tmp'}/llm-decisions.log"
+    )
+
+
+def fastest_completed_seconds(*decisions: str) -> int | None:
+    """The shortest `OK` call this run logged for any of `decisions`.
+
+    Names match exactly: a batch runs slower than its single-item sibling, so
+    letting one floor the other would refuse calls that fit. `None` until
+    one completes: without a measurement nothing is refused.
+    """
+    fastest: int | None = None
+    try:
+        lines = _decision_log_path().read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        match = re.match(
+            r"^\S+ (\S+)(?: \S+=\S+)* OK\b.*?\belapsed=(\d+)s", line,
+        )
+        if match and match.group(1) in decisions:
+            seconds = int(match.group(2))
+            fastest = seconds if fastest is None else min(fastest, seconds)
+    return fastest
 
 
 def log_decision(

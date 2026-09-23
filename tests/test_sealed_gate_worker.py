@@ -259,6 +259,46 @@ class SealTests(unittest.TestCase):
         self.assertEqual(worker._schedule_expansion([first, second], None), "idle")
         worker._stop = True
 
+    def test_completed_future_waits_for_its_callback_before_next_batch(self) -> None:
+        first = _artifact(self.results, "crashes", "CRASH-001-1")
+        second = _artifact(self.results, "crashes", "CRASH-002-1")
+        worker = self._worker()
+        callback_entered = threading.Event()
+        release_callback = threading.Event()
+        batches: list[list[Path]] = []
+        original_done = worker._expansion_done
+
+        def expand(_runtime, **kwargs):
+            batch = list(kwargs["only"])
+            batches.append(batch)
+            for crash in batch:
+                (crash / ".cluster_expanded").write_text("done\n", encoding="utf-8")
+            return {"expanded": len(batch), "added": 0, "skipped": 0, "pending": 0}
+
+        def delayed_done(future, deadline):
+            if not callback_entered.is_set():
+                callback_entered.set()
+                release_callback.wait(5)
+            original_done(future, deadline)
+
+        try:
+            with mock.patch.object(audit_runner, "expand_new_crash_clusters", side_effect=expand), \
+                 mock.patch.object(worker, "_expansion_done", side_effect=delayed_done):
+                self.assertEqual(worker._schedule_expansion([first], None), "started")
+                self.assertTrue(callback_entered.wait(5))
+                self.assertTrue(worker._expansion.done())
+                self.assertEqual(worker._schedule_expansion([second], None), "in-flight")
+                self.assertEqual(batches, [[first]])
+                release_callback.set()
+                deadline = time.monotonic() + 5
+                while len(batches) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+        finally:
+            release_callback.set()
+            worker._stop = True
+            worker._expander.shutdown(wait=True)
+        self.assertEqual(batches, [[first], [second]])
+
     def _sweep_with_gates(self, worker) -> dict[str, dict]:
         calls: dict[str, dict] = {}
 

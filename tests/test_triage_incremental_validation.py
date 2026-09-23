@@ -4027,6 +4027,45 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
                 self.assertEqual(llm_decide.decision_timeout("work_rerank"), rerank)
                 self.assertEqual(llm_decide.decision_timeout("find_quality_batch"), other)
 
+    def test_review_is_not_launched_with_less_wall_than_the_fastest_review(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "llm-decisions.log"
+            env = {"ACTIVE_BACKEND": "codex", "LLM_DECIDE_LOG": str(log)}
+            with mock.patch.dict(os.environ, env, clear=True):
+                soon = time.monotonic() + 20
+                # No completed review yet: no measurement, nothing refused.
+                self.assertGreater(triage._trigger_review_timeout(soon), 0)
+                log.write_text(
+                    "t trigger-validator-batch votes=1/1 OK bytes=9 elapsed=58s\n"
+                    "t trigger-validator votes=1/1 OK bytes=9 elapsed=41s\n"
+                    "t trigger-validator-batch votes=0/1 FAIL rc=124 bytes=9 "
+                    "elapsed=5s timeout=4s\n"
+                    "t work_rerank OK bytes=9 elapsed=9s\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(llm_decide.fastest_completed_seconds(
+                    "trigger-validator", "trigger-validator-batch"), 41)
+                # Exact names: the 58s batch alone is its own floor.
+                self.assertEqual(
+                    llm_decide.fastest_completed_seconds("trigger-validator-batch"), 58,
+                )
+                self.assertEqual(triage._trigger_review_timeout(soon), 0)
+                later = time.monotonic() + 300
+                self.assertGreaterEqual(triage._trigger_review_timeout(later), 299)
+                # Each decision is floored by its own completions: the 9s
+                # rerank does not let a 20s cluster expansion through the
+                # 41s review floor, and the review floor does not bind it.
+                self.assertIn(triage._launch_timeout("work_rerank", 150, soon), (19, 20))
+                self.assertGreater(triage._launch_timeout("cluster_expand", 800, soon), 0)
+                with log.open("a", encoding="utf-8") as stream:
+                    stream.write("t cluster_expand OK bytes=9 elapsed=55s\n")
+                self.assertEqual(triage._launch_timeout("cluster_expand", 800, soon), 0)
+                # Finalization without a wall is never refused.
+                self.assertEqual(
+                    triage._trigger_review_timeout(None),
+                    triage._trigger_review_seconds(),
+                )
+
     def test_decision_timeout_requires_a_decision_name(self) -> None:
         with self.assertRaises(TypeError):
             llm_decide.decision_timeout()  # type: ignore[call-arg]

@@ -204,12 +204,13 @@ pass after the workers drain.
     expansion, which asks the model for neighbours of a newly gated crash,
     runs on its own lane behind the sweep: its decision can take minutes,
     and a sweep that waited on it once left every later artifact ungated to
-    the end of the wall. A slot is not relaunched with less wall left than
-    the fastest first probe any session of the run has recorded, since such
-    a session ends before its resume. A
-    steward tick every few minutes scores the generation, rotates starved
-    strategy lanes, and re-ranks the queue without stopping anyone. The one
-    full pass over the whole tree, including orphan-testcase enforcement and
+    the end of the wall. A gate or cluster-expansion model call is not
+    started with less wall left than the fastest completed call of its kind
+    in the run; a review waits for the pass after the wall instead of being
+    cut off without a vote. A steward tick every few minutes scores the
+    generation, rotates starved strategy lanes, and re-ranks the queue
+    without stopping anyone. The one full pass over the whole tree, including
+    orphan-testcase enforcement and
     corpus promotion (which touch a slot's own scratch), runs after the last
     slot drains. It reuses the cached verdicts, so what the sweeps settled
     costs no further review, and what they could not reach is judged there.
