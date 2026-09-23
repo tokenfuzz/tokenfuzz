@@ -401,6 +401,49 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual(chosen["id"], "WORK-S7")
 
+    def test_an_untouched_card_beats_a_worked_card_kept_only_for_diversity(self) -> None:
+        # Agent 1 owns the parser subsystem. The only card elsewhere, a CI
+        # helper, has already been worked; diversity must not hand it back
+        # while an untouched card waits in the owned subsystem.
+        # The untouched card is a carried angle from another lane, and a card
+        # already worked in the owned subsystem ranks above it: the lane sort
+        # must not put either worked card back in front of it.
+        self.write_cards([
+            self.card("WORK-OWNED", "lib/pkg/parser.py", strategy="S7", score=90),
+            self.card("WORK-WORKED", "lib/pkg/emitter.py", strategy="S7", score=85),
+            self.card(
+                "WORK-FRESH", "lib/pkg/scanner.py", strategy="S3", score=80,
+                allowed_strategies=["S7"],
+            ),
+            self.card("WORK-CI", "ci/actions/matrix.py", strategy="S7", score=40),
+        ])
+        self.assertEqual(workqueue.claim_next_card(
+            self.ctx, "1", mode="generic", strategy="S7",
+        )["id"], "WORK-OWNED")
+        self.assertEqual(workqueue.claim_next_card(
+            self.ctx, "2", mode="generic", strategy="S7",
+        )["id"], "WORK-CI")
+        self.add_hypothesis(
+            hyp_id="H-worked", card_id="WORK-WORKED", agent="3",
+            file="lib/pkg/emitter.py:emit:5",
+        )
+        workqueue.update_hypothesis(self.ctx, "H-worked", "DISCARDED", agent="3")
+        # A dry pass over the CI card that meets the discard floor.
+        for hyp, line in (("H-a", 10), ("H-b", 20)):
+            self.add_hypothesis(
+                hyp_id=hyp, card_id="WORK-CI", agent="2",
+                file=f"ci/actions/matrix.py:main:{line}", guard_gap=f"gap {line}",
+            )
+        for index, hyp in enumerate(("H-a", "H-b", "H-b"), 1):
+            self.add_run(card_id="WORK-CI", agent="2", hypothesis_id=hyp, index=index)
+        for hyp in ("H-a", "H-b"):
+            workqueue.update_hypothesis(self.ctx, hyp, "DISCARDED", agent="2")
+        workqueue.update_card_status(self.ctx, "WORK-CI", "discarded", agent="2")
+        chosen = workqueue.claim_next_card(
+            self.ctx, "2", mode="generic", strategy="S7", claim=False,
+        )
+        self.assertEqual(chosen["id"], "WORK-FRESH")
+
     def test_a_carried_angle_is_returned_as_the_requested_strategy(self) -> None:
         """A resumed queue can still collapse angles onto one card.
 

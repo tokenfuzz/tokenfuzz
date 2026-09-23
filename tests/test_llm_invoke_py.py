@@ -440,6 +440,17 @@ with mock.patch.dict(os.environ, {"CLAUDE_CODE_PROMPT_CACHE_TTL": "1h"}):
     assert_eq({}, inv.prompt_cache_env("claude"), "an operator's own cache TTL is respected")
 with mock.patch.dict(os.environ, {"FORCE_PROMPT_CACHING_5M": "1"}):
     assert_eq({}, inv.prompt_cache_env("claude"), "an operator's legacy cache switch is respected")
+with mock.patch.dict(os.environ, {}, clear=False):
+    for name in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"):
+        os.environ.pop(name, None)
+    env = inv.invocation_env("claude")
+    ok(int(env["BASH_DEFAULT_TIMEOUT_MS"]) > 120_000 and env["BASH_MAX_TIMEOUT_MS"],
+       "claude keeps a long harness command in the foreground past its 120s default")
+    ok("BASH_DEFAULT_TIMEOUT_MS" not in inv.invocation_env("codex"),
+       "a codex invocation carries no Claude Bash timeout")
+    os.environ["BASH_DEFAULT_TIMEOUT_MS"] = "5000"
+    ok("BASH_DEFAULT_TIMEOUT_MS" not in inv.bash_timeout_env("claude"),
+       "an operator's own Bash timeout is respected")
 assert_eq("json", f[f.index("--output-format") + 1],
           "decide claude asks for the usage-bearing envelope")
 turns_idx = f.index("--permission-mode")

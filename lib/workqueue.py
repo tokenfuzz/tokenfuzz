@@ -4671,6 +4671,37 @@ def _claim_next_card_locked(
             preferred.append(card)
         if not preferred:
             preferred = candidates
+        # Diversity is worth less than fresh work. When every card left in a
+        # free subsystem has already been worked, and the owned
+        # subsystems still hold untouched cards, offer only those: on one
+        # pyyaml cell the lone free-subsystem card, a CI helper script
+        # already discarded, was handed back to the same agent for twenty minutes
+        # while five untouched parser cards waited behind this filter. Only
+        # the untouched cards are returned, because the lane and buildability
+        # sorts below outrank the demotion order and could put a dry card
+        # first again; a card the agent is still holding stays with it.
+        # The same prior-work measure the demotion sort below uses.
+        def worked(card: dict) -> bool:
+            cid = card.get("id", "")
+            return (
+                conclusion_counts.get(cid, 0) + unreachable_counts.get(cid, 0)
+                + distinct_counts.get(cid, 0)
+            ) > 0
+
+        def own_lease(card: dict) -> bool:
+            claim_row = latest.get(card.get("id", ""))
+            return bool(
+                claim_row and str(claim_row.get("agent", "")) == str(agent)
+                and claim_blocks_card(claim_row, ttl, now)
+            )
+
+        fresh = [card for card in candidates if not worked(card)]
+        if (
+            fresh and len(preferred) < len(candidates)
+            and all(worked(card) for card in preferred)
+        ):
+            held = [card for card in preferred if own_lease(card)]
+            return held + [card for card in fresh if card not in held]
         return preferred
 
     preferred = _apply_diversity(_build_candidates())

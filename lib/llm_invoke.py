@@ -620,6 +620,7 @@ def invocation_env(
     """Return environment controls needed for one backend invocation."""
     environment = memory_env(backend)
     environment.update(prompt_cache_env(backend))
+    environment.update(bash_timeout_env(backend))
     if backend == "gemini" and use_gemini_cli():
         settings = prepare_gemini_settings(model, max_session_turns)
         if settings:
@@ -934,6 +935,27 @@ def prompt_cache_env(backend: str) -> dict[str, str]:
             return {}
         return {"CLAUDE_CODE_PROMPT_CACHE_TTL": "5m"}
     return {}
+
+
+# Claude Code moves a Bash command still running at its 120s default timeout
+# to the background. A headless --print session that then ends its turn to
+# "wait for the notification" simply exits: a libxml2 cell's fuzz lane spent
+# five sessions restarting one `bin/fuzz run` this way and never finished it.
+# Harness commands run to completion in the foreground; the session's own
+# wall timeout bounds them.
+_CLAUDE_BASH_TIMEOUT_MS = str(3600 * 1000)
+
+
+def bash_timeout_env(backend: str) -> dict[str, str]:
+    """Keep a Claude session's long harness commands in the foreground."""
+    if backend != "claude":
+        return {}
+    return {
+        name: _CLAUDE_BASH_TIMEOUT_MS
+        for name in ("BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS")
+        # An operator who set either has made the choice.
+        if name not in os.environ
+    }
 
 
 def agent_flags(
