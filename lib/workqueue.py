@@ -4794,6 +4794,8 @@ def _claim_next_card_locked(
 
     for card in preferred:
         cid = card.get("id", "")
+        primary_strategy = str(card.get("strategy", "")).strip().upper()
+        effective_strategy = strategy_filter or primary_strategy
         if claim:
             claim_time = datetime.now(timezone.utc)
             claimed_at = claim_time.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -4810,7 +4812,9 @@ def _claim_next_card_locked(
                 "queue_rank": rank_by_id.get(cid, 0),
                 "queue_size": len(cards),
                 "score": int(card.get("score", 0) or 0),
-                "strategy": str(card.get("strategy", "")),
+                # A carried angle belongs to the lane that claimed it, not
+                # the card's primary strategy. Rotation reads this receipt.
+                "strategy": effective_strategy,
             }
             _append_jsonl_unlocked(claims_path, claim_row)
         # The claimed copy is relabelled to the lane that claimed it, so a
@@ -4818,8 +4822,6 @@ def _claim_next_card_locked(
         # strategy `add-hyp` then refuses. `source_strategy` keeps that
         # provenance visible; the reason and patch metadata are narrowed to
         # the evidence this lane can act on.
-        primary_strategy = str(card.get("strategy", "")).strip().upper()
-        effective_strategy = strategy_filter or primary_strategy
         shown_reason = card_reason_for_strategy(card, effective_strategy)
         if (
             effective_strategy != primary_strategy
@@ -4920,6 +4922,17 @@ def add_hypothesis(ctx: Context, args: argparse.Namespace) -> dict:
                     "source": "add-hyp",
                     "hypothesis_id": hid,
                 }
+                # A manual add-hyp can be the first claim. When it refreshes
+                # an assigned claim, retain that claim's lane.
+                prior_lane = (
+                    str(latest_for_card.get("strategy", ""))
+                    if active_claim and same_agent_claim and latest_for_card else ""
+                )
+                claim_row["strategy"] = prior_lane or next(
+                    (lane for lane in STRATEGY_KEYWORDS
+                     if strategy_matches_pin(args.strategy, lane)),
+                    "",
+                )
                 for card in read_jsonl(work_cards_path(ctx)):
                     if card.get("id") == args.card_id:
                         claim_row["file"] = normalized_relpath(card.get("file", ""))
@@ -5587,7 +5600,16 @@ STRATEGY_KEYWORDS: dict[str, tuple[re.Pattern[str], int]] = {
 
 
 def strategy_evidence_count(ctx: Context, agent: str, strategy: str) -> int:
-    """Count notes that look like strategy-relevant evidence."""
+    """Count notes that look like strategy-relevant evidence, plus the cards
+    this agent concluded in the strategy's lane.
+
+    A concluded card is the strategy's method carried to an end, including a
+    source-proof block at the strategy's own entry gate. Counting only notes
+    held an agent whose every card failed that gate (an S8 lane on a target
+    whose property surfaces reach no security consumer) until the forced
+    threshold: a measured 30-minute cell spent every one of its sessions
+    re-blocking S8 cards and never rotated.
+    """
     spec = STRATEGY_KEYWORDS.get(strategy.upper())
     if not spec:
         return 0
@@ -5599,6 +5621,31 @@ def strategy_evidence_count(ctx: Context, agent: str, strategy: str) -> int:
         text = str(note.get("text", ""))
         if pattern.search(text):
             n += 1
+    claimant: dict[str, tuple[str, str]] = {}
+    for row in read_jsonl(state_dir(ctx.results_dir) / "claims.jsonl"):
+        cid = str(row.get("card_id", ""))
+        status = str(row.get("status", ""))
+        if status == "claimed":
+            # add-hyp refreshes the lease without naming the lane.
+            owner = str(row.get("agent", ""))
+            previous_owner, previous_lane = claimant.get(cid, ("", ""))
+            claimant[cid] = (
+                owner,
+                str(row.get("strategy", "")).strip().upper()
+                or (previous_lane if owner == previous_owner else ""),
+            )
+        elif (
+            status in TERMINAL_CARD_STATUSES
+            and row.get("source", "") != "release-stale-claims"
+            and cid in claimant
+        ):
+            owner, lane = claimant.pop(cid)
+            closer = str(row.get("agent", ""))
+            if (
+                closer == owner and lane == strategy.upper()
+                and (not agent or closer == str(agent))
+            ):
+                n += 1
     return n
 
 
@@ -5868,6 +5915,11 @@ def update_card_status(
                 f"{', '.join(blocked_owners)} have "
                 "an unfinished crash report. Complete its `_TODO (agent):` fields first."
             )
+    if not agent:
+        # Agents close cards without --agent; the closer is the live claimant.
+        latest = latest_claims_by_card(ctx).get(card_id)
+        if claim_blocks_card(latest, work_card_claim_ttl(), datetime.now(timezone.utc)):
+            agent = str(latest.get("agent", ""))
     row = {
         "card_id": card_id,
         "agent": agent,

@@ -1354,7 +1354,9 @@ def _agent_live_strategies(runtime: Runtime) -> dict[str, set[str]]:
     now = datetime.now(timezone.utc)
     for card_id, claim in workqueue.latest_claims_by_card(ctx).items():
         if workqueue.claim_blocks_card(claim, ttl, now):
-            _record(claim.get("agent", ""), cards.get(str(card_id)))
+            # The ranked window can drop a card while its lease is live. Its
+            # claim still records the actual lane that must finish the work.
+            _record(claim.get("agent", ""), claim, cards.get(str(card_id)))
     for row in workqueue.read_jsonl(
         runtime.results / "state" / "hypotheses.jsonl"
     ):

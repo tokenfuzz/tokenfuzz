@@ -379,6 +379,22 @@ with tempfile.TemporaryDirectory(prefix="audit-migration-parity-") as temporary:
         allowed_lane.read_text().strip() == "S8",
         "a claim taken through allowed_strategies keeps that lane",
     )
+    # A queue refresh can remove a card while its lease remains live. The
+    # claim still names the lane the agent is finishing.
+    (allowed_results / "work-cards.jsonl").write_text(
+        json.dumps({"id": "OTHER", "status": "unclaimed", "strategy": "S1",
+                    "file": "src/b.c"}) + "\n",
+        encoding="utf-8",
+    )
+    check(
+        "S8" in audit_runner._agent_live_strategies(allowed_runtime).get("1", set()),
+        "a live claim keeps its lane when the card leaves the ranked window",
+    )
+    audit_runner.initialize_agent_strategies(allowed_runtime)
+    check(
+        allowed_lane.read_text().strip() == "S8",
+        "a queue refresh cannot reassign a live claimed lane",
+    )
     # And from an open hypothesis when the claim is not this agent's: the card
     # was released and taken by a peer while this agent is still investigating
     # it, so neither the unclaimed count nor its own claims mention the lane.

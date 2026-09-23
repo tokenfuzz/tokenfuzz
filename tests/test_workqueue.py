@@ -2109,6 +2109,102 @@ class WorkQueueTests(unittest.TestCase):
         completion = workqueue.strategy_completion_status(self.ctx, "1", "S8")
         self.assertTrue(completion["complete"])
 
+    def test_cards_concluded_in_a_lane_count_as_its_rotation_evidence(self) -> None:
+        # An S8 lane whose every card fails the consumer gate produces source
+        # blocks, not property notes; those conclusions must let it rotate.
+        self.write_cards([
+            self.card(f"WORK-{index}", f"src/p{index}.c", strategy=strategy)
+            for index, strategy in enumerate(("S8", "S8", "S7", "S8"))
+        ])
+        claims = self.results / "state" / "claims.jsonl"
+        for index, (agent, strategy) in enumerate(
+            (("1", "S8"), ("1", "S8"), ("1", "S7"), ("2", "S8"))
+        ):
+            workqueue.append_jsonl(claims, {
+                "card_id": f"WORK-{index}", "agent": agent,
+                "status": "claimed", "strategy": strategy,
+                "claimed_at": workqueue.now_iso(),
+            })
+        # add-hyp refreshes a lease without naming the lane.
+        workqueue.append_jsonl(claims, {
+            "card_id": "WORK-1", "agent": "1", "status": "claimed", "source": "add-hyp",
+            "claimed_at": workqueue.now_iso(),
+        })
+        self.assertFalse(
+            workqueue.strategy_completion_status(self.ctx, "1", "S8")["complete"]
+        )
+        for index in range(4):
+            row = workqueue.update_card_status(
+                self.ctx, f"WORK-{index}", "blocked", note="no security consumer",
+            )
+            self.assertEqual(row["agent"], "2" if index == 3 else "1")
+        completion = workqueue.strategy_completion_status(self.ctx, "1", "S8")
+        self.assertEqual(completion["evidence"], 2)
+        self.assertTrue(completion["complete"])
+        self.assertEqual(
+            workqueue.strategy_completion_status(self.ctx, "1", "S7")["evidence"], 1,
+        )
+        # An expired lease no longer names who is closing the card.
+        self.write_cards([
+            self.card("WORK-OLD", "src/old.c", strategy="S8"),
+            self.card("WORK-TRANSFER", "src/transfer.c", strategy="S8"),
+        ])
+        workqueue.append_jsonl(claims, {
+            "card_id": "WORK-OLD", "agent": "3", "status": "claimed",
+            "strategy": "S8", "claimed_at": "2000-01-01T00:00:00Z",
+        })
+        row = workqueue.update_card_status(
+            self.ctx, "WORK-OLD", "blocked", note="no security consumer",
+        )
+        self.assertEqual(row["agent"], "")
+        self.assertEqual(
+            workqueue.strategy_evidence_count(self.ctx, "3", "S8"), 0,
+        )
+        # A legacy add-hyp refresh by another agent cannot inherit the
+        # previous owner's lane when its own claim carries no strategy.
+        workqueue.append_jsonl(claims, {
+            "card_id": "WORK-TRANSFER", "agent": "3", "status": "claimed",
+            "strategy": "S8", "claimed_at": workqueue.now_iso(),
+        })
+        workqueue.append_jsonl(claims, {
+            "card_id": "WORK-TRANSFER", "agent": "4", "status": "claimed",
+            "source": "add-hyp", "claimed_at": workqueue.now_iso(),
+        })
+        workqueue.update_card_status(
+            self.ctx, "WORK-TRANSFER", "blocked", note="different route",
+        )
+        self.assertEqual(
+            workqueue.strategy_evidence_count(self.ctx, "4", "S8"), 0,
+        )
+
+    def test_carried_card_conclusion_counts_for_the_claiming_lane(self) -> None:
+        self.write_cards([self.card(
+            "WORK-A", "src/a.c", strategy="S7", allowed_strategies=["S5"],
+        )])
+        card = workqueue.claim_next_card(
+            self.ctx, "1", mode="generic", strategy="S5", claim=True,
+        )
+        self.assertEqual(card["strategy"], "S5")
+        workqueue.update_card_status(
+            self.ctx, "WORK-A", "blocked", note="call path unavailable",
+        )
+        self.assertEqual(
+            workqueue.strategy_evidence_count(self.ctx, "1", "S5"), 1,
+        )
+        self.assertEqual(
+            workqueue.strategy_evidence_count(self.ctx, "1", "S7"), 0,
+        )
+
+    def test_manual_hypothesis_claim_records_its_lane_for_rotation(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/a.c", strategy="S7")])
+        self.add_hypothesis(strategy="S7-adversarial-input")
+        workqueue.update_card_status(
+            self.ctx, "WORK-A", "blocked", note="unavailable input route",
+        )
+        self.assertEqual(
+            workqueue.strategy_evidence_count(self.ctx, "1", "S7"), 1,
+        )
+
     def test_resume_keeps_assigned_card_history_and_finding_aware_feedback(self) -> None:
         self.write_cards([
             self.card(
