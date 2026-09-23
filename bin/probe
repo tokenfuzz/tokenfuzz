@@ -1439,12 +1439,16 @@ class Probe:
                 self.hypothesis_strategy == "S8" and bool(self.header["property"])
             )
             property_violation: bool | None = None
+            handled_resolution = False
             if self.sanitizer == "runner":
                 testcase_failure = verdict_lib.runner_testcase_failure(
                     self.output, self.exec_testcase,
                 )
                 if testcase_failure == "unavailable":
                     return "NO_EXEC"
+                # A target can log a caught import failure, then complete.
+                # Its verified success is not a resolver crash pattern.
+                handled_resolution = testcase_failure == "handled"
                 # An S8 oracle that prints its marker and then asserts
                 # produced its counterexample; the assertion is how it exits
                 # nonzero, not a testcase defect.
@@ -1455,7 +1459,9 @@ class Probe:
                         )
                     if not property_violation:
                         return "EXEC_FAIL"
-            if verdict_lib.file_has_crash(self.output, tuple(self.config.runner_crash_patterns)):
+            if not handled_resolution and verdict_lib.file_has_crash(
+                self.output, tuple(self.config.runner_crash_patterns),
+            ):
                 return "CRASH"
             # A property marker is agent-authored output, while 124 is the
             # timeout wrapper's reserved process result. An oracle that prints

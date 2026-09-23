@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
+from urllib.parse import unquote
 
 
 CRASH_PATTERNS = (
@@ -86,6 +87,20 @@ _RUNNER_UNAVAILABLE_RE = re.compile(
     r"^(?:RuntimeError|OSError): .*\b(?:unavailable|not available)\b", re.IGNORECASE,
 )
 _RUNNER_ASSERTION_RE = re.compile(r"^AssertionError(?::|$)")
+#: Only Node's ESM resolver prints "imported from <module>"; CommonJS follows
+#: "Cannot find module" with "Require stack:".
+_NODE_IMPORT_FAILURE_RE = re.compile(r"^Error \[ERR_[A-Z_]+\]: .* imported from (\S.*)$")
+#: A class absent from the JVM classpath. "Could not initialize class X", the
+#: same error after a failed static initializer, is target code and stays.
+_JVM_CLASSPATH_FAILURE_RE = re.compile(
+    r'^Exception in thread "[^"]*" java\.lang\.NoClassDefFoundError: [\w/$.]+$'
+)
+#: The start of any later error report. A resolution failure the program
+#: caught and logged is followed by the one that actually ended it.
+_ERROR_HEADER_RE = re.compile(
+    r"^(?:[\w$]+\.)*[\w$]*(?:Error|Exception)\b|^Exception in thread|^==\d+=="
+    r"|^panic:|^fatal error:|^FATAL ERROR:|^PHP Fatal error:|^Traceback \("
+)
 _PYTHON_FRAME_RE = re.compile(r'^\s*File "([^"]+)"')
 #: The runner started the configured command and it returned, in at least one
 #: repetition. This is an execution *attempt*, not proof the target's entry
@@ -421,20 +436,81 @@ def coverage_outcome(path: str | Path) -> tuple[str, str]:
     return "", ""
 
 
+def _reported_path(text: str) -> Path:
+    """A module path as Node prints it: a filesystem path or a file: URL."""
+    text = text.strip()
+    if text.startswith("file://"):
+        text = unquote(text[len("file://"):])
+    return Path(text).resolve()
+
+
 def runner_testcase_failure(path: str | Path, testcase: str | Path) -> str:
-    """Classify a Python exception whose deepest frame is the testcase.
+    """Classify a runner failure that is not the target's own diagnostic.
 
     A bare exception name is insufficient: target code can legitimately raise
     the same exception.  Traceback provenance keeps target-origin diagnostics
     visible while separating an unavailable prerequisite — a missing module,
     a missing attribute, a runtime that reports itself unavailable — from a
-    testcase assertion.
+    testcase assertion.  A Node module-resolution failure or a class missing
+    from the JVM classpath is that missing prerequisite whichever module
+    asked for it: a static import fails at link time, before any module body
+    runs, and the importer is as often an unbuilt `dist/` or unwired
+    workspace package as the testcase. Without this the runners' uncaught-
+    exception crash patterns recorded every one as CRASH. A program that logs
+    a resolution error and then exits 0 handled it (`handled`), unless the
+    testcase's own import failed; any other runtime diagnostic still takes
+    precedence over that logged error.
     """
+    unresolved = False
+    testcase_import = False
+    handled_resolution = False
+    other_error = False
     try:
         expected = Path(testcase).resolve()
         last_frame: Path | None = None
+        cannot_find = False
+        require_stack = False
         with Path(path).open(encoding="utf-8", errors="replace") as stream:
             for line in stream:
+                text = line.rstrip("\n")
+                if require_stack:
+                    # CommonJS names the requiring module first.
+                    require_stack = False
+                    testcase_import = (
+                        text.startswith("- ") and _reported_path(text[2:]) == expected
+                    )
+                postrun = _POSTRUN_RC_RE.search(text)
+                node_import = _NODE_IMPORT_FAILURE_RE.match(text)
+                if postrun and postrun.group(1) == "0":
+                    # Exit 0 proves the program caught the logged failure; a
+                    # configured success code such as 1 does not, because an
+                    # uncaught resolution failure exits 1 too. A testcase that
+                    # caught its own failed import may never have reached the
+                    # target, so that one stays unavailable.
+                    if not testcase_import:
+                        handled_resolution = unresolved and not other_error
+                        unresolved = False
+                elif (
+                    node_import
+                    or _JVM_CLASSPATH_FAILURE_RE.match(text)
+                    or (cannot_find and text == "Require stack:")
+                ):
+                    unresolved = True
+                    handled_resolution = False
+                    require_stack = text == "Require stack:"
+                    testcase_import = bool(
+                        node_import and _reported_path(node_import.group(1)) == expected
+                    )
+                elif text.startswith("Error: Cannot find module '"):
+                    # CommonJS needs the following Require stack to prove
+                    # this is resolution, not a target-authored Error line.
+                    unresolved = False
+                    handled_resolution = False
+                elif _ERROR_HEADER_RE.match(text):
+                    unresolved = False
+                    handled_resolution = False
+                    other_error = True
+                cannot_find = text.startswith("Error: Cannot find module '")
                 if line.startswith("Traceback (most recent call last):"):
                     last_frame = None
                     continue
@@ -454,7 +530,10 @@ def runner_testcase_failure(path: str | Path, testcase: str | Path) -> str:
                     return "assertion"
     except OSError:
         pass
-    return ""
+    # A diagnostic anywhere else is target evidence; no resolution error hides it.
+    if unresolved and not other_error:
+        return "unavailable"
+    return "handled" if handled_resolution else ""
 
 
 def main() -> int:

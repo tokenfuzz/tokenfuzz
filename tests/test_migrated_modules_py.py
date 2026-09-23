@@ -383,6 +383,47 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
     check(verdict.file_is_clean(clean_log), "verdict recognizes verified clean probe output")
     check(not verdict.file_has_crash(clean_log), "clean execution is not classified as a crash")
 
+    # A Node module-resolution failure is a missing prerequisite whoever
+    # imported it: static imports fail at link time, before any module body
+    # runs. The JavaScript `^Error:` crash pattern otherwise records it as CRASH.
+    node_case = root / "scratch-1" / "probe.mjs"
+    target_module = root / "target" / "lib" / "app.js"
+    node_log = root / "verdict-node-import.log"
+    for body, expected, label in (
+        ("node:internal/modules/esm/resolve:272\n"
+         "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/absent/app.mjs' "
+         f"imported from {node_case}\n  code: 'ERR_MODULE_NOT_FOUND',\n",
+         "unavailable", "an ESM import the testcase cannot resolve"),
+        ("Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: No \"exports\" main defined in "
+         f"/absent/package.json imported from {target_module}\n",
+         "unavailable", "an ESM import target code cannot resolve"),
+        (f"Error: Cannot find module 'sampleproj/static'\nRequire stack:\n- {node_case}\n",
+         "unavailable", "a CommonJS require that cannot resolve"),
+        (f"{target_module}:12\nTypeError: Cannot read properties of undefined\n"
+         f"    at app_parse ({target_module}:12:5)\n"
+         "    at node:internal/modules/run_main:123:12\n",
+         "", "a runtime error thrown in target code"),
+        ('Exception in thread "main" java.lang.NoClassDefFoundError: sampleproj/Enums\n'
+         "\tat sampleproj.App.<clinit>(App.kt:70)\n",
+         "unavailable", "a class missing from the JVM classpath"),
+        ('Exception in thread "main" java.lang.NoClassDefFoundError: '
+         "Could not initialize class sampleproj.App\n",
+         "", "a JVM class whose own initializer failed"),
+        # A resolution failure the program caught and logged does not hide
+        # the error that actually ended it.
+        ("Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'optional-dep' "
+         f"imported from {node_case}\n    at node:internal/modules/esm/resolve:272\n"
+         f"TypeError: Cannot read properties of null\n    at {target_module}:3:5\n",
+         "", "a logged import failure followed by a target crash"),
+        ("Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'optional-dep' "
+         f"imported from {target_module}\n"
+         "==7==ERROR: AddressSanitizer: heap-buffer-overflow\n",
+         "", "a logged import failure followed by a sanitizer report"),
+    ):
+        node_log.write_text(body, encoding="utf-8")
+        got = verdict.runner_testcase_failure(node_log, node_case)
+        check(got == expected, f"{label} classifies as {expected!r} (got {got!r})")
+
     raw_report = root / "raw-symbols.txt"
     raw_report.write_text("    #0 0x123  (/tmp/apptool+0x123)\n", encoding="utf-8")
     symbolizer_command = []

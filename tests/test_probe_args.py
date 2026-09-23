@@ -312,6 +312,55 @@ class ProbeArgumentTests(unittest.TestCase):
             )
             self.assertEqual(instance._classify(1), "CRASH")
 
+    def test_logged_resolution_failure_does_not_hide_verified_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            instance = object.__new__(probe.Probe)
+            instance.output = root / "runner.txt"
+            instance.exec_testcase = root / "testcase.mjs"
+            instance.sanitizer = "runner"
+            instance.config = SimpleNamespace(runner_crash_patterns=[r"^Error:"])
+            instance.hypothesis_strategy = "S7"
+            instance.header = {"property": ""}
+            target_module = root / "target" / "lib" / "app.js"
+            instance.output.write_text(
+                "Error: Cannot find module 'optional-package'\n"
+                "Require stack:\n"
+                f"- {target_module}\n"
+                f"- {instance.exec_testcase}\n"
+                "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(0), "CLEAN")
+            # A testcase that caught its own failed import may never have
+            # reached the target; exit 0 does not make that a clean run.
+            instance.output.write_text(
+                "Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/t/dist/app.js' "
+                f"imported from {instance.exec_testcase}\n"
+                "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(0), "NO_EXEC")
+            instance.output.write_text(
+                "==7==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+                "Error: Cannot find module 'optional-package'\n"
+                "Require stack:\n"
+                f"- {instance.exec_testcase}\n"
+                "[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(0), "CRASH")
+            # A configured success code is not proof the failure was caught:
+            # an uncaught resolution failure exits 1 as well.
+            instance.output.write_text(
+                "Error: Cannot find module 'optional-package'\n"
+                "Require stack:\n"
+                f"- {instance.exec_testcase}\n"
+                "[run-asan] generic EXECUTION VERIFIED (post-run, rc=1)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(instance._classify(1), "NO_EXEC")
+
     def test_missing_module_attribute_requires_testcase_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
