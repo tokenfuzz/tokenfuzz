@@ -263,12 +263,18 @@ class SealTests(unittest.TestCase):
         first = _artifact(self.results, "crashes", "CRASH-001-1")
         second = _artifact(self.results, "crashes", "CRASH-002-1")
         worker = self._worker()
+        registered = threading.Event()
         callback_entered = threading.Event()
         release_callback = threading.Event()
         batches: list[list[Path]] = []
         original_done = worker._expansion_done
 
         def expand(_runtime, **kwargs):
+            # A future that finishes before add_done_callback runs its callback
+            # on the scheduling thread, so the first batch waits until the
+            # callback is registered and must run on the expander thread.
+            if not batches:
+                registered.wait(5)
             batch = list(kwargs["only"])
             batches.append(batch)
             for crash in batch:
@@ -285,6 +291,7 @@ class SealTests(unittest.TestCase):
             with mock.patch.object(audit_runner, "expand_new_crash_clusters", side_effect=expand), \
                  mock.patch.object(worker, "_expansion_done", side_effect=delayed_done):
                 self.assertEqual(worker._schedule_expansion([first], None), "started")
+                registered.set()
                 self.assertTrue(callback_entered.wait(5))
                 self.assertTrue(worker._expansion.done())
                 self.assertEqual(worker._schedule_expansion([second], None), "in-flight")
@@ -294,6 +301,7 @@ class SealTests(unittest.TestCase):
                 while len(batches) < 2 and time.monotonic() < deadline:
                     time.sleep(0.01)
         finally:
+            registered.set()
             release_callback.set()
             worker._stop = True
             worker._expander.shutdown(wait=True)
