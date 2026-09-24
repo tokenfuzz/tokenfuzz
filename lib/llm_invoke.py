@@ -661,6 +661,63 @@ _CODEX_PLUGIN_OFF_FLAGS = [
     "-c", "features.plugins=false",
 ]
 
+_codex_user_extension_flags: dict[tuple[str, int], list[str]] = {}
+
+
+def codex_user_extension_off_flags() -> list[str]:
+    """Overrides that switch off MCP servers and the notify hook from user config.
+
+    Disabling plugins removes plugin-contributed MCPs only. Servers declared in
+    the operator's own config.toml still started in every audit session: a
+    browser or computer-use REPL and remote MCPs run as Codex's children,
+    outside the command sandbox, beside a model reading untrusted source. The
+    `notify` hook likewise ran a desktop client after every turn. Names are
+    read from that config, so nothing about a particular setup is hardcoded;
+    `-c mcp_servers={}` does not work because overrides merge, and
+    `--ignore-user-config` would also drop provider settings a launch needs.
+    The file is read rather than `codex mcp list` run, because a configured
+    CODEX_BIN may be a wrapper that treats every invocation as a session.
+
+    Raises ValueError when containment cannot be established, as an unusable
+    security mode does: Codex splits `-c` keys on every dot and ignores TOML
+    quoting, so a server named with a dot or space cannot be disabled, and an
+    unreadable config cannot be enumerated at all.
+    """
+    config = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    try:
+        # Keyed on the file read, so an edit mid-audit or another CODEX_HOME
+        # is enumerated again rather than served from a stale list.
+        key = (str(config), config.stat().st_mtime_ns)
+    except OSError:
+        key = (str(config), -1)
+    if key in _codex_user_extension_flags:
+        return list(_codex_user_extension_flags[key])
+    flags = ["-c", "notify=[]"]
+    servers: dict = {}
+    if config.is_file():
+        try:
+            import tomllib
+            parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+            servers = parsed.get("mcp_servers") or {}
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"cannot read Codex MCP servers from {config} ({exc}), so an "
+                "audit launch cannot disable them; fix the file before auditing"
+            ) from exc
+    for name, server in (servers.items() if isinstance(servers, dict) else ()):
+        if isinstance(server, dict) and server.get("enabled") is False:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", str(name)):
+            raise ValueError(
+                f"Codex MCP server {name!r} in {config} cannot be disabled by a "
+                "launch override (Codex splits override keys on '.'); rename it "
+                "to letters, digits, '_' or '-', or set enabled = false there"
+            )
+        flags += ["-c", f"mcp_servers.{name}.enabled=false"]
+    _codex_user_extension_flags[key] = flags
+    return list(flags)
+
+
 # Codex otherwise walks from --cd to the enclosing Git root and loads every
 # AGENTS.md on that path. Benchmark cells live below the TokenFuzz checkout, so
 # that silently gives a model-direct control the harness's audit contract.
@@ -1068,6 +1125,7 @@ def agent_flags(
             "--json",
             "-c", 'history.persistence="none"',
             *_CODEX_PLUGIN_OFF_FLAGS,
+            *codex_user_extension_off_flags(),
             *_CODEX_PROJECT_ROOT_FLAGS,
             # Codex's web search is on by default (measured: a default session
             # answered a search with example.com's title and streamed a
@@ -1740,7 +1798,8 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         # timeout stops mid-turn would otherwise report no usage at all.
         flags = [
             "--json", "-c", 'history.persistence="none"',
-            *_CODEX_PLUGIN_OFF_FLAGS, *_CODEX_PROJECT_ROOT_FLAGS,
+            *_CODEX_PLUGIN_OFF_FLAGS, *codex_user_extension_off_flags(),
+            *_CODEX_PROJECT_ROOT_FLAGS,
             "-c", 'web_search="disabled"',
             "--skip-git-repo-check", "--sandbox", "read-only",
         ]

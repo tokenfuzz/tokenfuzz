@@ -11,6 +11,16 @@ export SCRIPT_ROOT
 # (LLM_DECIDE_MOCK_*) still run — DISABLE only gates the real backend.
 export LLM_DECIDE_DISABLE="${LLM_DECIDE_DISABLE:-1}"
 
+# Codex launch flags are derived from the operator's config.toml. An empty
+# home keeps flag-building suites independent of the host; live-backend runs
+# keep the real one, which holds their authentication.
+CODEX_HOME_TMP=""
+if [ -z "${TOKENFUZZ_LIVE_BACKENDS:-}" ]; then
+  CODEX_HOME_TMP="$(mktemp -d "${TMPDIR:-/tmp}/tokenfuzz-codex-home.XXXXXX")"
+  export CODEX_HOME="$CODEX_HOME_TMP"
+  trap 'rm -rf ${CODEX_HOME_TMP:+"$CODEX_HOME_TMP"}' EXIT
+fi
+
 # Container shells export AUDIT_BUILD_SUFFIX; fixtures build bare build-<san>/
 # trees. Clear it here too — python suites never source tests/helpers.sh.
 unset AUDIT_BUILD_SUFFIX
@@ -591,7 +601,7 @@ format_elapsed_seconds() {
 # Take the baseline synchronously: no suite may start before it is saved.
 start_checkout_guard() {
   GUARD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/audit-tests-guard-XXXXXXXX") || return 1
-  trap 'rm -rf "$GUARD_DIR"' EXIT
+  trap 'rm -rf "$GUARD_DIR" ${CODEX_HOME_TMP:+"$CODEX_HOME_TMP"}' EXIT
   if ! python3 "$TESTS_DIR/checkout_guard.py" record "$SCRIPT_ROOT" "$GUARD_DIR/snapshot"; then
     echo "tests/run-tests.sh: checkout-guard could not record the baseline" >&2
     return 1

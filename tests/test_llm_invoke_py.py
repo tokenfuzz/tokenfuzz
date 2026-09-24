@@ -29,6 +29,9 @@ HELPER = ROOT / "lib" / "llm_invoke.py"
 # test process insulated from a developer shell that happens to export the
 # Gemini CLI switch.
 os.environ.pop("USE_GEMINI_CLI", None)
+# Codex flags read the operator's config.toml; an empty home keeps every
+# assertion below independent of the machine running it.
+os.environ["CODEX_HOME"] = tempfile.mkdtemp(prefix="codex-home-")
 # Cross-run memory defaults to OFF when the switch is unset; clear any
 # developer-shell value so the default-off assertions are deterministic.
 os.environ.pop("TOKENFUZZ_MEMORY_ENABLED", None)
@@ -1148,6 +1151,60 @@ claude_single = inv.agent_flags("claude", allow_subagents=False)
 ok("--disallowedTools" in claude_single, "single-agent Claude disables native delegation")
 assert_eq("WebFetch,WebSearch,Agent,Task", claude_single[claude_single.index("--disallowedTools") + 1],
           "a bounded validator adds both delegation tool names to the standing web deny")
+# Servers the operator's own Codex config declares start outside the command
+# sandbox; every launch disables each one, plus the notify hook. The config is
+# read, never the backend binary run: a fake or wrapper CODEX_BIN treats every
+# invocation as a session.
+with tempfile.TemporaryDirectory() as fake_home:
+    (Path(fake_home) / "config.toml").write_text(
+        'notify = ["desktop-client"]\n'
+        '[mcp_servers.browser_repl]\ncommand = "repl"\n'
+        '[mcp_servers.off_already]\ncommand = "x"\nenabled = false\n'
+        '[mcp_servers.remote_docs]\nurl = "https://docs.example.test/mcp"\n',
+        encoding="utf-8",
+    )
+    with mock.patch.dict(os.environ, {"CODEX_HOME": fake_home, "CODEX_BIN": "/nonexistent/codex"}), \
+            mock.patch.object(inv, "_codex_user_extension_flags", {}):
+        extension_flags = inv.codex_user_extension_off_flags()
+        agent_with_servers = inv.agent_flags("codex")
+    assert_eq(
+        ["-c", "notify=[]", "-c", "mcp_servers.browser_repl.enabled=false",
+         "-c", "mcp_servers.remote_docs.enabled=false"],
+        extension_flags,
+        "Codex launches disable every enabled user MCP server and the notify hook",
+    )
+    ok("mcp_servers.remote_docs.enabled=false" in agent_with_servers,
+       "agent_flags('codex') carries the user-extension overrides")
+    # Containment that cannot be established refuses the launch, as an
+    # unusable security mode does, rather than starting with a server live.
+    for label, text in (
+        ("an unaddressable server name", '[mcp_servers."dotted.name"]\ncommand = "y"\n'),
+        ("an unreadable config", "[mcp_servers\n"),
+    ):
+        (Path(fake_home) / "config.toml").write_text(text, encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": fake_home}), \
+                mock.patch.object(inv, "_codex_user_extension_flags", {}):
+            try:
+                inv.agent_flags("codex")
+                refused = False
+            except ValueError:
+                refused = True
+        ok(refused, f"a Codex launch with {label} is refused")
+    # A decision reaching the same refusal logs a local launch failure and
+    # returns no answer; its callers (triage, setup helpers) never crash.
+    (Path(fake_home) / "config.toml").write_text(
+        '[mcp_servers."dotted.name"]\ncommand = "y"\n', encoding="utf-8",
+    )
+    decision_log = Path(fake_home) / "decisions.log"
+    with mock.patch.dict(os.environ, {
+        "CODEX_HOME": fake_home, "CODEX_BIN": "/nonexistent/codex",
+        "ACTIVE_BACKEND": "codex", "LLM_DECIDE_DISABLE": "0",
+        "LLM_DECIDE_LOG": str(decision_log),
+    }), mock.patch.object(inv, "_codex_user_extension_flags", {}):
+        answer = decide_mod.llm_decide("runner-suggest", "binary", "choose one", 5)
+    ok(answer is None and "FAIL local-launch" in decision_log.read_text(),
+       "a refused Codex decision launch is a logged local failure, not a crash")
+
 codex_single = inv.agent_flags("codex", allow_subagents=False)
 ok("features.multi_agent=false" in codex_single, "single-agent Codex disables native delegation")
 ok("features.plugins=false" in codex_single,

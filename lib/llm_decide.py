@@ -654,7 +654,12 @@ def _failcache_trip_timed_out_prompt(decision: str, prompt: str) -> None:
 # This local wrapper keeps the invocation callsite concise.
 
 def _backend_flags(backend: str, model: str) -> list[str]:
-    return _decide_flags_for_backend(backend, model)
+    try:
+        return _decide_flags_for_backend(backend, model)
+    except ValueError as exc:
+        # A launch the flag builder refuses (containment it cannot establish)
+        # is local setup, not a backend failure: log it and return no answer.
+        raise _LaunchPreparationError(str(exc)) from exc
 
 
 _WHICH_CACHE: dict[tuple[str, str], str] = {}
