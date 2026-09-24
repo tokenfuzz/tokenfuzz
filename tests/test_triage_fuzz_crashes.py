@@ -20,7 +20,9 @@ COMMAND = ROOT / "bin" / "triage-fuzz-crashes"
 sys.path.insert(0, str(ROOT / "lib"))
 
 import audit_runner  # noqa: E402
+import fuzz_campaign  # noqa: E402
 import fuzz_triage  # noqa: E402
+import prompt  # noqa: E402
 
 
 class TriageFuzzCrashTests(unittest.TestCase):
@@ -115,6 +117,42 @@ class TriageFuzzCrashTests(unittest.TestCase):
             log = runtime.index.read_text(encoding="utf-8")
             self.assertIn("RuntimeError: synthetic failure", log)
             self.assertIn("WARN: triage-fuzz-crashes failed rc=1", log)
+
+    def test_unreplayed_campaign_artifacts_are_leads_and_replayed_ones_are_not(self) -> None:
+        # `bin/fuzz run` writes under fuzz/artifacts/<harness>/, not the
+        # legacy fuzz-crashes/ root, so its artifacts never became leads. One
+        # the campaign already replayed through probe must not become one.
+        with tempfile.TemporaryDirectory(prefix="triage-fuzz-campaign-") as temporary:
+            results = Path(temporary) / "results"
+            artifacts = results / "fuzz" / "artifacts" / "fuzz_sample"
+            artifacts.mkdir(parents=True)
+            (artifacts / "crash-replayed").write_bytes(b"a")
+            (artifacts / "crash-pending").write_bytes(b"b")
+            fuzz_campaign.save_states(results, {
+                "fuzz_sample": fuzz_campaign.HarnessState(
+                    name="fuzz_sample", binary="/bin/fuzz_sample",
+                    seen_artifacts=["crash-replayed"]),
+            })
+
+            returncode, message = fuzz_triage.update_fuzz_leads(results, 20)
+            self.assertEqual(returncode, 0, message)
+            self.assertIn("1 leads", message)
+            text = (results / "fuzz-leads.md").read_text(encoding="utf-8")
+            self.assertIn("## fuzz_sample / crash-pending", text)
+            self.assertIn("fuzz/artifacts/fuzz_sample/crash-pending", text)
+            self.assertIn("bin/fuzz run", text)
+            self.assertNotIn("crash-replayed", text)
+            self.assertFalse(prompt.fuzz_leads_empty(results))
+
+            fuzz_campaign.save_states(results, {
+                "fuzz_sample": fuzz_campaign.HarnessState(
+                    name="fuzz_sample", binary="/bin/fuzz_sample",
+                    seen_artifacts=["crash-pending", "crash-replayed"]),
+            })
+            fuzz_triage.update_fuzz_leads(results, 20)
+            # An index with nothing left to replay reads as no lead, so an
+            # idle slot is not launched on it.
+            self.assertTrue(prompt.fuzz_leads_empty(results))
 
     def test_write_failure_preserves_the_previous_index(self) -> None:
         with tempfile.TemporaryDirectory(prefix="triage-fuzz-write-") as temporary:

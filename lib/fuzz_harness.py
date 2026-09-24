@@ -73,8 +73,12 @@ def corpus_dir(results_dir: "str | os.PathLike", name: str) -> Path:
     return fuzz_root(results_dir) / "corpus" / name
 
 
+def artifacts_root(results_dir: "str | os.PathLike") -> Path:
+    return fuzz_root(results_dir) / "artifacts"
+
+
 def artifact_dir(results_dir: "str | os.PathLike", name: str) -> Path:
-    return fuzz_root(results_dir) / "artifacts" / name
+    return artifacts_root(results_dir) / name
 
 
 def log_dir(results_dir: "str | os.PathLike", name: str) -> Path:

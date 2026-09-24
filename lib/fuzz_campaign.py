@@ -679,6 +679,23 @@ def load_states(results_dir: "str | os.PathLike") -> "dict[str, HarnessState]":
     return out
 
 
+def unreplayed_artifacts(results_dir: "str | os.PathLike",
+                         state: HarnessState) -> "list[Path]":
+    """One harness's artifacts that no campaign has replayed through probe.
+
+    The campaign's replay queue and the fuzz-lead index both read this, so an
+    artifact left behind when the budget ran out is a lead until a campaign
+    adjudicates it, and one already replayed never is.
+    """
+    directory = fuzz_harness.artifact_dir(results_dir, state.name)
+    seen = set(state.seen_artifacts)
+    try:
+        return sorted(path for path in directory.iterdir()
+                      if path.is_file() and path.name not in seen)
+    except OSError:
+        return []
+
+
 def save_states(results_dir: "str | os.PathLike",
                 states: "dict[str, HarnessState]") -> None:
     path = state_path(results_dir)
@@ -1029,13 +1046,7 @@ class Campaign:
         more than another slice, and the previous campaign may have run out of
         wall midway through its replays.
         """
-        directory = fuzz_harness.artifact_dir(self.results, state.name)
-        seen = set(state.seen_artifacts)
-        try:
-            return sorted(str(path) for path in directory.iterdir()
-                          if path.is_file() and path.name not in seen)
-        except OSError:
-            return []
+        return [str(path) for path in unreplayed_artifacts(self.results, state)]
 
     # ── the loop ────────────────────────────────────────────────────
 
