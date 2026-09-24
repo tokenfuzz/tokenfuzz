@@ -331,6 +331,15 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         ("ınvalid\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
         ("İnvalid\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
         ("ſyntax error\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
+        # A rejected flag at exit 1 is the command line, unless something
+        # else in the output names the input.
+        ("ERROR: unrecognized command-line flag '-sample'\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "usage"),
+        ("unrecognized option '-x'\nsyntax error in input\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
+        ("usage: app <file>\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "usage"),
+        # Error-first word order from a demuxer refusing the container.
+        ("[in#0 @ 0x1] error reading header\nError opening input files: Cannot allocate memory\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=244)\n", "input-rejected"),
+        ("Error opening input: End of file\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "input-rejected"),
+        ("error writing output\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "exit"),
         # The header names the testcase; its name is not the target's verdict.
         ("ASAN_RUN_HEADER: sanitizer=asan runs=1 mode=generic testcase=/r/scratch-1/invalid-utf8.xml\n"
          "cannot open input.bin: No such file or directory\n[run-asan] generic EXECUTION INCONCLUSIVE (post-run, rc=1)\n", "exit"),

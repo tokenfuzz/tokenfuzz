@@ -226,7 +226,9 @@ FORMAT_REJECT_RE = re.compile(
     r"(?:error|fail(?:ed|ure)?|invalid|mismatch|rejected?)\b"
     r"|\b(?:invalid|malformed|corrupt(?:ed)?|unsupported|unrecognized|not a valid)\b"
     r"|\bnot an? [A-Za-z0-9_ -]{1,30} (?:file|stream|format|image|archive|document)\b"
-    r"|\bcannot (?:parse|decode|read)\b",
+    r"|\bcannot (?:parse|decode|read)\b"
+    # Error-first word order, as a demuxer reports a refused container.
+    r"|\berror (?:reading|parsing|decoding) (?:the )?header\b|\berror opening input\b",
     re.IGNORECASE,
 )
 
@@ -266,6 +268,7 @@ _LOADER_RE = re.compile(
 #: The program rejected its own command line.
 _USAGE_RE = re.compile(
     r"\busage:|unrecognized option|invalid option|unknown option|illegal option"
+    r"|unrecognized command[- ]line (?:flag|option)"
     r"|missing (?:argument|operand)|too (?:few|many) arguments|requires an argument",
     re.IGNORECASE,
 )
@@ -289,7 +292,7 @@ _LOADER_HINTS = (
     "cannot open shared object",
     "image not found",
 )
-_USAGE_HINTS = ("usage:", "option", "argument", "operand")
+_USAGE_HINTS = ("usage:", "option", "argument", "operand", "command")
 _ABORT_HINTS = (
     "killed by SIG",
     "Abort trap",
@@ -321,6 +324,7 @@ _FORMAT_HINTS = (
     "unrecognized",
     "not",
     "cannot",
+    "error",
 )
 _IGNORECASE_EXTRA_CHARS = "İıſK"
 
@@ -381,9 +385,12 @@ def execution_failure_class(
     ):
         kind = "loader"
     elif (
-        (rc in (2, 64) or rc is None)
+        rc in (1, 2, 64, None)
         and has_case_insensitive_hint(_USAGE_HINTS)
         and _USAGE_RE.search(text)
+        # Exit 1 is also a common input refusal, so there a usage line wins
+        # only when nothing outside it names the input as the problem.
+        and (rc != 1 or not FORMAT_REJECT_RE.search(_USAGE_RE.sub(" ", text)))
     ):
         kind = "usage"
     elif (
