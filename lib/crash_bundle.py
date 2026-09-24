@@ -826,6 +826,59 @@ def state_owner(
     return None
 
 
+def _own_revision(
+    crashes: Path,
+    agent: str,
+    hypothesis: str,
+    sanitizer_output: Path,
+    route: CrashRoute,
+    testcase_name: str,
+    harness_name: str,
+) -> str | None:
+    """This agent's bundle that a re-confirm after a harness edit revises.
+
+    The route keys the harness by content, so a comment edit re-filed the
+    same crash as a second bundle. A bundle is revised only when the agent,
+    hypothesis, testcase and harness file names, the rest of the route, and
+    the exact crash state all match: a differently named harness is a
+    deliberately different call sequence and still files separately.
+    """
+    if not hypothesis or not harness_name:
+        return None
+    try:
+        state = crash_state(sanitizer_output.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    if state is None:
+        return None
+    pattern = re.compile(rf"^CRASH-[0-9]+-{re.escape(str(agent))}$")
+    for directory in sorted(crashes.glob("CRASH-*")):
+        # An exported bundle's maintainer files would mix with new evidence.
+        if (
+            not directory.is_dir() or not pattern.match(directory.name)
+            or (directory / ".audit").exists()
+        ):
+            continue
+        path = _probe_context_path(directory)
+        bundle_route = bundle_crash_route(directory)
+        if path is None or bundle_route is None:
+            continue
+        try:
+            context = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        harness = context.get("harness")
+        if (
+            context.get("hypothesis_id") == hypothesis
+            and context.get("testcase") == testcase_name
+            and isinstance(harness, dict) and harness.get("name") == harness_name
+            and bundle_route[:2] + bundle_route[3:] == route[:2] + route[3:]
+            and bundle_crash_state(directory) == state
+        ):
+            return directory.name
+    return None
+
+
 def _identity(
     testcase: Path, sanitizer: str, mode: str, harness: Path | None,
     args: Sequence[str], build_config_id: str = "", build_recipe_digest: str = "",
@@ -985,6 +1038,35 @@ def materialize(
     duplicate_of = filed_duplicate(results_dir, sanitizer_path, route)
     if duplicate_of:
         return "DUP-STATE", duplicate_of
+    revised = _own_revision(
+        crashes, agent, hypothesis, sanitizer_path, route,
+        testcase_path.name, harness_path.name if harness_path else "",
+    )
+    if revised:
+        destination = crashes / revised
+        # Refresh the evidence in place; the agent's report.md and the
+        # creation clock stay. The changed artifacts lapse any receipt, so
+        # triage reviews the revised harness rather than the old one.
+        (destination / ".probe-identity").write_text(identity + "\n", encoding="utf-8")
+        shutil.copy2(testcase_path, destination / testcase_path.name)
+        shutil.copy2(sanitizer_path, destination / "sanitizer.txt")
+        shutil.copy2(harness_path, destination / harness_path.name)
+        _write_probe_context(
+            destination, identity=identity,
+            testcase=destination / testcase_path.name,
+            sanitizer=sanitizer, mode=mode,
+            harness=destination / harness_path.name,
+            args=args, sanitizer_output=destination / "sanitizer.txt",
+            binary=binary, build_config_id=build_config_id,
+            hypothesis_id=hypothesis,
+            build_recipe_digest=build_recipe_digest,
+        )
+        try:
+            with index.open("a") as stream:
+                stream.write(f"{identity}\t{revised}\n")
+        except OSError as exc:
+            print(f"WARN: crash {revised} refreshed, but dedup index update failed: {exc}", file=sys.stderr)
+        return "REFRESHED", revised
     crash_id = f"CRASH-{maximum + 1:03d}-{agent}"
     destination = crashes / crash_id
     destination.mkdir()

@@ -1816,6 +1816,17 @@ class Probe:
                     self.header["hypothesis"],
                     f"bin/probe filed {crash_id} at crashes/{crash_id}",
                 )
+        elif status == "REFRESHED":
+            print(
+                f"[probe] CRASH REFRESHED: {self.config.results_dir}/crashes/{crash_id} already carries "
+                "this hypothesis and crash state; its harness, reproducer, and sanitizer.txt were "
+                "updated in place - keep enriching that report.md, do not file another bundle"
+            )
+            if self.header["hypothesis"]:
+                self._append_state_note(
+                    self.header["hypothesis"],
+                    f"bin/probe refreshed {crash_id} at crashes/{crash_id} with the revised harness",
+                )
         else:
             print(f"[probe] CRASH already filed (identical reproducer): {self.config.results_dir}/crashes/{crash_id}")
 

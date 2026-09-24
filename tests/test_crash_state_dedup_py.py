@@ -242,6 +242,49 @@ class CrashStateDedupTests(unittest.TestCase):
         self.assertEqual(self.file("2", "c", trace(), mode="browser")[0], "FILED")
         self.assertEqual(self.file("2", "d", trace(), args=("--strict",))[0], "FILED")
 
+    def test_a_harness_edit_refreshes_the_agents_own_bundle(self) -> None:
+        harness = self.root / "harness.c"
+        harness.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        status, first = self.file("1", "a", trace(), harness=harness, hypothesis="H-1")
+        self.assertEqual(status, "FILED")
+        bundle = self.results / "crashes" / first
+        (bundle / "report.md").write_text("# enriched\n", encoding="utf-8")
+        harness.write_text("/* revised */\nint main(void) { return 0; }\n", encoding="utf-8")
+        self.assertEqual(
+            self.file("1", "a", trace(), harness=harness, hypothesis="H-1"),
+            ("REFRESHED", first),
+        )
+        self.assertIn("revised", (bundle / "harness.c").read_text())
+        self.assertEqual((bundle / "report.md").read_text(), "# enriched\n")
+        self.assertIsNotNone(crash_bundle.recorded_evidence_context(bundle))
+        self.assertEqual(
+            [p.name for p in (self.results / "crashes").glob("CRASH-*")], [first],
+        )
+
+    def test_an_exported_bundle_is_not_refreshed_in_place(self) -> None:
+        harness = self.root / "harness.c"
+        harness.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        _, first = self.file("1", "a", trace(), harness=harness, hypothesis="H-1")
+        (self.results / "crashes" / first / ".audit").mkdir()
+        harness.write_text("/* revised */\n", encoding="utf-8")
+        self.assertEqual(self.file("1", "a", trace(), harness=harness, hypothesis="H-1")[0], "FILED")
+
+    def test_a_harness_edit_files_anew_for_another_hypothesis_agent_or_state(self) -> None:
+        harness = self.root / "harness.c"
+        harness.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        self.file("1", "a", trace(), harness=harness, hypothesis="H-1")
+        harness.write_text("/* v2 */\n", encoding="utf-8")
+        self.assertEqual(self.file("1", "a", trace(), harness=harness, hypothesis="H-2")[0], "FILED")
+        harness.write_text("/* v3 */\n", encoding="utf-8")
+        self.assertEqual(self.file("2", "a", trace(), harness=harness, hypothesis="H-1")[0], "FILED")
+        harness.write_text("/* v4 */\n", encoding="utf-8")
+        self.assertEqual(
+            self.file("1", "a", trace(line=25), harness=harness, hypothesis="H-1")[0], "FILED",
+        )
+        other = self.root / "harness_b.c"
+        other.write_text("/* another call sequence */\n", encoding="utf-8")
+        self.assertEqual(self.file("1", "a", trace(), harness=other, hypothesis="H-1")[0], "FILED")
+
     def test_a_lifetime_crash_is_keyed_on_its_free_site_too(self) -> None:
         _, first = self.file("1", "a", uaf_trace(free_line=60))
         self.promote(first)
