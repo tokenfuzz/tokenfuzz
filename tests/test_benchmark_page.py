@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -611,6 +612,40 @@ class BuildTests(unittest.TestCase):
         # activity still reads the cells, so a live run shows what it is doing
         harness = next(c for c in run["conditions"] if c["token"] == "harness")
         self.assertIsNotNone(harness["activity"])
+        # no process owns it, so it is a run that stopped, not one still going
+        self.assertEqual(run["provisional_reason"], "interrupted")
+        html = benchmark_page.render(data)
+        self.assertIn("Some runs stopped before finishing", html)
+        self.assertNotIn("Some runs are still going", html)
+
+    def test_a_condition_with_no_finished_repeat_is_pending_not_zero(self) -> None:
+        # every repeat hit a provider limit (the ledger's `(1p)`): its zeros
+        # were never measured, so it must not rank or draw as a result
+        path = self.fixture.run / "report.json"
+        report = json.loads(path.read_text(encoding="utf-8"))
+        direct = next(c for c in report["conditions"] if c["condition"] == "model-direct")
+        direct.update(replicates_done=0, replicates_provider_limited=1)
+        path.write_text(json.dumps(report), encoding="utf-8")
+        data = benchmark_page.build(self.fixture.root)
+        run = data["runs"][0]
+        self.assertFalse(run["provisional"])
+        cond = next(c for c in run["conditions"] if c["token"] == "model-direct")
+        self.assertTrue(cond["provisional"])
+        self.assertEqual(cond["find"]["label"], "Pending")
+        group_cond = next(c for c in data["targets"][0]["conditions"]
+                          if c["token"] == "model-direct")
+        self.assertTrue(group_cond["provisional"])
+        # the per-run curve reads the payload, so the flag must reach it too
+        payload = benchmark_page._payload(data)["runs"][0]["conditions"]
+        self.assertTrue(next(c for c in payload if c["token"] == "model-direct")["provisional"])
+
+    def test_a_run_whose_owner_is_alive_is_still_going(self) -> None:
+        (self.fixture.run / "report.json").unlink()
+        lock = self.fixture.run.parent / f".run-{self.fixture.run.name}.lock"
+        lock.write_text(f"{os.getpid()} 2026-01-01T00:00:00+00:00\n", encoding="utf-8")
+        data = benchmark_page.build(self.fixture.root)
+        self.assertEqual(data["runs"][0]["provisional_reason"], "in-progress")
+        self.assertIn("Some runs are still going", benchmark_page.render(data))
 
     def test_a_run_without_cells_parks_its_counts_at_the_wall(self) -> None:
         # an exported bundle ships no cells/, so nothing can be placed in time;
@@ -631,6 +666,26 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(harness["activity"]["bins"], 20)
         # the hypothesis at 4h is inside this cell's wall now, so it counts
         self.assertEqual(sum(harness["activity"]["hyp"]["S3"]), 2)
+
+    def test_activity_scales_match_across_a_paused_and_short_condition(self) -> None:
+        self.fixture._jsonl(self.fixture.direct / "logs" / "index.jsonl", [
+            {"timestamp": "2026-01-01T00:01:00+00:00", "tokens": {"output": 50}},
+        ])
+        for cell, seconds in ((self.fixture.harness, 8100), (self.fixture.direct, 300)):
+            path = cell / "cell.json"
+            meta = json.loads(path.read_text())
+            meta["wall_seconds"] = seconds
+            path.write_text(json.dumps(meta))
+        path = self.fixture.run / "report.json"
+        report = json.loads(path.read_text())
+        for cond in report["conditions"]:
+            cond.update(wall_budget_seconds=900, wall_median=300)
+        path.write_text(json.dumps(report))
+        run = benchmark_page.build(self.fixture.root)["runs"][0]
+        activities = [c["activity"] for c in run["conditions"]]
+        self.assertTrue(all(activities))
+        self.assertEqual(len({(a["bin_h"], a["bins"]) for a in activities}), 1)
+        self.assertGreaterEqual(activities[0]["bin_h"] * activities[0]["bins"], 2.25)
 
     def test_empty_root_builds_no_runs(self) -> None:
         with tempfile.TemporaryDirectory() as empty:
@@ -731,7 +786,7 @@ class RenderTests(unittest.TestCase):
         # replay, trace, attention, and the drawer are all on the page
         self.assertIn('class="replay" data-wall="3.000"', html)
         self.assertIn('data-cell="harness-r1"', html)
-        self.assertIn("1 hit · 1 refuted", html)
+        self.assertIn("1 became an artifact · 1 refuted", html)
         self.assertIn('<table class="attn">', html)
         self.assertIn('id="drawer"', html)
         self.assertIn('data-t="', html)
@@ -805,6 +860,67 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(medium["hours"], [0.5, 1.0, 1.5, 2.0])
         long = benchmark_page._checkpoints([cond([2.5], 3.0, 3.0)])
         self.assertEqual(long["hours"], [1, 2, 3])
+        smoke = benchmark_page._checkpoints([cond([0.05, 0.2], 0.25, 0.25)])
+        self.assertEqual([benchmark_page._fmt_min(h * 60) for h in smoke["hours"]],
+                         ["5m", "10m", "15m"])
+        self.assertEqual(smoke["rows"][0]["counts"], [1, 1, 2])
+
+    def test_activity_includes_the_wall_endpoint_only(self) -> None:
+        activity = benchmark_page._new_activity(15, 1 / 60)
+        self.assertEqual(benchmark_page._bin_of(activity, 900, 0, 900), 14)
+        self.assertIsNone(benchmark_page._bin_of(activity, 901, 0, 900))
+        self.assertIsNone(benchmark_page._bin_of(activity, -1, 0, 900))
+
+    def test_checkpoint_boundaries_do_not_round_discoveries_into_another_column(self) -> None:
+        condition = {"key": "c", "name": "c", "backend": "codex", "token": "harness",
+                     "provisional": False, "budget_h": 0.25, "wall_h": 0.25,
+                     "find": {"times": [5 / 60, 10 / 60 + 0.01 / 3600], "approx": False},
+                     "crash": {"times": [], "approx": False}}
+        cp = benchmark_page._checkpoints([condition])
+        self.assertEqual(cp["rows"][0]["counts"], [1, 1, 2])
+        condition.update(budget_h=27 / 60, wall_h=27 / 60)
+        condition["find"]["times"].append(25 / 60)
+        cp = benchmark_page._checkpoints([condition])
+        self.assertEqual(cp["rows"][0]["counts"], [1, 1, 2, 2, 3, 3])
+
+    def test_activity_capacity_covers_long_runs(self) -> None:
+        width = benchmark_page._bin_hours(120, benchmark_page.MAX_BINS)
+        self.assertGreaterEqual(width * benchmark_page.MAX_BINS, 120)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_clock_axes_cover_the_data_without_an_extra_step(self) -> None:
+        script = benchmark_page._JS
+        helpers = script[script.index("function nice("):script.index("function binH(")]
+        spans = [0, 1 / 3600, 0.25, 0.2501, 0.5, 1, 1.251, 3.001, 120]
+        checked = subprocess.run(
+            ["node", "-e", helpers + "\nconsole.log(JSON.stringify(" + json.dumps(spans)
+             + ".map(x=>{let a=clock(x,5);return {top:a.top,step:a.step}})));"],
+            capture_output=True, text=True, check=True)
+        for span, axis in zip(spans, json.loads(checked.stdout)):
+            with self.subTest(span=span):
+                self.assertGreater(axis["top"], 0)
+                self.assertAlmostEqual(axis["top"], max(span, 1 / 60))
+                self.assertGreater(axis["step"], 0)
+
+    def test_activity_bins_scale_with_the_grant(self) -> None:
+        # a smoke run gets a strip of columns, not one quarter-hour block
+        self.assertEqual(benchmark_page._bin_hours(0.25) * 60, 1)
+        self.assertEqual(benchmark_page._bin_hours(0.5) * 60, 2)
+        self.assertEqual(benchmark_page._bin_hours(3.0) * 60, 15)
+        self.assertEqual(benchmark_page._bin_hours(24.0) * 60, 120)
+
+    def test_a_long_pause_widens_the_bins_instead_of_dropping_work(self) -> None:
+        # a fifteen-minute grant parked two hours on a provider reset: every
+        # minute of the wall, the work after the pause included, has a column
+        wall_h = 2.25
+        bin_h = max(benchmark_page._bin_hours(0.25),
+                    benchmark_page._bin_hours(wall_h, benchmark_page.MAX_BINS))
+        self.assertLessEqual(wall_h / bin_h, benchmark_page.MAX_BINS)
+
+    def test_times_read_in_minutes_then_hours(self) -> None:
+        self.assertEqual(
+            [benchmark_page._fmt_min(m) for m in (0.4, 2.5, 7, 59.4, 59.6, 75, 90, 180)],
+            ["0m", "3m", "7m", "59m", "1h", "1.3h", "1.5h", "3h"])
 
     def test_raw_cell_counts_are_every_candidate(self) -> None:
         # the gate's candidate count includes a crash still pending, which the

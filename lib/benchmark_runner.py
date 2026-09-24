@@ -759,11 +759,7 @@ def _verify_model_direct_crash(
     return "reproduced"
 
 
-def target_key(raw: str) -> str:
-    if raw and all(ch.isalnum() or ch in "._-" for ch in raw):
-        return raw
-    safe = "-".join(filter(None, __import__("re").split(r"[^a-z0-9._-]+", raw.lower()))).strip("-")
-    return f"{safe or 'target'}-{hashlib.sha1(raw.encode()).hexdigest()[:8]}"
+target_key = metrics.target_key
 
 
 def _positive(value: str) -> int:

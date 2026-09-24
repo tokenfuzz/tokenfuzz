@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -6860,6 +6861,41 @@ def _report_validation_state(report: dict) -> str:
     )
 
 
+def target_key(raw: str) -> str:
+    """A run id or target as a file-name component; the run lock is named by it."""
+    if raw and all(ch.isalnum() or ch in "._-" for ch in raw):
+        return raw
+    safe = "-".join(filter(None, re.split(r"[^a-z0-9._-]+", raw.lower()))).strip("-")
+    return f"{safe or 'target'}-{hashlib.sha1(raw.encode()).hexdigest()[:8]}"
+
+
+def _run_is_live(run_dir: Path) -> bool:
+    """Whether a bin/benchmark process still owns *run_dir*.
+
+    The runner holds `.run-<id>.lock` beside the run for its whole life, with
+    its pid inside, and removes it on exit. A run with no report and no live
+    owner was killed partway: calling it "still going" would never correct
+    itself.
+    """
+    lock = run_dir.parent / f".run-{target_key(run_dir.name)}.lock"
+    try:
+        os.kill(int(lock.read_text(encoding="utf-8").split()[0]), 0)
+    except PermissionError:
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+    return True
+
+
+def _cell_status(provisional_reason: str, status: object) -> str:
+    """A provisional cell's status as the ledger and the page print it."""
+    if provisional_reason == "pre-receipt":
+        return "regenerate"
+    if provisional_reason == "interrupted" and status == "running":
+        return "interrupted"
+    return str(status or "unknown")
+
+
 def _reports_by_run_target(bench_root: Path) -> list[dict]:
     """Every final or provisional report under a backend benchmark root.
 
@@ -6896,7 +6932,8 @@ def _reports_by_run_target(bench_root: Path) -> list[dict]:
             else:
                 report = aggregate(run_dir, include_pool=False)
                 report["provisional"] = True
-                report["provisional_reason"] = "in-progress"
+                report["provisional_reason"] = (
+                    "in-progress" if _run_is_live(run_dir) else "interrupted")
         except (OSError, ValueError):
             continue
         # report.json records the absolute bench_dir it was aggregated in.
@@ -7050,11 +7087,19 @@ def crosstab(bench_root: Path) -> str:
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}._"
     )
     lines.append("")
-    if any(row["provisional"] for row in rows):
+    if any(row["provisional_reason"] == "in-progress" for row in rows):
         lines.append(
             "**Some runs are still going.** Their rows show only what finished "
             "work has already written to disk. Duplicate-merged totals, "
             "severity, and the comparison itself arrive when the run ends."
+        )
+        lines.append("")
+    if any(row["provisional_reason"] == "interrupted" for row in rows):
+        lines.append(
+            "**Some runs stopped before finishing.** No `bin/benchmark` process "
+            "owns them any more, so their rows show only what was written "
+            "before they stopped. Re-run with the same `--run-id` to resume "
+            "them."
         )
         lines.append("")
     if not rows:
@@ -7282,10 +7327,9 @@ def crosstab(bench_root: Path) -> str:
                                 cell.get("condition") == "model-direct"
                                 and bool(run.get("model_direct_hold")),
                             ),
-                            status=(
-                                "regenerate"
-                                if row["provisional_reason"] == "pre-receipt"
-                                else cell.get("status", "unknown")
+                            status=_cell_status(
+                                row["provisional_reason"],
+                                cell.get("status", "unknown"),
                             ),
                             findings=(
                                 int(metrics.get("findings", 0) or 0)
@@ -7510,8 +7554,12 @@ def crosstab(bench_root: Path) -> str:
         "ledger keeps the cents."
     )
     lines.append(
-        "- **`~` prefix** — the backend did not report usage, so the row is a "
-        "character-count estimate. Rows without the prefix are measured."
+        "- **`~` prefix** — usage or pricing is approximate: a session stopped "
+        "at the wall is summed from the per-request usage it streamed, whose "
+        "output is a floor; a backend that reports no usage is estimated from "
+        "character counts; or a request-size pricing tier was reconstructed "
+        "from invocation totals. Rows without the prefix use measured usage "
+        "and the recorded or configured rates."
     )
     lines.append("")
     return "\n".join(lines)

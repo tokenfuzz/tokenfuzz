@@ -43,7 +43,11 @@ import severity_receipt
 import stack_frames
 import strategies
 
-BIN_HOURS = 0.25
+# Activity column widths: the narrowest that fits the budget in BIN_TARGET
+# columns, so a fifteen-minute smoke run and a three-hour cell both read as a
+# strip rather than one or two blocks.
+BIN_MINUTES = (1, 2, 5, 10, 15, 30, 60)
+BIN_TARGET = 16
 MAX_BINS = 96
 
 # What each strategy lane means, for the activity legend and the lane table.
@@ -356,9 +360,15 @@ def _rejected_clusters(run_dir: Path, bench_dir: Path | None) -> dict[str, list[
 
 # ── activity: what the agents were doing, on the run's clock ─────────────────
 
-def _new_activity(bins: int) -> dict:
+def _bin_hours(span_h: float, columns: int = BIN_TARGET) -> float:
+    minutes = next((m for m in BIN_MINUTES if span_h * 60 <= m * columns),
+                   max(60, math.ceil(span_h / columns) * 60))
+    return minutes / 60
+
+
+def _new_activity(bins: int, bin_h: float) -> dict:
     return {
-        "bin_h": BIN_HOURS,
+        "bin_h": bin_h,
         "bins": bins,
         "hyp": {},
         "probe": {verdict: [0] * bins for verdict in PROBE_VERDICTS},
@@ -377,10 +387,12 @@ def _bin_of(activity: dict, when: float | None, origin: float,
             limit: float | None = None) -> int | None:
     if when is None or (limit is not None and when > limit):
         return None
-    index = int((when - origin) / 3600.0 / activity["bin_h"])
-    if index < 0 or index >= activity["bins"]:
+    elapsed = when - origin
+    width = activity["bin_h"] * 3600.0
+    if elapsed < 0 or elapsed > activity["bins"] * width:
         return None
-    return index
+    # The final bin includes the wall endpoint; later review stays excluded.
+    return min(activity["bins"] - 1, int(elapsed / width))
 
 
 def _usage_index(results: Path) -> Path | None:
@@ -468,23 +480,31 @@ def _mark(activity: dict, source: str) -> None:
         activity["sources"].append(source)
 
 
-def _condition_activity(bench_dir: Path | None, condition: str, wall_h: float) -> dict | None:
+def _condition_activity(bench_dir: Path | None, condition: str, wall_h: float,
+                        budget_h: float | None) -> dict | None:
     if bench_dir is None:
         return None
     cells = []
     for cell_dir in sorted((bench_dir / "cells").glob("*")):
         meta = _read_json(cell_dir / "cell.json", None)
-        if isinstance(meta, dict) and meta.get("condition") == condition:
+        if isinstance(meta, dict):
             cells.append((cell_dir, meta))
-    # the axis spans the longest repeat, not the median: a repeat that ran
-    # past the median keeps its tail instead of losing it off the last bin
-    span = max([wall_h] + [
+    # Both conditions use the longest elapsed wall across the run, including
+    # provider pauses, so equal positions on their strips mean equal times.
+    span = max([wall_h, budget_h or 0.0] + [
         (_float(meta.get("wall_seconds")) or 0.0) / 3600.0 for _, meta in cells
     ])
-    bins = max(1, min(MAX_BINS, math.ceil(max(span, BIN_HOURS) / BIN_HOURS)))
-    activity = _new_activity(bins)
+    # Width from the grant, which both conditions of a run share, so a control
+    # that stopped early is binned like its harness row.
+    # A wall includes provider pauses, so a short grant can span hours: widen
+    # the bins until the whole wall fits under MAX_BINS rather than drop the
+    # work after the pause.
+    bin_h = max(_bin_hours(budget_h or span), _bin_hours(span, MAX_BINS))
+    bins = max(1, min(MAX_BINS, math.ceil(span / bin_h)))
+    activity = _new_activity(bins, bin_h)
     for cell_dir, meta in cells:
-        _add_cell_activity(activity, cell_dir, meta)
+        if meta.get("condition") == condition:
+            _add_cell_activity(activity, cell_dir, meta)
     if not activity["sources"]:
         return None
     # trailing bins with nothing in them are still audit time: keep them
@@ -504,6 +524,10 @@ _OUTCOME = {
     "ENV-BLOCKED": "blocked", "BLOCKED": "blocked",
 }
 OUTCOMES = ("hit", "confirmed", "refuted", "discarded", "blocked", "open")
+# The trace legend's words, so its summary line counts what the legend names.
+_OUTCOME_LABEL = {"hit": "became an artifact", "confirmed": "confirmed, not filed",
+                  "refuted": "refuted", "discarded": "discarded", "blocked": "blocked",
+                  "open": "open"}
 _TEXT_CAP = {"hypothesis": 480, "guard_gap": 280, "input_shape": 200, "note": 320}
 
 
@@ -911,7 +935,7 @@ def _target_groups(runs: list[dict]) -> list[dict]:
                     "token": cond["token"],
                     "name": _condition_name(run, cond),
                     "label": cond["label"],
-                    "provisional": run["provisional"],
+                    "provisional": cond["provisional"],
                     "outdated_scorers": run["outdated_scorers"],
                     "traced": bool(cond.get("traces")),
                     "wall_h": cond["wall_h"],
@@ -1020,14 +1044,16 @@ def _yield_split(conditions: list[dict], problems: list[dict]) -> None:
 
 
 def _checkpoint_step(latest: float) -> float:
-    """Column width in hours: whole hours on a long run, quarter hours on a
-    short one, so a thirty-minute budget gets checkpoints inside it rather
-    than a single column at 1h."""
+    """Column width in hours: whole hours on a long run, down to five minutes
+    on a smoke run, so a short budget gets checkpoints inside it rather than
+    a single column at its end."""
     if latest >= 3:
         return 1.0
     if latest >= 1.5:
         return 0.5
-    return 0.25
+    if latest >= 0.5:
+        return 0.25
+    return 1 / 12
 
 
 def _checkpoints(conditions: list[dict]) -> dict:
@@ -1042,8 +1068,10 @@ def _checkpoints(conditions: list[dict]) -> dict:
                  + [c["wall_h"] or 0 for c in conditions]
                  + [t for c in conditions for t in c["find"]["times"] + c["crash"]["times"]]
                  + [0])
-    step = _checkpoint_step(latest)
-    hours = [round(step * i, 4) for i in range(1, int(math.ceil(latest / step - 1e-9)) + 1)] \
+    # Build boundaries in whole seconds before converting to hours: multiplying
+    # 1/12 hours can put the 25-minute boundary just before a 25-minute event.
+    step = round(_checkpoint_step(latest) * 3600)
+    hours = [step * i / 3600 for i in range(1, math.ceil(latest * 3600 / step - 1e-9) + 1)] \
         if latest > 0 else []
     rows = []
     for cond in conditions:
@@ -1330,8 +1358,7 @@ def _cells(condition: dict, bench_dir: Path | None, provisional_reason: str) -> 
         name = str(cell.get("cell") or "?")
         rows.append({
             "name": name,
-            "status": "regenerate" if provisional_reason == "pre-receipt" else str(
-                cell.get("status") or "unknown"),
+            "status": benchmark._cell_status(provisional_reason, cell.get("status")),
             "quality": str(cell.get("run_quality") or ""),
             "wall_h": _hours(cell.get("wall_effective_seconds")),
             "paused_h": _hours(cell.get("paused_seconds")),
@@ -1355,6 +1382,11 @@ def _condition(condition: dict, run: dict, bench_dir: Path | None,
     wall_h = _hours(condition.get("wall_median"))
     budget_h = _hours(condition.get("wall_budget_seconds"))
     timing = series.get(cond)
+    replicates = _replicates(condition)
+    # No repeat finished (each hit a provider limit and is excluded, the
+    # ledger's `(Np)`): its zeros were never measured, so it is pending a
+    # re-run like a live run, not a result that found nothing.
+    provisional = provisional or (replicates["total"] > 0 and not replicates["done"])
     return {
         "token": cond,
         "label": benchmark._condition_label(
@@ -1364,7 +1396,7 @@ def _condition(condition: dict, run: dict, bench_dir: Path | None,
         "wall_h": wall_h,
         "budget_h": budget_h,
         "wall_label": benchmark._wall_cell(condition),
-        "replicates": _replicates(condition),
+        "replicates": replicates,
         "find": _count_block(condition, "find", bench_dir, cond, provisional,
                              timing.get("find") if timing else None),
         "crash": _count_block(condition, "crash", bench_dir, cond, provisional,
@@ -1374,7 +1406,7 @@ def _condition(condition: dict, run: dict, bench_dir: Path | None,
         "tokens": _tokens(condition),
         "efficiency": _efficiency(condition),
         "lanes": _lanes(condition),
-        "activity": _condition_activity(bench_dir, cond, wall_h or budget_h or 0.0),
+        "activity": _condition_activity(bench_dir, cond, wall_h or budget_h or 0.0, budget_h),
         "traces": _traces(bench_dir, cond, _target_root(run)) if cond == "harness" else [],
         "cells": _cells(condition, bench_dir, provisional_reason),
         "unjudged_published": [
@@ -1481,11 +1513,17 @@ def _fmt_h(value: float | None) -> str:
 
 
 def _fmt_min(value: float | None) -> str:
+    """A span in minutes as the page writes every time: `7m`, `1.5h`, `3h`.
+
+    The page's JavaScript `dur` is the same rule, so a tooltip and the table
+    beside it never name one moment two ways."""
     if value is None:
         return "—"
-    if value >= 120:
-        return f"{value / 60:.1f}h"
-    return f"{value:.0f}m"
+    # half up, as JavaScript's Math.round does, not format()'s half-even
+    minutes = math.floor(value + 0.5)
+    if minutes >= 60:
+        return f"{math.floor(value / 6 + 0.5) / 10:g}h"
+    return f"{minutes}m"
 
 
 def _fmt_pct(value: float | None) -> str:
@@ -1839,7 +1877,7 @@ def _checkpoint_table(group: dict) -> str:
     cp = group["checkpoints"]
     if not cp["hours"] or not cp["rows"]:
         return ""
-    head = "".join(f'<th class="num">{h:g}h</th>' for h in cp["hours"])
+    head = "".join(f'<th class="num">{_fmt_min(h * 60)}</th>' for h in cp["hours"])
     body = []
     for row in cp["rows"]:
         cells = "".join(f'<td class="num">{n}</td>' for n in row["counts"])
@@ -1923,7 +1961,7 @@ def _replay_bar(run: dict) -> str:
         '<button type="button" class="play">▶ Replay the run</button>'
         f'<input type="range" min="0" max="{ticks}" value="{ticks}" step="1" '
         'aria-label="hours into the run">'
-        f'<span class="rt">{wall:.2f}h</span><span class="rn">whole run</span></div>')
+        f'<span class="rt">{_fmt_min(wall * 60)}</span><span class="rn">whole run</span></div>')
 
 
 def _trace_panel(run: dict) -> str:
@@ -1949,7 +1987,10 @@ def _trace_panel(run: dict) -> str:
         bits = [f'{total} hypotheses']
         for outcome in OUTCOMES:
             if summary[outcome]:
-                bits.append(f'{summary[outcome]} {outcome}')
+                label = _OUTCOME_LABEL[outcome]
+                if summary[outcome] != 1:
+                    label = label.replace("an artifact", "artifacts")
+                bits.append(f'{summary[outcome]} {label}')
         if trace["median_minutes"] is not None:
             bits.append(f'median {trace["median_minutes"]:g} min from opened to resolved')
         parts.append(
@@ -2054,7 +2095,7 @@ def _convergence(group: dict) -> str:
             looked = problem["looked"].get(cond["key"])
             if found:
                 sev = found["severity"].lower() if found["severity"] in _SEVERITY_RANK else "none"
-                when = "" if found["t"] is None else f'{found["t"]:.1f}h'
+                when = "" if found["t"] is None else _fmt_min(found["t"] * 60)
                 cells.append(
                     f'<td class="cv found"><span class="dot dot-{problem["kind"]} sev-{sev} demo"></span> '
                     f'{when}</td>')
@@ -2103,7 +2144,7 @@ def _target_section(group: dict) -> str:
         f'<div class="replay treplay" data-target="{_e(group["key"])}" data-wall="{wall:.3f}">'
         '<button type="button" class="play">▶ Replay every run</button>'
         f'<input type="range" min="0" max="{ticks}" value="{ticks}" step="1" aria-label="hours into the runs">'
-        f'<span class="rt">{wall:.2f}h</span><span class="rn">whole runs</span></div>'
+        f'<span class="rt">{_fmt_min(wall * 60)}</span><span class="rn">whole runs</span></div>'
         if ticks > 0 else "")
     heat = _attention_heatmap(group)
     lanes = _lane_mix_panel(group)
@@ -2111,7 +2152,7 @@ def _target_section(group: dict) -> str:
         f'<section class="target" id="target-{_e(_slug(group["key"]))}" data-target="{_e(group["key"])}">'
         f'<div class="rh"><h2>{_e(group["target"])} <span class="sha">{_e(group["target_sha"][:7])}</span>'
         f' <span class="mono dim">{group["runs"]} run{"s" if group["runs"] != 1 else ""} · '
-        f'{len(group["conditions"])} conditions</span></h2></div>'
+        f'{len(group["conditions"])} condition{"s" if len(group["conditions"]) != 1 else ""}</span></h2></div>'
         '<div class="panel"><div class="pt">The race</div>'
         '<p class="pd">Every condition on one clock: colour is the backend, solid is tokenfuzz, '
         'dashed is the model on its own, each step one distinct problem that held up. Drag the '
@@ -2257,10 +2298,14 @@ def _run_section(run: dict) -> str:
         f' <span class="mono dim">{_e(run["run_id"])}</span></h2><div class="ident">{identity}</div></div>',
     ]
     if run["provisional"]:
-        why = ("finished before publication receipts existed; run bin/benchmark --regenerate "
-               "to re-derive its counts" if run["provisional_reason"] == "pre-receipt"
-               else "still running — the counts below are raw per-cell tallies, not the "
-                    "reviewed, duplicate-merged result")
+        why = {
+            "pre-receipt": "finished before publication receipts existed; run "
+                           "bin/benchmark --regenerate to re-derive its counts",
+            "interrupted": "stopped before finishing, and no bin/benchmark process owns it — "
+                           "re-run with the same --run-id to resume; the counts below are "
+                           "raw per-cell tallies",
+        }.get(run["provisional_reason"], "still running — the counts below are raw per-cell "
+                                         "tallies, not the reviewed, duplicate-merged result")
         parts.append(f'<p class="banner">Provisional: {why}.</p>')
     unjudged = [(cond, a) for cond in run["conditions"] for a in cond["unjudged_published"]]
     if unjudged:
@@ -2290,9 +2335,10 @@ def _run_section(run: dict) -> str:
         parts.append(_ground_truth_panel(run))
     parts.append(_trace_panel(run))
     if any(cond["activity"] for cond in run["conditions"]):
+        bin_min = round(max(c["activity"]["bin_h"] for c in run["conditions"] if c["activity"]) * 60)
         parts.append(
             '<div class="panel"><div class="pt">How the run thought</div>'
-            '<p class="pd">What the agents were doing, in quarter-hour bins on the run\'s clock: '
+            f'<p class="pd">What the agents were doing, in {bin_min}-minute bins on the run\'s clock: '
             'hypotheses by strategy lane, probes by verdict, artifacts filed, and output tokens. '
             'The control writes no hypotheses or probes, so its strip shows only what it filed '
             'and generated.</p>'
@@ -2360,7 +2406,7 @@ _GUIDE = """
 <h3>Effort</h3>
 <p><b>Wall</b> is <code>spent/granted</code> hours, the median across finished repeats; time parked on a provider reset counts as neither. The harness usually spends the whole grant; the control stops when the model decides it is done, so a short numerator beside a count means that count came from a shorter experiment. <b>Replicates</b> is <code>done/total</code>; <code>(Np)</code> repeats never came back and are excluded, <code>(Nt)</code> repeats stopped early on a terminal backend exit but are counted. The wall contains every second the harness spent deciding what to look at next — housekeeping between iterations is steering, not overhead — and only provider-withheld capacity is subtracted.</p>
 <h3>Tokens and cost</h3>
-<p>Token columns are normalised so backends can be compared and cover the audit wall only: <b>Input</b> is tokens charged at the full input rate (Claude's fresh input plus cache writes; running totals from Codex and Gemini have cache reads subtracted back out). <b>Output</b> includes tool-call payloads where reported. Review of the frozen artifact set after the wall is recorded per cell as <code>finalization_tokens</code> and left out of every token and cost figure, so a condition that filed more reports is not charged for having them judged. <b>Cost</b> prices each backend's own billing buckets at its published list rates and rounds to whole dollars; a <code>~</code> prefix marks an estimated price, for either of two reasons: the backend reported no usage and tokens were estimated from character counts, or the rate card is tiered by request size and the tier was reconstructed from the CLI's per-invocation totals rather than read from an invoice. Each backend's own ledger keeps the cents.</p>
+<p>Token columns are normalised so backends can be compared and cover the audit wall only: <b>Input</b> is tokens charged at the full input rate (Claude's fresh input plus cache writes; running totals from Codex and Gemini have cache reads subtracted back out). <b>Output</b> includes tool-call payloads where reported. Review of the frozen artifact set after the wall is recorded per cell as <code>finalization_tokens</code> and left out of every token and cost figure, so a condition that filed more reports is not charged for having them judged. <b>Cost</b> prices each backend's own billing buckets at its published list rates and rounds to whole dollars; a <code>~</code> prefix marks an estimated price, for one of three reasons: a session stopped at the wall never sent its final tally, so its usage is summed from the per-request counts it streamed and its output is a floor; the backend reported no usage and tokens were estimated from character counts; or the rate card is tiered by request size and the tier was reconstructed from the CLI's per-invocation totals rather than read from an invoice. Each backend's own ledger keeps the cents.</p>
 <h3>Unique, shared, and coverage</h3>
 <p>A problem is <b>unique</b> to a condition when no other condition on the same target revision reached it — the model's own control included, because a problem the plain prompt also found is not the harness's contribution. <b>Coverage</b> is a condition's share of every distinct problem any run has reported on the revision: the union of all runs is the closest thing to an answer key a live target has, and it grows as more models run, so coverage is comparable within a revision and only there.</p>
 <h3>What makes this comparable</h3>
@@ -2375,7 +2421,8 @@ _GUIDE = """
 
 def render(data: dict) -> str:
     runs = data.get("runs") or []
-    provisional = [r for r in runs if r["provisional"]]
+    going = any(r["provisional_reason"] == "in-progress" for r in runs)
+    stopped = any(r["provisional_reason"] == "interrupted" for r in runs)
     backends = sorted({r["backend"] for r in runs})
     targets = sorted({(r["target"], r["target_sha"]) for r in runs})
     payload = json.dumps(_payload(data), separators=(",", ":")).replace("<", "\\u003c")
@@ -2398,7 +2445,10 @@ def render(data: dict) -> str:
         f'scorer <span class="mono">{_e(data["scorer"])}</span> · <a href="#guide">how to read this page</a></p>'
         + ('<p class="banner">Some runs are still going. Their rows show only what finished work '
            'has already written to disk; duplicate-merged totals, severity, and the comparison '
-           'itself arrive when the run ends.</p>' if provisional else "")
+           'itself arrive when the run ends.</p>' if going else "")
+        + ('<p class="banner">Some runs stopped before finishing: no <code>bin/benchmark</code> '
+           'process owns them, so their rows show only what was written before they stopped. '
+           'Re-run with the same <code>--run-id</code> to resume them.</p>' if stopped else "")
         + "</header>"
     )
     if not runs:
@@ -2465,6 +2515,7 @@ def _payload(data: dict) -> dict:
                 "first_filed_min": cond["efficiency"]["first_filed_min"],
                 "first_crash_min": cond["efficiency"]["first_crash_min"],
                 "first_admitted_min": cond["efficiency"]["first_admitted_min"],
+                "provisional": cond["provisional"],
             })
         runs.append({
             "key": run["key"],
@@ -2734,9 +2785,14 @@ if(table){var ths=[].slice.call(table.querySelectorAll("th[data-sort]"));ths.for
 // ── helpers ────────────────────────────────────────────────────────────────
 function nice(vmax,n,integer){if(!(vmax>0))vmax=1;var s=vmax/(n||4),p=Math.pow(10,Math.floor(Math.log10(s))),q=s/p;
  var st=(q<=1?1:q<=2?2:q<=2.5?2.5:q<=5?5:10)*p;if(integer)st=Math.max(1,Math.round(st));return{step:st,top:Math.ceil(vmax/st-1e-9)*st}}
-function hrs(x){return (Math.round((+x||0)*100)/100)+"h"}
-function fmtH(q){return (q%1?q.toFixed(1):q)+"h"}
-function binH(i,bw){return (i*bw).toFixed(2)+"–"+((i+1)*bw).toFixed(2)+"h"}
+// the page's one time format, the rule _fmt_min writes server-side: 7m, 1.5h, 3h
+function dur(x){var m=(+x||0)*60;return Math.round(m)>=60?(Math.round(m/6)/10)+"h":Math.round(m)+"m"}
+// Choose readable ticks independently of the extent: retain every event without
+// padding an overrun to another whole step. Empty/sub-minute plots span a minute.
+function clock(maxH,n){var top=Math.max(maxH,1/60);
+ if(top>1){return{step:nice(top,n).step,top:top,fmt:function(q){return +q.toFixed(2)+"h"}}}
+ return{step:nice(top*60,n,true).step/60,top:top,fmt:function(q){return Math.round(q*60)+"m"}}}
+function binH(i,bw){return dur(i*bw)+"–"+dur((i+1)*bw)}
 function noun(kind,n){return kind==="crash"?(n===1?"crash":"crashes"):(n===1?"finding":"findings")}
 function steps(times){var p=[[0,0]];times.forEach(function(t,i){p.push([t,i]);p.push([t,i+1])});return p}
 function runOf(key){for(var i=0;i<D.runs.length;i++)if(D.runs[i].key===key)return D.runs[i];return null}
@@ -2749,23 +2805,24 @@ function axes(s,X,Y,ys,xs,ml,mt,pw,ph,ylabel){
   s.appendChild(el("text",{x:ml-8,y:Y(q)+4,"text-anchor":"end","font-size":10.5,fill:v("--muted")},[tx(q)]))}
  s.appendChild(el("text",{x:4,y:mt-6,"font-size":10,"font-weight":700,fill:v("--muted")},[tx(ylabel)]));
  for(var xv=0;xv<=xs.top+1e-9;xv+=xs.step){var r=Math.round(xv*1e6)/1e6;
-  s.appendChild(el("text",{x:X(r),y:mt+ph+16,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(fmtH(r))]))}
- s.appendChild(el("text",{x:ml,y:mt+ph+30,"font-size":10,"font-weight":700,fill:v("--muted")},[tx("hours since the cell started →")]))}
+  s.appendChild(el("text",{x:X(r),y:mt+ph+16,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(xs.fmt(r))]))}
+ s.appendChild(el("text",{x:ml,y:mt+ph+30,"font-size":10,"font-weight":700,fill:v("--muted")},[tx("time since the cell started →")]))}
 // ── time to discovery ──────────────────────────────────────────────────────
 function drawTTD(host){var run=runOf(host.dataset.run);if(!run)return;var kind=host.dataset.kind||"find",showRej=host.dataset.rejected!=="0",cut=cutOf(host);
  host.replaceChildren();
  var seg=h("div","seg");[["find","Findings"],["crash","Crashes"]].forEach(function(k){var b=h("button",null,k[1]);b.setAttribute("aria-pressed",k[0]===kind?"true":"false");
   b.addEventListener("click",function(){host.dataset.kind=k[0];drawTTD(host)});seg.appendChild(b)});host.appendChild(seg);
- var legend=h("div","legend");run.conditions.forEach(function(c){var k=h("span","k");var i=h("i");i.style.borderTopColor=hue(run.backend);if(c.token!=="harness")i.className="dash";
+ var conds=run.conditions.filter(function(c){return !c.provisional});
+ var legend=h("div","legend");conds.forEach(function(c){var k=h("span","k");var i=h("i");i.style.borderTopColor=hue(run.backend);if(c.token!=="harness")i.className="dash";
   k.appendChild(i);k.appendChild(tx(c.label+" — "+c[kind].unique+" "+noun(kind,c[kind].unique)+" kept"+(c[kind].rejected!=null?", "+(c[kind].rejected_upper?"up to ":"")+c[kind].rejected+" rejected":"")));legend.appendChild(k)});
  host.appendChild(legend);
- var W=900,ml=46,mr=70,pw=W-ml-mr,mt=16,ph=220,H=mt+ph+50,maxY=1,maxX=.5,approx=false;
- run.conditions.forEach(function(c){var m=c[kind];maxY=Math.max(maxY,m.unique);maxX=Math.max(maxX,c.wall_h||0,c.budget_h||0);
+ var W=900,ml=46,mr=70,pw=W-ml-mr,mt=16,ph=220,H=mt+ph+50,maxY=1,maxX=0,approx=false;
+ conds.forEach(function(c){var m=c[kind];maxY=Math.max(maxY,m.unique);maxX=Math.max(maxX,c.wall_h||0,c.budget_h||0);
   m.times.forEach(function(t){maxX=Math.max(maxX,t)});if(m.approx)approx=true});
- var ys=nice(maxY*1.12,4,true),xs=nice(maxX*1.02,5),X=function(x){return ml+(x/xs.top)*pw},Y=function(y){return mt+ph-(y/ys.top)*ph};
+ var ys=nice(maxY*1.12,4,true),xs=clock(maxX,5),X=function(x){return ml+(x/xs.top)*pw},Y=function(y){return mt+ph-(y/ys.top)*ph};
  var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"cumulative "+noun(kind,2)+" over time"});
  axes(s,X,Y,ys,xs,ml,mt,pw,ph,"distinct "+noun(kind,2));
- run.conditions.forEach(function(c){var m=c[kind],col=hue(run.backend),direct=c.token!=="harness",name=c.label;
+ conds.forEach(function(c){var m=c[kind],col=hue(run.backend),direct=c.token!=="harness",name=c.label;
   if(c.budget_h){s.appendChild(el("line",{x1:X(c.budget_h),x2:X(c.budget_h),y1:mt,y2:mt+ph,stroke:v("--axis"),"stroke-width":1,"stroke-dasharray":"2 4"}))}
   if(showRej)m.rejected_times.forEach(function(t){s.appendChild(el("line",{x1:X(t),x2:X(t),y1:mt+ph+2,y2:mt+ph+8,stroke:direct?v("--direct"):col,"stroke-width":direct?1.5:2,opacity:.8}))});
   // a side that kept nothing still ran: its end mark sits on the axis at the hour it stopped
@@ -2777,13 +2834,13 @@ function drawTTD(host){var run=runOf(host.dataset.run);if(!run)return;var kind=h
   m.times.forEach(function(t,i){var px=X(t),py=Y(i+1);
    var dot=el("circle",{cx:px,cy:py,r:direct?3.2:3.8,fill:direct?v("--surf"):col,stroke:direct?col:v("--surf"),"stroke-width":2,opacity:t>cut?.15:null});
    var hit=el("circle",{cx:px,cy:py,r:10,fill:"transparent",style:"cursor:pointer"});s.appendChild(dot);s.appendChild(hit);
-   hover(hit,function(){return[{text:name+" · "+noun(kind,1)+" "+(i+1)+" of "+m.unique,b:true},{text:m.sites[i]||"",src:true},{text:"first seen "+hrs(t)+" into the run"},
+   hover(hit,function(){return[{text:name+" · "+noun(kind,1)+" "+(i+1)+" of "+m.unique,b:true},{text:m.sites[i]||"",src:true},{text:"first seen "+dur(t)+" into the run"},
     {text:"one distinct problem after duplicate merging; the same problem written up more than once counts once",dim:true}]})});
   var ex=X(end[0]),ey=Y(end[1]);
   var mark=direct?el("polygon",{points:[[ex-6,ey-6],[ex-6,ey+6],[ex+6,ey]].map(function(p){return p.join(",")}).join(" "),fill:v("--surf"),stroke:col,"stroke-width":2,"stroke-linejoin":"round"})
    :el("polygon",{points:[[ex,ey-5.5],[ex+5.5,ey],[ex,ey+5.5],[ex-5.5,ey]].map(function(p){return p.join(",")}).join(" "),fill:col,stroke:v("--surf"),"stroke-width":2});
   mark.style.cursor="pointer";s.appendChild(mark);
-  hover(mark,function(){var l=[{text:name+" · final: "+m.unique+" "+noun(kind,m.unique)+" kept",b:true},{text:(direct?"stopped at ":"audited for ")+hrs(c.wall_h)},
+  hover(mark,function(){var l=[{text:name+" · final: "+m.unique+" "+noun(kind,m.unique)+" kept",b:true},{text:(direct?"stopped at ":"audited for ")+dur(c.wall_h)},
    {text:direct?"the model alone, judged by the same rules as the harness row":"counted across this run's repeats with duplicates merged",dim:true}];
    if(m.approx)l.push({text:"discovery timing approximate",dim:true});return l});
   s.appendChild(el("text",{x:ex+10,y:ey+4,"font-size":11.5,"font-weight":700,fill:v("--ink")},[tx(m.unique)]))});
@@ -2835,8 +2892,8 @@ function drawActivity(host){var run=runOf(host.dataset.run);if(!run)return;host.
   // clock marks: first filed / first crash / first admitted, from the aggregate
   [["first_filed_min","first filed"],["first_crash_min","first crash confirmed"],["first_admitted_min","first admitted"]].forEach(function(m,j){var mins=c[m[0]];if(mins==null)return;var x=X(mins/60);if(x>ml+pw)return;
    s.appendChild(el("line",{x1:x,x2:x,y1:mt,y2:y-gap+6,stroke:v("--ink2"),"stroke-width":1,"stroke-dasharray":"3 3",opacity:.6}));
-   s.appendChild(el("text",{x:x+3,y:y-gap+16+(j%2)*10,"font-size":9,fill:v("--ink2")},[tx(m[1]+" "+fmtH(Math.round(mins/60*100)/100))]))});
-  for(var xv=0,xs=nice(wall,6);xv<=wall+1e-9;xv+=xs.step){var q=Math.round(xv*1e6)/1e6;s.appendChild(el("text",{x:X(q),y:H-6,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(fmtH(q))]))}
+   s.appendChild(el("text",{x:x+3,y:y-gap+16+(j%2)*10,"font-size":9,fill:v("--ink2")},[tx(m[1]+" "+dur(mins/60))]))});
+  for(var xv=0,xs=clock(wall,6);xv<=wall+1e-9;xv+=xs.step){var q=Math.round(xv*1e6)/1e6;s.appendChild(el("text",{x:X(q),y:H-6,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(xs.fmt(q))]))}
   if(cut<Infinity&&cut<wall){var cx=X(cut);s.appendChild(el("rect",{x:cx,y:mt,width:ml+pw-cx,height:y-gap-mt+6,fill:v("--bg"),opacity:.7}));playhead(s,cx,mt,y-gap+6)}
   host.appendChild(s)})}
 function PROBEsum(A){var t=0;for(var k in A.probe)A.probe[k].forEach(function(x){t+=x});return t}
@@ -2849,9 +2906,11 @@ function drawRace(host){var G=groupOf(host.dataset.target);if(!G)return;var kind
   b.addEventListener("click",function(){host.dataset.kind=k[0];drawRace(host)});seg.appendChild(b)});host.appendChild(seg);
  var conds=G.conditions.filter(function(c){return !c.provisional});
  var legend=h("div","legend");conds.forEach(function(c){var k=h("span","k"),i=h("i");i.style.borderTopColor=hue(c.backend);if(c.token!=="harness")i.className="dash";k.appendChild(i);k.appendChild(tx(c.name+" — "+c[kind].unique));legend.appendChild(k)});host.appendChild(legend);
- var W=900,ml=46,mr=150,pw=W-ml-mr,mt=16,ph=240,H=mt+ph+50,maxY=1,maxX=.5;
- conds.forEach(function(c){maxY=Math.max(maxY,c[kind].unique);maxX=Math.max(maxX,c.wall_h||0,c.budget_h||0);c[kind].times.forEach(function(t){maxX=Math.max(maxX,t)})});
- var ys=nice(maxY*1.12,4,true),xs=nice(maxX*1.02,5),X=function(x){return ml+(x/xs.top)*pw},Y=function(y){return mt+ph-(y/ys.top)*ph};
+ var W=900,ml=46,mr=150,pw=W-ml-mr,mt=16,ph=240,H=mt+ph+50,maxY=1,maxX=0;
+ // every grant sets the clock, a run still going included, so the axis never collapses
+ G.conditions.forEach(function(c){maxX=Math.max(maxX,c.budget_h||0)});
+ conds.forEach(function(c){maxY=Math.max(maxY,c[kind].unique);maxX=Math.max(maxX,c.wall_h||0);c[kind].times.forEach(function(t){maxX=Math.max(maxX,t)})});
+ var ys=nice(maxY*1.12,4,true),xs=clock(maxX,5),X=function(x){return ml+(x/xs.top)*pw},Y=function(y){return mt+ph-(y/ys.top)*ph};
  var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"cumulative "+noun(kind,2)+" per condition"});
  axes(s,X,Y,ys,xs,ml,mt,pw,ph,"distinct "+noun(kind,2));
  var ends=[];
@@ -2861,7 +2920,7 @@ function drawRace(host){var G=groupOf(host.dataset.target);if(!G)return;var kind
   var path=el("path",{d:d,fill:"none",stroke:col,"stroke-width":direct?2:2.5,"stroke-dasharray":direct?"6 5":null,"stroke-linejoin":"round","stroke-linecap":"round"});
   s.appendChild(path);
   var hit=el("path",{d:d,fill:"none",stroke:"transparent","stroke-width":12});s.appendChild(hit);
-  hover(hit,function(){return[{text:c.name,b:true},{text:m.unique+" "+noun(kind,m.unique)+" kept over "+hrs(c.wall_h)},m.approx?{text:"discovery timing approximate",dim:true}:null]});
+  hover(hit,function(){return[{text:c.name,b:true},{text:m.unique+" "+noun(kind,m.unique)+" kept over "+dur(c.wall_h)},m.approx?{text:"discovery timing approximate",dim:true}:null]});
   ends.push({x:X(end[0]),y:Y(end[1]),label:c.name+" "+m.unique,col:col})});
  // end labels, nudged apart so two curves that finish together stay readable
  ends.sort(function(a,b){return a.y-b.y});for(var i=1;i<ends.length;i++)if(ends[i].y-ends[i-1].y<12)ends[i].y=ends[i-1].y+12;
@@ -2873,7 +2932,7 @@ function drawRace(host){var G=groupOf(host.dataset.target);if(!G)return;var kind
 document.querySelectorAll(".treplay").forEach(function(bar){var key=bar.dataset.target,range=bar.querySelector("input"),play=bar.querySelector(".play"),out=bar.querySelector(".rt"),note=bar.querySelector(".rn"),max=+range.max,timer=null,pending=false,G=groupOf(key);
  function kept(cut){return (G?G.conditions:[]).filter(function(c){return !c.provisional}).map(function(c){return c.name+" "+c.find.times.filter(function(t){return t<=cut}).length+" / "+c.crash.times.filter(function(t){return t<=cut}).length}).join(" · ")}
  function apply(){pending=false;var val=+range.value,cut=val>=max?"":String(val/100);
-  out.textContent=(val>=max?max/100:val/100).toFixed(2)+"h";note.textContent=val>=max?"whole runs":"findings / crashes so far: "+kept(val/100);
+  out.textContent=dur(val>=max?max/100:val/100);note.textContent=val>=max?"whole runs":"findings / crashes so far: "+kept(val/100);
   document.querySelectorAll('.race[data-target="'+key+'"]').forEach(function(r){r.dataset.cut=cut;drawRace(r)});
   document.querySelectorAll('.run[data-target="'+key+'"]').forEach(function(run){var rr=run.querySelector(".replay input");
    if(rr){rr.value=cut===""?rr.max:Math.min(+rr.max,Math.round(+cut*100));rr.dispatchEvent(new Event("input"))}else{run.dataset.cut=cut;redraw(run)}})}
@@ -2885,19 +2944,20 @@ document.querySelectorAll(".treplay").forEach(function(bar){var key=bar.dataset.
 function openPassport(G,P){dtitle.textContent=P.title||P.site||P.key;dbody.replaceChildren();
  dbody.appendChild(h("p","meta",(P.kind==="crash"?"sanitizer crash":"finding")+" · "+P.class+(P.severity?" · "+P.severity:"")+(P.site?" · "+P.site:"")));
  G.conditions.forEach(function(c){var f=P.found[c.key],l=P.looked[c.key];dbody.appendChild(h("h4",null,c.name));
-  if(f){var line=h("p",null,"found"+(f.t!=null?" "+hrs(f.t)+" into the run":"")+(f.lane?" · lane "+f.lane:"")+(f.severity?" · "+f.severity+" as this side filed it":""));
+  if(f){var line=h("p",null,"found"+(f.t!=null?" "+dur(f.t)+" into the run":"")+(f.lane?" · lane "+f.lane:"")+(f.severity?" · "+f.severity+" as this side filed it":""));
    if(f.href){var a=document.createElement("a");a.href=f.href;a.textContent=" open the report";line.appendChild(a)}dbody.appendChild(line)}
   else if(l){dbody.appendChild(h("p",null,"looked at this file: "+l.n+" hypothes"+(l.n===1?"is":"es")+(l.filed_nearby?", "+l.filed_nearby+" became artifacts at other sites in it":"")+", none matched this problem"));var ul=h("ul");
-   l.hyps.forEach(function(x){ul.appendChild(h("li",null,x.outcome+" · "+x.lane+" · "+hrs(x.t0)+" — "+x.text))});dbody.appendChild(ul)}
+   l.hyps.forEach(function(x){ul.appendChild(h("li",null,x.outcome+" · "+x.lane+" · "+dur(x.t0)+" — "+x.text))});dbody.appendChild(ul)}
   else if(c.traced)dbody.appendChild(h("p","dim","never opened a hypothesis on this file"));
-  else dbody.appendChild(h("p","dim",c.provisional?"still running":c.token==="harness"?"no trace on disk for this cell":"no trace — the control records only what it reports"))});
+  else dbody.appendChild(h("p","dim",c.provisional?"pending — no finished repeat to read yet":c.token==="harness"?"no trace on disk for this cell":"no trace — the control records only what it reports"))});
  drawer.hidden=false}
 document.querySelectorAll(".conv .prow").forEach(function(row){row.addEventListener("click",function(e){if(e.target.tagName==="A")return;var G=groupOf(row.dataset.target);if(G&&G.problems[+row.dataset.problem])openPassport(G,G.problems[+row.dataset.problem])})});
 // ── the mind trace: one row per agent, one bar per hypothesis ────────────────
 function traceOf(run,cell){var h=run.conditions.filter(function(c){return c.token==="harness"})[0];
  return ((h&&h.traces)||[]).filter(function(t){return t.cell===cell})[0]||null}
 function drawTrace(host){var run=runOf(host.dataset.run),T=run&&traceOf(run,host.dataset.cell);if(!T)return;host.replaceChildren();
- var cut=cutOf(host),wall=T.wall_h||Math.max.apply(null,T.hyps.map(function(x){return x.t1}).concat([1]));
+ var hc=run.conditions.filter(function(c){return c.token==="harness"})[0];
+ var cut=cutOf(host),wall=T.wall_h||Math.max.apply(null,T.hyps.map(function(x){return x.t1}).concat([(hc&&hc.budget_h)||1]));
  var col=hue(run.backend),OUT={hit:{fill:col},confirmed:{fill:v("--good")},refuted:{fill:v("--muted")},discarded:{fill:v("--none")},blocked:{fill:v("--med")},open:{fill:v("--surf"),stroke:v("--ink2")}};
  // pack each agent's hypotheses into sub-rows so overlapping ideas stay legible
  var subs={};T.agents.forEach(function(a){subs[a]=[]});
@@ -2907,9 +2967,9 @@ function drawTrace(host){var run=runOf(host.dataset.run),T=run&&traceOf(run,host
  Object.keys(subs).forEach(function(a){ys[a]=y;y+=Math.max(1,subs[a].length)*(rowH+gap)+agentGap});
  var H=y+18,X=function(x){return ml+(x/wall)*pw};
  var s=el("svg",{viewBox:"0 0 "+W+" "+H,role:"img","aria-label":"hypotheses over time"});
- for(var xv=0,xs=nice(wall,6);xv<=wall+1e-9;xv+=xs.step){var q=Math.round(xv*1e6)/1e6;
+ for(var xv=0,xs=clock(wall,6);xv<=wall+1e-9;xv+=xs.step){var q=Math.round(xv*1e6)/1e6;
   s.appendChild(el("line",{x1:X(q),x2:X(q),y1:mt-4,y2:y-agentGap+4,stroke:v("--grid")}));
-  s.appendChild(el("text",{x:X(q),y:H-3,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(fmtH(q))]))}
+  s.appendChild(el("text",{x:X(q),y:H-3,"text-anchor":"middle","font-size":10.5,fill:v("--muted")},[tx(xs.fmt(q))]))}
  Object.keys(subs).forEach(function(a){s.appendChild(el("text",{x:ml-8,y:ys[a]+10,"text-anchor":"end","font-size":10.5,"font-weight":700,fill:v("--ink2")},[tx("agent "+a)]))});
  T.hyps.forEach(function(hp){if(hp.t0>cut)return;var y0=ys[hp.agent]+hp._row*(rowH+gap),x0=X(hp.t0),x1=X(Math.min(hp.t1,cut)),w=Math.max(3,x1-x0),o=OUT[hp.outcome]||OUT.open;
   var r=el("rect",{x:x0.toFixed(1),y:y0+3,width:w.toFixed(1),height:rowH-4,rx:2,fill:o.fill,stroke:o.stroke||null,"stroke-width":o.stroke?1.2:null,"class":"hyp"});
@@ -2919,7 +2979,7 @@ function drawTrace(host){var run=runOf(host.dataset.run),T=run&&traceOf(run,host
   hover(r,function(){var n=hp.probes.length;return[{text:hp.file||hp.id,b:true},
    {text:hp.lane+" "+(D.lane_names[hp.lane]||"")+" · "+hp.outcome+(hp.status?" ("+hp.status+")":"")+" · "+n+" probe"+(n===1?"":"s")},
    {text:hp.text.length>240?hp.text.slice(0,239)+"…":hp.text},
-   {text:"opened "+hrs(hp.t0)+(hp.t1>hp.t0?" · resolved "+hrs(hp.t1):""),dim:true},{text:"click to read the reasoning",dim:true}]});
+   {text:"opened "+dur(hp.t0)+(hp.t1>hp.t0?" · resolved "+dur(hp.t1):""),dim:true},{text:"click to read the reasoning",dim:true}]});
   r.addEventListener("click",function(){openDrawer(run,hp)})});
  if(cut<Infinity&&cut<wall)playhead(s,X(cut),mt-6,y-agentGap+6);
  host.appendChild(s)}
@@ -2927,11 +2987,11 @@ function drawTrace(host){var run=runOf(host.dataset.run),T=run&&traceOf(run,host
 var drawer=document.getElementById("drawer"),dtitle=document.getElementById("dtitle"),dbody=document.getElementById("dbody");
 function section(title,text){if(!text)return;dbody.appendChild(h("h4",null,title));dbody.appendChild(h("p",null,text))}
 function openDrawer(run,hp){dtitle.textContent=hp.file||hp.id;dbody.replaceChildren();
- var meta=h("p","meta",hp.lane+" "+(D.lane_names[hp.lane]||"")+" · agent "+hp.agent+" · "+hp.outcome+(hp.status?" ("+hp.status+")":"")+(hp.artifact?" · filed as "+hp.artifact:"")+(hp.diagnostic?" · "+hp.diagnostic:"")+" · opened "+hrs(hp.t0)+(hp.t1>hp.t0?", resolved "+hrs(hp.t1):"")+" into the run");
+ var meta=h("p","meta",hp.lane+" "+(D.lane_names[hp.lane]||"")+" · agent "+hp.agent+" · "+hp.outcome+(hp.status?" ("+hp.status+")":"")+(hp.artifact?" · filed as "+hp.artifact:"")+(hp.diagnostic?" · "+hp.diagnostic:"")+" · opened "+dur(hp.t0)+(hp.t1>hp.t0?", resolved "+dur(hp.t1):"")+" into the run");
  dbody.appendChild(meta);
  section("Hypothesis",hp.text);section("Guard gap",hp.guard_gap);section("Input shape",hp.input_shape);section("Agent's conclusion",hp.note);
  if(hp.probes.length){dbody.appendChild(h("h4",null,hp.probes.length+" sanitizer probe"+(hp.probes.length===1?"":"s")));var ul=h("ul"),shown=hp.probes.slice(0,40);
-  shown.forEach(function(p){ul.appendChild(h("li",null,hrs(p.t)+" · "+p.verdict+(p.s?" · "+p.s+"s":"")))});
+  shown.forEach(function(p){ul.appendChild(h("li",null,dur(p.t)+" · "+p.verdict+(p.s?" · "+p.s+"s":"")))});
   if(hp.probes.length>shown.length)ul.appendChild(h("li","dim","… and "+(hp.probes.length-shown.length)+" more"));dbody.appendChild(ul)}
  if(hp.notes.length){dbody.appendChild(h("h4",null,"Notes"));var nl=h("ul");hp.notes.forEach(function(n){nl.appendChild(h("li",null,(n.kind?n.kind+": ":"")+n.text))});dbody.appendChild(nl)}
  drawer.hidden=false}
@@ -2945,9 +3005,9 @@ function redraw(run){run.querySelectorAll(".ttd").forEach(drawTTD);run.querySele
  run.querySelectorAll(".dot[data-t]").forEach(function(d){d.classList.toggle("future",+d.dataset.t>cut)})}
 document.querySelectorAll(".replay:not(.treplay)").forEach(function(bar){var run=bar.closest(".run"),range=bar.querySelector("input"),play=bar.querySelector(".play"),out=bar.querySelector(".rt"),note=bar.querySelector(".rn"),max=+range.max,timer=null,pending=false;
  var R=runOf(run.dataset.run);
- function kept(cut){var parts=[];(R?R.conditions:[]).forEach(function(c){var f=c.find.times.filter(function(t){return t<=cut}).length,k=c.crash.times.filter(function(t){return t<=cut}).length;parts.push(c.label+" "+f+" / "+k)});return parts.join(" · ")}
- function apply(){pending=false;var val=+range.value;if(val>=max){run.dataset.cut="";out.textContent=(max/100).toFixed(2)+"h";note.textContent="whole run"}
-  else{var cut=val/100;run.dataset.cut=String(cut);out.textContent=cut.toFixed(2)+"h";note.textContent="findings / crashes kept so far: "+kept(cut)}redraw(run)}
+ function kept(cut){var parts=[];(R?R.conditions:[]).filter(function(c){return !c.provisional}).forEach(function(c){var f=c.find.times.filter(function(t){return t<=cut}).length,k=c.crash.times.filter(function(t){return t<=cut}).length;parts.push(c.label+" "+f+" / "+k)});return parts.join(" · ")}
+ function apply(){pending=false;var val=+range.value;if(val>=max){run.dataset.cut="";out.textContent=dur(max/100);note.textContent="whole run"}
+  else{var cut=val/100;run.dataset.cut=String(cut);out.textContent=dur(cut);note.textContent="findings / crashes kept so far: "+kept(cut)}redraw(run)}
  range.addEventListener("input",function(){if(!pending){pending=true;requestAnimationFrame(apply)}});
  function stop(){if(timer)cancelAnimationFrame(timer);timer=null;play.textContent="▶ Replay the run"}
  play.addEventListener("click",function(){if(timer){stop();return}if(+range.value>=max)range.value=0;
