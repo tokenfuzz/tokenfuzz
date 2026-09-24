@@ -530,7 +530,14 @@ CODE_PATTERNS: tuple[tuple[re.Pattern[str], int, str], ...] = (
         r"|\b(?:jwt|saml|oauth|oidc)[_-]?(?:token|assertion|claim|issuer|audience|verif|valid)\w*"
         r"|\bassertion[\s_-]?(?:valid|verif|select)\w*"
         r"|\b(?:validate|check)[\s_-]?(?:token|claim|issuer|audience|assertion"
-        r"|signature|certificate|cert[\s_-]?chain)\w*"
+        r"|certificate|cert[\s_-]?chain)\w*"
+        # "Check signature" is also how file formats name their magic-byte
+        # test, so it counts only with a crypto co-token: a key/cert
+        # qualifier in the name or a key/cert/digest argument in the call.
+        r"|\b(?:validate|check)[\s_-]?(?:cert|key|pubkey|public[\s_-]?key|hmac|rsa"
+        r"|dsa|ecdsa|eddsa|pgp|gpg|x509|jws|jwt)\w*?[\s_-]?signature"
+        r"|\b(?:validate|check)[\s_-]?signature\w*\s*\([^)\n]*"
+        r"\b(?:\w+_)?(?:(?:pub(?:lic)?[_-]?)?key|cert\w*|hmac|digest)\b"
     , re.IGNORECASE), 10, "credential/verification decision"),
     # S3 — query and template construction: the injection families whose sink
     # is a grammar rather than a shell. A query assembled by concatenation, or

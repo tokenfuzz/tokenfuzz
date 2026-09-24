@@ -716,6 +716,28 @@ class WorkQueueTests(unittest.TestCase):
         deduped = workqueue.dedupe_work_cards([duplicate, distinct, first])
         self.assertEqual([row["id"] for row in deduped], ["WORK-B", "WORK-C"])
 
+    def test_file_format_signature_checks_are_not_credential_decisions(self) -> None:
+        # Image and container formats call their magic-byte test a
+        # signature; only a crypto co-token makes it a verification step.
+        for source in (
+            "bool checkSignature(const String& signature) const;",
+            "/* check signature */",
+            "if (!check_signature(buf, 8)) return false;",
+            "validateSignature(header);",
+        ):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertNotIn("credential/verification decision", reasons)
+        for source in (
+            "rc = check_signature (ctrl, sig, digest);",
+            "if (!checkRsaSignature(msg, sig)) return 0;",
+            "check_key_signature(keyblock, node, &is_selfsig);",
+            "return validate_signature(token, public_key);",
+        ):
+            with self.subTest(source=source):
+                _score, reasons = workqueue.code_feature_reasons(source)
+                self.assertIn("credential/verification decision", reasons)
+
     def test_code_feature_signals_cover_languages_and_strategy_mapping(self) -> None:
         cases = (
             ("int parse_packet(const char *p) { memcpy(dst, p, n); }", "S7", "input-consumption entrypoint"),
