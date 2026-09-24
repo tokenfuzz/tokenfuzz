@@ -234,7 +234,9 @@ def _unreachable_route_summary(text: str, limit: int = 300) -> str:
     return compact[: limit - 1].rstrip() + "…"
 
 
-def _record_unreachable_route(directory: Path, results_dir: Path) -> None:
+def _record_unreachable_route(
+    directory: Path, results_dir: Path, *, out_of_model: str = "",
+) -> None:
     """Keep the disproof that killed a trigger route where an agent will read it.
 
     The gate writes a precise, anchored reason for every trigger rejection and
@@ -244,11 +246,17 @@ def _record_unreachable_route(directory: Path, results_dir: Path) -> None:
     full harness / confirm / bundle / enrich cycle to re-derive the same
     answer. Recording the route is advisory only: it never removes a card and
     never blocks a claim, so a different route to the same defect stays open.
+
+    `out_of_model` is the scope reason for a threat-model rejection. There the
+    defect was confirmed and no disproof exists; the reviewers' verified
+    anchors still locate it, and the note says the trigger was out of scope.
     """
     row: dict | None = None
     for name in _TRIGGER_EVIDENCE_NAMES:
         vote = _finding_cache(directory / name)
-        summary = _unreachable_route_summary(vote.get("disproof", ""))
+        summary = _unreachable_route_summary(
+            out_of_model or vote.get("disproof", ""),
+        )
         anchors = vote.get("anchors") or []
         # An unverified anchor set is the reviewer's unchecked claim about
         # where the code is; keying advice on it would put the note on a file
@@ -279,6 +287,7 @@ def _record_unreachable_route(directory: Path, results_dir: Path) -> None:
             "artifact": directory.name,
             "lane": directory.parent.name,
             "summary": summary,
+            "kind": "out-of-model" if out_of_model else "disproved",
             "recorded_at": workqueue.now_iso(),
         }
         break
@@ -329,10 +338,21 @@ def _retract_unreachable_route(directory: Path, results_dir: Path) -> None:
         )
 
 
+def _out_of_model_route(directory: Path, reason: str) -> str:
+    """The route note for a threat-model rejection, or "" for any other."""
+    if not reason.startswith(THREAT_MODEL_REJECTION_PREFIX):
+        return ""
+    note = reason[len(THREAT_MODEL_REJECTION_PREFIX):].strip()
+    report = _report(directory)
+    trigger = _field(_read(report), "Trigger source") if report else ""
+    return f"{note} (reported trigger source: {trigger})" if trigger else note
+
+
 def _reject(
     directory: Path, rejected_root: Path, reason: str, *, category: str = "",
 ) -> Path:
     rejected_root.mkdir(parents=True, exist_ok=True)
+    out_of_model = _out_of_model_route(directory, reason)
     _annotate_rejection(directory, reason)
     validation_receipt.write(
         directory,
@@ -349,6 +369,13 @@ def _reject(
         # artifact active and records nothing; a later requeue moves the
         # artifact back out and the note stops rendering with it.
         _record_unreachable_route(destination, rejected_root.parent)
+    elif out_of_model:
+        # The commonest rejection: a confirmed defect whose trigger lies
+        # outside the declared controls. Without a note the next session on
+        # the file files the same kind again.
+        _record_unreachable_route(
+            destination, rejected_root.parent, out_of_model=out_of_model,
+        )
     try:
         workqueue.record_artifact_rejection(
             rejected_root.parent, directory.name, reason, category=category,
@@ -447,16 +474,13 @@ def _restore_rejected_artifact(
 ) -> Path:
     """Move one superseded rejection back to its active validation lane."""
     active_root.mkdir(parents=True, exist_ok=True)
-    had_route_advice = bool(
-        _TRIGGER_REJECTION_RE.match(_rejection_reason(directory))
-    )
     destination = _unique_destination(active_root, directory.name)
     shutil.move(str(directory), destination)
     # The rejected path is reusable after this move. Remove its row rather
     # than relying only on directory absence, or rejecting the reopened
     # artifact under the same name would make the obsolete route live again.
-    if had_route_advice:
-        _retract_unreachable_route(directory, active_root.parent)
+    # Trigger and threat-model rejections both leave rows, so always look.
+    _retract_unreachable_route(directory, active_root.parent)
     (destination / "rejection.md").unlink(missing_ok=True)
     (destination / "validation.json").unlink(missing_ok=True)
     validation_receipt.write(

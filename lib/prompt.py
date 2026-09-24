@@ -406,7 +406,7 @@ _BLOCKED_NOTE_CHARS = 300
 
 
 def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
-    """Trigger routes a source-review gate already disproved on this file.
+    """Trigger routes a source-review gate already ruled out on this file.
 
     Without this the gate's reasoning dies with the artifact, and sessions
     re-derive it: over four measured targets, 55% of trigger rejections landed
@@ -414,6 +414,10 @@ def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
     harness / confirm / bundle / enrich cycle. This is context, never a filter
     — the file keeps its card and a different route stays open, so a real
     defect reachable another way is not lost.
+
+    Two kinds render apart because they mean different things: a disproved
+    route never reached the defect, while an out-of-model one reached a real
+    defect through a trigger the declared attacker controls do not cover.
     """
     rel = workqueue.normalized_relpath(file)
     if not rel:
@@ -421,8 +425,8 @@ def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
     rows = workqueue.read_jsonl(
         context.results_dir / "state" / "unreachable-routes.jsonl"
     )
-    seen: set[str] = set()
-    shown: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    shown: dict[str, list[str]] = {"disproved": [], "out-of-model": []}
     # Newest first. A session repeats the route it just watched fail, so the
     # oldest three entries are the least useful three to keep showing — and
     # once a file had three, nothing later could ever appear.
@@ -447,26 +451,41 @@ def _ruled_out_routes(context: PromptContext, file: str) -> list[str]:
         )
         if site is None:
             continue
+        kind = "out-of-model" if row.get("kind") == "out-of-model" else "disproved"
         summary = str(row.get("summary", "")).strip()
-        if not summary or summary in seen:
-            continue
-        seen.add(summary)
         symbol = str(site.get("symbol", "")).strip()
+        # One scope reason spans many functions, so the symbol is part of
+        # what makes a route distinct.
+        if (
+            not summary or (symbol, summary) in seen
+            or len(shown[kind]) >= _RULED_OUT_ROUTES_SHOWN
+        ):
+            continue
+        seen.add((symbol, summary))
         where = f"`{symbol}` — " if symbol else ""
-        shown.append(f"  - {where}{summary}")
-        if len(shown) >= _RULED_OUT_ROUTES_SHOWN:
-            break
-    if not shown:
-        return []
-    return [
-        "- **Trigger routes already disproved on this file** (independent "
-        "source review, most recent first):",
-        *shown,
-        "  Check the stated invariant before rebuilding a reproducer for one "
-        "of these. They rule out a *route*, not the file: reach the same code "
-        "through a different attacker-controlled path and it counts, and a "
-        "disproof you can show to be wrong is worth arguing.",
-    ]
+        shown[kind].append(f"  - {where}{summary}")
+    lines: list[str] = []
+    if shown["disproved"]:
+        lines += [
+            "- **Trigger routes already disproved on this file** (independent "
+            "source review, most recent first):",
+            *shown["disproved"],
+            "  Check the stated invariant before rebuilding a reproducer for one "
+            "of these. They rule out a *route*, not the file: reach the same code "
+            "through a different attacker-controlled path and it counts, and a "
+            "disproof you can show to be wrong is worth arguing.",
+        ]
+    if shown["out-of-model"]:
+        lines += [
+            "- **Triggers already rejected as outside the threat model on this "
+            "file** (the defect was real; the declared attacker controls do "
+            "not reach its trigger, most recent first):",
+            *shown["out-of-model"],
+            "  Another report driven the same way will be rejected the same "
+            "way. This rules out the *trigger*, not the code: a defect here "
+            "that the declared attacker controls do reach still counts.",
+        ]
+    return lines
 
 
 def _blocked_routes(context: PromptContext, card_id: str) -> list[str]:

@@ -100,6 +100,50 @@ class UnreachableRouteFeedbackTests(unittest.TestCase):
         self.reject(self.artifact("FIND-002"), "find-quality: no security impact")
         self.assertEqual(len(self.routes()), 1)
 
+    def out_of_model(self, name: str) -> Path:
+        """A confirmed defect whose trigger the declared controls do not reach."""
+        directory = self.artifact(name, disproof="")
+        (directory / "report.md").write_text(
+            "# report\n\nTrigger source: call-sequence\n", encoding="utf-8",
+        )
+        return self.reject(
+            directory,
+            triage.THREAT_MODEL_REJECTION_PREFIX
+            + "source review placed the trigger outside attacker_controls=bytes",
+        )
+
+    def test_a_threat_model_rejection_records_an_out_of_model_route(self) -> None:
+        # The commonest rejection has no disproof: the defect was confirmed
+        # and only its trigger was out of scope. It still reaches the next
+        # session on that file, worded as scope, not as a disproof.
+        self.out_of_model("CRASH-001-1")
+        recorded = self.routes()
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["kind"], "out-of-model")
+        self.assertIn("outside attacker_controls=bytes", recorded[0]["summary"])
+        self.assertIn("call-sequence", recorded[0]["summary"])
+
+        lines = "\n".join(prompt._ruled_out_routes(self.context(), "src/app.c"))
+        self.assertIn("outside the threat model", lines)
+        self.assertIn("app_parse", lines)
+        self.assertNotIn("disproved", lines)
+        self.assertIn("still counts", lines, "advice, never a refusal")
+
+        # An unsettled scope established nothing, so it records nothing.
+        self.reject(
+            self.artifact("CRASH-002-1", disproof=""),
+            triage.UNSETTLED_REJECTION_REASON,
+        )
+        self.assertEqual(len(self.routes()), 1)
+
+    def test_a_requeued_threat_model_rejection_retracts_its_route(self) -> None:
+        destination = self.out_of_model("CRASH-003-1")
+        triage._restore_rejected_artifact(
+            destination, self.results / "findings", kind="finding",
+            detail="requeued because the threat model changed",
+        )
+        self.assertEqual(self.routes(), [])
+
     def test_nothing_is_recorded_without_verified_anchors(self) -> None:
         self.reject(self.artifact("FIND-003", anchors=[]))
         self.assertEqual(self.routes(), [])

@@ -118,7 +118,7 @@ state/runs.jsonl             one row per bin/probe invocation
 state/notes.jsonl            compact supporting notes
 state/events.jsonl           audit events
 state/run-config.json        the run's recorded mode, security profile, and delta scope
-state/unreachable-routes.jsonl   anchored disproofs later work cards render
+state/unreachable-routes.jsonl   anchored disproofs and out-of-model triggers later work cards render
 state/callgraph.json         optional call-neighbourhood context
 state/manifest.jsonl         every auditable file, with content identity and whether it was ever offered
 state/receipts.jsonl         line ranges a session recorded reading, pinned to the file's content hash

@@ -288,6 +288,11 @@ to `state/unreachable-routes.jsonl`, and a later work card on any file that
 disproof names renders it, newest first. Without this, later sessions can
 spend time re-deriving the same disproved route on the same source.
 
+A threat-model rejection, the commonest kind, records a row too. There the
+defect was real and only its trigger fell outside the declared attacker
+controls, so the card says exactly that, under its own heading, rather than
+calling the route disproved.
+
 Two properties keep the note honest:
 
 - **It rules out a route, not a file.** The card is still assigned, and
