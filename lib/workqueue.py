@@ -6033,14 +6033,20 @@ def card_discard_requirements() -> tuple[int, int]:
     )
 
 
-def card_discard_evidence(ctx: Context, card_id: str) -> tuple[int, int]:
-    """Return CLEAN runs and actually-probed hypothesis shapes for a card."""
+def card_discard_evidence(ctx: Context, card_id: str) -> tuple[int, int, int]:
+    """Return counted CLEAN runs, their probed shapes, and MISSED CLEAN runs.
+
+    A CLEAN verdict whose coverage gate reported MISSED never reached the
+    target, and AGENTS.md Rule 4 says MISSED never justifies a discard, so it
+    is returned separately for the refusal message instead of counted. HIT
+    and UNAVAILABLE (no coverage build) runs count.
+    """
     hypothesis_shapes = {
         (str(row.get("agent", "")), str(row.get("id", ""))): _hypothesis_shape(row)
         for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
         if str(row.get("card_id", "")) == str(card_id) and row.get("id")
     }
-    clean_runs = 0
+    clean_runs = missed_runs = 0
     probed_shapes: set[str] = set()
     for run in read_jsonl(state_dir(ctx.results_dir) / "runs.jsonl"):
         if str(run.get("card_id", "")) != str(card_id):
@@ -6052,9 +6058,12 @@ def card_discard_evidence(ctx: Context, card_id: str) -> tuple[int, int]:
         )
         if not shape:
             continue
+        if str(run.get("coverage", "")).upper() == "MISSED":
+            missed_runs += 1
+            continue
         clean_runs += 1
         probed_shapes.add(shape)
-    return clean_runs, len(probed_shapes)
+    return clean_runs, len(probed_shapes), missed_runs
 
 
 def update_card_status(
@@ -6073,7 +6082,8 @@ def update_card_status(
         `discarded` and `done`) requires ≥WORK_CARD_MIN_RUNS_BEFORE_DISCARD (default 3)
         CLEAN runs.jsonl rows referencing the card and a real hypothesis AND
         ≥WORK_CARD_MIN_HYPS_BEFORE_DISCARD (default 2) distinct hypothesis
-        shapes among those runs: MISSED/NO_EXEC probes and unprobed rows cannot
+        shapes among those runs: MISSED/NO_EXEC probes (including CLEAN
+        rows whose coverage gate was MISSED) and unprobed rows cannot
         retire a concrete surface. Broad ranked-source cards retain the
         conclusion as dry-work history but remain re-offerable for unexamined
         functions. The set is derived from
@@ -6115,7 +6125,7 @@ def update_card_status(
     init_state(ctx)
     if status in _EVIDENCE_GATED_CARD_STATUSES:
         min_runs, min_hyps = card_discard_requirements()
-        runs, hyps = card_discard_evidence(ctx, card_id)
+        runs, hyps, missed = card_discard_evidence(ctx, card_id)
         ok = runs >= min_runs and hyps >= min_hyps
         if not ok:
             # A card with a probed crash is concluded, and `crash` has its own
@@ -6129,11 +6139,17 @@ def update_card_status(
                 if card_run_count(ctx, card_id, verdict="CRASH")
                 else "Run bin/probe and add distinct hypotheses first."
             )
+            missed_note = (
+                f"{missed} CLEAN run(s) with coverage MISSED do not count: they "
+                "never reached the target, so revise the input until coverage "
+                "is HIT (or UNAVAILABLE on a build without coverage). "
+                if missed else ""
+            )
             raise CardStatusUpdateError(
                 f"update-card refuses {status} for {card_id}: "
                 f"clean_runs={runs} (need {min_runs}); "
                 f"probed_distinct_hypotheses={hyps} (need {min_hyps}). "
-                + hint
+                + missed_note + hint
             )
     elif status == "blocked" and not str(note or "").strip():
         raise CardStatusUpdateError(

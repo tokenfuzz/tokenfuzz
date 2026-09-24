@@ -263,7 +263,8 @@ function names the call graph did not parse.
 
 `update-card --status discarded` requires the configured evidence floor
 (default: three card-linked CLEAN runs across two distinct hypothesis shapes
-that were actually probed. MISSED, NO_EXEC, EXEC_FAIL, and CRASH rows do not count. This
+that were actually probed. MISSED, NO_EXEC, EXEC_FAIL, and CRASH rows do not count,
+nor does a CLEAN row whose coverage gate reported MISSED. This
 retires a concrete patch/site card; for a broad whole-file card it records a
 dry pass and yields to fresher work, but the card remains reofferable with its
 history because finite probes cannot prove unexamined functions exhausted.

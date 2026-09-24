@@ -1908,7 +1908,32 @@ class WorkQueueTests(unittest.TestCase):
             workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")
 
         self.add_run(index=4, hypothesis_id="H-2")
-        self.assertEqual(workqueue.card_discard_evidence(self.ctx, "WORK-A"), (3, 2))
+        self.assertEqual(workqueue.card_discard_evidence(self.ctx, "WORK-A"), (3, 2, 0))
+        self.assertEqual(
+            workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")["status"],
+            "discarded",
+        )
+
+    def test_card_discard_does_not_count_clean_runs_whose_coverage_missed(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/app.c")])
+        self.add_hypothesis()
+        self.add_hypothesis(
+            hyp_id="H-2", hypothesis="issue in app_close", input_shape="callback sequence",
+            guard_gap="state checked after callback", diagnostic="lifetime", strategy="S5",
+        )
+        for index in range(1, 5):
+            self.add_run(index=index, hypothesis_id=f"H-{index % 2 + 1}", coverage="MISSED")
+        self.assertEqual(workqueue.card_discard_evidence(self.ctx, "WORK-A"), (0, 0, 4))
+        with self.assertRaisesRegex(
+            workqueue.CardStatusUpdateError, "clean_runs=0.*4 CLEAN run.*coverage MISSED do not count",
+        ):
+            workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")
+
+        # A reached target (HIT) and a build without coverage (UNAVAILABLE) count.
+        self.add_run(index=5, coverage="HIT")
+        self.add_run(index=6, coverage="UNAVAILABLE")
+        self.add_run(index=7, hypothesis_id="H-2", coverage="HIT")
+        self.assertEqual(workqueue.card_discard_evidence(self.ctx, "WORK-A"), (3, 2, 4))
         self.assertEqual(
             workqueue.update_card_status(self.ctx, "WORK-A", "discarded", agent="1")["status"],
             "discarded",

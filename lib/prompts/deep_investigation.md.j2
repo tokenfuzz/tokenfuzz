@@ -89,7 +89,8 @@ proof. Record the `bin/probe` verdict and one untried shape when a probe ran.
 --status discarded`, the harness requires at least
 {{ card_discard_min_runs }} card-linked CLEAN `bin/probe` runs across at least
 {{ card_discard_min_hypotheses }} distinct hypothesis shapes that were actually
-probed. This is a card floor, not a tax on every hypothesis. Use the runs on
+probed; a CLEAN run whose coverage gate reported MISSED does not count. This
+is a card floor, not a tax on every hypothesis. Use the runs on
 genuinely different angles (for example S2 invariant, S3 spec/fast-path, and
 S5 lifetime/state), and deepen any angle that shows signal. This retires a
 concrete patch/site card. For a broad whole-file card it records this dry pass
