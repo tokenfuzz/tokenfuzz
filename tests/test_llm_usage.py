@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -287,6 +288,31 @@ class UsageExtractionTests(unittest.TestCase):
         row = llm_usage.extract_usage(str(raw), backend="claude")
         self.assertEqual(row["tokens"]["cached_input"], 1_000)
         self.assertGreater(row["tokens"]["output"], 2_000)
+        self.assertTrue(row["estimated"])
+
+    def test_capped_claude_session_counts_redacted_thinking(self) -> None:
+        # Current models stream thinking with empty text and only a signature.
+        # Counting visible text alone read a deadline-cut session's output
+        # about 10x low; the signature length is scaled by the calibrated
+        # constant, and a non-empty thinking text is not counted twice.
+        def event(identifier: str, block: dict) -> dict:
+            return {"type": "assistant", "message": {
+                "id": identifier, "content": [block],
+                "usage": {"input_tokens": 2, "cache_read_input_tokens": 500,
+                          "output_tokens": 3},
+            }}
+
+        raw = self.fixture("redacted.raw", [
+            event("msg_1", {"type": "thinking", "thinking": "",
+                            "signature": "s" * 100_000}),
+            event("msg_1", {"type": "text", "text": "t" * 4_000}),
+            event("msg_2", {"type": "thinking", "thinking": "v" * 400,
+                            "signature": "s" * 100_000}),
+        ])
+        row = llm_usage.extract_usage(str(raw), backend="claude")
+        per_char = llm_usage._OUTPUT_TOKENS_PER_THINKING_SIGNATURE_CHAR
+        self.assertEqual(row["tokens"]["output"],
+                         math.ceil(4_400 / 4 + 100_000 * per_char))
         self.assertTrue(row["estimated"])
 
     def rollout(self, home: Path, tid: str, *totals: dict) -> Path:

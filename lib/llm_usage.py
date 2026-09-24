@@ -109,6 +109,14 @@ _TERMINAL_TYPES = ("result", "turn.completed", "step_finish", "step-finish", "en
 # the row is flagged `estimated`.
 _CHARS_PER_TOKEN = 4
 
+# Output tokens per signature character of a redacted Claude thinking block.
+# Current Claude models stream thinking with an empty `thinking` text and only
+# its opaque `signature`, whose length tracks the hidden reasoning. Fitted
+# against 76 finished sessions: final `modelUsage` output tokens minus visible
+# chars/4, divided by signature chars, has median 0.35 (p10 0.32, p90 0.40).
+# Without it a deadline-cut session's output read ~10x low.
+_OUTPUT_TOKENS_PER_THINKING_SIGNATURE_CHAR = 0.35
+
 
 def usage_is_complete(usage: dict, returncode: int) -> bool:
     """Return whether a finished invocation supplied usable usage data.
@@ -636,30 +644,38 @@ def _claude_per_request_usage(raw: str) -> tuple[dict, bool] | None:
     those totals sum. Verified against a completed 236-request session: the
     cache-read and cache-creation buckets equal terminal `modelUsage` exactly.
     Fresh input can omit CLI-internal requests, so a terminal-less row is
-    always marked estimated even when its generated-content floor is not the
+    always marked estimated even when its generated-content estimate is not the
     larger output value.
 
     Output does not: Claude reports a request's usage as the message begins, so
     `output_tokens` there is a stub (~2% of the real count) and the true figure
     only lands in the terminal event this path exists to replace. Generated
     content — reply text, thinking blocks, and serialized tool calls, all of
-    which are billed output — gives a closer floor, so take whichever is
-    larger. The row remains estimated because neither the generated-content
-    floor nor the visible fresh-input counters are guaranteed complete.
+    which are billed output — gives a closer estimate, so take whichever is
+    larger. A redacted thinking block carries no text, only its signature, so
+    it is scaled by _OUTPUT_TOKENS_PER_THINKING_SIGNATURE_CHAR. The row remains
+    estimated because neither the generated-content estimate nor the visible
+    fresh-input counters are exact.
     """
-    def _generated_content_chars(content: object) -> int:
-        """Conservative generated-content size for one Claude stream event."""
+    def _generated_content_size(content: object) -> tuple[int, int]:
+        """(visible chars, redacted-thinking signature chars) for one event."""
         if not isinstance(content, list):
-            return 0
+            return 0, 0
         total = 0
+        signature_chars = 0
         for block in content:
             if not isinstance(block, dict):
                 continue
             block_type = block.get("type")
             if block_type == "text" and isinstance(block.get("text"), str):
                 total += len(block["text"])
-            elif block_type == "thinking" and isinstance(block.get("thinking"), str):
-                total += len(block["thinking"])
+            elif block_type == "thinking":
+                text = block.get("thinking")
+                signature = block.get("signature")
+                if isinstance(text, str) and text:
+                    total += len(text)
+                elif isinstance(signature, str):
+                    signature_chars += len(signature)
             elif block_type == "tool_use":
                 name = block.get("name")
                 if isinstance(name, str):
@@ -667,10 +683,11 @@ def _claude_per_request_usage(raw: str) -> tuple[dict, bool] | None:
                 tool_input = block.get("input")
                 if isinstance(tool_input, (dict, list)):
                     total += len(json.dumps(tool_input, separators=(",", ":")))
-        return total
+        return total, signature_chars
 
     per_message: dict[str, dict] = {}
     generated_chars = 0
+    signature_chars = 0
     for line in raw.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -701,7 +718,9 @@ def _claude_per_request_usage(raw: str) -> tuple[dict, bool] | None:
         # blocks of one message id, while repeating that request's same usage
         # counters on each. Sum every generated block, but keep one usage row
         # per id.
-        generated_chars += _generated_content_chars(message.get("content"))
+        visible, signature = _generated_content_size(message.get("content"))
+        generated_chars += visible
+        signature_chars += signature
         previous = per_message.get(identifier)
         if previous is None:
             per_message[identifier] = candidate
@@ -716,9 +735,12 @@ def _claude_per_request_usage(raw: str) -> tuple[dict, bool] | None:
         key: sum(row[key] for row in per_message.values())
         for key in ("input", "cached_input", "cache_creation", "output", "cache_creation_1h")
     }
-    floor = math.ceil(generated_chars / _CHARS_PER_TOKEN) if generated_chars else 0
-    if floor > totals["output"]:
-        totals["output"] = floor
+    generated = math.ceil(
+        generated_chars / _CHARS_PER_TOKEN
+        + signature_chars * _OUTPUT_TOKENS_PER_THINKING_SIGNATURE_CHAR
+    )
+    if generated > totals["output"]:
+        totals["output"] = generated
     return totals, True
 
 
@@ -1070,7 +1092,7 @@ def extract_usage_from_text(
     # Fallback path A: Claude streams one per-request usage object per
     # assistant message, so a session that never reached its terminal event
     # (turn cap, wall-clock kill) can still recover its exact cache buckets and
-    # a conservative floor for the rest. Taking the last one instead reports a
+    # an estimate for the rest. Taking the last one instead reports a
     # single request — a ~30x undercount on a long session, which would make a
     # capped run look free.
     per_request = _claude_per_request_usage(raw) if backend == "claude" else None

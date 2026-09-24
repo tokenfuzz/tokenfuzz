@@ -4854,9 +4854,10 @@ def _row_token_source(row: dict) -> str:
     """Where one token row's numbers came from: measured/estimated/unknown.
 
     `measured`  — parsed from the backend's own usage telemetry.
-    `estimated` — a floor: derived from character counts (a backend that
+    `estimated` — not exact: derived from character counts (a backend that
                   reports no usage at all, e.g. Antigravity), recovered from
-                  a terminal-less stream, or measured for a session whose
+                  a terminal-less stream (Claude output is then a calibrated
+                  estimate, not a floor), or measured for a session whose
                   delegated work ran where its usage cannot see it.
     `unknown`   — the row carries no token signal of any kind, so it must
                   not be presented as a measurement of zero cost.
@@ -7556,7 +7557,7 @@ def crosstab(bench_root: Path) -> str:
     lines.append(
         "- **`~` prefix** — usage or pricing is approximate: a session stopped "
         "at the wall is summed from the per-request usage it streamed, whose "
-        "output is a floor; a backend that reports no usage is estimated from "
+        "output is estimated from the streamed content; a backend that reports no usage is estimated from "
         "character counts; or a request-size pricing tier was reconstructed "
         "from invocation totals. Rows without the prefix use measured usage "
         "and the recorded or configured rates."
