@@ -353,6 +353,12 @@ def _reject(
 ) -> Path:
     rejected_root.mkdir(parents=True, exist_ok=True)
     out_of_model = _out_of_model_route(directory, reason)
+    report = _report(directory)
+    if report is not None:
+        # The concern block says triage *kept* the crash; a rejected bundle
+        # carrying it contradicts its own rejection.md. Report identity
+        # ignores the section, so no cached review goes stale.
+        _clear_contract_concern(report)
     _annotate_rejection(directory, reason)
     validation_receipt.write(
         directory,

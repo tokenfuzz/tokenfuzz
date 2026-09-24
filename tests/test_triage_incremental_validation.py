@@ -549,6 +549,21 @@ Generated score text.
         )
         self.assertNotEqual(before, report_identity.content_sha1(self.report))
 
+    def test_a_rejected_bundle_does_not_claim_triage_kept_it(self) -> None:
+        # The concern is written before the scope verdict; once that verdict
+        # rejects the bundle, "Triage kept this crash" contradicts rejection.md.
+        triage._set_contract_concern(self.report, "call-sequence outside configured controls")
+        before = report_identity.content_sha1(self.report)
+        destination = triage._reject(
+            self.finding, self.root / "findings-rejected",
+            triage.THREAT_MODEL_REJECTION_PREFIX + "trigger outside attacker_controls=bytes",
+        )
+        text = (destination / "report.md").read_text(encoding="utf-8")
+        self.assertNotIn("kept this crash", text)
+        self.assertNotIn(report_identity.CONTRACT_CONCERN_HEADING, text)
+        self.assertFalse((destination / ".contract-flagged").exists())
+        self.assertEqual(before, report_identity.content_sha1(destination / "report.md"))
+
     def test_table_padding_does_not_invalidate_report_identity(self) -> None:
         self.report.write_text(
             "# State issue\n\n| Field | Value |\n| --- | --- |\n"
