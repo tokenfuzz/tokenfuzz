@@ -207,6 +207,14 @@ class CrashStateDedupTests(unittest.TestCase):
             ("DUP-STATE", first),
         )
 
+    def test_a_build_id_does_not_hide_the_module_offset(self) -> None:
+        text = (
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+            "    #0 0x55d0 (/usr/lib/libsample.so+0x4f30) (BuildId: 0123abcd)\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+        )
+        self.assertEqual(crash_bundle.crash_state(text)[2], ("libsample.so+0x4f30",))
+
     def test_a_symbolized_module_frame_is_still_scrubbed(self) -> None:
         text = (
             "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"

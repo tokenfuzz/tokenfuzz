@@ -529,7 +529,7 @@ class RunnerPreflightTests(unittest.TestCase):
         events = []
         runtime = SimpleNamespace(config=self.config(Path("/target"), "python3"))
         args = SimpleNamespace(allow_concurrent=False, max_iterations=1)
-        state = SimpleNamespace(iteration=0)
+        state = SimpleNamespace(iteration=0, runtime=runtime)
         with mock.patch.object(
             audit_runner, "instance_lock", return_value=contextlib.nullcontext()
         ), mock.patch.object(

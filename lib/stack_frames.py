@@ -42,6 +42,9 @@ _MODULE_RE = re.compile(r"(?P<func>.*?)\s+(?P<loc>\([^)]*(?:\+0x[0-9a-fA-F]+)?\)
 _UNSYMBOLIZED_RE = re.compile(
     r"^\((?P<module>[^()]+?)(?P<arch>:[A-Za-z0-9_]+)?\+(?P<offset>0x[0-9a-fA-F]+)\)$"
 )
+# Linux prints the module's build id after such a frame, which the module
+# parser reads as its location; it adds nothing the offset does not say.
+_BUILD_ID_RE = re.compile(r"^\(BuildId: [0-9a-fA-F]+\)$")
 # A normalized function never ends in `+0x..` (`filter_function_name` strips
 # that), so a state function that does is a module offset from the rule above.
 _MODULE_OFFSET_STATE_RE = re.compile(r"^[^\s()]+\+0x[0-9a-f]+$")
@@ -242,7 +245,7 @@ class StackFrame:
         `filter_function_name`. Use this (not `function`) anywhere the name
         is shown to a human or used as a dedup key; `function` stays raw for
         the ignore step."""
-        if not self.location:
+        if not self.location or _BUILD_ID_RE.match(self.location):
             match = _UNSYMBOLIZED_RE.match(self.function)
             if match:
                 # The basename: one library is reached through build
@@ -273,7 +276,9 @@ def state_line(function: str, location: str) -> str:
     Symbolized frames are address- and number-scrubbed as ClusterFuzz does;
     an unsymbolized frame keeps its module offset, its only identity.
     """
-    if not location and is_module_offset(function):
+    if is_module_offset(function):
+        # Only an unsymbolized frame normalizes to one, and its location is
+        # at most a build id.
         return function
     line = f"{function} {location}" if location else function
     return filter_addresses_and_numbers(line)
