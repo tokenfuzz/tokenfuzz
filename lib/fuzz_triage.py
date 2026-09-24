@@ -31,9 +31,12 @@ class Candidate:
     size: int
     # Whether a `bin/fuzz` campaign wrote it, which decides how it replays.
     campaign: bool = False
+    # A campaign replays only harnesses whose source it recorded.
+    replayable: bool = True
 
 
-def _lead(path: Path, campaign: bool = False) -> "Candidate | None":
+def _lead(path: Path, campaign: bool = False,
+          replayable: bool = True) -> "Candidate | None":
     if not path.name.startswith(CANDIDATE_PREFIXES) or path.name == SHUTDOWN_SHA1:
         return None
     try:
@@ -43,7 +46,7 @@ def _lead(path: Path, campaign: bool = False) -> "Candidate | None":
     if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
         return None
     return Candidate(path=path, mtime=int(info.st_mtime), size=info.st_size,
-                     campaign=campaign)
+                     campaign=campaign, replayable=replayable)
 
 
 def parse_limit(raw: str) -> int | None:
@@ -82,7 +85,7 @@ def campaign_candidates(results: Path):
     for name in harnesses:
         state = states.get(name) or fuzz_campaign.HarnessState(name=name, binary="")
         for path in fuzz_campaign.unreplayed_artifacts(results, state):
-            lead = _lead(path, campaign=True)
+            lead = _lead(path, campaign=True, replayable=bool(state.source))
             if lead is not None:
                 yield lead
 
@@ -131,7 +134,14 @@ def render_leads(
         modified = datetime.fromtimestamp(lead.mtime, timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
-        if lead.campaign:
+        if lead.campaign and not lead.replayable:
+            replay = (
+                f"- **Replay:** no source is recorded for harness `{fuzzer}`, "
+                "so `bin/fuzz run` cannot replay it; rebuild the harness with "
+                "`bin/fuzz build`, or run `bin/probe --harness <its source>` "
+                "on this artifact"
+            )
+        elif lead.campaign:
             replay = (
                 f"- **Replay:** `bin/fuzz run` replays harness `{fuzzer}`'s "
                 "unreplayed artifacts through `bin/probe --confirm` before "

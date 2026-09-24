@@ -143,7 +143,19 @@ class TriageFuzzCrashTests(unittest.TestCase):
             self.assertIn("bin/fuzz run", text)
             self.assertNotIn("crash-replayed", text)
             self.assertFalse(prompt.fuzz_leads_empty(results))
+            # No source recorded: the campaign cannot replay it, so the lead
+            # must not promise that it will.
+            self.assertIn("cannot replay", text)
 
+            fuzz_campaign.save_states(results, {
+                "fuzz_sample": fuzz_campaign.HarnessState(
+                    name="fuzz_sample", binary="/bin/fuzz_sample",
+                    source="/src/fuzz_sample.c",
+                    seen_artifacts=["crash-replayed"]),
+            })
+            fuzz_triage.update_fuzz_leads(results, 20)
+            text = (results / "fuzz-leads.md").read_text(encoding="utf-8")
+            self.assertIn("`bin/fuzz run` replays", text)
             fuzz_campaign.save_states(results, {
                 "fuzz_sample": fuzz_campaign.HarnessState(
                     name="fuzz_sample", binary="/bin/fuzz_sample",
