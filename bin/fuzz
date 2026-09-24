@@ -268,6 +268,7 @@ TEMPLATE = '''// TARGET: {target}
 // S4-RECEIPT CONTROLS: {controls}
 // S4-RECEIPT DECLARATION: {declaration}
 // S4-RECEIPT SOURCE-USAGE: {source_usage}
+// S4-RECEIPT INPUT-BUFFER: UNRESOLVED
 // S4-RECEIPT CONSTRUCTOR: UNRESOLVED
 // S4-RECEIPT ARG-RELATIONS: UNRESOLVED
 // S4-RECEIPT RESOURCE-FLOW: UNRESOLVED
@@ -288,6 +289,14 @@ TEMPLATE = '''// TARGET: {target}
 #include <string.h>
 
 /* TODO: include the public header that declares {symbol}. */
+
+/* Bytes the grounding caller allocates past the payload it passes, as quoted
+   on the INPUT-BUFFER receipt line; use the public header's constant when it
+   names one. libFuzzer and the replay main below both hand over an
+   exact-size buffer, so a target that relies on its callers' padding would
+   read past it and report a harness-made crash. The copy below zeroes this
+   padding, which also supplies a caller's NUL terminator. */
+#define FZ_INPUT_PADDING 0
 
 /* Split one mutator input into decisions and payload. A harness that spends
    the whole buffer on a single call can only ever find input-parsing bugs;
@@ -317,7 +326,12 @@ static size_t fz_rest(fz_stream *s, const uint8_t **out) {{
 }}
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
-  fz_stream s = {{data, size}};
+  /* Rebuild the input the way the grounding caller allocates it; `!size`
+     keeps a zero-length input allocatable. */
+  uint8_t *input = (uint8_t *)calloc(1, size + FZ_INPUT_PADDING + !size);
+  if (!input) return 0;
+  if (size) memcpy(input, data, size);
+  fz_stream s = {{input, size}};
 
   /* TODO, in this order:
      1. draw configuration from fz_u8/fz_u32 so options are fuzzed too —
@@ -327,10 +341,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
      4. optionally loop 2-3 more calls driven by fz_u8(&s), so a call
         sequence is reachable;
      5. free everything. An allocation the harness never releases is
-        reported as a leak in the harness, not a defect in the target. */
+        reported as a leak in the harness, not a defect in the target;
+        leave through the single free(input) below. */
 
   (void)fz_u32;
   (void)fz_rest;
+  free(input);
   return 0;
 }}
 
@@ -527,6 +543,7 @@ def cmd_status(args) -> int:
         if receipt:
             print(f"    boundary: {receipt.get('boundary') or '(unrecorded)'}")
             print(f"    source usage: {receipt.get('source_usage') or 'UNRESOLVED'}")
+            print(f"    input buffer: {receipt.get('input_buffer') or 'UNRESOLVED'}")
             unresolved = receipt.get("unresolved") or []
             if unresolved:
                 print(f"    unresolved: {', '.join(str(item) for item in unresolved)}")

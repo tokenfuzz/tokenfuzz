@@ -9,7 +9,11 @@ this target's `attacker_controls` shape, and uncovered by an existing harness),
 `bin/fuzz template <symbol>`, fill the `S4-RECEIPT` fields from local callers
 read with `bin/peek`, `bin/fuzz build` (refuses byte-to-struct casts, private
 headers, and hand-declared symbols), `bin/fuzz run --budget-seconds N`,
-`bin/fuzz status`. Improving an existing harness usually beats writing a new
+`bin/fuzz status`. The `INPUT-BUFFER` receipt line quotes how the grounding
+caller allocates the bytes it passes (trailing padding, terminator, alignment,
+minimum size), and the harness reproduces that allocation (`FZ_INPUT_PADDING`
+in the template): a read into padding every real caller supplies is a
+harness-made crash. Improving an existing harness usually beats writing a new
 one. Harness sources live under `${RESULTS_DIR}/fuzz/src/`, never in the
 target checkout. Keep both `LLVMFuzzerTestOneInput` and the standalone `main`
 working. Never file a fuzz artifact by hand.
@@ -132,6 +136,12 @@ convention.
 Complete the `S4-RECEIPT` comments at the top of the source:
 
 - `SOURCE-USAGE` — the local caller locations actually read;
+- `INPUT-BUFFER` — how that caller allocates the input it passes: quote the
+  allocation, and name any trailing padding, terminator, alignment, or
+  minimum size it guarantees. Set the template's `FZ_INPUT_PADDING` to that
+  padding (from the public header's constant when one exists) and preserve
+  the rest in the harness; libFuzzer's buffer is exact-size, so a target read
+  into padding every real caller supplies is a crash no caller can cause;
 - `CONSTRUCTOR` — the public operation that creates required state;
 - `ARG-RELATIONS` — length/capacity/option relationships the caller preserves;
 - `RESOURCE-FLOW` — ownership or state passed between public calls;

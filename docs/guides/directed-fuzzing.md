@@ -82,8 +82,13 @@ perform trusted setup unavailable to an attacker, so it cannot override the
 published/untrusted/uncovered admission gate. When no example exists, the
 template records `UNRESOLVED` and continues from the public declaration.
 
-Fill the receipt's `CONSTRUCTOR`, `ARG-RELATIONS`, `RESOURCE-FLOW`, and
-`TEARDOWN` fields with source-anchored facts. `bin/fuzz build` stores them in
+Fill the receipt's `INPUT-BUFFER`, `CONSTRUCTOR`, `ARG-RELATIONS`,
+`RESOURCE-FLOW`, and `TEARDOWN` fields with source-anchored facts.
+`INPUT-BUFFER` quotes how the caller allocates the bytes it passes (trailing
+padding, terminator, alignment, minimum size); the harness reproduces it,
+because libFuzzer hands over an exact-size buffer and a read into padding
+every real caller supplies is a crash no caller can cause. The template's
+`FZ_INPUT_PADDING` sets that padding. `bin/fuzz build` stores the fields in
 the binary manifest beside the exact harness digest, coverage guidance, and
 sanitizer status. A field still reading `UNRESOLVED` lists itself as
 unresolved, so an answered field cannot be contradicted by a stale summary

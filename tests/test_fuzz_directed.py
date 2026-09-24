@@ -565,10 +565,60 @@ class ContractFaithfulnessTests(unittest.TestCase):
         self.assertIn("#ifndef FUZZ_CAMPAIGN_BUILD", rendered)
         for field in (
             "BOUNDARY", "CONTROLS", "DECLARATION", "SOURCE-USAGE",
-            "CONSTRUCTOR", "ARG-RELATIONS", "RESOURCE-FLOW", "TEARDOWN",
-            "UNRESOLVED",
+            "INPUT-BUFFER", "CONSTRUCTOR", "ARG-RELATIONS", "RESOURCE-FLOW",
+            "TEARDOWN", "UNRESOLVED",
         ):
             self.assertIn(f"S4-RECEIPT {field}:", rendered)
+        # The generated receipt starts with the caller's allocation unknown,
+        # so it is listed until the agent quotes it.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "fuzz_f.c"
+            path.write_text(rendered, encoding="utf-8")
+            self.assertIn("input-buffer", fuzz_harness.harness_receipt(path).unresolved)
+
+    def test_the_template_hands_the_target_a_caller_padded_copy(self) -> None:
+        # libFuzzer's buffer is exact-size; a caller that pads its input
+        # makes a read into that padding legal. The template must pass the
+        # target a copy padded by FZ_INPUT_PADDING, and the replay main must
+        # go through the same path, or the probe replay disagrees.
+        compiler = shutil.which("cc") or shutil.which("clang")
+        if not compiler:
+            self.skipTest("no C compiler")
+        source = ROOT / "bin" / "fuzz"
+        namespace: dict = {}
+        text = source.read_text(encoding="utf-8")
+        start = text.index("TEMPLATE = ")
+        end = text.index("\ndef cmd_template")
+        exec(compile(text[start:end], "fuzz-template", "exec"), namespace)
+        rendered = namespace["TEMPLATE"].format(
+            target="a.c:f", hypothesis="H-1", symbol="f",
+            declaration="int f(const unsigned char *d, size_t n);",
+            controls="bytes", shapes="buffer+length", source_usage="UNRESOLVED")
+        self.assertIn("#define FZ_INPUT_PADDING 0", rendered)
+        # A stand-in target that reads four bytes past a short payload, as a
+        # parser relying on its callers' padding does.
+        rendered = rendered.replace("#define FZ_INPUT_PADDING 0",
+                                    "#define FZ_INPUT_PADDING 8")
+        rendered = rendered.replace(
+            "  (void)fz_rest;\n",
+            "  const uint8_t *buf;\n"
+            "  size_t n = fz_rest(&s, &buf);\n"
+            "  volatile uint32_t word;\n"
+            "  memcpy((void *)&word, buf + n, 4);\n"
+            "  if (word != 0) abort();\n")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "t.c").write_text(rendered, encoding="utf-8")
+            (root / "input").write_bytes(b"abc")
+            built = subprocess.run(
+                [compiler, "-fsanitize=address", "-g", "-o", str(root / "t"),
+                 str(root / "t.c")], capture_output=True, text=True)
+            if built.returncode != 0 and "sanitizer" in built.stderr.lower():
+                self.skipTest("compiler has no AddressSanitizer runtime")
+            self.assertEqual(built.returncode, 0, built.stderr)
+            ran = subprocess.run([str(root / "t"), str(root / "input")],
+                                 capture_output=True, text=True, timeout=60)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
 
 
 class HarnessReceiptTests(unittest.TestCase):
@@ -582,6 +632,8 @@ class HarnessReceiptTests(unittest.TestCase):
                 "// S4-RECEIPT CONTROLS: bytes\n"
                 "// S4-RECEIPT DECLARATION: int sample_parse(const char *, size_t);\n"
                 "// S4-RECEIPT SOURCE-USAGE: tests/sample_usage.c:7\n"
+                "// S4-RECEIPT INPUT-BUFFER: exact-size heap copy, no padding"
+                " — tests/sample_usage.c:5\n"
                 "// S4-RECEIPT CONSTRUCTOR: sample_open — include/sample.h:12\n"
                 "// S4-RECEIPT ARG-RELATIONS: length is payload bytes\n"
                 "// S4-RECEIPT RESOURCE-FLOW: handle remains caller-owned\n"
@@ -593,8 +645,39 @@ class HarnessReceiptTests(unittest.TestCase):
 
         self.assertEqual(receipt.boundary, "sample_parse")
         self.assertEqual(receipt.source_usage, "tests/sample_usage.c:7")
+        self.assertTrue(receipt.input_buffer.startswith("exact-size heap copy"))
+        self.assertEqual(receipt.as_dict()["input_buffer"], receipt.input_buffer)
         self.assertEqual(receipt.unresolved, ["callback-order", "optional-state"])
         self.assertEqual(receipt.warnings, [])
+
+    def test_a_receipt_without_the_callers_input_buffer_is_not_resolved(self) -> None:
+        # Every other field answered, but nothing says how the grounding
+        # caller allocates its input: that receipt must stay unresolved, so
+        # status withholds the derivative step exactly as for any other
+        # unanswered field.
+        with tempfile.TemporaryDirectory() as raw:
+            source = Path(raw) / "fuzz_sample.c"
+            source.write_text(
+                "// S4-RECEIPT BOUNDARY: sample_parse\n"
+                "// S4-RECEIPT SOURCE-USAGE: tests/sample_usage.c:7\n"
+                "// S4-RECEIPT CONSTRUCTOR: none\n"
+                "// S4-RECEIPT ARG-RELATIONS: length is payload bytes\n"
+                "// S4-RECEIPT RESOURCE-FLOW: none\n"
+                "// S4-RECEIPT TEARDOWN: sample_free\n"
+                "// S4-RECEIPT UNRESOLVED: none\n",
+                encoding="utf-8",
+            )
+            receipt = fuzz_harness.harness_receipt(source)
+        self.assertEqual(receipt.unresolved, ["input-buffer"])
+        state = fuzz_campaign.HarnessState(
+            name="fuzz_sample", binary="/tmp/fuzz_sample",
+            slices=3, quarantine=fuzz_campaign.VERDICT_SATURATED,
+        )
+        record = {"binary": state.binary, "guided": True,
+                  "receipt": receipt.as_dict(), "receipt_warnings": []}
+        self.assertFalse(fuzz_campaign.derivative_ready(state, record))
+        row = fuzz_campaign.status_rows({state.name: state}, {state.name: record})
+        self.assertIn("input-buffer", row[state.name]["next"])
 
     def test_duplicates_warn_and_legacy_sources_remain_compatible(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -615,8 +698,8 @@ class HarnessReceiptTests(unittest.TestCase):
         # Nothing answered the source questions, so every one is unresolved
         # whether or not the author remembered to list it.
         self.assertEqual(parsed.unresolved, [
-            "source-usage", "constructor", "argument-relations",
-            "resource-flow", "teardown",
+            "source-usage", "input-buffer", "constructor",
+            "argument-relations", "resource-flow", "teardown",
         ])
         # A source with no receipt records none, so "has a receipt" is
         # readable straight off the manifest field rather than off a dict of
@@ -978,7 +1061,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(record["receipt"]["boundary"], "sample_parse")
         self.assertEqual(
             record["receipt"]["unresolved"],
-            ["constructor", "resource-flow", "teardown"],
+            ["constructor", "resource-flow", "teardown", "input-buffer"],
         )
         self.assertEqual(ungrounded["receipt"], {})
         self.assertEqual(legacy["receipt"], {})

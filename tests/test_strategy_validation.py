@@ -144,7 +144,8 @@ class StrategyValidationTests(unittest.TestCase):
         s4 = " ".join(self.text("S4-directed-fuzzing.md").split())
         for pattern in (
             r"at most two.*local caller",
-            r"SOURCE-USAGE", r"CONSTRUCTOR", r"ARG-RELATIONS",
+            r"SOURCE-USAGE", r"INPUT-BUFFER", r"FZ_INPUT_PADDING",
+            r"CONSTRUCTOR", r"ARG-RELATIONS",
             r"RESOURCE-FLOW", r"TEARDOWN", r"UNRESOLVED",
             r"at most three.*hop",
             r"does not prove.*reachab",
@@ -157,6 +158,11 @@ class StrategyValidationTests(unittest.TestCase):
         ):
             with self.subTest(pattern=pattern):
                 self.assertRegex(s4, pattern)
+        # The rendered brief carries the allocation rule, not only the
+        # playbook body an agent may never open.
+        brief = " ".join(prompt.strategy_brief(
+            "S4", ROOT / ".agents" / "references").split())
+        self.assertRegex(brief, r"INPUT-BUFFER.*padding.*harness-made crash")
 
     def test_s6_playbook_time_query_and_mapping_guidance_are_current(self) -> None:
         s6 = self.text("S6-cross-project.md")

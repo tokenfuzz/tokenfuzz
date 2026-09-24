@@ -1322,6 +1322,7 @@ _RECEIPT_FIELDS = {
     "CONTROLS": "controls",
     "DECLARATION": "declaration",
     "SOURCE-USAGE": "source_usage",
+    "INPUT-BUFFER": "input_buffer",
     "CONSTRUCTOR": "constructor",
     "ARG-RELATIONS": "argument_relations",
     "RESOURCE-FLOW": "resource_flow",
@@ -1335,6 +1336,11 @@ _RECEIPT_LINE = re.compile(
 # field is filled in and its name is not struck from the list.
 _RECEIPT_ANSWERABLE = (
     ("source-usage", "source_usage"),
+    # How the grounding caller allocates the bytes it passes: trailing
+    # padding, terminator, alignment, minimum size. A harness that hands the
+    # target libFuzzer's exact-size buffer where every real caller pads it
+    # reports the target reading into that padding as a harness-made crash.
+    ("input-buffer", "input_buffer"),
     ("constructor", "constructor"),
     ("argument-relations", "argument_relations"),
     ("resource-flow", "resource_flow"),
@@ -1351,6 +1357,7 @@ class HarnessReceipt:
     controls: str = ""
     declaration: str = ""
     source_usage: str = ""
+    input_buffer: str = ""
     constructor: str = ""
     argument_relations: str = ""
     resource_flow: str = ""
@@ -1372,6 +1379,7 @@ class HarnessReceipt:
             "controls": self.controls,
             "declaration": self.declaration,
             "source_usage": self.source_usage,
+            "input_buffer": self.input_buffer,
             "constructor": self.constructor,
             "argument_relations": self.argument_relations,
             "resource_flow": self.resource_flow,
