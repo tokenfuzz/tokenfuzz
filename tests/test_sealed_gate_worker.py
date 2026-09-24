@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import threading
@@ -195,16 +196,16 @@ class SealTests(unittest.TestCase):
         (done / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
         self.assertEqual(self._sealed(worker), (set(), set()))
 
-    def test_a_quiet_finding_seals_while_a_session_that_may_own_it_runs(self) -> None:
-        # A finding names no slot and nothing attributes it until its writer
-        # ends; a crash triage demotes mid-run is in the same position.
+    def test_a_quiet_finding_waits_for_the_session_that_may_own_it(self) -> None:
+        # Agents file a finding first and keep probing, so a verdict that moved
+        # it under a live writer would let the writer recreate it as a second
+        # artifact; only a crash bundle seals on quiet.
         worker = self._worker()
         worker.launch(1, continuation=False)
         filed = _artifact(self.results, "findings", "FIND-001-1")
         worker.observe()
-        self.assertEqual(self._sealed(worker), (set(), set()))
         self._age(filed, audit_runner.GATE_QUIET_SECONDS + 1)
-        self.assertEqual(self._sealed(worker), ({filed.name}, set()))
+        self.assertEqual(self._sealed(worker), (set(), set()))
 
     def test_the_worker_wakes_when_a_finished_artifact_turns_quiet(self) -> None:
         worker = self._worker()
@@ -228,18 +229,16 @@ class SealTests(unittest.TestCase):
             wait.call_args.args[0], audit_runner.GATE_QUIET_SECONDS, delta=1,
         )
 
-    def test_a_lapsed_quiet_seal_leaves_no_past_due_hold(self) -> None:
-        # Held while quiet-sealed, then edited by its still-running writer:
-        # the next sweep seals nothing, and a hold left armed spins _run.
-        worker = self._worker()
-        worker.launch(1, continuation=False)
+    def test_a_hold_whose_finding_left_is_not_left_past_due(self) -> None:
+        # A held finding a verdict moved away: the next sweep seals nothing,
+        # and a hold left armed would spin _run.
         filed = _artifact(self.results, "findings", "FIND-001-1")
+        worker = self._worker()
         worker.observe()
-        self._age(filed, audit_runner.GATE_QUIET_SECONDS + 1)
         with mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 180):
             self.assertEqual(self._sweep_with_gates(worker), {})
         self.assertIsNotNone(worker._hold_deadline)
-        (filed / "input.bin").write_bytes(b"late")
+        shutil.rmtree(filed)
         worker._hold_deadline = time.monotonic() - 1
         self.assertEqual(self._sweep_with_gates(worker), {})
         self.assertIsNone(worker._hold_deadline)

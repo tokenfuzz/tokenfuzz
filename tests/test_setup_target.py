@@ -792,6 +792,22 @@ class SetupTargetTests(unittest.TestCase):
             ["-lm", "build-asan/libdependency.a", "-framework", "Security"],
         )
 
+    def test_an_inconclusive_peer_trial_keeps_the_peer(self) -> None:
+        # A hung or unlaunchable trial is no diagnostic; dropping a library a
+        # harness needs would read as every harness failing.
+        def fake(command, *_args, **_kwargs):
+            peer_step = any("peer" in Path(str(part)).name for part in command)
+            code = target_config.timeout_utils.TIMEOUT_RC if peer_step else 0
+            return SimpleNamespace(returncode=code, stdout=b"")
+
+        with mock.patch.object(target_config.timeout_utils, "run_timeout", side_effect=fake), \
+                contextlib.redirect_stderr(io.StringIO()) as warned:
+            trial = target_config.loadable_shared_peers(
+                self.temp, "build-asan/libcore.so", ["build-asan/libpeer.so"], [],
+            )
+        self.assertEqual(trial, (["build-asan/libpeer.so"], {}))
+        self.assertIn("inconclusive", warned.getvalue())
+
     def test_a_shared_peer_a_harness_cannot_load_is_left_out(self) -> None:
         # A binding module in the output directory needs its interpreter's
         # symbols; listing it broke every harness. A peer an earlier setup

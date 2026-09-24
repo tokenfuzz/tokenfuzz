@@ -85,7 +85,9 @@ origin, credential verification, and the other boundary rows); size
 arithmetic, casts, and exported APIs alone make S3 a companion on nearly
 every memory-heavy file, so those cards stay claimable behind it. The
 optional rerank is told the pinned strategy and the declared attacker
-controls.
+controls. Unpinned runs use the same evidence key, but only to break ties
+among cards no one has worked, and their rerank also sees the attacker
+controls; neither hides a card.
 
 Each angle a file signals is its own card: a file that reads as both S7 and
 S5 material yields one card per strategy, and each is claimed, worked, and

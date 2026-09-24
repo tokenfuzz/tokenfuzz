@@ -78,7 +78,7 @@ Install and authenticate at least one supported CLI:
 
 | Backend | CLI | Notes |
 | --- | --- | --- |
-| Claude | `claude` | Install and authenticate Claude Code. |
+| Claude | `claude` | Install and authenticate Claude Code. Agents load none of your Claude settings files, so authenticate by login or environment, not an `apiKeyHelper` or `env` block in `settings.json`. |
 | Codex | `codex` | Install and authenticate Codex CLI. |
 | Gemini | `agy` by default | Install the Antigravity CLI and authenticate. Google Gemini CLI is used instead when `USE_GEMINI_CLI=1`. |
 | Grok | `grok` | Install Grok Build and configure its credentials. |

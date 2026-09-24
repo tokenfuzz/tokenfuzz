@@ -332,9 +332,9 @@ static size_t fz_rest(fz_stream *s, const uint8_t **out) {{
 extern "C"
 #endif
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
-  /* Rebuild the input the way the grounding caller allocates it; `!size`
-     keeps a zero-length input allocatable. */
-  uint8_t *input = (uint8_t *)calloc(1, size + FZ_INPUT_PADDING + !size);
+  /* Rebuild the input the way the grounding caller allocates it. No extra
+     byte for empty input: a read of data[0] must still overflow. */
+  uint8_t *input = (uint8_t *)calloc(1, size + FZ_INPUT_PADDING);
   if (!input) return 0;
   if (size) memcpy(input, data, size);
   fz_stream s = {{input, size}};

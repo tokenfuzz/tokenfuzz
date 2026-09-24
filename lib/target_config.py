@@ -3039,6 +3039,10 @@ def peer_harness_link_args(
 _PEER_TRIAL_SECONDS = 60
 
 
+class _PeerTrialInconclusive(Exception):
+    """A peer trial step that neither linked nor produced a diagnostic."""
+
+
 def loadable_shared_peers(
     target_root: Path, primary_library: str, peers: list[str], base: list[str],
 ) -> tuple[list[str], dict[str, str]] | None:
@@ -3076,7 +3080,9 @@ def loadable_shared_peers(
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 )
             except OSError as exc:
-                return f"{stage} failed: {exc}"
+                raise _PeerTrialInconclusive(f"{stage}: {exc}") from exc
+            if completed.returncode == timeout_utils.TIMEOUT_RC:
+                raise _PeerTrialInconclusive(f"{stage} timed out")
             if not completed.returncode:
                 return ""
             output = (completed.stdout or b"").decode("utf-8", "replace")
@@ -3097,17 +3103,27 @@ def loadable_shared_peers(
                 "link",
             ) or run([str(binary)], "start")
 
-        if run(
-            [compiler, "-fsanitize=address", "-c", str(source), "-o", str(program)],
-            "compile",
-        ) or attempt([], "base"):
+        try:
+            if run(
+                [compiler, "-fsanitize=address", "-c", str(source), "-o", str(program)],
+                "compile",
+            ) or attempt([], "base"):
+                return None
+        except _PeerTrialInconclusive:
             return None
         kept: list[str] = []
         dropped: dict[str, str] = {}
         for index, peer in enumerate(peers):
-            reason = attempt(
-                [str(_resolve_target_path(target_root, peer))], f"peer{index}",
-            )
+            try:
+                reason = attempt(
+                    [str(_resolve_target_path(target_root, peer))], f"peer{index}",
+                )
+            except _PeerTrialInconclusive as exc:
+                # Only a real link or load diagnostic drops a peer; a hung or
+                # unlaunchable trial says nothing, and dropping a library a
+                # harness needs would read as every harness failing.
+                print(f"WARN: kept shared peer {peer}: trial inconclusive ({exc})", file=sys.stderr)
+                reason = ""
             if reason:
                 dropped[peer] = reason
             else:

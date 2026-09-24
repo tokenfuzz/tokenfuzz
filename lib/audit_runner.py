@@ -3685,7 +3685,10 @@ class SealedGateWorker:
                     sealed_now = touchers_done(directory.name)
                 else:
                     sealed_now = seen < threshold
-                if sealed_now or quiet(directory):
+                # No quiet seal for findings: agents file one first and keep
+                # probing, so a verdict could move it under a live writer
+                # that then recreates it as a second artifact.
+                if sealed_now:
                     findings.append(directory)
                 continue
             total_crashes += 1
