@@ -126,6 +126,22 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertFalse([name for name in cache_entries if name.endswith(".dSYM")], cache_entries)
         self.assertTrue(binaries[0].with_name(binaries[0].name + ".o").is_file(), cache_entries)
 
+    def test_an_edited_local_include_rebuilds_the_harness(self) -> None:
+        (self.scratch / "shared").mkdir()
+        (self.scratch / "shared" / "leaf.h").write_text("#define LEAF 1\n")
+        (self.scratch / "local.h").write_text('#include "shared/leaf.h"\n')
+        self.harness.write_text('#include "local.h"\n' + self.harness.read_text())
+        compiler = self.fake_compiler()
+        first = self.run_probe(CXX=compiler)
+        self.assertIn("built harness:", first.stdout + first.stderr)
+        # An unrelated scratch file is not part of the build.
+        (self.scratch / "notes.h").write_text("unrelated\n")
+        self.assertNotIn("built harness:", self.run_probe(CXX=compiler).stdout)
+        # A transitively included local header is.
+        (self.scratch / "shared" / "leaf.h").write_text("#define LEAF 2\n")
+        second = self.run_probe(CXX=compiler)
+        self.assertIn("built harness:", second.stdout + second.stderr)
+
     def test_a_link_libs_source_builds_with_the_target_includes_and_defines(self) -> None:
         (self.target / "include").mkdir()
         (self.target / "include" / "support.h").write_text(

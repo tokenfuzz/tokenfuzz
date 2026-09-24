@@ -336,6 +336,38 @@ def stat_key(path: str) -> str:
         return ""
 
 
+_QUOTED_INCLUDE_RE = re.compile(rb'^[ \t]*#[ \t]*include[ \t]*"([^"\n]+)"', re.MULTILINE)
+
+
+def local_include_digest(source: Path) -> str:
+    """Digest the quoted `#include` files a harness pulls from its own directory.
+
+    The harness cache keys the build on source bytes, so an edited local
+    header otherwise reran the stale binary. Only files that resolve inside
+    the harness directory count: target headers are pinned by the target
+    revision already, and the walk must stay bounded and deterministic.
+    """
+    root = source.parent.resolve()
+    seen: dict[Path, str] = {}
+    pending = [source.resolve()]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        try:
+            data = current.read_bytes()
+        except OSError:
+            continue
+        seen[current] = hashlib.sha1(data).hexdigest()
+        for name in _QUOTED_INCLUDE_RE.findall(data):
+            included = (current.parent / os.fsdecode(name)).resolve()
+            if included.is_file() and included.is_relative_to(root) and included not in seen:
+                pending.append(included)
+    return hashlib.sha1("".join(
+        f"{path.relative_to(root)}={digest}\n" for path, digest in sorted(seen.items())
+    ).encode()).hexdigest()
+
+
 def _c_carrier_tokens(text: str) -> str:
     """Keep only carrier-relevant C tokens after translation-phase splicing."""
     text = _C_LINE_SPLICE_RE.sub("", text)
@@ -540,7 +572,8 @@ class HarnessBuilder:
         cache.mkdir(parents=True, exist_ok=True)
         sanitizer_lib = self._sanitizer_lib() if kind == "cc" else ""
         identity = "\n".join((
-            "schema=6", f"source={hashlib.sha1(self.source.read_bytes()).hexdigest()}",
+            "schema=7", f"source={hashlib.sha1(self.source.read_bytes()).hexdigest()}",
+            f"local_includes={local_include_digest(self.source)}",
             f"compiler={shutil.which(compiler) or compiler}", f"compiler_stat={stat_key(shutil.which(compiler) or compiler)}",
             f"kind={kind}", f"flags={flags}", f"sanitizer={self.probe.sanitizer}",
             f"library={sanitizer_lib}", f"library_stat={stat_key(sanitizer_lib)}",
