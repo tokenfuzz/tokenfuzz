@@ -3036,6 +3036,85 @@ def peer_harness_link_args(
     ]
 
 
+_PEER_TRIAL_SECONDS = 60
+
+
+def loadable_shared_peers(
+    target_root: Path, primary_library: str, peers: list[str], base: list[str],
+) -> tuple[list[str], dict[str, str]] | None:
+    """Split shared peers into those a harness can link and start, and the rest.
+
+    A build's output directory also holds libraries that are not standalone
+    APIs: a language extension module whose interpreter symbols only the
+    interpreter provides, or a test fixture. Listing one in `link_libs` broke
+    every harness, at the link on one platform and at load on another, so a
+    peer earns its place by linking and starting an empty sanitizer program
+    beside the primary and `base`, the inputs every harness links. Trial,
+    not a name list: nothing in a file name says a library cannot load.
+
+    Returns (kept, dropped peer -> reason), or None when the empty program
+    fails without any peer: the trial then says nothing about the peers.
+    Static peers are not tried: an empty program pulls nothing from an archive.
+    """
+    compiler = os.environ.get("CC") or "clang"
+    primary = _resolve_target_path(target_root, primary_library)
+    base_args = [
+        str(_resolve_target_path(target_root, value)) if is_path else value
+        for value, is_path in link_arg_path_roles(base)
+    ]
+    with tempfile.TemporaryDirectory(prefix="peer-trial-") as name:
+        work = Path(name)
+        source = work / "main.c"
+        source.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        program = work / "main.o"
+
+        def run(command: list[str], stage: str) -> str:
+            """Why one step failed, or ""."""
+            try:
+                completed = timeout_utils.run_timeout(
+                    command, _PEER_TRIAL_SECONDS,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                )
+            except OSError as exc:
+                return f"{stage} failed: {exc}"
+            if not completed.returncode:
+                return ""
+            output = (completed.stdout or b"").decode("utf-8", "replace")
+            lines = [line.strip() for line in output.splitlines() if line.strip()]
+            detail = next(
+                (line for line in lines if re.search(r"error|not found|undefined", line, re.I)),
+                lines[0] if lines else f"exit {completed.returncode}",
+            )
+            return f"{stage} failed: {detail}"
+
+        def attempt(extra: list[str], name: str) -> str:
+            """Why the empty harness failed to link or start, or ""."""
+            binary = work / name
+            return run(
+                [compiler, "-fsanitize=address", str(program), str(primary),
+                 f"-Wl,-rpath,{primary.parent}", *base_args, *extra,
+                 "-o", str(binary)],
+                "link",
+            ) or run([str(binary)], "start")
+
+        if run(
+            [compiler, "-fsanitize=address", "-c", str(source), "-o", str(program)],
+            "compile",
+        ) or attempt([], "base"):
+            return None
+        kept: list[str] = []
+        dropped: dict[str, str] = {}
+        for index, peer in enumerate(peers):
+            reason = attempt(
+                [str(_resolve_target_path(target_root, peer))], f"peer{index}",
+            )
+            if reason:
+                dropped[peer] = reason
+            else:
+                kept.append(peer)
+        return kept, dropped
+
+
 def _cmake_delegated_language(target_root: Path) -> str:
     """Return a language whose top-level product CMake only orchestrates."""
     manifests = [target_root / "CMakeLists.txt"]

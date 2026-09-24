@@ -792,6 +792,60 @@ class SetupTargetTests(unittest.TestCase):
             ["-lm", "build-asan/libdependency.a", "-framework", "Security"],
         )
 
+    def test_a_shared_peer_a_harness_cannot_load_is_left_out(self) -> None:
+        # A binding module in the output directory needs its interpreter's
+        # symbols; listing it broke every harness. A peer an earlier setup
+        # listed is judged again and removed.
+        compiler = os.environ.get("CC") or "clang"
+        if shutil.which(compiler) is None:
+            self.skipTest(f"{compiler} is not available")
+        target = self.temp / "shared-peer-trial"
+        lib = target / "build-asan" / "lib"
+        lib.mkdir(parents=True)
+        suffix = ".dylib" if sys.platform == "darwin" else ".so"
+        undefined = (
+            ["-Wl,-undefined,dynamic_lookup"] if sys.platform == "darwin" else []
+        )
+        sources = {
+            "samplecore": ("int sample_core(void) { return 1; }\n", []),
+            "sampleimage": ("int sample_image(void) { return 2; }\n", []),
+            # A data reference binds at load on every platform.
+            "samplebinding": (
+                "extern int interp_state;\nint *sample_binding = &interp_state;\n",
+                undefined,
+            ),
+        }
+        for name, (body, flags) in sources.items():
+            source = self.temp / f"{name}.c"
+            source.write_text(body, encoding="utf-8")
+            subprocess.run(
+                [compiler, "-shared", "-fPIC", str(source), *flags,
+                 "-o", str(lib / f"lib{name}{suffix}")],
+                check=True, capture_output=True,
+            )
+        config = self.temp / "shared-peer-trial.toml"
+        binding = f"build-asan/lib/libsamplebinding{suffix}"
+        config.write_text(
+            'target = "demo"\n'
+            f'asan_lib = "build-asan/lib/libsamplecore{suffix}"\n'
+            f'link_libs = ["-lm", "{binding}"]\n\n'
+            '[sanitizer]\nenabled = ["asan"]\n',
+            encoding="utf-8",
+        )
+        setup = SETUP_TARGET.Setup.__new__(SETUP_TARGET.Setup)
+        setup.target_root = target
+        setup.checkout_root = target
+        setup.toml = config
+        logged = io.StringIO()
+        with contextlib.redirect_stdout(logged), contextlib.redirect_stderr(logged):
+            setup.refresh_harness_link_libs()
+        loaded = target_config.Config(target_root=str(target))
+        target_config.load_toml_into(loaded, config)
+        self.assertEqual(
+            loaded.link_libs, ["-lm", f"build-asan/lib/libsampleimage{suffix}"],
+        )
+        self.assertIn(f"Left harness peer {binding} out of link_libs", logged.getvalue())
+
     def test_a_header_only_repair_preserves_curated_harness_inputs(self) -> None:
         setup_target = SETUP_TARGET
         target = self.temp / "header-mismatch-target"

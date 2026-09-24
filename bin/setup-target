@@ -1723,10 +1723,32 @@ class Setup:
             detected += target_config.cmake_package_harness_link_args(
                 self.target_root, san_dir, config.asan_lib,
             )
-        detected += target_config.peer_harness_link_args(
+        peers = target_config.peer_harness_link_args(
             self.target_root, san_dir, config.asan_lib,
         )
-        merged = target_config.merge_link_args(config.link_libs, detected)
+        existing = list(config.link_libs)
+        if peers and Path(config.asan_lib).suffix in {".dylib", ".so"}:
+            # Peers are tried without the ones an earlier setup listed, so a
+            # listed peer that cannot load is judged again and removed rather
+            # than kept by the merge.
+            base = target_config.merge_link_args(
+                [value for value in existing if value not in peers], detected,
+            )
+            trial = target_config.loadable_shared_peers(
+                self.target_root, config.asan_lib, peers, base,
+            )
+            if trial is None:
+                log(
+                    "WARN: an empty harness linked against "
+                    f"{config.asan_lib} failed to link or start; peer libraries "
+                    "were added untried"
+                )
+            else:
+                peers, dropped = trial
+                for peer, reason in dropped.items():
+                    log(f"Left harness peer {peer} out of link_libs: {reason}")
+                existing = [value for value in existing if value not in dropped]
+        merged = target_config.merge_link_args(existing, [*detected, *peers])
         if merged == config.link_libs:
             return
         before = self.toml.read_text(encoding="utf-8")
