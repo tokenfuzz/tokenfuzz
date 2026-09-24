@@ -1282,7 +1282,8 @@ class WorkQueueTests(unittest.TestCase):
 
     def test_accepted_finding_demotes_its_origin_card_once(self) -> None:
         self.add_hypothesis(hyp_id="H-find", card_id="WORK-A")
-        workqueue.update_hypothesis(self.ctx, "H-find", "FIND-007", agent="1")
+        (self.results / "findings" / "FIND-007-example").mkdir(parents=True)
+        workqueue.update_hypothesis(self.ctx, "H-find", "FIND-007-example", agent="1")
 
         self.assertTrue(
             workqueue.record_accepted_artifact_card(
@@ -1297,6 +1298,33 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual(workqueue.card_conclusion_counts(self.ctx), {"WORK-A": 1})
 
+    def test_update_hyp_resolves_artifact_status_to_a_filed_bundle(self) -> None:
+        """A bare CRASH-NNN names no bundle; artifact joins then cannot link it."""
+        for name in ("CRASH-001-2", "CRASH-001-3", "CRASH-004-1", "CRASH-009-routed"):
+            bundle = self.results / "crashes" / name
+            bundle.mkdir(parents=True)
+            (bundle / "report.md").write_text("# complete\n")
+        self.add_hypothesis(hyp_id="H-own", card_id="WORK-A")
+        self.add_hypothesis(hyp_id="H-none", card_id="WORK-A")
+
+        row = workqueue.update_hypothesis(self.ctx, "H-own", "CRASH-004", agent="1")
+        self.assertEqual(row["status"], "CRASH-004-1")
+        with self.assertRaisesRegex(
+            workqueue.HypothesisStateError, "candidates: CRASH-001-2, CRASH-001-3",
+        ):
+            workqueue.update_hypothesis(self.ctx, "H-none", "CRASH-001", agent="1")
+        # A finding triage routed to crashes/ is still named as a candidate.
+        with self.assertRaisesRegex(
+            workqueue.HypothesisStateError, "FIND-009.*candidates: CRASH-009-routed",
+        ):
+            workqueue.update_hypothesis(self.ctx, "H-none", "FIND-009", agent="1")
+        rows = {r["id"]: r for r in workqueue.read_jsonl(self.results / "state" / "hypotheses.jsonl")}
+        self.assertEqual(rows["H-none"]["status"], "PENDING")
+        row = workqueue.update_hypothesis(
+            self.ctx, "H-none", "crash-001-2 (duplicate)", agent="1",
+        )
+        self.assertEqual(row["status"], "CRASH-001-2 (duplicate)")
+
     def test_an_agent_recorded_finding_is_not_counted_twice_on_acceptance(self) -> None:
         # The agent closed the hypothesis with the FIND id and recorded the
         # card status itself; triage accepting that finding is the same
@@ -1304,7 +1332,8 @@ class WorkQueueTests(unittest.TestCase):
         # its first bug.
         self.write_cards([self.card("PATCH-1", "src/parse.c", kind="s1-patch", strategy="S1")])
         self.add_hypothesis(hyp_id="H-one", card_id="PATCH-1")
-        workqueue.update_hypothesis(self.ctx, "H-one", "FIND-0001", agent="1")
+        (self.results / "findings" / "FIND-0001-x").mkdir(parents=True)
+        workqueue.update_hypothesis(self.ctx, "H-one", "FIND-0001-x", agent="1")
         workqueue.update_card_status(self.ctx, "PATCH-1", "find", agent="1")
         self.assertFalse(
             workqueue.record_accepted_artifact_card(self.results, "FIND-0001-x", "find"),
@@ -1563,6 +1592,28 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual([card["id"] for card in capped], ["PATCH-BUILT"])
         self.assertEqual(capped[0]["kind"], "s1-patch")
 
+    def test_patch_cards_stand_only_on_files_present_in_the_tree(self) -> None:
+        """A prior fix to a since-removed file has no surface to audit."""
+        (self.target / "src").mkdir()
+        (self.target / "src/kept.c").write_text("int fn(void);\n", encoding="utf-8")
+        patches = self.results / "patch-cards.jsonl"
+        workqueue.write_cards(patches, [
+            {
+                "id": "PATCH-REMOVED", "kind": "s1-patch", "score": 100,
+                "touched_files": ["src/removed.c"], "description": "fix",
+            },
+            {
+                "id": "PATCH-MIXED", "kind": "s1-patch", "score": 10,
+                "touched_files": ["src/removed.c", "src/kept.c"], "description": "fix",
+            },
+        ])
+
+        cards = workqueue.load_patch_cards(patches, None, ctx=self.ctx)
+
+        self.assertEqual([card["id"] for card in cards], ["PATCH-MIXED"])
+        self.assertEqual(cards[0]["file"], "src/kept.c")
+        self.assertEqual(cards[0]["touched_files"], ["src/kept.c"])
+
     def test_unclassified_work_does_not_outrank_unbuilt_native_work(self) -> None:
         """Absence of compilation evidence must not act as evidence of absence.
 
@@ -1679,6 +1730,28 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertNotIn("invalid status", result.stderr)
         self.assertIn("refuses discarded for WORK-A", result.stderr)
+
+    def test_state_cli_records_card_status_only_with_an_agent(self) -> None:
+        """An agentless row joins no lease, crash gate, or conclusion count."""
+        self.write_cards([self.card("WORK-A", "src/app.c")])
+        command = [
+            sys.executable, str(ROOT / "bin" / "state"),
+            "--target-path", str(self.target), "--target-slug", "sample",
+            "--results-dir", str(self.results),
+            "update-card", "--card-id", "WORK-A", "--status", "claimed",
+        ]
+        environment = {k: v for k, v in os.environ.items() if k != "AGENT_NUM"}
+
+        missing = subprocess.run(command, capture_output=True, text=True, env=environment)
+        from_env = subprocess.run(
+            command, capture_output=True, text=True, env=environment | {"AGENT_NUM": "2"},
+        )
+
+        self.assertEqual(missing.returncode, 2, missing.stderr)
+        self.assertIn("requires --agent", missing.stderr)
+        self.assertEqual(from_env.returncode, 0, from_env.stderr)
+        rows = workqueue.read_jsonl(self.results / "state" / "claims.jsonl")
+        self.assertEqual([row["agent"] for row in rows], ["2"])
 
     def test_card_discard_ignores_nonclean_runs_and_unprobed_hypotheses(self) -> None:
         self.write_cards([self.card("WORK-A", "src/app.c")])
@@ -2322,6 +2395,7 @@ class WorkQueueTests(unittest.TestCase):
 
         # A filed sibling must not hide a new one-run crash that still needs
         # bin/probe --confirm before it can become an artifact.
+        (self.results / "findings" / "FIND-007-1").mkdir(parents=True)
         workqueue.update_hypothesis(
             self.ctx, "H-KEPT", "FIND-007", agent="1",
         )
@@ -2340,6 +2414,7 @@ class WorkQueueTests(unittest.TestCase):
             hyp_id="H-PRIOR", card_id="WORK-HOT", agent="3",
             hypothesis="external entity at parse_manifest",
         )
+        (self.results / "findings" / "FIND-001-3").mkdir(parents=True)
         workqueue.update_hypothesis(
             self.ctx, "H-PRIOR", "FIND-001",
             note="filed after the parser fetched a remote entity", agent="3",
@@ -3420,7 +3495,7 @@ class WorkQueueTests(unittest.TestCase):
             sys.executable, str(ROOT / "bin/state"),
             "--results-dir", str(self.results), "--target-path", str(self.target),
             "--target-slug", "sample", "update-card", "--card-id", "WORK-B",
-            "--status", "blocked",
+            "--status", "blocked", "--agent", "1",
         ]
 
         empty = self.run_command(base + ["--note", "   "])
@@ -3453,6 +3528,7 @@ class WorkQueueTests(unittest.TestCase):
             "--results-dir", str(self.results), "--target-path", str(self.target),
             "--target-slug", "sample", "update-card", "--card-id", card["id"],
             "--status", "blocked", "--note", "runner cannot enter parser",
+            "--agent", "1",
         ])
         after = self.run_command(peek + ["--strategy", "S7"])
 

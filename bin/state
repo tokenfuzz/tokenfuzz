@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from workqueue import (
     site_overlap_advisory,
     add_note,
     add_run,
-    AmbiguousHypothesisUpdateError,
+    HypothesisStateError,
     agent_counts,
     AGENT_COUNT_KEYS,
     CardStatusUpdateError,
@@ -270,7 +271,7 @@ def main(argv: list[str]) -> int:
     )
     p_up.add_argument("--id", default="", help="hypothesis id to update (required)")
     p_up.add_argument("--agent", default="", help="agent scope for ids shared by several agents' rows")
-    p_up.add_argument("--status", required=True, help="new status; CRASH* is refused while the agent's crash report is unfinished, ENV-BLOCKED also blocks the card")
+    p_up.add_argument("--status", required=True, help="new status; CRASH-*/FIND-* must name a filed bundle (its directory name, or NNN resolved to this agent's -<agent> bundle), CRASH* is refused while the agent's crash report is unfinished, ENV-BLOCKED also blocks the card")
     p_up.add_argument("--note", default="", help="note stored on the hypothesis when non-empty")
     p_up.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
@@ -279,7 +280,7 @@ def main(argv: list[str]) -> int:
     )
     p_card.add_argument("--card-id", default="", help="work card id to update (required)")
     p_card.add_argument("--status", required=True, help="claimed, discarded, crash, find or blocked; CRASH-*, FIND-*, done, ENV-BLOCKED and mode-incompatible:* are normalized to those")
-    p_card.add_argument("--agent", default="", help="agent recorded on the status row")
+    p_card.add_argument("--agent", default=os.environ.get("AGENT_NUM", ""), help="agent recorded on the status row (default: $AGENT_NUM); required")
     p_card.add_argument("--note", default="", help="note recorded on the status row")
     p_card.add_argument("--json", action="store_true", help="emit full JSON row instead of the terse OK line")
 
@@ -575,7 +576,7 @@ def main(argv: list[str]) -> int:
             return 2
         try:
             row = update_hypothesis(ctx, args.id, args.status, args.note, agent=args.agent)
-        except AmbiguousHypothesisUpdateError as exc:
+        except HypothesisStateError as exc:
             print(f"[state] {exc}", file=sys.stderr)
             return 2
         if row is None:
@@ -586,6 +587,11 @@ def main(argv: list[str]) -> int:
     if args.cmd == "update-card":
         if not args.card_id:
             print("[state] update-card requires --card-id", file=sys.stderr)
+            return 2
+        if not args.agent.strip():
+            # An agentless row cannot be joined to its owner's lease, crash
+            # gates, or conclusion counts.
+            print("[state] update-card requires --agent (or AGENT_NUM)", file=sys.stderr)
             return 2
         allowed_card_status = {"claimed", "discarded", "crash", "find", "blocked"}
         requested_status = args.status.strip()

@@ -282,6 +282,7 @@ class CrashStateDedupTests(unittest.TestCase):
             return workqueue.site_overlap_advisory(ctx, row)
 
         add("1", "H-found", "src/parser.c:app_check:198")
+        (self.results / "findings" / "FIND-001").mkdir(parents=True)
         workqueue.update_hypothesis(ctx, "H-found", "FIND-001", agent="1")
         add("1", "H-dropped", "src/parser.c:app_check:190")
         workqueue.update_hypothesis(ctx, "H-dropped", "DISCARDED", agent="1")

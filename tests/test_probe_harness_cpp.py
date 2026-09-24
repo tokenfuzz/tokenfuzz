@@ -154,6 +154,56 @@ class ProbeCppHarnessTests(unittest.TestCase):
         self.assertFalse([name for name in cache_entries if name.endswith(".dSYM")], cache_entries)
         self.assertTrue([name for name in cache_entries if name.endswith(".link0.o")], cache_entries)
 
+    def _source_testcase(self, name: str, include: str) -> Path:
+        (self.target / "include" / "sampleproj").mkdir(parents=True)
+        (self.target / "include" / "sampleproj" / "api.h").write_text("int app_parse(void);\n")
+        # A source-parsing target may ship its own standard headers.
+        (self.target / "include" / "stddef.h").write_text("typedef long ptrdiff_t;\n")
+        cli = self.executable("target-cli", "print('ignored input')\n")
+        (self.slug_dir / "target.toml").write_text(
+            'target = "testproject"\nasan_lib = "build/libtarget.a"\n'
+            f'asan_bin = "{cli}"\nincludes = ["include"]\ndefines = []\n'
+            'link_libs = []\n[sanitizer]\nenabled = ["asan"]\n'
+        )
+        path = self.scratch / name
+        path.write_text(
+            "// TARGET: native/api.cpp:app_parse:1\n// HYPOTHESIS-ID: H-src\n"
+            f"// CATEGORY: bounds\n#include {include}\n#include <stdio.h>\n"
+            "int main(void) { return 0; }\n"
+        )
+        return path
+
+    def test_api_driver_without_harness_header_is_refused_not_fed_as_input(self) -> None:
+        """A driver fed to the target binary as input never runs.
+
+        The binary ignores the source and the run read as CLEAN evidence
+        against the card, so the probe refuses it before anything executes.
+        """
+        testcase = self._source_testcase("driver.cpp", "<sampleproj/api.h>")
+
+        process = subprocess.run(
+            [str(PROBE), str(testcase)], capture_output=True, text=True, env=self.env,
+        )
+
+        self.assertEqual(process.returncode, 2, process.stdout + process.stderr)
+        self.assertIn("<sampleproj/api.h>", process.stderr)
+        self.assertIn("// HARNESS: <driver>.cpp", process.stderr)
+        self.assertFalse((self.results / "state" / "runs.jsonl").exists())
+
+    def test_source_input_without_target_headers_still_reaches_the_binary(self) -> None:
+        """A source-parsing target's input includes standard headers only.
+
+        The target ships its own `stddef.h`, but the compiler's system search
+        list resolves that name too, and a commented-out include is not one.
+        """
+        testcase = self._source_testcase("input.c", "<stddef.h>\n// #include <sampleproj/api.h>")
+
+        process = self.run_probe(testcase)
+
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertRegex(process.stdout, r"command: \S+ asan generic \S+/input\.c\n")
+        self.assertNotIn("built harness", process.stdout + process.stderr)
+
     def _pin_s7(self) -> None:
         state = self.results / "state"
         state.mkdir(exist_ok=True)

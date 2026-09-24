@@ -1277,6 +1277,11 @@ def card_reason_for_strategy(card: dict, strategy: str = "") -> str:
     return "; ".join([f"{assigned} evidence: {', '.join(specific)}", *context])
 
 
+def _card_file_present(ctx: Context, file: str) -> bool:
+    """Whether a card's source file exists in the audited tree."""
+    return not file or (Path(ctx.target_root) / file).exists()
+
+
 def is_auditable_work_card(card: dict) -> bool:
     file = card.get("file", "")
     if file and not is_auditable_source_path(file):
@@ -1800,6 +1805,11 @@ def load_patch_cards(path: Path, limit: int | None = 40, ctx: Context | None = N
         touched_files = [f for f in card.get("touched_files", []) or [] if is_auditable_source_path(f)]
         if is_non_audit_patch_description(card.get("description", ""), touched_files):
             continue
+        # A fix's files may since have been removed from the pinned tree; a
+        # card on one has no surface, and the first touched file becomes the
+        # card's site, so only present files may stand for the fix.
+        if ctx is not None:
+            touched_files = [f for f in touched_files if _card_file_present(ctx, f)]
         if not touched_files:
             continue
         base_score = int(card.get("score", 0)) + 80
@@ -5124,6 +5134,51 @@ def _record_env_blocked_card(
     return True
 
 
+_ARTIFACT_STATUS_RE = re.compile(r"^(CRASH|FIND)-\S+", re.I)
+
+
+def _resolve_artifact_status(ctx: Context, status: str, agent: str, hid: str) -> str:
+    """Rewrite a CRASH-*/FIND-* status to the bundle directory it names.
+
+    Bundles are filed as `CRASH-NNN-<agent>`, so a bare `CRASH-NNN` names no
+    bundle; artifact-to-origin joins then miss it, or prefix-match another
+    agent's bundle with the same number. Accept the exact directory name or
+    this agent's `-<agent>` form, wherever triage has moved the bundle.
+    """
+    match = _ARTIFACT_STATUS_RE.match(str(status).strip())
+    if not match:
+        return status
+    token = match.group(0)
+    kind = "crashes" if match.group(1).upper() == "CRASH" else "findings"
+
+    def bundle_names(kind: str) -> set[str]:
+        roots = (
+            ctx.results_dir / kind,
+            ctx.results_dir / kind / ".duplicates",
+            ctx.results_dir / f"{kind}-rejected",
+        )
+        return {path.name for root in roots if root.is_dir() for path in root.iterdir() if path.is_dir()}
+
+    names = bundle_names(kind)
+    by_upper = {name.upper(): name for name in names}
+    for wanted in (token, f"{token}-{agent}"):
+        if wanted.upper() in by_upper:
+            return by_upper[wanted.upper()] + str(status).strip()[len(token):]
+    # Triage routes a finding with a saved reproducer to crashes/ under
+    # CRASH-<rest>, so list either kind's bundle carrying this number.
+    number = token.split("-", 1)[1].upper()
+    candidates = sorted(
+        name for name in names | bundle_names("findings" if kind == "crashes" else "crashes")
+        if re.match(rf"{re.escape(number)}(?:$|[-.])", name.split("-", 1)[-1].upper())
+    )
+    raise HypothesisStateError(
+        f"update-hyp refuses {token} for {hid}: no {kind}/ bundle is named "
+        f"{token} or {token}-{agent}"
+        + (f"; candidates: {', '.join(candidates)}" if candidates else "")
+        + ". Use the exact bundle directory name."
+    )
+
+
 def update_hypothesis(
     ctx: Context,
     hid: str,
@@ -5133,6 +5188,7 @@ def update_hypothesis(
 ) -> dict | None:
     path = state_dir(ctx.results_dir) / "hypotheses.jsonl"
     def mutate(rows: list[dict]) -> dict | None:
+        nonlocal status
         matches = [
             row
             for row in rows
@@ -5146,6 +5202,10 @@ def update_hypothesis(
                 f"{f' (agents: {agents})' if agents else ''}; rerun with --agent or use unique ids"
             )
         found = matches[0] if matches else None
+        if found:
+            status = _resolve_artifact_status(
+                ctx, status, str(found.get("agent", "")), hid,
+            )
         if (
             found
             and str(status).upper().startswith("CRASH")

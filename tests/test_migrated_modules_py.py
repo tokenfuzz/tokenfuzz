@@ -2116,6 +2116,11 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         f"tools={pinned_tools!r} cards={pinned_cards!r}",
     )
     refresh_runtime.fixed_strategy = "S1"
+    # Patch cards stand only on files present in the audited tree.
+    for index in range(12):
+        unit = generic_target / "src" / f"unit{index:02d}.c"
+        unit.parent.mkdir(parents=True, exist_ok=True)
+        unit.write_text("int unit(void);\n", encoding="utf-8")
     audit_runner.workqueue.write_cards(
         refresh_results / "patch-cards.jsonl",
         [
