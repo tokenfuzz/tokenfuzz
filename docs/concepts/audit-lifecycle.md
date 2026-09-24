@@ -212,7 +212,8 @@ while, before judging it, then makes a final pass after the workers drain.
     and a sweep that waited on it once left every later artifact ungated to
     the end of the wall. A gate or cluster-expansion model call is not
     started with less wall left than the fastest completed call of its kind
-    in the run; a review waits for the pass after the wall instead of being
+    in the run, or, before one completes, than the backend's base decision
+    timeout; a review waits for the pass after the wall instead of being
     cut off without a vote. A steward tick every few minutes scores the
     generation, rotates starved strategy lanes, and re-ranks the queue
     without stopping anyone. The one full pass over the whole tree, including

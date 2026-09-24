@@ -36,6 +36,7 @@ from workqueue import (
     list_work_cards,
     list_crashes,
     list_findings,
+    open_cardless_lead,
     recent_claims,
     recent_hypotheses,
     recent_notes,
@@ -143,7 +144,7 @@ def main(argv: list[str]) -> int:
 
     p_next = sub.add_parser(
         "next-card",
-        help="claim and print the next eligible work card for one agent",
+        help="print the agent's open card-less lead, else claim and print its next eligible work card",
         formatter_class=formatter,
     )
     p_next.add_argument("--agent", required=True, help="agent number the claim is recorded for")
@@ -447,6 +448,28 @@ def main(argv: list[str]) -> int:
         except ValueError as exc:
             print(f"[state] {exc}", file=sys.stderr)
             return 2
+        # An open lead of the agent's own, such as a crash sibling from
+        # cluster expansion, outranks a fresh card (bugs cluster). It is
+        # printed in the card's shape so a caller reading id/kind/file/reason
+        # sees it, and nothing is claimed: the lead already belongs to the agent.
+        lead = open_cardless_lead(ctx, args.agent)
+        if lead is not None:
+            print(json.dumps({
+                "id": lead.get("id", ""),
+                "kind": "open-lead",
+                "file": lead.get("file", ""),
+                "strategy": lead.get("strategy", ""),
+                "status": lead.get("status", ""),
+                "hypothesis": lead.get("hypothesis", ""),
+                "reason": (
+                    f"Your open hypothesis ({lead.get('input_shape', '')}) comes "
+                    "before any new card. Probe it with "
+                    f"`HYPOTHESIS-ID: {lead.get('id', '')}`, then close it with "
+                    "`bin/state update-hyp`; a lead whose site already heads a "
+                    "filed crash state closes with that CRASH id."
+                ),
+            }, sort_keys=True))
+            return 0
         card = claim_next_card(ctx, args.agent, args.mode, args.role, claim=not args.peek, strategy=strategy)
         if card is None:
             return 1

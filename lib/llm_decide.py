@@ -180,7 +180,7 @@ def fastest_completed_seconds(*decisions: str) -> int | None:
 
     Names match exactly: a batch runs slower than its single-item sibling, so
     letting one floor the other would refuse calls that fit. `None` until
-    one completes: without a measurement nothing is refused.
+    one completes.
     """
     fastest: int | None = None
     try:
@@ -1113,6 +1113,11 @@ def decision_timeout(decision: str, backend: str = "") -> int:
     return value if value >= 1 else default
 
 
+def tier_decision_timeout() -> int:
+    """The ceiling of a decision with no measured default: the tier or the operator's setting."""
+    return decision_timeout("")
+
+
 def llm_decide(
     decision: str,
     required_keys: str,
@@ -1120,6 +1125,7 @@ def llm_decide(
     timeout: int = 15,
     *,
     usage_index: str | os.PathLike[str] | None = None,
+    deadline_clamped: bool = False,
 ) -> Optional[dict | list]:
     """Run one LLM decision. Returns the parsed JSON, or None on any failure.
 
@@ -1127,7 +1133,8 @@ def llm_decide(
     set still runs the mock. On real
     backend dispatch, telemetry lines `<decision> <state> bytes=N elapsed=Ns`
     are emitted to the LLM decision log so cost-analysis tooling can sum
-    prompt bytes + wall-clock per decision.
+    prompt bytes + wall-clock per decision. `deadline_clamped` marks a
+    `timeout` a stage deadline cut below the decision's configured window.
     """
     mock_val = _resolve_mock_value(decision)
 
@@ -1163,6 +1170,7 @@ def llm_decide(
 
     result, backend_error = _run_decision(
         decision, required_keys, prompt, timeout, mock_val, usage_index,
+        deadline_clamped=deadline_clamped,
     )
 
     # Update the breaker on real-backend outcomes only: a success clears the
@@ -1297,6 +1305,8 @@ def _run_decision(
     timeout: int,
     mock_val: str,
     usage_index: str | os.PathLike[str] | None = None,
+    *,
+    deadline_clamped: bool = False,
 ) -> "tuple[Optional[dict | list], bool]":
     """Dispatch one decision (mock or real backend) and validate its JSON.
 
@@ -1375,7 +1385,10 @@ def _run_decision(
                 "\n".join(raw_string(part) for part in (exc.output, exc.stderr)),
                 complete=False,
             )
-            _failcache_trip_timed_out_prompt(decision, prompt)
+            # A window a stage deadline cut short says nothing about how long
+            # the prompt needs; the ordinary failure count still applies.
+            if not deadline_clamped:
+                _failcache_trip_timed_out_prompt(decision, prompt)
             return None, False
         except subprocess.CalledProcessError as exc:
             # The backend RAN and exited non-zero — rate-limit / overload /

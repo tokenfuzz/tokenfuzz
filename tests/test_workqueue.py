@@ -3462,6 +3462,42 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(blocked.returncode, 0, blocked.stdout + blocked.stderr)
         self.assertEqual(after.stdout.strip(), "")
 
+    def test_next_card_offers_an_open_cluster_lead_before_a_fresh_card(self) -> None:
+        """A live session learns of expansion leads only through a queue read."""
+        self.write_cards([self.card("WORK-FRESH", "src/fresh.c")])
+        added = workqueue.add_cluster_hypotheses(
+            self.ctx, "CRASH-001-1",
+            [{"file": "src/app.c", "function": "app_parse", "line": 40,
+              "hypothesis": "sibling copy loop trusts the same length", "category": "bounds"}],
+            num_agents=2,
+        )
+        self.assertEqual((added["agent"], added["added"]), ("1", 1))
+        lead_id = workqueue.read_jsonl(self.results / "state/hypotheses.jsonl")[-1]["id"]
+        base = [
+            sys.executable, str(ROOT / "bin/state"),
+            "--results-dir", str(self.results), "--target-path", str(self.target),
+            "--target-slug", "sample",
+        ]
+        next_card = base + ["next-card", "--agent", "1", "--mode", "generic"]
+
+        offered = self.run_command(next_card)
+        other_agent = self.run_command(base + [
+            "next-card", "--agent", "2", "--mode", "generic", "--peek",
+        ])
+
+        self.assertEqual(offered.returncode, 0, offered.stdout + offered.stderr)
+        lead = json.loads(offered.stdout)
+        self.assertEqual((lead["id"], lead["kind"]), (lead_id, "open-lead"))
+        self.assertEqual(lead["file"], "src/app.c:app_parse:40")
+        self.assertIn("CRASH-001-1", lead["reason"])
+        self.assertEqual(workqueue.read_jsonl(self.results / "state/claims.jsonl"), [])
+        self.assertEqual(json.loads(other_agent.stdout)["id"], "WORK-FRESH")
+
+        # A lead parked for a reproduce agent no longer holds its owner.
+        workqueue.update_hypothesis(self.ctx, lead_id, "NEEDS_TESTCASE", "needs a driver", agent="1")
+        claimed = self.run_command(next_card)
+        self.assertEqual(json.loads(claimed.stdout)["id"], "WORK-FRESH")
+
     def test_an_operator_pin_rejects_a_hypothesis_from_another_strategy(self) -> None:
         self.write_cards([
             self.card("WORK-S1", "src/one.c", strategy="S1", touched_files=["src/one.c"]),

@@ -547,7 +547,9 @@ class CrashStateDedupTests(unittest.TestCase):
                 [self.results / "crashes" / first], self.root / "target",
             )
         self.assertEqual(len(prompts), 1)
-        self.assertNotIn("Promoted crash signature frames", prompts[0])
+        # A bundle under review is listed: bin/probe refuses a same-state
+        # reproducer against it whatever its review verdict.
+        self.assertIn(f"- app_parse /src/parser.c:20 - {first} (under review)", prompts[0])
         self.assertNotIn("src/other.c:app_other:7", prompts[0])
         self.promote(first)
         prompts.clear()
@@ -555,7 +557,7 @@ class CrashStateDedupTests(unittest.TestCase):
             triage.cluster_expansion_decisions(
                 [self.results / "crashes" / first], self.root / "target",
             )
-        self.assertIn(f"- app_parse /src/parser.c:20 - {first}", prompts[0])
+        self.assertIn(f"- app_parse /src/parser.c:20 - {first} (promoted)", prompts[0])
         self.assertNotIn("src/other.c:app_other:7", prompts[0])
         self.assertIn("A different primitive, object, or materially different route", prompts[0])
 

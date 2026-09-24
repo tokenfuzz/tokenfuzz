@@ -1509,31 +1509,39 @@ _FILED_LINES_PROMPT_LIMIT = 40
 
 
 def _filed_lines_block(results: Path) -> str:
-    """Promoted crash frames that can steer expansion away from repeats.
+    """Filed crash frames that can steer expansion away from repeats.
 
     Without it the model named a line another bundle or a closed hypothesis
     already covered in 84 of 135 benchmark siblings, and each cost the agent
     it was routed to a session to close as the artifact that existed. The
     list only informs: every row still lands in the queue, so a genuinely
     different mechanism or route at a filed line is the model's call, not a
-    filter's. Pending and rejected evidence is omitted because it has not
-    earned the authority to steer discovery away from a site.
+    filter's. Bundles under review or reviewed as not reportable are listed
+    too, labelled: `bin/probe` refuses a same-state reproducer against any
+    filed bundle, so a lead repeating one can never be filed.
     """
-    lines: dict[str, str] = {}
-    for item in crash_bundle.filed_crash_states(results):
-        if not item.promoted:
-            continue
+    lines: dict[str, tuple[bool, str]] = {}
+    # Promoted first, so a frame shared with another bundle names the
+    # credited one, and the prompt limit cuts unpromoted lines first.
+    filed = sorted(
+        crash_bundle.filed_crash_states(results),
+        key=lambda item: (not item.promoted, item.crash_id),
+    )
+    for item in filed:
         for frame in item.state[2][:1] + item.state[3][:1]:
-            lines.setdefault(frame, item.crash_id)
+            lines.setdefault(frame, (not item.promoted, f"{item.crash_id} ({item.label})"))
     if not lines:
         return ""
-    body = [f"- {site} - {artifact}" for site, artifact in sorted(lines.items())]
+    body = [
+        f"- {site} - {artifact}"
+        for site, (_rank, artifact) in sorted(lines.items(), key=lambda kv: (kv[1][0], kv[0]))
+    ]
     omitted = len(body) - _FILED_LINES_PROMPT_LIMIT
     body = body[:_FILED_LINES_PROMPT_LIMIT]
     if omitted > 0:
         body.append(f"- ... and {omitted} more filed lines")
     return (
-        "\nPromoted crash signature frames already filed in this audit:\n"
+        "\nCrash signature frames already filed in this audit:\n"
         + "\n".join(body) + "\n"
         "Avoid a row that predicts the same primitive, object, frame chain, "
         "and probe route. A different primitive, object, or materially "
@@ -1591,14 +1599,14 @@ def cluster_expansion_decisions(
             "filed_block": _filed_lines_block(crash_dirs[0].parents[1]),
         },
     )
-    timeout = _launch_timeout(
-        "cluster_expand", llm_decide.decision_timeout("cluster_expand"), deadline,
-    )
+    configured = llm_decide.decision_timeout("cluster_expand")
+    timeout = _launch_timeout("cluster_expand", configured, deadline)
     if timeout <= 0:
         return decisions
     decision = llm_decide.llm_decide(
         "cluster_expand", "items", prompt, timeout,
         usage_index=llm_usage.find_usage_index(crash_dirs[0].parents[1]),
+        deadline_clamped=timeout < configured,
     )
     if not isinstance(decision, dict) or not isinstance(decision.get("items"), list):
         return decisions
@@ -2516,16 +2524,18 @@ def _launch_timeout(
     expansion with 18s on cjson, a quality batch with 15s on libxml2. Gate
     calls run again in the pass after the wall, and an expansion after it
     adds nothing, so the launch only spent a session and misreported
-    reviewer health. This is the model-call twin of
-    the scheduler's fastest-first-probe launch floor; with no completed call
-    yet, nothing is refused.
+    reviewer health. Before any call of the decision completes, the tier
+    ceiling stands in for the measurement: a first expansion launched with
+    11s left timed out, since no decision is sized below that ceiling.
     """
     timeout = _decision_timeout(configured, deadline)
     if deadline is None or timeout <= 0:
         return timeout
     names = (decisions,) if isinstance(decisions, str) else decisions
     fastest = llm_decide.fastest_completed_seconds(*names)
-    return 0 if fastest is not None and timeout < fastest else timeout
+    if fastest is None:
+        fastest = min(configured, llm_decide.tier_decision_timeout())
+    return 0 if timeout < fastest else timeout
 
 
 def _trigger_review_timeout(deadline: float | None, *, batch: bool = False) -> int:
@@ -3681,13 +3691,14 @@ def _quality_terminal(payload: dict, quorum: int, accept_quorum: int) -> bool:
 def _quality_vote(
     report_text: str, timeout: int,
     usage_index: str | os.PathLike[str] | None = None,
+    *, deadline_clamped: bool = False,
 ) -> dict | None:
     prompt = render_template("triage_find_quality.md.j2", {
         "body": report_text, "bug_class_menu": bug_classes.prompt_menu(),
     })
     return llm_decide.llm_decide(
         "find_quality", "accept,reason,class,severity", prompt, timeout,
-        usage_index=usage_index,
+        usage_index=usage_index, deadline_clamped=deadline_clamped,
     )
 
 
@@ -3719,6 +3730,7 @@ def _batch_decisions(
         })
         result = llm_decide.llm_decide(
             decision, "items", prompt, call_timeout, usage_index=usage_index,
+            deadline_clamped=call_timeout < timeout,
         )
         if not isinstance(result, dict) or not isinstance(result.get("items"), list):
             return {}
@@ -3803,16 +3815,18 @@ def _batch_quality_votes(
         return max(1, min(accept_quorum - accepts, quorum - rejects))
 
     def cast_round(ordered: list[Path]) -> dict[str, dict]:
-        vote_timeout = _decision_timeout(timeout, deadline)
-        if vote_timeout <= 0 or not ordered:
+        if _decision_timeout(timeout, deadline) <= 0 or not ordered:
             return {}
         items = [
             {"id": directory.name, "report": reports[directory]}
             for directory in ordered
         ]
+        # The configured window, not the time left: `_batch_decisions` clamps
+        # it to the deadline itself and must see the cut to floor the launch
+        # and to keep a cut-short timeout off the exact-prompt breaker.
         return _batch_decisions(
             "find_quality_batch", "triage_find_quality_batch.md.j2",
-            instructions, items, vote_timeout, usage_index, deadline, workers,
+            instructions, items, timeout, usage_index, deadline, workers,
         )
 
     def record(ordered: list[Path], by_id: dict[str, dict]) -> None:
@@ -4475,7 +4489,10 @@ def validate_one_finding(
             # omission back out into individual calls recreates the provider
             # storm batching is meant to prevent.
             break
-        vote = _quality_vote(report_text, vote_timeout, usage_index)
+        vote = _quality_vote(
+            report_text, vote_timeout, usage_index,
+            deadline_clamped=vote_timeout < timeout,
+        )
         if not isinstance(vote, dict) or not isinstance(vote.get("accept"), bool):
             break
         queued_votes.append(vote)

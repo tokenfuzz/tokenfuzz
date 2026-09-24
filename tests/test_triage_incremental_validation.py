@@ -4051,6 +4051,28 @@ Generated score text.
             (self.finding / ".llm-find-quality.json").read_text(),
         )["accept"])
 
+    def test_quality_batch_sees_the_deadline_cut_to_its_window(self) -> None:
+        calls: list[tuple[int, bool]] = []
+
+        def decide(_decision, _required, _prompt, timeout, **kwargs):
+            calls.append((timeout, kwargs.get("deadline_clamped", False)))
+            return None
+
+        env = {"ACTIVE_BACKEND": "codex", "LLM_DECIDE_LOG": str(self.root / "decisions.log")}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(
+            triage.llm_decide, "llm_decide", side_effect=decide,
+        ):
+            # Below the 45s tier floor with no completed call: not launched.
+            triage._batch_quality_votes(
+                [self.finding], self.root, 2, 2, 300, time.monotonic() + 20, 1,
+            )
+            self.assertEqual(calls, [])
+            triage._batch_quality_votes(
+                [self.finding], self.root, 2, 2, 300, time.monotonic() + 100, 1,
+            )
+        self.assertTrue(calls)
+        self.assertTrue(all(timeout <= 100 and clamped for timeout, clamped in calls), calls)
+
 
 class DecisionTimeoutBackoffTests(unittest.TestCase):
     def test_decision_timeout_honors_the_session_setting_and_backend_tier(self) -> None:
@@ -4090,8 +4112,13 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
             env = {"ACTIVE_BACKEND": "codex", "LLM_DECIDE_LOG": str(log)}
             with mock.patch.dict(os.environ, env, clear=True):
                 soon = time.monotonic() + 20
-                # No completed review yet: no measurement, nothing refused.
-                self.assertGreater(triage._trigger_review_timeout(soon), 0)
+                mid = time.monotonic() + 50
+                # No completed review yet: the 45s tier ceiling is the floor,
+                # never the decision's larger configured window.
+                self.assertEqual(triage._trigger_review_timeout(soon), 0)
+                self.assertGreater(triage._trigger_review_timeout(mid), 0)
+                self.assertEqual(triage._launch_timeout("find_quality", 30, soon), 0)
+                self.assertIn(triage._launch_timeout("find_quality", 30, mid), (29, 30))
                 log.write_text(
                     "t trigger-validator-batch votes=1/1 OK bytes=9 elapsed=58s\n"
                     "t trigger-validator votes=1/1 OK bytes=9 elapsed=41s\n"
@@ -4110,13 +4137,13 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
                 later = time.monotonic() + 300
                 self.assertGreaterEqual(triage._trigger_review_timeout(later), 299)
                 # Each decision is floored by its own completions: the 9s
-                # rerank does not let a 20s cluster expansion through the
-                # 41s review floor, and the review floor does not bind it.
+                # rerank lets a 20s rerank through, the 41s review floor does
+                # not bind a 50s expansion, and its own 55s completion does.
                 self.assertIn(triage._launch_timeout("work_rerank", 150, soon), (19, 20))
-                self.assertGreater(triage._launch_timeout("cluster_expand", 800, soon), 0)
+                self.assertGreater(triage._launch_timeout("cluster_expand", 800, mid), 0)
                 with log.open("a", encoding="utf-8") as stream:
                     stream.write("t cluster_expand OK bytes=9 elapsed=55s\n")
-                self.assertEqual(triage._launch_timeout("cluster_expand", 800, soon), 0)
+                self.assertEqual(triage._launch_timeout("cluster_expand", 800, mid), 0)
                 # Finalization without a wall is never refused.
                 self.assertEqual(
                     triage._trigger_review_timeout(None),
@@ -4281,6 +4308,28 @@ class DecisionTimeoutBackoffTests(unittest.TestCase):
                 self.assertIsNone(llm_decide.llm_decide("cluster_expand", "rows", "same prompt", 1))
                 self.assertIsNone(llm_decide.llm_decide("cluster_expand", "rows", "same prompt", 1))
             self.assertEqual(invoke.call_count, 1)
+
+    def test_a_deadline_clamped_timeout_does_not_defer_the_prompt(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="decision-timeout-clamp-") as tmp:
+            environment = {
+                "ACTIVE_BACKEND": "codex",
+                "LLM_DECIDE_FAILCACHE_FILE": str(Path(tmp) / "failcache.json"),
+                "LLM_DECIDE_LOG": str(Path(tmp) / "decisions.log"),
+                "LLM_DECIDE_MAX_CALLS": "0",
+                "LLM_DECIDE_FAIL_THRESHOLD": "2",
+                "LLM_DECIDE_FAIL_COOLDOWN": "300",
+            }
+            timeout = subprocess.TimeoutExpired(["codex"], 1)
+            with mock.patch.dict(os.environ, environment, clear=True), mock.patch.object(
+                llm_decide, "_invoke_backend", side_effect=[timeout, '{"rows":[]}'],
+            ) as invoke:
+                self.assertIsNone(llm_decide.llm_decide(
+                    "cluster_expand", "rows", "same prompt", 1, deadline_clamped=True,
+                ))
+                self.assertEqual(llm_decide.llm_decide(
+                    "cluster_expand", "rows", "same prompt", 1,
+                ), {"rows": []})
+            self.assertEqual(invoke.call_count, 2)
 
     def test_timeout_backoff_is_exact_keyed_and_half_opens(self) -> None:
         with tempfile.TemporaryDirectory(prefix="decision-timeout-scope-") as tmp:

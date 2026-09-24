@@ -5054,6 +5054,27 @@ def add_cluster_hypotheses(
     return {"agent": agent, "added": added, "skipped": skipped}
 
 
+def open_cardless_lead(ctx: Context, agent: str) -> dict | None:
+    """Return the agent's oldest open hypothesis that belongs to no card.
+
+    Cluster expansion files its crash-sibling leads this way, owned by the
+    filing agent while that agent's session is still running. A live session
+    learns of them only through a queue read; a `next-card` that hands out a
+    fresh card over them leaves every lead PENDING until the wall.
+    NEEDS_TESTCASE is excluded: it is parked for a reproduce agent, and
+    re-offering it would hold its holder off every card until it is closed.
+    """
+    leads = [
+        row for row in read_jsonl(state_dir(ctx.results_dir) / "hypotheses.jsonl")
+        if str(row.get("agent", "")) == str(agent)
+        and not row.get("card_id")
+        and row.get("status", "") in ("PENDING", "INVESTIGATING")
+    ]
+    if not leads:
+        return None
+    return min(leads, key=lambda row: row.get("created_at") or "")
+
+
 def _record_env_blocked_card(
     ctx: Context,
     card_id: str,
