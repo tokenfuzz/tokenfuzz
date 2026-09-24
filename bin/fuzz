@@ -490,7 +490,9 @@ def cmd_run(args) -> int:
     built = fuzz_harness.built_harnesses(config.results_dir, sanitizer)
     for name, record in built.items():
         campaign.add(name, record["binary"], record.get("source", ""),
-                     record.get("hypothesis_id", ""))
+                     record.get("hypothesis_id", ""),
+                     guided=bool(record.get("guided")),
+                     sanitized=bool(record.get("sanitized")))
     if not built:
         say(f"no {sanitizer} harness built under "
             f"{fuzz_harness.binary_dir(config.results_dir)}; "

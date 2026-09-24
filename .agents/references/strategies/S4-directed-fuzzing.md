@@ -214,13 +214,13 @@ classifies the result and moves on when a harness stops paying:
 
 | Verdict | Meaning | What you do |
 |---|---|---|
-| `productive` | New edges, or a crash. | Nothing — it keeps its share. |
+| `productive` | New edges, feature growth above 2%, or a crash. An unguided build's own edges do not count. | Nothing — it keeps its share. |
 | `dry` | No new coverage yet. | Nothing — one or two are normal. |
 | `saturated` | No new coverage for three slices. | Widen the harness, or seed it. Returns automatically when its corpus grows. |
 | `blocked-on-crash` | Crashing with no new coverage. libFuzzer stops at its first crash, so it cannot get past a filed bug. | Nothing — the crash is filed. Move on. |
 | `dead` | Zero executions, never reached `INITED`. | Read the build log; the library probably does not load. |
 | `startup-crash` | Crashed before the corpus finished loading. | **Your harness is broken**, not the target. Fix it before believing the artifact. |
-| `noise-flood` | Only OOM / timeout / leak artifacts. | Bound the allocation, or free what the harness allocates. These are auto-rejected downstream. |
+| `noise-flood` | OOM / timeout / leak endings with no new coverage. | Bound the allocation, or free what the harness allocates. These are auto-rejected downstream. |
 
 The campaign ends when the budget is spent **or every harness is
 quarantined**, and it refuses to start a slice it cannot finish inside the

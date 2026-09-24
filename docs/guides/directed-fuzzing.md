@@ -249,11 +249,11 @@ stops paying:
 
 | Verdict | Meaning |
 | --- | --- |
-| `saturated` | No new coverage for three slices. Revived automatically when its corpus grows. |
+| `saturated` | No new target coverage for three slices: no new edge, and features grew by 2% or less of the harness's high-water mark. An unguided harness's own edges never count. Revived automatically when its corpus grows. |
 | `blocked-on-crash` | Crashing with no new coverage; libFuzzer stops at its first crash, so it cannot get past a filed bug. |
 | `dead` | No meaningful executions, usually because the library failed to load. |
 | `startup-crash` | Crashed before the initial corpus finished loading. If the crashing input is one of the seeds, that seed is removed and the campaign continues; otherwise the harness setup is broken. |
-| `noise-flood` | Only OOM/timeout/leak artifacts, which are auto-rejected downstream anyway. |
+| `noise-flood` | Two slices running that ended in OOM/timeout/leak and reached no new coverage; those artifacts are auto-rejected downstream anyway. |
 
 Slices are allocated by measured new coverage per second with a UCB1
 exploration term, so every harness runs before any runs twice, and a quiet

@@ -896,6 +896,47 @@ class HealthAndRecoveryTests(unittest.TestCase):
         self.assertEqual(second, fuzz_campaign.VERDICT_NOISE_FLOOD)
         self.assertIn("out-of-memory", detail)
 
+    def test_an_oom_slice_that_reached_new_code_is_not_noise(self) -> None:
+        # The noise check ran before the coverage check, so a slice that
+        # added hundreds of edges and then hit an OOM quarantined its harness.
+        noisy = self.result(executions=9999, inited=True, oom=True,
+                            artifacts=["a"], edges=645)
+        verdict, _ = fuzz_campaign.classify(
+            noisy, self.state(noise_streak=1, edges=100, features=300), 545)
+        self.assertEqual(verdict, fuzz_campaign.VERDICT_PRODUCTIVE)
+
+    def test_feature_creep_without_new_edges_does_not_keep_a_harness_productive(self) -> None:
+        # A mined-out corpus still gains a handful of features per slice;
+        # calling that productive held a harness in rotation for the whole
+        # campaign instead of letting it saturate.
+        state = self.state(dry_streak=2, edges=500, features=3000)
+        creep = self.result(executions=9999, inited=True, edges=500,
+                            features=3027)
+        verdict, detail = fuzz_campaign.classify(
+            creep, state, 0, new_features=27)
+        self.assertEqual(verdict, fuzz_campaign.VERDICT_SATURATED)
+        self.assertIn("2% or less", detail)
+        # Growth above the documented threshold is still learning.
+        grew = self.result(executions=9999, inited=True, edges=500,
+                           features=3100)
+        verdict, _ = fuzz_campaign.classify(grew, state, 0, new_features=100)
+        self.assertEqual(verdict, fuzz_campaign.VERDICT_PRODUCTIVE)
+
+    def test_an_unguided_slice_is_not_productive_on_harness_edges(self) -> None:
+        # Without an instrumented target library the only edges are the
+        # harness's own, so they measure nothing about the target.
+        blind = self.state(guided=False)
+        slice_ = self.result(executions=9999, inited=True, edges=36,
+                             features=46)
+        verdict, detail = fuzz_campaign.classify(slice_, blind, 36, new_features=46)
+        self.assertEqual(verdict, fuzz_campaign.VERDICT_DRY)
+        self.assertIn("unguided", detail)
+        # A crash is still evidence, and is replayed like any other.
+        crashed = self.result(executions=9999, inited=True, edges=36,
+                              artifacts=["/x/crash-a"])
+        verdict, _ = fuzz_campaign.classify(crashed, blind, 36, ["/x/crash-a"])
+        self.assertEqual(verdict, fuzz_campaign.VERDICT_PRODUCTIVE)
+
     def test_three_slices_with_no_new_coverage_is_saturation(self) -> None:
         verdict, _ = fuzz_campaign.classify(
             self.result(executions=9999, inited=True, edges=100),
@@ -1144,6 +1185,30 @@ class FirstSliceReceiptTests(unittest.TestCase):
         self.assertEqual(resumed.first_slice["new_edges"], 12)
         self.assertEqual(resumed.first_slice["new_features"], 18)
         self.assertEqual(resumed.first_slice["verdict"], "productive")
+
+    def test_each_journal_row_records_guidance_and_streaks_match_the_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            results = Path(raw) / "results"
+            results.mkdir()
+            config = config_for(Path(raw) / "source", ["bytes"])
+            config.results_dir = str(results)
+            campaign = fuzz_campaign.Campaign(config, log=lambda _: None)
+            state = campaign.add("fuzz_blind", "/tmp/fuzz_blind",
+                                 guided=False, sanitized=False)
+            result = fuzz_campaign.SliceResult(
+                harness=state.name, seconds=2.0, returncode=0,
+                executions=200, edges=36, features=46, inited=True)
+            verdict, detail = fuzz_campaign.classify(
+                result, state, 36, [], 46)
+            campaign._record(state, result, verdict, detail, 36, [], 46)
+            rows = [json.loads(line) for line in fuzz_campaign.journal_path(
+                results).read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(rows[-1]["guided"], False)
+        self.assertEqual(rows[-1]["sanitized"], False)
+        self.assertEqual(rows[-1]["verdict"], fuzz_campaign.VERDICT_DRY)
+        self.assertEqual(state.dry_streak, 1)
+        self.assertEqual(state.value, 0.0)
 
     def test_status_joins_build_and_receipt_without_changing_campaign_state(self) -> None:
         state = fuzz_campaign.HarnessState(

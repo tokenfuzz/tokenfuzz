@@ -92,6 +92,12 @@ REPEAT_SLICES = 2
 # slices, not within one: libFuzzer exits at its first such artifact, so a
 # within-slice threshold above one can never be reached.
 NOISE_SLICES = 2
+# Feature growth, relative to the harness's high-water `ft`, that counts as
+# progress in a slice with no new edge. Value-profile learning moves `ft`
+# by far more than this; a saturated corpus still creeps up by a handful of
+# features a slice, and counting those kept a mined-out harness "productive"
+# for a whole campaign.
+FEATURE_GROWTH_MIN = 0.02
 # Executions below which a slice did not fuzz at all. libFuzzer reaches
 # thousands per second on any working target; single digits means the binary
 # is failing to run rather than running slowly.
@@ -308,6 +314,10 @@ class HarnessState:
     # One number, because that is what selection needs and a full history
     # would have to be re-derived on every resume.
     value: float = 0.0
+    # From the build manifest. An unguided build instruments only the harness,
+    # so its edges and features say nothing about the target.
+    guided: bool = True
+    sanitized: bool = True
     # The first slice is the fastest falsifier of a generated harness: it says
     # whether the binary really executed, whether guidance moved, and which
     # repair class applies. Keep that exact receipt across later productive
@@ -498,6 +508,18 @@ def progress(result: SliceResult, state: HarnessState) -> "tuple[int, int]":
             max(0, result.features - state.features))
 
 
+def advanced(state: HarnessState, new_edges: int, new_features: int) -> bool:
+    """Whether a slice moved the target's coverage enough to count.
+
+    Any new edge counts; features alone count only above
+    ``FEATURE_GROWTH_MIN`` of the high-water mark. Neither counts on an
+    unguided build, where both measure the harness itself.
+    """
+    if not state.guided:
+        return False
+    return new_edges > 0 or new_features > state.features * FEATURE_GROWTH_MIN
+
+
 def classify(result: SliceResult, state: HarnessState,
              new_edges: int, fresh: "list[str] | None" = None,
              new_features: int = 0) -> "tuple[str, str]":
@@ -526,10 +548,13 @@ def classify(result: SliceResult, state: HarnessState,
             + (f" — it printed: {result.opening}" if result.opening else
                " — check the build log and that the linked library loads")
         )
+    moved = advanced(state, new_edges, new_features)
     kinds = [name for name, hit in
              (("out-of-memory", result.oom), ("timeout", result.timeout),
               ("leak", result.leak)) if hit]
-    if kinds and state.noise_streak + 1 >= NOISE_SLICES:
+    # A slice that reached new code before its OOM or timeout bought that
+    # code; only one that also added nothing is noise.
+    if kinds and not moved and state.noise_streak + 1 >= NOISE_SLICES:
         return VERDICT_NOISE_FLOOD, (
             f"ended in {'/'.join(kinds)} for {state.noise_streak + 1} slices "
             f"running; these are auto-rejected downstream, so the slices "
@@ -537,7 +562,7 @@ def classify(result: SliceResult, state: HarnessState,
             f"what it allocates"
         )
     fresh = result.artifacts if fresh is None else fresh
-    if new_edges > 0 or new_features > 0:
+    if moved:
         return VERDICT_PRODUCTIVE, (
             f"{new_edges} new edges, {new_features} new features, "
             f"{len(fresh)} new artifacts"
@@ -559,12 +584,22 @@ def classify(result: SliceResult, state: HarnessState,
             f"{len(fresh)} new artifacts, no new coverage — the crash is "
             f"filed; one more slice decides whether it blocks the harness"
         )
+    if not state.guided:
+        # Harness-only edges are not target progress, so a blind slice
+        # without an artifact is dry whatever its counters did.
+        why = "unguided build: its edges are the harness's own"
+    else:
+        why = (f"no new edges and features grew {new_features} "
+               f"({FEATURE_GROWTH_MIN:.0%} or less)") if new_features else ""
     if state.dry_streak + 1 >= SATURATION_SLICES:
         return VERDICT_SATURATED, (
-            f"no new edges and no new features across {state.dry_streak + 1} "
-            f"slices at {coverage_note(state)}; widen or re-seed it"
+            f"no new target coverage across {state.dry_streak + 1} "
+            f"slices at {coverage_note(state)}"
+            + (f" — {why}" if why else "") + "; widen or re-seed it"
         )
-    return VERDICT_DRY, f"no new coverage ({state.dry_streak + 1} in a row)"
+    return VERDICT_DRY, (
+        f"no new coverage ({state.dry_streak + 1} in a row)"
+        + (f" — {why}" if why else ""))
 
 
 def select_next(states: "list[HarnessState]", total_slices: int) -> "HarnessState | None":
@@ -1051,11 +1086,13 @@ class Campaign:
     # ── the loop ────────────────────────────────────────────────────
 
     def add(self, name: str, binary: str, source: str = "",
-            hypothesis_id: str = "") -> HarnessState:
+            hypothesis_id: str = "", *, guided: bool = True,
+            sanitized: bool = True) -> HarnessState:
         state = self.states.get(name)
         if state is None:
             state = HarnessState(name=name, binary=binary, source=source,
-                                 hypothesis_id=hypothesis_id)
+                                 hypothesis_id=hypothesis_id,
+                                 guided=guided, sanitized=sanitized)
             self.states[name] = state
         else:
             if state.binary != binary:
@@ -1069,9 +1106,11 @@ class Campaign:
                     name=state.name, binary=binary, source=source or state.source,
                     hypothesis_id=hypothesis_id or state.hypothesis_id,
                     dictionary=state.dictionary,
+                    guided=guided, sanitized=sanitized,
                 )
                 self.states[name] = carried
                 return carried
+            state.guided, state.sanitized = guided, sanitized
             state.source = source or state.source
             state.hypothesis_id = hypothesis_id or state.hypothesis_id
         return state
@@ -1175,6 +1214,8 @@ class Campaign:
     def _record(self, state: HarnessState, result: SliceResult,
                 verdict: str, detail: str, new_edges: int,
                 fresh: "list[str]", new_features: int = 0) -> None:
+        # Read before the high-water marks below move.
+        moved = advanced(state, new_edges, new_features)
         if not state.first_slice:
             state.first_slice = {
                 "seconds": round(result.seconds, 2),
@@ -1200,18 +1241,19 @@ class Campaign:
         state.features = max(state.features, result.features)
         state.artifacts += len(fresh)
         state.since_merge += 1
-        # Dry means neither signal moved. Counting only edges made a
-        # value-profiled slice look dry while it was still learning.
-        state.dry_streak = 0 if (new_edges or new_features) else state.dry_streak + 1
+        # The same judgement `classify` made, so a streak cannot disagree
+        # with the verdict it leads to.
+        state.dry_streak = 0 if moved else state.dry_streak + 1
         state.repeat_streak = (
-            state.repeat_streak + 1
-            if result.artifacts and not (new_edges or new_features) else 0)
+            state.repeat_streak + 1 if result.artifacts and not moved else 0)
         state.noise_streak = (
             state.noise_streak + 1
-            if (result.oom or result.timeout or result.leak) else 0)
+            if (result.oom or result.timeout or result.leak) and not moved
+            else 0)
         state.value = _ewma(
             state.value,
-            (new_edges + new_features) / result.seconds if result.seconds else 0.0)
+            (new_edges + new_features) / result.seconds
+            if result.seconds and moved else 0.0)
         if verdict in REVIVABLE_VERDICTS:
             state.corpus_at_quarantine = self.corpus_size(state.name)
         # A crash cuts a slice short, so libFuzzer's own exec/s is missing or
@@ -1228,6 +1270,7 @@ class Campaign:
             "new_edges": new_edges, "features": result.features,
             "new_features": new_features,
             "artifacts": len(result.artifacts), "new_artifacts": len(fresh),
+            "guided": state.guided, "sanitized": state.sanitized,
             "log": result.log, "corpus": self.corpus_size(state.name),
         })
         self.log(
