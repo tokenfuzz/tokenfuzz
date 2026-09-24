@@ -31,5 +31,9 @@ Constraints:
 - if the target is synthetic, a harness fixture, or has no meaningful same-spec /
   same-format / same-algorithm peers, output "domain": "" and "peers": []; do
   not invent placeholder peers from a nearby taxonomy row
+- a project spanning several domains (a multimedia or vision framework, a
+  toolkit bundling many formats) is not "no peers": pick the row for its
+  component that parses the most untrusted external input, such as its
+  file-format decoders, and list that component's peers
 - prefer projects in the taxonomy table; if the target has no row, pick
   peers only when they genuinely share a spec/format/algorithm with brief reasoning

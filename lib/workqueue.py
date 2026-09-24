@@ -3759,10 +3759,14 @@ def _is_broad_file_card(card: dict) -> bool:
 
     ``ranked-source`` cards rank a whole file for a strategy; their bugs live
     across functions never yet hypothesised, so re-discovery is not an
-    exhaustion proof for them. Concrete cards (patch cards)
-    name a specific site, so their opened hypotheses *are* their search space.
+    exhaustion proof for them. The S4 campaign card is broader still: it
+    covers every admitted API, and one dry campaign over one harness proves
+    nothing about the APIs no harness drives yet. Treating it as concrete
+    retired fuzzing for the whole target after a single short campaign.
+    Concrete cards (patch cards) name a specific site, so their opened
+    hypotheses *are* their search space.
     """
-    return str(card.get("kind", "")) == "ranked-source"
+    return str(card.get("kind", "")) in {"ranked-source", "s4-campaign"}
 
 
 #: Prefix `record_artifact_rejection` stamps on a hypothesis it discards. The

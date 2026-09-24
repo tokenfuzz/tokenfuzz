@@ -264,6 +264,7 @@ def main(argv: list[str]) -> int:
         if source_error:
             degraded_peers.append(peer)
         group: list[dict] = []
+        unresolvable = 0
         clone = peer_sources.find_peer_clone(peer, clone_roots)
         for fix in fixes:
             if len(group) >= args.max_per_peer:
@@ -291,6 +292,17 @@ def main(argv: list[str]) -> int:
                     summary=str(fix.get("summary", "")),
                 )
 
+            if (
+                fix.get("source") == "osv" and not fix.get("evidence_url")
+                and not diff_excerpt and clone is None
+            ):
+                # Nothing can resolve this lead in-session: agents have no
+                # network, so with no evidence URL, excerpt, or local clone the
+                # advisory names a crash and a revision but never the repair.
+                # Every such card was claimed only to be blocked. A lead whose
+                # excerpt fetch merely failed or ran out of budget is kept.
+                unresolvable += 1
+                continue
             card = build_s6_card(ctx.target_slug, peer, fix, diff_excerpt)
             if card["id"] in seen_ids:
                 continue
@@ -315,6 +327,13 @@ def main(argv: list[str]) -> int:
                 build_s6_discovery_card(ctx.target_slug, peer, clone, source_error),
                 *group,
             ]
+        if unresolvable and not args.quiet:
+            print(
+                f"[peer-fix-cards] {peer}: skipped {unresolvable} advisory "
+                "lead(s) with no evidence link, excerpt, or local clone; clone the "
+                "peer under targets/ to make them resolvable",
+                file=sys.stderr,
+            )
         peer_cards.append(group[:args.max_per_peer])
 
     # Interleave peers so one noisy advisory feed cannot consume the review

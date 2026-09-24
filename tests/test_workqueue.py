@@ -971,6 +971,14 @@ class WorkQueueTests(unittest.TestCase):
         self.assertLessEqual(len(cards), 3)
         self.assertNotIn("s4-campaign", {c.get("kind") for c in cards})
 
+    def test_a_dry_campaign_leaves_the_target_fuzzable(self) -> None:
+        """One dry campaign over one harness says nothing about the APIs no
+        harness drives yet; only a whole-surface block retires S4."""
+        card = workqueue.campaign_card(self.ctx)
+        for status in ("discarded", "done"):
+            self.assertFalse(workqueue.card_closed_for_run(self.ctx, card, status))
+        self.assertTrue(workqueue.card_closed_for_run(self.ctx, card, "blocked"))
+
     def test_one_campaign_card_exists_per_target_and_is_stable(self) -> None:
         card = workqueue.campaign_card(self.ctx)
         again = workqueue.campaign_card(self.ctx)

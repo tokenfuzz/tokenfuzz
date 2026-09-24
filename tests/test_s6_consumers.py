@@ -52,7 +52,7 @@ class PeerFixCardTests(unittest.TestCase):
             "    return [{'source':'osv','id':f'CVE-2099-{index:04d}','fix_hash':(peer + str(index)).encode().hex().ljust(40, '0')[:40],"
             "'summary':f'fix bounds check in {peer} entity parser {index}','url':f'https://osv.dev/vulnerability/CVE-2099-{index:04d}',"
             "'repo_url':f'https://example.test/{peer}.git',"
-            "'range_start_hash':('' if peer == os.environ.get('S6_TEST_ENDPOINT_PEER') else 'b' * 40),'evidence_url':f'https://example.test/{peer}/compare/{index}.diff','evidence_kind':('endpoint' if peer == os.environ.get('S6_TEST_ENDPOINT_PEER') else 'fixed-range'),"
+            "'range_start_hash':('' if peer == os.environ.get('S6_TEST_ENDPOINT_PEER') else 'b' * 40),'evidence_url':('' if peer in os.environ.get('S6_TEST_NO_EVIDENCE_PEER', '').split(',') else f'https://example.test/{peer}/compare/{index}.diff'),'evidence_kind':('endpoint' if peer == os.environ.get('S6_TEST_ENDPOINT_PEER') else 'fixed-range'),"
             "'modified':'2099-01-01T00:00:00Z'} for index in range(1, int(os.environ.get('S6_TEST_FIXES', '1')) + 1)]\n"
             "peer_sources.osv_query = fake_osv_query\n"
             "_real_gather = peer_sources.gather_peer_fixes\n"
@@ -325,6 +325,25 @@ class PeerFixCardTests(unittest.TestCase):
         self.assertEqual(card["peer_fix_source"], "discovery")
         self.assertIn("source unavailable", card["reason"])
         self.assertIn("OSV unavailable: TimeoutError", card["reason"])
+
+    def test_an_advisory_nothing_in_session_can_resolve_is_not_a_card(self) -> None:
+        # No excerpt and no local clone: an agent without network could only
+        # block it. A clone keeps it, because the endpoint is searchable there.
+        self.write_config(peers=["expat", "libxml"])
+        self.clone_peers("libxml")
+        env = self.environment(fixes=2)
+        env["S6_TEST_ENDPOINT_PEER"] = "libxml"
+        env["S6_TEST_NO_EVIDENCE_PEER"] = "expat,libxml"
+
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        cards = [json.loads(line) for line in self.card_file.read_text().splitlines()]
+        self.assertEqual({card["peer_project"] for card in cards}, {"libxml"})
+        self.assertNotIn("expat", {card.get("peer_project") for card in cards})
 
     def test_endpoint_only_peer_keeps_one_exact_fix_discovery_route(self) -> None:
         self.write_config(peers=["expat"])

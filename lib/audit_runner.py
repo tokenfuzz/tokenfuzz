@@ -2715,6 +2715,9 @@ def fixed_lane_exhausted(runtime: Runtime, iteration: int = 0) -> bool:
     receive cards, relaunching after every one is closed cannot expose more.
     Productive cards use the queue's normal scope-aware closure rule: one
     finding is a reason to search clustered variants, not an exhaustion proof.
+    S4's campaign card is broad under that rule, so a pinned S4 run keeps
+    starting campaigns over APIs no harness drives yet until only `blocked`
+    closes it or the wall and STALL_STOP end the run.
 
     An open hypothesis still can, so it holds the run open the way STALL_STOP
     requires: an agent can close its card and keep investigating what the card

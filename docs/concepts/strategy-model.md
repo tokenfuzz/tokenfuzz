@@ -102,11 +102,15 @@ scope.
   fetched beforehand: a fix diff or advisory excerpt rides on the card, and
   the discovery card that asks the agent to find an exact fix itself is
   issued only when a local peer clone under `targets/` holds the history to
-  search.
+  search. An advisory with no evidence link, fix excerpt, or local clone is
+  not carded, since no session could resolve it; `bin/peer-fix-cards` reports how many were
+  skipped so you can clone the peer.
 - **The S4 campaign card**: one target-wide boundary-fuzzing campaign,
   rather than one feature-derived card per file. When more than one agent is
   available, the scheduler reserves one reproduce seat for this campaign
-  while it remains eligible.
+  while it remains eligible. Like a ranked file card, a dry campaign does not
+  retire it: one harness proves nothing about the APIs no harness drives yet,
+  so it stays claimable behind fresher work, and only `blocked` closes it.
 - **Call-edge cards** (always S3): the second pass. Once every parsed
   function of a file carries an examined attestation, one card is minted per
   file with a certain call into it, naming the caller. File cards cover
