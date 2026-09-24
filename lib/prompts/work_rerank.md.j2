@@ -4,7 +4,7 @@ The first stage already ranked files with deterministic structural signals.
 Pick candidates the regex scorer may undervalue: parsers/decoders, state
 machines, unsafe/FFI boundaries, multi-pass size computations, hand-written
 allocators, and prior-fix neighbors. Preserve diversity; do not only pick one
-subsystem or one strategy.
+subsystem or, unless the run is pinned below, one strategy.
 {{ focus_rule }}
 
 Return JSON only:

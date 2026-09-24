@@ -339,20 +339,37 @@ def _retract_unreachable_route(directory: Path, results_dir: Path) -> None:
 
 
 def _out_of_model_route(directory: Path, reason: str) -> str:
-    """The route note for a threat-model rejection, or "" for any other."""
-    if not reason.startswith(THREAT_MODEL_REJECTION_PREFIX):
-        return ""
-    note = reason[len(THREAT_MODEL_REJECTION_PREFIX):].strip()
+    """The route note for a rejection whose trigger was out of scope."""
+    note = reason.removeprefix(THREAT_MODEL_REJECTION_PREFIX).strip()
     report = _report(directory)
     trigger = _field(_read(report), "Trigger source") if report else ""
     return f"{note} (reported trigger source: {trigger})" if trigger else note
 
 
+def _trigger_out_of_scope(
+    state: str, reach_verdict: str, review_facts: dict[str, str] | None,
+) -> bool:
+    """Whether a `not-reportable` state was decided by the trigger's scope.
+
+    Mirrors `_final_publication_state`: caller-contract misuse and a defect
+    at no security boundary are also not-reportable, but they say nothing
+    about which triggers the attacker controls reach.
+    """
+    return (
+        state == "not-reportable"
+        and reach_verdict != "contract-flag"
+        and (review_facts or {}).get("rejection_kind") != "no-added-boundary"
+    )
+
+
 def _reject(
     directory: Path, rejected_root: Path, reason: str, *, category: str = "",
+    trigger_out_of_scope: bool = False,
 ) -> Path:
     rejected_root.mkdir(parents=True, exist_ok=True)
-    out_of_model = _out_of_model_route(directory, reason)
+    out_of_model = (
+        _out_of_model_route(directory, reason) if trigger_out_of_scope else ""
+    )
     report = _report(directory)
     if report is not None:
         # The concern block says triage *kept* the crash; a rejected bundle
@@ -3175,6 +3192,9 @@ def triage_one_crash(
             _publication_rejection_reason(
                 state, verdict, detail, review_facts, attacker_controls,
             ),
+            trigger_out_of_scope=_trigger_out_of_scope(
+                state, verdict, review_facts,
+            ),
         )
         return "rejected"
     validation_receipt.write(
@@ -4367,6 +4387,9 @@ def _finalize_accepted_finding(
             finding_dir, results_dir / "findings-rejected",
             _publication_rejection_reason(
                 state, reach_verdict, reach_detail, review_facts, controls,
+            ),
+            trigger_out_of_scope=_trigger_out_of_scope(
+                state, reach_verdict, review_facts,
             ),
         )
         return "rejected"

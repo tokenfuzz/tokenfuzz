@@ -1307,6 +1307,43 @@ class WorkQueueTests(unittest.TestCase):
         )
         self.assertEqual(second["id"], "WORK-COMP", "companions stay claimable")
 
+    def test_a_dry_evidence_card_yields_to_fresh_companions(self) -> None:
+        self.write_cards([
+            self.card(
+                "WORK-COMP", "src/a/big.c", strategy="S3", score=90,
+                reason="companion strategy S3 for S7; size math",
+            ),
+            self.card(
+                "WORK-SEC", "src/b/auth.c", strategy="S3", score=20,
+                reason="access-control decision",
+            ),
+        ])
+        for index in range(3):
+            self.add_hypothesis(
+                # Another agent's dry work: the claimer holds no lease on it.
+                hyp_id=f"H-dry-{index}", card_id="WORK-SEC", status="DISCARDED",
+                agent="2",
+                file=f"src/b/auth.c:app_gate_{index}:{10 + index}",
+            )
+        # That agent's lease lapsed, so the dry card is claimable again.
+        workqueue.append_jsonl(self.results / "state" / "claims.jsonl", {
+            "card_id": "WORK-SEC", "agent": "2", "status": "unclaimed",
+        })
+        chosen = workqueue.claim_next_card(
+            self.ctx, "1", mode="generic", strategy="S3", claim=False,
+        )
+        self.assertEqual(chosen["id"], "WORK-COMP")
+        self.write_cards([self.card(
+            "WORK-SEC", "src/b/auth.c", strategy="S3", score=20,
+            reason="access-control decision",
+        )])
+        self.assertEqual(
+            workqueue.claim_next_card(
+                self.ctx, "1", mode="generic", strategy="S3", claim=False,
+            )["id"],
+            "WORK-SEC", "the dry card is demoted, not closed",
+        )
+
     def test_lane_evidence_for_s3_is_a_security_decision(self) -> None:
         mechanical = self.card(
             "WORK-A", "src/a.c", strategy="S3",

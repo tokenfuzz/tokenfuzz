@@ -106,10 +106,13 @@ class UnreachableRouteFeedbackTests(unittest.TestCase):
         (directory / "report.md").write_text(
             "# report\n\nTrigger source: call-sequence\n", encoding="utf-8",
         )
-        return self.reject(
-            directory,
+        return triage._reject(
+            directory, self.results / "findings-rejected",
             triage.THREAT_MODEL_REJECTION_PREFIX
             + "source review placed the trigger outside attacker_controls=bytes",
+            trigger_out_of_scope=triage._trigger_out_of_scope(
+                "not-reportable", "within", {"trigger_controls_fit": "outside"},
+            ),
         )
 
     def test_a_threat_model_rejection_records_an_out_of_model_route(self) -> None:
@@ -129,6 +132,21 @@ class UnreachableRouteFeedbackTests(unittest.TestCase):
         self.assertNotIn("disproved", lines)
         self.assertIn("still counts", lines, "advice, never a refusal")
 
+        # A defect at no security boundary, or caller-contract misuse, is
+        # also a threat-model rejection, but says nothing about the trigger.
+        for verdict, facts in (
+            ("within", {"rejection_kind": "no-added-boundary"}),
+            ("contract-flag", {}),
+        ):
+            self.assertFalse(
+                triage._trigger_out_of_scope("not-reportable", verdict, facts),
+            )
+        self.reject(
+            self.artifact("CRASH-004-1", disproof=""),
+            triage.THREAT_MODEL_REJECTION_PREFIX
+            + "real defect that crosses no security boundary",
+        )
+        self.assertEqual(len(self.routes()), 1)
         # An unsettled scope established nothing, so it records nothing.
         self.reject(
             self.artifact("CRASH-002-1", disproof=""),

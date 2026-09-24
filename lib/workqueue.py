@@ -4934,8 +4934,17 @@ def _claim_next_card_locked(
                 0 if strategy_filter == "S1" and card.get("kind") == "s1-patch" else 1,
                 0 if primary == strategy_filter else 1,
                 # Companions carry the lane's label but another lane's
-                # evidence; they stay claimable once its own work is taken.
-                0 if carries_lane_evidence(card, strategy_filter) else 1,
+                # evidence, so unworked evidence cards go first. Only
+                # unworked ones: this sort outranks the demotion above, and
+                # a dry evidence card must not keep blocking fresh companions.
+                0 if (
+                    carries_lane_evidence(card, strategy_filter)
+                    and not (
+                        conclusion_counts.get(card.get("id", ""), 0)
+                        + unreachable_counts.get(card.get("id", ""), 0)
+                        + distinct_counts.get(card.get("id", ""), 0)
+                    )
+                ) else 1,
             )
 
         preferred.sort(key=_lane_priority)
