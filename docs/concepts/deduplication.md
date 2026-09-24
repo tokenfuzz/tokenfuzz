@@ -56,6 +56,15 @@ than the similarity cluster below and does not replace cluster-time review of
 distinct evidence. The structured resume lists every filed state with how far
 its review has got, so an agent can close a hypothesis on it at once.
 
+A finding that saves its own sanitizer diagnostic and testcase is normally
+moved into `crashes/` for crash triage. When a bundle in `crashes/` holds a
+byte-identical sanitizer report, it is instead folded into
+`crashes/.duplicates/` beside that bundle and its hypothesis closed with the
+bundle's id. A probe-written report carries its run header, process id, and
+the binary's frame paths, so an identical copy is the same execution; matching
+input bytes are not, because the same input through another build or harness
+is a separate route.
+
 The same lookup runs earlier, too. A one-run exploration probe whose crash
 repeats a filed state through the same route prints `CRASH STATE ALREADY
 FILED` with the owning bundle, so the agent skips a confirm that could not

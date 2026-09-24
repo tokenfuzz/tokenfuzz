@@ -221,6 +221,29 @@ class AuditClockTests(unittest.TestCase):
 
         self.assertEqual(progress.roots, frozenset({"finding:FCL-TIMER"}))
 
+    def test_agent_progress_uses_the_artifact_matcher_triage_uses(self) -> None:
+        # A full name claims its collision-renamed copy, never a same-numbered
+        # finding another agent filed.
+        runtime = SimpleNamespace(results=self.root / "results")
+        snapshot = audit_runner.ProgressSnapshot(
+            findings=2, crashes=0, finding_roots=2, crash_roots=0,
+            active=0, env_blocked=0,
+            artifact_roots={
+                "FIND-003-alpha.20260924T120000Z.1": "finding:FCL-ALPHA",
+                "FIND-003-beta": "finding:FCL-BETA",
+            },
+        )
+        with mock.patch.object(
+            audit_runner.structured_state, "agent_counts",
+            return_value={"active": 0, "env_blocked": 0},
+        ), mock.patch.object(
+            audit_runner.structured_state, "agent_rows",
+            return_value=[{"status": "FIND-003-alpha"}],
+        ):
+            progress = audit_runner.agent_progress(runtime, 2, snapshot)
+
+        self.assertEqual(progress.roots, frozenset({"finding:FCL-ALPHA"}))
+
     def test_phase_failure_is_recorded_without_masking_the_failure(self) -> None:
         runtime = SimpleNamespace(
             results=self.root / "results", target_root=self.root / "target",

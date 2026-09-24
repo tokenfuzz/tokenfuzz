@@ -723,6 +723,33 @@ def _last_crash_demotion_was_unverifiable_replay(report_text: str) -> bool:
     )
 
 
+def _filed_crash_with_same_evidence(results: Path, sanitizer: Path) -> str | None:
+    """The crash bundle whose saved sanitizer report is this finding's, byte for byte.
+
+    A probe-written report opens with its run header (testcase path, start
+    time) and carries the process id and the binary's own frame paths, so an
+    identical copy is the same execution. Input bytes are not provenance: the
+    same input through another build or harness is a separate route, and any
+    bundle file can happen to match them.
+    """
+    try:
+        wanted = sanitizer.read_bytes()
+    except OSError:
+        return None
+    state = crash_bundle.crash_state(wanted.decode("utf-8", errors="replace"))
+    if not wanted or state is None:
+        return None
+    for filed in crash_bundle.filed_crash_states(results, state_filter=state):
+        bundle = results / "crashes" / filed.crash_id
+        primary = crash_artifacts.find_primary_sanitizer((bundle, bundle / ".audit"))
+        try:
+            if primary is not None and primary.read_bytes() == wanted:
+                return filed.crash_id
+        except OSError:
+            continue
+    return None
+
+
 def route_finding_diagnostics(
     results_dir: str | os.PathLike[str], *,
     reconsider_unverifiable_replay: bool = False,
@@ -799,6 +826,15 @@ def route_finding_diagnostics(
                     ),
                 },
             )
+            continue
+        duplicate = _filed_crash_with_same_evidence(results, sanitizer)
+        if duplicate:
+            # The agent filed this run through bin/probe and also copied its
+            # report beside the finding. Routing the copy made a second crash
+            # bundle with no probe route, which the filing-time fold cannot
+            # match, so one execution was reviewed twice. Fold it as the crash
+            # lane folds its own.
+            _fold_duplicate_crash(directory, results, duplicate)
             continue
         if directory.parent.name == "findings-rejected":
             directory = _restore_rejected_artifact(

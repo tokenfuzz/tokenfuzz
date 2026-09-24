@@ -2024,17 +2024,15 @@ def iteration_outcome_label(
 
 def agent_progress(runtime: Runtime, agent: int, snapshot: ProgressSnapshot) -> AgentProgress:
     counts = structured_state.agent_counts(str(agent), runtime.results) or {}
-    roots_by_status: dict[str, set[str]] = {}
-    for artifact, root in snapshot.artifact_roots.items():
-        status_id = workqueue._artifact_status_id(artifact)
-        roots_by_status.setdefault(status_id, set()).add(root)
     roots: set[str] = set()
     for row in structured_state.agent_rows(str(agent), runtime.results):
         status = str(row.get("status", ""))
-        if status in snapshot.artifact_roots:
-            roots.add(snapshot.artifact_roots[status])
-            continue
-        roots.update(roots_by_status.get(workqueue._artifact_status_id(status), ()))
+        # The same matcher triage uses: a full name claims only its artifact
+        # (collision-renamed copies included), a bare id falls back to the number.
+        roots.update(
+            root for artifact, root in snapshot.artifact_roots.items()
+            if workqueue.status_names_artifact(status, artifact)
+        )
     return AgentProgress(
         counts.get("active", 0), counts.get("env_blocked", 0), frozenset(roots)
     )
@@ -2241,8 +2239,16 @@ def post_iteration(
 
 def _write_cluster_marker(path: Path) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text("expanded\n", encoding="utf-8")
-    os.replace(temporary, path)
+    try:
+        temporary.write_text("expanded\n", encoding="utf-8")
+        os.replace(temporary, path)
+    except FileNotFoundError:
+        # Triage folds a duplicate into crashes/.duplicates/ or moves a
+        # rejected bundle while the expansion decision is in flight. The
+        # bundle is no longer a seed, so there is nothing left to mark; raising
+        # here dropped every later crash's paid-for rows from the same pass.
+        if path.parent.is_dir():
+            raise
 
 
 def _migrate_cluster_backlog(runtime: Runtime) -> None:

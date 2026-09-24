@@ -3777,6 +3777,29 @@ def _artifact_status_id(value: str) -> str:
     return match.group(0) if match else normalized
 
 
+def status_names_artifact(status: str, artifact_name: str) -> bool:
+    """Whether a hypothesis status refers to this filed artifact.
+
+    Agents name findings themselves, so two parallel agents can both write
+    `FIND-003-<slug>`. A status carrying the full name matches only that
+    artifact; only a bare id (`FIND-003`, `CRASH-003-2`) falls back to the
+    numeric match, which is all it can say. Comparing ids alone let triage
+    rejecting one agent's finding discard another agent's hypothesis.
+    """
+    normalized_status = (status or "").strip().upper()
+    # A collision on move appends `.<UTC stamp>.<serial>` (triage's
+    # _unique_destination); the status still names the original directory.
+    normalized_artifact = re.sub(
+        r"\.\d{8}T\d{6}Z\.\d+$", "", (artifact_name or "").strip(),
+    ).upper()
+    if not normalized_status or not normalized_artifact:
+        return False
+    if normalized_status == normalized_artifact:
+        return True
+    bare = _artifact_status_id(normalized_status)
+    return bare == normalized_status and bare == _artifact_status_id(normalized_artifact)
+
+
 def record_artifact_rejection(
     results_dir: Path, artifact_name: str, reason: str, *, category: str = "",
 ) -> list[dict]:
@@ -3806,7 +3829,7 @@ def record_artifact_rejection(
         for index in latest_indexes.values():
             row = rows[index]
             previous = str(row.get("status", "")).strip()
-            if _artifact_status_id(previous) != artifact_id:
+            if not status_names_artifact(previous, artifact_name):
                 continue
             row["status"] = "DISCARDED"
             row["updated_at"] = now_iso()
@@ -3851,7 +3874,7 @@ def record_artifact_duplicate(
         for index in latest_indexes.values():
             row = rows[index]
             previous = str(row.get("status", "")).strip()
-            filed_it = _artifact_status_id(previous) == artifact_id
+            filed_it = status_names_artifact(previous, artifact_name)
             still_open = (
                 str(row.get("id", "")).strip() in named
                 and is_active_hypothesis_status(previous)
@@ -3875,12 +3898,12 @@ def record_artifact_reconsideration(
     path = state_dir(results_dir) / "hypotheses.jsonl"
     if not path.is_file():
         return []
-    artifact_id = _artifact_status_id(artifact_name)
-    if not artifact_id:
+    if not _artifact_status_id(artifact_name):
         return []
+    # The note records the status the rejection replaced, full name or bare
+    # id; match it the way the rejection did so a restore undoes exactly it.
     rejected_note = re.compile(
-        rf"^{TRIAGE_REJECTED_NOTE.strip()}\s+({re.escape(artifact_id)}(?:-\d+)?)\s*:",
-        re.IGNORECASE,
+        rf"^{TRIAGE_REJECTED_NOTE.strip()}\s+(\S+?)\s*:", re.IGNORECASE,
     )
 
     def mutate(rows: list[dict]) -> list[dict]:
@@ -3895,9 +3918,9 @@ def record_artifact_reconsideration(
             if str(row.get("status", "")).strip().upper() != "DISCARDED":
                 continue
             match = rejected_note.match(str(row.get("note", "")).strip())
-            if match is None:
+            if match is None or not status_names_artifact(match.group(1), artifact_name):
                 continue
-            previous = match.group(1).upper()
+            previous = match.group(1)
             row["status"] = previous
             row["updated_at"] = now_iso()
             row["note"] = f"Triage requeued {previous}: {reason}".strip()

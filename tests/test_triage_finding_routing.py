@@ -62,6 +62,42 @@ class FindingCrashRoutingTests(unittest.TestCase):
         self.assertTrue(routed.is_dir())
         self.assertIn("Routed from `findings/`", (routed / "report.md").read_text())
 
+    def test_a_run_already_filed_as_a_crash_is_not_routed_again(self) -> None:
+        def report(pid: int, binary: str) -> str:
+            return (
+                f"=={pid}==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+                "READ of size 1 at 0x1 thread T0\n"
+                f"    #0 0x1 in app_parse sample.c:12 ({binary})\n"
+                "SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:12 in app_parse\n"
+            )
+        filed = self.results / "crashes" / "CRASH-004-3"
+        (filed / ".audit").mkdir(parents=True)
+        (filed / "sanitizer.txt").write_text(report(11, "build-asan/app"), encoding="utf-8")
+        (filed / "input.bin").write_bytes(b"input")
+        (filed / ".audit" / "notes.txt").write_bytes(b"unrelated")
+
+        # The agent's copy of the filed run's report is that execution.
+        copy = self.finding("FIND-002-same-run", diagnostic=report(11, "build-asan/app"))
+        (copy / "input.bin").write_bytes(b"input")
+        # Same input and crash state through another build is another route.
+        other_build = self.finding(
+            "FIND-003-other-build", diagnostic=report(12, "build-asan+cfg-alt/app"),
+        )
+        (other_build / "input.bin").write_bytes(b"input")
+        # An input that happens to equal some bundle file proves nothing.
+        coincidence = self.finding(
+            "FIND-004-coincidence", diagnostic=report(13, "build-asan/app"),
+        )
+        (coincidence / "input.bin").write_bytes(b"unrelated")
+
+        self.assertEqual(triage.route_finding_diagnostics(self.results), 2)
+        folded = self.results / "crashes" / ".duplicates" / "FIND-002-same-run"
+        self.assertEqual(
+            (folded / "duplicate-of.txt").read_text().splitlines()[0], "CRASH-004-3",
+        )
+        self.assertTrue((self.results / "crashes" / "CRASH-003-other-build").is_dir())
+        self.assertTrue((self.results / "crashes" / "CRASH-004-coincidence").is_dir())
+
     def test_unreproduced_memory_diagnostic_stays_as_visible_crash_lead(self) -> None:
         directory = self.finding("FIND-002")
         self.assertEqual(triage.route_finding_diagnostics(self.results), 0)

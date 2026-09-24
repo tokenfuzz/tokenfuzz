@@ -1765,6 +1765,45 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(latest["H-2"]["status"], "PENDING")
         self.assertEqual(latest["H-3"]["status"], "FIND-003")
 
+    def test_rejecting_one_agents_finding_spares_a_same_numbered_one(self) -> None:
+        # Agents name findings themselves; two parallel agents both wrote
+        # FIND-003-<slug>. Only the named artifact's hypothesis is rejected.
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_hypothesis(status="FIND-003-raw-read", card_id="WORK-A")
+        self.add_hypothesis(
+            hyp_id="H-2", status="FIND-003-frame-offset", card_id="WORK-A",
+            file="src/a.c:app_close:20",
+        )
+        changed = workqueue.record_artifact_rejection(
+            self.results, "FIND-003-raw-read.20260721T120000Z.1", "not security relevant",
+        )
+        self.assertEqual([row["id"] for row in changed], ["H-1"])
+        latest = {
+            row["id"]: row for row in workqueue.read_jsonl(self.results / "state/hypotheses.jsonl")
+        }
+        self.assertEqual(latest["H-2"]["status"], "FIND-003-frame-offset")
+
+    def test_a_named_finding_is_restored_after_rejection_and_requeue(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_hypothesis(status="FIND-003-alpha", card_id="WORK-A")
+        self.add_hypothesis(
+            hyp_id="H-2", status="FIND-003-beta", card_id="WORK-A",
+            file="src/a.c:app_close:20",
+        )
+        workqueue.record_artifact_rejection(self.results, "FIND-003-alpha", "scope")
+        workqueue.record_artifact_rejection(self.results, "FIND-003-beta", "scope")
+
+        changed = workqueue.record_artifact_reconsideration(
+            self.results, "FIND-003-alpha.20260924T120000Z.1", "policy changed",
+        )
+
+        self.assertEqual([row["id"] for row in changed], ["H-1"])
+        latest = {
+            row["id"]: row for row in workqueue.read_jsonl(self.results / "state/hypotheses.jsonl")
+        }
+        self.assertEqual(latest["H-1"]["status"], "FIND-003-alpha")
+        self.assertEqual(latest["H-2"]["status"], "DISCARDED")
+
     def test_artifact_reconsideration_restores_only_prior_rejection(self) -> None:
         self.write_cards([self.card("WORK-A", "src/a.c")])
         self.add_hypothesis(status="CRASH-002", card_id="WORK-A")

@@ -166,6 +166,24 @@ with tempfile.TemporaryDirectory(prefix="cluster-expansion-") as temporary:
     check((empty / ".cluster_expanded").is_file(), "empty rows are a completed expansion")
     check(not (retry / ".cluster_expanded").exists(), "unavailable decisions remain retryable")
 
+    # Triage can move a bundle while its expansion decision is in flight; the
+    # crashes after it in the same pass must still receive their rows.
+    moved = crash_with_frame(results, target, "CRASH-033-1", line=34)
+    later = crash_with_frame(results, target, "CRASH-034-1", line=36)
+    runtime.cluster_expansion_attempted = set()
+
+    def fold_during_decision(directories, _target, **_kwargs):
+        (results / "crashes" / ".duplicates").mkdir(exist_ok=True)
+        moved.rename(results / "crashes" / ".duplicates" / moved.name)
+        return {directory: [] for directory in directories}
+
+    with mock.patch.object(
+        triage, "cluster_expansion_decisions", side_effect=fold_during_decision,
+    ):
+        folded = audit_runner.expand_new_crash_clusters(runtime)
+    check(folded["pending"] == 0, "a bundle moved mid-decision does not abort the pass")
+    check((later / ".cluster_expanded").is_file(), "crashes after a moved bundle are still marked")
+
     # An out-of-model seed still expands: expansion proposes source
     # neighbours, and a neighbour reachable from bytes can sit beside a crash
     # that is not. Skipping the seed would lose that lead for good. The seed's
