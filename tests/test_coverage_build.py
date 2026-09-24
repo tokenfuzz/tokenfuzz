@@ -402,6 +402,45 @@ class CoveragePreflightTests(unittest.TestCase):
 
 
 
+class ToolchainShimCompanionTests(unittest.TestCase):
+    """A shim directory answers for the tools CMake seeks beside a compiler."""
+
+    def _llvm(self, root: Path, *tools: str) -> Path:
+        llvm = root / "llvm" / "bin"
+        llvm.mkdir(parents=True)
+        for name in ("clang", "clang++", *tools):
+            tool = llvm / name
+            tool.write_text("#!/bin/sh\n", encoding="utf-8")
+            tool.chmod(0o755)
+        return llvm
+
+    def _shims(self, root: Path, llvm: Path, sibling: str) -> Path:
+        with mock.patch.object(
+            coverage_build.fuzz_harness, "fuzzing_compiler",
+            side_effect=lambda cxx=False: str(llvm / ("clang++" if cxx else "clang")),
+        ):
+            cc, _cxx = coverage_build.toolchain_shims(root, sibling)
+        return cc.parent
+
+    def test_module_scanner_beside_the_compiler_is_reachable_from_the_shims(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            llvm = self._llvm(root, "clang-scan-deps")
+            for sibling in coverage_build.SIBLING_SUFFIXES:
+                directory = self._shims(root, llvm, sibling)
+                scanner = directory / "clang-scan-deps"
+                self.assertEqual(scanner.resolve(), (llvm / "clang-scan-deps").resolve())
+                # Rewritten on every build without failing on the old link.
+                self._shims(root, llvm, sibling)
+                self.assertTrue(os.access(scanner, os.X_OK))
+
+    def test_no_scanner_beside_the_compiler_adds_no_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = self._shims(root, self._llvm(root), coverage_build.COVERAGE_SUFFIX)
+            self.assertFalse((directory / "clang-scan-deps").exists())
+
+
 class SiblingLinkInputTests(unittest.TestCase):
     def test_peer_libraries_follow_the_primary_into_its_sibling(self) -> None:
         import fuzz_harness

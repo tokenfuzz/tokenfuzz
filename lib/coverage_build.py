@@ -72,6 +72,10 @@ _MASQUERADE_NAMES = (
 )
 
 
+#: Tools a build system locates beside the compiler rather than on PATH.
+_COMPILER_COMPANIONS = ("clang-scan-deps",)
+
+
 def tree_name(san: str = "asan", sibling: str = COVERAGE_SUFFIX, *,
               suffix: "str | None" = None) -> str:
     """Directory name of a sibling, honouring AUDIT_BUILD_SUFFIX."""
@@ -163,6 +167,18 @@ def toolchain_shims(root: Path, sibling: str = COVERAGE_SUFFIX) -> "tuple[Path, 
         temporary.chmod(0o755)
         os.replace(temporary, path)
         shims.append(path)
+    # CMake finds a C++20 module scanner beside the compiler it was handed and
+    # records NOTFOUND otherwise, failing every scan step of a C++20 project
+    # that the primary, built with the real compiler, compiled. Link the one
+    # that ships beside the real compiler so the shim directory answers too.
+    for tool in _COMPILER_COMPANIONS:
+        real = Path(shutil.which(fuzz_harness.fuzzing_compiler(cxx=True))).parent / tool
+        if real.is_file():
+            link = directory / tool
+            temporary = link.with_name(f".{tool}.{os.getpid()}.tmp")
+            temporary.unlink(missing_ok=True)
+            temporary.symlink_to(real)
+            os.replace(temporary, link)
     # Same content under every name a build might reach for, so a recipe that
     # ignores CC/CXX still compiles through the instrumentation when this
     # directory leads PATH.
