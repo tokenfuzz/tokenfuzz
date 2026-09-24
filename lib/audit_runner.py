@@ -1036,6 +1036,12 @@ def _write_rank_window(runtime: Runtime, limit: int) -> None:
     os.replace(temporary, path)
 
 
+def _last_line(text: str | None) -> str:
+    """A generator's closing diagnostic, which states its outcome."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return lines[-1] if lines else "no diagnostic"
+
+
 def refresh_work_cards(
     runtime: Runtime, *, force: bool = False, limit: int | None = None,
 ) -> bool:
@@ -1120,19 +1126,36 @@ def refresh_work_cards(
         # other projects' histories, not this range.
         (runtime.results / "s6-peer-cards.jsonl").unlink(missing_ok=True)
     elif peer_cards.is_file():
+        s6_output = runtime.results / "s6-peer-cards.jsonl"
         completed = subprocess.run(
             [str(peer_cards), "--target-path", str(runtime.target_root),
              "--target-slug", runtime.target_slug, "--results-dir", str(runtime.results),
-             "--output", str(runtime.results / "s6-peer-cards.jsonl")],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+             "--output", str(s6_output)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False,
         )
         if completed.returncode:
-            (runtime.results / "s6-peer-cards.jsonl").unlink(missing_ok=True)
+            s6_output.unlink(missing_ok=True)
             refresh_ok = False
             runtime.s6_source_degraded = True
-            index_log(runtime, f"WARN: peer-fix-cards refresh failed rc={completed.returncode}; stale cards removed")
+            index_log(
+                runtime,
+                f"WARN: peer-fix-cards refresh failed rc={completed.returncode}; "
+                f"stale cards removed: {_last_line(completed.stderr)}",
+            )
         else:
             runtime.s6_source_degraded = False
+            # The generator exits 0 when every configured peer answered with
+            # nothing minable (no local clone, no resolvable advisory). A pinned
+            # S6 lane then has no card source in this environment; stop it as
+            # unavailable with the per-peer reason rather than idle its agents.
+            if pinned_s6 and not workqueue.read_jsonl(s6_output):
+                runtime.s6_lane_unavailable = (
+                    "S6 peer mining produced no cards: "
+                    f"{_last_line(completed.stderr)}"
+                )
+                index_log(runtime, f"WARN: {runtime.s6_lane_unavailable}")
+            else:
+                runtime.s6_lane_unavailable = ""
     else:
         # A missing generator is a permanent fault, not a degraded source, so
         # the campaign is left to stop rather than retried for the whole wall.
@@ -2708,6 +2731,11 @@ def _fixed_lane_unavailable(runtime: Runtime) -> str:
     if pinned == "S6" and not _s6_peers_configured(runtime):
         return (
             "S6 requires configured peer projects; run bin/suggest-peers "
+            "or drop the pin"
+        )
+    if pinned == "S6" and getattr(runtime, "s6_lane_unavailable", ""):
+        return (
+            f"{runtime.s6_lane_unavailable}; clone a peer under targets/ "
             "or drop the pin"
         )
     return ""

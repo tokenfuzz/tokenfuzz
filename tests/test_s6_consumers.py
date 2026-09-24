@@ -289,6 +289,26 @@ class PeerFixCardTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, expected, proc.stderr)
                 self.assertEqual(self.card_file.read_text(), "")
 
+    def test_an_empty_lane_names_why_each_peer_produced_nothing(self) -> None:
+        # The audit logs this closing line when a pinned S6 lane gets no card,
+        # so it must say per peer what was missing, not just that it was empty.
+        self.write_config(peers=["expat", "libxml"])
+        env = self.environment(fixes=2)
+        env["S6_TEST_EMPTY_PEER"] = "expat"
+        env["S6_TEST_NO_EVIDENCE_PEER"] = "libxml"
+        proc = subprocess.run(
+            [sys.executable, str(self.shim)], env=env,
+            capture_output=True, text=True,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.card_file.read_text(), "")
+        closing = proc.stderr.strip().splitlines()[-1]
+        self.assertIn("expat (no local clone; no OSV advisory)", closing)
+        self.assertIn(
+            "libxml (no local clone; 2 OSV advisory lead(s), none resolvable)",
+            closing,
+        )
+
     def test_a_source_failure_falls_open_to_peer_discovery(self) -> None:
         self.write_config(peers=["expat"])
         self.clone_peers("expat")

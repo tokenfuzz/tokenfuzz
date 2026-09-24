@@ -2115,6 +2115,28 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         "a pinned S6 refresh skips unrelated patch and source ranking",
         f"tools={pinned_tools!r} cards={pinned_cards!r}",
     )
+    # A generator that answers with no card (no peer clone, nothing
+    # resolvable) left the pinned lane idling its agents with no log line.
+    audit_runner.workqueue.write_cards(refresh_results / "s6-peer-cards.jsonl", [])
+    empty_answer = SimpleNamespace(returncode=0, stderr=(
+        "[peer-fix-cards] wrote 0 S6 card(s)\n"
+        "[peer-fix-cards] no cards from configured peers: "
+        "peerlib (no local clone; no OSV advisory)\n"
+    ))
+    with mock.patch.object(audit_runner.housekeeping, "should_run", return_value=True), \
+         mock.patch.object(audit_runner.housekeeping, "mark_clean"), \
+         mock.patch.object(audit_runner.subprocess, "run", return_value=empty_answer):
+        audit_runner.refresh_work_cards(refresh_runtime)
+    empty_reason = audit_runner._fixed_lane_unavailable(refresh_runtime)
+    empty_log = (refresh_logs / "index.log").read_text(encoding="utf-8")
+    check(
+        "peerlib (no local clone; no OSV advisory)" in empty_reason
+        and audit_runner.fixed_lane_exhausted(refresh_runtime, iteration=1)
+        and "WARN: S6 peer mining produced no cards: " in empty_log,
+        "a pinned S6 lane whose peers yield no card stops unavailable with the reason",
+        f"reason={empty_reason!r}",
+    )
+    refresh_runtime.s6_lane_unavailable = ""
     refresh_runtime.fixed_strategy = "S1"
     # Patch cards stand only on files present in the audited tree.
     for index in range(12):
@@ -2546,7 +2568,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
          mock.patch.object(audit_runner.housekeeping, "mark_clean") as failed_clean, \
          mock.patch.object(
              audit_runner.subprocess, "run",
-             side_effect=[SimpleNamespace(returncode=1)] * 3,
+             side_effect=[SimpleNamespace(returncode=1, stderr="")] * 3,
          ):
         audit_runner.refresh_work_cards(refresh_runtime)
     remaining_cards = audit_runner.workqueue.read_jsonl(

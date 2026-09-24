@@ -226,6 +226,7 @@ def main(argv: list[str]) -> int:
     seen_ids: set[str] = set()
     excerpt_deadline = time.monotonic() + EXCERPT_FETCH_BUDGET_SECONDS
     degraded_peers: list[str] = []
+    empty_reasons: list[str] = []
     for peer in cfg.s6_peers[:args.limit]:
         source_error = ""
         source_errors: list[str] = []
@@ -334,6 +335,16 @@ def main(argv: list[str]) -> int:
                 "peer under targets/ to make them resolvable",
                 file=sys.stderr,
             )
+        if not group:
+            # A clone always yields a discovery card, so an empty peer had
+            # none; say what its advisory feed returned instead.
+            advisories = sum(1 for fix in fixes if fix.get("source") == "osv")
+            empty_reasons.append(
+                f"{peer} (no local clone; "
+                + (f"{advisories} OSV advisory lead(s), none resolvable"
+                   if advisories else "no OSV advisory")
+                + ")"
+            )
         peer_cards.append(group[:args.max_per_peer])
 
     # Interleave peers so one noisy advisory feed cannot consume the review
@@ -377,9 +388,8 @@ def main(argv: list[str]) -> int:
             print(f"[peer-fix-cards] no cards; sources unreachable for "
                   f"{', '.join(degraded_peers)}", file=sys.stderr)
             return 1
-        print(f"[peer-fix-cards] no cards from configured peers "
-              f"{', '.join(cfg.s6_peers)}: no exact fix and no local clone",
-              file=sys.stderr)
+        print(f"[peer-fix-cards] no cards from configured peers: "
+              f"{', '.join(empty_reasons)}", file=sys.stderr)
     return 0
 
 

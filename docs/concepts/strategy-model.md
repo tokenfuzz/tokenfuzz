@@ -115,7 +115,9 @@ scope.
   issued only when a local peer clone under `targets/` holds the history to
   search. An advisory with no evidence link, fix excerpt, or local clone is
   not carded, since no session could resolve it; `bin/peer-fix-cards` reports how many were
-  skipped so you can clone the peer.
+  skipped so you can clone the peer. A run pinned to S6 whose peers yield
+  no card at all stops with `LANE_UNAVAILABLE` in `index.log`, naming what
+  each peer lacked.
 - **The S4 campaign card**: one target-wide boundary-fuzzing campaign,
   rather than one feature-derived card per file. When more than one agent is
   available, the scheduler reserves one reproduce seat for this campaign
