@@ -1712,16 +1712,21 @@ class Setup:
             self.toml.write_text(after, encoding="utf-8")
             log("Refreshed public harness includes from build install metadata")
 
-    def refresh_cmake_harness_link_libs(self) -> None:
-        """Merge a static product's published downstream link closure."""
+    def refresh_harness_link_libs(self) -> None:
+        """Merge the link closure and peer libraries the build publishes."""
         config = self.load_config()
-        if config.build_system != "cmake" or not config.asan_lib:
+        if not config.asan_lib:
             return
-        detected = target_config.cmake_package_harness_link_args(
-            self.target_root, target_config.build_dir_name("asan", suffix=""),
-            config.asan_lib,
+        san_dir = target_config.build_dir_name("asan", suffix="")
+        detected: list[str] = []
+        if config.build_system == "cmake":
+            detected += target_config.cmake_package_harness_link_args(
+                self.target_root, san_dir, config.asan_lib,
+            )
+        detected += target_config.peer_harness_link_args(
+            self.target_root, san_dir, config.asan_lib,
         )
-        merged = list(dict.fromkeys([*config.link_libs, *detected]))
+        merged = target_config.merge_link_args(config.link_libs, detected)
         if merged == config.link_libs:
             return
         before = self.toml.read_text(encoding="utf-8")
@@ -1730,7 +1735,7 @@ class Setup:
         )
         if after != before:
             self.toml.write_text(after, encoding="utf-8")
-            log("Refreshed harness link dependencies from CMake package metadata")
+            log("Refreshed harness link dependencies from published build metadata")
 
     def harness_input_sanitizers(self) -> "list[str]":
         config = self.load_config()
@@ -1796,7 +1801,7 @@ class Setup:
         self.sanitizer_builds(config)
         self.configure_native_python_runner()
         self.refresh_installed_harness_includes()
-        self.refresh_cmake_harness_link_libs()
+        self.refresh_harness_link_libs()
         self.runner_bootstrap()
         self.report_invariant_runners()
         self.require_reachable_runner(config)

@@ -159,7 +159,7 @@ def _utc_iso() -> str:
 
 def _llm_log(line: str) -> None:
     """Append to the LLM decision audit trail. Best-effort, never raises."""
-    target = _decision_log_path()
+    target = decision_log_path()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         with open(target, "a", encoding="utf-8") as f:
@@ -168,7 +168,7 @@ def _llm_log(line: str) -> None:
         pass
 
 
-def _decision_log_path() -> Path:
+def decision_log_path() -> Path:
     return Path(
         os.environ.get("LLM_DECIDE_LOG")
         or f"{os.environ.get('LOGDIR') or '/tmp'}/llm-decisions.log"
@@ -184,7 +184,7 @@ def fastest_completed_seconds(*decisions: str) -> int | None:
     """
     fastest: int | None = None
     try:
-        lines = _decision_log_path().read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = decision_log_path().read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return None
     for line in lines:

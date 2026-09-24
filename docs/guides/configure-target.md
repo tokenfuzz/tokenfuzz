@@ -145,6 +145,15 @@ package config when it names the selected static archive. Its published
 transitive libraries are merged into `link_libs`, with build-local paths kept
 relative so the same configuration works in container build trees.
 
+Setup also adds the other libraries the build publishes beside the selected
+one, so a harness can call any of the project's public APIs, not only one
+library's. With pkg-config files in the build tree, each package whose
+library the build produced is added, ordered before the packages it
+requires, followed by the external libraries and frameworks those packages
+declare. Without them, a shared library's peers are the other unversioned
+shared libraries in its directory. Coverage and fuzz builds link each peer
+from their own instrumented sibling tree.
+
 After repeated C/C++ harness build failures, `bin/auto-repair-target-toml`
 proposes a conservative additive repair to `includes`, `defines`, or
 `link_libs`:

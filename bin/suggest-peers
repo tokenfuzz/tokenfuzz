@@ -37,7 +37,7 @@ from pathlib import Path
 ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT") \
     else Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
-from llm_decide import llm_decide  # noqa: E402
+from llm_decide import decision_log_path, llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 import target_config as tc  # noqa: E402
 
@@ -161,8 +161,8 @@ def main(argv: list[str]) -> int:
             print(
                 f"[suggest-peers] backend={backend} returned no usable response — "
                 f"hand-edit [s6_peers] in {target_toml} (see {S6_DOC}), or set "
-                f"BACKEND=claude|codex|gemini|grok|oss and rerun. See lib/llm_decide.log "
-                f"for call telemetry.",
+                f"BACKEND=claude|codex|gemini|grok|oss and rerun. See "
+                f"{decision_log_path()} for call telemetry.",
                 file=sys.stderr,
             )
         return 2

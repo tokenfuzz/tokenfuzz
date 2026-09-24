@@ -151,11 +151,11 @@ assert_eq(
 cfg = tc.Config()
 write(
     "runner-success.toml",
-    'slug = "runner-success"\n[runner]\nsuccess_codes = [255, 123, 1, 0, 1, -1, 124, 125, 126, 127, 137, 256, true]\n',
+    'slug = "runner-success"\n[runner]\nsuccess_codes = [255, 123, 1, 0, 1, -1, 124, 125, 126, 127, 128, 137, 159, 160, 183, 256, true]\n',
 )
 tc.load_toml_into(cfg, TEST_TMPDIR / "runner-success.toml")
-assert_eq([0, 1, 123], cfg.runner_success_codes,
-          "runner success_codes keeps unique application exits below the wrapper range")
+assert_eq([0, 1, 123, 160, 183, 255], cfg.runner_success_codes,
+          "runner success_codes keeps unique application exits outside the wrapper and signal band")
 cfg = tc.Config()
 tc.load_toml_into(cfg, TEST_TMPDIR / "no-tm.toml")
 assert_eq([0], cfg.runner_success_codes,
@@ -1086,6 +1086,104 @@ if shutil.which("cmake"):
     )
 else:
     passed("CMake package links: skipped without cmake")
+
+# A build that publishes several libraries: a harness linking only the selected
+# one cannot call any peer's API. pkg-config names the peers, their order, and
+# the external flags their archives need.
+peer_root = TEST_TMPDIR / "pkgconfig-peers"
+peer_build = peer_root / "build-asan"
+for name in ("samplecore", "sampleformat", "sampleutil"):
+    (peer_build / f"lib{name}").mkdir(parents=True)
+    (peer_build / f"lib{name}" / f"lib{name}.a").write_bytes(b"!<arch>\n")
+pc_header = "prefix=/usr/local\nlibdir=${prefix}/lib\n\n"
+(peer_build / "libsamplecore" / "libsamplecore.pc").write_text(
+    pc_header + "Name: libsamplecore\nRequires: libsampleutil >= 1.0\n"
+    "Libs: -L${libdir} -lsamplecore -lz -framework Alpha\n", encoding="utf-8",
+)
+(peer_build / "libsampleformat" / "libsampleformat.pc").write_text(
+    pc_header + "Name: libsampleformat\nRequires: libsamplecore >= 1.0, libsampleutil\n"
+    "Libs: -L${libdir} -lsampleformat -framework Beta\nLibs.private: -lbz2\n",
+    encoding="utf-8",
+)
+(peer_build / "libsampleutil" / "libsampleutil.pc").write_text(
+    pc_header + "Name: libsampleutil\nLibs: -L${libdir} -lsampleutil -lm\n",
+    encoding="utf-8",
+)
+# The uninstalled twin names the same package through pkg-config's builtin.
+(peer_build / "uninstalled").mkdir()
+(peer_build / "uninstalled" / "libsampleutil-uninstalled.pc").write_text(
+    "Name: libsampleutil\nLibs: -Wl,-rpath,${pcfiledir}/x -lsampleutil\n",
+    encoding="utf-8",
+)
+assert_eq(
+    [
+        "build-asan/libsampleformat/libsampleformat.a",
+        "build-asan/libsamplecore/libsamplecore.a",
+        "build-asan/libsampleutil/libsampleutil.a",
+        "-framework", "Beta", "-lbz2", "-lz", "-framework", "Alpha", "-lm",
+    ],
+    tc.peer_harness_link_args(
+        peer_root, "build-asan", "build-asan/libsamplecore/libsamplecore.a",
+    ),
+    "peer links: each archive precedes what it requires, the primary repeated after its dependents",
+)
+assert_eq(
+    [
+        "build-asan/libsamplecore/libsamplecore.a",
+        "build-asan/libsampleutil/libsampleutil.a",
+        "-framework", "Beta", "-lbz2", "-lz", "-framework", "Alpha", "-lm",
+    ],
+    tc.peer_harness_link_args(
+        peer_root, "build-asan", "build-asan/libsampleformat/libsampleformat.a",
+    ),
+    "peer links: a primary nothing requires is not repeated",
+)
+assert_eq(
+    ["sampleb", "samplec", "sampled"],
+    tc._pkgconfig_requires("sampleb samplec >= 1.2, sampled"),
+    "peer links: Requires entries split on commas and spaces, versions dropped",
+)
+shared_pc_root = TEST_TMPDIR / "pkgconfig-shared"
+for name in ("samplecore", "sampleutil"):
+    (shared_pc_root / "build-asan" / f"lib{name}").mkdir(parents=True)
+    (shared_pc_root / "build-asan" / f"lib{name}" / f"lib{name}.dylib").write_bytes(b"\0")
+    (shared_pc_root / "build-asan" / f"lib{name}" / f"lib{name}.pc").write_text(
+        f"Name: lib{name}\nLibs: -l{name}\n", encoding="utf-8",
+    )
+assert_eq(
+    [],
+    tc.peer_harness_link_args(
+        shared_pc_root, "build-asan", "build-asan/libsamplecore/libsamplecore.dylib",
+    ),
+    "peer links: shared peers in other directories are not linked without a search path",
+)
+assert_eq(
+    [], tc.peer_harness_link_args(
+        peer_root, "build-asan", "build-asan/other/libsampleother.a",
+    ),
+    "peer links: a primary no local package names adds nothing",
+)
+
+shared_root = TEST_TMPDIR / "shared-peers"
+shared_lib = shared_root / "build-asan" / "lib"
+shared_lib.mkdir(parents=True)
+for name in ("samplecore", "sampleimage"):
+    (shared_lib / f"lib{name}.1.0.dylib").write_bytes(b"\0")
+    (shared_lib / f"lib{name}.dylib").symlink_to(f"lib{name}.1.0.dylib")
+assert_eq(
+    ["build-asan/lib/libsampleimage.dylib"],
+    tc.peer_harness_link_args(
+        shared_root, "build-asan", "build-asan/lib/libsamplecore.dylib",
+    ),
+    "peer links: a shared primary's unversioned sibling libraries are peers",
+)
+assert_eq(
+    ["-lm", "-framework", "Alpha", "-framework", "Beta", "-lz"],
+    tc.merge_link_args(
+        ["-lm", "-framework", "Alpha"], ["-framework", "Alpha", "-framework", "Beta", "-lz", "-lm"],
+    ),
+    "merge_link_args keeps option operands paired while deduplicating",
+)
 
 standard_root = TEST_TMPDIR / "compile-standard"
 (standard_root / "build-asan").mkdir(parents=True)

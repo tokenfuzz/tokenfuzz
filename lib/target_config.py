@@ -2809,6 +2809,233 @@ def cmake_package_harness_link_args(
     return []
 
 
+# Link options whose operand is the next argv token; merging must move the pair
+# as one unit or `-framework A -framework B` collapses into `-framework A B`.
+_LINK_PAIR_OPTIONS = frozenset({
+    "-F", "-L", "-isysroot", "--sysroot",
+    "-framework", "-weak_framework", "-Xlinker", "-Wl,-force_load",
+})
+
+
+def _link_units(values: list[str]) -> list[tuple[str, ...]]:
+    units: list[tuple[str, ...]] = []
+    index = 0
+    while index < len(values):
+        if values[index] in _LINK_PAIR_OPTIONS and index + 1 < len(values):
+            units.append((values[index], values[index + 1]))
+            index += 2
+        else:
+            units.append((values[index],))
+            index += 1
+    return units
+
+
+def merge_link_args(existing: list[str], detected: list[str]) -> list[str]:
+    """Append detected link argv to a curated list, deduplicating whole units."""
+    merged = list(dict.fromkeys([*_link_units(existing), *_link_units(detected)]))
+    return [token for unit in merged for token in unit]
+
+
+_LIBRARY_FILE_RE = re.compile(r"^lib(?P<name>.+?)(?P<kind>\.a|\.dylib|\.so)$")
+
+
+def _unversioned_library_name(filename: str) -> str:
+    """`foo` for libfoo.a/.dylib/.so; empty for libfoo.1.2.dylib and non-libraries."""
+    match = _LIBRARY_FILE_RE.match(filename)
+    if not match or re.search(r"\.\d[\d.]*$", match.group("name")):
+        return ""
+    return match.group("name")
+
+
+def _library_kind(path: str) -> str:
+    match = _LIBRARY_FILE_RE.match(Path(path).name)
+    return match.group("kind") if match else ""
+
+
+def _parse_pkgconfig(path: Path) -> dict[str, str]:
+    """Fields of one pkg-config file with its `${var}` references expanded."""
+    # pkg-config's one builtin; `-uninstalled` variants locate the tree by it.
+    variables: dict[str, str] = {"pcfiledir": str(path.parent)}
+    fields: dict[str, str] = {}
+
+    def expand(value: str) -> str:
+        for _ in range(8):
+            expanded = re.sub(
+                r"\$\{([A-Za-z0-9_.]+)\}",
+                lambda m: variables.get(m.group(1), ""), value,
+            )
+            if expanded == value:
+                break
+            value = expanded
+        return value
+
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.split("#", 1)[0].strip()
+        field_match = re.match(r"^([A-Za-z0-9_.]+):\s*(.*)$", line)
+        variable_match = re.match(r"^([A-Za-z0-9_.]+)=(.*)$", line)
+        if field_match:
+            fields[field_match.group(1)] = expand(field_match.group(2).strip())
+        elif variable_match:
+            variables[variable_match.group(1)] = expand(variable_match.group(2).strip())
+    fields["libdir"] = variables.get("libdir", "")
+    return fields
+
+
+def _pkgconfig_requires(value: str) -> list[str]:
+    """Package names from a Requires field, dropping version constraints.
+
+    Entries are separated by commas or whitespace, and a comparison operator
+    consumes the version that follows it (`a >= 1.0, b c`).
+    """
+    names: list[str] = []
+    tokens = [token for token in re.split(r"[,\s]+", value) if token]
+    index = 0
+    while index < len(tokens):
+        if tokens[index] in {"<", "<=", "=", "!=", ">=", ">"}:
+            index += 2
+            continue
+        names.append(tokens[index])
+        index += 1
+    return names
+
+
+def peer_harness_link_args(
+    target_root: Path, canonical_dir_name: str, primary_library: str,
+) -> list[str]:
+    """Link argv for the libraries a build publishes beside its selected one.
+
+    A harness links `<san>_lib` plus `link_libs`, and setup selects exactly one
+    library. A project that ships several libraries (a codec library beside
+    its format, scaling, and utility libraries; one module per shared object)
+    then has every other public API unlinkable, and a harness that calls one
+    fails at the linker. Two published structures name the peers without
+    knowing the project:
+
+    - pkg-config files in the build tree: each package whose `-l` resolves to
+      a library of the primary's kind in this tree is a peer, ordered so a
+      package precedes the packages it requires (static linkers resolve left
+      to right), followed by the external `Libs`/`Libs.private` flags those
+      archives need. The package's own install `-L` is dropped; a harness
+      links the build tree.
+    - a shared primary's peers are the other unversioned shared libraries in
+      its output directory, the one directory the harness puts on its runtime
+      search path. pkg-config is used for static archives only, since its
+      shared peers can sit in directories nothing would search. A dynamic
+      library carries its own dependency list, so nothing external is needed.
+
+    The primary itself is omitted: the harness builder places it first.
+    """
+    if not primary_library:
+        return []
+    san_dir = _resolve_target_path(target_root, canonical_dir_name)
+    primary = _resolve_target_path(target_root, primary_library)
+    kind = _library_kind(primary_library)
+    if not kind or not san_dir.is_dir() or not primary.is_file():
+        return []
+    primary = primary.resolve()
+
+    def relative(path: Path) -> str:
+        try:
+            return path.relative_to(target_root).as_posix()
+        except ValueError:
+            return str(path)
+
+    libraries: dict[str, Path] = {}
+    try:
+        found = sorted(san_dir.rglob(f"lib*{kind}"), key=lambda p: (len(p.parts), str(p)))
+    except OSError:
+        found = []
+    for path in found:
+        name = _unversioned_library_name(path.name)
+        if name and path.is_file():
+            libraries.setdefault(name, path)
+
+    packages: dict[str, dict] = {}
+    try:
+        # `<name>-uninstalled.pc` describes the same package as `<name>.pc`;
+        # sorting installed files first lets the first one seen win.
+        pc_files = sorted(
+            san_dir.rglob("*.pc"),
+            key=lambda p: (p.stem.endswith("-uninstalled"), str(p)),
+        )
+    except OSError:
+        pc_files = []
+    for pc in pc_files:
+        package = pc.stem.removesuffix("-uninstalled")
+        if package in packages:
+            continue
+        try:
+            fields = _parse_pkgconfig(pc)
+        except OSError:
+            continue
+        own = ""
+        external: list[str] = []
+        try:
+            tokens = shlex.split(
+                f"{fields.get('Libs', '')} {fields.get('Libs.private', '')}"
+            )
+        except ValueError:
+            continue
+        for token in tokens:
+            if token.startswith("-l") and token[2:] in libraries:
+                own = own or token[2:]
+            elif token.startswith("-L") and token[2:] == fields["libdir"]:
+                continue
+            else:
+                external.append(token)
+        if own:
+            packages[package] = {
+                "library": libraries[own],
+                "requires": _pkgconfig_requires(
+                    f"{fields.get('Requires', '')},{fields.get('Requires.private', '')}"
+                ),
+                "external": external,
+            }
+
+    # Static archives only: a shared peer in another directory would need
+    # its own runtime search path, and the harness sets one for the primary's
+    # directory alone, so every harness would fail to load.
+    if kind == ".a" and any(p["library"].resolve() == primary for p in packages.values()):
+        ordered: list[str] = []
+        visiting: set[str] = set()
+
+        def visit(name: str) -> None:
+            # Post-order over Requires, then reversed: a package lands before
+            # everything it requires.
+            if name in ordered or name in visiting or name not in packages:
+                return
+            visiting.add(name)
+            for required in packages[name]["requires"]:
+                visit(required)
+            visiting.discard(name)
+            ordered.append(name)
+
+        for name in sorted(packages):
+            visit(name)
+        ordered.reverse()
+        # The harness links the primary first. A peer that requires it (a
+        # format library over a codec library) comes later, so the primary is
+        # repeated after it: GNU ld resolves archives left to right only.
+        libraries_in_order = [packages[name]["library"] for name in ordered]
+        if libraries_in_order[0].resolve() == primary:
+            libraries_in_order = libraries_in_order[1:]
+        result = [relative(path) for path in libraries_in_order]
+        external = [
+            token for name in ordered for token in packages[name]["external"]
+        ]
+        return merge_link_args(result, external)
+
+    if kind == ".a":
+        return []
+    return [
+        relative(path) for path in sorted(
+            _resolve_target_path(target_root, primary_library).parent.glob(f"lib*{kind}")
+        )
+        if _unversioned_library_name(path.name)
+        and path.resolve() != primary
+    ]
+
+
 def _cmake_delegated_language(target_root: Path) -> str:
     """Return a language whose top-level product CMake only orchestrates."""
     manifests = [target_root / "CMakeLists.txt"]
@@ -4790,14 +5017,18 @@ def _apply_runner_section(cfg: Config, raw: dict, source_path: str) -> None:
 def runner_success_code_allowed(code: int) -> bool:
     """Whether a process exit can unambiguously mean normal completion.
 
-    The timeout wrapper returns the target's full 8-bit status, so 124 and
-    above is where its own timeout code, the shell's exec failures, and every
-    ``128 + signal`` death live. Which of those a host can name differs by
-    platform and Python version, so the boundary is the fixed 124 rather than
-    a per-host signal table: a target.toml calibrated on one machine must not
-    silently lose a code on another.
+    The timeout wrapper returns the target's full 8-bit status, so 124 to 159
+    is where its own timeout code, the shell's exec failures, and every
+    ``128 + signal`` death for the POSIX signals 1-31 live. That band is fixed
+    rather than a per-host signal table: a target.toml calibrated on one
+    machine must not silently lose a code on another. Above it, a program's
+    own status is kept: a CLI that returns a negative error code from main
+    exits with its low byte, which often lands there on rejected input.
+    Linux realtime signals also fold into 162-192, but nothing the
+    harness runs dies of one: glibc handles its own, and no sanitizer, timeout,
+    or RSS limit sends one.
     """
-    return 0 <= code < 124
+    return 0 <= code < 124 or 160 <= code <= 255
 
 
 def load_toml_into(cfg: Config, toml_path: str | os.PathLike) -> None:

@@ -338,6 +338,45 @@ class SuggestRunnerTests(unittest.TestCase):
         target_config.load_toml_into(config, self.toml)
         self.assertEqual(config.runner_success_codes, [0, 42])
 
+    def test_a_failed_decision_names_the_backend_and_its_log(self) -> None:
+        log = Path(self.temporary.name) / "decisions.log"
+        with mock.patch.dict(os.environ, {"LLM_DECIDE_LOG": str(log)}):
+            result = self.run_command({"reasoning": "no binary or args"})
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("backend=codex returned no usable response", result.stderr)
+        self.assertIn(str(log), result.stderr)
+
+    def test_records_a_rejection_exit_above_the_signal_band(self) -> None:
+        # A CLI returning a negative error code from main exits with its low
+        # byte; 183 was refused as a signal death before the band ended at 159.
+        self.binary.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, sys\n"
+            "if '-h' in sys.argv or '--help' in sys.argv:\n"
+            " print('usage: sampleproj --input FILE --sink FILE' * 4)\n"
+            " raise SystemExit(0)\n"
+            "path = pathlib.Path(sys.argv[sys.argv.index('--input') + 1])\n"
+            "if not path.is_file():\n"
+            " print('input does not exist')\n"
+            " raise SystemExit(3)\n"
+            "print('input has invalid data')\n"
+            "raise SystemExit(183)\n",
+            encoding="utf-8",
+        )
+        accepted = self.run_command(
+            {
+                "binary": "c1",
+                "args": ["--input", "{TESTCASE}", "--sink", "{NULL_DEVICE}"],
+                "reasoning": "help names an input and sink",
+            },
+            "--apply",
+            validation={"valid": True, "reasoning": "diagnostic came from input parsing"},
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+        config = target_config.Config(target_root=str(self.target))
+        target_config.load_toml_into(config, self.toml)
+        self.assertEqual(config.runner_success_codes, [0, 183])
+
     def test_zero_exit_launch_must_depend_on_the_testcase(self) -> None:
         self.binary.write_text(
             f"#!{sys.executable}\n"

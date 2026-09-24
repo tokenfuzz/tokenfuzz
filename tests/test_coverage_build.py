@@ -401,5 +401,46 @@ class CoveragePreflightTests(unittest.TestCase):
             self.assertEqual(held, ["build-asan", "build-asan+cov", "build-asan+fuzz"])
 
 
+
+class SiblingLinkInputTests(unittest.TestCase):
+    def test_peer_libraries_follow_the_primary_into_its_sibling(self) -> None:
+        import fuzz_harness
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for tree in ("build-asan", "build-asan+cov"):
+                (root / tree / "lib").mkdir(parents=True)
+                (root / tree / "lib" / "libsampleutil.a").write_bytes(b"!<arch>\n")
+            (root / "build-asan" / "lib" / "libsampleonly.a").write_bytes(b"!<arch>\n")
+            config = target_config.Config(target_root=str(root))
+            config.link_libs = [
+                "build-asan/lib/libsampleutil.a", "build-asan/lib/libsampleonly.a",
+                "-framework", "Alpha",
+            ]
+            canonical = [
+                str(root / "build-asan/lib/libsampleutil.a"),
+                str(root / "build-asan/lib/libsampleonly.a"),
+                "-framework", "Alpha",
+            ]
+            self.assertEqual(
+                fuzz_harness.sibling_link_inputs(
+                    config, str(root / "build-asan/lib/libsamplecore.a"),
+                ),
+                canonical,
+            )
+            self.assertEqual(
+                fuzz_harness.sibling_link_inputs(
+                    config, str(root / "build-asan+cov/lib/libsamplecore.a"),
+                ),
+                [str(root / "build-asan+cov/lib/libsampleutil.a"), *canonical[1:]],
+            )
+            (root / "build-msan" / "lib").mkdir(parents=True)
+            (root / "build-msan" / "lib" / "libsampleutil.a").write_bytes(b"!<arch>\n")
+            self.assertEqual(
+                fuzz_harness.sibling_link_inputs(
+                    config, str(root / "build-msan/lib/libsamplecore.a"),
+                ),
+                [str(root / "build-msan/lib/libsampleutil.a"), *canonical[1:]],
+            )
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

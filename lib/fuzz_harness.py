@@ -1559,10 +1559,36 @@ def build_command(source: Path, binary: Path, san: str, config,
         "-DFUZZ_CAMPAIGN_BUILD=1",
         "-fno-omit-frame-pointer", "-g", "-O1", *flags,
         *config.defines, *includes, str(source), *library_args,
-        *config.resolved_link_libs(),
+        *sibling_link_inputs(config, library),
         *shlex.split(os.environ.get("LDFLAGS", "")),
         "-o", str(binary),
     ]
+
+
+_SANITIZER_TREE_RE = re.compile(r"/(build-(?:asan|ubsan|msan|tsan)[^/]*)/")
+
+
+def sibling_link_inputs(config, library: str) -> "list[str]":
+    """`link_libs` taken from the same sanitizer build tree as ``library``.
+
+    `link_libs` names the canonical ASan build, so a coverage, fuzz, alternate
+    configuration, or other-sanitizer build that swapped only the primary
+    library linked every peer library from a different tree: no coverage for
+    their code, mixed sanitizer runtimes, and for shared libraries two copies
+    of the project loaded side by side. A peer with no twin in the primary's
+    tree keeps its configured path.
+    """
+    values = config.resolved_link_libs()
+    match = _SANITIZER_TREE_RE.search(str(library or ""))
+    if not match:
+        return values
+    tree = f"/{match.group(1)}/"
+    result = []
+    for value in values:
+        own = _SANITIZER_TREE_RE.search(value)
+        candidate = value.replace(f"/{own.group(1)}/", tree, 1) if own else value
+        result.append(candidate if candidate != value and Path(candidate).exists() else value)
+    return result
 
 
 # Source inputs a target may list among `link_libs` (target_config accepts
@@ -1613,7 +1639,7 @@ def probe_compile_command(compiler: str, sanitizer_flag: str, source: Path,
     harness_object = binary.with_name(binary.name + ".o")
     objects = [(source, harness_object)]
     link_inputs = []
-    for index, value in enumerate(config.resolved_link_libs()):
+    for index, value in enumerate(sibling_link_inputs(config, library)):
         if Path(value).suffix.lower() in _SOURCE_LINK_INPUT_SUFFIXES:
             linked_object = binary.with_name(f"{binary.name}.link{index}.o")
             objects.append((Path(value), linked_object))
@@ -1672,7 +1698,7 @@ def build_identity(source: Path, san: str, config, library: str,
         f"library={library}:{stat.st_size if stat else '-'}:"
         f"{stat.st_mtime_ns if stat else '-'}",
         f"includes={config.includes}", f"defines={config.defines}",
-        f"links={config.resolved_link_libs()}", f"flags={flags}",
+        f"links={sibling_link_inputs(config, library)}", f"flags={flags}",
         f"ldflags={os.environ.get('LDFLAGS', '')}",
     )
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:12]

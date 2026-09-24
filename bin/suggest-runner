@@ -16,7 +16,7 @@ ROOT = Path(os.environ["SCRIPT_ROOT"]).resolve() if os.environ.get("SCRIPT_ROOT"
 sys.path.insert(0, str(ROOT / "lib"))
 
 import cli_help  # noqa: E402
-from llm_decide import llm_decide  # noqa: E402
+from llm_decide import decision_log_path, llm_decide  # noqa: E402
 from prompt_render import render_template  # noqa: E402
 import runner_preflight  # noqa: E402
 import target_config as tc  # noqa: E402
@@ -488,6 +488,20 @@ def main(argv: list[str]) -> int:
                 "runner-suggest", "binary,args,reasoning", prompt, args.timeout
             )
             if result is None:
+                # Quiet inside bin/setup-target's backend rotation, which
+                # narrates each attempt, as the sibling suggest helpers are.
+                if os.environ.get("LLM_BOOTSTRAP_QUIET", "0") != "1":
+                    backend = (
+                        os.environ.get("ACTIVE_BACKEND")
+                        or os.environ.get("BACKEND") or "<unset>"
+                    )
+                    print(
+                        f"[suggest-runner] backend={backend} returned no usable "
+                        f"response - set BACKEND=claude|codex|gemini|grok|oss "
+                        f"and rerun, or hand-edit [runner] in {target_toml}. See "
+                        f"{decision_log_path()} for call telemetry.",
+                        file=sys.stderr,
+                    )
                 return 2
             chosen = next(
                 (p for p in programs if p["id"] == str(result.get("binary", ""))),

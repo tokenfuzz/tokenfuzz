@@ -784,7 +784,7 @@ class SetupTargetTests(unittest.TestCase):
             SETUP_TARGET.target_config, "cmake_package_harness_link_args",
             return_value=["build-asan/libdependency.a", "-framework", "Security"],
         ):
-            setup.refresh_cmake_harness_link_libs()
+            setup.refresh_harness_link_libs()
         loaded = target_config.Config(target_root=str(target))
         target_config.load_toml_into(loaded, config)
         self.assertEqual(
