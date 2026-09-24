@@ -431,6 +431,46 @@ class HarnessInputAgreementTests(unittest.TestCase):
 class SymbolFamilyTests(unittest.TestCase):
     """A macro-mangled API is still the API."""
 
+    def test_a_mangled_cpp_export_is_admitted_under_its_declared_name(self) -> None:
+        # nm spells a C++ API mangled; the header index keys it by source
+        # identifier. Looking the raw symbol up admitted nothing, and its
+        # leading underscore read as a reserved identifier.
+        exported = {"_ZN6sample9app_parseEPKhm", "_ZN6sample6helperEv"}
+        declarations = {
+            "app_parse": "int app_parse(const unsigned char *data, size_t size);",
+        }
+        with mock.patch.object(
+            fuzz_harness.symbol_names, "demangle_text",
+            # One line per mangled name, in sorted order.
+            return_value="sample::helper()\n"
+                         "sample::app_parse(unsigned char const*, unsigned long)\n",
+        ):
+            found = fuzz_harness.candidates(
+                config_for(Path("/t"), ["bytes"]), exported, [], declarations)
+        self.assertEqual([c.symbol for c in found], ["_ZN6sample9app_parseEPKhm"])
+        self.assertTrue(found[0].admitted, found[0].blockers)
+        self.assertEqual(found[0].source_name, "app_parse")
+        self.assertEqual(found[0].declaration, declarations["app_parse"])
+
+    def test_template_and_candidates_resolve_an_export_the_same_way(self) -> None:
+        declarations = {"app_parse": "int app_parse(const char *, size_t);"}
+        aliases = fuzz_harness.suffix_aliases({"app_parse_8"})
+        self.assertEqual(fuzz_harness.resolve_declaration(
+            "app_parse_8", declarations, aliases, {}), declarations["app_parse"])
+        self.assertEqual(fuzz_harness.resolve_declaration(
+            "_Z9app_parsePKcm", declarations, {}, {"_Z9app_parsePKcm": "app_parse"}),
+            declarations["app_parse"])
+        self.assertEqual(fuzz_harness.resolve_declaration(
+            "_Z5otherv", declarations, {}, {"_Z5otherv": "other"}), "")
+
+    def test_without_a_demangler_a_mangled_export_maps_to_nothing(self) -> None:
+        with mock.patch.object(
+            fuzz_harness.symbol_names, "demangle_text",
+            side_effect=lambda text: text,
+        ):
+            self.assertEqual(
+                fuzz_harness.source_identifiers({"_Z9app_parsePKcm", "plain"}), {})
+
     EXPORTED = {"pcre2_compile_8", "pcre2_match_8", "pcre2_code_free_8",
                 "other_plain"}
 

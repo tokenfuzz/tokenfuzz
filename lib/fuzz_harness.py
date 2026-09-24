@@ -763,7 +763,10 @@ def compatible_api_hints(boundary_declaration: str, candidates,
     for candidate in candidates:
         if not getattr(candidate, "admitted", False):
             continue
-        if candidate.symbol == exclude:
+        # A C++ boundary's receipt names its source identifier, not the
+        # mangled export.
+        if exclude and exclude in (candidate.symbol,
+                                   getattr(candidate, "source_name", "")):
             continue
         theirs = parameter_types(candidate.declaration)
         shared_specific = len(specific & theirs)
@@ -804,6 +807,52 @@ def suffix_aliases(exported: "set[str]") -> "dict[str, str]":
     return aliases
 
 
+def source_identifiers(symbols: "Iterable[str]") -> "dict[str, str]":
+    """ABI-mangled export -> the source identifier a header declares it by.
+
+    C++ headers carry source identifiers while nm carries mangled names.
+    Demangle in one bounded subprocess and keep only the final identifier
+    before the parameter list (`ns::Type::parse` -> `parse`). Without a
+    demangler the names come back unchanged and nothing maps, so a C++
+    target reads as undeclared rather than as wrongly declared.
+    """
+    mangled = sorted({symbol for symbol in symbols
+                      if symbol.startswith(("_Z", "?"))})
+    if not mangled:
+        return {}
+    demangled = symbol_names.demangle_text("\n".join(mangled) + "\n").splitlines()
+    if len(demangled) != len(mangled):
+        return {}
+    identifiers: "dict[str, str]" = {}
+    for symbol, display in zip(mangled, demangled):
+        if display == symbol:
+            continue
+        match = re.search(r"([A-Za-z_]\w*)\s*$", display.split("(", 1)[0])
+        if match:
+            identifiers[symbol] = match.group(1)
+    return identifiers
+
+
+def resolve_declaration(symbol: str, declarations: "dict[str, str]",
+                        aliases: "dict[str, str]",
+                        identifiers: "dict[str, str]") -> str:
+    """The public declaration of one exported symbol, or "".
+
+    The export is not always spelled as its header spells it: a width suffix
+    is applied by a macro the header never names, and a C++ export is
+    mangled. ``candidates`` and ``bin/fuzz template`` both resolve through
+    here so a symbol one admits the other can generate.
+    """
+    declaration = declarations.get(symbol, "")
+    if declaration:
+        return declaration
+    match = _WIDTH_SUFFIX_RE.match(symbol)
+    base = match.group("base") if match else ""
+    if base and aliases.get(base) and base in declarations:
+        return declarations[base]
+    return declarations.get(identifiers.get(symbol, ""), "")
+
+
 # Word split for an identifier: `_` separators and camelCase humps alike, so
 # `xmlReadMemory`, `xml_read_memory`, and `cJSON_ParseWithLength` all yield the
 # verb. The vocabulary is workqueue's — one list of consume verbs for the whole
@@ -833,6 +882,9 @@ class Candidate:
     covered_by: str = ""
     rank: int = 0
     route: str = ""
+    # The identifier the header declares, when the export spells it
+    # differently (a mangled C++ name); empty otherwise.
+    source_name: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -840,12 +892,13 @@ class Candidate:
             "shapes": self.shapes, "controls": self.controls,
             "admitted": self.admitted, "blockers": self.blockers,
             "covered_by": self.covered_by, "rank": self.rank,
-            "route": self.route,
+            "route": self.route, "source_name": self.source_name,
         }
 
 
 def gate(symbol: str, declaration: str, exported: "set[str]",
-         attacker_controls: "list[str]", covered_by: str = "") -> Candidate:
+         attacker_controls: "list[str]", covered_by: str = "",
+         source_name: str = "") -> Candidate:
     """Decide whether one API earns a fuzz target, and say why not.
 
     Three independent facts, each from a structured source. Every one that
@@ -859,13 +912,15 @@ def gate(symbol: str, declaration: str, exported: "set[str]",
             "not exported: the sanitizer build does not publish this symbol, "
             "so a harness could only reach it by compiling target internals"
         )
-    elif symbol.startswith("_"):
+    elif (source_name or symbol).startswith("_"):
         # C reserves file-scope identifiers beginning with an underscore for
         # the implementation, so a library naming a symbol this way has said
         # it is not public. The distinction matters most where it is otherwise
         # invisible: a *static archive* has no dynamic export list, so `nm`
         # reports every cross-translation-unit helper as global and the whole
         # internal surface would be offered as fuzz candidates.
+        # A mangled C++ export always starts with one, so the reservation is
+        # read off the identifier its header declares.
         blockers.append(
             "reserved identifier: a leading underscore marks an internal, not "
             "a published API. Fuzzing it tests a contract no caller has"
@@ -918,26 +973,24 @@ def candidates(config, exported: "set[str]",
         for harness in existing for symbol in harness.drives
     }
     aliases = suffix_aliases(exported)
+    identifiers = source_identifiers(
+        symbol for symbol in exported if symbol not in declarations)
     out: "list[Candidate]" = []
     for symbol in sorted(exported):
-        declaration = declarations.get(symbol, "")
-        if not declaration:
-            # A width-suffixed export is declared under its bare name, because
-            # the suffix is applied by a macro the header never spells out.
-            match = _WIDTH_SUFFIX_RE.match(symbol)
-            base = match.group("base") if match else ""
-            if base and aliases.get(base) and base in declarations:
-                declaration = declarations[base]
+        declaration = resolve_declaration(
+            symbol, declarations, aliases, identifiers)
         if not declaration:
             # No public declaration is itself the answer to "is this a key
             # API": an exported symbol no header names is an internal the
             # linker happened to publish.
             continue
+        source_name = identifiers.get(symbol, symbol)
         candidate = gate(
             symbol, declaration, exported, config.attacker_controls,
-            covered.get(symbol, ""),
+            covered.get(symbol, ""), source_name=source_name,
         )
         candidate.route = (routes or {}).get(symbol, "")
+        candidate.source_name = source_name if source_name != symbol else ""
         candidate.rank = (
             len(candidate.controls) * 10
             + max((SHAPE_RANK.get(shape, 0) for shape in candidate.shapes),
@@ -947,7 +1000,7 @@ def candidates(config, exported: "set[str]",
             # `cJSON_Parse(const char *)` is the weakest shape and the actual
             # parser. When the two disagree, the verb is the better guess at
             # which one consumes untrusted input.
-            + (10 if consumes_input(symbol) else 0)
+            + (10 if consumes_input(source_name) else 0)
             + (5 if candidate.route else 0)
         )
         out.append(candidate)
@@ -1194,25 +1247,12 @@ def declared_exports(config, sanitizer: str) -> "tuple[int, int]":
         if symbol.split("@", 1)[0] in index
     )
 
-    mangled = sorted(
-        symbol for symbol in exported - declared
-        if symbol.startswith(("_Z", "?"))
+    # Without a demangler setup merely reports the inconclusive mismatch and
+    # never rewrites the operator's configuration from it.
+    declared.update(
+        symbol for symbol, name in source_identifiers(exported - declared).items()
+        if name in index
     )
-    if mangled:
-        # C++ headers carry source identifiers while nm carries ABI-mangled
-        # names. Demangle in one bounded subprocess, then compare only the
-        # final identifier before the parameter list (`ns::Type::parse` ->
-        # `parse`). If no demangler is installed, the names remain unchanged;
-        # setup merely reports the inconclusive mismatch and never rewrites the
-        # operator's configuration from it.
-        rendered = symbol_names.demangle_text("\n".join(mangled) + "\n")
-        demangled = rendered.splitlines()
-        if len(demangled) == len(mangled):
-            for symbol, display in zip(mangled, demangled):
-                prefix = display.split("(", 1)[0]
-                match = re.search(r"([A-Za-z_]\w*)\s*$", prefix)
-                if match and match.group(1) in index:
-                    declared.add(symbol)
     return len(exported), len(declared)
 
 

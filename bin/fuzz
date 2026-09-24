@@ -240,7 +240,8 @@ def cmd_candidates(args) -> int:
           f"in {config.slug} (attacker_controls: "
           f"{', '.join(config.attacker_controls) or 'none'})\n")
     for candidate in admitted[:args.limit]:
-        print(f"  {candidate.symbol}")
+        print(f"  {candidate.symbol}"
+              + (f"  ({candidate.source_name})" if candidate.source_name else ""))
         print(f"    {candidate.declaration}")
         print(f"    reachable by: {', '.join(candidate.controls)} "
               f"via {', '.join(candidate.shapes)}")
@@ -325,6 +326,11 @@ static size_t fz_rest(fz_stream *s, const uint8_t **out) {{
   return n;
 }}
 
+/* A C++ target's harness is compiled as C++; libFuzzer still looks the
+   entry point up by its C name. */
+#ifdef __cplusplus
+extern "C"
+#endif
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {{
   /* Rebuild the input the way the grounding caller allocates it; `!size`
      keeps a zero-length input allocatable. */
@@ -384,9 +390,17 @@ def cmd_template(args) -> int:
     )
     existing = discovered(config, exported)
     covered = {s: h.path for h in existing for s in h.drives}
+    # Resolve the export exactly as `candidates` did, or a width-suffixed or
+    # mangled symbol it admitted would be refused here for want of a header.
+    identifiers = fuzz_harness.source_identifiers([args.symbol])
+    source_name = identifiers.get(args.symbol, args.symbol)
     verdict = fuzz_harness.gate(
-        args.symbol, declarations.get(args.symbol, ""), exported,
-        config.attacker_controls, covered.get(args.symbol, ""),
+        args.symbol,
+        fuzz_harness.resolve_declaration(
+            args.symbol, declarations, fuzz_harness.suffix_aliases(exported),
+            identifiers),
+        exported, config.attacker_controls, covered.get(args.symbol, ""),
+        source_name=source_name,
     )
     if not verdict.admitted and not args.force:
         say(f"{args.symbol} is not admitted:")
@@ -395,20 +409,21 @@ def cmd_template(args) -> int:
         say("Pass --force only if you can name why the gate is wrong here.")
         return 3
     destination = Path(args.output) if args.output else (
-        fuzz_harness.source_dir(config.results_dir) / f"fuzz_{args.symbol}.c")
+        fuzz_harness.source_dir(config.results_dir)
+        / f"fuzz_{source_name}.{'cc' if args.symbol in identifiers else 'c'}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     fuzz_harness.reject_in_tree_source(destination, config.target_root)
     if destination.exists() and not args.force:
         say(f"refusing to overwrite {destination}; pass --force to replace it")
         return 1
     examples = fuzz_harness.local_caller_examples(
-        config.target_root, args.symbol, limit=2)
+        config.target_root, source_name, limit=2)
     source_usage = ", ".join(
         f"{entry.path}:{entry.line}" for entry in examples) or "UNRESOLVED"
     destination.write_text(TEMPLATE.format(
-        target=args.target or f"{args.symbol}",
+        target=args.target or source_name,
         hypothesis=args.hypothesis_id or "H-TODO",
-        symbol=args.symbol,
+        symbol=source_name,
         declaration=verdict.declaration or "(no public declaration found)",
         controls=", ".join(verdict.controls) or "(forced)",
         shapes=", ".join(verdict.shapes) or "(none)",
