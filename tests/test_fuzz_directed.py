@@ -452,6 +452,21 @@ class SymbolFamilyTests(unittest.TestCase):
         self.assertEqual(found[0].source_name, "app_parse")
         self.assertEqual(found[0].declaration, declarations["app_parse"])
 
+    def test_a_cpp_harness_calling_the_source_name_covers_the_mangled_export(self) -> None:
+        driven = fuzz_harness._driven(
+            {"app_parse", "malloc"}, {"_Z9app_parsePKcm", "_Z5otherv"},
+            {"_Z9app_parsePKcm": "app_parse", "_Z5otherv": "other"})
+        self.assertEqual(driven, {"_Z9app_parsePKcm"})
+
+    def test_a_destructor_does_not_resolve_to_its_constructor(self) -> None:
+        with mock.patch.object(
+            fuzz_harness.symbol_names, "demangle_text",
+            return_value="sample::Box::Box()\nsample::Box::~Box()\n",
+        ):
+            self.assertEqual(
+                fuzz_harness.source_identifiers({"_ZN6sample3BoxC1Ev", "_ZN6sample3BoxD1Ev"}),
+                {"_ZN6sample3BoxC1Ev": "Box"})
+
     def test_template_and_candidates_resolve_an_export_the_same_way(self) -> None:
         declarations = {"app_parse": "int app_parse(const char *, size_t);"}
         aliases = fuzz_harness.suffix_aliases({"app_parse_8"})

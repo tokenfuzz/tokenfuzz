@@ -152,7 +152,8 @@ class ExistingHarness:
 _CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(")
 
 
-def _driven(calls: "set[str]", exported: "set[str]") -> "set[str]":
+def _driven(calls: "set[str]", exported: "set[str]",
+            identifiers: "dict[str, str] | None" = None) -> "set[str]":
     """Exported symbols a harness's call sites actually reach.
 
     Resolves the width-suffix spelling both ways, so a harness calling
@@ -162,8 +163,11 @@ def _driven(calls: "set[str]", exported: "set[str]") -> "set[str]":
     candidate.
     """
     aliases = suffix_aliases(exported)
+    # A C++ harness calls `parse`; the export it reaches is mangled.
     return (calls & exported) | {
         aliases[name] for name in calls if name in aliases
+    } | {
+        symbol for symbol, name in (identifiers or {}).items() if name in calls
     }
 # A harness large enough to be a whole framework is not a harness; reading it
 # costs more than it tells us. libFuzzer entry files are tens of lines.
@@ -204,6 +208,8 @@ def discover(target_root: "str | os.PathLike",
     """
     root = Path(target_root)
     found: "list[ExistingHarness]" = []
+    # Demangled once, on the first harness found, not once per harness.
+    identifiers: "dict[str, str] | None" = None
     for path in _walk(root, keep=_FUZZ_DIR_NAMES):
         suffix = path.suffix.lower()
         if not suffix:
@@ -232,9 +238,11 @@ def discover(target_root: "str | os.PathLike",
             relative = path.relative_to(root).as_posix()
         except ValueError:
             relative = path.name
+        if exported and identifiers is None:
+            identifiers = source_identifiers(exported)
         found.append(ExistingHarness(
             path=relative, kind=kind,
-            drives=sorted(_driven(calls, exported)) if exported else [],
+            drives=sorted(_driven(calls, exported, identifiers)) if exported else [],
             gaps=[(gap, cost) for gap, pattern, cost in _HARNESS_GAPS
                   if pattern.search(text)],
         ))
@@ -831,8 +839,9 @@ def source_identifiers(symbols: "Iterable[str]") -> "dict[str, str]":
     for symbol, display in zip(mangled, demangled):
         if display == symbol:
             continue
-        match = re.search(r"([A-Za-z_]\w*)\s*$", display.split("(", 1)[0])
-        if match:
+        match = re.search(r"(~?[A-Za-z_]\w*)\s*$", display.split("(", 1)[0])
+        # A destructor would otherwise map to its class's constructor name.
+        if match and not match.group(1).startswith("~"):
             identifiers[symbol] = match.group(1)
     return identifiers
 
