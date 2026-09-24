@@ -1182,6 +1182,37 @@ def llm_decide(
 REFUSED_MARKER = "rejected"
 
 
+def _failure_detail(*chunks: object) -> str:
+    """One-line reason a backend CLI gave for a non-zero exit, for the log.
+
+    A bare rc hides the difference between a refusal, a usage limit and a
+    crash; the CLI's own message is what an operator needs to act. Claude's
+    JSON envelope puts it in `result`; other CLIs end with a plain line.
+    """
+    text = "\n".join(
+        part.decode("utf-8", "replace") if isinstance(part, bytes) else str(part or "")
+        for part in chunks
+    )
+    reason = ""
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            envelope = json.loads(line)
+        except ValueError:
+            envelope = None
+        if isinstance(envelope, dict):
+            result = envelope.get("result")
+            if isinstance(result, str) and result.strip():
+                reason = result.strip().splitlines()[0]
+                break
+            continue
+        reason = line
+        break
+    return f" detail={' '.join(reason.split())[:200]!r}" if reason else ""
+
+
 def record_provider_limit(*chunks: str) -> None:
     """Record a provider limit or refusal seen in a failed decide call.
 
@@ -1354,6 +1385,7 @@ def _run_decision(
             _llm_log(
                 f"{decision} FAIL {backend}-rc={exc.returncode} bytes={prompt_bytes} "
                 f"elapsed={elapsed}s timeout={timeout}s"
+                f"{_failure_detail(exc.output, exc.stderr)}"
             )
             record_usage(
                 "\n".join(raw_string(part) for part in (exc.output, exc.stderr)),

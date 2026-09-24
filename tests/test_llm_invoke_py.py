@@ -1205,6 +1205,29 @@ with tempfile.TemporaryDirectory() as fake_home:
     ok(answer is None and "FAIL local-launch" in decision_log.read_text(),
        "a refused Codex decision launch is a logged local failure, not a crash")
 
+# A backend that exits non-zero names its reason in the decision log: a bare
+# rc cannot tell a refusal from a usage limit or a crash.
+with tempfile.TemporaryDirectory() as detail_home:
+    detail_log = Path(detail_home) / "decisions.log"
+    refusal = subprocess.CalledProcessError(
+        1, ["claude"],
+        output='{"type":"result","is_error":true,"result":"API Error: request refused\\n\\nretry later"}\n',
+        stderr="",
+    )
+    with mock.patch.dict(os.environ, {
+        "ACTIVE_BACKEND": "claude", "LLM_DECIDE_DISABLE": "0",
+        "LLM_DECIDE_LOG": str(detail_log), "LOGDIR": detail_home,
+    }), mock.patch.object(decide_mod, "_invoke_backend", side_effect=refusal):
+        answer = decide_mod.llm_decide("runner-suggest", "binary", "choose one", 5)
+    logged = detail_log.read_text()
+    ok(answer is None and "FAIL claude-rc=1" in logged
+       and "detail='API Error: request refused'" in logged,
+       f"a non-zero decision exit logs the backend's own reason: {logged!r}")
+    plain = subprocess.CalledProcessError(1, ["grok"], output="", stderr="boot\nquota exhausted\n")
+    ok(decide_mod._failure_detail(plain.output, plain.stderr) == " detail='quota exhausted'",
+       "a plain-text CLI failure logs its last line")
+    ok(decide_mod._failure_detail("", None) == "", "no output adds no detail")
+
 codex_single = inv.agent_flags("codex", allow_subagents=False)
 ok("features.multi_agent=false" in codex_single, "single-agent Codex disables native delegation")
 ok("features.plugins=false" in codex_single,
@@ -1224,6 +1247,8 @@ os.environ.pop("USE_GEMINI_CLI", None)
 decide_claude = inv.decide_flags("claude")
 ok("--print" in decide_claude, "decide_flags('claude') has --print")
 ok("--safe-mode" in decide_claude, "decide_flags('claude') disables user customizations")
+assert_eq("", decide_claude[decide_claude.index("--setting-sources") + 1],
+          "decide_flags('claude') loads no operator settings file")
 ok("--no-session-persistence" in decide_claude, "decide_flags('claude') disables persistence")
 ok("--max-turns" not in decide_claude, "decide_flags('claude') has no turn cap")
 ok("plan" in decide_claude, "decide_flags('claude') uses read-only plan mode")
@@ -1292,6 +1317,10 @@ with tempfile.TemporaryDirectory() as _raw_td:
 # Gemini backend do not take a --max-turns flag.
 agent_claude = inv.agent_flags("claude", max_turns=120)
 ok("--safe-mode" in agent_claude, "agent_flags('claude') disables user customizations")
+# --safe-mode keeps permissions, so an operator deny rule (for example on
+# .git) would reach every agent without this.
+assert_eq("", agent_claude[agent_claude.index("--setting-sources") + 1],
+          "agent_flags('claude') loads no operator settings file")
 ok("--no-session-persistence" not in agent_claude,
    "agent_flags('claude') stays persistable so audit resume can work")
 ok(agent_claude[agent_claude.index("--max-turns") + 1] == "120",

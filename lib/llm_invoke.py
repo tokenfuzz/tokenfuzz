@@ -1038,6 +1038,10 @@ def agent_flags(
         flags = [
             "--print",
             "--safe-mode",
+            # --safe-mode still applies permission rules, so without this an
+            # operator's user or checkout-local settings (a deny on .git, say)
+            # would silently confine every agent. Only --settings below loads.
+            "--setting-sources", "",
             "--verbose",
             "--output-format", "stream-json",
         ]
@@ -1779,6 +1783,7 @@ def decide_flags(backend: str, model: str = "") -> list[str]:
         flags = [
             "--print",
             "--safe-mode",
+            "--setting-sources", "",
             "--no-session-persistence",
             "--output-format", "json",
             "--permission-mode", "plan",
