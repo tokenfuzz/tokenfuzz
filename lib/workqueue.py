@@ -3791,6 +3791,24 @@ def _artifact_status_id(value: str) -> str:
     return match.group(0) if match else normalized
 
 
+def _status_match(status: str, artifact_name: str) -> str:
+    """How a hypothesis status names this artifact: "full", "bare", or ""."""
+    normalized_status = (status or "").strip().upper()
+    # A collision on move appends `.<UTC stamp>.<serial>` (triage's
+    # _unique_destination); the status still names the original directory.
+    normalized_artifact = re.sub(
+        r"\.\d{8}T\d{6}Z\.\d+$", "", (artifact_name or "").strip(),
+    ).upper()
+    if not normalized_status or not normalized_artifact:
+        return ""
+    if normalized_status == normalized_artifact:
+        return "full"
+    bare = _artifact_status_id(normalized_status)
+    if bare == normalized_status and bare == _artifact_status_id(normalized_artifact):
+        return "bare"
+    return ""
+
+
 def status_names_artifact(status: str, artifact_name: str) -> bool:
     """Whether a hypothesis status refers to this filed artifact.
 
@@ -3799,23 +3817,46 @@ def status_names_artifact(status: str, artifact_name: str) -> bool:
     artifact; only a bare id (`FIND-003`, `CRASH-003-2`) falls back to the
     numeric match, which is all it can say. Comparing ids alone let triage
     rejecting one agent's finding discard another agent's hypothesis.
+    Callers rewriting other agents' rows scope bare matches with
+    `_rows_naming_artifact`.
     """
-    normalized_status = (status or "").strip().upper()
-    # A collision on move appends `.<UTC stamp>.<serial>` (triage's
-    # _unique_destination); the status still names the original directory.
-    normalized_artifact = re.sub(
-        r"\.\d{8}T\d{6}Z\.\d+$", "", (artifact_name or "").strip(),
-    ).upper()
-    if not normalized_status or not normalized_artifact:
-        return False
-    if normalized_status == normalized_artifact:
-        return True
-    bare = _artifact_status_id(normalized_status)
-    return bare == normalized_status and bare == _artifact_status_id(normalized_artifact)
+    return bool(_status_match(status, artifact_name))
+
+
+def _artifact_owner_agents(rows: Iterable[dict], artifact_dir: Path | None) -> set[str]:
+    """Agents whose hypotheses the bundle's evidence headers were probed under."""
+    named = set(hypotheses_named_in_evidence(artifact_dir)) if artifact_dir else set()
+    return {
+        str(row.get("agent", "")) for row in rows
+        if str(row.get("id", "")).strip() in named
+    }
+
+
+def _rows_naming_artifact(
+    rows: list[dict], how_named, artifact_dir: Path | None,
+) -> list[dict]:
+    """The rows ``how_named(row)`` says name this artifact ("full" or "bare").
+
+    A bare `FIND-001` names every agent's `FIND-001-<slug>`, so triage
+    folding or rejecting one agent's bundle rewrote another agent's own
+    finding. A bare id therefore counts only for the agents the bundle's
+    evidence headers name; when they name none, only while a single agent
+    holds that bare id.
+    """
+    matched = [(row, how_named(row)) for row in rows]
+    bare = [row for row, how in matched if how == "bare"]
+    owners = _artifact_owner_agents(rows, artifact_dir)
+    if owners:
+        bare = [row for row in bare if str(row.get("agent", "")) in owners]
+    elif len({str(row.get("agent", "")) for row in bare}) > 1:
+        bare = []
+    kept = {id(row) for row in bare}
+    return [row for row, how in matched if how == "full" or id(row) in kept]
 
 
 def record_artifact_rejection(
     results_dir: Path, artifact_name: str, reason: str, *, category: str = "",
+    artifact_dir: Path | None = None,
 ) -> list[dict]:
     """Replace filed-artifact statuses with their final rejected disposition.
 
@@ -3840,11 +3881,12 @@ def record_artifact_rejection(
             if hypothesis_id:
                 latest_indexes[(str(row.get("agent", "")), hypothesis_id)] = index
         changed: list[dict] = []
-        for index in latest_indexes.values():
-            row = rows[index]
+        for row in _rows_naming_artifact(
+            [rows[index] for index in latest_indexes.values()],
+            lambda row: _status_match(str(row.get("status", "")), artifact_name),
+            artifact_dir,
+        ):
             previous = str(row.get("status", "")).strip()
-            if not status_names_artifact(previous, artifact_name):
-                continue
             row["status"] = "DISCARDED"
             row["updated_at"] = now_iso()
             row["note"] = f"{TRIAGE_REJECTED_NOTE}{previous}: {reason}".strip()
@@ -3884,11 +3926,18 @@ def record_artifact_duplicate(
             hypothesis_id = str(row.get("id", "")).strip()
             if hypothesis_id:
                 latest_indexes[(str(row.get("agent", "")), hypothesis_id)] = index
+        latest = [rows[index] for index in latest_indexes.values()]
+        filed = {
+            id(row) for row in _rows_naming_artifact(
+                latest,
+                lambda row: _status_match(str(row.get("status", "")), artifact_name),
+                artifact_dir,
+            )
+        }
         changed: list[dict] = []
-        for index in latest_indexes.values():
-            row = rows[index]
+        for row in latest:
             previous = str(row.get("status", "")).strip()
-            filed_it = status_names_artifact(previous, artifact_name)
+            filed_it = id(row) in filed
             still_open = (
                 str(row.get("id", "")).strip() in named
                 and is_active_hypothesis_status(previous)
@@ -3907,6 +3956,7 @@ def record_artifact_duplicate(
 
 def record_artifact_reconsideration(
     results_dir: Path, artifact_name: str, reason: str,
+    artifact_dir: Path | None = None,
 ) -> list[dict]:
     """Restore the originating hypothesis when adjudication requeues an artifact."""
     path = state_dir(results_dir) / "hypotheses.jsonl"
@@ -3926,15 +3976,19 @@ def record_artifact_reconsideration(
             hypothesis_id = str(row.get("id", "")).strip()
             if hypothesis_id:
                 latest_indexes[(str(row.get("agent", "")), hypothesis_id)] = index
-        changed: list[dict] = []
-        for index in latest_indexes.values():
-            row = rows[index]
+        def rejected_status(row: dict) -> str:
             if str(row.get("status", "")).strip().upper() != "DISCARDED":
-                continue
+                return ""
             match = rejected_note.match(str(row.get("note", "")).strip())
-            if match is None or not status_names_artifact(match.group(1), artifact_name):
-                continue
-            previous = match.group(1)
+            return match.group(1) if match else ""
+
+        changed: list[dict] = []
+        for row in _rows_naming_artifact(
+            [rows[index] for index in latest_indexes.values()],
+            lambda row: _status_match(rejected_status(row), artifact_name),
+            artifact_dir,
+        ):
+            previous = rejected_status(row)
             row["status"] = previous
             row["updated_at"] = now_iso()
             row["note"] = f"Triage requeued {previous}: {reason}".strip()
@@ -5340,6 +5394,7 @@ def reconcile_artifact_hypotheses(results_dir: Path, artifact_dir: Path) -> list
 
 def record_accepted_artifact_card(
     results_dir: Path, artifact_id: str, kind: str,
+    artifact_dir: Path | None = None,
 ) -> bool:
     """Demote the card that produced an accepted finding or crash.
 
@@ -5360,15 +5415,17 @@ def record_accepted_artifact_card(
         hid = str(row.get("id", "")).strip()
         if hid:
             latest[(str(row.get("agent", "")), hid)] = row
-    matches = []
     artifact_upper = artifact.upper()
-    for row in latest.values():
+
+    def how_named(row: dict) -> str:
         status = str(row.get("status", "")).strip().upper()
-        if not status.startswith(prefix):
-            continue
-        if artifact_upper == status or artifact_upper.startswith(status + "-"):
-            if row.get("card_id"):
-                matches.append(row)
+        if not status.startswith(prefix) or not row.get("card_id"):
+            return ""
+        if artifact_upper == status:
+            return "full"
+        return "bare" if artifact_upper.startswith(status + "-") else ""
+
+    matches = _rows_naming_artifact(list(latest.values()), how_named, artifact_dir)
     if not matches:
         return False
     origin = max(

@@ -1864,6 +1864,70 @@ class WorkQueueTests(unittest.TestCase):
         }
         self.assertEqual(latest["H-2"]["status"], "FIND-003-frame-offset")
 
+    def _bundle_probed_under(self, name: str, hyp_id: str) -> Path:
+        bundle = self.results / "crashes" / name
+        bundle.mkdir(parents=True)
+        (bundle / "testcase.py").write_text(
+            f"# TARGET: src/app.c:app_parse:10\n# HYPOTHESIS-ID: {hyp_id}\n"
+            "# CATEGORY: bounds\n",
+        )
+        return bundle
+
+    def test_folding_one_agents_bundle_spares_another_agents_bare_status(self) -> None:
+        # Agent 2 closed its own finding with a bare FIND-001; agent 1's
+        # FIND-001-<slug> bundle is folded. The bare id cannot say which
+        # FIND-001 it meant, so only the agent the evidence names is closed.
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_hypothesis(hyp_id="H-own", agent="1")
+        self.add_hypothesis(hyp_id="H-other", agent="2", status="FIND-001")
+        bundle = self._bundle_probed_under("FIND-001-table-read", "H-own")
+
+        changed = workqueue.record_artifact_duplicate(
+            self.results, bundle.name, "CRASH-001-1", "identical crash state",
+            artifact_dir=bundle,
+        )
+
+        self.assertEqual([row["id"] for row in changed], ["H-own"])
+        latest = {
+            row["id"]: row for row in workqueue.read_jsonl(self.results / "state/hypotheses.jsonl")
+        }
+        self.assertEqual(latest["H-other"]["status"], "FIND-001")
+
+    def test_bare_status_rewrites_only_the_owning_agent(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_hypothesis(hyp_id="H-own", agent="1", status="FIND-004")
+        self.add_hypothesis(hyp_id="H-other", agent="2", status="FIND-004")
+        bundle = self._bundle_probed_under("FIND-004-table-read", "H-own")
+
+        changed = workqueue.record_artifact_rejection(
+            self.results, bundle.name, "scope", artifact_dir=bundle,
+        )
+        self.assertEqual([(r["agent"], r["id"]) for r in changed], [("1", "H-own")])
+        restored = workqueue.record_artifact_reconsideration(
+            self.results, bundle.name, "policy changed", artifact_dir=bundle,
+        )
+        self.assertEqual([(r["agent"], r["id"]) for r in restored], [("1", "H-own")])
+        # Accepting the bundle credits the owner's card, not the other agent's.
+        self.assertTrue(workqueue.record_accepted_artifact_card(
+            self.results, bundle.name, "find", artifact_dir=bundle,
+        ))
+        credited = [
+            row for row in workqueue.read_jsonl(self.results / "state/claims.jsonl")
+            if row.get("source") == "accepted-artifact"
+        ]
+        self.assertEqual([row["agent"] for row in credited], ["1"])
+
+    def test_bare_status_without_evidence_is_not_applied_across_agents(self) -> None:
+        self.write_cards([self.card("WORK-A", "src/a.c")])
+        self.add_hypothesis(hyp_id="H-a", agent="1", status="FIND-005")
+        self.add_hypothesis(hyp_id="H-b", agent="2", status="FIND-005")
+        self.assertEqual(
+            workqueue.record_artifact_rejection(self.results, "FIND-005-slug", "scope"), [],
+        )
+        self.assertFalse(
+            workqueue.record_accepted_artifact_card(self.results, "FIND-005-slug", "find"),
+        )
+
     def test_a_named_finding_is_restored_after_rejection_and_requeue(self) -> None:
         self.write_cards([self.card("WORK-A", "src/a.c")])
         self.add_hypothesis(status="FIND-003-alpha", card_id="WORK-A")

@@ -352,6 +352,7 @@ def _reject(
     try:
         workqueue.record_artifact_rejection(
             rejected_root.parent, directory.name, reason, category=category,
+            artifact_dir=destination,
         )
     except OSError as exc:
         print(
@@ -463,7 +464,7 @@ def _restore_rejected_artifact(
     )
     try:
         workqueue.record_artifact_reconsideration(
-            active_root.parent, directory.name, detail,
+            active_root.parent, directory.name, detail, artifact_dir=destination,
         )
     except OSError as exc:
         print(
@@ -4251,7 +4252,7 @@ def _record_accepted_artifact(directory: Path, results_dir: Path, kind: str) -> 
     try:
         workqueue.reconcile_artifact_hypotheses(results_dir, directory)
         workqueue.record_accepted_artifact_card(
-            results_dir, directory.name, kind,
+            results_dir, directory.name, kind, artifact_dir=directory,
         )
     except OSError as exc:
         print(
