@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The sealed background result gate that runs while agent slots are busy.
 
-A result gate may only touch an artifact no live session can still write.
+A result gate may only touch an artifact no live session is still writing.
 These cover the seal itself, what a sweep hands each gate, that a failing
 sweep is loud and survivable, and that the pool gates a clean session's
 findings while its peers keep running -- but never a turn-capped session's.
@@ -161,6 +161,88 @@ class SealTests(unittest.TestCase):
         self.assertEqual(self._sealed(worker), (set(), {skeleton.name}))
         worker.retire(1)
         self.assertEqual(self._sealed(worker), (set(), {skeleton.name, held.name}))
+
+    def _age(self, directory: Path, seconds: float) -> None:
+        """Backdate every write under an artifact by `seconds`."""
+        stamp = time.time() - seconds
+        for path in [directory, *directory.rglob("*")]:
+            os.utime(path, (stamp, stamp))
+
+    def test_a_quiet_finished_crash_seals_while_its_owner_still_runs(self) -> None:
+        # A session that filed a crash in its fourth minute and ran to the
+        # wall left it to the barrier, which past the wall only says pending.
+        worker = self._worker()
+        worker.launch(1, continuation=False)
+        done = _artifact(self.results, "crashes", "CRASH-001-1")
+        skeleton = _artifact(self.results, "crashes", "CRASH-002-1", skeleton=True)
+        held = _artifact(self.results, "crashes", "CRASH-003-1")
+        (held / ".promotion_pending").write_text("missing: testcase\n", encoding="utf-8")
+        worker.observe()
+        self.assertEqual(self._sealed(worker), (set(), set()))
+        # The next quiet deadline is the finished bundle's; the unfinished
+        # ones do not set one of their own.
+        self.assertIsNotNone(worker._quiet_deadline)
+        self.assertGreater(
+            worker._quiet_deadline - time.monotonic(),
+            audit_runner.GATE_QUIET_SECONDS - 60,
+        )
+        for directory in (done, skeleton, held):
+            self._age(directory, audit_runner.GATE_QUIET_SECONDS + 1)
+        # Quiet or not, an unfinished bundle is still the owner's to write.
+        self.assertEqual(self._sealed(worker), (set(), {done.name}))
+        self.assertIsNone(worker._quiet_deadline)
+        # A late write by the owner restarts the clock.
+        (done / "patch.diff").write_text("--- a\n+++ b\n", encoding="utf-8")
+        self.assertEqual(self._sealed(worker), (set(), set()))
+
+    def test_a_quiet_finding_seals_while_a_session_that_may_own_it_runs(self) -> None:
+        # A finding names no slot and nothing attributes it until its writer
+        # ends; a crash triage demotes mid-run is in the same position.
+        worker = self._worker()
+        worker.launch(1, continuation=False)
+        filed = _artifact(self.results, "findings", "FIND-001-1")
+        worker.observe()
+        self.assertEqual(self._sealed(worker), (set(), set()))
+        self._age(filed, audit_runner.GATE_QUIET_SECONDS + 1)
+        self.assertEqual(self._sealed(worker), ({filed.name}, set()))
+
+    def test_the_worker_wakes_when_a_finished_artifact_turns_quiet(self) -> None:
+        worker = self._worker()
+        worker.launch(1, continuation=False)
+        done = _artifact(self.results, "crashes", "CRASH-001-1")
+        self._age(done, audit_runner.GATE_QUIET_SECONDS - 40)
+        self._sealed(worker)
+        now = time.monotonic()
+        with mock.patch.object(audit_runner.time, "monotonic", return_value=now), \
+             mock.patch.object(worker._wake, "wait", return_value=False) as wait, \
+             mock.patch.object(worker, "_sweep", side_effect=lambda: setattr(worker, "_stop", True)):
+            worker._run()
+        self.assertAlmostEqual(wait.call_args.args[0], 40, delta=5)
+        # Nothing pending: it still looks again, for artifacts filed later.
+        worker._quiet_deadline = None
+        worker._stop = False
+        with mock.patch.object(worker._wake, "wait", return_value=False) as wait, \
+             mock.patch.object(worker, "_sweep", side_effect=lambda: setattr(worker, "_stop", True)):
+            worker._run()
+        self.assertAlmostEqual(
+            wait.call_args.args[0], audit_runner.GATE_QUIET_SECONDS, delta=1,
+        )
+
+    def test_a_lapsed_quiet_seal_leaves_no_past_due_hold(self) -> None:
+        # Held while quiet-sealed, then edited by its still-running writer:
+        # the next sweep seals nothing, and a hold left armed spins _run.
+        worker = self._worker()
+        worker.launch(1, continuation=False)
+        filed = _artifact(self.results, "findings", "FIND-001-1")
+        worker.observe()
+        self._age(filed, audit_runner.GATE_QUIET_SECONDS + 1)
+        with mock.patch.object(audit_runner, "GATE_BATCH_HOLD_SECONDS", 180):
+            self.assertEqual(self._sweep_with_gates(worker), {})
+        self.assertIsNotNone(worker._hold_deadline)
+        (filed / "input.bin").write_bytes(b"late")
+        worker._hold_deadline = time.monotonic() - 1
+        self.assertEqual(self._sweep_with_gates(worker), {})
+        self.assertIsNone(worker._hold_deadline)
 
     def test_a_sweep_hands_each_gate_only_the_sealed_set_and_never_ages(self) -> None:
         sealed_finding = _artifact(self.results, "findings", "FIND-001-old")

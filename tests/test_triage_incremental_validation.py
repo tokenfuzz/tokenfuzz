@@ -2290,6 +2290,63 @@ Generated score text.
             {"promoted": 0, "rejected": 2, "pending": 0, "demoted": 0, "duplicate": 0},
         )
 
+    def test_crash_receipt_covers_the_class_line_export_drops(self) -> None:
+        # A receipt bound to a report missing Class goes stale when the next
+        # pass adds it back; past the wall that pass can only say pending.
+        crash = self.root / "crashes" / "CRASH-001"
+        crash.mkdir(parents=True)
+        report = crash / "report.md"
+        body = (
+            "# Bounds issue\n\n"
+            "Surface: library-api\n"
+            "Caller contract: obeyed\n"
+            "Trigger source: bytes\n"
+            "Boundary: public API\n"
+        )
+        report.write_text(body + "Class: memory-safety\n", encoding="utf-8")
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow\n"
+            "WRITE of size 4\n",
+            encoding="utf-8",
+        )
+        testcase = crash / "input.bin"
+        testcase.write_bytes(b"input")
+
+        def export(tool, *_args, **_kwargs):
+            # What export-repro does to a bare Class label: strip it.
+            self.assertEqual(tool, "export-repro")
+            report.write_text(body, encoding="utf-8")
+            return 0
+
+        with mock.patch.dict(os.environ, {"CRASH_TRIGGER_GATE": "0"}), \
+             mock.patch.object(
+                 triage.crash_artifacts, "find_testcase", return_value=testcase,
+             ), mock.patch.object(
+                 triage.crash_artifacts, "find_harness_source", return_value=None,
+             ), mock.patch.object(
+                 triage, "_bundle_needs_refresh", return_value=True,
+             ), mock.patch.object(
+                 triage, "_bundle_missing_artifacts", return_value=[],
+             ), mock.patch.object(
+                 triage, "has_valid_diagnostic", return_value=True,
+             ), mock.patch.object(
+                 triage, "_run_tool", side_effect=export,
+             ), mock.patch.object(
+                 triage, "fill_reach_fields", return_value=False,
+             ), mock.patch.object(
+                 triage, "_direct_probe_trigger_bypass", return_value=False,
+             ), mock.patch.object(
+                 triage, "_score_final_report",
+                 side_effect=lambda _d, _r, _k, state, **_kw: state,
+             ), mock.patch.object(triage, "_record_accepted_artifact"):
+            status = triage.triage_one_crash(
+                crash, self.root, self.root, "sampleproj", ["bytes"],
+            )
+        self.assertEqual(status, "promoted")
+        self.assertIsNotNone(validation_receipt.read_current(crash))
+        self.assertFalse(triage._materialize_crash_class(crash))
+        self.assertIsNotNone(validation_receipt.read_current(crash))
+
     def test_crash_gate_converges_fields_on_canonical_report_after_export(self) -> None:
         crash = self.root / "crashes" / "CRASH-001"
         crash.mkdir(parents=True)

@@ -3039,6 +3039,10 @@ def triage_one_crash(
             age_pending=age_pending,
         )
     if not _deadline_expired(deadline):
+        # Export rewrites the report and drops the Class line the pass added
+        # up front; restore it before the receipt binds, or the next pass
+        # re-adds it and re-triages a crash already settled.
+        _materialize_crash_class(crash_dir)
         fill_reach_fields(
             crash_dir, usage_index, decision_override=reach_fields_override,
         )
@@ -3225,7 +3229,10 @@ def triage_crash_dirs(
     if only is not None:
         chosen = {Path(path) for path in only}
         directories = [path for path in directories if path in chosen]
-    for directory in directories:
+    # Annotating a report stales the receipt bound to it, and a pass past the
+    # deadline can only answer a stale receipt with pending: one such pass
+    # downgraded a promoted crash at the wall. The artifact set is frozen then.
+    for directory in [] if _deadline_expired(deadline) else directories:
         sanitizer = _sanitizer_file(directory)
         sanitizer_text = _read(sanitizer) if sanitizer else ""
         if (

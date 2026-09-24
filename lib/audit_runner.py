@@ -61,6 +61,13 @@ STRATEGIES = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
 #: How long the background gate lets a sealed, unreviewed finding wait for
 #: batch company before reviewing it alone; see SealedGateWorker._hold_unreviewed.
 GATE_BATCH_HOLD_SECONDS = 180
+#: How long a complete artifact must sit unwritten before the background gate
+#: seals it while a session that may own it is still running; see
+#: SealedGateWorker.sealed. The longest gap measured between an agent's
+#: successive writes into a bundle it had already finished was about four
+#: minutes, and an edit after the seal is not lost: it stales the receipt and
+#: the next pass re-gates the bundle.
+GATE_QUIET_SECONDS = 300
 STRATEGY_DRY_THRESHOLD = 3
 STRATEGY_S1_DRY_THRESHOLD = 8
 STRATEGY_FORCE_EXTRA = 5
@@ -3225,8 +3232,34 @@ def _crash_owner(name: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _seconds_unwritten(directory: Path) -> float:
+    """Seconds since anything under an artifact directory was last written.
+
+    Directory mtimes count, so a file created, renamed, or removed is a write.
+    An artifact that vanishes mid-scan (a verdict moving it) reads as just
+    written: a seal is never granted on a scan that did not finish.
+    """
+    newest = 0.0
+    try:
+        pending = [directory]
+        while pending:
+            current = pending.pop()
+            newest = max(newest, current.stat().st_mtime)
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(Path(entry.path))
+                    else:
+                        newest = max(
+                            newest, entry.stat(follow_symlinks=False).st_mtime,
+                        )
+    except OSError:
+        return 0.0
+    return time.time() - newest
+
+
 class SealedGateWorker:
-    """Adjudicate artifacts no live session can still write, while agents run.
+    """Adjudicate artifacts no live session is still writing, while agents run.
 
     The barrier held every result gate until the slowest slot returned:
     measured cells spent 12-14% of the audit wall there with every slot
@@ -3262,6 +3295,13 @@ class SealedGateWorker:
     another session filed; that observation is what makes a session's end
     the seal.
 
+    A session's end is not the only seal. Sessions often run to the wall, and
+    one that filed a crash in its fourth minute left it for the barrier, which
+    past the wall can only mark it pending. So a complete artifact nothing has
+    written for GATE_QUIET_SECONDS is sealed too, whoever is still running. An
+    unfinished bundle never is: the quiet clock runs only once the owner has
+    nothing left it is told to write.
+
     Everything a sweep does the barrier repeats over the whole tree, with the
     caches the sweep left, so a repeated verdict costs no provider call and a
     failed sweep is retried there. A sweep never ages a pending crash: the
@@ -3283,6 +3323,8 @@ class SealedGateWorker:
         self._sealed_since: dict[str, float] = {}
         # monotonic time the oldest held finding's hold expires; None = no hold
         self._hold_deadline: float | None = None
+        # monotonic time the next complete, unsealed artifact turns quiet
+        self._quiet_deadline: float | None = None
         self._wake = threading.Event()
         self._stop = False
         self._thread: threading.Thread | None = None
@@ -3432,11 +3474,17 @@ class SealedGateWorker:
             # A hold is released by age, and age is only checked in a sweep,
             # so wake on the hold clock too; otherwise a lone finding sealed
             # by the last session to end before the wall waits for a sweep
-            # nothing requests.
-            timeout = None
-            if self._hold_deadline is not None:
-                timeout = max(0.0, self._hold_deadline - time.monotonic())
-            self._wake.wait(timeout)
+            # nothing requests. The quiet seal is age-released the same way,
+            # and an artifact filed since the last sweep has no deadline yet,
+            # so the worker also looks again every GATE_QUIET_SECONDS.
+            now = time.monotonic()
+            wake = min(
+                deadline for deadline in (
+                    self._hold_deadline, self._quiet_deadline,
+                    now + GATE_QUIET_SECONDS,
+                ) if deadline is not None
+            )
+            self._wake.wait(max(0.0, wake - now))
             self._wake.clear()
             if self._stop:
                 return
@@ -3464,6 +3512,7 @@ class SealedGateWorker:
         findings: list[Path] = []
         crashes: list[Path] = []
         total_findings = total_crashes = 0
+        next_quiet: float | None = None
 
         def touchers_done(name: str) -> bool:
             """Every session that named this artifact has ended for good."""
@@ -3471,6 +3520,15 @@ class SealedGateWorker:
                 agent not in chains or chains[agent] > ended_tick
                 for agent, ended_tick in touched.get(name, {}).items()
             )
+
+        def quiet(directory: Path) -> bool:
+            """Nothing has written this complete artifact for the quiet span."""
+            nonlocal next_quiet
+            remaining = GATE_QUIET_SECONDS - _seconds_unwritten(directory)
+            if remaining <= 0:
+                return True
+            next_quiet = remaining if next_quiet is None else min(next_quiet, remaining)
+            return False
 
         for directory in artifacts:
             seen = seen_at[directory.name]
@@ -3486,14 +3544,19 @@ class SealedGateWorker:
                     sealed_now = touchers_done(directory.name)
                 else:
                     sealed_now = seen < threshold
-                if sealed_now:
+                if sealed_now or quiet(directory):
                     findings.append(directory)
                 continue
             total_crashes += 1
             owner = _crash_owner(directory.name)
             start = chains.get(owner) if owner is not None else threshold
-            if (start is None or seen < start) and touchers_done(directory.name):
+            if (
+                (start is None or seen < start) and touchers_done(directory.name)
+            ) or quiet(directory):
                 crashes.append(directory)
+        self._quiet_deadline = (
+            None if next_quiet is None else time.monotonic() + next_quiet
+        )
         return findings, crashes, total_findings, total_crashes
 
     def _hold_unreviewed(self, findings: list[Path], deadline: float | None) -> list[Path]:
@@ -3526,13 +3589,15 @@ class SealedGateWorker:
         return unreviewed
 
     def _sweep(self) -> None:
+        # Cleared before any early return: a quiet seal lapses when its
+        # writer edits again, and a past-due hold left armed spins _run.
+        self._hold_deadline = None
         findings, crashes, total_findings, total_crashes = self.sealed()
         if not findings and not crashes:
             return
         deadline = _productive_wall_deadline(self.state)
         if deadline is not None and time.monotonic() >= deadline:
             return
-        self._hold_deadline = None
         held = self._hold_unreviewed(findings, deadline)
         if held:
             findings = [d for d in findings if d not in held]

@@ -184,21 +184,27 @@ instead.
 Triage decides whether an artifact is useful and in scope.
 
 Review can happen while other agents are still working. The harness waits
-until a report's writers have finished before judging it, then makes a final
-pass after the workers drain.
+until a report's writers have finished, or have left it untouched for a
+while, before judging it, then makes a final pass after the workers drain.
 
 ??? info "Scheduling and background review"
     An ordinary audit schedules continuously. A slot that finishes a session
     relaunches at once if it has work, and nothing waits for the slowest
     peer. While slots are busy, a background sweep adjudicates the artifacts
-    no live session can still write:
+    no live session is still writing:
 
     - a completed crash bundle, once the slot that filed it has no session in
       flight and no other session has written into it (a `bin/probe`
       skeleton or a held bundle stays with its owner until finished);
     - a finding, once every session whose own commands or file writes named
       it has ended, or, when no session named it, once every session still
-      running started after it was filed.
+      running started after it was filed;
+    - either kind, once it is complete and nothing has written under it for
+      five minutes, even while a session that may own it is still running.
+      Sessions often run to the wall, and a bundle their end would have
+      sealed then reaches only the pass after the wall, which marks it
+      pending. A later edit is not lost: it invalidates the verdict and the
+      next pass judges the bundle again.
 
     A turn-capped session's continuation counts as the same session. Cluster
     expansion, which asks the model for neighbours of a newly gated crash,

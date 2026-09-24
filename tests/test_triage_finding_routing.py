@@ -320,6 +320,53 @@ class HeldBundleReceiptTests(unittest.TestCase):
         self.assertEqual(receipt["state"], "pending")
 
 
+class ExpiredDeadlineTests(unittest.TestCase):
+    """A pass that starts after the wall must leave settled verdicts alone."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="expired-deadline-")
+        self.results = Path(self.temporary.name) / "results"
+        self.crash = self.results / "crashes" / "CRASH-001-1"
+        self.crash.mkdir(parents=True)
+        (self.crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602\n"
+            "WRITE of size 4 at 0x602 thread T0\n"
+            "    #0 0x1 in app_parse sample.c:12\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow sample.c:12 in app_parse\n",
+            encoding="utf-8",
+        )
+        (self.crash / "input.bin").write_bytes(b"input")
+        # Promoted, but without the Class line triage derives from admission:
+        # export rewrites the report after that line was first added.
+        self.report = self.crash / "report.md"
+        self.report.write_text(
+            "# Bounds issue\n\nSurface: library-api\nTrigger source: bytes\n",
+            encoding="utf-8",
+        )
+        validation_receipt.write(
+            self.crash, kind="crash", state="reportable",
+            detail="trigger within attacker_controls=bytes",
+            attacker_controls=["bytes"],
+        )
+        self.assertIsNotNone(validation_receipt.read_current(self.crash))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_a_promoted_crash_keeps_its_verdict_and_report(self) -> None:
+        before = self.report.read_bytes()
+        counts = triage.triage_crash_dirs(
+            self.results, self.results / "target", "sampleproj", ["bytes"],
+            deadline=0,
+        )
+        self.assertEqual(counts["promoted"], 1)
+        self.assertEqual(counts["pending"], 0)
+        self.assertEqual(self.report.read_bytes(), before)
+        receipt = validation_receipt.read_current(self.crash)
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt["state"], "reportable")
+
+
 class PublicationDetailTests(unittest.TestCase):
     """A receipt's recorded reason must be the reason it was decided for."""
 
