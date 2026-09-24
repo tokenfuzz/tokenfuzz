@@ -222,7 +222,10 @@ while, before judging it, then makes a final pass after the workers drain.
     slot drains. It reuses the cached verdicts, so what the sweeps settled
     costs no further review, and what they could not reach is judged there.
     Fixed-lane, delta, and ensemble runs keep the older cohort model with a
-    pass at the end of every iteration.
+    pass at the end of every iteration. Neither model waits for cluster
+    expansion mid-run: its lane keeps working into the next cohort, and a
+    run waits for it only at the end, or when its leads could be the only
+    work left.
 
 **For crashes, the gates are strict:**
 

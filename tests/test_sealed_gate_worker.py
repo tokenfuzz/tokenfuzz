@@ -270,7 +270,7 @@ class SealTests(unittest.TestCase):
              mock.patch.object(triage, "validate_find_gate", side_effect=find_gate), \
              mock.patch.object(audit_runner, "expand_new_crash_clusters", side_effect=expand):
             worker._sweep()
-            worker._expander.shutdown(wait=True)
+            worker._lane._executor.shutdown(wait=True)
         self.assertEqual(calls["crash"]["only"], [sealed_crash])
         self.assertFalse(calls["crash"]["age_pending"])
         self.assertEqual(calls["find"]["only"], [sealed_finding])
@@ -314,13 +314,13 @@ class SealTests(unittest.TestCase):
                 # Returned while the first expansion still blocks.
                 self.assertLess(time.monotonic() - started, 2.0)
                 self.assertEqual(worker.sweeps, 1)
-                self.assertFalse(worker._expansion.done())
+                self.assertFalse(worker._lane._expansion.done())
                 second = _artifact(self.results, "crashes", "CRASH-002-2")
                 worker.observe()
                 worker._sweep()
                 self.assertEqual(worker.sweeps, 2)
                 # Queued behind the expansion in flight, not run beside it.
-                self.assertEqual(worker._expand_backlog, [second])
+                self.assertEqual(worker._lane._backlog, [second])
                 self.assertEqual(batches, [[first]])
                 release.set()
                 deadline = time.monotonic() + 5
@@ -329,7 +329,7 @@ class SealTests(unittest.TestCase):
         finally:
             release.set()
             worker._stop = True
-            worker._expander.shutdown(wait=True)
+            worker._lane._executor.shutdown(wait=True)
         self.assertEqual(batches, [[first], [second]])
         log = self.runtime.index.read_text()
         self.assertEqual(log.count("Background cluster expansion: expanded=1"), 2)
@@ -337,9 +337,7 @@ class SealTests(unittest.TestCase):
         # queued again (the marker is what expand_new_crash_clusters writes).
         (first / ".cluster_expanded").write_text("done\n", encoding="utf-8")
         (second / ".cluster_expanded").write_text("done\n", encoding="utf-8")
-        worker._stop = False
-        self.assertEqual(worker._schedule_expansion([first, second], None), "idle")
-        worker._stop = True
+        self.assertEqual(worker._lane.schedule([first, second], None, 1), "idle")
 
     def test_completed_future_waits_for_its_callback_before_next_batch(self) -> None:
         first = _artifact(self.results, "crashes", "CRASH-001-1")
@@ -349,7 +347,7 @@ class SealTests(unittest.TestCase):
         callback_entered = threading.Event()
         release_callback = threading.Event()
         batches: list[list[Path]] = []
-        original_done = worker._expansion_done
+        original_done = worker._lane._done
 
         def expand(_runtime, **kwargs):
             # A future that finishes before add_done_callback runs its callback
@@ -371,12 +369,12 @@ class SealTests(unittest.TestCase):
 
         try:
             with mock.patch.object(audit_runner, "expand_new_crash_clusters", side_effect=expand), \
-                 mock.patch.object(worker, "_expansion_done", side_effect=delayed_done):
-                self.assertEqual(worker._schedule_expansion([first], None), "started")
+                 mock.patch.object(worker._lane, "_done", side_effect=delayed_done):
+                self.assertEqual(worker._lane.schedule([first], None, 1), "started")
                 registered.set()
                 self.assertTrue(callback_entered.wait(5))
-                self.assertTrue(worker._expansion.done())
-                self.assertEqual(worker._schedule_expansion([second], None), "in-flight")
+                self.assertTrue(worker._lane._expansion.done())
+                self.assertEqual(worker._lane.schedule([second], None, 1), "in-flight")
                 self.assertEqual(batches, [[first]])
                 release_callback.set()
                 deadline = time.monotonic() + 5
@@ -386,7 +384,7 @@ class SealTests(unittest.TestCase):
             registered.set()
             release_callback.set()
             worker._stop = True
-            worker._expander.shutdown(wait=True)
+            worker._lane._executor.shutdown(wait=True)
         self.assertEqual(batches, [[first], [second]])
 
     def _sweep_with_gates(self, worker) -> dict[str, dict]:

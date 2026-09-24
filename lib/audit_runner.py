@@ -291,6 +291,7 @@ class Runtime:
     # Why the last delta refresh failed; a stale scoped queue stops the run.
     delta_refresh_failed: str = ""
     cluster_expansion_attempted: set[Path] = field(default_factory=set, repr=False)
+    cluster_lane: ClusterExpansionLane | None = field(default=None, repr=False, compare=False)
 
     def prompt_context(self, guide: str) -> prompt.PromptContext:
         return prompt.PromptContext(
@@ -2151,32 +2152,34 @@ def _record_phase_rows(
 
 
 def _result_gate_pass(
-    runtime: Runtime, *, deadline: float | None, detail: list[str] | None = None,
-) -> tuple[dict, dict]:
-    """Run the find gate and cluster expansion together, returning their counts.
+    runtime: Runtime, *, deadline: float | None, iteration: int | None = None,
+    detail: list[str] | None = None,
+) -> tuple[dict, str]:
+    """Run the find gate, handing unexpanded crashes to the expansion lane.
 
-    The two touch disjoint trees — findings/ against crashes/ plus the
-    flock-serialized work queue — so overlapping them takes the shorter off
-    the wall. It is the body of the result_gates phase, run as a single serial pass.
+    The barrier never waits for expansion: a 604s decision held every slot
+    of a pinned run idle for a third of its wall. The lane works beside the
+    gate — they touch disjoint trees, findings/ against crashes/ plus the
+    flock-serialized work queue — and past it, into the next cohort; a
+    driver drains it only when it has nothing else to run.
     """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        expansion = pool.submit(
-            _timed, expand_new_crash_clusters, runtime, deadline=deadline,
-        )
-        try:
-            finding_counts, gate_seconds = _timed(
-                triage.validate_find_gate, runtime.results,
-                workers=runtime.num_agents, deadline=deadline,
-                target_root_is_product=True,
-            )
-        finally:
-            # Collected even when the gate raised, so an expansion failure
-            # is not discarded behind the gate's.
-            cluster_counts, expand_seconds = expansion.result()
+    attempted = getattr(runtime, "cluster_expansion_attempted", None) or set()
+    crashes = [
+        crash for crash in sorted((Path(runtime.results) / "crashes").glob("CRASH-*"))
+        # A crash whose decision was unavailable this process stays retryable
+        # after a resume but is not re-handed every barrier.
+        if crash.is_dir() and crash not in attempted
+    ]
+    expansion = _cluster_lane(runtime).schedule(crashes, deadline, iteration)
+    finding_counts, gate_seconds = _timed(
+        triage.validate_find_gate, runtime.results,
+        workers=runtime.num_agents, deadline=deadline,
+        target_root_is_product=True,
+    )
     if detail is not None:
         detail.append(f"finding_gate={gate_seconds:.1f}s")
-        detail.append(f"cluster_expand={expand_seconds:.1f}s")
-    return finding_counts, cluster_counts
+        detail.append(f"cluster_expand={expansion}")
+    return finding_counts, expansion
 
 
 def post_iteration(
@@ -2193,15 +2196,14 @@ def post_iteration(
                 findings_only=runtime.config.sanitizers_explicitly_disabled,
                 deadline=deadline, target_root_is_product=True,
             )
-        # Both gates are provider-latency bound and touch disjoint trees —
-        # findings/ against crashes/ plus the flock-serialized work queue — so
-        # running them together takes the shorter of the two off the audit
-        # wall. Crash triage keeps its place in front of both: it demotes
-        # crashes into findings/ and settles the crash set expansion reads.
+        # Crash triage keeps its place in front of the find gate and the
+        # expansion handover: it demotes crashes into findings/ and settles
+        # the crash set expansion reads.
         gate_detail: list[str] = []
         with _phase_span(spans, "result_gates", detail=gate_detail, records=records):
-            finding_counts, cluster_counts = _result_gate_pass(
-                runtime, deadline=deadline, detail=gate_detail,
+            finding_counts, expansion = _result_gate_pass(
+                runtime, deadline=deadline, iteration=iteration,
+                detail=gate_detail,
             )
         # Discovery and disposition stamps for the timeline, stamped before the
         # deadline gate below. The find gate already stamps finding discovery
@@ -2237,7 +2239,7 @@ def post_iteration(
             f"pending={crash_counts['pending']} demoted={crash_counts['demoted']} "
             f"duplicate={crash_counts.get('duplicate', 0)} "
             f"findings accepted={finding_counts['accepted']} rejected={finding_counts['rejected']} "
-            f"pending={finding_counts['pending']} cluster_added={cluster_counts['added']} "
+            f"pending={finding_counts['pending']} cluster_expand={expansion} "
             f"orphans_enforced={enforced} corpus_promoted={promoted}",
         )
     finally:
@@ -3258,6 +3260,175 @@ def _seconds_unwritten(directory: Path) -> float:
     return time.time() - newest
 
 
+class ClusterExpansionLane:
+    """Expand promoted crashes off every critical path, for the whole audit.
+
+    Cluster expansion is lead generation, not adjudication, and its decision
+    call can take minutes: hosted calls have run 330s and 604s, and the 800s
+    ceiling is deliberate. While a sweep waited on one, every crash and
+    finding that sealed sat ungated; while a cohort barrier waited on one,
+    every slot idled for ten minutes. So sweeps and barriers only hand
+    crashes over. One expansion runs at a time so two decisions never mint
+    the same neighbours; crashes handed over meanwhile wait in a backlog the
+    completion drains. The lane outlives any one pool so a mid-run barrier
+    never joins it; only a caller with nothing else to run waits, in `drain`.
+    """
+
+    def __init__(self, runtime: Runtime) -> None:
+        self.runtime = runtime
+        self._lock = threading.Lock()
+        self._idle = threading.Condition(self._lock)
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="cluster-expand",
+        )
+        self._expansion: concurrent.futures.Future | None = None
+        self._started: float | None = None
+        self._iteration: int | None = None
+        self._expanding: set[Path] = set()
+        self._backlog: list[Path] = []
+
+    def busy(self) -> bool:
+        with self._lock:
+            return self._expansion is not None
+
+    def schedule(
+        self, crashes: list[Path], deadline: float | None, iteration: int | None,
+    ) -> str:
+        """Queue crashes for expansion and return a word for the log line."""
+        with self._lock:
+            # A crash is handed over by every sweep and barrier until its
+            # receipt lands; one already expanded, queued, or being expanded
+            # is not queued again, so an idle run does not submit a no-op
+            # batch and log it every pass.
+            self._backlog.extend(
+                crash for crash in crashes
+                if crash not in self._backlog
+                and crash not in self._expanding
+                and not (crash / ".cluster_expanded").is_file()
+            )
+            self._iteration = iteration
+            # A Future becomes done before its callback has retired the
+            # batch. The callback owns this slot until it clears it.
+            if self._expansion is not None:
+                return "in-flight"
+            future = self._start_locked(deadline)
+        if future is None:
+            return "idle"
+        self._watch(future, deadline)
+        return "started"
+
+    def _start_locked(self, deadline: float | None) -> concurrent.futures.Future | None:
+        batch = [
+            crash for crash in self._backlog
+            if not (crash / ".cluster_expanded").is_file()
+        ]
+        self._backlog.clear()
+        if not batch:
+            return None
+        self._expanding = set(batch)
+        self._started = time.monotonic()
+        self._expansion = self._executor.submit(
+            expand_new_crash_clusters, self.runtime, deadline=deadline, only=batch,
+        )
+        return self._expansion
+
+    def _watch(self, future: concurrent.futures.Future, deadline: float | None) -> None:
+        # Registered outside the lock: a future that has already finished
+        # runs its callback synchronously, and the callback takes the lock.
+        future.add_done_callback(lambda done: self._done(done, deadline))
+
+    def _done(self, future: concurrent.futures.Future, deadline: float | None) -> None:
+        finished = time.monotonic()
+        with self._lock:
+            if self._expansion is not future:
+                return
+            seconds = finished - (self._started or finished)
+            iteration = self._iteration
+        following = None
+        try:
+            _record_phase_rows(
+                self.runtime,
+                [{"phase": "cluster_expand", "seconds": round(seconds, 3)}],
+                iteration=iteration, blocked=False,
+            )
+            exc = future.exception()
+            if exc is not None:
+                index_log(
+                    self.runtime,
+                    "ERROR: background cluster expansion failed: "
+                    f"{type(exc).__name__}: {exc}; the next barrier will retry it",
+                )
+            else:
+                counts = future.result()
+                index_log(
+                    self.runtime,
+                    f"Background cluster expansion: expanded={counts['expanded']} "
+                    f"added={counts['added']} pending={counts['pending']} "
+                    f"in {seconds:.1f}s",
+                )
+        finally:
+            # Retiring and starting the next batch under one lock leaves no
+            # gap in which `drain` could see the lane idle with a backlog.
+            with self._lock:
+                self._expansion = None
+                self._expanding = set()
+                if deadline is None or time.monotonic() < deadline:
+                    following = self._start_locked(deadline)
+                self._idle.notify_all()
+        if following is not None:
+            self._watch(following, deadline)
+
+    def drain(self) -> float | None:
+        """Wait out expansion in flight; seconds waited, or None if idle.
+
+        Unbounded here because each decision is already clamped to the wall
+        deadline, and no batch starts once that deadline has passed.
+        """
+        started = time.monotonic()
+        with self._idle:
+            if self._expansion is None:
+                return None
+            while self._expansion is not None:
+                self._idle.wait()
+        return time.monotonic() - started
+
+
+def _cluster_lane(runtime: Runtime) -> ClusterExpansionLane:
+    lane = getattr(runtime, "cluster_lane", None)
+    if lane is None:
+        lane = ClusterExpansionLane(runtime)
+        runtime.cluster_lane = lane
+    return lane
+
+
+def _charge_blocked(state: BackendState, phase: str, seconds: float) -> None:
+    """Bill time every slot spent idle behind `phase` to housekeeping."""
+    state.housekeeping_seconds += seconds
+    try:
+        (state.runtime.logs / ".housekeeping_secs").write_text(
+            f"{state.housekeeping_seconds:.6f}\n", encoding="utf-8",
+        )
+    except (OSError, AttributeError, TypeError):
+        pass
+    _record_phase_rows(
+        state.runtime, [{"phase": phase, "seconds": round(seconds, 3)}],
+        iteration=state.iteration, blocked=True,
+    )
+
+
+def _drain_cluster_lane(state: BackendState) -> bool:
+    """Wait for background expansion when nothing else can run.
+
+    Its leads can be the only work left, so a run must not read an empty
+    queue as exhausted, or end, while a decision is still minting them.
+    """
+    waited = _cluster_lane(state.runtime).drain()
+    if waited is None:
+        return False
+    _charge_blocked(state, "expansion_drain", waited)
+    return True
+
+
 class SealedGateWorker:
     """Adjudicate artifacts no live session is still writing, while agents run.
 
@@ -3331,19 +3502,9 @@ class SealedGateWorker:
         self.sweeps = 0
         self.seconds = 0.0
         self._sweep_started: float | None = None
-        # Cluster expansion is lead generation, not adjudication, and its
-        # decision call can take minutes: one hosted call ran 330s and, while
-        # the sweep waited on it, nine crashes and every finding that sealed
-        # sat ungated to the end of the wall. It runs on its own lane; the
-        # sweep hands it newly promoted crashes and never waits for it.
-        self._expander = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="cluster-expand",
-        )
-        self._expansion: concurrent.futures.Future | None = None
-        self._expansion_started: float | None = None
-        self._expansion_finished: float | None = None
-        self._expanding: set[Path] = set()
-        self._expand_backlog: list[Path] = []
+        # The sweep hands newly promoted crashes to the audit's expansion
+        # lane and never waits for it.
+        self._lane = _cluster_lane(self.runtime)
         results = getattr(self.runtime, "results", None)
         self._results = Path(results) if results else None
         if self._results is None:
@@ -3437,37 +3598,17 @@ class SealedGateWorker:
         drained_at = time.monotonic()
         self._wake.set()
         self._thread.join()
-        # An expansion still deciding is the barrier's cluster_expand phase
-        # by another name; it is joined here so the barrier never runs a
-        # second decision over the same seeds, and its tail is billed alike.
-        self._expander.shutdown(wait=True)
+        # An expansion in flight is not joined: the lane outlives this pool,
+        # and only a caller with nothing else to run drains it.
         sweep_in_flight = (
             self._sweep_started is not None and self._sweep_started <= drained_at
         )
-        expansion_in_flight = (
-            self._expansion_started is not None
-            and self._expansion_started <= drained_at
-            and (
-                self._expansion_finished is None
-                or self._expansion_finished > drained_at
-            )
-        )
-        if not (sweep_in_flight or expansion_in_flight):
+        if not sweep_in_flight:
             return
         tail = time.monotonic() - drained_at
         if tail <= 0:
             return
-        self.state.housekeeping_seconds += tail
-        try:
-            (self.runtime.logs / ".housekeeping_secs").write_text(
-                f"{self.state.housekeeping_seconds:.6f}\n", encoding="utf-8",
-            )
-        except (OSError, AttributeError, TypeError):
-            pass
-        _record_phase_rows(
-            self.runtime, [{"phase": "gate_drain", "seconds": round(tail, 3)}],
-            iteration=self.state.iteration, blocked=True,
-        )
+        _charge_blocked(self.state, "gate_drain", tail)
 
     def _run(self) -> None:
         while True:
@@ -3635,7 +3776,7 @@ class SealedGateWorker:
         _record_phase_rows(
             runtime, records, iteration=self.state.iteration, blocked=False,
         )
-        expansion = self._schedule_expansion(crashes, deadline)
+        expansion = self._lane.schedule(crashes, deadline, self.state.iteration)
         acted = (
             crash_counts["rejected"] or crash_counts["demoted"]
             or crash_counts.get("duplicate", 0)
@@ -3653,90 +3794,6 @@ class SealedGateWorker:
                 f"pending={finding_counts['pending']} cluster_expand={expansion} "
                 f"in {elapsed:.1f}s",
             )
-
-    def _schedule_expansion(self, crashes: list[Path], deadline: float | None) -> str:
-        """Queue newly gated crashes for expansion off the sweep's critical path.
-
-        One expansion runs at a time so two decisions never mint the same
-        neighbours; crashes that seal while one is in flight wait in a backlog
-        the completion callback drains. Returns a word for the log line.
-        """
-        with self._lock:
-            # A sealed crash is handed over by every sweep until its receipt
-            # lands; one already expanded, queued, or being expanded is not
-            # queued again, so an idle run does not submit a no-op batch and
-            # log it every sweep.
-            self._expand_backlog.extend(
-                crash for crash in crashes
-                if crash not in self._expand_backlog
-                and crash not in self._expanding
-                and not (crash / ".cluster_expanded").is_file()
-            )
-            if self._stop:
-                return "stopped"
-            # A Future becomes done before its callback has retired the
-            # batch. The callback owns this slot until it clears it below.
-            if self._expansion is not None:
-                return "in-flight"
-            if not self._expand_backlog:
-                return "idle"
-            batch = [
-                crash for crash in self._expand_backlog
-                if not (crash / ".cluster_expanded").is_file()
-            ]
-            self._expand_backlog.clear()
-            if not batch:
-                return "idle"
-            self._expanding = set(batch)
-            self._expansion_started = time.monotonic()
-            self._expansion_finished = None
-            self._expansion = future = self._expander.submit(
-                expand_new_crash_clusters, self.runtime, deadline=deadline,
-                only=batch,
-            )
-        # Registered outside the lock: a future that has already finished
-        # runs its callback synchronously, and the callback schedules the
-        # next batch under this same lock.
-        future.add_done_callback(
-            lambda done: self._expansion_done(done, deadline),
-        )
-        return "started"
-
-    def _expansion_done(
-        self, future: concurrent.futures.Future, deadline: float | None,
-    ) -> None:
-        with self._lock:
-            if self._expansion is not future:
-                return
-            finished = time.monotonic()
-            seconds = finished - (self._expansion_started or finished)
-            self._expansion_finished = finished
-            self._expanding = set()
-            self._expansion = None
-        _record_phase_rows(
-            self.runtime, [{"phase": "cluster_expand", "seconds": round(seconds, 3)}],
-            iteration=self.state.iteration, blocked=False,
-        )
-        exc = future.exception()
-        if exc is not None:
-            index_log(
-                self.runtime,
-                "ERROR: background cluster expansion failed: "
-                f"{type(exc).__name__}: {exc}; the barrier will retry it",
-            )
-        else:
-            counts = future.result()
-            index_log(
-                self.runtime,
-                f"Background cluster expansion: expanded={counts['expanded']} "
-                f"added={counts['added']} pending={counts['pending']} in {seconds:.1f}s",
-            )
-        if self._stop:
-            return
-        # A backlog gathered while this ran, or a deadline that has not passed,
-        # starts the next batch without waiting for another sweep.
-        if deadline is None or time.monotonic() < deadline:
-            self._schedule_expansion([], deadline)
 
 
 def run_agent_pool(
@@ -4289,8 +4346,10 @@ def run_continuous(state: BackendState) -> tuple[str, list[AgentResult]]:
                 gate_worker.request_sweep()
     # The only barrier: every slot has drained, so the whole tree is sealed.
     # Full triage, orphan enforcement and corpus promotion run here, charged
-    # to housekeeping because nothing else was running.
+    # to housekeeping because nothing else was running; so does the wait for
+    # expansion, whose leads the exhaustion check below must see.
     _run_post_iteration(state)
+    _drain_cluster_lane(state)
     if stalled:
         # The tick that stalled already scored this span; scoring it again
         # would count the same dry generation twice.
@@ -4339,7 +4398,10 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
     initialize_agent_strategies(runtime)
     if state.iteration == 1:
         _log_foreign_active_work(runtime)
-    if fixed_lane_exhausted(runtime, state.iteration):
+    lane_exhausted = fixed_lane_exhausted(runtime, state.iteration)
+    if lane_exhausted and _drain_cluster_lane(state):
+        lane_exhausted = fixed_lane_exhausted(runtime, state.iteration)
+    if lane_exhausted:
         unavailable = _fixed_lane_unavailable(runtime)
         if unavailable:
             index_log(runtime, f"LANE_UNAVAILABLE: {unavailable}")
@@ -4360,7 +4422,10 @@ def run_iteration(state: BackendState) -> tuple[str, list[AgentResult]]:
         )
         state.stopped = True
         return "stalled", []
-    if delta_queue_exhausted(runtime, context):
+    delta_exhausted = delta_queue_exhausted(runtime, context)
+    if delta_exhausted and _drain_cluster_lane(state):
+        delta_exhausted = delta_queue_exhausted(runtime, context)
+    if delta_exhausted:
         index_log(
             runtime,
             "DELTA_EXHAUSTED: no scoped card, active hypothesis, handoff, or "
@@ -4535,6 +4600,8 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         try:
             return _drive_backend(runtime, args, state, drive)
         finally:
+            # The final barrier: a mid-run barrier left expansion running.
+            _drain_cluster_lane(state)
             stop_sweep(
                 runtime, sweeper, deadline=_productive_wall_deadline(state),
             )
@@ -4752,6 +4819,8 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
                     time.sleep(cooldown)
             return 2 if failures == len(states) else 0
         finally:
+            for state in states:
+                _drain_cluster_lane(state)
             stop_sweeps([
                 (runtime, sweeper, _productive_wall_deadline(state))
                 for runtime, sweeper, state in zip(runtimes, sweepers, states)

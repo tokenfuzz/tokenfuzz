@@ -97,14 +97,13 @@ class AuditClockTests(unittest.TestCase):
         self.assertIs(crash_gate.call_args.kwargs["target_root_is_product"], True)
         self.assertIs(finding_gate.call_args.kwargs["target_root_is_product"], True)
 
-        # The finding gate and cluster expansion share one wall, so they report
-        # as the single span they cost, keeping each component's own duration so
-        # a regression in either is still attributable.
+        # The barrier only hands crashes to the expansion lane, so the span
+        # names what that handover did rather than timing a wait it never pays.
         phase_line = index_log.call_args_list[-1].args[1]
         self.assertRegex(
             phase_line,
             r"^Housekeeping phases: crash_triage=[\d.]+s "
-            r"result_gates=[\d.]+s\(finding_gate=[\d.]+s cluster_expand=[\d.]+s\) "
+            r"result_gates=[\d.]+s\(finding_gate=[\d.]+s cluster_expand=(idle|started|in-flight)\) "
             r"artifact_events=[\d.]+s indexes=[\d.]+s "
             r"orphan_enforce=[\d.]+s corpus_promote=[\d.]+s$",
         )
@@ -158,31 +157,39 @@ class AuditClockTests(unittest.TestCase):
             "a deferred index phase must not drop the crash's first-seen stamp",
         )
 
-    def test_the_two_result_gates_actually_run_at_the_same_time(self) -> None:
-        """The span name is not the claim; overlap is. Each gate blocks until it
-        sees the other running, so a sequential implementation deadlocks out."""
+    def test_the_barrier_never_waits_for_an_expansion_in_flight(self) -> None:
+        """A 604s expansion decision held every slot of a cohort run idle at
+        the barrier. The barrier hands crashes to the lane, overlaps the find
+        gate with it, and returns; only a drain waits, billed as blocked."""
+        results = self.root / "results"
+        crash = results / "crashes" / "CRASH-001-1"
+        crash.mkdir(parents=True)
+        (results / "state").mkdir()
         runtime = SimpleNamespace(
-            results=self.root / "results", target_root=self.root / "target",
+            results=results, target_root=self.root / "target",
             target_slug="sampleproj", num_agents=2, index=self.runtime.index,
+            logs=self.logs,
             config=SimpleNamespace(
                 attacker_controls=["bytes"],
                 sanitizers_explicitly_disabled=False,
             ),
         )
-        gate_running = threading.Event()
         expand_running = threading.Event()
-        saw = {}
+        release = threading.Event()
+        batches: list[list[Path]] = []
 
         def _gate(*_args, **_kwargs):
-            gate_running.set()
-            saw["gate_saw_expand"] = expand_running.wait(5)
+            # The gate still overlaps the expansion it handed over.
+            self.assertTrue(expand_running.wait(5))
             return {"accepted": 0, "rejected": 0, "pending": 0}
 
-        def _expand(*_args, **_kwargs):
+        def _expand(_runtime, **kwargs):
+            batches.append(list(kwargs["only"]))
             expand_running.set()
-            saw["expand_saw_gate"] = gate_running.wait(5)
-            return {"added": 0}
+            release.wait(5)
+            return {"expanded": 1, "added": 2, "skipped": 0, "pending": 0}
 
+        state = audit_runner.BackendState(runtime, mock.Mock(), iteration=3)
         with mock.patch.object(
             audit_runner.triage, "triage_crash_dirs",
             return_value={"promoted": 0, "rejected": 0, "pending": 0, "demoted": 0},
@@ -193,13 +200,80 @@ class AuditClockTests(unittest.TestCase):
         ), mock.patch.object(audit_runner, "maintain_local_indexes"), \
                 mock.patch.object(audit_runner, "maintain_aggregate_indexes"), \
                 mock.patch.object(audit_runner, "enforce_orphan_testcases", return_value=0), \
-                mock.patch.object(audit_runner, "promote_corpus", return_value=0), \
-                mock.patch.object(audit_runner, "index_log"):
-            audit_runner.post_iteration(runtime)
+                mock.patch.object(audit_runner, "promote_corpus", return_value=0):
+            try:
+                audit_runner.post_iteration(runtime, iteration=3)
+                lane = runtime.cluster_lane
+                self.assertTrue(lane.busy(), "the barrier returned mid-expansion")
+                # The next barrier neither waits nor starts a second decision
+                # over the same seed.
+                audit_runner.post_iteration(runtime, iteration=4)
+                self.assertEqual(batches, [[crash]])
+                self.assertIn("cluster_expand=in-flight", self.runtime.index.read_text())
+                threading.Timer(0.2, release.set).start()
+                self.assertTrue(audit_runner._drain_cluster_lane(state))
+            finally:
+                release.set()
+        self.assertFalse(lane.busy())
+        self.assertFalse(audit_runner._drain_cluster_lane(state), "an idle lane is not waited on")
+        self.assertIn("Background cluster expansion: expanded=1 added=2", self.runtime.index.read_text())
+        rows = [
+            json.loads(line)
+            for line in (results / "state" / "events.jsonl").read_text().splitlines()
+        ]
+        drained = [row for row in rows if row.get("phase") == "expansion_drain"]
+        self.assertEqual(len(drained), 1, rows)
+        self.assertTrue(drained[0]["blocked"])
+        self.assertAlmostEqual(drained[0]["seconds"], state.housekeeping_seconds, places=2)
+        self.assertGreater(state.housekeeping_seconds, 0.1)
+        background = [row for row in rows if row.get("phase") == "cluster_expand"]
+        self.assertEqual([row["blocked"] for row in background], [False])
 
-        self.assertEqual(
-            saw, {"gate_saw_expand": True, "expand_saw_gate": True},
+    def test_a_pinned_lane_is_not_exhausted_while_expansion_mints_its_leads(self) -> None:
+        """With the barrier no longer waiting, the next cohort can start before
+        expansion lands; an empty lane then waits for it instead of stopping."""
+        results = self.root / "results"
+        (results / "state").mkdir(parents=True)
+        runtime = SimpleNamespace(
+            results=results, index=self.runtime.index, logs=self.logs,
+            fixed_strategy="s4",
         )
+        state = audit_runner.BackendState(runtime, mock.Mock(), iteration=2)
+        release = threading.Event()
+        crash = results / "crashes" / "CRASH-001-1"
+        crash.mkdir(parents=True)
+
+        def _expand(_runtime, **_kwargs):
+            release.wait(5)
+            return {"expanded": 1, "added": 1, "skipped": 0, "pending": 0}
+
+        busy_when_asked: list[bool] = []
+
+        def _exhausted(_runtime, _iteration=0):
+            busy_when_asked.append(runtime.cluster_lane.busy())
+            return True
+
+        noop = mock.Mock(return_value=0)
+        with mock.patch.object(audit_runner, "expand_new_crash_clusters", side_effect=_expand), \
+                mock.patch.multiple(
+                    audit_runner, _activate_runtime=noop, refresh_fuzz_leads=noop,
+                    reset_sanitizer_run_counters=noop, reset_llm_decision_counters=noop,
+                    progress=noop, filed_artifact_count=noop, _cold=noop,
+                    refresh_work_cards=noop, release_stale_card_claims=noop,
+                    expand_work_cards_if_exhausted=noop,
+                    initialize_agent_strategies=noop,
+                    _productive_wall_exhausted=mock.Mock(return_value=False),
+                    _fixed_lane_unavailable=mock.Mock(return_value=""),
+                    fixed_lane_exhausted=mock.Mock(side_effect=_exhausted),
+                ):
+            try:
+                audit_runner._cluster_lane(runtime).schedule([crash], None, 2)
+                threading.Timer(0.2, release.set).start()
+                status, _results = audit_runner.run_iteration(state)
+            finally:
+                release.set()
+        self.assertEqual(status, "stalled")
+        self.assertEqual(busy_when_asked, [True, False])
 
     def test_agent_progress_matches_bare_status_to_suffixed_artifact(self) -> None:
         runtime = SimpleNamespace(results=self.root / "results")
