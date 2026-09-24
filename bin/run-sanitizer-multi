@@ -745,7 +745,14 @@ def main(argv: list[str]) -> int:
     if not run.account_budget():
         run.record_actual_runs(0)
         return 2
-    run.run_repetitions()
+    # Runs share one symbolizer-timeout marker, so a report that timed out
+    # once keeps raw frames on the remaining runs instead of timing out again.
+    with tempfile.TemporaryDirectory(prefix="symbolize-") as directory:
+        os.environ[sanitizer.SYMBOLIZE_TIMEOUT_MARKER_ENV] = str(Path(directory) / "timed-out")
+        try:
+            run.run_repetitions()
+        finally:
+            os.environ.pop(sanitizer.SYMBOLIZE_TIMEOUT_MARKER_ENV, None)
     return run.finish()
 
 

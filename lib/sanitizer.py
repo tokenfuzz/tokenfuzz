@@ -34,6 +34,11 @@ FUZZER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: Wall a symbolizer gets before the report is kept as it is. Shared with
 #: bin/hits' batched call so a wedged tool costs one budget, not two.
 SYMBOLIZE_TIMEOUT_SECONDS = 60
+#: A path a repeated-run driver exports to its per-run children. The first
+#: symbolizer timeout creates it, and later runs keep raw frames instead of
+#: paying the same timeout again: a very large library timed out on every run
+#: of a five-run confirm, and one confirm was still symbolizing at the wall.
+SYMBOLIZE_TIMEOUT_MARKER_ENV = "_TOKENFUZZ_SYMBOLIZE_TIMEOUT_MARKER"
 
 RAW_FRAME = re.compile(
     r"^ *#[0-9]+ +0x[0-9a-f]+ +(?:in +.*? +)?\([^)]*\+0x[0-9a-f]+\)", re.M)
@@ -235,6 +240,13 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
     raw = report.read_text(errors="replace")
     if not RAW_FRAME.search(raw):
         return True
+    marker = os.environ.get(SYMBOLIZE_TIMEOUT_MARKER_ENV, "")
+    if marker and os.path.exists(marker):
+        _warn_unsymbolized(
+            report, None,
+            detail="symbolizer timed out on an earlier run of this probe; not retried",
+        )
+        return False
     args = [sys.executable, str(SYMBOLIZER)]
     if sys.platform == "darwin" and shutil.which("atos"):
         args.append("--no-llvm-symbolizer")
@@ -253,6 +265,14 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
         )
         rendered.flush()
         if completed.returncode != 0 or not Path(rendered.name).stat().st_size:
+            if completed.returncode == 124 and marker:
+                try:
+                    Path(marker).touch()
+                except OSError as exc:
+                    print(
+                        f"[sanitizer] WARN: symbolizer timeout could not be "
+                        f"remembered for later runs: {exc}", file=sys.stderr,
+                    )
             _warn_unsymbolized(report, completed)
             return False
         # Replaced, never truncated in place: this rewrites saved evidence now,
@@ -269,9 +289,10 @@ def symbolize_file(path: str | os.PathLike[str], *, full_path: bool = False) -> 
     return True
 
 
-def _warn_unsymbolized(report: Path, completed) -> None:
+def _warn_unsymbolized(
+    report: Path, completed, *, detail: str = "symbolizer left raw frames",
+) -> None:
     """Say that a report kept raw frames, and why, on the runner's stderr."""
-    detail = "symbolizer left raw frames"
     if completed is not None:
         tail = (completed.stderr or b"").decode(errors="replace").strip().splitlines()
         reason = tail[-1] if tail else f"rc={completed.returncode}"

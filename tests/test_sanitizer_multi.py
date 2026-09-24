@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -159,6 +160,41 @@ else:
         self.assertEqual(declared_no_exec.returncode, 2, output)
         self.assertIn("EXECUTION_RATE: 0/1", output)
         self.assertIn("testcase may not have executed", output)
+
+    def test_a_symbolizer_timeout_is_paid_once_per_invocation(self) -> None:
+        # A very large library timed out the symbolizer on every run of a
+        # five-run confirm; the later runs keep raw frames instead.
+        stall = self.root / "stall.py"
+        stall.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+        self.write_runner(
+            f"sys.path.insert(0, {str(ROOT / 'lib')!r})\n"
+            "import sanitizer\n"
+            "sanitizer.SYMBOLIZE_TIMEOUT_SECONDS = 1\n"
+            f"sanitizer.SYMBOLIZER = pathlib.Path({str(stall)!r})\n"
+            "report = pathlib.Path(os.environ['REPORT_DIR']) / f'report-{os.getpid()}.txt'\n"
+            "report.write_text('    #0 0x1000 in app_parse+0x10 (/t/libsample.dylib:arm64+0x30)\\n')\n"
+            "print('symbolized', sanitizer.symbolize_file(report))\n"
+            "print('TESTCASE_EXECUTED')\n"
+            "print('[run-asan] browser EXECUTION VERIFIED (post-run, marker=TESTCASE_EXECUTED)')\n"
+        )
+        saved = self.root / "saved.txt"
+        reports = self.root / "reports"
+        reports.mkdir()
+        started = time.monotonic()
+        result = self.run_multi(
+            runs=3, process_boundary=True,
+            environment={"SAN_OUTPUT_FILE": saved, "REPORT_DIR": reports},
+        )
+        elapsed = time.monotonic() - started
+        text = saved.read_text()
+        self.assertEqual(text.count("symbolizer timed out after 1s"), 1, self.output(result))
+        self.assertEqual(text.count("timed out on an earlier run of this probe"), 2, text)
+        self.assertEqual(text.count("symbolized False"), 3, text)
+        self.assertLess(elapsed, 20)
+        # Raw frames are kept, and the marker does not outlive the invocation.
+        for report in reports.iterdir():
+            self.assertIn("libsample.dylib:arm64+0x30", report.read_text())
+        self.assertNotIn(sanitizer_multi.sanitizer.SYMBOLIZE_TIMEOUT_MARKER_ENV, os.environ)
 
     def test_runner_sanitizers_skip_native_coverage_gate(self) -> None:
         self.write_hits("raise SystemExit('native coverage must not run')\n")
