@@ -38,6 +38,19 @@ def trace(
     )
 
 
+def raw_trace(offsets: tuple[str, ...], *, pc: str = "0x0001", build: str = "build-asan") -> str:
+    """A report whose frames no symbolizer named: module offsets only."""
+    frames = "".join(
+        f"    #{index} {pc}{index}  (/src/{build}/lib/libsample.dylib:arm64+{offset})\n"
+        for index, offset in enumerate(offsets)
+    )
+    return (
+        "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+        f"{frames}"
+        "SUMMARY: AddressSanitizer: heap-buffer-overflow (/src/lib/libsample.dylib)\n"
+    )
+
+
 def uaf_trace(free_line: int) -> str:
     return (
         "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
@@ -171,6 +184,39 @@ class CrashStateDedupTests(unittest.TestCase):
         self.promote(first)
         self.assertEqual(self.file("2", "b", trace(kind="heap-use-after-free"))[0], "FILED")
         self.assertEqual(self.file("2", "c", trace(line=25))[0], "FILED")
+
+    def test_unsymbolized_frames_keep_their_module_offsets(self) -> None:
+        # Scrubbing the offset as an address made every raw frame in one
+        # library the same frame, so a second, unrelated crash there was
+        # refused as a duplicate of the first.
+        first_state = crash_bundle.crash_state(raw_trace(("0x9470", "0x9420")))
+        self.assertEqual(
+            first_state[2],
+            ("libsample.dylib:arm64+0x9470", "libsample.dylib:arm64+0x9420"),
+        )
+        _, first = self.file("1", "a", raw_trace(("0x9470", "0x9420")))
+        self.assertEqual(
+            self.file("2", "b", raw_trace(("0x5510", "0x5500")))[0], "FILED",
+        )
+        # Offsets are module-relative: another load address or build
+        # directory is still the same crash.
+        self.assertEqual(
+            self.file("3", "c", raw_trace(
+                ("0x9470", "0x9420"), pc="0x7fff", build="build-asan-abc123",
+            )),
+            ("DUP-STATE", first),
+        )
+
+    def test_a_symbolized_module_frame_is_still_scrubbed(self) -> None:
+        text = (
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+            "    #0 0x1 in app_parse+0x10 (/t/libsample.dylib:arm64+0x84f30)\n"
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow\n"
+        )
+        self.assertEqual(
+            crash_bundle.crash_state(text)[2],
+            ("app_parse (/t/libsample.dylib:arm64+ADDRESS)",),
+        )
 
     def test_a_different_access_direction_is_a_new_metric_state(self) -> None:
         _, first = self.file("1", "a", trace(access="READ"))

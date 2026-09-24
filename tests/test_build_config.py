@@ -613,6 +613,58 @@ class BuildConfigTests(unittest.TestCase):
             primary_binary.write_bytes(b"changed")
             self.assertIsNone(crash_bundle.verified_primary_differential(crash))
 
+    def test_raw_frames_cannot_call_two_builds_different_crashes(self) -> None:
+        # A module offset names an instruction in one binary only, so two
+        # builds crashing in unsymbolized frames are not provably different.
+        def status(primary_frame: str, alternate_frame: str) -> str:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                testcase = root / "input.bin"
+                testcase.write_bytes(b"A")
+                recipe = root / "config.sh"
+                recipe.write_text("#!/bin/sh\n")
+                binaries = []
+                for name in ("build-asan+cfg-wide", "build-asan"):
+                    binary = root / name / "tool"
+                    binary.parent.mkdir()
+                    binary.write_bytes(name.encode())
+                    binary.chmod(0o755)
+                    binaries.append(binary)
+                texts = []
+                for name, frame in (("alternate", alternate_frame), ("primary", primary_frame)):
+                    path = root / f"{name}.txt"
+                    path.write_text(
+                        "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+                        f"    #0 0x1 {frame}\n"
+                        "CRASH_RATE: 5/5\n"
+                        "[run-sanitizer-multi] EXECUTION_RATE: 5/5\n"
+                    )
+                    texts.append(path)
+                _, crash_id = crash_bundle.materialize(
+                    root, "1", testcase, texts[0], "asan", "generic",
+                    binary=binaries[0], build_config=build_config.BuildConfig(
+                        "wide", "wide", widen=True,
+                    ), build_recipe=recipe,
+                )
+                result = crash_bundle.record_primary_differential(
+                    root / "crashes" / crash_id, texts[1], {
+                        "version": 1,
+                        "testcase_sha1": crash_bundle._sha1(testcase),
+                        "build_config": "primary", "verdict": "CRASH",
+                        "binary": crash_bundle.binary_identity(binaries[1]),
+                    },
+                )
+                return result["status"]
+
+        self.assertEqual(
+            status("(/b/libsample.so+0x5510)", "(/a/libsample.so+0x9470)"),
+            "inconclusive",
+        )
+        self.assertEqual(
+            status("in app_other src/app.c:12", "in app_parse src/app.c:9"),
+            "different-crash",
+        )
+
     def test_rotation_keeps_one_reproducer_on_primary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

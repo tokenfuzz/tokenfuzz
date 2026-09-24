@@ -62,7 +62,6 @@ import strategies  # noqa: E402
 import crash_artifacts  # noqa: E402
 import stack_frames  # noqa: E402
 import symbol_names  # noqa: E402
-import clusterfuzz_stacktrace as cf_stack  # noqa: E402
 import finding_signature  # noqa: E402
 import validation_receipt  # noqa: E402
 import evidence_pages  # noqa: E402
@@ -186,15 +185,10 @@ def _frame_token(frame: tuple[str, str]) -> str:
 
 
 def _frame_display(frame: tuple[str, str]) -> str:
-    # Mirror lib/stack_frames.py::StackFrame.display: the index "Root
-    # signature" column is a dedup-display string, so it goes through
-    # ClusterFuzz's filter_addresses_and_numbers — collapses ASLR module
-    # offsets (`+0x1000677e0`) to `+ADDRESS` and matches the per-report
-    # "Dedup frames" field. Source `file.c:1234` line numbers are preserved
-    # by upstream's lookbehind, so debug-info frames are untouched.
+    # The same line as lib/stack_frames.py::StackFrame.display, so the index
+    # "Root signature" column matches the per-report "Dedup frames" field.
     func, loc = frame
-    line = f"{func} {loc}" if loc else func
-    return cf_stack.filter_addresses_and_numbers(line)
+    return stack_frames.state_line(func, loc)
 
 
 def _frame_set_signature(frames: list[tuple[str, str]], want: int = 3) -> str:
@@ -204,8 +198,8 @@ def _frame_set_signature(frames: list[tuple[str, str]], want: int = 3) -> str:
 
 def _cf_crash_state(asan_text: str, *, skip: int = 0, want: int = 3) -> str:
     # ClusterFuzz crash state: top interesting frames, each name normalized
-    # (filter_function_name) then address/number-scrubbed. Both helpers live
-    # in lib/clusterfuzz_stacktrace.py with upstream attribution.
+    # (filter_function_name) then address/number-scrubbed; an unsymbolized
+    # frame keeps its module offset (see stack_frames.state_line).
     lines = []
     skipped = 0
     for frame in stack_frames.iter_asan_frames(asan_text):
@@ -214,9 +208,9 @@ def _cf_crash_state(asan_text: str, *, skip: int = 0, want: int = 3) -> str:
         if skipped < skip:
             skipped += 1
             continue
-        filtered = cf_stack.filter_function_name(frame.function)
+        filtered = frame.state_function
         if filtered:
-            lines.append(cf_stack.filter_addresses_and_numbers(filtered))
+            lines.append(stack_frames.state_line(filtered, ""))
         if len(lines) >= want:
             break
     return "\n".join(lines) + ("\n" if lines else "")

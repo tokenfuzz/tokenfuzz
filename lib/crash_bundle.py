@@ -407,7 +407,12 @@ def record_primary_differential(
         status = "reproduced"
     elif primary_crash == (0, 5) and primary_execution == (5, 5):
         status = "not-reproduced"
-    elif primary_crash == (5, 5) and primary_signature:
+    elif primary_crash == (5, 5) and primary_signature and not any(
+        # A module offset names an instruction in one binary only, so an
+        # unsymbolized frame cannot tell two builds' crashes apart.
+        stack_frames.is_module_offset(line)
+        for line in (*primary_signature, *alternate_signature)
+    ):
         status = "different-crash"
     else:
         status = "inconclusive"

@@ -34,6 +34,17 @@ _ASAN_FRAME_RE = re.compile(r"^\s*#(?P<index>\d+):?\s+(?P<addr>0x[0-9a-fA-F]+|[x
 _LOC_RE = re.compile(r"(?P<loc>\S+:\d+(?::\d+)?)$")
 _PATH_RE = re.compile(r"(?P<loc>\S+\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|m|mm|rs|go|java|js|ts))$")
 _MODULE_RE = re.compile(r"(?P<func>.*?)\s+(?P<loc>\([^)]*(?:\+0x[0-9a-fA-F]+)?\))$")
+# A frame no symbolizer named: only `(/path/libx.dylib:arm64+0x84f30)` or
+# `(/path/app+0x4f30)`. Its module-relative offset is ASLR-stable within one
+# binary, so it is the frame's identity; scrubbing it as an address made every
+# such frame in one library the same frame, and two unrelated crashes in it
+# one crash state.
+_UNSYMBOLIZED_RE = re.compile(
+    r"^\((?P<module>[^()]+?)(?P<arch>:[A-Za-z0-9_]+)?\+(?P<offset>0x[0-9a-fA-F]+)\)$"
+)
+# A normalized function never ends in `+0x..` (`filter_function_name` strips
+# that), so a state function that does is a module offset from the rule above.
+_MODULE_OFFSET_STATE_RE = re.compile(r"^[^\s()]+\+0x[0-9a-f]+$")
 # A conflicting-access header opens each of the race's two accesses, e.g.
 # "Write at 0x.. by goroutine 7:" / "Previous read at 0x.. by main goroutine:".
 # We anchor at column 0 (headers are unindented; frames are indented) and stop
@@ -231,6 +242,13 @@ class StackFrame:
         `filter_function_name`. Use this (not `function`) anywhere the name
         is shown to a human or used as a dedup key; `function` stays raw for
         the ignore step."""
+        if not self.location:
+            match = _UNSYMBOLIZED_RE.match(self.function)
+            if match:
+                # The basename: one library is reached through build
+                # directories that differ per container image.
+                module = re.split(r"[/\\]", match.group("module"))[-1]
+                return f"{module}{match.group('arch') or ''}+{match.group('offset').lower()}"
         return filter_function_name(self.function)
 
     @property
@@ -241,9 +259,24 @@ class StackFrame:
         (`crash_signature`, `extract_dedup_frames`); the raw `function` and
         `location` fields stay untouched for forensic display (render-md uses
         them directly for the triage card)."""
-        func = self.state_function
-        line = f"{func} {self.location}" if self.location else func
-        return filter_addresses_and_numbers(line)
+        return state_line(self.state_function, self.location)
+
+
+def is_module_offset(line: str) -> bool:
+    """Whether a crash-state line is an unsymbolized frame's module offset."""
+    return bool(_MODULE_OFFSET_STATE_RE.match(line))
+
+
+def state_line(function: str, location: str) -> str:
+    """Crash-state line for a normalized function name and its location.
+
+    Symbolized frames are address- and number-scrubbed as ClusterFuzz does;
+    an unsymbolized frame keeps its module offset, its only identity.
+    """
+    if not location and is_module_offset(function):
+        return function
+    line = f"{function} {location}" if location else function
+    return filter_addresses_and_numbers(line)
 
 
 def parse_frame_body(body: str) -> tuple[str, str]:
