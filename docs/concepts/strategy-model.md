@@ -78,6 +78,15 @@ highest-ranked card on a file the window does not already hold, one
 buildability tier at a time. Every strategy keeps a share, and the slots buy
 distinct files.
 
+A run pinned with `--strategy` keeps only that lane's cards, and those whose
+own reasons carry the lane's evidence lead the window and the claim order.
+For S3 that evidence is a security decision (access control, identity or
+origin, credential verification, and the other boundary rows); size
+arithmetic, casts, and exported APIs alone make S3 a companion on nearly
+every memory-heavy file, so those cards stay claimable behind it. The
+optional rerank is told the pinned strategy and the declared attacker
+controls.
+
 Each angle a file signals is its own card: a file that reads as both S7 and
 S5 material yields one card per strategy, and each is claimed, worked, and
 closed on its own evidence. Collapsing them into one card made their

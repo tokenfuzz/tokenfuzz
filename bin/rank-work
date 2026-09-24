@@ -22,8 +22,9 @@ from workqueue import RERANK_MODES, add_common_args, campaign_supported, annotat
 def _target_config_for(ctx):
     """The target's config, or None when it cannot be read.
 
-    Only used to decide whether a fuzz campaign is possible at all; an
-    unreadable config means "cannot tell", so no card is minted.
+    Decides whether a fuzz campaign is possible (an unreadable config means
+    "cannot tell", so no card is minted) and supplies the threat model the
+    rerank prompt is steered by.
     """
     toml = target_config.find_target_toml(ctx.results_dir)
     if toml is None:
@@ -127,7 +128,12 @@ def main(argv: list[str]) -> int:
                         delta_files=delta_files,
                         # A preview written elsewhere never reached the run.
                         record_manifest=out == default_out)
-    cards = llm_rerank_cards(ctx, cards, args.llm_top_n, args.llm_timeout, args.llm_mode)
+    config = _target_config_for(ctx)
+    cards = llm_rerank_cards(
+        ctx, cards, args.llm_top_n, args.llm_timeout, args.llm_mode,
+        strategy=args.strategy or "",
+        attacker_controls=config.attacker_controls if config else (),
+    )
     # Merge S6 peer-fix cards. bin/peer-fix-cards writes these to a
     # separate s6-peer-cards.jsonl, refreshed each iteration alongside
     # patch-cards.jsonl — but rank_target only ever rebuilds patch +
@@ -150,7 +156,7 @@ def main(argv: list[str]) -> int:
     # window slot, and without it S4 owns no card and is never assignable.
     if delta_files is None and (not args.strategy or args.strategy == "S4") \
             and not any(c.get("kind") == "s4-campaign" for c in cards) \
-            and campaign_supported(_target_config_for(ctx)):
+            and campaign_supported(config):
         cards = cards + [campaign_card(ctx)]
     cards = apply_latest_claim_status(ctx, cards)
     write_cards(out, cards)

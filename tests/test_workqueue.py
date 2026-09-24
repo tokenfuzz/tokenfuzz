@@ -325,6 +325,30 @@ class WorkQueueTests(unittest.TestCase):
             "a pinned lane spends the whole window on its own best files",
         )
 
+    def test_pinned_window_leads_with_its_own_evidence(self) -> None:
+        # Dense memory-heavy files mint S3 companions on size math alone and
+        # outscore a sparse file holding the lane's real decision.
+        for index in range(8):
+            body = "".join(
+                "void parse_input_{n}(char *dst, const char *src, size_t length) {{\n"
+                "  char *copy = malloc(length * 2);\n"
+                "  memcpy(dst, src, length);\n"
+                "  free(copy);\n"
+                "}}\n".format(n=repeat)
+                for repeat in range(20)
+            )
+            (self.target / f"unit{index}.c").write_text(body, encoding="utf-8")
+        (self.target / "gate.c").write_text(
+            "int app_gate(int user, int length) {\n"
+            "  if (!check_permission(user)) return -1;\n"
+            "  return length + 1;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        pinned = workqueue.rank_target(self.ctx, 3, strategy="S3")
+        self.assertEqual(pinned[0]["file"], "gate.c")
+        self.assertEqual(len({card["file"] for card in pinned}), 3)
+
     def test_round_trip_needs_an_inverse_somewhere_in_the_target(self) -> None:
         """A decode-only library has nothing to round-trip through.
 
@@ -1235,6 +1259,63 @@ class WorkQueueTests(unittest.TestCase):
         self.assertEqual(lines[0], "rank|claims|cards|probed|runs|diagnostics|diagnostics_per_card")
         self.assertIn("1-5|2|2|1|2|1|0.50", lines[1])
         self.assertIn("cards touched: 2 (queue of up to 3 per iteration)", lines[-1])
+
+    def test_pinned_lane_offers_its_own_evidence_before_companions(self) -> None:
+        # A companion shares its parent's score but carries another lane's
+        # evidence; a pinned S3 run starts on a card with a security decision.
+        self.write_cards([
+            self.card(
+                "WORK-COMP", "src/a/big.c", strategy="S3", score=90,
+                reason=(
+                    "companion strategy S3 for S7; input-consumption entrypoint; "
+                    "exported API surface; size math"
+                ),
+            ),
+            self.card(
+                "WORK-SEC", "src/b/auth.c", strategy="S3", score=20,
+                reason="access-control decision; size math",
+            ),
+        ])
+        first = workqueue.claim_next_card(
+            self.ctx, "1", mode="generic", strategy="S3", claim=True,
+        )
+        self.assertEqual(first["id"], "WORK-SEC")
+        second = workqueue.claim_next_card(
+            self.ctx, "2", mode="generic", strategy="S3", claim=False,
+        )
+        self.assertEqual(second["id"], "WORK-COMP", "companions stay claimable")
+
+    def test_lane_evidence_for_s3_is_a_security_decision(self) -> None:
+        mechanical = self.card(
+            "WORK-A", "src/a.c", strategy="S3",
+            reason="exported API surface; size math; cast-heavy path",
+        )
+        self.assertFalse(workqueue.carries_lane_evidence(mechanical, "S3"))
+        self.assertTrue(workqueue.carries_lane_evidence(
+            {**mechanical, "reason": "credential/verification decision"}, "S3",
+        ))
+        self.assertTrue(workqueue.carries_lane_evidence(
+            {**mechanical, "reason": "companion strategy S5 for S7; lifetime/ownership operation"},
+            "S5",
+        ))
+        # Cards minted for a lane (edges, patches) are never demoted.
+        self.assertTrue(workqueue.carries_lane_evidence(
+            {**mechanical, "kind": "call-edge"}, "S3",
+        ))
+
+    def test_rerank_focus_names_the_pinned_lane_and_threat_model(self) -> None:
+        self.assertEqual(workqueue._rerank_focus_rule("", ()), "")
+        focus = workqueue._rerank_focus_rule("S3", ["bytes", "network"])
+        self.assertIn("pinned to strategy S3", focus)
+        self.assertIn("access-control decision", focus)
+        self.assertNotIn("size math", focus)
+        self.assertIn("attacker controls are: bytes, network", focus)
+        from prompt_render import render_template
+        rendered = render_template("work_rerank.md.j2", {
+            "max_boost": "30", "mode_rule": "", "candidate_lines": "",
+            "focus_rule": focus,
+        })
+        self.assertIn(focus, rendered)
 
     def test_claim_reports_requested_carried_strategy(self) -> None:
         self.write_cards([

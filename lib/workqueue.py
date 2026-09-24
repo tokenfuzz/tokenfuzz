@@ -801,6 +801,36 @@ _STRATEGY_BUCKETS: tuple[tuple[str, frozenset[str]], ...] = (
         "numerical-domain surface"})),
 )
 
+def lane_evidence_reasons(strategy: str) -> frozenset[str]:
+    """Reason tags that make a ranked card its strategy's own work.
+
+    A strategy's bucket tags, except S3's: its size-math, cast, and
+    exported-API tags fire on nearly every memory-heavy file, so they make S3
+    a companion on each S7/S5 card and the fallback label of files with no
+    decision to audit. Only the security decisions `strategy_for` promotes S3
+    for are a rule to check against its implementation.
+    """
+    pin = str(strategy or "").strip().upper()
+    if pin == "S3":
+        return S3_SECURITY_REASONS
+    return dict(_STRATEGY_BUCKETS).get(pin, frozenset())
+
+
+def carries_lane_evidence(card: dict, strategy: str) -> bool:
+    """Whether a pinned lane should offer this card before its fallback work.
+
+    Only ranked-source cards are judged; patch, edge, and campaign cards were
+    minted for their lane. In a pinned S3 run the unfiltered queue was mostly
+    companion cards whose own evidence was another lane's, and the top one
+    held no security decision at all.
+    """
+    tags = lane_evidence_reasons(strategy)
+    if card.get("kind") != "ranked-source" or not tags:
+        return True
+    parts = {part.strip() for part in str(card.get("reason", "")).split(";")}
+    return bool(parts & tags)
+
+
 # Patch proximity is useful ranking context only for prior-fix review.  It is
 # not evidence for a lifetime, parser, invariant, or property hypothesis.
 _S1_REASON_TAGS = frozenset({"near prior-fix card"})
@@ -2281,7 +2311,13 @@ def rank_target(
     # before a reproduce agent gets the chance to prefer built cards.
     cards = annotate_card_buildability(ctx, cards)
     floor_cards = annotate_card_buildability(ctx, floor_cards)
-    cards.sort(key=lambda card: (_built_first(card), work_card_sort_key(card)))
+    # A pinned lane spends its window on its own evidence first; the other
+    # cards stay in rank order behind them.
+    cards.sort(key=lambda card: (
+        _built_first(card),
+        0 if not strategy or carries_lane_evidence(card, strategy) else 1,
+        work_card_sort_key(card),
+    ))
     if delta_files is not None:
         # The window is the delta: every card, no floor, no rotation.
         selected = cards
@@ -2618,8 +2654,32 @@ def path_has_executable(name: str) -> bool:
 RERANK_MODES = ("boost", "primary")
 
 
+def _rerank_focus_rule(strategy: str, attacker_controls: Iterable[str]) -> str:
+    """The rerank prompt's run-specific focus, or "" for an unpinned run."""
+    lines: list[str] = []
+    pin = str(strategy or "").strip().upper()
+    if pin:
+        tags = sorted(lane_evidence_reasons(pin))
+        lines.append(
+            f"This run is pinned to strategy {pin}; every card is {pin} work."
+            + (
+                f" Boost first the cards whose reason names one of: {', '.join(tags)}."
+                if tags else ""
+            )
+        )
+    controls = [str(value).strip() for value in attacker_controls if str(value).strip()]
+    if controls:
+        lines.append(
+            "The declared attacker controls are: " + ", ".join(controls)
+            + ". Do not boost a card whose surface none of them reaches."
+        )
+    return "\n".join(lines)
+
+
 def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
-                     timeout: int | None = None, mode: str = "boost") -> list[dict]:
+                     timeout: int | None = None, mode: str = "boost",
+                     strategy: str = "",
+                     attacker_controls: Iterable[str] = ()) -> list[dict]:
     """Second-stage optional ranking over deterministic candidates.
 
     The first stage stays authoritative on availability: if the one-shot LLM
@@ -2631,6 +2691,10 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
     score with the deterministic key breaking ties — inside each buildability
     tier and over the same cards, so the model promotes what it scored and
     nothing else.
+
+    `strategy` (a pinned lane) and `attacker_controls` (the declared threat
+    model) steer the model; without them it favours parsers and memory
+    signals whatever the run is for.
     """
     import subprocess
 
@@ -2717,6 +2781,7 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
             if mode == "primary" else
             "Your boost is added to the first stage's score."
         ),
+        "focus_rule": _rerank_focus_rule(strategy, attacker_controls),
         "candidate_lines": "\n".join(candidate_lines),
     })
 
@@ -2753,6 +2818,7 @@ def llm_rerank_cards(ctx: Context, cards: list[dict], top_n: int = 160,
     identity = "\x00".join([
         f"source={source}" if source else f"prompt={prompt}",
         f"mode={mode}", f"max_boost={max_boost}",
+        f"focus={_rerank_focus_rule(strategy, attacker_controls)}",
         f"candidates={candidate_evidence}",
         decider_key,
     ])
@@ -4848,7 +4914,7 @@ def _claim_next_card_locked(
     # below the buildability pass that follows: a lane preference is soft,
     # while an uncompiled file is a hard blocker for a reproduce shot.
     if strategy_filter and len(preferred) > 1:
-        def _lane_priority(card: dict) -> tuple[int, int, int]:
+        def _lane_priority(card: dict) -> tuple[int, int, int, int]:
             current = latest.get(card.get("id", ""))
             own_active_lease = bool(
                 current
@@ -4860,6 +4926,9 @@ def _claim_next_card_locked(
                 0 if own_active_lease else 1,
                 0 if strategy_filter == "S1" and card.get("kind") == "s1-patch" else 1,
                 0 if primary == strategy_filter else 1,
+                # Companions carry the lane's label but another lane's
+                # evidence; they stay claimable once its own work is taken.
+                0 if carries_lane_evidence(card, strategy_filter) else 1,
             )
 
         preferred.sort(key=_lane_priority)
