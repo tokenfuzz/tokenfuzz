@@ -326,10 +326,40 @@ class ContinuousSchedulerTests(unittest.TestCase):
              mock.patch.object(audit_runner, "preflight_build"), \
              mock.patch.object(audit_runner, "initialize_backend", return_value=state), \
              mock.patch.object(audit_runner, "run_iteration", return_value=("stalled", [])) as cohort, \
-             mock.patch.object(audit_runner, "run_continuous", return_value=("stalled", [])) as continuous:
+             mock.patch.object(audit_runner, "run_continuous", return_value=("stalled", [])) as continuous, \
+             mock.patch.object(audit_runner, "_render_final_indexes"):
             audit_runner.run_backend(runtime, args, "")
         cohort.assert_called_once()
         continuous.assert_not_called()
+
+    def test_a_wall_cut_run_renders_its_cluster_indexes_before_returning(self) -> None:
+        # post_iteration defers index work when the wall lands mid-triage and
+        # had no later caller, so a wall-cut run shipped stale cluster pages.
+        with tempfile.TemporaryDirectory(prefix="final-indexes-") as temp:
+            runtime = SimpleNamespace(
+                refill_workers=False, logs=Path(temp),
+                config=SimpleNamespace(attacker_controls=[]),
+            )
+            state = audit_runner.BackendState(runtime, mock.Mock(), iteration=0)
+            args = SimpleNamespace(allow_concurrent=False, max_iterations=0)
+            order = []
+            with mock.patch.object(audit_runner, "instance_lock", return_value=contextlib.nullcontext()), \
+                 mock.patch.object(audit_runner, "_fixed_lane_unavailable", return_value=""), \
+                 mock.patch.object(audit_runner.runner_preflight, "validate"), \
+                 mock.patch.object(audit_runner, "validate_model"), \
+                 mock.patch.object(audit_runner, "preflight_build"), \
+                 mock.patch.object(audit_runner, "initialize_backend", return_value=state), \
+                 mock.patch.object(audit_runner, "run_iteration",
+                                   side_effect=lambda _s: order.append("iteration") or ("budget", [])), \
+                 mock.patch.object(audit_runner, "maintain_local_indexes",
+                                   side_effect=lambda _r: order.append("local") or time.sleep(0.01)), \
+                 mock.patch.object(audit_runner, "maintain_aggregate_indexes",
+                                   side_effect=lambda _r: order.append("aggregate")):
+                rc = audit_runner.run_backend(runtime, args, "")
+            self.assertEqual(rc, 0)
+            self.assertEqual(order, ["iteration", "local", "aggregate"])
+            self.assertGreater(state.housekeeping_seconds, 0.0)
+            self.assertTrue((Path(temp) / ".housekeeping_secs").is_file())
 
 
 class StewardTickTests(unittest.TestCase):

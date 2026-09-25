@@ -545,7 +545,7 @@ class RunnerPreflightTests(unittest.TestCase):
             audit_runner, "run_iteration", return_value=("stalled", [])
         ), mock.patch.object(
             audit_runner, "run_continuous", return_value=("stalled", [])
-        ):
+        ), mock.patch.object(audit_runner, "_render_final_indexes"):
             audit_runner.run_backend(runtime, args, "")
         self.assertEqual(["runner", "model", "build"], events)
 

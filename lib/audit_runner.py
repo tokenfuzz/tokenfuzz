@@ -3444,6 +3444,23 @@ def _charge_blocked(state: BackendState, phase: str, seconds: float) -> None:
     )
 
 
+def _render_final_indexes(state: BackendState) -> None:
+    """Render the cluster indexes once, after the run's last result pass.
+
+    post_iteration defers index work when the wall lands during triage, and
+    nothing ran it later, so a wall-cut run kept stale or missing cluster
+    pages beside the artifacts it filed. Rendering adds no discovery or
+    verdict, so it may run past the wall; its time is billed to housekeeping
+    like the other end-of-run bookkeeping. Clean indexes make this a no-op.
+    """
+    started = time.monotonic()
+    try:
+        maintain_local_indexes(state.runtime)
+        maintain_aggregate_indexes(state.runtime)
+    finally:
+        _charge_blocked(state, "final_indexes", time.monotonic() - started)
+
+
 def _drain_cluster_lane(state: BackendState) -> bool:
     """Wait for background expansion when nothing else can run.
 
@@ -4629,13 +4646,15 @@ def run_backend(runtime: Runtime, args, guide: str) -> int:
         state.max_generations = 0 if bounded else args.max_iterations
         sweeper = launch_sweep(runtime)
         try:
-            return _drive_backend(runtime, args, state, drive)
+            status = _drive_backend(runtime, args, state, drive)
         finally:
             # The final barrier: a mid-run barrier left expansion running.
             _drain_cluster_lane(state)
             stop_sweep(
                 runtime, sweeper, deadline=_productive_wall_deadline(state),
             )
+        _render_final_indexes(state)
+        return status
 
 
 def _drive_backend(runtime: Runtime, args, state: "BackendState", drive) -> int:
@@ -4848,7 +4867,6 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
                 cooldown = max(0, int(os.environ.get("COOLDOWN", "5")))
                 if cooldown and any(not state.stopped for state in states):
                     time.sleep(cooldown)
-            return 2 if failures == len(states) else 0
         finally:
             for state in states:
                 _drain_cluster_lane(state)
@@ -4856,6 +4874,9 @@ def run_ensemble(runtimes: list[Runtime], args, guide: str) -> int:
                 (runtime, sweeper, _productive_wall_deadline(state))
                 for runtime, sweeper, state in zip(runtimes, sweepers, states)
             ])
+        for state in states:
+            _render_final_indexes(state)
+        return 2 if failures == len(states) else 0
 
 
 def bound_target_root(root: Path, target: str, target_path: str = "") -> Path:

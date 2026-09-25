@@ -2599,6 +2599,7 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
          mock.patch.object(audit_runner, "preflight_build") as ensemble_preflight, \
          mock.patch.object(audit_runner, "initialize_backend", side_effect=_initialize_cycle), \
          mock.patch.object(audit_runner, "run_iteration", side_effect=_cycle_once), \
+         mock.patch.object(audit_runner, "_render_final_indexes") as ensemble_indexes, \
          mock.patch.dict(os.environ, {"COOLDOWN": "0"}, clear=False):
         ensemble_rc = audit_runner.run_ensemble(
             ensemble_runtimes, SimpleNamespace(max_iterations=3, allow_concurrent=False), "guide"
@@ -2607,8 +2608,10 @@ with tempfile.TemporaryDirectory(prefix="migration-modules-") as temporary:
         ensemble_rc == 0 and cycle_order == ["claude", "codex", "claude"]
         and ensemble_runner_preflight.call_count == 1
         and ensemble_model_preflight.call_count == 2
-        and ensemble_preflight.call_count == 1,
-        "ensemble mode preflights the runner/build once, each model, and cycles backends",
+        and ensemble_preflight.call_count == 1
+        and ensemble_indexes.call_count == 2,
+        "ensemble mode preflights the runner/build once, each model, cycles "
+        "backends, and renders each backend's indexes at the end",
         repr(cycle_order),
     )
 
