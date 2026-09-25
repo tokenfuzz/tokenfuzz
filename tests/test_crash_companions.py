@@ -9,6 +9,7 @@ noticed them rather than by the receipt.
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import tempfile
 import time
@@ -140,6 +141,64 @@ class CompanionAbsorptionTests(unittest.TestCase):
         kept = triage.absorb_crash_companions(self.results, [finding])
         self.assertEqual(kept, [])
         self.assertTrue((crash / ".companion" / finding.name).is_dir())
+
+    def test_bare_frame_file_names_the_one_target_file_of_that_name(self) -> None:
+        # Export symbolizes a copy keyed by the raw diagnostic's digest, and
+        # an offline symbolizer names only the frame's file.
+        target = self.results / "target"
+        (target / "src").mkdir(parents=True)
+        (target / "src" / "parse.c").touch()
+        (self.results / ".session-env").write_text(
+            f"TARGET_ROOT={target}\n", encoding="utf-8",
+        )
+        crash = self._crash("CRASH-001-3")
+        raw = (
+            "==1==ERROR: AddressSanitizer: container-overflow\n"
+            "READ of size 4 at 0x60200000001 thread T0\n"
+            "    #0 0x1000  (/tmp/libsample.dylib:arm64+0x123)\n"
+        )
+        (crash / "sanitizer.txt").write_text(raw, encoding="utf-8")
+        audit = crash / ".audit"
+        audit.mkdir()
+        digest = hashlib.sha256(raw.encode()).hexdigest()[:16]
+        (audit / f".symbolized-{digest}.txt").write_text(
+            SANITIZER.replace("app_push_cdata", "ns::app_push_cdata")
+            .replace("parse.c:8190", "parse.c:91"),
+            encoding="utf-8",
+        )
+        other = self._finding(
+            "FIND-003-other-fn", file="src/parse.c", function="app_other",
+            line=91,
+        )
+        same = self._finding(
+            "FIND-004-length-read", file="src/parse.c", line=91,
+        )
+        (target / "vendor").mkdir()
+        (target / "vendor" / "parse.c").touch()
+        # A copy elsewhere can hold the same function at the same line.
+        self.assertEqual(
+            triage.absorb_crash_companions(self.results, [other, same]),
+            [other, same],
+        )
+        (target / "vendor" / "parse.c").unlink()
+        kept = triage.absorb_crash_companions(self.results, [other, same])
+        self.assertEqual(kept, [other])
+        self.assertTrue((crash / ".companion" / same.name).is_dir())
+
+    def test_stale_cached_stack_cannot_fold(self) -> None:
+        crash = self._crash("CRASH-001-3")
+        (crash / "sanitizer.txt").write_text(
+            "==1==ERROR: AddressSanitizer: container-overflow\n"
+            "    #0 0x1000  (/tmp/libsample.dylib:arm64+0x123)\n",
+            encoding="utf-8",
+        )
+        audit = crash / ".audit"
+        audit.mkdir()
+        (audit / ".symbolized-stale.txt").write_text(SANITIZER, encoding="utf-8")
+        finding = self._finding("FIND-004-length-read")
+        self.assertEqual(
+            triage.absorb_crash_companions(self.results, [finding]), [finding],
+        )
 
     def test_find_gate_folds_an_already_rejected_companion(self) -> None:
         crash = self._crash("CRASH-001-3")

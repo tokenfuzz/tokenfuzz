@@ -512,6 +512,23 @@ class SymbolFamilyTests(unittest.TestCase):
                 config_for(Path("/t"), ["bytes"]), exported, [], declarations)
         self.assertEqual(found, [])
 
+    def test_ambiguous_partial_cpp_call_does_not_cover_both_namespaces(self) -> None:
+        exported = {"_ZN3one1A5parseEv", "_ZN3two1A5parseEv"}
+        qualified = {
+            "_ZN3one1A5parseEv": "one::A::parse",
+            "_ZN3two1A5parseEv": "two::A::parse",
+        }
+        self.assertEqual(
+            fuzz_harness._driven({"parse"}, exported, qualified, {"A::parse"}),
+            set(),
+        )
+        self.assertEqual(
+            fuzz_harness._driven(
+                {"parse"}, exported, qualified, {"one::A::parse"},
+            ),
+            {"_ZN3one1A5parseEv"},
+        )
+
     def test_overloads_of_one_method_share_an_identity(self) -> None:
         with mock.patch.object(
             fuzz_harness.symbol_names, "demangle_text",

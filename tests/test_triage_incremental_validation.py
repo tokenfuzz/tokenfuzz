@@ -1664,6 +1664,51 @@ Generated score text.
             triage._trigger_resolution_sources(self.report, self.finding), (),
         )
 
+    def test_two_promotes_with_split_scope_need_a_focused_resolution(self) -> None:
+        first = self.finding / ".trigger-gate.json"
+        second = self.finding / ".trigger-gate-2.json"
+        resolution = self.finding / ".trigger-gate-resolution.json"
+        for path, fit in ((first, "within"), (second, "outside")):
+            payload = trigger_vote(self.report, self.root, "Promote")
+            payload["review_facts"]["trigger_controls_fit"] = fit
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+        self.assertEqual(
+            triage._trigger_resolution_sources(self.report, self.finding),
+            (first, second),
+        )
+        self.assertFalse(triage._cached_trigger_resolution(
+            self.finding, self.report, second_lens=True,
+        ))
+
+        def resolve(report, vote_file, *_args, **kwargs):
+            if kwargs.get("resolve"):
+                vote_file.write_text(json.dumps(trigger_resolution_vote(
+                    report, self.root, [first, second], "Promote",
+                )), encoding="utf-8")
+            return 0
+
+        with mock.patch.dict(os.environ, {
+            "ACTIVE_BACKEND": "codex", "TARGET_ROOT": str(self.root),
+        }), mock.patch.object(triage, "_trigger_vote", side_effect=resolve):
+            self.assertEqual(
+                triage._finding_trigger_disposition(self.finding, self.report),
+                "accepted",
+            )
+        self.assertEqual(
+            triage._cached_trigger_vote(self.report, resolution), "Promote",
+        )
+        self.assertTrue(triage._cached_trigger_resolution(
+            self.finding, self.report, second_lens=True,
+        ))
+        votes, facts = triage._trigger_publication_evidence(
+            self.report, self.finding,
+        )
+        self.assertEqual(
+            triage._final_publication_state("promote", votes, facts),
+            "reportable",
+        )
+
     def test_focused_resolution_can_settle_a_review_conflict(self) -> None:
         first = self.finding / ".trigger-gate.json"
         second = self.finding / ".trigger-gate-2.json"

@@ -11,11 +11,11 @@ from typing import Iterable
 
 # Bump whenever the trigger-provenance prompt changes classification semantics.
 # Old verdicts then fail open and receive a fresh source-reading review.
-TRIGGER_GATE_DECISION_VERSION = "trigger-v14-supported-config"
+TRIGGER_GATE_DECISION_VERSION = "trigger-v15-address-knowledge"
 # A resolver reads the cached reviews as evidence and answers their exact open
 # question. It has a separate identity so changing that policy never invalidates
 # the independent first-pass votes it is meant to adjudicate.
-TRIGGER_RESOLUTION_DECISION_VERSION = "trigger-resolution-v3"
+TRIGGER_RESOLUTION_DECISION_VERSION = "trigger-resolution-v4"
 
 
 def trigger_gate_decision_version() -> str:
@@ -56,19 +56,26 @@ TRIGGER_GATE_ADVISORY_VERSIONS = {
 
 def trigger_resolution_review_names(
     first_vote: str | None, second_vote: str | None,
-    *, first_scope_open: bool = False,
+    *, first_fit: str | None, second_fit: str | None,
 ) -> tuple[str, ...]:
     """Return the prior review files needed to resolve an unsettled gate.
 
-    A Promote whose reviewer left `trigger_controls_fit` unclear settled
-    reachability but not scope, and scope decides publication; it is re-asked
-    the way an Uncertain is, or the artifact stays `pending` for good.
+    Scope (`trigger_controls_fit`) decides publication. A Promote whose
+    reviewer left it unclear settled reachability but not scope; it is
+    re-asked the way an Uncertain is, or the artifact stays `pending` for good.
+    Two Promotes that answer scope differently are a split like any other:
+    without a resolver they leave nothing to publish from.
     """
-    if first_vote == "Uncertain" or (first_vote == "Promote" and first_scope_open):
+    if first_vote == "Uncertain" or (
+        first_vote == "Promote" and first_fit not in {"within", "outside"}
+    ):
         return (".trigger-gate.json",)
     if first_vote == "Reject" and second_vote in {"Promote", "Uncertain"}:
         return (".trigger-gate.json", ".trigger-gate-2.json")
-    if first_vote == "Promote" and second_vote in {"Reject", "Uncertain"}:
+    if first_vote == "Promote" and (
+        second_vote in {"Reject", "Uncertain"}
+        or (second_vote == "Promote" and second_fit != first_fit)
+    ):
         # The second reader, through the reachability lens, did not agree.
         return (".trigger-gate.json", ".trigger-gate-2.json")
     return ()

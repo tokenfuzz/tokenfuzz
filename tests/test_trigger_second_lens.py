@@ -101,11 +101,21 @@ class SecondLensTests(unittest.TestCase):
                 self.assertFalse(triage._second_review_due(self.finding, self.report))
 
     def test_resolution_reads_both_reviews_after_a_promote_split(self) -> None:
-        names = triage_validate.trigger_resolution_review_names
-        self.assertEqual(names("Promote", "Reject"), (".trigger-gate.json", ".trigger-gate-2.json"))
-        self.assertEqual(names("Promote", "Uncertain"), (".trigger-gate.json", ".trigger-gate-2.json"))
+        def names(first, second, first_fit="within", second_fit="within"):
+            return triage_validate.trigger_resolution_review_names(
+                first, second, first_fit=first_fit, second_fit=second_fit,
+            )
+        both = (".trigger-gate.json", ".trigger-gate-2.json")
+        self.assertEqual(names("Promote", "Reject"), both)
+        self.assertEqual(names("Promote", "Uncertain"), both)
         self.assertEqual(names("Promote", "Promote"), ())
-        self.assertEqual(names("Promote", None), ())
+        self.assertEqual(names("Promote", None, second_fit=None), ())
+        # Agreeing on reachability is not agreeing on the scope that publishes.
+        self.assertEqual(names("Promote", "Promote", second_fit="outside"), both)
+        self.assertEqual(
+            names("Promote", "Promote", first_fit="unclear"),
+            (".trigger-gate.json",),
+        )
 
     def test_the_validator_renders_the_lens_only_for_a_second_review(self) -> None:
         loader = __import__("importlib.machinery", fromlist=["SourceFileLoader"])
@@ -117,6 +127,9 @@ class SecondLensTests(unittest.TestCase):
         without = module.render_validator_prompt(SimpleNamespace(lens="", **base), {})
         self.assertIn("Your lens: REACHABILITY", with_lens)
         self.assertNotIn("Your lens", without)
+        self.assertIn(
+            "Knowledge or guessing of a useful mapped address", without,
+        )
         resolving = module.render_validator_prompt(
             SimpleNamespace(lens="reachability", **{**base, "resolve_trigger": True}), {})
         self.assertNotIn("Your lens", resolving)

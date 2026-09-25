@@ -164,23 +164,32 @@ def _driven(calls: "set[str]", exported: "set[str]",
     coverage at all, and every already-fuzzed entry point is re-offered as a
     candidate.
 
-    A mangled C++ export is credited by its qualified name: a harness call
-    spelled `A::parse(` reaches `ns::A::parse` and not `ns::B::parse`. A bare
-    call can credit a global C++ function, but cannot identify a method:
-    unrelated harnesses routinely call methods named `input` or `write`.
+    A mangled C++ export is credited by its qualified name. A partial call
+    such as `A::parse(` resolves only when one exported qualified name ends
+    that way; two namespaces can each define `A::parse`. A bare call can
+    credit a global C++ function, but cannot identify a method: unrelated
+    harnesses routinely call methods named `input` or `write`.
     """
     qualified = qualified or {}
     aliases = suffix_aliases(exported)
+    qualified_driven: "set[str]" = set()
+    if qualified_calls:
+        by_name: "dict[str, set[str]]" = {}
+        for symbol, name in qualified.items():
+            by_name.setdefault(name, set()).add(symbol)
+        for call in qualified_calls:
+            if call in by_name:
+                qualified_driven.update(by_name[call])
+                continue
+            matches = [name for name in by_name if name.endswith("::" + call)]
+            if len(matches) == 1:
+                qualified_driven.update(by_name[matches[0]])
     return (calls & exported) | {
         aliases[name] for name in calls if name in aliases
     } | {
         symbol for symbol, name in unique_identifiers(qualified, exported).items()
         if name in calls and "::" not in qualified[symbol]
-    } | {
-        symbol for symbol, name in qualified.items()
-        for call in (qualified_calls or ())
-        if name == call or name.endswith("::" + call)
-    }
+    } | qualified_driven
 # A harness large enough to be a whole framework is not a harness; reading it
 # costs more than it tells us. libFuzzer entry files are tens of lines.
 _MAX_HARNESS_BYTES = 256 * 1024

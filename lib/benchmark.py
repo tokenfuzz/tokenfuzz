@@ -972,14 +972,17 @@ def _current_trigger_vote(
 def _trigger_resolution_sources(
     report_sha1s: frozenset[str], directory: Path,
 ) -> tuple[Path, ...]:
-    first = directory / ".trigger-gate.json"
-    first_vote = _current_trigger_vote(
-        _read_json(first), report_sha1s, directory,
-    )
-    second = directory / ".trigger-gate-2.json"
+    first = _read_json(directory / ".trigger-gate.json")
+    second = _read_json(directory / ".trigger-gate-2.json")
     names = triage_validate.trigger_resolution_review_names(
-        first_vote,
-        _current_trigger_vote(_read_json(second), report_sha1s, directory),
+        _current_trigger_vote(first, report_sha1s, directory),
+        _current_trigger_vote(second, report_sha1s, directory),
+        first_fit=triage_validate.source_review_facts(
+            first.get("review_facts"),
+        ).get("trigger_controls_fit"),
+        second_fit=triage_validate.source_review_facts(
+            second.get("review_facts"),
+        ).get("trigger_controls_fit"),
     )
     return tuple(directory / name for name in names)
 

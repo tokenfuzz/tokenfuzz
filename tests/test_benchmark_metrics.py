@@ -525,6 +525,37 @@ class BenchmarkMetricsTests(unittest.TestCase):
             benchmark._trigger_snapshot(finding), ("promote", {"Promote"}),
         )
 
+    def test_scope_resolution_replaces_two_promote_votes_in_metrics(self) -> None:
+        finding = self.root / "findings" / "FIND-001"
+        finding.mkdir(parents=True)
+        report = finding / "report.md"
+        report.write_text("# Boundary issue\n", encoding="utf-8")
+        common = {
+            "content_sha1": report_identity.content_sha1(report),
+            "decision_version": triage_validate.TRIGGER_GATE_DECISION_VERSION,
+            "attacker_controls": ["bytes"],
+            "anchors": [{"path": "sample.c"}],
+            "anchors_verified": True,
+        }
+        first = finding / ".trigger-gate.json"
+        second = finding / ".trigger-gate-2.json"
+        for path, fit in ((first, "within"), (second, "outside")):
+            path.write_text(json.dumps({
+                **common, "vote": "Promote",
+                "review_facts": {"trigger_controls_fit": fit},
+            }))
+        (finding / ".trigger-gate-resolution.json").write_text(json.dumps({
+            **common,
+            "vote": "Reject",
+            "decision_version": triage_validate.TRIGGER_RESOLUTION_DECISION_VERSION,
+            "prior_review_sha256s": triage_validate.prior_review_sha256s(
+                (first, second),
+            ),
+        }))
+        self.assertEqual(
+            benchmark._trigger_snapshot(finding), ("reject", {"Reject"}),
+        )
+
     def test_oss_input_is_disjoint_from_cache_reads(self) -> None:
         # OpenCode reports fresh input separately from cache reads, so a long
         # session's summed cache reads dwarf its summed input. Normalizing oss

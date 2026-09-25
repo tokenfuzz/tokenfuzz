@@ -303,6 +303,10 @@ Definitions:
   directions — a driver exercising documented entry points reads as
   caller-driven even when attacker bytes alone decide the fault, and an
   unreproduced claim reads as byte-driven even when only a caller can reach it.
+  Knowledge or guessing of a useful mapped address is an exploitability
+  precondition, not another trigger control, when attacker bytes directly name
+  the pointer the target dereferences. An additional attacker-controlled API
+  sequence to disclose an address or shape mappings remains a component.
 - For Reject, `rejection_kind` distinguishes a false security claim from a
   real target defect that adds no capability at a code-execution or trusted
   operator surface. Use `no-added-boundary` only for the latter; it remains

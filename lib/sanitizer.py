@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -304,6 +305,11 @@ def symbolize_file(
 _RAW_FRAME_MODULE = re.compile(r"\(([^()]+?)(?::[A-Za-z0-9_]+)?\+0x[0-9a-f]+\)\s*$")
 
 
+def symbolized_cache_path(raw: bytes, cache_dir: Path) -> Path:
+    """Where `symbolized_copy` keeps the copy of a report with these bytes."""
+    return cache_dir / f".symbolized-{hashlib.sha256(raw).hexdigest()[:16]}.txt"
+
+
 def symbolized_copy(
     report: Path, cache_dir: Path,
     budget: int = REPORT_SYMBOLIZE_TIMEOUT_SECONDS,
@@ -320,13 +326,11 @@ def symbolized_copy(
     smaller `budget`; a failure under a cut budget is not cached, so a later
     export with time to spare retries it.
     """
-    import hashlib
-
     raw = report.read_bytes()
     text = raw.decode(errors="replace")
     if not RAW_FRAME.search(text):
         return report
-    cached = cache_dir / f".symbolized-{hashlib.sha256(raw).hexdigest()[:16]}.txt"
+    cached = symbolized_cache_path(raw, cache_dir)
     if cached.is_file():
         return cached
     written = report.stat().st_mtime

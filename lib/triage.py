@@ -2414,11 +2414,16 @@ def _promote_left_scope_open(report: Path, vote_file: Path) -> bool:
 def _trigger_resolution_sources(report: Path, directory: Path) -> tuple[Path, ...]:
     """Return the cached reviews a focused resolver must adjudicate."""
     first = directory / _TRIGGER_PRIMARY_NAME
-    first_vote = _cached_trigger_vote(report, first)
     second = directory / _TRIGGER_SECOND_NAME
     names = triage_validate.trigger_resolution_review_names(
-        first_vote, _cached_trigger_vote(report, second),
-        first_scope_open=_promote_left_scope_open(report, first),
+        _cached_trigger_vote(report, first),
+        _cached_trigger_vote(report, second),
+        first_fit=_source_review_facts(report, (first,)).get(
+            "trigger_controls_fit",
+        ),
+        second_fit=_source_review_facts(report, (second,)).get(
+            "trigger_controls_fit",
+        ),
     )
     return tuple(directory / name for name in names)
 
@@ -4053,7 +4058,7 @@ def _finding_trigger_disposition(
                 target_root_is_product, lens=TRIGGER_SECOND_LENS,
             )
         second_vote = _cached_trigger_vote(report, second)
-        if second_vote not in {"Reject", "Uncertain"}:
+        if not _trigger_resolution_sources(report, finding_dir):
             # Agreed, or no second reviewer available: the first verdict
             # stands, as it always has.
             return "accepted"
@@ -4137,12 +4142,11 @@ def _cached_trigger_resolution(
             return resolution in {"Promote", "Reject", "Uncertain"}
         if not second_lens:
             return True
-        second = _cached_trigger_vote(report, directory / _TRIGGER_SECOND_NAME)
-        if second == "Promote":
-            return True
-        if second in {"Reject", "Uncertain"}:
+        if _trigger_resolution_sources(report, directory):
             return resolution in {"Promote", "Reject", "Uncertain"}
-        return False
+        return _cached_trigger_vote(
+            report, directory / _TRIGGER_SECOND_NAME,
+        ) == "Promote"
     if first == "Uncertain":
         return resolution in {"Promote", "Reject", "Uncertain"}
     if first == "Reject":
@@ -4842,9 +4846,22 @@ def _crash_site(
     if sanitizer is None:
         return None
     frame = stack_frames.first_interesting_frame(_read(sanitizer))
-    if frame is None:
-        return None
-    match = _SITE_LINE_RE.match(frame.location.strip())
+    match = _SITE_LINE_RE.match(frame.location.strip()) if frame else None
+    if match is None:
+        # Export keeps the filed diagnostic raw, since its frames are the
+        # crash identity, and caches a symbolized copy under its digest.
+        try:
+            raw = sanitizer.read_bytes()
+        except OSError as exc:
+            print(
+                f"WARN: cannot read {sanitizer} for site matching: {exc}",
+                file=sys.stderr,
+            )
+            return None
+        cached = sanitizer_lib.symbolized_cache_path(raw, directory / ".audit")
+        if cached.is_file():
+            frame = stack_frames.first_interesting_frame(_read(cached))
+            match = _SITE_LINE_RE.match(frame.location.strip()) if frame else None
     if not match:
         return None
     return (
@@ -4869,6 +4886,35 @@ def _finding_site(
     )
 
 
+def _same_function(frame: str, named: str) -> bool:
+    """Whether a frame's qualified function is the one a report names:
+    `ns::A::parse` is `A::parse`, whichever side carries the namespace."""
+    return bool(frame and named) and (
+        frame == named
+        or frame.endswith("::" + named)
+        or named.endswith("::" + frame)
+    )
+
+
+def _target_files_by_name(target_root: str) -> dict[str, list[str]]:
+    """Target-relative files keyed by file name: the tracked files of a
+    checkout, otherwise every file outside hidden directories."""
+    root = Path(target_root)
+    files = target_config.vcs_tracked_files(root)
+    if files is None:
+        files = set()
+        for directory, subdirectories, names in os.walk(root):
+            subdirectories[:] = [d for d in subdirectories if not d.startswith(".")]
+            files.update(
+                (Path(directory) / name).relative_to(root).as_posix()
+                for name in names
+            )
+    by_name: dict[str, list[str]] = {}
+    for path in files:
+        by_name.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+    return by_name
+
+
 def absorb_crash_companions(results: Path, directories: list[Path]) -> list[Path]:
     """Fold each finding into the crash filed at its exact source line.
 
@@ -4882,21 +4928,36 @@ def absorb_crash_companions(results: Path, directories: list[Path]) -> list[Path
     `.companion/<FIND-id>` where its argument stays on disk and follows the
     crash whichever way triage rules. Only a memory-safety finding at the exact
     target-relative path and line qualifies: a shared basename, function, or
-    source line across different issue classes is not a shared defect. Pinned
-    findings stay under review.
+    source line across different issue classes is not a shared defect. A bare
+    frame file name, as Darwin's offline symbolizer prints it, names the one
+    target file of that name, and then the function must agree too: `src/`
+    and `vendor/` copies can hold the same function at the same line, and an
+    untracked generated file can share a tracked file's name. Pinned findings
+    stay under review.
     """
     target = target_config.find_target_root(results, repository_root=SCRIPT_ROOT)
     target_root = str(target) if target is not None else ""
-    sites: dict[tuple[str, int], list[tuple[str, Path]]] = {}
+    sites: dict[int, list[tuple[str, str, Path]]] = {}
     for lane in ("crashes", "crashes-rejected"):
         for crash in sorted((results / lane).glob("CRASH-*")):
             if not crash.is_dir():
                 continue
             site = _crash_site(crash, target_root)
             if site is not None:
-                sites.setdefault(site[:2], []).append((site[2], crash))
+                sites.setdefault(site[1], []).append((site[0], site[2], crash))
     if not sites:
         return list(directories)
+    names: dict[str, list[str]] | None = None
+
+    def resolved(path: str) -> str:
+        nonlocal names
+        if "/" in path or not target_root:
+            return path
+        if names is None:
+            names = _target_files_by_name(target_root)
+        owners = names.get(path, [])
+        return owners[0] if len(owners) == 1 else path
+
     kept: list[Path] = []
     for directory in directories:
         pinned = (directory / ".keep").is_file() or (directory / ".reviewed").is_file()
@@ -4907,8 +4968,11 @@ def absorb_crash_companions(results: Path, directories: list[Path]) -> list[Path
         )
         owner = None
         if site is not None and site[3] == "memory-safety":
-            for function, crash in sites.get(site[:2], []):
-                if not function or not site[2] or function == site[2]:
+            for crash_path, function, crash in sites.get(site[1], []):
+                if resolved(crash_path) == resolved(site[0]) and (
+                    _same_function(function, site[2])
+                    or ("/" in crash_path and (not function or not site[2]))
+                ):
                     owner = crash
                     break
         if owner is None:
