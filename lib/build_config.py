@@ -119,6 +119,11 @@ def suffix(config: BuildConfig, base: str = "") -> str:
     return f"{base}+cfg-{config.config_id}"
 
 
+def control_suffix(value: str) -> str:
+    """The control tree's ``AUDIT_BUILD_SUFFIX`` for a possibly selected one."""
+    return value.partition("+cfg-")[0]
+
+
 @contextlib.contextmanager
 def selected_suffix(value: str) -> Iterator[None]:
     """Address a sibling tree through the shared build-directory helpers.

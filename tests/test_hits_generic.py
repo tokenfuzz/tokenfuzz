@@ -283,6 +283,38 @@ class GenericCoverageTests(unittest.TestCase):
         self.assertIn("__sancov_guards", output)
         self.assertNotIn("MISSED", output)
 
+    def _widened_route(self) -> dict[str, str]:
+        """An agent on a build config: its own tree, and no +cov twin of it."""
+        widened = self.target / "build-asan+cfg-widened-0123456789"
+        widened.mkdir()
+        self._compile(self.target / "src.c", widened / "app", instrumented=False)
+        return {
+            "AUDIT_BUILD_SUFFIX": "+cfg-widened-0123456789",
+            "ASAN_GENERIC_BIN": str(widened / "app"),
+        }
+
+    def test_a_build_config_without_a_twin_is_measured_on_the_control_build(self) -> None:
+        # Nothing builds a +cov twin per build config, so every probe from an
+        # agent on one reported coverage unavailable. The control twin shows
+        # a HIT, labelled as control-build coverage.
+        result = self._run_hits("app_parse", environment=self._widened_route())
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertRegex(
+            output, r"HIT: app_parse.*\[control-build coverage: build-asan\+cov\]",
+        )
+
+    def test_a_control_build_miss_is_unavailable_not_missed(self) -> None:
+        # The config may compile code the control build lacks, so a miss on
+        # the control twin proves nothing about the active build.
+        result = self._run_hits(
+            "symbol_never_defined_anywhere", environment=self._widened_route(),
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 4, output)
+        self.assertIn("COVERAGE_UNAVAILABLE: control-build coverage", output)
+        self.assertNotIn("MISSED", output)
+
     def test_route_override_is_unavailable_instead_of_gating_the_wrong_binary(self) -> None:
         harness = self.results / "scratch-1" / "harness"
         harness.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")

@@ -324,7 +324,11 @@ against the sibling's `asan_lib`.
 The coverage route must describe the same program and source generation as
 the primary ASan route. Otherwise `bin/hits` reports `COVERAGE_UNAVAILABLE`
 and the sanitizer run proceeds. Interpreter and wrapper routes behave the
-same way because they have no route-equivalent native sibling. In generic
+same way because they have no route-equivalent native sibling. A probe on
+an alternate build config has no coverage twin of its own, so it is replayed
+on the control build's twin: a `HIT` there is labelled control-build
+coverage, and a miss is `COVERAGE_UNAVAILABLE`, since the config may compile
+code the control build lacks. In generic
 mode, coverage is feedback: even a `MISSED` continues to the sanitizer run.
 Browser and JavaScript routes can use it as a hard pre-run gate.
 

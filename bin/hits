@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
+import build_config
 import cli_help
 import coverage_build
 import edges
@@ -194,12 +195,63 @@ class Hits:
         # takes the harness's argv shape, and frames from that file are the
         # harness's own, not target coverage.
         self.harness_twin: Path | None = None
+        # The control tree measured in place of an active build config that
+        # has no coverage twin; empty when the active tree was measured.
+        self.control_fallback = ""
         if args.mode == "generic":
             self.generic_binary, self.generic_tree, self.generic_reason = (
                 self._resolve_generic()
             )
+            if self.generic_binary is None:
+                self._resolve_control_fallback()
 
-    def _resolve_generic(self) -> tuple[Path | None, Path | None, str]:
+    def _resolve_control_fallback(self) -> None:
+        """Measure the control build when the active build config has no twin.
+
+        Nothing builds a `+cov` twin per build config, so an agent on one got
+        no coverage at all. The control twin is the same source without the
+        config's extra features. Replaying there is meaningful only for code
+        the control build compiles: a HIT proves that, but a miss cannot be
+        told from code only the config compiles, so `result` reports a miss
+        as unavailable. Building a twin per config instead would double every
+        config's build cost for feedback only.
+        """
+        active = os.environ.get("AUDIT_BUILD_SUFFIX", "")
+        control = build_config.control_suffix(active)
+        if control == active:
+            return
+        raw = self.config.sanitizer_bin("asan") if self.config else ""
+        route_is_cli = self._route_is_cli(
+            Path(self.config.resolve_path(raw)) if raw else None
+        )
+        # Process-wide, like bin/probe's selection: every later path (runner
+        # env, twin includes and link inputs) must resolve into one tree.
+        os.environ["AUDIT_BUILD_SUFFIX"] = control
+        self.asan_build = sanitizer.build_dir("asan", str(self.target_root))
+        binary, tree, reason = self._resolve_generic(route_is_cli=route_is_cli)
+        if binary is None:
+            os.environ["AUDIT_BUILD_SUFFIX"] = active
+            self.asan_build = sanitizer.build_dir("asan", str(self.target_root))
+            self.harness_twin = None
+            return
+        self.generic_binary, self.generic_tree = binary, tree
+        self.control_fallback = f"{self.asan_build.name}{coverage_build.COVERAGE_SUFFIX}"
+
+    def _route_is_cli(self, plain: Path | None) -> bool:
+        """Whether the caller's sanitizer route is the configured ASan CLI."""
+        route_text = self.args.route_binary or os.environ.get("ASAN_GENERIC_BIN", "")
+        if not route_text:
+            return True
+        if plain is None:
+            return False
+        try:
+            return os.path.samefile(route_text, plain)
+        except OSError:
+            return os.path.realpath(route_text) == os.path.realpath(plain)
+
+    def _resolve_generic(
+        self, *, route_is_cli: bool | None = None,
+    ) -> tuple[Path | None, Path | None, str]:
         """The target's configured binary inside an instrumented sibling tree.
 
         The audit drives a native testcase through the plain ``build-<san>``
@@ -212,15 +264,11 @@ class Hits:
         raw = self.config.sanitizer_bin("asan") if self.config else ""
         plain = Path(self.config.resolve_path(raw)) if raw else None
         route_text = self.args.route_binary or os.environ.get("ASAN_GENERIC_BIN", "")
+        if route_is_cli is None:
+            route_is_cli = self._route_is_cli(plain)
         if route_text:
             route = Path(route_text)
-            same_route = False
-            if plain is not None:
-                try:
-                    same_route = os.path.samefile(route, plain)
-                except OSError:
-                    same_route = os.path.realpath(route) == os.path.realpath(plain)
-            if not same_route:
+            if not route_is_cli:
                 # A library-only target has no CLI at all; its harness route
                 # is the only one, and the twin below is its coverage build.
                 if self.args.harness_source:
@@ -804,6 +852,18 @@ class Hits:
         content_match = next((line for line in content if self.want.search(line)), "")
         full_match = next((line for line in all_lines if self.want.search(line)), "")
         match = content_match or full_match
+        if self.control_fallback and not match:
+            reason = (
+                f"control-build coverage ({self.control_fallback}) did not reach "
+                "WANT, and the active build config has no coverage twin, so a "
+                "miss cannot be told from code only that config compiles"
+            )
+            print(f"COVERAGE_UNAVAILABLE: {reason}")
+            print(f"hits-file: {hits_file}", file=sys.stderr)
+            self.append_verdict("COVERAGE_UNAVAILABLE:", reason)
+            return 4
+        if self.control_fallback:
+            match = f"{match} [control-build coverage: {self.control_fallback}]"
         if match:
             if not content_match and content and not any(value in self.args.want for value in ("chrome/", "browser/", "toolkit/components/")):
                 print(f"MISSED - want symbol only seen in parent process (likely startup noise): {match}")
