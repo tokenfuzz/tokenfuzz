@@ -171,7 +171,7 @@ class CoverageSiblingBuildTests(unittest.TestCase):
         # The shim is what the recipe compiled with, and it carries the flags.
         shim = (self.target / ".audit" / "coverage-toolchain" / "cc").read_text()
         self.assertIn("-fsanitize-coverage=trace-pc-guard", shim)
-        self.assertTrue(shim.rstrip().endswith('"$@" -Wno-error'))
+        self.assertTrue(shim.rstrip().endswith('"$@" -Wno-error -Wno-error=pedantic'))
 
         # A second pass finds it fresh and does not rebuild.
         stamp = (self.sibling / ".audit-build-stamp").read_bytes()
@@ -464,6 +464,18 @@ class ToolchainShimCompanionTests(unittest.TestCase):
                 (directory / "clang-scan-deps").unlink()
                 unlinked = coverage_build._identity(root, recipe, shims)
             self.assertNotEqual(linked, unlinked)
+
+    def test_the_shim_demotes_the_projects_warning_errors_last(self) -> None:
+        # A newer compiler's warnings under -Werror or -pedantic-errors fail an
+        # instrumentation build of code that already compiles.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory = self._shims(root, self._llvm(root), coverage_build.FUZZ_SUFFIX)
+            argv = subprocess.run(
+                [str(directory / "cxx"), "-Werror", "-pedantic-errors", "-c", "a.cc"],
+                capture_output=True, text=True, check=True,
+            ).stdout.splitlines()
+            self.assertEqual(argv[-2:], ["-Wno-error", "-Wno-error=pedantic"])
 
     def test_no_scanner_beside_the_compiler_adds_no_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

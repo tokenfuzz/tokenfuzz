@@ -141,11 +141,12 @@ def toolchain_shims(root: Path, sibling: str = COVERAGE_SUFFIX) -> "tuple[Path, 
     compiler that is not there is an OSError, so the caller can skip rather
     than record a doomed build as this target's failure.
 
-    ``-Wno-error`` trails the recipe's own flags: this compiler is deliberately
-    not the one the primary was built with, and a newer clang's new warnings
-    under a project's ``-Werror`` are the predictable way an instrumentation
-    build of code that already compiles would fail. Warnings never change
-    what the sibling executes.
+    ``-Wno-error -Wno-error=pedantic`` trail the recipe's own flags: this
+    compiler is deliberately not the one the primary was built with, and a
+    newer clang's new warnings under a project's ``-Werror`` or
+    ``-pedantic-errors`` (which ``-Wno-error`` alone does not demote) are the
+    predictable way an instrumentation build of code that already compiles
+    would fail. Warnings never change what the sibling executes.
     """
     spec = _SIBLINGS[sibling]
     directory = Path(root) / ".audit" / spec.shim_dir
@@ -162,7 +163,7 @@ def toolchain_shims(root: Path, sibling: str = COVERAGE_SUFFIX) -> "tuple[Path, 
         path = directory / name
         text = (
             "#!/bin/sh\nexec " + shlex.join([real, *spec.flags])
-            + ' "$@" -Wno-error\n'
+            + ' "$@" -Wno-error -Wno-error=pedantic\n'
         )
         temporary = path.with_name(f".{name}.{os.getpid()}.tmp")
         temporary.write_text(text, encoding="utf-8")
