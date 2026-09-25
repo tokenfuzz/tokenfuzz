@@ -3056,6 +3056,9 @@ def loadable_shared_peers(
     beside the primary and `base`, the inputs every harness links. Trial,
     not a name list: nothing in a file name says a library cannot load.
 
+    A peer that binds another peer's symbols fails alone, so each dropped
+    peer is tried once more beside every kept one, and kept if that starts.
+
     Returns (kept, dropped peer -> reason), or None when the empty program
     fails without any peer: the trial then says nothing about the peers.
     Static peers are not tried: an empty program pulls nothing from an archive.
@@ -3113,22 +3116,36 @@ def loadable_shared_peers(
             return None
         kept: list[str] = []
         dropped: dict[str, str] = {}
-        for index, peer in enumerate(peers):
+
+        def judge(peer: str, beside: list[str], name: str) -> str:
             try:
-                reason = attempt(
-                    [str(_resolve_target_path(target_root, peer))], f"peer{index}",
+                # The peer precedes its possible providers: an --as-needed
+                # link records a library only for references made before it.
+                return attempt(
+                    [str(_resolve_target_path(target_root, value))
+                     for value in (peer, *beside)], name,
                 )
             except _PeerTrialInconclusive as exc:
                 # Only a real link or load diagnostic drops a peer; a hung or
                 # unlaunchable trial says nothing, and dropping a library a
                 # harness needs would read as every harness failing.
                 print(f"WARN: kept shared peer {peer}: trial inconclusive ({exc})", file=sys.stderr)
-                reason = ""
+                return ""
+
+        for index, peer in enumerate(peers):
+            reason = judge(peer, [], f"peer{index}")
             if reason:
                 dropped[peer] = reason
             else:
                 kept.append(peer)
-        return kept, dropped
+        if kept:
+            alone = list(kept)
+            for index, peer in enumerate(list(dropped)):
+                if not judge(peer, alone, f"beside{index}"):
+                    del dropped[peer]
+                    kept.append(peer)
+        # Configured order, not trial order: link_libs keeps its layout.
+        return [peer for peer in peers if peer in kept], dropped
 
 
 def _cmake_delegated_language(target_root: Path) -> str:

@@ -862,6 +862,44 @@ class SetupTargetTests(unittest.TestCase):
         )
         self.assertIn(f"Left harness peer {binding} out of link_libs", logged.getvalue())
 
+    def test_a_peer_that_needs_another_peer_is_kept(self) -> None:
+        # Each peer was tried alone beside the primary, so a library that
+        # binds a sibling peer's symbol failed and was dropped although the
+        # harness links both.
+        compiler = os.environ.get("CC") or "clang"
+        if shutil.which(compiler) is None:
+            self.skipTest(f"{compiler} is not available")
+        lib = self.temp / "dependent-peer" / "build-asan" / "lib"
+        lib.mkdir(parents=True)
+        suffix = ".dylib" if sys.platform == "darwin" else ".so"
+        undefined = (
+            ["-Wl,-undefined,dynamic_lookup"] if sys.platform == "darwin" else []
+        )
+        sources = {
+            "samplecore": ("int sample_core(void) { return 1; }\n", []),
+            "samplebase": ("int sample_base_state = 3;\n", []),
+            "sampleuser": (
+                "extern int sample_base_state;\n"
+                "int *sample_user = &sample_base_state;\n",
+                undefined,
+            ),
+        }
+        for name, (body, flags) in sources.items():
+            source = self.temp / f"{name}.c"
+            source.write_text(body, encoding="utf-8")
+            subprocess.run(
+                [compiler, "-shared", "-fPIC", str(source), *flags,
+                 "-o", str(lib / f"lib{name}{suffix}")],
+                check=True, capture_output=True,
+            )
+        peers = [f"build-asan/lib/libsamplebase{suffix}",
+                 f"build-asan/lib/libsampleuser{suffix}"]
+        trial = target_config.loadable_shared_peers(
+            self.temp / "dependent-peer", f"build-asan/lib/libsamplecore{suffix}",
+            peers, [],
+        )
+        self.assertEqual(trial, (peers, {}))
+
     def test_a_header_only_repair_preserves_curated_harness_inputs(self) -> None:
         setup_target = SETUP_TARGET
         target = self.temp / "header-mismatch-target"

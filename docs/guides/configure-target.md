@@ -152,8 +152,9 @@ library the build produced is added, ordered before the packages it
 requires, followed by the external libraries and frameworks those packages
 declare. Without them, a shared library's peers are the other unversioned
 shared libraries in its directory that an empty harness can link and start
-with; one that cannot, such as a language extension module that needs its
-interpreter's symbols, is left out, and setup logs why. Coverage and fuzz
+with, alone or beside the peers that pass alone; one that cannot, such as a
+language extension module that needs its interpreter's symbols, is left out,
+and setup logs why. Coverage and fuzz
 builds link each peer from their own instrumented sibling tree.
 
 After repeated C/C++ harness build failures, `bin/auto-repair-target-toml`
