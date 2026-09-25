@@ -1005,6 +1005,42 @@ class HealthAndRecoveryTests(unittest.TestCase):
         verdict, _ = fuzz_campaign.classify(grew, state, 0, new_features=100)
         self.assertEqual(verdict, fuzz_campaign.VERDICT_PRODUCTIVE)
 
+    @staticmethod
+    def verdicts(feature_steps: "list[int]") -> "list[str]":
+        """Run slices through the campaign's own judge-then-record loop."""
+        with tempfile.TemporaryDirectory() as raw:
+            config = config_for(Path(raw) / "source", ["bytes"])
+            config.results_dir = str(Path(raw) / "results")
+            campaign = fuzz_campaign.Campaign(config, log=lambda _: None)
+            state = campaign.add("h", "/b")
+            state.slices, state.edges, state.features = 1, 500, 1000
+            out = []
+            for step in feature_steps:
+                result = fuzz_campaign.SliceResult(
+                    harness="h", seconds=60.0, returncode=0, executions=9999,
+                    inited=True, edges=500, features=state.features + step)
+                new_edges, new_features = fuzz_campaign.progress(result, state)
+                verdict, detail = fuzz_campaign.classify(
+                    result, state, new_edges, [], new_features)
+                campaign._record(state, result, verdict, detail,
+                                 new_edges, [], new_features)
+                out.append(verdict)
+            return out
+
+    def test_steady_small_feature_growth_adds_up_to_progress(self) -> None:
+        # Each slice adds 1.5% of the high-water mark. Judged slice by slice,
+        # three of them saturated a harness that was still learning.
+        self.assertEqual(self.verdicts([15, 15, 15, 15]), [
+            fuzz_campaign.VERDICT_DRY, fuzz_campaign.VERDICT_PRODUCTIVE,
+            fuzz_campaign.VERDICT_DRY, fuzz_campaign.VERDICT_PRODUCTIVE,
+        ])
+
+    def test_flat_slices_still_saturate(self) -> None:
+        self.assertEqual(self.verdicts([3, 3, 3]), [
+            fuzz_campaign.VERDICT_DRY, fuzz_campaign.VERDICT_DRY,
+            fuzz_campaign.VERDICT_SATURATED,
+        ])
+
     def test_an_unguided_slice_is_not_productive_on_harness_edges(self) -> None:
         # Without an instrumented target library the only edges are the
         # harness's own, so they measure nothing about the target.

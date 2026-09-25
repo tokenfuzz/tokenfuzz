@@ -249,7 +249,7 @@ stops paying:
 
 | Verdict | Meaning |
 | --- | --- |
-| `saturated` | No new target coverage for three slices: no new edge, and features grew by 2% or less of the harness's high-water mark. An unguided harness's own edges never count. Revived automatically when its corpus grows. |
+| `saturated` | No new target coverage for three slices: no new edge, and features grew by 2% or less of the harness's high-water mark in total across those slices. Steady growth that adds up past 2% counts as progress and restarts the count. An unguided harness's own edges never count. Revived automatically when its corpus grows. |
 | `blocked-on-crash` | Crashing with no new coverage; libFuzzer stops at its first crash, so it cannot get past a filed bug. |
 | `dead` | No meaningful executions, usually because the library failed to load. |
 | `startup-crash` | Crashed before the initial corpus finished loading. If the crashing input is one of the seeds, that seed is removed and the campaign continues; otherwise the harness setup is broken. |

@@ -93,10 +93,11 @@ REPEAT_SLICES = 2
 # within-slice threshold above one can never be reached.
 NOISE_SLICES = 2
 # Feature growth, relative to the harness's high-water `ft`, that counts as
-# progress in a slice with no new edge. Value-profile learning moves `ft`
-# by far more than this; a saturated corpus still creeps up by a handful of
-# features a slice, and counting those kept a mined-out harness "productive"
-# for a whole campaign.
+# progress with no new edge. Value-profile learning moves `ft` by far more
+# than this; a saturated corpus still creeps up by a handful of features a
+# slice, and counting those kept a mined-out harness "productive" for a whole
+# campaign. Growth is summed across the current dry streak, so steady learning
+# a little under the bar each slice is not saturated three slices in.
 FEATURE_GROWTH_MIN = 0.02
 # Executions below which a slice did not fuzz at all. libFuzzer reaches
 # thousands per second on any working target; single digits means the binary
@@ -287,6 +288,9 @@ class HarnessState:
     edges: int = 0
     artifacts: int = 0
     dry_streak: int = 0
+    # High-water `ft` when the current dry streak began; None when no streak
+    # has been recorded with it (a state saved before the field existed).
+    streak_features: "int | None" = None
     since_merge: int = 0
     corpus_at_quarantine: int = 0
     quarantine: str = ""
@@ -512,16 +516,30 @@ def progress(result: SliceResult, state: HarnessState) -> "tuple[int, int]":
             max(0, result.features - state.features))
 
 
+def feature_growth(state: HarnessState, new_features: int) -> "tuple[int, int]":
+    """Features gained since the current dry streak began, and that baseline.
+
+    Outside a streak the baseline is the high-water mark, so this is one
+    slice's growth.
+    """
+    base = state.features
+    if state.dry_streak and state.streak_features is not None:
+        base = state.streak_features
+    return state.features + new_features - base, base
+
+
 def advanced(state: HarnessState, new_edges: int, new_features: int) -> bool:
     """Whether a slice moved the target's coverage enough to count.
 
-    Any new edge counts; features alone count only above
-    ``FEATURE_GROWTH_MIN`` of the high-water mark. Neither counts on an
-    unguided build, where both measure the harness itself.
+    Any new edge counts; features alone count once their growth across the
+    current dry streak exceeds ``FEATURE_GROWTH_MIN`` of the high-water mark
+    where the streak began. Neither counts on an unguided build, where both
+    measure the harness itself.
     """
     if state.guided is False:
         return False
-    return new_edges > 0 or new_features > state.features * FEATURE_GROWTH_MIN
+    grown, base = feature_growth(state, new_features)
+    return new_edges > 0 or grown > base * FEATURE_GROWTH_MIN
 
 
 def classify(result: SliceResult, state: HarnessState,
@@ -593,8 +611,9 @@ def classify(result: SliceResult, state: HarnessState,
         # without an artifact is dry whatever its counters did.
         why = "unguided build: its edges are the harness's own"
     else:
-        why = (f"no new edges and features grew {new_features} "
-               f"({FEATURE_GROWTH_MIN:.0%} or less)") if new_features else ""
+        grown, _ = feature_growth(state, new_features)
+        why = (f"no new edges and features grew {grown} since the dry streak "
+               f"began ({FEATURE_GROWTH_MIN:.0%} or less)") if grown else ""
     if state.dry_streak + 1 >= SATURATION_SLICES:
         return VERDICT_SATURATED, (
             f"no new target coverage across {state.dry_streak + 1} "
@@ -1220,6 +1239,8 @@ class Campaign:
                 fresh: "list[str]", new_features: int = 0) -> None:
         # Read before the high-water marks below move.
         moved = advanced(state, new_edges, new_features)
+        if not moved and not state.dry_streak:
+            state.streak_features = state.features
         if not state.first_slice:
             state.first_slice = {
                 "seconds": round(result.seconds, 2),
