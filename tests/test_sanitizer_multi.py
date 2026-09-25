@@ -694,7 +694,7 @@ print("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)")
         # recording the reason rather than counting the run as a miss.
         self.write_hits(
             "if 'generic' in sys.argv:\n"
-            "    print('COVERAGE_UNAVAILABLE: no instrumented sibling build (build-asan+cov)')\n"
+            "    print('COVERAGE_UNAVAILABLE: no instrumented sibling build (build-asan+cov) carrying libsample.a - `bin/setup-target <slug> --build` builds it (see the guide)')\n"
             "    raise SystemExit(4)\n"
             "print('HIT: sample_function')\n"
         )
@@ -707,6 +707,10 @@ print("[run-asan] generic EXECUTION VERIFIED (post-run, rc=0)")
         output = self.output(generic)
         self.assertIn("COVERAGE_GATE: COVERAGE_UNAVAILABLE", output)
         self.assertIn("no instrumented sibling build", output)
+        # Rebuilding is the operator's remedy; the agent is told to go on.
+        self.assertNotIn("setup-target", output)
+        self.assertIn("coverage unavailable for this build", output)
+        self.assertIn("proceed without the coverage gate", gate_output.read_text())
         self.assertNotIn("COVERAGE_GATE: MISSED", output)
         # The sanitizer still ran: an unmeasurable input is never skipped.
         self.assertIn("CRASH_RATE: 0/1", output)
