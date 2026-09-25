@@ -315,9 +315,13 @@ class HarnessState:
     # would have to be re-derived on every resume.
     value: float = 0.0
     # From the build manifest. An unguided build instruments only the harness,
-    # so its edges and features say nothing about the target.
-    guided: bool = True
-    sanitized: bool = True
+    # so its edges and features say nothing about the target. None is a
+    # legacy manifest that did not record the field; progress is then judged
+    # as guided, because calling real target coverage dry saturates a working
+    # harness, while a blind build's own edges stop growing within a few
+    # slices and the saturation streak still ends it.
+    guided: "bool | None" = True
+    sanitized: "bool | None" = True
     # The first slice is the fastest falsifier of a generated harness: it says
     # whether the binary really executed, whether guidance moved, and which
     # repair class applies. Keep that exact receipt across later productive
@@ -515,7 +519,7 @@ def advanced(state: HarnessState, new_edges: int, new_features: int) -> bool:
     ``FEATURE_GROWTH_MIN`` of the high-water mark. Neither counts on an
     unguided build, where both measure the harness itself.
     """
-    if not state.guided:
+    if state.guided is False:
         return False
     return new_edges > 0 or new_features > state.features * FEATURE_GROWTH_MIN
 
@@ -584,7 +588,7 @@ def classify(result: SliceResult, state: HarnessState,
             f"{len(fresh)} new artifacts, no new coverage — the crash is "
             f"filed; one more slice decides whether it blocks the harness"
         )
-    if not state.guided:
+    if state.guided is False:
         # Harness-only edges are not target progress, so a blind slice
         # without an artifact is dry whatever its counters did.
         why = "unguided build: its edges are the harness's own"
@@ -1086,8 +1090,8 @@ class Campaign:
     # ── the loop ────────────────────────────────────────────────────
 
     def add(self, name: str, binary: str, source: str = "",
-            hypothesis_id: str = "", *, guided: bool = True,
-            sanitized: bool = True) -> HarnessState:
+            hypothesis_id: str = "", *, guided: "bool | None" = True,
+            sanitized: "bool | None" = True) -> HarnessState:
         state = self.states.get(name)
         if state is None:
             state = HarnessState(name=name, binary=binary, source=source,

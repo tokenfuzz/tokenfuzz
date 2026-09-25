@@ -494,8 +494,8 @@ def cmd_run(args) -> int:
     for name, record in built.items():
         campaign.add(name, record["binary"], record.get("source", ""),
                      record.get("hypothesis_id", ""),
-                     guided=bool(record.get("guided")),
-                     sanitized=bool(record.get("sanitized")))
+                     guided=record.get("guided"),
+                     sanitized=record.get("sanitized"))
     if not built:
         say(f"no {sanitizer} harness built under "
             f"{fuzz_harness.binary_dir(config.results_dir)}; "
@@ -553,9 +553,10 @@ def cmd_status(args) -> int:
         print(f"    coverage: {row.get('coverage', '0 edges, 0 features')}")
         build = row.get("build") or {}
         if build:
-            guidance = "guided" if build.get("guided") else "blind"
-            runtime = ("sanitized" if build.get("sanitized")
-                       else "target-only sanitizer")
+            guidance = {True: "guided", False: "blind"}.get(
+                build.get("guided"), "guidance unrecorded")
+            runtime = {True: "sanitized", False: "target-only sanitizer"}.get(
+                build.get("sanitized"), "sanitizer unrecorded")
             print(f"    build: {guidance}, {runtime}")
             if build.get("current") is False:
                 print("    build: stale — the source changed since this binary")

@@ -1231,6 +1231,22 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(legacy["receipt"], {})
         self.assertEqual(legacy["receipt_warnings"], [])
 
+    def test_an_unrecorded_build_mode_stays_unknown_and_is_judged_as_guided(self) -> None:
+        # Reading a missing field as False put `sanitized: false` in every
+        # journal row, and a missing `guided` marked real coverage dry.
+        with tempfile.TemporaryDirectory() as raw:
+            self.manifest(Path(raw), "fuzz_legacy", "asan")
+            legacy = fuzz_harness.built_harnesses(Path(raw), "asan")["fuzz_legacy"]
+        self.assertIsNone(legacy["guided"])
+        self.assertIsNone(legacy["sanitized"])
+        unknown = fuzz_campaign.HarnessState(
+            name="fuzz_legacy", binary="b", guided=legacy["guided"],
+            sanitized=legacy["sanitized"], edges=100, features=1000)
+        self.assertTrue(fuzz_campaign.advanced(unknown, 5, 0))
+        blind = fuzz_campaign.HarnessState(
+            name="fuzz_blind", binary="b", guided=False, edges=100, features=1000)
+        self.assertFalse(fuzz_campaign.advanced(blind, 5, 0))
+
 
 class FirstSliceReceiptTests(unittest.TestCase):
     """The first useful feedback survives resume and is never overwritten."""

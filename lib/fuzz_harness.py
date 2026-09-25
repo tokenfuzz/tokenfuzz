@@ -2058,6 +2058,11 @@ def built_harnesses(results_dir: "str | os.PathLike",
         # merely because status learned to explain it better.
         record.setdefault("receipt", {})
         record.setdefault("receipt_warnings", [])
+        # The earliest schema-1 manifests did not record whether the runtime
+        # was sanitized. Unknown stays None: reading it as False would put a
+        # false field in every journal row this binary produces.
+        record.setdefault("guided", None)
+        record.setdefault("sanitized", None)
         binary = Path(str(record.get("binary", "")))
         if not binary.is_file() or not os.access(binary, os.X_OK):
             continue
