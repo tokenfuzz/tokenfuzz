@@ -630,6 +630,75 @@ class BenchmarkMetricsTests(unittest.TestCase):
                 substituted["cost_usd"], benchmark.harvest_tokens(index)["cost_usd"],
             )
 
+    def test_cost_rounds_once_after_summing_usage_records(self) -> None:
+        row = {"backend": "codex", "model": "gpt-6-luna",
+               "prompt_chars": 4, "tokens": {"input": 1}}
+        split = benchmark.harvest_tokens(
+            self.root / "unused", lines=[json.dumps(row)] * 10,
+        )
+        row["tokens"]["input"] = 10
+        combined = benchmark.harvest_tokens(
+            self.root / "unused", lines=[json.dumps(row)],
+        )
+        self.assertEqual(split["cost_usd"], "0.000001")
+        self.assertEqual(split["cost_usd"], combined["cost_usd"])
+
+    def test_missing_model_price_marks_partial_cost_as_estimated(self) -> None:
+        known = {"backend": "claude", "model": "claude-opus-5-5",
+                 "tokens": {"input": 1_000_000}}
+        unknown = {**known, "model": "unknown-model"}
+        for rows, expected in (([unknown], ""), ([known, unknown], "4.000000")):
+            with self.subTest(rows=rows):
+                totals = benchmark.harvest_tokens(
+                    self.root / "unused", lines=[json.dumps(row) for row in rows],
+                )
+                self.assertEqual(totals["cost_usd"], expected)
+                self.assertTrue(totals["cost_estimated"])
+                self.assertFalse(totals["spend_lower_bound"],
+                                 "an unknown price does not imply unobserved worker seats")
+                self.assertEqual(totals["token_source"], "measured")
+                self.assertEqual(totals["cost_source"], "unknown" if len(rows) == 1 else "mixed")
+
+        # A row without usage omits no spend, whether or not it has a price.
+        empty = {"backend": "claude", "model": "", "tokens": {}}
+        totals = benchmark.harvest_tokens(
+            self.root / "unused", lines=[json.dumps(known), json.dumps(empty)],
+        )
+        self.assertEqual(totals["cost_usd"], "4.000000")
+        self.assertFalse(totals["cost_estimated"])
+        self.assertEqual(totals["cost_source"], "claude-api-opus-5.5")
+
+    def test_stored_zero_cost_defers_to_rate_card(self) -> None:
+        row = {"backend": "claude", "model": "claude-opus-5-5",
+               "tokens": {"input": 1_000_000},
+               "cost_usd": 0, "cost_source": "backend-reported"}
+        totals = benchmark.harvest_tokens(
+            self.root / "unused", lines=[json.dumps(row)],
+        )
+        self.assertEqual(totals["cost_usd"], "4.000000")
+        self.assertEqual(totals["cost_source"], "claude-api-opus-5.5")
+
+    def test_tier_fallback_counts_cached_prompt(self) -> None:
+        for backend, model, fresh, cached, expected in (
+            ("codex", "gpt-6-sol", 10_000, 290_000, "0.171000"),
+            ("gemini", "gemini-2.5-pro", 10_000, 200_000, "0.090000"),
+            ("grok", "grok-4.7", 10_000, 190_000, "0.242000"),
+        ):
+            with self.subTest(backend=backend):
+                cost, _ = benchmark._cost_decimal(
+                    backend, model, input_tokens=fresh,
+                    cached_input_tokens=cached, output_tokens=1000,
+                )
+                self.assertEqual(benchmark._decimal_text(cost), expected)
+
+        # OpenCode's input excludes cache reads; old rows without a prompt
+        # estimate still need the entire prompt when reconstructing a tier.
+        totals = benchmark.harvest_tokens(self.root / "unused", lines=[json.dumps({
+            "backend": "oss", "model": "openai/gpt-6-sol",
+            "tokens": {"input": 10_000, "cached_input": 290_000, "output": 1000},
+        })])
+        self.assertEqual(totals["cost_usd"], "0.171000")
+
     def test_artifact_links_are_advisory_and_preserve_raw_counts(self) -> None:
         results = self.root / "linked-results"
         findings = results / "findings"
@@ -857,6 +926,11 @@ class BenchmarkMetricsTests(unittest.TestCase):
             ("codex", "gpt-4o-mini", "0.15", "0.075", "0.60"),
             ("codex", "o1", "15", "7.50", "60"),
             ("codex", "o1-pro", "150", "0", "600"),
+            ("codex", "gpt-5.2-codex", "1.75", "0.175", "14"),
+            ("codex", "gpt-5.1-codex", "1.25", "0.125", "10"),
+            ("codex", "gpt-5.1-codex-max", "1.25", "0.125", "10"),
+            ("codex", "gpt-5.1-codex-mini", "0.25", "0.025", "2"),
+            ("codex", "gpt-5-codex", "1.25", "0.125", "10"),
             ("codex", "o3", "2", "0.50", "8"),
             ("codex", "o3-pro", "20", "0", "80"),
             ("codex", "o4-mini", "1.10", "0.275", "4.40"),

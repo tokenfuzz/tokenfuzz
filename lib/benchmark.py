@@ -1416,6 +1416,13 @@ def _pricing_rates(
     really changes, change the row. A backend that reports its own cost is
     believed ahead of this table either way; what this provides is one
     denominator applied uniformly to every condition in a comparison.
+
+    Current hosted rates checked 2026-09-25 against the provider tables:
+    https://developers.openai.com/api/docs/pricing
+    https://platform.claude.com/docs/en/about-claude/pricing
+    https://ai.google.dev/gemini-api/docs/pricing
+    https://docs.x.ai/developers/pricing
+    Retired models retain their last published rates for older ledgers.
     """
     b = (backend or "").strip().lower()
     m = (model or "").strip().lower()
@@ -1545,13 +1552,9 @@ def _pricing_rates(
         # tokens, so the boundary itself remains on the standard rate, like
         # Google's <= 200k low tier below.
         #
-        # A rate keys on the pricing day only where the vendor publishes the
-        # date, as Gemini Flash does below. Guessing one is worse than not
-        # dating at all: a made-up boundary silently restates a completed run's
-        # spend on the day it passes, and it reads as sourced. OpenAI says only
-        # that Sol's promotional pricing runs "at least through November 21,
-        # 2026" — a floor with no start, and no post-promotion rate published —
-        # so there is nothing here to encode but the price in force.
+        # OpenAI publishes only a minimum promotional period for GPT-5.6
+        # Sol, with no post-promotion rate. Keep the rate in force, as with
+        # Google's Flash promotion below, until a change actually takes effect.
         #
         # GPT-6 has three separately named tiers. There is no documented
         # unsuffixed GPT-6 alias, so each exact API model gets its own row.
@@ -1725,6 +1728,13 @@ def _pricing_rates(
         # Specific snapshots with exceptional prices precede their aliases.
         openai_flat = (
             (("gpt-5.3-codex",), "1.75", "0.175", "14"),
+            # Legacy Codex IDs have separate official model pages; a base
+            # model's row deliberately does not match arbitrary suffixes.
+            (("gpt-5.2-codex",), "1.75", "0.175", "14"),
+            (("gpt-5.1-codex",), "1.25", "0.125", "10"),
+            (("gpt-5.1-codex-max",), "1.25", "0.125", "10"),
+            (("gpt-5.1-codex-mini",), "0.25", "0.025", "2"),
+            (("gpt-5-codex",), "1.25", "0.125", "10"),
             (("gpt-5.2-pro",), "21", None, "168"),
             (("gpt-5.2",), "1.75", "0.175", "14"),
             (("gpt-5.1",), "1.25", "0.125", "10"),
@@ -1964,7 +1974,9 @@ def _cost_decimal(
     )
 
     if rates.get("tiered"):
-        prompt = _as_nonnegative_int(prompt_tokens_for_tier or input_tokens)
+        # The normalized input bucket excludes cache reads, but cached
+        # tokens still occupy the request's context window.
+        prompt = _as_nonnegative_int(prompt_tokens_for_tier) or int(inp + cached)
         threshold = int(rates["threshold"])
         high = (
             prompt >= threshold
@@ -2140,7 +2152,8 @@ def harvest_tokens(
       * input_tokens — tokens the model processed this turn at the
         full input rate (≥100%). On Claude this is `input + cache_creation`
         (cache writes are billed at 125% or 200% of base input and represent
-        genuinely new content the model just read). On codex/oss/gemini/grok
+        genuinely new content the model just read). OpenCode/oss likewise
+        reports disjoint input and cache buckets. On codex/gemini/grok
         the SDK's `input` is cumulative — cache_read is subtracted so the
         remainder is the new content this turn. End result: one number
         meaning "non-cache-hit input the model paid full freight on,"
@@ -2200,6 +2213,7 @@ def harvest_tokens(
 
     token_sources: set[str] = set()
     cost_sources: set[str] = set()
+    cost_total: Decimal | None = None
     for line in lines:
         line = line.strip()
         if not line:
@@ -2271,7 +2285,7 @@ def harvest_tokens(
         # prompt size instead: prompt_chars is the rendered request captured by
         # audit_runner; fall back to legacy prompt estimates, then the caller's
         # prompt_estimate_fallback (model-direct has no harness stash, so harvest
-        # derives this from the cell's persisted prompt.txt), then raw_input for
+        # derives this from the cell's persisted prompt.txt), then total input for
         # rows that predate every estimate. Underestimates within-session context
         # growth past the threshold, but errs far smaller than tiering on the
         # cumulative sum.
@@ -2280,7 +2294,7 @@ def harvest_tokens(
             or _int(tok.get("prompt_estimate_build"))
             or _int(tok.get("prompt_estimate"))
             or prompt_estimate_fallback
-            or raw_input
+            or full_rate_input + cache_read
         )
         if prompt_estimate:
             totals["prompt_estimate_tokens"] += prompt_estimate
@@ -2297,7 +2311,8 @@ def harvest_tokens(
         if event_cost is not None and not event_cost.is_finite():
             event_cost = None
         source = str(row.get("cost_source") or "")
-        used_rate_card = event_cost is None or event_cost < 0
+        # A $0 beside usage is not a price (see llm_usage.with_reported_cost).
+        used_rate_card = event_cost is None or event_cost <= 0
         if used_rate_card:
             event_cost, source = _cost_decimal(
                 backend,
@@ -2310,11 +2325,16 @@ def harvest_tokens(
                 prompt_tokens_for_tier=tier_basis,
             )
         if event_cost is not None:
-            totals["cost_usd"] = _decimal_text(
-                Decimal(totals["cost_usd"] or "0") + event_cost
-            )
+            # Round only the completed sum: cheap models can produce rows
+            # below a microdollar that would otherwise disappear entirely.
+            cost_total = (cost_total or Decimal("0")) + event_cost
             if source:
                 cost_sources.add(source)
+        elif any((pricing_input, cache_read, cache_creation, output)):
+            # Measured tokens do not imply a known price. Preserve the known
+            # subtotal, but never present omitted model spend as complete.
+            cost_sources.add("unknown")
+            totals["cost_estimated"] = True
         if used_rate_card and event_cost is not None:
             rates = _pricing_rates(backend, model)
             # The threshold is per provider request, while CLI telemetry is an
@@ -2326,6 +2346,7 @@ def harvest_tokens(
                 totals["cost_estimated"] = True
         if row.get("estimated") is True or estimated_pricing:
             totals["estimated"] = True
+    totals["cost_usd"] = _decimal_text(cost_total)
     if cost_sources:
         totals["cost_source"] = (
             next(iter(cost_sources)) if len(cost_sources) == 1 else "mixed"
@@ -6708,8 +6729,9 @@ def render_section(report: dict) -> str:
             "rates: fresh input + cache writes + cache reads + output. "
             "A `~` marks a figure that is not exact: character counts, a "
             "reconstructed per-request long-context tier, one turn's counters "
-            "standing in for a session, or a session that reported no usage "
-            "at all — read **Source** to tell which. "
+            "standing in for a session, a session that reported no usage "
+            "at all, or a model missing from the rate table whose spend the "
+            "figure omits — read **Source** to tell which. "
             "This is token cost, not separately metered provider tools, "
             "explicit cache storage, or non-standard service tiers. "
             "Codex rows use OpenAI API-equivalent dollars, including "
@@ -7558,8 +7580,9 @@ def crosstab(bench_root: Path) -> str:
         "- **`~` prefix** — usage or pricing is approximate: a session stopped "
         "at the wall is summed from the per-request usage it streamed, whose "
         "output is estimated from the streamed content; a backend that reports no usage is estimated from "
-        "character counts; or a request-size pricing tier was reconstructed "
-        "from invocation totals. Rows without the prefix use measured usage "
+        "character counts; a request-size pricing tier was reconstructed "
+        "from invocation totals; or a model missing from the rate table left "
+        "its spend out of the total. Rows without the prefix use measured usage "
         "and the recorded or configured rates."
     )
     lines.append("")

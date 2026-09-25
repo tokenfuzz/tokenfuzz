@@ -233,6 +233,16 @@ class UsageExtractionTests(unittest.TestCase):
         self.assertEqual(row["tokens"]["cache_creation_1h"], 200)
         self.assertEqual(row["cost_usd"], 0.123456)
 
+    def test_zero_reported_cost_defers_to_rate_card(self) -> None:
+        # $0 beside real usage is not a price; harvest must apply the rate card.
+        raw = json.dumps({
+            "type": "result", "total_cost_usd": 0,
+            "usage": {"input_tokens": 1000, "output_tokens": 100},
+        })
+        row = llm_usage.extract_usage_from_text(raw, backend="claude")
+        self.assertNotIn("cost_usd", row)
+        self.assertNotIn("cost_source", row)
+
     def test_capped_claude_session_sums_every_request(self) -> None:
         # A session ended by the turn cap or the wall clock never emits its
         # terminal event. Taking only the last per-request usage reported one

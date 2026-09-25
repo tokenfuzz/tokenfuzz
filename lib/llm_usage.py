@@ -1012,6 +1012,9 @@ def extract_usage_from_text(
             }, backend, delegation)
 
     def with_reported_cost(row: dict) -> dict:
+        # Only a positive total outranks the rate card: a $0 beside real
+        # usage cannot be told apart from a CLI that does not price the
+        # model or plan it ran on.
         if reported_cost > 0:
             row["cost_usd"] = reported_cost
             row["cost_source"] = "backend-reported"

@@ -9,6 +9,35 @@ Use the [environment reference](../reference/environment.md) for worker,
 wall-time, and session limits. Use [Benchmarking](benchmark.md) to compare
 cost against reviewed results.
 
+## How token dollars are calculated
+
+A positive cost reported by the backend CLI takes precedence. Otherwise the
+harness applies public standard API token rates to the served model's usage;
+a reported $0 is not treated as a price, because it cannot be told apart from
+a CLI that does not price its model or plan. These are comparison dollars:
+subscription fees, negotiated discounts, regional or fast-mode premiums, tool
+fees, and cache-storage charges are not reconstructed from token counts.
+
+The rate table is `_pricing_rates` in `lib/benchmark.py`; its docstring names
+the provider pages and the date the rates were last checked. It holds the
+prices in force, including active promotions, and retired model IDs keep
+their last published rates. Recomputing an old ledger without reported costs
+uses the checked-in table, not the historical invoice.
+
+Cache writes count toward the non-cache-hit input bucket but use the
+provider's cache-write price where one is published; Claude's five-minute and
+one-hour writes are priced separately. Long-context tiers apply per request
+and count the whole prompt, including cache reads. The ledger holds session
+totals, so the harness selects a tier from the recorded prompt size, or from
+total input when no size was recorded, which can overstate a multi-turn
+session's tier. Either way the cost is marked estimated (`~`).
+
+A model the table does not recognize has unknown dollars. If other rows are
+priced, their subtotal is marked `~` because it omits that spend. The
+OpenCode (`oss`) backend reports no cost the harness reads, so its models,
+including local ones, have dollars only when the table recognizes the model
+ID.
+
 ## What scales with cost
 
 | Cost driver | Why it grows | How TokenFuzz contains it |
