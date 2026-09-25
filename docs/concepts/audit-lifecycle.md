@@ -199,12 +199,14 @@ while, before judging it, then makes a final pass after the workers drain.
     - a finding, once every session whose own commands or file writes named
       it has ended, or, when no session named it, once every session still
       running started after it was filed;
-    - either kind, once it is complete and nothing has written under it for
-      five minutes, even while a session that may own it is still running.
-      Sessions often run to the wall, and a bundle their end would have
-      sealed then reaches only the pass after the wall, which marks it
+    - a crash bundle, once it is complete and nothing has written under it
+      for five minutes, even while a session that may own it is still
+      running. Sessions often run to the wall, and a bundle their end would
+      have sealed then reaches only the pass after the wall, which marks it
       pending. A later edit is not lost: it invalidates the verdict and the
-      next pass judges the bundle again.
+      next pass judges the bundle again. Findings never seal this way: an
+      agent files one first and keeps probing, and a verdict that moved it
+      under a live writer would see it recreated as a second artifact.
 
     A turn-capped session's continuation counts as the same session. Cluster
     expansion, which asks the model for neighbours of a newly gated crash,
