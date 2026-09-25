@@ -78,7 +78,8 @@ On a harness build failure, use the raw first compiler diagnostic printed by
 `Sources/Probe/main.swift`), repair the testcase and probe again; do not
 paraphrase it into an environment failure.
 An S8 counterexample prints a line beginning exactly `PROPERTY VIOLATION:`
-and exits nonzero. Aliases such as `PROPERTY_FAIL` are ordinary testcase
+and exits nonzero. A marker naming another kind than the declared `PROPERTY`
+(`PROPERTY VIOLATION: <kind>: ...`) is not credited. Aliases such as `PROPERTY_FAIL` are ordinary testcase
 output and receive no finding credit.
 
 - Write testcases and sibling harnesses under `${RESULTS_DIR}/scratch-N/`;

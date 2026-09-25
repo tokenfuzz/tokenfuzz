@@ -371,7 +371,9 @@ shapes:
 
 On a counter-example, print a line beginning exactly `PROPERTY VIOLATION:` and
 exit nonzero. `bin/probe` records this as `PROPERTY` (executed oracle evidence,
-not a sanitizer crash and not `NO_EXEC`). Then minimize and file only if the
+not a sanitizer crash and not `NO_EXEC`), with the declared kind on the run
+row. To name the kind, write `PROPERTY VIOLATION: <kind>: <detail>`; a marker
+that names a kind other than the declared `PROPERTY` is not credited. Then minimize and file only if the
 security-consumer test below is satisfied.
 
 For an opaque byte input, keep the bytes exact and provide the fields that

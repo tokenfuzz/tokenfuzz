@@ -257,20 +257,46 @@ def validate_s8_property(strategy: str, property_kind: str) -> None:
         raise ValueError(f"S8 testcase requires PROPERTY: {allowed}")
 
 
-def file_has_property_violation(path: Path, returncode: int) -> bool:
-    """Require both the oracle marker and its raw nonzero child exit."""
+_PROPERTY_MARKER = "PROPERTY VIOLATION:"
+_NAMED_PROPERTY_RE = re.compile(r"\s*([A-Za-z]+)\s*:")
+
+
+def violation_kind(line: str) -> str:
+    """The property kind a marker line names (`PROPERTY VIOLATION: <kind>: ...`), or ""."""
+    match = _NAMED_PROPERTY_RE.match(line[len(_PROPERTY_MARKER):])
+    kind = match.group(1).lower() if match else ""
+    return kind if kind in S8_PROPERTY_KINDS else ""
+
+
+def file_has_property_violation(
+    path: Path, returncode: int, declared: str,
+) -> tuple[bool, str]:
+    """(credited, other kind named) for an S8 oracle's output.
+
+    Requires both the marker and its raw nonzero child exit. A marker that
+    names a different kind from the declared PROPERTY checked a property the
+    hypothesis never claimed, so it is ordinary output; an unnamed marker is
+    the declared kind.
+    """
+    declared = declared.strip().lower()
     marker = False
+    mismatch = ""
     failed = returncode != 0
     try:
         with path.open(encoding="utf-8", errors="replace") as stream:
             for line in stream:
-                marker = marker or line.startswith("PROPERTY VIOLATION:")
+                if line.startswith(_PROPERTY_MARKER):
+                    kind = violation_kind(line)
+                    if kind and kind != declared:
+                        mismatch = mismatch or kind
+                    else:
+                        marker = True
                 failed = failed or bool(_VERIFIED_NONZERO_RUNNER_RE.match(line.rstrip("\n")))
                 if marker and failed:
-                    return True
+                    return True, mismatch
     except OSError:
         pass
-    return False
+    return False, mismatch
 
 
 def derive_want(target: str) -> str:
@@ -1539,6 +1565,18 @@ class Probe:
         )
         return "NO_EXEC"
 
+    def _property_violation(self, returncode: int) -> bool:
+        credited, mismatch = file_has_property_violation(
+            self.output, returncode, self.header["property"],
+        )
+        if mismatch and not credited:
+            print(
+                f"[probe] PROPERTY VIOLATION names {mismatch}, but this testcase declares "
+                f"PROPERTY: {self.header['property']}; not credited. Declare the property "
+                "the oracle checks, or print `PROPERTY VIOLATION: <declared kind>: <detail>`."
+            )
+        return credited
+
     def _classify(self, returncode: int) -> str:
         if self.output.is_file() and self.output.stat().st_size:
             property_test = (
@@ -1560,9 +1598,7 @@ class Probe:
                 # nonzero, not a testcase defect.
                 if testcase_failure == "assertion":
                     if property_test:
-                        property_violation = file_has_property_violation(
-                            self.output, returncode,
-                        )
+                        property_violation = self._property_violation(returncode)
                     if not property_violation:
                         return "EXEC_FAIL"
             if not handled_resolution and verdict_lib.file_has_crash(
@@ -1578,9 +1614,7 @@ class Probe:
                 return "TIMEOUT"
             if property_test:
                 if property_violation is None:
-                    property_violation = file_has_property_violation(
-                        self.output, returncode,
-                    )
+                    property_violation = self._property_violation(returncode)
                 if property_violation:
                     return "PROPERTY"
             if verdict_lib.file_is_clean(self.output):
@@ -1770,6 +1804,10 @@ class Probe:
             coverage=coverage,
             closest=frame[:200] if frame else "",
             duplicate_of=self.duplicate_of,
+            property=(
+                self.header["property"].strip().lower()
+                if self.hypothesis_strategy == "S8" else ""
+            ),
         ))
         if probe_verdict == "CRASH" and self.sanitizer != "runner":
             self._append_state_note(

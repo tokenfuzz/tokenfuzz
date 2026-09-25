@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -94,6 +95,34 @@ class ProbeArgumentTests(unittest.TestCase):
             property_check.assert_called_once()
             instance.hypothesis_strategy = "S3"
             self.assertEqual(instance._classify(1), "EXEC_FAIL")
+
+    def test_s8_violation_naming_another_property_is_not_credited(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            instance = object.__new__(probe.Probe)
+            instance.output = Path(directory) / "property.asan.txt"
+            instance.config = SimpleNamespace(runner_crash_patterns=[])
+            instance.sanitizer = "asan"
+            instance.hypothesis_strategy = "S8"
+            instance.header = {"property": "equivalence"}
+
+            def classify(*markers: str) -> str:
+                instance.output.write_text(
+                    "ASAN_RUN_HEADER: sanitizer=asan runs=1\n"
+                    + "".join(f"PROPERTY VIOLATION: {text}\n" for text in markers)
+                    + "[run-asan] generic EXECUTION VERIFIED (post-run, rc=1)\n",
+                    encoding="utf-8",
+                )
+                return instance._classify(1)
+
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                self.assertNotEqual(classify("domain: size out of range"), "PROPERTY")
+            self.assertIn("names domain", stdout.getvalue())
+            self.assertIn("PROPERTY: equivalence", stdout.getvalue())
+            self.assertEqual(classify("Equivalence: rows differ"), "PROPERTY")
+            self.assertEqual(classify("rows differ between modes"), "PROPERTY")
+            self.assertEqual(classify("domain: x", "equivalence: rows differ"), "PROPERTY")
+            # Only a named kind from the declared set is a mismatch.
+            self.assertEqual(classify("frame 5: rows differ"), "PROPERTY")
 
     def test_a_run_that_returned_is_exec_fail_not_a_dead_harness(self) -> None:
         """A command that ran and returned uncleanly is EXEC_FAIL, not NO_EXEC.
@@ -210,7 +239,8 @@ class ProbeArgumentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             instance = object.__new__(probe.Probe)
-            instance.header = {"hypothesis": "H-RESOURCE"}
+            instance.header = {"hypothesis": "H-RESOURCE", "property": ""}
+            instance.hypothesis_strategy = ""
             instance.agent = "2"
             instance.card = "WORK-PARSER"
             instance.mode = "generic"
@@ -247,7 +277,8 @@ class ProbeArgumentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             instance = object.__new__(probe.Probe)
-            instance.header = {"hypothesis": "H-STATE"}
+            instance.header = {"hypothesis": "H-STATE", "property": ""}
+            instance.hypothesis_strategy = ""
             instance.agent = "3"
             instance.card = "WORK-STATE"
             instance.mode = "generic"
@@ -589,6 +620,7 @@ class OpaqueInputHeaderTests(unittest.TestCase):
             self.assertEqual(testcase.read_bytes(), original)
             run = json.loads((state / "runs.jsonl").read_text().splitlines()[-1])
             self.assertEqual(run["verdict"], "PROPERTY")
+            self.assertEqual(run["property"], "inverse")
 
 
 if __name__ == "__main__":

@@ -36,7 +36,8 @@ harness's harvester only looks under `${RESULTS_DIR}`.
     points into `scratch-N` (including copied `Sources/Probe/main.swift`),
     repair the testcase and probe again; do not call it ENV-BLOCKED.
   - An S8 counterexample prints a line beginning exactly
-    `PROPERTY VIOLATION:` and exits nonzero. Aliases receive no finding credit.
+    `PROPERTY VIOLATION:` and exits nonzero. Aliases, and a marker naming a
+    kind other than the declared PROPERTY, receive no finding credit.
   - Do not create repo-root `scratch-N/` dirs; a bare relative path writes to
     the shell cwd, not the active audit scratch dir.
   - MISSED → revise input, don't discard. Don't burn ASan budget.

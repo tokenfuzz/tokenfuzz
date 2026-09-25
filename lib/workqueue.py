@@ -6250,6 +6250,11 @@ def add_run(ctx: Context, args: argparse.Namespace) -> dict:
     closest = str(getattr(args, "closest", "") or "").strip()
     if closest:
         row["closest"] = closest
+    # The S8 property kind the testcase declared, so a PROPERTY verdict says
+    # which oracle it satisfied.
+    property_kind = str(getattr(args, "property", "") or "").strip().lower()
+    if property_kind:
+        row["property"] = property_kind
     # Present (possibly empty) only when bin/probe checked the filed crash
     # states: "" is a new state, an id is the bundle this one repeats, and a
     # missing key is unknown, so older ledgers never read as zero repeats.
