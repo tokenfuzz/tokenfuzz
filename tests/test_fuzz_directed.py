@@ -458,6 +458,74 @@ class SymbolFamilyTests(unittest.TestCase):
             {"_Z9app_parsePKcm": "app_parse", "_Z5otherv": "other"})
         self.assertEqual(driven, {"_Z9app_parsePKcm"})
 
+    def test_same_named_methods_are_distinct_identities(self) -> None:
+        # A::parse and B::parse share a bare identifier. The header index
+        # cannot say which class a `parse` prototype belongs to, so neither
+        # may claim it, and a harness calls one of them, not both.
+        exported = {"_ZN1A5parseEPKcm", "_ZN1B5parseEi"}
+        qualified = {"_ZN1A5parseEPKcm": "A::parse", "_ZN1B5parseEi": "B::parse"}
+        declarations = {"parse": "int parse(const char *data, size_t size);"}
+        unique = fuzz_harness.unique_identifiers(qualified, exported)
+        self.assertEqual(unique, {})
+        for symbol in exported:
+            self.assertEqual(fuzz_harness.resolve_declaration(
+                symbol, declarations, {}, unique), "")
+        self.assertEqual(fuzz_harness._driven(
+            {"parse"}, exported, qualified, {"A::parse"}), {"_ZN1A5parseEPKcm"})
+        self.assertEqual(fuzz_harness._driven(
+            {"parse"}, exported, qualified, set()), set())
+        with mock.patch.object(
+            fuzz_harness.symbol_names, "demangle_text",
+            return_value="A::parse(char const*, unsigned long)\nB::parse(int)\n",
+        ):
+            found = fuzz_harness.candidates(
+                config_for(Path("/t"), ["bytes"]), exported, [], declarations)
+        self.assertEqual(found, [])
+
+    def test_overloads_of_one_method_share_an_identity(self) -> None:
+        with mock.patch.object(
+            fuzz_harness.symbol_names, "demangle_text",
+            return_value="ns::Doc<int>::load(char const*)\n"
+                         "ns::Doc<int>::load(char const*, unsigned long)\n",
+        ):
+            qualified = fuzz_harness.source_identifiers(
+                {"_ZN2ns3DocIiE4loadEPKc", "_ZN2ns3DocIiE4loadEPKcm"})
+        self.assertEqual(set(qualified.values()), {"ns::Doc::load"})
+        self.assertEqual(
+            set(fuzz_harness.unique_identifiers(qualified, set(qualified)).values()),
+            {"load"})
+        self.assertEqual(fuzz_harness._driven(
+            {"load"}, set(qualified), qualified, {"Doc::load"}), set(qualified))
+
+    def test_class_metadata_symbols_do_not_share_a_constructors_name(self) -> None:
+        # `vtable for ns::Doc` has no parameter list; read as a name it made
+        # `ns::Doc` a second owner of `Doc` and hid every polymorphic
+        # class's constructor.
+        symbols = sorted({"_ZN2ns3DocC1EPKcm", "_ZTVN2ns3DocE", "_ZTIN2ns3DocE",
+                          "_ZTSN2ns3DocE", "_ZGVZN2ns3Doc4loadEPKcmE1x"})
+        displays = {
+            "_ZN2ns3DocC1EPKcm": "ns::Doc::Doc(char const*, unsigned long)",
+            "_ZTVN2ns3DocE": "vtable for ns::Doc",
+            "_ZTIN2ns3DocE": "typeinfo for ns::Doc",
+            "_ZTSN2ns3DocE": "typeinfo name for ns::Doc",
+            "_ZGVZN2ns3Doc4loadEPKcmE1x":
+                "guard variable for ns::Doc::load(char const*, unsigned long)::x",
+        }
+        with mock.patch.object(
+            fuzz_harness.symbol_names, "demangle_text",
+            return_value="".join(displays[name] + "\n" for name in symbols),
+        ):
+            qualified = fuzz_harness.source_identifiers(symbols)
+        self.assertEqual(qualified, {"_ZN2ns3DocC1EPKcm": "ns::Doc::Doc"})
+        self.assertEqual(
+            fuzz_harness.unique_identifiers(qualified, set(symbols)),
+            {"_ZN2ns3DocC1EPKcm": "Doc"})
+
+    def test_a_c_export_owns_its_name_over_a_same_named_method(self) -> None:
+        exported = {"app_parse", "_ZN1A9app_parseEv"}
+        self.assertEqual(fuzz_harness.unique_identifiers(
+            {"_ZN1A9app_parseEv": "A::app_parse"}, exported), {})
+
     def test_a_destructor_does_not_resolve_to_its_constructor(self) -> None:
         with mock.patch.object(
             fuzz_harness.symbol_names, "demangle_text",
@@ -465,7 +533,7 @@ class SymbolFamilyTests(unittest.TestCase):
         ):
             self.assertEqual(
                 fuzz_harness.source_identifiers({"_ZN6sample3BoxC1Ev", "_ZN6sample3BoxD1Ev"}),
-                {"_ZN6sample3BoxC1Ev": "Box"})
+                {"_ZN6sample3BoxC1Ev": "sample::Box::Box"})
 
     def test_template_and_candidates_resolve_an_export_the_same_way(self) -> None:
         declarations = {"app_parse": "int app_parse(const char *, size_t);"}

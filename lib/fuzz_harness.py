@@ -150,10 +150,12 @@ class ExistingHarness:
 
 
 _CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{2,})\s*\(")
+_QUALIFIED_CALL_RE = re.compile(r"\b((?:[A-Za-z_]\w*::)+[A-Za-z_]\w*)\s*\(")
 
 
 def _driven(calls: "set[str]", exported: "set[str]",
-            identifiers: "dict[str, str] | None" = None) -> "set[str]":
+            qualified: "dict[str, str] | None" = None,
+            qualified_calls: "set[str] | None" = None) -> "set[str]":
     """Exported symbols a harness's call sites actually reach.
 
     Resolves the width-suffix spelling both ways, so a harness calling
@@ -161,13 +163,23 @@ def _driven(calls: "set[str]", exported: "set[str]",
     Without it a target that mangles its whole API reads as having no
     coverage at all, and every already-fuzzed entry point is re-offered as a
     candidate.
+
+    A mangled C++ export is credited by its qualified name: a harness call
+    spelled `A::parse(` reaches `ns::A::parse` and not `ns::B::parse`. A bare
+    `parse(` (a member call) credits it only when no other export shares the
+    identifier, or one harness would hide every same-named method.
     """
+    qualified = qualified or {}
     aliases = suffix_aliases(exported)
-    # A C++ harness calls `parse`; the export it reaches is mangled.
     return (calls & exported) | {
         aliases[name] for name in calls if name in aliases
     } | {
-        symbol for symbol, name in (identifiers or {}).items() if name in calls
+        symbol for symbol, name in unique_identifiers(qualified, exported).items()
+        if name in calls
+    } | {
+        symbol for symbol, name in qualified.items()
+        for call in (qualified_calls or ())
+        if name == call or name.endswith("::" + call)
     }
 # A harness large enough to be a whole framework is not a harness; reading it
 # costs more than it tells us. libFuzzer entry files are tens of lines.
@@ -232,8 +244,10 @@ def discover(target_root: "str | os.PathLike",
             continue
         # Comments first: a `/* TODO api_parse(d, n); */` note would otherwise
         # count as driving api_parse and suppress a real candidate.
-        calls = {match.group(1)
-                 for match in _CALL_RE.finditer(_COMMENT_RE.sub(" ", text))}
+        code = _COMMENT_RE.sub(" ", text)
+        calls = {match.group(1) for match in _CALL_RE.finditer(code)}
+        qualified_calls = {
+            match.group(1) for match in _QUALIFIED_CALL_RE.finditer(code)}
         try:
             relative = path.relative_to(root).as_posix()
         except ValueError:
@@ -242,7 +256,8 @@ def discover(target_root: "str | os.PathLike",
             identifiers = source_identifiers(exported)
         found.append(ExistingHarness(
             path=relative, kind=kind,
-            drives=sorted(_driven(calls, exported, identifiers)) if exported else [],
+            drives=sorted(_driven(calls, exported, identifiers, qualified_calls))
+            if exported else [],
             gaps=[(gap, cost) for gap, pattern, cost in _HARNESS_GAPS
                   if pattern.search(text)],
         ))
@@ -819,14 +834,21 @@ def suffix_aliases(exported: "set[str]") -> "dict[str, str]":
     return aliases
 
 
+_TEMPLATE_ARGS_RE = re.compile(r"<[^<>]*>")
+_QUALIFIED_TAIL_RE = re.compile(r"((?:[A-Za-z_]\w*::)*~?[A-Za-z_]\w*)\s*$")
+# `vtable for ns::Doc`, `guard variable for ns::f()::x`: compiler-emitted
+# data named after a class or function, never a callable of that name.
+_SPECIAL_NAME_RE = re.compile(r"^[A-Za-z0-9# -]+ for ")
+
+
 def source_identifiers(symbols: "Iterable[str]") -> "dict[str, str]":
-    """ABI-mangled export -> the source identifier a header declares it by.
+    """ABI-mangled export -> its qualified source name (`ns::Type::parse`).
 
     C++ headers carry source identifiers while nm carries mangled names.
-    Demangle in one bounded subprocess and keep only the final identifier
-    before the parameter list (`ns::Type::parse` -> `parse`). Without a
-    demangler the names come back unchanged and nothing maps, so a C++
-    target reads as undeclared rather than as wrongly declared.
+    Demangle in one bounded subprocess and keep the qualified name before
+    the parameter list, template arguments removed; overloads share one.
+    Without a demangler the names come back unchanged and nothing maps, so a
+    C++ target reads as undeclared rather than as wrongly declared.
     """
     mangled = sorted({symbol for symbol in symbols
                       if symbol.startswith(("_Z", "?"))})
@@ -837,13 +859,41 @@ def source_identifiers(symbols: "Iterable[str]") -> "dict[str, str]":
         return {}
     identifiers: "dict[str, str]" = {}
     for symbol, display in zip(mangled, demangled):
-        if display == symbol:
+        # No parameter list is data (a variable, a vtable), not a function.
+        if display == symbol or "(" not in display or _SPECIAL_NAME_RE.match(display):
             continue
-        match = re.search(r"(~?[A-Za-z_]\w*)\s*$", display.split("(", 1)[0])
+        head = display.split("(", 1)[0]
+        while (stripped := _TEMPLATE_ARGS_RE.sub("", head)) != head:
+            head = stripped
+        match = _QUALIFIED_TAIL_RE.search(head)
         # A destructor would otherwise map to its class's constructor name.
-        if match and not match.group(1).startswith("~"):
+        if match and not final_identifier(match.group(1)).startswith("~"):
             identifiers[symbol] = match.group(1)
     return identifiers
+
+
+def final_identifier(qualified: str) -> str:
+    return qualified.rsplit("::", 1)[-1]
+
+
+def unique_identifiers(qualified: "dict[str, str]",
+                       exported: "set[str]") -> "dict[str, str]":
+    """Mangled export -> final identifier, only where that identifier is unambiguous.
+
+    The header index keys declarations by bare identifier and records no
+    enclosing namespace or class, so `A::parse` and `B::parse` would both
+    match whichever `parse` prototype came first. An identifier shared by two
+    qualified names, or by a C export, therefore resolves to nothing;
+    overloads of one qualified name remain one identity.
+    """
+    owners: "dict[str, set[str]]" = {}
+    for name in qualified.values():
+        owners.setdefault(final_identifier(name), set()).add(name)
+    return {
+        symbol: final_identifier(name) for symbol, name in qualified.items()
+        if len(owners[final_identifier(name)]) == 1
+        and final_identifier(name) not in exported
+    }
 
 
 def resolve_declaration(symbol: str, declarations: "dict[str, str]",
@@ -854,7 +904,9 @@ def resolve_declaration(symbol: str, declarations: "dict[str, str]",
     The export is not always spelled as its header spells it: a width suffix
     is applied by a macro the header never names, and a C++ export is
     mangled. ``candidates`` and ``bin/fuzz template`` both resolve through
-    here so a symbol one admits the other can generate.
+    here so a symbol one admits the other can generate. ``identifiers`` is
+    ``unique_identifiers`` output: a mangled export whose bare name another
+    export shares has no declaration it can safely claim.
     """
     declaration = declarations.get(symbol, "")
     if declaration:
@@ -986,8 +1038,7 @@ def candidates(config, exported: "set[str]",
         for harness in existing for symbol in harness.drives
     }
     aliases = suffix_aliases(exported)
-    identifiers = source_identifiers(
-        symbol for symbol in exported if symbol not in declarations)
+    identifiers = unique_identifiers(source_identifiers(exported), exported)
     out: "list[Candidate]" = []
     for symbol in sorted(exported):
         declaration = resolve_declaration(
@@ -1263,7 +1314,8 @@ def declared_exports(config, sanitizer: str) -> "tuple[int, int]":
     # Without a demangler setup merely reports the inconclusive mismatch and
     # never rewrites the operator's configuration from it.
     declared.update(
-        symbol for symbol, name in source_identifiers(exported - declared).items()
+        symbol for symbol, name in unique_identifiers(
+            source_identifiers(exported - declared), exported).items()
         if name in index
     )
     return len(exported), len(declared)

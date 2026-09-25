@@ -392,8 +392,11 @@ def cmd_template(args) -> int:
     covered = {s: h.path for h in existing for s in h.drives}
     # Resolve the export exactly as `candidates` did, or a width-suffixed or
     # mangled symbol it admitted would be refused here for want of a header.
-    identifiers = fuzz_harness.source_identifiers([args.symbol])
-    source_name = identifiers.get(args.symbol, args.symbol)
+    # Uniqueness is judged across every export, as `candidates` judges it.
+    qualified = fuzz_harness.source_identifiers(exported | {args.symbol})
+    identifiers = fuzz_harness.unique_identifiers(qualified, exported)
+    source_name = fuzz_harness.final_identifier(
+        qualified.get(args.symbol, args.symbol))
     verdict = fuzz_harness.gate(
         args.symbol,
         fuzz_harness.resolve_declaration(
@@ -410,7 +413,7 @@ def cmd_template(args) -> int:
         return 3
     destination = Path(args.output) if args.output else (
         fuzz_harness.source_dir(config.results_dir)
-        / f"fuzz_{source_name}.{'cc' if args.symbol in identifiers else 'c'}")
+        / f"fuzz_{source_name}.{'cc' if args.symbol in qualified else 'c'}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     fuzz_harness.reject_in_tree_source(destination, config.target_root)
     if destination.exists() and not args.force:
